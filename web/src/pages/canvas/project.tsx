@@ -1388,6 +1388,12 @@ function AtelierCanvasPage() {
 
             if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "q") {
                 event.preventDefault();
+                createNode(CanvasNodeType.Chat);
+                return;
+            }
+
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "r") {
+                event.preventDefault();
                 createNode(CanvasNodeType.Text);
                 return;
             }

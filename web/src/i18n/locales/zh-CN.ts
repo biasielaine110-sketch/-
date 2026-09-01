@@ -750,6 +750,7 @@ export default {
             upload: "上传到画布",
             drag: "拖动",
             click: "点击",
+            createChat: "新建 AI 对话窗口",
             createText: "新建文本节点",
             createImage: "新建图片节点",
             copyImage: "复制选中图片到系统剪贴板",

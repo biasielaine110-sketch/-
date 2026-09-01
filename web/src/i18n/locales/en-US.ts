@@ -751,6 +751,7 @@ export default {
             upload: "Upload to canvas",
             drag: "Drag",
             click: "Click",
+            createChat: "Create an AI chat node",
             createText: "Create a text node",
             createImage: "Create an image node",
             copyImage: "Copy the selected image to the system clipboard",
