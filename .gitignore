@@ -17,3 +17,6 @@ web/.fix-tmp/
 web/.playwright-cli/
 web/output/
 web/deploy-payload.json
+
+.vercel
+.env*

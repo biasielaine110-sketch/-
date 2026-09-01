@@ -34,8 +34,18 @@ import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas
 import { AtelierCanvas } from "@/components/canvas/atelier-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
+import { CanvasDraftSaveDialog } from "@/components/canvas/canvas-draft-save-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import { CanvasTextClipboardMenu, isCanvasTextInteractionTarget } from "@/components/canvas/canvas-text-clipboard-menu";
+import {
+    getCanvasDraftMeta,
+    overwriteCanvasDraft,
+    pickCanvasDraftFile,
+    saveCanvasDraftFallbackDownload,
+    saveCanvasDraftToHandle,
+    supportsFileSystemAccess,
+    type CanvasDraftMeta,
+} from "@/lib/canvas/canvas-draft";
 import { CanvasNodePromptPanel, type CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { CanvasToolbar } from "@/components/canvas/canvas-toolbar";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
@@ -219,6 +229,10 @@ function AtelierCanvasPage() {
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
     const [textEditNodeId, setTextEditNodeId] = useState<string | null>(null);
+    const [draftDialogOpen, setDraftDialogOpen] = useState(false);
+    const [draftSaving, setDraftSaving] = useState(false);
+    const [draftMeta, setDraftMeta] = useState<CanvasDraftMeta | null>(null);
+    const [draftPickerHandle, setDraftPickerHandle] = useState<FileSystemFileHandle | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
@@ -245,6 +259,9 @@ function AtelierCanvasPage() {
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
     const mouseWorldRef = useRef<Position | null>(null);
+    const draftMetaRef = useRef<CanvasDraftMeta | null>(null);
+    const draftSavingRef = useRef(false);
+    const DRAFT_AUTO_SAVE_MS = 10 * 60 * 1000;
 
     const createHistoryEntry = useCallback(
         (): CanvasHistoryEntry => ({
@@ -414,6 +431,28 @@ function AtelierCanvasPage() {
             if (viewportSaveTimerRef.current) clearTimeout(viewportSaveTimerRef.current);
         };
     }, [projectId, projectLoaded, updateProject, viewport]);
+
+    useEffect(() => {
+        draftMetaRef.current = draftMeta;
+    }, [draftMeta]);
+
+    useEffect(() => {
+        draftSavingRef.current = draftSaving;
+    }, [draftSaving]);
+
+    useEffect(() => {
+        let cancelled = false;
+        setDraftMeta(null);
+        setDraftPickerHandle(null);
+        setDraftDialogOpen(false);
+        if (!projectId) return;
+        void getCanvasDraftMeta(projectId).then((meta) => {
+            if (!cancelled) setDraftMeta(meta);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [projectId]);
 
     useLayoutEffect(() => {
         nodesRef.current = nodes;
@@ -965,6 +1004,134 @@ function AtelierCanvasPage() {
         }
     }, [message, projectId, t]);
 
+    const buildLiveProjectSnapshot = useCallback(() => {
+        const project = useCanvasStore.getState().projects.find((item) => item.id === projectId);
+        if (!project) return null;
+        return {
+            ...project,
+            nodes: nodesRef.current,
+            connections: connectionsRef.current,
+            updatedAt: new Date().toISOString(),
+        };
+    }, [projectId]);
+
+    const overwriteBoundDraft = useCallback(
+        async (quiet = false) => {
+            const project = buildLiveProjectSnapshot();
+            if (!project) {
+                if (!quiet) message.error(t("canvas.projectPage.notFound"));
+                return false;
+            }
+            if (draftSavingRef.current) return false;
+            setDraftSaving(true);
+            const hide = quiet ? null : message.loading(t("canvas.draft.saving"), 0);
+            try {
+                const meta = await overwriteCanvasDraft(project);
+                if (!meta) {
+                    setDraftDialogOpen(true);
+                    return false;
+                }
+                setDraftMeta(meta);
+                if (!quiet) message.success(t("canvas.draft.saved", { name: meta.fileName }));
+                return true;
+            } catch (error) {
+                console.error(error);
+                const code = error instanceof Error ? error.message : "";
+                if (code === "FILE_PERMISSION_DENIED") {
+                    message.warning(t("canvas.draft.permissionDenied"));
+                    setDraftDialogOpen(true);
+                } else {
+                    message.error(error instanceof Error ? error.message : t("canvas.draft.saveFailed"));
+                    setDraftDialogOpen(true);
+                }
+                return false;
+            } finally {
+                hide?.();
+                setDraftSaving(false);
+            }
+        },
+        [buildLiveProjectSnapshot, message, t],
+    );
+
+    const handleDraftPickPath = useCallback(
+        async (draftName: string) => {
+            try {
+                const handle = await pickCanvasDraftFile(draftName || currentProject?.title || t("canvas.project.untitled"));
+                setDraftPickerHandle(handle);
+            } catch (error) {
+                if (error instanceof DOMException && error.name === "AbortError") return;
+                console.error(error);
+                message.error(t("canvas.draft.pickFailed"));
+            }
+        },
+        [currentProject?.title, message, t],
+    );
+
+    const handleDraftConfirm = useCallback(
+        async (draftName: string) => {
+            const project = buildLiveProjectSnapshot();
+            if (!project) {
+                message.error(t("canvas.projectPage.notFound"));
+                return;
+            }
+            if (draftSavingRef.current) return;
+            setDraftSaving(true);
+            const hide = message.loading(t("canvas.draft.saving"), 0);
+            try {
+                let meta: CanvasDraftMeta;
+                if (supportsFileSystemAccess()) {
+                    const handle = draftPickerHandle || (await pickCanvasDraftFile(draftName || project.title));
+                    meta = await saveCanvasDraftToHandle(project, handle);
+                    setDraftPickerHandle(handle);
+                } else {
+                    meta = await saveCanvasDraftFallbackDownload(project, draftName || project.title);
+                }
+                setDraftMeta(meta);
+                setDraftDialogOpen(false);
+                message.success(t("canvas.draft.bound", { name: meta.fileName }));
+            } catch (error) {
+                if (error instanceof DOMException && error.name === "AbortError") return;
+                console.error(error);
+                const code = error instanceof Error ? error.message : "";
+                if (code === "FILE_SYSTEM_ACCESS_UNSUPPORTED") {
+                    try {
+                        const meta = await saveCanvasDraftFallbackDownload(project, draftName || project.title);
+                        setDraftMeta(meta);
+                        setDraftDialogOpen(false);
+                        message.success(t("canvas.draft.boundFallback", { name: meta.fileName }));
+                        return;
+                    } catch (fallbackError) {
+                        console.error(fallbackError);
+                    }
+                }
+                message.error(error instanceof Error ? error.message : t("canvas.draft.saveFailed"));
+            } finally {
+                hide();
+                setDraftSaving(false);
+            }
+        },
+        [buildLiveProjectSnapshot, draftPickerHandle, message, t],
+    );
+
+    const handleDraftShortcut = useCallback(async () => {
+        if (draftMetaRef.current) {
+            await overwriteBoundDraft(false);
+            return;
+        }
+        setDraftDialogOpen(true);
+    }, [overwriteBoundDraft]);
+
+    useEffect(() => {
+        if (!projectLoaded || !draftMeta) return;
+        const timer = window.setInterval(() => {
+            if (!draftMetaRef.current || draftSavingRef.current) return;
+            void overwriteBoundDraft(true).then((ok) => {
+                if (ok) message.success(t("canvas.draft.autoSaved"));
+            });
+        }, DRAFT_AUTO_SAVE_MS);
+        return () => window.clearInterval(timer);
+    }, [DRAFT_AUTO_SAVE_MS, draftMeta, message, overwriteBoundDraft, projectLoaded, t]);
+
     const handleCanvasMouseDown = useCallback(
         (event: ReactPointerEvent<HTMLDivElement>) => {
             setContextMenu(null);
@@ -1358,6 +1525,12 @@ function AtelierCanvasPage() {
                 return;
             }
 
+            if (isModifierShortcut && !event.altKey && key === "s") {
+                event.preventDefault();
+                void handleDraftShortcut();
+                return;
+            }
+
             if (isModifierShortcut && !event.altKey && key === "a") {
                 event.preventDefault();
                 setSelectedNodeIds(new Set(nodesRef.current.map((node) => node.id)));
@@ -1465,7 +1638,7 @@ function AtelierCanvasPage() {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [copySelectedImageToClipboard, copySelectedNodes, createNode, deleteConnection, deleteNodes, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, t, undoCanvas]);
+    }, [copySelectedImageToClipboard, copySelectedNodes, createNode, deleteConnection, deleteNodes, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, t, undoCanvas]);
 
     const handleConnectStart = useCallback(
         (event: ReactMouseEvent, nodeId: string, handleType: "source" | "target") => {
@@ -3358,6 +3531,19 @@ function AtelierCanvasPage() {
                         if (!textEditNode) return;
                         handleNodeContentChange(textEditNode.id, content);
                     }}
+                />
+
+                <CanvasDraftSaveDialog
+                    open={draftDialogOpen}
+                    defaultName={draftMeta?.fileName?.replace(/\.zip$/i, "") || currentProject?.title || t("canvas.project.untitled")}
+                    selectedFileName={draftPickerHandle?.name || draftMeta?.fileName}
+                    saving={draftSaving}
+                    onClose={() => {
+                        if (draftSaving) return;
+                        setDraftDialogOpen(false);
+                    }}
+                    onPickPath={handleDraftPickPath}
+                    onConfirm={handleDraftConfirm}
                 />
 
                 <CanvasTextClipboardMenu />
