@@ -58,7 +58,7 @@ export function ImageToolSettingsModal({
     const selectedTools = tools.filter((tool) => selected.has(tool.id));
     const previewTools: PreviewTool[] = [
         ...selectedTools,
-        { id: "more", title: t("canvas.imageTools.configure"), label: t("canvas.imageTools.more"), icon: <Ellipsis className="size-4" />, active: true },
+        { id: "more", title: t("canvas.imageTools.configure"), label: t("canvas.imageTools.more"), icon: <Ellipsis className="size-[10px]" />, active: true },
     ];
 
     const syncPreviewScroll = useCallback(() => {
@@ -161,8 +161,7 @@ export function ImageToolSettingsModal({
                 <div className="relative flex min-h-[300px] w-full justify-center pt-20 pb-9">
                     <div
                         ref={previewToolbarRef}
-                        className="hide-scrollbar absolute left-2 right-2 top-3 z-10 flex h-12 items-center overflow-x-auto rounded-[18px] border px-1 text-[13px]"
-                        style={{ background: token.colorBgElevated, borderColor: token.colorBorderSecondary, boxShadow: token.boxShadowSecondary, color: token.colorText }}
+                        className="hide-scrollbar absolute left-2 right-2 top-3 z-10 flex h-[31px] items-center overflow-x-auto rounded-[12px] border border-white/15 bg-neutral-700/55 px-[3px] text-[10px] text-white/90 shadow-[0_4px_14px_rgba(15,23,42,.18)] backdrop-blur-md"
                         onScroll={syncPreviewScroll}
                     >
                         {previewTools.map((tool) => (
@@ -222,8 +221,8 @@ export function ImageToolSettingsModal({
 function PreviewToolbarItem({ tool, showLabels }: { tool: PreviewTool; showLabels: boolean }) {
     return (
         <Tooltip title={tool.title}>
-            <span className="flex h-12 shrink-0 items-center px-1.5" style={{ color: tool.danger ? "#ef4444" : undefined }}>
-                <span className={`flex h-9 items-center rounded-lg px-2 ${showLabels ? "gap-2" : "justify-center"}`}>
+            <span className="flex h-[31px] shrink-0 items-center px-[3px]" style={{ color: tool.danger ? "#f87171" : undefined }}>
+                <span className={`flex h-[23px] items-center rounded-md px-1.5 ${showLabels ? "gap-1.5 px-2" : "justify-center"}`}>
                     {tool.icon}
                     {showLabels ? <span className="whitespace-nowrap">{tool.label}</span> : null}
                 </span>

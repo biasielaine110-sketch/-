@@ -16,7 +16,7 @@ import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { cropDataUrl, mergeDataUrls, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
@@ -25,9 +25,12 @@ import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
 import { CanvasNodeAngleDialog, type CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
+import { CanvasNodePanoramaDialog, type PanoramaCapturePayload } from "@/components/canvas/canvas-node-panorama-dialog";
 import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
+import { CanvasNodeAnnotateDialog, type CanvasAnnotateInpaintPayload, type CanvasAnnotateSavePayload } from "@/components/canvas/canvas-node-annotate-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
+import { CanvasNodeMergeDialog, type CanvasImageMergeParams, type MergeCandidateImage } from "@/components/canvas/canvas-node-merge-dialog";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
@@ -228,15 +231,18 @@ function AtelierCanvasPage() {
     const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
+    const [annotateNodeId, setAnnotateNodeId] = useState<string | null>(null);
     const [textEditNodeId, setTextEditNodeId] = useState<string | null>(null);
     const [draftDialogOpen, setDraftDialogOpen] = useState(false);
     const [draftSaving, setDraftSaving] = useState(false);
     const [draftMeta, setDraftMeta] = useState<CanvasDraftMeta | null>(null);
     const [draftPickerHandle, setDraftPickerHandle] = useState<FileSystemFileHandle | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
+    const [mergeDialogOpen, setMergeDialogOpen] = useState(false);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
+    const [panoramaNodeId, setPanoramaNodeId] = useState<string | null>(null);
     const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
     const [previewImageId, setPreviewImageId] = useState<string | null>(null);
     const [titleEditing, setTitleEditing] = useState(false);
@@ -349,7 +355,9 @@ function AtelierCanvasPage() {
         }
 
         const restore = async () => {
-            const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes));
+            const restoredNodes = (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes))).map((node) =>
+                node.type === CanvasNodeType.Chat && node.height === 520 ? { ...node, height: 1040 } : node,
+            );
             const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
             setNodes(restoredNodes);
             setConnections(project.connections);
@@ -624,11 +632,28 @@ function AtelierCanvasPage() {
     const infoNode = infoNodeId ? nodeById.get(infoNodeId) || null : null;
     const cropNode = cropNodeId ? nodeById.get(cropNodeId) || null : null;
     const maskEditNode = maskEditNodeId ? nodeById.get(maskEditNodeId) || null : null;
+    const annotateNode = annotateNodeId ? nodeById.get(annotateNodeId) || null : null;
     const textEditNode = textEditNodeId ? nodeById.get(textEditNodeId) || null : null;
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
+    const mergeCandidates = useMemo<MergeCandidateImage[]>(() => {
+        const selected = nodes.filter((node) => selectedNodeIds.has(node.id) && node.type === CanvasNodeType.Image && node.metadata?.content);
+        if (selected.length < 2) return [];
+        const groupId = selected.find((node) => node.metadata?.grid?.groupId)?.metadata?.grid?.groupId;
+        const grouped = groupId ? selected.filter((node) => node.metadata?.grid?.groupId === groupId) : selected;
+        const source = grouped.length >= 2 ? grouped : selected;
+        return source.map((node) => ({
+            id: node.id,
+            title: node.title || node.id,
+            dataUrl: node.metadata!.content!,
+            grid: node.metadata?.grid,
+            position: node.position,
+        }));
+    }, [nodes, selectedNodeIds]);
+    const mergeCandidateCount = mergeCandidates.length;
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
+    const panoramaNode = panoramaNodeId ? nodeById.get(panoramaNodeId) || null : null;
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
     const previewContent = previewImageId ? previewNode?.metadata?.images?.find((image) => image.id === previewImageId)?.content : previewNode?.metadata?.content;
     const hasMultipleSelectedNodes = selectedNodeIds.size > 1;
@@ -727,8 +752,10 @@ function AtelierCanvasPage() {
             setInfoNodeId((current) => (current && allIds.has(current) ? null : current));
             setCropNodeId((current) => (current && allIds.has(current) ? null : current));
             setMaskEditNodeId((current) => (current && allIds.has(current) ? null : current));
+            setAnnotateNodeId((current) => (current && allIds.has(current) ? null : current));
             setTextEditNodeId((current) => (current && allIds.has(current) ? null : current));
             setAngleNodeId((current) => (current && allIds.has(current) ? null : current));
+            setPanoramaNodeId((current) => (current && allIds.has(current) ? null : current));
             setPreviewNodeId((current) => (current && allIds.has(current) ? null : current));
             setRunningNodeId((current) => (current && allIds.has(current) ? null : current));
             setExpandedImageNodeIds((current) => new Set([...current].filter((nodeId) => !allIds.has(nodeId))));
@@ -761,8 +788,10 @@ function AtelierCanvasPage() {
         setInfoNodeId(null);
         setCropNodeId(null);
         setMaskEditNodeId(null);
+        setAnnotateNodeId(null);
         setTextEditNodeId(null);
         setAngleNodeId(null);
+        setPanoramaNodeId(null);
         setPreviewNodeId(null);
         setRunningNodeId(null);
         deselectCanvas();
@@ -1631,6 +1660,8 @@ function AtelierCanvasPage() {
                 setInfoNodeId(null);
                 setCropNodeId(null);
                 setMaskEditNodeId(null);
+                setAnnotateNodeId(null);
+                setPanoramaNodeId(null);
                 setTextEditNodeId(null);
                 setPendingConnectionCreate(null);
             }
@@ -1762,7 +1793,7 @@ function AtelierCanvasPage() {
     }, []);
 
     const downloadNodeImage = useCallback((node: CanvasNodeData) => {
-        if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
+        if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
         saveAs(node.metadata.content, `canvas-${node.type}-${node.id}.${node.type === CanvasNodeType.Video ? "mp4" : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content)}`);
     }, []);
 
@@ -1890,6 +1921,7 @@ function AtelierCanvasPage() {
             const cellHeight = node.height / params.rows;
             const startX = node.position.x + node.width + 96;
             const startY = node.position.y;
+            const groupId = nanoid();
             const childNodes = await Promise.all(
                 pieces.map(async (piece) => {
                     const image = await uploadImage(piece.dataUrl);
@@ -1904,6 +1936,13 @@ function AtelierCanvasPage() {
                         metadata: {
                             ...imageMetadata(image),
                             prompt: node.metadata?.prompt,
+                            grid: {
+                                groupId,
+                                row: piece.row,
+                                column: piece.column,
+                                rows: params.rows,
+                                columns: params.columns,
+                            },
                         },
                     } satisfies CanvasNodeData;
                 }),
@@ -1916,6 +1955,60 @@ function AtelierCanvasPage() {
             message.success(t("canvas.projectPage.splitSuccess", { count: childNodes.length }));
         },
         [message, t],
+    );
+
+    const mergeSelectedGridImages = useCallback(
+        async (params: CanvasImageMergeParams) => {
+            if (params.pieces.length < 2) {
+                message.warning(t("canvas.projectPage.mergeNeedImages"));
+                return;
+            }
+
+            const sourceIds = new Set(params.sourceNodeIds.length ? params.sourceNodeIds : params.pieces.map((piece) => piece.nodeId).filter(Boolean));
+            const source = nodesRef.current.filter((node) => sourceIds.has(node.id));
+            const rows = Math.max(1, params.rows);
+            const columns = Math.max(1, params.columns);
+            const pieces = params.pieces.map((piece) => ({
+                row: piece.row,
+                column: piece.column,
+                dataUrl: piece.dataUrl,
+            }));
+
+            try {
+                const merged = await mergeDataUrls({ rows, columns, pieces, aspectRatio: params.aspectRatio });
+                const uploaded = await uploadImage(merged);
+                const size = fitNodeSize(uploaded.width, uploaded.height);
+                const anchor =
+                    source[0] ||
+                    nodesRef.current.find((node) => selectedNodeIds.has(node.id)) ||
+                    nodesRef.current[0];
+                if (!anchor) return;
+                const childId = nanoid();
+                const child: CanvasNodeData = {
+                    id: childId,
+                    type: CanvasNodeType.Image,
+                    title: t("canvas.projectPage.mergeResult"),
+                    position: { x: anchor.position.x + anchor.width + 96, y: anchor.position.y },
+                    width: size.width,
+                    height: size.height,
+                    metadata: {
+                        ...imageMetadata(uploaded),
+                        prompt: anchor.metadata?.prompt,
+                    },
+                };
+                setNodes((prev) => [...prev, child]);
+                if (source.length) {
+                    setConnections((prev) => [...prev, ...source.map((node) => ({ id: nanoid(), fromNodeId: node.id, toNodeId: childId }))]);
+                }
+                setSelectedNodeIds(new Set([childId]));
+                setSelectedConnectionId(null);
+                setMergeDialogOpen(false);
+                message.success(t("canvas.projectPage.mergeSuccess", { count: pieces.length }));
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("canvas.projectPage.mergeFailed"));
+            }
+        },
+        [message, selectedNodeIds, t],
     );
 
     const maskEditImageNode = useCallback(
@@ -1966,6 +2059,72 @@ function AtelierCanvasPage() {
             }
         },
         [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest, t],
+    );
+
+    const saveAnnotateNode = useCallback(
+        async (node: CanvasNodeData, payload: CanvasAnnotateSavePayload) => {
+            setNodes((prev) =>
+                prev.map((item) =>
+                    item.id === node.id
+                        ? {
+                              ...item,
+                              metadata: {
+                                  ...item.metadata,
+                                  annotations: payload.annotations,
+                              },
+                          }
+                        : item,
+                ),
+            );
+            if (!payload.bakedDataUrl) {
+                setAnnotateNodeId(null);
+                message.success(t("canvas.projectPage.annotateSaved"));
+                return;
+            }
+            const uploaded = await uploadImage(payload.bakedDataUrl);
+            const size = fitNodeSize(uploaded.width, uploaded.height, node.width, node.height);
+            const childId = nanoid();
+            setNodes((prev) => [
+                ...prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, annotations: payload.annotations } } : item)),
+                {
+                    id: childId,
+                    type: CanvasNodeType.Image,
+                    title: t("canvas.projectPage.annotateBaked"),
+                    position: { x: node.position.x + node.width + 96, y: node.position.y },
+                    width: size.width,
+                    height: size.height,
+                    metadata: { ...imageMetadata(uploaded), prompt: node.metadata?.prompt },
+                },
+            ]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setAnnotateNodeId(null);
+            message.success(t("canvas.projectPage.annotateBakedSuccess"));
+        },
+        [message, t],
+    );
+
+    const inpaintAnnotateNode = useCallback(
+        async (node: CanvasNodeData, payload: CanvasAnnotateInpaintPayload) => {
+            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, annotations: payload.annotations } } : item)));
+            setAnnotateNodeId(null);
+            await maskEditImageNode(node, { prompt: payload.prompt, maskDataUrl: payload.maskDataUrl });
+        },
+        [maskEditImageNode],
+    );
+
+    const addTextNodeFromAnnotate = useCallback(
+        (node: CanvasNodeData, text: string) => {
+            const textNode = createCanvasNode(CanvasNodeType.Text, {
+                x: node.position.x + node.width + 96 + getNodeSpec(CanvasNodeType.Text).width / 2,
+                y: node.position.y + getNodeSpec(CanvasNodeType.Text).height / 2,
+            }, { content: text, status: "idle", fontSize: 14 });
+            setNodes((prev) => [...prev, textNode]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: textNode.id }]);
+            setSelectedNodeIds(new Set([textNode.id]));
+            message.success(t("canvas.projectPage.annotateTextNodeAdded"));
+        },
+        [message, t],
     );
 
     const upscaleImageNode = useCallback(async (node: CanvasNodeData, params: CanvasImageUpscaleParams) => {
@@ -2049,6 +2208,32 @@ function AtelierCanvasPage() {
         [effectiveConfig, finishGenerationRequest, openConfigDialog, startGenerationRequest, t],
     );
 
+    const capturePanoramaShot = useCallback(
+        async (node: CanvasNodeData, payload: PanoramaCapturePayload) => {
+            const uploaded = await uploadImage(payload.dataUrl);
+            const size = fitNodeSize(uploaded.width, uploaded.height, Math.max(node.width, 420), Math.max(node.height, 240));
+            const childId = nanoid();
+            const child: CanvasNodeData = {
+                id: childId,
+                type: CanvasNodeType.Image,
+                title: payload.label,
+                position: { x: node.position.x + node.width + 96, y: node.position.y },
+                width: size.width,
+                height: size.height,
+                metadata: {
+                    ...imageMetadata(uploaded),
+                    prompt: node.metadata?.prompt,
+                },
+            };
+            setNodes((prev) => [...prev, child]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setSelectedConnectionId(null);
+            message.success(t("canvas.projectPage.panoramaCaptured"));
+        },
+        [message, t],
+    );
+
     const handleFontSizeChange = useCallback((nodeId: string, fontSize: number) => {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, fontSize } } : node)));
     }, []);
@@ -2119,35 +2304,38 @@ function AtelierCanvasPage() {
                 } else {
                     const image = await uploadImage(first);
                     const s = fitNodeSize(image.width, image.height);
+                    const targetNode = nodesRef.current.find((node) => node.id === target.nodeId);
+                    const keepAnnotate = targetNode?.type === CanvasNodeType.Annotate;
                     setNodes((prev) =>
-                        prev.map((node) =>
-                            node.id === target.nodeId
-                                ? {
-                                      ...node,
-                                      type: CanvasNodeType.Image,
-                                      title: first.name,
-                                      width: s.width,
-                                      height: s.height,
-                                      metadata: {
-                                          ...node.metadata,
-                                          ...imageMetadata(image),
-                                          errorDetails: undefined,
-                                          freeResize: false,
-                                          images: undefined,
-                                          generationType: undefined,
-                                          model: undefined,
-                                          size: undefined,
-                                          quality: undefined,
-                                          count: undefined,
-                                          references: undefined,
-                                          primaryImageId: undefined,
-                                      },
-                                  }
-                                : node,
-                        ),
+                        prev.map((node) => {
+                            if (node.id !== target.nodeId) return node;
+                            return {
+                                ...node,
+                                type: keepAnnotate ? CanvasNodeType.Annotate : CanvasNodeType.Image,
+                                title: first.name,
+                                width: s.width,
+                                height: s.height,
+                                metadata: {
+                                    ...node.metadata,
+                                    ...imageMetadata(image),
+                                    errorDetails: undefined,
+                                    freeResize: false,
+                                    images: undefined,
+                                    generationType: undefined,
+                                    model: undefined,
+                                    size: undefined,
+                                    quality: undefined,
+                                    count: undefined,
+                                    references: undefined,
+                                    primaryImageId: undefined,
+                                    annotations: keepAnnotate ? node.metadata?.annotations || [] : undefined,
+                                },
+                            };
+                        }),
                     );
                     setSelectedNodeIds(new Set([target.nodeId]));
                     setSelectedConnectionId(null);
+                    if (keepAnnotate) setAnnotateNodeId(target.nodeId);
                 }
 
                 // Create the remaining files near the target node.
@@ -3404,6 +3592,13 @@ function AtelierCanvasPage() {
                             onInsertChatImage={(image) => void insertAssistantImage(image)}
                             onEditText={(node) => setTextEditNodeId(node.id)}
                             onViewImage={handleNodeViewImage}
+                            onAnnotate={(node) => {
+                                if (!node.metadata?.content) {
+                                    handleUploadRequest(node.id);
+                                    return;
+                                }
+                                setAnnotateNodeId(node.id);
+                            }}
                             onContextMenu={handleNodeContextMenu}
                         />
                     ))}
@@ -3452,11 +3647,19 @@ function AtelierCanvasPage() {
                     onDownload={downloadNodeImage}
                     onSaveAsset={(node) => void saveNodeAsset(node)}
                     onMaskEdit={(node) => setMaskEditNodeId(node.id)}
+                    onAnnotate={(node) => {
+                        if (!node.metadata?.content) {
+                            handleUploadRequest(node.id);
+                            return;
+                        }
+                        setAnnotateNodeId(node.id);
+                    }}
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
                     onUpscale={(node) => setUpscaleNodeId(node.id)}
                     onSuperResolve={(node) => setSuperResolveNodeId(node.id)}
                     onAngle={(node) => setAngleNodeId(node.id)}
+                    onPanorama={(node) => setPanoramaNodeId(node.id)}
                     onViewImage={handleNodeViewImage}
                     onReversePrompt={createImageReversePromptNodes}
                     onRetry={(node) => void handleRetryNode(node)}
@@ -3476,6 +3679,7 @@ function AtelierCanvasPage() {
                     onAddAudio={() => createNode(CanvasNodeType.Audio)}
                     onAddText={() => createNode(CanvasNodeType.Text)}
                     onAddChat={() => createNode(CanvasNodeType.Chat)}
+                    onAddAnnotate={() => createNode(CanvasNodeType.Annotate)}
                     onAddConfig={() => createNode(CanvasNodeType.Config)}
                     onAddGroup={() => createNode(CanvasNodeType.Group)}
                     onAddDirector={() => createNode(CanvasNodeType.Director)}
@@ -3483,6 +3687,13 @@ function AtelierCanvasPage() {
                     onRedo={redoCanvas}
                     onUpload={() => handleUploadRequest()}
                     onDelete={() => deleteNodes(new Set(selectedNodeIds))}
+                    onMergeGrid={() => {
+                        if (mergeCandidateCount < 2) {
+                            message.warning(t("canvas.projectPage.mergeNeedImages"));
+                            return;
+                        }
+                        setMergeDialogOpen(true);
+                    }}
                     onClear={() => setClearConfirmOpen(true)}
                     onCanvasToolChange={setCanvasTool}
                     onBackgroundModeChange={setBackgroundMode}
@@ -3523,6 +3734,19 @@ function AtelierCanvasPage() {
                     <CanvasNodeMaskEditDialog dataUrl={maskEditNode.metadata.content} open={Boolean(maskEditNode)} onClose={() => setMaskEditNodeId(null)} onConfirm={(payload) => void maskEditImageNode(maskEditNode!, payload)} />
                 ) : null}
 
+                {annotateNode?.metadata?.content ? (
+                    <CanvasNodeAnnotateDialog
+                        dataUrl={annotateNode.metadata.content}
+                        open={Boolean(annotateNode)}
+                        initialAnnotations={annotateNode.metadata.annotations || []}
+                        onClose={() => setAnnotateNodeId(null)}
+                        onSave={(payload) => void saveAnnotateNode(annotateNode, payload)}
+                        onInpaint={(payload) => void inpaintAnnotateNode(annotateNode, payload)}
+                        onAddTextNode={(text) => addTextNodeFromAnnotate(annotateNode, text)}
+                        onReplaceImage={() => handleUploadRequest(annotateNode.id)}
+                    />
+                ) : null}
+
                 <CanvasTextEditDialog
                     open={Boolean(textEditNode)}
                     value={textEditNode?.metadata?.content || ""}
@@ -3550,6 +3774,13 @@ function AtelierCanvasPage() {
 
                 {splitNode?.metadata?.content ? <CanvasNodeSplitDialog dataUrl={splitNode.metadata.content} open={Boolean(splitNode)} onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode!, params)} /> : null}
 
+                <CanvasNodeMergeDialog
+                    open={mergeDialogOpen}
+                    candidates={mergeCandidates}
+                    onClose={() => setMergeDialogOpen(false)}
+                    onConfirm={(params) => void mergeSelectedGridImages(params)}
+                />
+
                 {upscaleNode?.metadata?.content ? (
                     <CanvasNodeUpscaleDialog dataUrl={upscaleNode.metadata.content} open={Boolean(upscaleNode)} onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode!, params)} />
                 ) : null}
@@ -3559,6 +3790,15 @@ function AtelierCanvasPage() {
                 </Modal>
 
                 {angleNode?.metadata?.content ? <CanvasNodeAngleDialog dataUrl={angleNode.metadata.content} open={Boolean(angleNode)} onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode!, params)} /> : null}
+
+                {panoramaNode?.metadata?.content ? (
+                    <CanvasNodePanoramaDialog
+                        dataUrl={panoramaNode.metadata.content}
+                        open={Boolean(panoramaNode)}
+                        onClose={() => setPanoramaNodeId(null)}
+                        onCapture={(payload) => void capturePanoramaShot(panoramaNode, payload)}
+                    />
+                ) : null}
 
                 <Modal
                     title={t("canvas.projectPage.imageDetails")}

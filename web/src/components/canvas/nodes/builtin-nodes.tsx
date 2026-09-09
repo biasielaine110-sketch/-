@@ -1,4 +1,4 @@
-import { Clapperboard, FileText, Group, Image as ImageIcon, MessageSquareText, Music2, Settings2, Video } from "lucide-react";
+import { Clapperboard, FileText, Group, Highlighter, Image as ImageIcon, MessageSquareText, Music2, Settings2, Video } from "lucide-react";
 
 import i18n from "@/i18n";
 
@@ -11,6 +11,7 @@ import type { CanvasNodeDefinition, CanvasNodeResource } from "@/types/canvas-pl
 // Rendering remains in canvas-node's internal renderer, so no Content component is provided.
 function builtinResource(node: CanvasNodeData): CanvasNodeResource | null {
     if (node.type === CanvasNodeType.Image && node.metadata?.content) return { kind: "image", url: node.metadata.content };
+    if (node.type === CanvasNodeType.Annotate && node.metadata?.content) return { kind: "image", url: node.metadata.content };
     if (node.type === CanvasNodeType.Video && node.metadata?.content) return { kind: "video", url: node.metadata.content };
     if (node.type === CanvasNodeType.Audio && node.metadata?.content) return { kind: "audio", url: node.metadata.content };
     if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) return { kind: "text", text: node.metadata.content || node.metadata.prompt };
@@ -26,11 +27,12 @@ const iconClass = "size-5";
 const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
     { type: CanvasNodeType.Text, title: i18n.t("assets.kinds.text"), icon: <FileText className={iconClass} />, minimapColor: undefined, resource: builtinResource },
     { type: CanvasNodeType.Image, title: i18n.t("assets.kinds.image"), icon: <ImageIcon className={iconClass} />, minimapColor: "#10b981", keepAspectRatio: (node: CanvasNodeData) => !node.metadata?.freeResize, resource: builtinResource },
+    { type: CanvasNodeType.Annotate, title: i18n.t("canvas.nodeTypes.annotate"), icon: <Highlighter className={iconClass} />, minimapColor: "#f43f5e", keepAspectRatio: () => true, resource: builtinResource, hidePanel: true },
     { type: CanvasNodeType.Video, title: i18n.t("assets.kinds.video"), icon: <Video className={iconClass} />, minimapColor: "#f97316", keepAspectRatio: () => true, resource: builtinResource },
     { type: CanvasNodeType.Audio, title: i18n.t("assets.kinds.audio"), icon: <Music2 className={iconClass} />, minimapColor: "#a855f7", resource: builtinResource },
     { type: CanvasNodeType.Config, title: i18n.t("canvas.configNode.title"), icon: <Settings2 className={iconClass} />, minimapColor: "#60a5fa", hasSourceHandle: false },
     { type: CanvasNodeType.Group, title: i18n.t("canvas.node.group"), icon: <Group className={iconClass} />, minimapColor: "#94a3b8" },
-    { type: CanvasNodeType.Director, title: i18n.t("canvas.nodeTypes.director"), icon: <Clapperboard className={iconClass} />, minimapColor: "#14b8a6", hasSourceHandle: false, hasTargetHandle: false },
+    { type: CanvasNodeType.Director, title: i18n.t("canvas.nodeTypes.director"), icon: <Clapperboard className={iconClass} />, hasSourceHandle: false, hasTargetHandle: false, minimapColor: "#14b8a6" },
     { type: CanvasNodeType.Chat, title: i18n.t("canvas.nodeTypes.chat"), icon: <MessageSquareText className={iconClass} />, minimapColor: "#38bdf8", resource: builtinResource, hidePanel: true },
 ].map((def) => {
     const spec = NODE_SPECS[def.type];

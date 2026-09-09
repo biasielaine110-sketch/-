@@ -1,7 +1,7 @@
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
 import { Button, Segmented, Switch } from "antd";
-import { CircleDot, Clapperboard, Eraser, Grid2x2, Group, Hand, Image as ImageIcon, Info, MessageSquareText, Moon, MousePointer2, Music2, Palette, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, Video } from "lucide-react";
+import { CircleDot, Clapperboard, Eraser, Grid2x2, Group, Hand, Highlighter, Image as ImageIcon, Info, MessageSquareText, Moon, MousePointer2, Music2, Palette, Redo2, Settings2, Square, Sun, Trash2, Type, Undo2, Upload, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasBackgroundMode, type CanvasColorTheme, type CanvasTheme } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -20,6 +20,7 @@ export function CanvasToolbar({
     onAddAudio,
     onAddText,
     onAddChat,
+    onAddAnnotate,
     onAddConfig,
     onAddGroup,
     onAddDirector,
@@ -27,6 +28,7 @@ export function CanvasToolbar({
     onRedo,
     onUpload,
     onDelete,
+    onMergeGrid,
     onClear,
     onCanvasToolChange,
     onBackgroundModeChange,
@@ -43,6 +45,7 @@ export function CanvasToolbar({
     onAddAudio: () => void;
     onAddText: () => void;
     onAddChat: () => void;
+    onAddAnnotate: () => void;
     onAddConfig: () => void;
     onAddGroup: () => void;
     onAddDirector: () => void;
@@ -50,6 +53,7 @@ export function CanvasToolbar({
     onRedo: () => void;
     onUpload: () => void;
     onDelete: () => void;
+    onMergeGrid?: () => void;
     onClear: () => void;
     onCanvasToolChange: (tool: "select" | "pan") => void;
     onBackgroundModeChange: (mode: CanvasBackgroundMode) => void;
@@ -105,6 +109,9 @@ export function CanvasToolbar({
                 <ToolbarButton id="tool-image" label={t("canvas.toolbar.image")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddImage}>
                     <ImageIcon className="size-4.5" />
                 </ToolbarButton>
+                <ToolbarButton id="tool-annotate" label={t("canvas.toolbar.annotate")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddAnnotate}>
+                    <Highlighter className="size-4.5" />
+                </ToolbarButton>
                 <ToolbarButton id="tool-video" label={t("canvas.toolbar.video")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddVideo}>
                     <Video className="size-4.5" />
                 </ToolbarButton>
@@ -144,6 +151,11 @@ export function CanvasToolbar({
                 {selectedCount ? (
                     <>
                         <Divider theme={theme} />
+                        {selectedCount >= 2 && onMergeGrid ? (
+                            <ToolbarButton id="tool-merge-grid" label={t("canvas.toolbar.mergeGrid")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onMergeGrid}>
+                                <Grid2x2 className="size-4.5" />
+                            </ToolbarButton>
+                        ) : null}
                         <ToolbarButton id="tool-delete" label={t("canvas.deleteSelected")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onDelete} danger>
                             <Trash2 className="size-4.5" />
                         </ToolbarButton>
@@ -309,6 +321,7 @@ function toolLabel(id: string, t: (key: string) => string) {
     if (id === "tool-text") return t("canvas.toolbar.text");
     if (id === "tool-chat") return t("canvas.toolbar.chat");
     if (id === "tool-image") return t("canvas.toolbar.image");
+    if (id === "tool-annotate") return t("canvas.toolbar.annotate");
     if (id === "tool-video") return t("canvas.toolbar.video");
     if (id === "tool-audio") return t("canvas.toolbar.audio");
     if (id === "tool-config") return t("canvas.toolbar.config");
@@ -317,6 +330,7 @@ function toolLabel(id: string, t: (key: string) => string) {
     if (id === "tool-upload") return t("canvas.toolbar.upload");
     if (id === "tool-style") return t("canvas.toolbar.appearance");
     if (id === "tool-delete") return t("canvas.deleteSelected");
+    if (id === "tool-merge-grid") return t("canvas.toolbar.mergeGrid");
     if (id === "tool-clear") return t("canvas.toolbar.clear");
     return "";
 }

@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { App, Button, Empty, Input, Popconfirm, Select, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, History as HistoryIcon, Image as ImageIcon, ListChecks, MessageSquareText, Music2, Plus, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Highlighter, History as HistoryIcon, Image as ImageIcon, ListChecks, MessageSquareText, Music2, Plus, Search, Settings2, Square, Trash2, Type, Video } from "lucide-react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
@@ -34,6 +34,7 @@ type Props = {
 
 const NODE_TYPE_ICON: Record<string, typeof Square> = {
     [CanvasNodeType.Image]: ImageIcon,
+    [CanvasNodeType.Annotate]: Highlighter,
     [CanvasNodeType.Video]: Video,
     [CanvasNodeType.Audio]: Music2,
     [CanvasNodeType.Text]: Type,
@@ -132,7 +133,7 @@ function TabButton({ label, active, theme, onClick }: { label: string; active: b
 // Canvas tab: list nodes and center, zoom, and select the clicked node.
 // ---------------------------------------------------------------------------
 
-const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Chat, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Group];
+const NODE_FILTER_VALUES = ["all", CanvasNodeType.Image, CanvasNodeType.Annotate, CanvasNodeType.Video, CanvasNodeType.Text, CanvasNodeType.Chat, CanvasNodeType.Audio, CanvasNodeType.Config, CanvasNodeType.Group];
 
 function nodePreviewText(node: CanvasNodeData) {
     if (node.type === CanvasNodeType.Text) return node.metadata?.content || node.metadata?.prompt || "";

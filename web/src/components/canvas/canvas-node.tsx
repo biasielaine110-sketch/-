@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Clapperboard, Copy, Group, Image as ImageIcon, MessageSquareText, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Clapperboard, Copy, Group, Highlighter, Image as ImageIcon, MessageSquareText, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -56,6 +56,7 @@ type CanvasNodeProps = {
     onInsertChatImage?: (image: import("@/types/canvas").CanvasAssistantImage) => void;
     onEditText?: (node: CanvasNodeData) => void;
     onViewImage?: (node: CanvasNodeData, imageId?: string) => void;
+    onAnnotate?: (node: CanvasNodeData) => void;
     onContextMenu: (event: React.MouseEvent, nodeId: string) => void;
 };
 
@@ -130,6 +131,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onInsertChatImage,
     onEditText,
     onViewImage,
+    onAnnotate,
     onContextMenu,
 }: CanvasNodeProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -139,7 +141,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const [isEditingContent, setIsEditingContent] = useState(false);
     const [isEditingTitle, setIsEditingTitle] = useState(false);
     const [titleDraft, setTitleDraft] = useState(data.title || "");
-    const hasImageContent = data.type === CanvasNodeType.Image && Boolean(data.metadata?.content);
+    const hasImageContent = (data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Annotate) && Boolean(data.metadata?.content);
     const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content);
     const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
     const isGroup = data.type === CanvasNodeType.Group;
@@ -383,6 +385,11 @@ export const CanvasNode = React.memo(function CanvasNode({
                 }}
                 onMouseDown={(event) => onMouseDown(event, data.id)}
                 onDoubleClick={(event) => {
+                    if (data.type === CanvasNodeType.Annotate && hasImageContent) {
+                        event.stopPropagation();
+                        onAnnotate?.(data);
+                        return;
+                    }
                     if (data.type === CanvasNodeType.Image && hasImageContent) {
                         event.stopPropagation();
                         onViewImage?.(data);
@@ -475,6 +482,7 @@ function NodeContent(props: NodeContentRendererProps) {
 const nodeContentRenderers = {
     [CanvasNodeType.Text]: TextContent,
     [CanvasNodeType.Image]: ImageNodeContent,
+    [CanvasNodeType.Annotate]: AnnotateNodeContent,
     [CanvasNodeType.Config]: EmptyImageContent,
     [CanvasNodeType.Video]: VideoNodeContent,
     [CanvasNodeType.Audio]: AudioNodeContent,
@@ -482,6 +490,49 @@ const nodeContentRenderers = {
     [CanvasNodeType.Director]: DirectorNodeContent,
     [CanvasNodeType.Chat]: ChatNodeContent,
 } satisfies Record<CanvasNodeType, (props: NodeContentRendererProps) => ReactNode>;
+
+function AnnotateNodeContent({ node, theme }: NodeContentRendererProps) {
+    const { t } = useTranslation();
+    const content = node.metadata?.content;
+    const annotations = node.metadata?.annotations || [];
+    if (!content) {
+        return (
+            <div className="pointer-events-none flex h-full w-full flex-col items-center justify-center gap-2 p-4 text-center" style={{ color: theme.node.placeholder }}>
+                <span className="grid size-11 place-items-center rounded-2xl" style={{ background: theme.toolbar.activeBg, color: theme.node.muted }}>
+                    <Highlighter className="size-5" />
+                </span>
+                <span className="text-sm font-semibold" style={{ color: theme.node.text }}>
+                    {t("canvas.nodeTypes.annotate")}
+                </span>
+                <span className="text-xs opacity-55">{t("canvas.annotate.emptyHint")}</span>
+            </div>
+        );
+    }
+    return (
+        <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
+            <img src={content} alt={node.title} draggable={false} className="pointer-events-none block h-full w-full select-none object-contain" />
+            {annotations.length ? (
+                <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
+                    {annotations.map((item) => {
+                        if (item.kind === "rect") return <rect key={item.id} x={item.x} y={item.y} width={item.w} height={item.h} fill="none" stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
+                        if (item.kind === "ellipse") return <ellipse key={item.id} cx={item.x + item.w / 2} cy={item.y + item.h / 2} rx={item.w / 2} ry={item.h / 2} fill="none" stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
+                        if (item.kind === "arrow") {
+                            return <line key={item.id} x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
+                        }
+                        return (
+                            <text key={item.id} x={item.x} y={item.y} fill={item.color} fontSize={item.fontSize / 700} fontWeight={600}>
+                                {item.text}
+                            </text>
+                        );
+                    })}
+                </svg>
+            ) : null}
+            <div className="pointer-events-none absolute left-2 top-2 rounded-full px-2 py-0.5 text-[10px] font-medium text-white" style={{ background: "rgba(15,23,42,.55)" }}>
+                {t("canvas.annotate.badge", { count: annotations.length })}
+            </div>
+        </div>
+    );
+}
 
 function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onInsertChatImage }: NodeContentRendererProps) {
     const connectedTexts = mentionReferences.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim()).map((reference) => reference.text!.trim());
@@ -764,15 +815,31 @@ function ImageContent({
                           />
                       ))
                 : null}
-            <div className="h-full w-full overflow-hidden rounded-3xl">
+            <div className="relative h-full w-full overflow-hidden rounded-3xl">
                 {primaryContent ? (
-                    <img
-                        src={primaryContent}
-                        alt={node.title}
-                        draggable={false}
-                        onDragStart={(event) => event.preventDefault()}
-                        className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
-                    />
+                    <>
+                        <img
+                            src={primaryContent}
+                            alt={node.title}
+                            draggable={false}
+                            onDragStart={(event) => event.preventDefault()}
+                            className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
+                        />
+                        {(node.metadata?.annotations?.length || 0) > 0 ? (
+                            <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
+                                {node.metadata!.annotations!.map((item) => {
+                                    if (item.kind === "rect") return <rect key={item.id} x={item.x} y={item.y} width={item.w} height={item.h} fill="none" stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
+                                    if (item.kind === "ellipse") return <ellipse key={item.id} cx={item.x + item.w / 2} cy={item.y + item.h / 2} rx={item.w / 2} ry={item.h / 2} fill="none" stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
+                                    if (item.kind === "arrow") return <line key={item.id} x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
+                                    return (
+                                        <text key={item.id} x={item.x} y={item.y} fill={item.color} fontSize={item.fontSize / 700} fontWeight={600}>
+                                            {item.text}
+                                        </text>
+                                    );
+                                })}
+                            </svg>
+                        ) : null}
+                    </>
                 ) : (
                     <ImageSlotStatus image={primaryImage} />
                 )}

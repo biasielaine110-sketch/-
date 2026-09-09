@@ -26,9 +26,17 @@ export type ImageSplitParams = {
     columns: number;
     horizontalLines?: number[];
     verticalLines?: number[];
+    /** Optional output aspect ratio like "1:1" | "16:9" | "9:16". Source is center-cropped before split. */
+    aspectRatio?: string | null;
 };
 
 export type ImageSplitPiece = {
+    row: number;
+    column: number;
+    dataUrl: string;
+};
+
+export type ImageMergePiece = {
     row: number;
     column: number;
     dataUrl: string;
@@ -46,7 +54,9 @@ export async function cropDataUrl(dataUrl: string, crop?: ImageCropRect) {
 }
 
 export async function splitDataUrl(dataUrl: string, params: ImageSplitParams): Promise<ImageSplitPiece[]> {
-    const image = await loadImage(dataUrl);
+    const source = await loadImage(dataUrl);
+    const cropped = params.aspectRatio ? cropImageToAspect(source, parseAspectRatio(params.aspectRatio)) : source;
+    const image = cropped instanceof HTMLImageElement ? cropped : await canvasToImage(cropped);
     const xCuts = buildSplitCuts(params.verticalLines, image.width, Math.max(1, Math.floor(params.columns)));
     const yCuts = buildSplitCuts(params.horizontalLines, image.height, Math.max(1, Math.floor(params.rows)));
     const pieces: ImageSplitPiece[] = [];
@@ -62,6 +72,95 @@ export async function splitDataUrl(dataUrl: string, params: ImageSplitParams): P
     }
 
     return pieces;
+}
+
+export type ImageMergeParams = {
+    rows: number;
+    columns: number;
+    pieces: ImageMergePiece[];
+    /** Optional output aspect ratio like "1:1" | "16:9" | "9:16". Final merge is center-cropped. */
+    aspectRatio?: string | null;
+};
+
+export async function mergeDataUrls(params: ImageMergeParams) {
+    const rows = Math.max(1, Math.floor(params.rows));
+    const columns = Math.max(1, Math.floor(params.columns));
+    if (params.pieces.length < 1) throw new Error("merge pieces incomplete");
+
+    const loaded = await Promise.all(
+        params.pieces.map(async (piece) => ({
+            ...piece,
+            image: await loadImage(piece.dataUrl),
+        })),
+    );
+
+    const cellWidth = Math.max(...loaded.map((item) => item.image.width));
+    const cellHeight = Math.max(...loaded.map((item) => item.image.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = cellWidth * columns;
+    canvas.height = cellHeight * rows;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("merge canvas unavailable");
+    context.fillStyle = "#000000";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    loaded.forEach((piece) => {
+        const column = Math.min(columns - 1, Math.max(0, piece.column));
+        const row = Math.min(rows - 1, Math.max(0, piece.row));
+        const x = column * cellWidth + Math.floor((cellWidth - piece.image.width) / 2);
+        const y = row * cellHeight + Math.floor((cellHeight - piece.image.height) / 2);
+        context.drawImage(piece.image, x, y);
+    });
+
+    const merged = canvas.toDataURL("image/png");
+    const ratio = parseAspectRatio(params.aspectRatio);
+    if (!ratio) return merged;
+
+    const image = await loadImage(merged);
+    const cropped = cropImageToAspect(image, ratio);
+    if (cropped instanceof HTMLImageElement) return cropped.src;
+    return cropped.toDataURL("image/png");
+}
+
+export function parseAspectRatio(value?: string | null) {
+    if (!value || value === "original") return null;
+    const [w, h] = value.split(":").map(Number);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+    return w / h;
+}
+
+export function resolveGridPreset(cells: 3 | 4 | 6 | 9, aspectRatio?: string | null): { rows: number; columns: number } {
+    const ratio = parseAspectRatio(aspectRatio);
+    const portrait = ratio != null && ratio < 1;
+    if (cells === 3) return portrait ? { rows: 3, columns: 1 } : { rows: 1, columns: 3 };
+    if (cells === 4) return { rows: 2, columns: 2 };
+    if (cells === 6) return portrait ? { rows: 3, columns: 2 } : { rows: 2, columns: 3 };
+    return { rows: 3, columns: 3 };
+}
+
+function cropImageToAspect(image: HTMLImageElement, ratio: number | null) {
+    if (!ratio) return image;
+    const imageRatio = image.width / image.height;
+    let sw = image.width;
+    let sh = image.height;
+    if (imageRatio > ratio) {
+        sw = Math.round(image.height * ratio);
+    } else {
+        sh = Math.round(image.width / ratio);
+    }
+    const sx = Math.max(0, Math.floor((image.width - sw) / 2));
+    const sy = Math.max(0, Math.floor((image.height - sh) / 2));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, sw);
+    canvas.height = Math.max(1, sh);
+    const context = canvas.getContext("2d");
+    if (!context) return image;
+    context.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    return canvas;
+}
+
+function canvasToImage(canvas: HTMLCanvasElement) {
+    return loadImage(canvas.toDataURL("image/png"));
 }
 
 function buildSplitCuts(lines: number[] | undefined, size: number, count: number) {

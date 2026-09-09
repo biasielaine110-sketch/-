@@ -1,21 +1,23 @@
 import type { ReactNode } from "react";
-import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Scissors, Sparkles, Upload, ZoomIn } from "lucide-react";
+import { Brush, Camera, Copy, FileText, Globe2, Grid2x2, Highlighter, Lock, LockOpen, Maximize2, Scissors, Sparkles, Upload, ZoomIn } from "lucide-react";
 
 import type { CanvasNodeData } from "@/types/canvas";
 import i18n from "@/i18n";
 
-export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "view";
+export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "annotate" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "panorama" | "view";
 export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | ImageNodeActionToolId;
 
 export type ImageToolHandlers = {
     onUpload: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
     onMaskEdit: (node: CanvasNodeData) => void;
+    onAnnotate: (node: CanvasNodeData) => void;
     onCrop: (node: CanvasNodeData) => void;
     onSplit: (node: CanvasNodeData) => void;
     onUpscale: (node: CanvasNodeData) => void;
     onSuperResolve: (node: CanvasNodeData) => void;
     onAngle: (node: CanvasNodeData) => void;
+    onPanorama: (node: CanvasNodeData) => void;
     onViewImage: (node: CanvasNodeData) => void;
     onCopyPrompt: (node: CanvasNodeData) => void;
     onReversePrompt: (node: CanvasNodeData) => void;
@@ -36,7 +38,7 @@ export type ImageQuickToolsConfig = {
     showLabels: boolean;
 };
 
-export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v7";
+export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v9";
 
 const defaultBaseToolIds: ImageQuickToolId[] = ["info", "delete", "saveAsset", "download"];
 
@@ -46,7 +48,7 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         defaultVisible: true,
         label: () => i18n.t("canvas.imageTools.copyPrompt"),
         title: () => i18n.t("canvas.imageTools.copyPromptTitle"),
-        icon: () => <Copy className="size-4" />,
+        icon: () => <Copy className="size-[10px]" />,
         run: (node, handlers) => handlers.onCopyPrompt(node),
     },
     {
@@ -54,7 +56,7 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         defaultVisible: true,
         label: () => i18n.t("canvas.imageTools.reversePrompt"),
         title: () => i18n.t("canvas.imageTools.reversePromptTitle"),
-        icon: () => <FileText className="size-4" />,
+        icon: () => <FileText className="size-[10px]" />,
         run: (node, handlers) => handlers.onReversePrompt(node),
     },
     {
@@ -62,7 +64,7 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         defaultVisible: true,
         label: () => i18n.t("canvas.imageTools.replace"),
         title: () => i18n.t("canvas.imageTools.replace"),
-        icon: () => <Upload className="size-4" />,
+        icon: () => <Upload className="size-[10px]" />,
         run: (node, handlers) => handlers.onUpload(node),
     },
     {
@@ -70,7 +72,7 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         defaultVisible: false,
         label: (node) => i18n.t(node.metadata?.freeResize ? "canvas.imageTools.free" : "canvas.imageTools.locked"),
         title: (node) => i18n.t(node.metadata?.freeResize ? "canvas.imageTools.lockTitle" : "canvas.imageTools.freeTitle"),
-        icon: (node) => (node.metadata?.freeResize ? <LockOpen className="size-4" /> : <Lock className="size-4" />),
+        icon: (node) => (node.metadata?.freeResize ? <LockOpen className="size-[10px]" /> : <Lock className="size-[10px]" />),
         active: (node) => Boolean(node.metadata?.freeResize),
         run: (node, handlers) => handlers.onToggleFreeResize(node),
     },
@@ -79,15 +81,23 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         defaultVisible: true,
         label: () => i18n.t("canvas.imageTools.mask"),
         title: () => i18n.t("canvas.imageTools.maskTitle"),
-        icon: () => <Brush className="size-4" />,
+        icon: () => <Brush className="size-[10px]" />,
         run: (node, handlers) => handlers.onMaskEdit(node),
+    },
+    {
+        id: "annotate",
+        defaultVisible: true,
+        label: () => i18n.t("canvas.annotate.open"),
+        title: () => i18n.t("canvas.annotate.openTitle"),
+        icon: () => <Highlighter className="size-[10px]" />,
+        run: (node, handlers) => handlers.onAnnotate(node),
     },
     {
         id: "crop",
         defaultVisible: true,
         label: () => i18n.t("canvas.imageTools.crop"),
         title: () => i18n.t("canvas.imageTools.cropTitle"),
-        icon: () => <Scissors className="size-4" />,
+        icon: () => <Scissors className="size-[10px]" />,
         run: (node, handlers) => handlers.onCrop(node),
     },
     {
@@ -95,7 +105,7 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         defaultVisible: true,
         label: () => i18n.t("canvas.imageTools.split"),
         title: () => i18n.t("canvas.imageTools.splitTitle"),
-        icon: () => <Grid2x2 className="size-4" />,
+        icon: () => <Grid2x2 className="size-[10px]" />,
         run: (node, handlers) => handlers.onSplit(node),
     },
     {
@@ -103,7 +113,7 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         defaultVisible: true,
         label: () => i18n.t("canvas.imageTools.upscale"),
         title: () => i18n.t("canvas.imageTools.upscaleTitle"),
-        icon: () => <ZoomIn className="size-4" />,
+        icon: () => <ZoomIn className="size-[10px]" />,
         run: (node, handlers) => handlers.onUpscale(node),
     },
     {
@@ -111,7 +121,7 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         defaultVisible: false,
         label: () => i18n.t("canvas.imageTools.superResolve"),
         title: () => i18n.t("canvas.imageTools.superResolveTitle"),
-        icon: () => <Sparkles className="size-4" />,
+        icon: () => <Sparkles className="size-[10px]" />,
         run: (node, handlers) => handlers.onSuperResolve(node),
     },
     {
@@ -119,15 +129,23 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         defaultVisible: false,
         label: () => i18n.t("canvas.imageTools.angle"),
         title: () => i18n.t("canvas.imageTools.angleTitle"),
-        icon: () => <Camera className="size-4" />,
+        icon: () => <Camera className="size-[10px]" />,
         run: (node, handlers) => handlers.onAngle(node),
+    },
+    {
+        id: "panorama",
+        defaultVisible: true,
+        label: () => i18n.t("canvas.imageTools.panorama"),
+        title: () => i18n.t("canvas.imageTools.panoramaTitle"),
+        icon: () => <Globe2 className="size-[10px]" />,
+        run: (node, handlers) => handlers.onPanorama(node),
     },
     {
         id: "view",
         defaultVisible: true,
         label: () => i18n.t("canvas.imageTools.view"),
         title: () => i18n.t("canvas.imageTools.viewTitle"),
-        icon: () => <Maximize2 className="size-4" />,
+        icon: () => <Maximize2 className="size-[10px]" />,
         run: (node, handlers) => handlers.onViewImage(node),
     },
 ];

@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Button, InputNumber, Modal, Tooltip } from "antd";
+import { Button, InputNumber, Modal, Segmented, Tooltip } from "antd";
 import { Grid2x2, ListRestart, PanelTop, Redo2, Rows3, Trash2, Undo2, ZoomIn, ZoomOut } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { readImageMeta } from "@/lib/image-utils";
-import type { ImageSplitParams } from "@/lib/canvas/canvas-image-data";
+import { resolveGridPreset, type ImageSplitParams } from "@/lib/canvas/canvas-image-data";
 import { useImageEditorViewport } from "@/components/canvas/use-image-editor-viewport";
 
 export type CanvasImageSplitParams = ImageSplitParams;
 
-const defaultParams: CanvasImageSplitParams = { rows: 2, columns: 2, horizontalLines: [0.5], verticalLines: [0.5] };
+const defaultParams: CanvasImageSplitParams = { rows: 2, columns: 2, horizontalLines: [0.5], verticalLines: [0.5], aspectRatio: "original" };
 const maxGridSize = 12;
+const gridPresets = [3, 4, 6, 9] as const;
+const aspectPresets = ["original", "1:1", "4:3", "3:4", "16:9", "9:16"] as const;
 type ActiveLine = { axis: "horizontal" | "vertical"; index: number } | null;
 
 export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { dataUrl: string; open: boolean; onClose: () => void; onConfirm: (params: CanvasImageSplitParams) => void }) {
@@ -18,6 +20,7 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
     const [params, setParams] = useState(defaultParams);
     const [image, setImage] = useState<{ width: number; height: number } | null>(null);
     const [active, setActive] = useState<ActiveLine>(null);
+    const [activePreset, setActivePreset] = useState<number | null>(4);
     const historyRef = useRef<CanvasImageSplitParams[]>([]);
     const redoRef = useRef<CanvasImageSplitParams[]>([]);
     const dragAbortRef = useRef<AbortController | null>(null);
@@ -36,6 +39,7 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
         if (!open) return;
         setParams(defaultParams);
         setActive(null);
+        setActivePreset(4);
         setImage(null);
         historyRef.current = [];
         redoRef.current = [];
@@ -53,23 +57,64 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
         return () => dragAbortRef.current?.abort();
     }, [open]);
 
+    const applyGrid = (nextRows: number, nextColumns: number, preset: number | null = null) => {
+        pushHistory(historyRef, redoRef, params, setHistorySize, setRedoSize);
+        setActive(null);
+        setActivePreset(preset);
+        setParams((current) => ({
+            ...current,
+            rows: nextRows,
+            columns: nextColumns,
+            horizontalLines: buildGridLines(nextRows),
+            verticalLines: buildGridLines(nextColumns),
+        }));
+    };
+
+    const applyPreset = (cells: (typeof gridPresets)[number]) => {
+        const layout = resolveGridPreset(cells, params.aspectRatio);
+        applyGrid(layout.rows, layout.columns, cells);
+    };
+
     const update = (key: "rows" | "columns", value: string | number | null) => {
         const count = clampGrid(value ?? params[key]);
         pushHistory(historyRef, redoRef, params, setHistorySize, setRedoSize);
         setActive(null);
+        setActivePreset(null);
         setParams((current) => ({ ...current, [key]: count, [key === "rows" ? "horizontalLines" : "verticalLines"]: buildGridLines(count) }));
     };
+
+    const setAspectRatio = (aspectRatio: string) => {
+        pushHistory(historyRef, redoRef, params, setHistorySize, setRedoSize);
+        const preset = activePreset === 3 || activePreset === 4 || activePreset === 6 || activePreset === 9 ? activePreset : null;
+        if (preset) {
+            const layout = resolveGridPreset(preset, aspectRatio);
+            setParams((current) => ({
+                ...current,
+                aspectRatio,
+                rows: layout.rows,
+                columns: layout.columns,
+                horizontalLines: buildGridLines(layout.rows),
+                verticalLines: buildGridLines(layout.columns),
+            }));
+            return;
+        }
+        setParams((current) => ({ ...current, aspectRatio }));
+    };
+
     const addLine = (axis: "horizontal" | "vertical") => {
         pushHistory(historyRef, redoRef, params, setHistorySize, setRedoSize);
+        setActivePreset(null);
         const key = axis === "horizontal" ? "horizontalLines" : "verticalLines";
         const spot = findLineSpot(params[key] || []);
         const lines = [...(params[key] || []), spot].sort((a, b) => a - b);
         setActive({ axis, index: lines.indexOf(spot) });
         setParams({ ...params, [key]: lines, rows: axis === "horizontal" ? lines.length + 1 : params.rows, columns: axis === "vertical" ? lines.length + 1 : params.columns });
     };
+
     const deleteLine = () => {
         if (!active) return;
         pushHistory(historyRef, redoRef, params, setHistorySize, setRedoSize);
+        setActivePreset(null);
         setParams((current) => {
             const key = active.axis === "horizontal" ? "horizontalLines" : "verticalLines";
             const lines = (current[key] || []).filter((_, index) => index !== active.index);
@@ -77,6 +122,7 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
         });
         setActive(null);
     };
+
     const startDrag = (axis: "horizontal" | "vertical", index: number, event: ReactPointerEvent) => {
         event.preventDefault();
         event.stopPropagation();
@@ -93,6 +139,7 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
         window.addEventListener("pointerup", stop, { signal: controller.signal });
         window.addEventListener("pointercancel", stop, { signal: controller.signal });
     };
+
     const setLine = (axis: "horizontal" | "vertical", index: number, value: number) => {
         setParams((current) => {
             const key = axis === "horizontal" ? "horizontalLines" : "verticalLines";
@@ -101,26 +148,31 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
             return { ...current, [key]: lines };
         });
     };
+
     const resetLines = () => {
         pushHistory(historyRef, redoRef, params, setHistorySize, setRedoSize);
         setActive(null);
         setParams((current) => ({ ...current, horizontalLines: buildGridLines(current.rows), verticalLines: buildGridLines(current.columns) }));
     };
+
     const undoSplit = useCallback(() => {
         const previous = historyRef.current.pop();
         if (!previous) return;
         redoRef.current.push(cloneSplitParams(params));
         setParams(previous);
         setActive(null);
+        setActivePreset(null);
         setHistorySize(historyRef.current.length);
         setRedoSize(redoRef.current.length);
     }, [params]);
+
     const redoSplit = useCallback(() => {
         const next = redoRef.current.pop();
         if (!next) return;
         historyRef.current.push(cloneSplitParams(params));
         setParams(next);
         setActive(null);
+        setActivePreset(null);
         setHistorySize(historyRef.current.length);
         setRedoSize(redoRef.current.length);
     }, [params]);
@@ -145,17 +197,18 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
         window.addEventListener("keydown", handleKeyDown, true);
         return () => window.removeEventListener("keydown", handleKeyDown, true);
     }, [active, open, params, redoSplit, undoSplit]);
-    const confirmParams = { ...params, horizontalLines, verticalLines, rows, columns };
+
+    const confirmParams = { ...params, horizontalLines, verticalLines, rows, columns, aspectRatio: params.aspectRatio === "original" ? null : params.aspectRatio };
 
     return (
-        <Modal title={null} open={open && Boolean(dataUrl)} onCancel={onClose} footer={null} width={780} centered destroyOnHidden transitionName="" maskTransitionName="">
+        <Modal title={null} open={open && Boolean(dataUrl)} onCancel={onClose} footer={null} width={860} centered destroyOnHidden transitionName="" maskTransitionName="">
             <div className="space-y-5" data-canvas-no-zoom>
                 <div>
-                    <h2 className="text-xl font-semibold">{t("canvas.editors.splitTitle")}</h2>
+                    <h2 className="text-xl font-semibold">{t("canvas.editors.gridTitle")}</h2>
                     <p className="mt-1 text-sm opacity-60">{t("canvas.editors.splitDescription", { count: total })}</p>
                     <p className="mt-2 text-xs leading-5 opacity-55">{t("canvas.editors.splitHint")}</p>
                 </div>
-                <div className="grid gap-6 md:grid-cols-[minmax(260px,1fr)_280px]">
+                <div className="grid gap-6 md:grid-cols-[minmax(260px,1fr)_300px]">
                     <div className="rounded-xl border p-4">
                         <div
                             ref={viewport.viewportRef}
@@ -192,7 +245,32 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
                             <span className="font-semibold">{image ? `${image.width} x ${image.height} px` : t("canvas.editors.loading")}</span>
                         </div>
                     </div>
-                    <div className="space-y-5 py-2">
+                    <div className="space-y-4 py-2">
+                        <div className="space-y-2">
+                            <div className="text-sm font-medium opacity-75">{t("canvas.editors.gridPreset")}</div>
+                            <div className="grid grid-cols-4 gap-2">
+                                {gridPresets.map((cells) => (
+                                    <Button key={cells} type={activePreset === cells ? "primary" : "default"} onClick={() => applyPreset(cells)}>
+                                        {t("canvas.editors.gridCells", { count: cells })}
+                                    </Button>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="space-y-2">
+                            <div className="text-sm font-medium opacity-75">{t("canvas.editors.gridAspect")}</div>
+                            <Segmented
+                                block
+                                size="small"
+                                value={params.aspectRatio || "original"}
+                                options={aspectPresets.map((value) => ({
+                                    value,
+                                    label: value === "original" ? t("canvas.editors.originalMode") : value,
+                                }))}
+                                onChange={(value) => setAspectRatio(String(value))}
+                            />
+                        </div>
+
                         <NumberField label={t("canvas.editors.rows")} value={rows} onChange={(value) => update("rows", value)} />
                         <NumberField label={t("canvas.editors.columns")} value={columns} onChange={(value) => update("columns", value)} />
                         <div className="grid grid-cols-2 gap-2">
@@ -217,6 +295,12 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
                             <div className="mt-2 flex items-center justify-between">
                                 <span className="opacity-60">{t("canvas.editors.averageSize")}</span>
                                 <span className="font-semibold">{pieceSize ? `${pieceSize.width} x ${pieceSize.height}` : t("canvas.editors.unknown")}</span>
+                            </div>
+                            <div className="mt-2 flex items-center justify-between">
+                                <span className="opacity-60">{t("canvas.editors.gridLayout")}</span>
+                                <span className="font-semibold">
+                                    {rows} × {columns}
+                                </span>
                             </div>
                         </div>
                         <Button type="primary" size="large" className="w-full" icon={<Grid2x2 className="size-4" />} onClick={() => onConfirm(confirmParams)}>

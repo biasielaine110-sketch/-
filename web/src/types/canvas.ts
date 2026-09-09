@@ -18,6 +18,7 @@ export enum CanvasNodeType {
     Group = "group",
     Director = "director",
     Chat = "chat",
+    Annotate = "annotate",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -26,6 +27,14 @@ export type CanvasNodeTypeId = CanvasNodeType | (string & {});
 export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
+
+export type CanvasGridMeta = {
+    groupId: string;
+    row: number;
+    column: number;
+    rows: number;
+    columns: number;
+};
 
 export type CanvasNodeImage = {
     id: string;
@@ -38,6 +47,49 @@ export type CanvasNodeImage = {
     bytes: number;
     mimeType: string;
 };
+
+export type CanvasAnnotationKind = "rect" | "ellipse" | "arrow" | "text";
+
+export type CanvasAnnotationBase = {
+    id: string;
+    stroke: string;
+    strokeWidth: number;
+};
+
+export type CanvasRectAnnotation = CanvasAnnotationBase & {
+    kind: "rect";
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+};
+
+export type CanvasEllipseAnnotation = CanvasAnnotationBase & {
+    kind: "ellipse";
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+};
+
+export type CanvasArrowAnnotation = CanvasAnnotationBase & {
+    kind: "arrow";
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+};
+
+export type CanvasTextAnnotation = CanvasAnnotationBase & {
+    kind: "text";
+    x: number;
+    y: number;
+    text: string;
+    color: string;
+    fontSize: number;
+};
+
+export type CanvasAnnotation = CanvasRectAnnotation | CanvasEllipseAnnotation | CanvasArrowAnnotation | CanvasTextAnnotation;
 
 export type CanvasNodeMetadata = {
     content?: string;
@@ -79,6 +131,8 @@ export type CanvasNodeMetadata = {
     chatTextEnabled?: boolean;
     chatImageEnabled?: boolean;
     imageModel?: string;
+    annotations?: CanvasAnnotation[];
+    grid?: CanvasGridMeta;
 };
 
 export type CanvasNodeData = {

@@ -18,7 +18,8 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Audio]: { width: 340, height: 120, get title() { return i18n.t("canvas.nodeTypes.audio"); } },
     [CanvasNodeType.Group]: { width: 760, height: 480, get title() { return i18n.t("canvas.nodeTypes.group"); } },
     [CanvasNodeType.Director]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.director"); } },
-    [CanvasNodeType.Chat]: { width: 420, height: 520, get title() { return i18n.t("canvas.nodeTypes.chat"); } },
+    [CanvasNodeType.Chat]: { width: 420, height: 1040, get title() { return i18n.t("canvas.nodeTypes.chat"); } },
+    [CanvasNodeType.Annotate]: { width: 420, height: 320, get title() { return i18n.t("canvas.nodeTypes.annotate"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
 
 export const NODE_SPECS = {
@@ -51,8 +52,12 @@ export const NODE_SPECS = {
         metadata: { status: "idle" },
     },
     [CanvasNodeType.Chat]: {
-        width: 420, height: 520, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Chat].title; },
+        width: 420, height: 1040, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Chat].title; },
         metadata: { status: "idle", messages: [] },
+    },
+    [CanvasNodeType.Annotate]: {
+        width: 420, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Annotate].title; },
+        metadata: { content: "", status: "idle", annotations: [] },
     },
 } satisfies Record<CanvasNodeType, CanvasNodeSpec>;
 
