@@ -1,5 +1,6 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { Select } from "antd";
+import type { DefaultOptionType } from "antd/es/select";
 import { Cpu } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -22,7 +23,25 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     const { t } = useTranslation();
     const pickerId = useId();
     const [open, setOpen] = useState(false);
-    const options = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
+    const models = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
+    const selectOptions = useMemo<DefaultOptionType[]>(
+        () =>
+            models.length
+                ? models.map((model) => ({
+                      value: model,
+                      label: <ModelLabel config={config} model={model} />,
+                      title: modelOptionLabel(config, model),
+                  }))
+                : [
+                      {
+                          value: "__empty__",
+                          label: emptyModelLabel(config, capability),
+                          title: emptyModelLabel(config, capability),
+                          disabled: true,
+                      },
+                  ],
+        [capability, config, models],
+    );
     const current = value || undefined;
     const pickerPlaceholder = placeholder || t("settingsPanels.model.select");
 
@@ -42,21 +61,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 placeholder={pickerPlaceholder}
                 className={cn("canvas-composer-model-picker h-8 w-full max-w-full min-w-[9rem] [&_.ant-select-selector]:!rounded-full [&_.ant-select-selector]:!px-3")}
                 popupMatchSelectWidth={false}
-                options={
-                    options.length
-                        ? options.map((model) => ({
-                              value: model,
-                              label: <ModelLabel config={config} model={model} />,
-                              title: modelOptionLabel(config, model),
-                          }))
-                        : [
-                              {
-                                  value: "__empty__",
-                                  label: emptyModelLabel(config, capability),
-                                  disabled: true,
-                              },
-                          ]
-                }
+                options={selectOptions}
                 optionLabelProp="title"
                 popupRender={(menu) => (
                     <div data-canvas-no-zoom className="w-80 max-w-[calc(100vw-24px)]" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
@@ -64,19 +69,25 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                     </div>
                 )}
                 onOpenChange={(nextOpen) => {
-                    if (nextOpen && !options.length && config.channelMode === "local") onMissingConfig?.();
+                    if (nextOpen && !models.length && config.channelMode === "local") onMissingConfig?.();
                     if (nextOpen) window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
                     setOpen(nextOpen);
                 }}
                 onChange={(model) => {
                     if (model && model !== "__empty__") onChange(model);
                 }}
-                labelRender={(props) => (
-                    <span className="flex min-w-0 items-center gap-2">
-                        <ModelIcon model={String(props.value || "")} />
-                        <span className="canvas-model-picker-text min-w-0 flex-1 truncate text-left">{props.title || props.label || pickerPlaceholder}</span>
-                    </span>
-                )}
+                labelRender={(props) => {
+                    const model = String(props.value || "");
+                    const titleText = model && model !== "__empty__" ? modelOptionLabel(config, model) : "";
+                    const fallback = typeof props.label === "string" || typeof props.label === "number" ? String(props.label) : pickerPlaceholder;
+                    const text: ReactNode = titleText || fallback;
+                    return (
+                        <span className="flex min-w-0 items-center gap-2">
+                            <ModelIcon model={model} />
+                            <span className="canvas-model-picker-text min-w-0 flex-1 truncate text-left">{text}</span>
+                        </span>
+                    );
+                }}
             />
         </div>
     );
