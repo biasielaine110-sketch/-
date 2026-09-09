@@ -87,7 +87,7 @@ export function CanvasChatContent({
     const submit = () => {
         const text = draft.trim() || contextText;
         if (!text || loading || (!textEnabled && !imageEnabled)) return;
-        if (draft.trim()) setDraft("");
+        setDraft("");
         onSend(node.id, text, sendOptions);
     };
 

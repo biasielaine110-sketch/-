@@ -535,13 +535,15 @@ function AnnotateNodeContent({ node, theme }: NodeContentRendererProps) {
 }
 
 function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onInsertChatImage }: NodeContentRendererProps) {
-    const connectedTexts = mentionReferences.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim()).map((reference) => reference.text!.trim());
+    // Exclude this chat node itself: its resource text is the latest reply and must not fill the composer.
+    const upstreamReferences = mentionReferences.filter((reference) => reference.nodeId !== node.id);
+    const connectedTexts = upstreamReferences.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim()).map((reference) => reference.text!.trim());
     return (
         <CanvasChatContent
             node={node}
             theme={theme}
             connectedTexts={connectedTexts}
-            mentionReferences={mentionReferences}
+            mentionReferences={upstreamReferences}
             onSend={(nodeId, text, options) => onSendChat?.(nodeId, text, options)}
             onModelChange={(nodeId, model) => onChatModelChange?.(nodeId, model)}
             onImageModelChange={(nodeId, model) => onChatImageModelChange?.(nodeId, model)}
