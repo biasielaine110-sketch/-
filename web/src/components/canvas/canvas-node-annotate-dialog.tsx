@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { createPortal } from "react-dom";
 import { Button, ColorPicker, Input, InputNumber, Modal, Slider, Tooltip } from "antd";
 import {
     ArrowUpRight,
@@ -87,12 +86,15 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
     const maskCanvasRef = useRef<HTMLCanvasElement>(null);
     const previewCanvasRef = useRef<HTMLCanvasElement>(null);
     const drawingRef = useRef<{ active: boolean; stroke: MaskStroke | null; start?: Point }>({ active: false, stroke: null });
+    const draftRef = useRef<DraftShape>(null);
+    const annotationsRef = useRef<CanvasAnnotation[]>([]);
     const maskHistoryRef = useRef<MaskStroke[]>([]);
     const maskRedoRef = useRef<MaskStroke[]>([]);
     const viewport = useImageEditorViewport(image, open);
 
     const selected = useMemo(() => annotations.find((item) => item.id === selectedId) || null, [annotations, selectedId]);
     const isBrushTool = tool === "brush" || tool === "erase";
+    annotationsRef.current = annotations;
 
     useEffect(() => {
         if (!open) return;
@@ -107,6 +109,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
         setPrompt("");
         setError("");
         setTextDraft("");
+        draftRef.current = null;
         setDraft(null);
         setHistory([]);
         setRedo([]);
@@ -116,7 +119,9 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
         maskRedoRef.current = [];
         drawingRef.current = { active: false, stroke: null };
         void readImageMeta(dataUrl).then(setImage);
-    }, [dataUrl, initialAnnotations, open]);
+        // Only reset when the dialog opens or the image changes — not when parent re-renders with a new [] reference.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [dataUrl, open]);
 
     useEffect(() => {
         clearCanvas(maskCanvasRef.current);
@@ -135,15 +140,20 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
     }, [selected]);
 
     const pushHistory = useCallback((next: CanvasAnnotation[]) => {
-        setHistory((current) => [...current.slice(-40), annotations]);
+        setHistory((current) => [...current.slice(-40), annotationsRef.current]);
         setRedo([]);
         setAnnotations(next);
-    }, [annotations]);
+    }, []);
+
+    const setDraftShape = (next: DraftShape) => {
+        draftRef.current = next;
+        setDraft(next);
+    };
 
     const updateSelectedStyle = (patch: Partial<CanvasAnnotation>) => {
         if (!selectedId) return;
         pushHistory(
-            annotations.map((item) => {
+            annotationsRef.current.map((item) => {
                 if (item.id !== selectedId) return item;
                 if (item.kind === "text") {
                     return {
@@ -248,7 +258,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
         event.currentTarget.setPointerCapture(event.pointerId);
         drawingRef.current = { active: true, stroke: null, start: point };
         if (tool === "select") {
-            setSelectedId(hitTest(annotations, point));
+            setSelectedId(hitTest(annotationsRef.current, point));
             return;
         }
         if (tool === "text") {
@@ -264,13 +274,13 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
                 stroke: strokeColor,
                 strokeWidth,
             };
-            pushHistory([...annotations, item]);
+            pushHistory([...annotationsRef.current, item]);
             setSelectedId(item.id);
             setTool("select");
             return;
         }
-        if (tool === "arrow") setDraft({ kind: "arrow", x1: point.x, y1: point.y, x2: point.x, y2: point.y });
-        else setDraft({ kind: tool, x: point.x, y: point.y, w: 0, h: 0 });
+        if (tool === "arrow") setDraftShape({ kind: "arrow", x1: point.x, y1: point.y, x2: point.x, y2: point.y });
+        else setDraftShape({ kind: tool, x: point.x, y: point.y, w: 0, h: 0 });
     };
 
     const moveShape = (event: ReactPointerEvent<SVGSVGElement>) => {
@@ -279,11 +289,11 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
         if (!point) return;
         const start = drawingRef.current.start;
         if (tool === "arrow") {
-            setDraft({ kind: "arrow", x1: start.x, y1: start.y, x2: point.x, y2: point.y });
+            setDraftShape({ kind: "arrow", x1: start.x, y1: start.y, x2: point.x, y2: point.y });
             return;
         }
         if (tool === "rect" || tool === "ellipse") {
-            setDraft({
+            setDraftShape({
                 kind: tool,
                 x: Math.min(start.x, point.x),
                 y: Math.min(start.y, point.y),
@@ -294,20 +304,21 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
     };
 
     const endShape = () => {
-        const current = draft;
+        const current = draftRef.current;
+        draftRef.current = null;
         drawingRef.current = { active: false, stroke: null };
         setDraft(null);
         if (!current) return;
         if (current.kind === "arrow") {
             if (Math.hypot(current.x2 - current.x1, current.y2 - current.y1) < 0.01) return;
             const item: CanvasAnnotation = { id: nanoid(), ...current, stroke: strokeColor, strokeWidth };
-            pushHistory([...annotations, item]);
+            pushHistory([...annotationsRef.current, item]);
             setSelectedId(item.id);
             return;
         }
         if (current.w < 0.008 || current.h < 0.008) return;
         const item: CanvasAnnotation = { id: nanoid(), ...current, stroke: strokeColor, strokeWidth };
-        pushHistory([...annotations, item]);
+        pushHistory([...annotationsRef.current, item]);
         setSelectedId(item.id);
     };
 
@@ -355,18 +366,19 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
 
     const deleteSelected = () => {
         if (!selectedId) return;
-        pushHistory(annotations.filter((item) => item.id !== selectedId));
+        pushHistory(annotationsRef.current.filter((item) => item.id !== selectedId));
         setSelectedId(null);
     };
 
     const handleSave = async (bake: boolean) => {
+        const current = annotationsRef.current;
         if (!bake) {
-            onSave({ annotations });
+            onSave({ annotations: current });
             return;
         }
         if (!image) return;
-        const bakedDataUrl = await bakeAnnotations(dataUrl, image, annotations);
-        onSave({ annotations, bakedDataUrl });
+        const bakedDataUrl = await bakeAnnotations(dataUrl, image, current);
+        onSave({ annotations: current, bakedDataUrl });
     };
 
     const handleInpaint = () => {
@@ -374,7 +386,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
         const canvas = maskCanvasRef.current;
         if (!nextPrompt) return setError(t("canvas.editors.maskPromptRequired"));
         if (!canvas || !canvasHasPaint(canvas)) return setError(t("canvas.editors.maskRequired"));
-        onInpaint({ prompt: nextPrompt, maskDataUrl: buildEditMask(canvas), annotations });
+        onInpaint({ prompt: nextPrompt, maskDataUrl: buildEditMask(canvas), annotations: annotationsRef.current });
     };
 
     const handleAddTextNode = () => {
@@ -410,26 +422,22 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
 
     const overlayItems = draft ? [...annotations, draftAsAnnotation(draft, strokeColor, strokeWidth)] : annotations;
 
-    return createPortal(
+    return (
         <Modal
             open={open && Boolean(dataUrl)}
             onCancel={onClose}
             footer={null}
-            width="100vw"
-            centered={false}
+            width="min(96vw, 1280px)"
+            centered
             destroyOnHidden
             title={null}
-            className="!top-0 !m-0 !max-w-none !p-0 [&_.ant-modal-content]:!h-screen [&_.ant-modal-content]:!rounded-none [&_.ant-modal-content]:!shadow-none"
-            styles={{
-                mask: { background: "rgba(0,0,0,0.72)" },
-                wrapper: { overflow: "hidden" },
-                body: { padding: 12, height: "100vh", maxHeight: "100vh" },
-            }}
+            transitionName=""
+            maskTransitionName=""
+            styles={{ body: { padding: 16 } }}
             zIndex={4000}
-            getContainer={() => document.body}
-            mask={{ closable: true }}
+            maskClosable
         >
-            <div className="flex h-full min-h-0 flex-col gap-2" data-canvas-no-zoom data-canvas-shortcuts-ignore onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            <div className="space-y-4" data-canvas-no-zoom data-canvas-shortcuts-ignore onMouseDown={(event) => event.stopPropagation()}>
                 <div className="flex flex-wrap items-center gap-2">
                     <h2 className="mr-2 text-lg font-semibold">{t("canvas.editors.annotateTitle")}</h2>
                     <ToolButton active={tool === "select"} icon={<MousePointer2 className="size-4" />} label={t("canvas.editors.annotateSelect")} onClick={() => setTool("select")} />
@@ -474,11 +482,11 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
                     </div>
                 </div>
 
-                <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_280px]">
+                <div className="grid gap-4 lg:grid-cols-[minmax(360px,1fr)_300px]">
                     <div
                         ref={viewport.viewportRef}
                         {...viewport.panHandlers}
-                        className={`relative min-h-0 h-full overflow-hidden rounded-xl border border-black/10 bg-black/[0.03] dark:border-white/10 dark:bg-white/[0.03] ${viewport.scrollClassName} ${viewport.isPanning ? "cursor-grabbing" : viewport.spacePressed ? "cursor-grab" : ""}`}
+                        className={`relative h-[min(68vh,720px)] min-h-[360px] overflow-hidden rounded-xl border border-black/10 bg-black/[0.03] dark:border-white/10 dark:bg-white/[0.03] ${viewport.scrollClassName} ${viewport.isPanning ? "cursor-grabbing" : viewport.spacePressed ? "cursor-grab" : ""}`}
                     >
                         <div className="relative" style={viewport.contentStyle}>
                             <div ref={viewport.stageRef} className="absolute isolate overflow-hidden rounded-lg select-none" style={viewport.stageStyle}>
@@ -486,7 +494,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
                                     <div className="absolute left-0 top-0" style={viewport.mediaStyle}>
                                         <img src={dataUrl} alt="" className="absolute inset-0 block h-full w-full object-contain" draggable={false} />
                                         <svg
-                                            className={`absolute inset-0 h-full w-full ${isBrushTool ? "pointer-events-none" : "touch-none"}`}
+                                            className={`absolute inset-0 z-10 h-full w-full ${isBrushTool ? "pointer-events-none" : "cursor-crosshair touch-none"}`}
                                             viewBox="0 0 1 1"
                                             preserveAspectRatio="none"
                                             onPointerDown={startShape}
@@ -503,7 +511,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
                                             ref={previewCanvasRef}
                                             width={image.width}
                                             height={image.height}
-                                            className={`absolute inset-0 h-full w-full touch-none ${isBrushTool ? "cursor-crosshair" : "pointer-events-none"}`}
+                                            className={`absolute inset-0 z-20 h-full w-full touch-none ${isBrushTool ? "cursor-crosshair" : "pointer-events-none"}`}
                                             onPointerDown={startBrush}
                                             onPointerMove={moveBrush}
                                             onPointerUp={endBrush}
@@ -515,7 +523,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
                         </div>
                     </div>
 
-                    <div className="flex min-h-0 flex-col gap-3 overflow-y-auto rounded-xl border border-black/10 p-3 dark:border-white/10">
+                    <div className="flex min-h-[360px] flex-col gap-3 overflow-y-auto rounded-xl border border-black/10 p-3 dark:border-white/10">
                         <div className="text-sm opacity-60">{image ? `${image.width} × ${image.height}px` : t("canvas.editors.loading")}</div>
                         <div className="text-xs leading-5 opacity-55">{t("canvas.editors.annotateHint")}</div>
 
@@ -599,8 +607,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
                     </div>
                 </div>
             </div>
-        </Modal>,
-        document.body,
+        </Modal>
     );
 }
 

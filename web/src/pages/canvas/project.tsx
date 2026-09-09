@@ -87,6 +87,7 @@ import { CanvasTopBar } from "@/components/canvas/canvas-top-bar";
 import { ConnectionCreateMenu, NodeCreateMenu, type PendingConnectionCreate } from "@/components/canvas/canvas-create-menus";
 import {
     CanvasNodeType,
+    type CanvasAnnotation,
     type CanvasAssistantImage,
     type CanvasAssistantMessage,
     type CanvasAssistantSession,
@@ -135,6 +136,7 @@ const VIDEO_NODE_MAX_WIDTH = 420;
 const VIDEO_NODE_MAX_HEIGHT = 420;
 // Stable empty reference array prevents `... || []` from invalidating CanvasNode's React.memo on every render.
 const EMPTY_REFERENCES: CanvasResourceReference[] = [];
+const EMPTY_ANNOTATIONS: CanvasAnnotation[] = [];
 const CONNECTION_HANDLE_HIT_RADIUS = 40;
 const CONNECTION_NODE_HIT_PADDING = 32;
 const NODE_STATUS_IDLE = "idle" as const;
@@ -3738,7 +3740,7 @@ function AtelierCanvasPage() {
                     <CanvasNodeAnnotateDialog
                         dataUrl={annotateNode.metadata.content}
                         open={Boolean(annotateNode)}
-                        initialAnnotations={annotateNode.metadata.annotations || []}
+                        initialAnnotations={annotateNode.metadata.annotations || EMPTY_ANNOTATIONS}
                         onClose={() => setAnnotateNodeId(null)}
                         onSave={(payload) => void saveAnnotateNode(annotateNode, payload)}
                         onInpaint={(payload) => void inpaintAnnotateNode(annotateNode, payload)}
