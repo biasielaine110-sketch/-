@@ -147,6 +147,14 @@ function isGptImageModel(model: string) {
     return model.trim().toLowerCase().startsWith("gpt-image-");
 }
 
+/** gpt-image-1 / 1.5 / mini only accept a fixed size enum. */
+function isGptImageFixedSizeModel(model: string) {
+    const value = model.trim().toLowerCase();
+    if (!value.startsWith("gpt-image-")) return false;
+    if (value.startsWith("gpt-image-2")) return false;
+    return true;
+}
+
 function isDalleModel(model: string) {
     const value = model.trim().toLowerCase();
     return value.startsWith("dall-e") || value.startsWith("dalle");
@@ -154,7 +162,7 @@ function isDalleModel(model: string) {
 
 function resolveOpenAiImageParams(config: AiConfig, count: number) {
     const quality = normalizeQuality(config.quality);
-    const requestSize = resolveRequestSize(quality, config.size);
+    const requestSize = isGptImageModel(config.model) ? resolveGptImageRequestSize(config.model, quality, config.size) : resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
     const params: Record<string, string | number> = {
         n: isGptImageModel(config.model) ? Math.min(count, 10) : count,
@@ -248,6 +256,91 @@ function resolveRequestSize(quality: string | undefined, size: string) {
     }
     if (value.includes(":")) return resolveSize(quality, value);
     throw new Error(apiText("invalidImageSizeFormat"));
+}
+
+/**
+ * Map UI size/ratio into channel-friendly sizes for GPT Image models.
+ * Relays (NewAPI etc.) often reject uncommon WxH like 2720x1536 even when OpenAI accepts them.
+ */
+function resolveGptImageRequestSize(model: string, quality: string | undefined, size: string) {
+    const value = size.trim();
+    if (!value || value.toLowerCase() === "auto") return "auto";
+
+    if (isGptImageFixedSizeModel(model)) {
+        return snapToFixedGptImageSize(value);
+    }
+
+    const dimensions = parseImageDimensions(value);
+    if (dimensions) {
+        validateImageSize(dimensions.width, dimensions.height);
+        return `${dimensions.width}x${dimensions.height}`;
+    }
+    if (value.includes(":")) return resolveGptImage2PresetSize(quality, value);
+    throw new Error(apiText("invalidImageSizeFormat"));
+}
+
+const GPT_IMAGE_FIXED_SIZES = [
+    { width: 1024, height: 1024, size: "1024x1024" },
+    { width: 1536, height: 1024, size: "1536x1024" },
+    { width: 1024, height: 1536, size: "1024x1536" },
+];
+
+/** Popular gpt-image-2 sizes that most distributors whitelist. */
+const GPT_IMAGE_2_PRESETS: Array<{ ratio: number; low: string; medium: string; high: string }> = [
+    { ratio: 1, low: "1024x1024", medium: "2048x2048", high: "2048x2048" },
+    { ratio: 3 / 2, low: "1536x1024", medium: "2304x1536", high: "2880x1920" },
+    { ratio: 2 / 3, low: "1024x1536", medium: "1536x2304", high: "1920x2880" },
+    { ratio: 4 / 3, low: "1360x1024", medium: "2048x1536", high: "2720x2040" },
+    { ratio: 3 / 4, low: "1024x1360", medium: "1536x2048", high: "2040x2720" },
+    { ratio: 16 / 9, low: "1536x864", medium: "2048x1152", high: "3840x2160" },
+    { ratio: 9 / 16, low: "864x1536", medium: "1152x2048", high: "2160x3840" },
+];
+
+function snapToFixedGptImageSize(size: string) {
+    const targetRatio = readSizeAspectRatio(size);
+    let bestSize = GPT_IMAGE_FIXED_SIZES[0].size;
+    let bestDelta = Number.POSITIVE_INFINITY;
+    for (const item of GPT_IMAGE_FIXED_SIZES) {
+        const delta = Math.abs(item.width / item.height - targetRatio);
+        if (delta < bestDelta) {
+            bestSize = item.size;
+            bestDelta = delta;
+        }
+    }
+    return bestSize;
+}
+
+function resolveGptImage2PresetSize(quality: string | undefined, ratio: string) {
+    const parsed = parseImageRatio(ratio);
+    const target = parsed.width / parsed.height;
+    let bestPreset = GPT_IMAGE_2_PRESETS[0];
+    let bestDelta = Number.POSITIVE_INFINITY;
+    for (const preset of GPT_IMAGE_2_PRESETS) {
+        const delta = Math.abs(preset.ratio - target);
+        if (delta < bestDelta) {
+            bestPreset = preset;
+            bestDelta = delta;
+        }
+    }
+    const tier = resolveGptImage2QualityTier(quality);
+    return bestPreset[tier];
+}
+
+function resolveGptImage2QualityTier(quality: string | undefined): "low" | "medium" | "high" {
+    if (quality === "low" || quality === "standard") return "low";
+    if (quality === "high") return "high";
+    return "medium";
+}
+
+function readSizeAspectRatio(size: string) {
+    const value = size.trim();
+    const dimensions = parseImageDimensions(value);
+    if (dimensions) return dimensions.width / Math.max(1, dimensions.height);
+    if (value.includes(":")) {
+        const ratio = parseImageRatio(value);
+        return ratio.width / ratio.height;
+    }
+    return 1;
 }
 
 function resolveGeminiImageConfig(config: AiConfig) {
@@ -865,7 +958,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const script = resolveModelScript(config, config.model || config.imageModel);
     if (script) {
         const quality = normalizeQuality(config.quality);
-        const requestSize = resolveRequestSize(quality, config.size);
+        const requestSize = isGptImageModel(requestConfig.model) ? resolveGptImageRequestSize(requestConfig.model, quality, config.size) : resolveRequestSize(quality, config.size);
         const background = normalizeBackground(config.background);
         try {
             const result = await runModelPlugin({
@@ -917,7 +1010,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     const script = resolveModelScript(config, config.model || config.imageModel);
     if (script) {
         const quality = normalizeQuality(config.quality);
-        const requestSize = resolveRequestSize(quality, config.size);
+        const requestSize = isGptImageModel(requestConfig.model) ? resolveGptImageRequestSize(requestConfig.model, quality, config.size) : resolveRequestSize(quality, config.size);
         const background = normalizeBackground(config.background);
         const refs = await Promise.all(references.map((image) => imageToDataUrl(image)));
         try {
