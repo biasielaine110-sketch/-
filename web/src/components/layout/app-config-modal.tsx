@@ -1,4 +1,4 @@
-import { App, Button, Form, Input, Modal, Select, Tabs } from "antd";
+import { App, Button, Form, Input, Modal, Segmented, Select, Tabs } from "antd";
 import { Download, FileUp, GripVertical, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -17,6 +17,7 @@ import {
     useConfigStore,
     type AiConfig,
     type ApiCallFormat,
+    type ApiTransport,
     type ConfigTabKey,
     type ModelCapability,
     type ModelChannel,
@@ -215,6 +216,17 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                         </Form.Item>
                                     ))}
                                 </div>
+                                <Form.Item label={t("config.preferences.apiTransport")} extra={t("config.preferences.apiTransportDescription")} className="mb-6">
+                                    <Segmented
+                                        block
+                                        value={config.apiTransport || "direct"}
+                                        options={[
+                                            { label: t("config.preferences.apiTransportDirect"), value: "direct" },
+                                            { label: t("config.preferences.apiTransportProxy"), value: "proxy" },
+                                        ]}
+                                        onChange={(value) => updateConfig("apiTransport", value as ApiTransport)}
+                                    />
+                                </Form.Item>
                                 <div className="mb-2 text-sm font-semibold">{t("config.preferences.generation")}</div>
                                 <div className="grid gap-4 md:grid-cols-4">
                                     <Form.Item label={t("config.preferences.canvasImageCount")} extra={t("config.preferences.canvasImageCountDescription")} className="mb-4">

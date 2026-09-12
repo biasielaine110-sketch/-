@@ -6,6 +6,7 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 
 export type ApiCallFormat = "openai" | "gemini";
+export type ApiTransport = "direct" | "proxy";
 export type ModelCapability = "image" | "video" | "text" | "audio";
 export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 
@@ -47,6 +48,8 @@ export type AiConfig = {
     videoWatermark: string;
     systemPrompt: string;
     reasoningEffort: ReasoningEffort;
+    /** direct = browser→API (no Vercel 60s cap); proxy = via /api/proxy for CORS. */
+    apiTransport: ApiTransport;
     models: string[];
     quality: string;
     size: string;
@@ -97,6 +100,7 @@ export const defaultConfig: AiConfig = {
     videoWatermark: "false",
     systemPrompt: "",
     reasoningEffort: "auto",
+    apiTransport: "direct",
     models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
     quality: "medium",
     size: "2048x1152",
@@ -221,6 +225,7 @@ export const useConfigStore = create<ConfigStore>()(
                         audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
                         audioInstructions: config.audioInstructions || "",
                         reasoningEffort: config.reasoningEffort || "auto",
+                        apiTransport: config.apiTransport === "proxy" ? "proxy" : "direct",
                         videoSeconds: config.videoSeconds || "6",
                         vquality: config.vquality || "720",
                         videoGenerateAudio: config.videoGenerateAudio || "true",

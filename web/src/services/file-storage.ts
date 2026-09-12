@@ -1,7 +1,7 @@
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 
-import { proxyApiUrl } from "@/lib/api-proxy";
+import { proxyMediaUrl } from "@/lib/api-proxy";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
 
@@ -11,7 +11,7 @@ const objectUrls = new Map<string, string>();
 function proxyRemoteMediaUrl(url: string) {
     try {
         const parsed = new URL(url);
-        return parsed.protocol === "http:" || parsed.protocol === "https:" ? proxyApiUrl(url) : url;
+        return parsed.protocol === "http:" || parsed.protocol === "https:" ? proxyMediaUrl(url) : url;
     } catch {
         return url;
     }

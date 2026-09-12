@@ -554,6 +554,9 @@ function readAxiosError(error: unknown, fallback: string) {
 // Maps raw browser network error texts (fetch adapters, native fetch, service workers) that axios
 // cannot classify to the same clear message as ERR_NETWORK/ERR_FAILED.
 function readNetworkMessage(message: string) {
+    if (/upstream timed out|aborted due to timeout|TimeoutError|proxy error:.*timed out/i.test(message)) {
+        return apiText("proxyTimedOut");
+    }
     return /failed to fetch|network error|load failed|net::err_/i.test(message) ? apiText("networkFailed") : null;
 }
 

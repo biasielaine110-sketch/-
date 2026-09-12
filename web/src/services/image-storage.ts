@@ -3,7 +3,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import { readImageMeta } from "@/lib/image-utils";
-import { proxyApiUrl } from "@/lib/api-proxy";
+import { proxyMediaUrl } from "@/lib/api-proxy";
 
 export type UploadedImage = {
     url: string;
@@ -94,7 +94,7 @@ function blobToDataUrl(blob: Blob) {
 function proxyRemoteMediaUrl(url: string) {
     try {
         const parsed = new URL(url);
-        return parsed.protocol === "http:" || parsed.protocol === "https:" ? proxyApiUrl(url) : url;
+        return parsed.protocol === "http:" || parsed.protocol === "https:" ? proxyMediaUrl(url) : url;
     } catch {
         return url;
     }

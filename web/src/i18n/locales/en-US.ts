@@ -173,6 +173,7 @@ export default {
         requestCanceled: "Request canceled",
         corsRequired: "The browser blocked this cross-origin request. Route it through your own server",
         networkFailed: "Cannot reach the API server (cross-origin block, unreachable address, or network issue). Check the Base URL and network",
+        proxyTimedOut: "Proxy timed out (Vercel Hobby ~60s cap). In Settings → Preferences, set API transport to Direct, or upgrade to Vercel Pro.",
         baseUrlRequired: "Configure the Base URL first",
         apiKeyRequired: "Configure the API key first",
         authenticationFailed: "Authentication failed. Check the API key, plan permissions, and model permissions.",
@@ -1043,6 +1044,10 @@ export default {
             audioInstructionsPlaceholder: "For example: natural, warm, and suitable for narration.",
             systemPrompt: "System prompt",
             systemPromptPlaceholder: "For example: You are a visual director specializing in cinematic, photorealistic imagery.",
+            apiTransport: "API transport",
+            apiTransportDirect: "Browser direct",
+            apiTransportProxy: "Site proxy",
+            apiTransportDescription: "Direct avoids the Vercel ~60s limit (best for long chats). Switch to proxy only if the provider blocks CORS.",
         },
         channelEditor: {
             title: "Edit provider",

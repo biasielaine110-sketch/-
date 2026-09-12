@@ -173,6 +173,7 @@ export default {
         requestCanceled: "请求已取消",
         corsRequired: "请求被浏览器跨域策略拦截，请通过自己的服务转发请求",
         networkFailed: "无法连接接口服务器（可能是跨域拦截、地址不可达或网络问题），请检查 Base URL 与网络",
+        proxyTimedOut: "代理请求超时（Vercel Hobby 约 60 秒上限）。请到「配置 → 偏好设置」将「API 请求方式」改为「浏览器直连」，或升级 Vercel Pro。",
         baseUrlRequired: "请先配置 Base URL",
         apiKeyRequired: "请先配置 API Key",
         authenticationFailed: "鉴权失败，请检查 API Key、套餐权限或模型权限",
@@ -1042,6 +1043,10 @@ export default {
             audioInstructionsPlaceholder: "例如：自然、温暖、适合旁白。",
             systemPrompt: "系统提示词",
             systemPromptPlaceholder: "例如：你是一位擅长电影感写实摄影的视觉导演。",
+            apiTransport: "API 请求方式",
+            apiTransportDirect: "浏览器直连",
+            apiTransportProxy: "经站点代理",
+            apiTransportDescription: "直连不受 Vercel 约 60 秒限制，适合长对话；若对方接口禁止跨域再改用代理。",
         },
         channelEditor: {
             title: "编辑渠道",
