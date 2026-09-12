@@ -61,6 +61,9 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, onClose,
                     autoFocus
                     placeholder={placeholder || t("canvas.node.editTextPlaceholder")}
                     onChange={(event) => setDraft(event.target.value)}
+                    onCopy={(event) => event.stopPropagation()}
+                    onCut={(event) => event.stopPropagation()}
+                    onPaste={(event) => event.stopPropagation()}
                     className="font-mono text-sm"
                     data-canvas-shortcuts-ignore
                     data-canvas-text-input

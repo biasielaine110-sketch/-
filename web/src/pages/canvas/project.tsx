@@ -24,6 +24,8 @@ import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
+import type { ImageToolHandlers } from "@/components/canvas/canvas-image-toolbar-tools";
+import { useCopyText } from "@/hooks/use-copy-text";
 import { CanvasNodeAngleDialog, type CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
 import { CanvasNodePanoramaDialog, type PanoramaCapturePayload } from "@/components/canvas/canvas-node-panorama-dialog";
 import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
@@ -33,6 +35,7 @@ import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components
 import { CanvasNodeMergeDialog, type CanvasImageMergeParams, type MergeCandidateImage } from "@/components/canvas/canvas-node-merge-dialog";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { CanvasNodeScaleDialog } from "@/components/canvas/canvas-node-scale-dialog";
+import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { AtelierCanvas } from "@/components/canvas/atelier-canvas";
@@ -159,6 +162,7 @@ export default function CanvasPage() {
 function AtelierCanvasPage() {
     const { message, modal } = App.useApp();
     const { t } = useTranslation();
+    const copyText = useCopyText();
     const params = useParams<{ id: string }>();
     const navigate = useNavigate();
     const projectId = params.id || "";
@@ -1625,14 +1629,21 @@ function AtelierCanvasPage() {
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
-            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-shortcuts-ignore]"))
+            // Let native copy/paste/select work inside text fields and edit dialogs.
+            if (
+                event.target instanceof HTMLInputElement ||
+                event.target instanceof HTMLTextAreaElement ||
+                event.target instanceof HTMLSelectElement ||
+                target?.closest("[contenteditable],[data-canvas-text-input],[data-canvas-shortcuts-ignore],[data-canvas-no-zoom],.ant-modal,.ant-input,.ant-input-textarea")
+            ) {
                 return;
+            }
 
             const key = event.key.toLowerCase();
             const isModifierShortcut = event.metaKey || event.ctrlKey;
 
+            if (isModifierShortcut && (key === "c" || key === "v" || key === "x" || key === "a") && isCanvasTextInteractionTarget(event.target)) return;
             if (isModifierShortcut && key === "c" && window.getSelection()?.toString()) return;
-            if (isModifierShortcut && key === "v" && isCanvasTextInteractionTarget(event.target)) return;
 
             if (isModifierShortcut && !event.altKey && key === "z") {
                 event.preventDefault();
@@ -3524,8 +3535,48 @@ function AtelierCanvasPage() {
         if (isCanvasTextInteractionTarget(event.target)) return;
         event.preventDefault();
         event.stopPropagation();
+        setSelectedNodeIds(new Set([nodeId]));
+        setSelectedConnectionId(null);
         setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId });
     }, []);
+
+    const contextMenuNode = useMemo(() => {
+        if (!contextMenu || contextMenu.type !== "node") return null;
+        return nodes.find((node) => node.id === contextMenu.nodeId) || null;
+    }, [contextMenu, nodes]);
+
+    const imageContextHandlers = useMemo<ImageToolHandlers>(
+        () => ({
+            onUpload: (node) => handleUploadRequest(node.id),
+            onToggleFreeResize: (node) => toggleNodeFreeResize(node.id),
+            onScale: (node) => setScaleNodeId(node.id),
+            onMaskEdit: (node) => setMaskEditNodeId(node.id),
+            onAnnotate: (node) => {
+                if (!node.metadata?.content) {
+                    handleUploadRequest(node.id);
+                    return;
+                }
+                setAnnotateNodeId(node.id);
+            },
+            onCrop: (node) => setCropNodeId(node.id),
+            onSplit: (node) => setSplitNodeId(node.id),
+            onUpscale: (node) => setUpscaleNodeId(node.id),
+            onSuperResolve: (node) => setSuperResolveNodeId(node.id),
+            onAngle: (node) => setAngleNodeId(node.id),
+            onPanorama: (node) => setPanoramaNodeId(node.id),
+            onViewImage: handleNodeViewImage,
+            onCopyPrompt: (node) => {
+                const prompt = node.metadata?.prompt?.trim();
+                if (!prompt) {
+                    message.warning(t("canvas.nodeToolbar.noPrompt"));
+                    return;
+                }
+                copyText(prompt, t("common.promptCopied"));
+            },
+            onReversePrompt: createImageReversePromptNodes,
+        }),
+        [copyText, createImageReversePromptNodes, handleNodeViewImage, handleUploadRequest, message, t, toggleNodeFreeResize],
+    );
 
     const renderNodePanel = useCallback(
         (panelNode: CanvasNodeData) =>
@@ -3831,7 +3882,12 @@ function AtelierCanvasPage() {
                 {contextMenu ? (
                     <CanvasNodeContextMenu
                         menu={contextMenu}
+                        node={contextMenuNode}
+                        imageHandlers={imageContextHandlers}
                         onClose={() => setContextMenu(null)}
+                        onInfo={(node) => setInfoNodeId(node.id)}
+                        onDownload={downloadNodeImage}
+                        onSaveAsset={(node) => void saveNodeAsset(node)}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
@@ -3936,17 +3992,41 @@ function AtelierCanvasPage() {
                     />
                 ) : null}
 
-                <Modal
-                    title={t("canvas.projectPage.imageDetails")}
+                <CanvasImagePreviewModal
                     open={Boolean(previewContent)}
-                    centered
-                    onCancel={() => setPreviewNodeId(null)}
-                    footer={null}
-                    width="auto"
-                    styles={{ body: { padding: 0, display: "flex", justifyContent: "center", alignItems: "center", maxHeight: "80vh" } }}
-                >
-                    {previewContent ? <img src={previewContent} alt={previewNode?.title || t("assets.kinds.image")} style={{ maxWidth: "100%", maxHeight: "80vh", objectFit: "contain" }} /> : null}
-                </Modal>
+                    src={previewContent}
+                    title={previewNode?.title || t("canvas.projectPage.imageDetails")}
+                    fileName={
+                        previewContent
+                            ? `canvas-${previewNode?.type || "image"}-${previewNode?.id || "preview"}.${imageExtension(previewContent)}`
+                            : undefined
+                    }
+                    info={
+                        previewNode
+                            ? (() => {
+                                  const batchImage = previewImageId ? previewNode.metadata?.images?.find((image) => image.id === previewImageId) : null;
+                                  return {
+                                      title: previewNode.title,
+                                      nodeId: previewNode.id,
+                                      nodeType: previewNode.type,
+                                      naturalWidth: batchImage?.naturalWidth || previewNode.metadata?.naturalWidth,
+                                      naturalHeight: batchImage?.naturalHeight || previewNode.metadata?.naturalHeight,
+                                      displayWidth: previewNode.width,
+                                      displayHeight: previewNode.height,
+                                      mimeType: batchImage?.mimeType || previewNode.metadata?.mimeType,
+                                      bytes: batchImage?.bytes || previewNode.metadata?.bytes,
+                                      model: previewNode.metadata?.model || previewNode.metadata?.imageModel,
+                                      prompt: previewNode.metadata?.prompt,
+                                      status: batchImage?.status || previewNode.metadata?.status,
+                                  };
+                              })()
+                            : null
+                    }
+                    onClose={() => {
+                        setPreviewNodeId(null);
+                        setPreviewImageId(null);
+                    }}
+                />
 
                 <Modal
                     title={t("canvas.projectPage.clearTitle")}

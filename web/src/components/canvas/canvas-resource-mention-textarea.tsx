@@ -111,8 +111,12 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                 }}
                 value={value}
                 data-canvas-text-input
+                data-canvas-shortcuts-ignore
                 className={className}
                 style={mergedStyle}
+                onCopy={(event) => event.stopPropagation()}
+                onCut={(event) => event.stopPropagation()}
+                onPaste={(event) => event.stopPropagation()}
                 onChange={(event) => {
                     const next = event.target.value;
                     onChange(next);

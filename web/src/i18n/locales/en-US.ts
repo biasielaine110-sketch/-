@@ -449,6 +449,15 @@ export default {
             emptyClipboard: "Clipboard has no text to paste",
             pasteFailed: "Unable to read the clipboard. Check browser permissions.",
         },
+        imagePreview: {
+            infoTitle: "Image info",
+            resolution: "Resolution",
+            displaySize: "Display size",
+            format: "Format",
+            model: "Model",
+            zoom: "Zoom",
+            hint: "Scroll to zoom · Right-click to download · Drag when zoomed",
+        },
         sidePanel: {
             canvas: "Canvas",
             assets: "Assets",

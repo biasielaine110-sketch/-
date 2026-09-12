@@ -16,12 +16,12 @@ type TextClipboardMenuState = {
 };
 
 const SELECTABLE_SELECTOR = "[data-canvas-selectable-text]";
-const EDITABLE_SELECTOR = "textarea,input:not([type='button']):not([type='submit']):not([type='checkbox']):not([type='radio']),[contenteditable='true'],[data-canvas-text-input]";
+const EDITABLE_SELECTOR = "textarea,input:not([type='button']):not([type='submit']):not([type='checkbox']):not([type='radio']),[contenteditable],[contenteditable='true'],[data-canvas-text-input],.ant-input,.ant-input-textarea";
 const FOCUS_SAFE_SELECTOR = ".ant-select,.ant-select-dropdown,.ant-picker,.ant-picker-dropdown,.ant-dropdown,.ant-modal,.ant-popover,[role='listbox'],[role='option']";
 
 export function isCanvasTextInteractionTarget(target: EventTarget | null) {
     if (!(target instanceof Element)) return false;
-    return Boolean(target.closest(`${SELECTABLE_SELECTOR},${EDITABLE_SELECTOR}`));
+    return Boolean(target.closest(`${SELECTABLE_SELECTOR},${EDITABLE_SELECTOR},[data-canvas-shortcuts-ignore]`));
 }
 
 function isFocusSafeTarget(target: EventTarget | null | undefined) {
@@ -49,15 +49,18 @@ export function CanvasTextClipboardMenu() {
         const handleContextMenu = (event: MouseEvent) => {
             const target = event.target;
             if (!(target instanceof Element)) return;
-            if (target.closest(".ant-select-dropdown,.ant-picker-dropdown,[data-canvas-text-clipboard-menu]")) return;
+            if (target.closest(".ant-select-dropdown,.ant-picker-dropdown,[data-canvas-text-clipboard-menu],[data-canvas-image-preview-menu]")) return;
 
             const editable = target.closest(EDITABLE_SELECTOR) as HTMLElement | null;
             const selectable = target.closest(SELECTABLE_SELECTOR) as HTMLElement | null;
-            if (!editable && !selectable) return;
+            // Also treat Ant Design textareas / modal inputs as editable hosts.
+            const antEditable = target.closest(".ant-input,.ant-input-textarea,.ant-modal textarea,.ant-modal input") as HTMLElement | null;
+            const resolvedEditable = editable || (antEditable instanceof HTMLTextAreaElement || antEditable instanceof HTMLInputElement ? antEditable : antEditable?.querySelector?.("textarea,input") || null);
+            if (!resolvedEditable && !selectable) return;
 
             // Capture selection immediately — some browsers clear it during contextmenu.
-            const selectedText = readSelectedText(editable, selectable);
-            if (!selectedText && !editable) return;
+            const selectedText = readSelectedText(resolvedEditable instanceof HTMLElement ? resolvedEditable : null, selectable);
+            if (!selectedText && !resolvedEditable) return;
 
             event.preventDefault();
             event.stopPropagation();
@@ -65,7 +68,7 @@ export function CanvasTextClipboardMenu() {
                 x: event.clientX,
                 y: event.clientY,
                 selectedText,
-                editable,
+                editable: resolvedEditable instanceof HTMLElement ? resolvedEditable : null,
             });
         };
 
@@ -117,7 +120,7 @@ export function CanvasTextClipboardMenu() {
     return createPortal(
         <div
             data-canvas-text-clipboard-menu
-            className="fixed z-[1100] min-w-40 overflow-hidden rounded-xl border py-1 shadow-2xl"
+            className="fixed z-[5000] min-w-40 overflow-hidden rounded-xl border py-1 shadow-2xl"
             style={{ left: menu.x, top: menu.y, background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onPointerDown={(event) => event.stopPropagation()}
             onMouseDown={(event) => event.stopPropagation()}

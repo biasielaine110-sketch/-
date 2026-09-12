@@ -141,9 +141,13 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, o
                 role="textbox"
                 aria-multiline="true"
                 data-canvas-text-input
+                data-canvas-shortcuts-ignore
                 className={`${className || ""} select-text overflow-y-auto whitespace-pre-wrap break-words outline-none`}
                 style={{ ...style, cursor: "text" }}
                 onDoubleClick={onDoubleClick}
+                onCopy={(event) => event.stopPropagation()}
+                onCut={(event) => event.stopPropagation()}
+                onPaste={(event) => event.stopPropagation()}
                 onInput={() => {
                     if (!composingRef.current) syncFromEditor();
                 }}

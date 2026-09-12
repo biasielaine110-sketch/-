@@ -449,6 +449,15 @@ export default {
             emptyClipboard: "剪贴板没有可粘贴的文本",
             pasteFailed: "无法读取剪贴板，请检查浏览器权限",
         },
+        imagePreview: {
+            infoTitle: "图片信息",
+            resolution: "像素尺寸",
+            displaySize: "画布尺寸",
+            format: "格式",
+            model: "模型",
+            zoom: "缩放",
+            hint: "滚轮缩放 · 右键下载 · 放大后可拖动",
+        },
         sidePanel: {
             canvas: "画布",
             assets: "资产",
