@@ -202,6 +202,8 @@ export default {
         geminiNoImage: "The Gemini API did not return an image",
         geminiMaskUnsupported: "The Gemini API format does not support mask editing",
         maskModelUnsupported: "This model does not support mask editing. Use another provider.",
+        imagenOnlyModel:
+            "This provider's OpenAI image endpoint only supports Imagen models. Switch the image model to imagen-*, or set Gemini image models to the Gemini API format (not /images/generations). Current model: {{model}}",
         noContent: "No content returned",
         modelReadFailed: "Failed to load models",
         videoTimeout: "{{provider}}video generation timed out. Try again later.",

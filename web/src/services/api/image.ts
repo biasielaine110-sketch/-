@@ -147,6 +147,31 @@ function isGptImageModel(model: string) {
     return model.trim().toLowerCase().startsWith("gpt-image-");
 }
 
+function isImagenModel(model: string) {
+    return /imagen/i.test(model.trim());
+}
+
+/** Gemini native image models must use generateContent, not OpenAI /images/generations. */
+function isGeminiNativeImageModel(model: string) {
+    const value = model.trim().toLowerCase();
+    return value.includes("gemini") && !isImagenModel(value);
+}
+
+function resolveImageRequestConfig(config: AiConfig) {
+    const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    if (requestConfig.apiFormat === "openai" && isGeminiNativeImageModel(requestConfig.model)) {
+        return { ...requestConfig, apiFormat: "gemini" as const };
+    }
+    return requestConfig;
+}
+
+function normalizeImageApiErrorMessage(message: string, model?: string) {
+    if (/only imagen models are supported/i.test(message)) {
+        return apiText("imagenOnlyModel", { model: model || "?" });
+    }
+    return message;
+}
+
 /** gpt-image-1 / 1.5 / mini only accept a fixed size enum. */
 function isGptImageFixedSizeModel(model: string) {
     const value = model.trim().toLowerCase();
@@ -956,7 +981,7 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
 }
 
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
-    const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    const requestConfig = resolveImageRequestConfig(config);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
     if (script) {
@@ -975,14 +1000,14 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             });
             return normalizePluginImages(result).map((dataUrl) => ({ id: nanoid(), dataUrl }));
         } catch (error) {
-            throw new Error(readAxiosError(error, apiText("requestFailed")));
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
     }
     if (requestConfig.apiFormat === "gemini") {
         try {
             return await requestGeminiImages(requestConfig, prompt, [], n, options);
         } catch (error) {
-            throw new Error(readAxiosError(error, apiText("requestFailed")));
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
     }
     const imageParams = resolveOpenAiImageParams(requestConfig, n);
@@ -1002,12 +1027,12 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         const images = await resolveImageApiResponse(requestConfig, response.data, options);
         return images;
     } catch (error) {
-        throw new Error(readAxiosError(error, apiText("requestFailed")));
+        throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
     }
 }
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
-    const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
+    const requestConfig = resolveImageRequestConfig(config);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     const script = resolveModelScript(config, config.model || config.imageModel);
@@ -1028,7 +1053,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
             });
             return normalizePluginImages(result).map((dataUrl) => ({ id: nanoid(), dataUrl }));
         } catch (error) {
-            throw new Error(readAxiosError(error, apiText("requestFailed")));
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
     }
     if (requestConfig.apiFormat === "gemini") {
@@ -1036,7 +1061,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         try {
             return await requestGeminiImages(requestConfig, requestPrompt, references, n, options);
         } catch (error) {
-            throw new Error(readAxiosError(error, apiText("requestFailed")));
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
     }
 
@@ -1054,7 +1079,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         const images = await resolveImageApiResponse(requestConfig, response.data, options);
         return images;
     } catch (error) {
-        throw new Error(readAxiosError(error, apiText("requestFailed")));
+        throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
     }
 }
 

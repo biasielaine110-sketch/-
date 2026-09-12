@@ -202,6 +202,8 @@ export default {
         geminiNoImage: "Gemini 接口没有返回图片",
         geminiMaskUnsupported: "Gemini 调用格式暂不支持蒙版编辑",
         maskModelUnsupported: "蒙版编辑暂不支持该模型，请使用其他渠道",
+        imagenOnlyModel:
+            "当前中转的 OpenAI 生图接口仅支持 Imagen 模型。请将图片模型改为 imagen-*，或把 Gemini 出图模型的调用格式设为 Gemini（不要走 /images/generations）。当前模型：{{model}}",
         noContent: "没有返回内容",
         modelReadFailed: "读取模型失败",
         videoTimeout: "{{provider}}视频生成超时，请稍后重试",
