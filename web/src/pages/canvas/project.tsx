@@ -39,7 +39,7 @@ import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode } from "@/components/canvas/canvas-node";
 import { CanvasDraftSaveDialog } from "@/components/canvas/canvas-draft-save-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { CanvasTextClipboardMenu, isCanvasTextInteractionTarget } from "@/components/canvas/canvas-text-clipboard-menu";
+import { CanvasTextClipboardMenu, blurActiveCanvasTextInput, isCanvasTextInteractionTarget } from "@/components/canvas/canvas-text-clipboard-menu";
 import {
     getCanvasDraftMeta,
     overwriteCanvasDraft,
@@ -717,7 +717,7 @@ function AtelierCanvasPage() {
                             model: effectiveConfig.textModel || effectiveConfig.model,
                             imageModel: effectiveConfig.imageModel || effectiveConfig.model,
                             chatTextEnabled: true,
-                            chatImageEnabled: true,
+                            chatImageEnabled: false,
                             status: NODE_STATUS_IDLE,
                             messages: [],
                         }
@@ -1063,7 +1063,9 @@ function AtelierCanvasPage() {
             try {
                 const meta = await overwriteCanvasDraft(project);
                 if (!meta) {
-                    setDraftDialogOpen(true);
+                    // Autosave must never download a new file; ask the user to rebind when they save manually.
+                    if (!quiet) setDraftDialogOpen(true);
+                    else setDraftMeta((current) => (current ? { ...current, hasHandle: false } : current));
                     return false;
                 }
                 setDraftMeta(meta);
@@ -1072,6 +1074,10 @@ function AtelierCanvasPage() {
             } catch (error) {
                 console.error(error);
                 const code = error instanceof Error ? error.message : "";
+                if (quiet) {
+                    setDraftMeta((current) => (current ? { ...current, hasHandle: false } : current));
+                    return false;
+                }
                 if (code === "FILE_PERMISSION_DENIED") {
                     message.warning(t("canvas.draft.permissionDenied"));
                     setDraftDialogOpen(true);
@@ -1157,15 +1163,15 @@ function AtelierCanvasPage() {
     }, [overwriteBoundDraft]);
 
     useEffect(() => {
-        if (!projectLoaded || !draftMeta) return;
+        if (!projectLoaded || !draftMeta?.hasHandle) return;
         const timer = window.setInterval(() => {
-            if (!draftMetaRef.current || draftSavingRef.current) return;
+            if (!draftMetaRef.current?.hasHandle || draftSavingRef.current) return;
             void overwriteBoundDraft(true).then((ok) => {
                 if (ok) message.success(t("canvas.draft.autoSaved"));
             });
         }, DRAFT_AUTO_SAVE_MS);
         return () => window.clearInterval(timer);
-    }, [DRAFT_AUTO_SAVE_MS, draftMeta, message, overwriteBoundDraft, projectLoaded, t]);
+    }, [DRAFT_AUTO_SAVE_MS, draftMeta?.hasHandle, message, overwriteBoundDraft, projectLoaded, t]);
 
     const handleCanvasMouseDown = useCallback(
         (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1221,6 +1227,9 @@ function AtelierCanvasPage() {
     const handleNodeSelectCapture = useCallback(
         (event: ReactMouseEvent, nodeId: string) => {
             if (event.button !== 0) return;
+            // Leaving a text field by clicking another node (or non-input chrome) must drop focus,
+            // otherwise later shortcuts type into the stale composer/textarea.
+            blurActiveCanvasTextInput(event.target);
             setContextMenu(null);
             setHoveredNodeId(null);
             setSelectedConnectionId(null);
@@ -3181,7 +3190,7 @@ function AtelierCanvasPage() {
                     status: NODE_STATUS_IDLE,
                     messages: [],
                     chatTextEnabled: true,
-                    chatImageEnabled: true,
+                    chatImageEnabled: false,
                     model: effectiveConfig.textModel || effectiveConfig.model,
                     imageModel: effectiveConfig.imageModel || effectiveConfig.model,
                     content: context,

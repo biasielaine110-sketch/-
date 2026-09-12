@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ViewportTransform } from "@/types/canvas";
+import { blurActiveCanvasTextInput } from "@/components/canvas/canvas-text-clipboard-menu";
 
 type AtelierCanvasProps = {
     containerRef: React.RefObject<HTMLDivElement | null>;
@@ -116,6 +117,7 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
         const shouldPan = event.button === 1 || (event.button === 0 && activeTool === "pan" && isBackgroundClick);
 
         if (shouldPan) {
+            blurActiveCanvasTextInput(event.target);
             event.preventDefault();
             event.currentTarget.setPointerCapture(event.pointerId);
             panState.current = {
@@ -133,6 +135,8 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
         }
 
         if (event.button === 0 && isBackgroundClick) {
+            // preventDefault blocks the browser's default blur; clear focus explicitly for shortcuts.
+            blurActiveCanvasTextInput(event.target);
             event.preventDefault();
             event.currentTarget.setPointerCapture(event.pointerId);
             onCanvasMouseDown?.(event);

@@ -8,6 +8,8 @@ export type CanvasDraftMeta = {
     projectId: string;
     fileName: string;
     lastSavedAt?: string;
+    /** True when a File System Access handle is bound for in-place overwrite. */
+    hasHandle?: boolean;
 };
 
 type StoredDraft = CanvasDraftMeta & {
@@ -32,7 +34,7 @@ export function safeDraftFileName(value: string) {
 export async function getCanvasDraftMeta(projectId: string): Promise<CanvasDraftMeta | null> {
     const stored = await draftStore.getItem<StoredDraft>(draftKey(projectId));
     if (!stored) return null;
-    return { projectId: stored.projectId, fileName: stored.fileName, lastSavedAt: stored.lastSavedAt };
+    return { projectId: stored.projectId, fileName: stored.fileName, lastSavedAt: stored.lastSavedAt, hasHandle: Boolean(stored.handle) };
 }
 
 export async function getCanvasDraftHandle(projectId: string) {
@@ -69,7 +71,8 @@ export async function pickCanvasDraftFile(suggestedName: string) {
 export async function writeBlobToFileHandle(handle: FileSystemFileHandle, blob: Blob) {
     const allowed = await ensureWritePermission(handle);
     if (!allowed) throw new Error("FILE_PERMISSION_DENIED");
-    const writable = await handle.createWritable();
+    // keepExistingData:false truncates first so each save fully replaces the previous draft.
+    const writable = await handle.createWritable({ keepExistingData: false });
     try {
         await writable.write(blob);
     } finally {
@@ -87,7 +90,7 @@ export async function saveCanvasDraftToHandle(project: CanvasProject, handle: Fi
         handle,
     };
     await draftStore.setItem(draftKey(project.id), meta);
-    return meta;
+    return { projectId: meta.projectId, fileName: meta.fileName, lastSavedAt: meta.lastSavedAt, hasHandle: true };
 }
 
 export async function saveCanvasDraftFallbackDownload(project: CanvasProject, fileName: string) {
@@ -100,22 +103,18 @@ export async function saveCanvasDraftFallbackDownload(project: CanvasProject, fi
         lastSavedAt: new Date().toISOString(),
     };
     await draftStore.setItem(draftKey(project.id), meta);
-    return meta;
+    return { projectId: meta.projectId, fileName: meta.fileName, lastSavedAt: meta.lastSavedAt, hasHandle: false };
 }
 
+/** Overwrite the bound draft file in place. Never downloads a new file. */
 export async function overwriteCanvasDraft(project: CanvasProject) {
     const stored = await draftStore.getItem<StoredDraft>(draftKey(project.id));
-    if (!stored?.handle) {
-        if (stored?.fileName) {
-            return saveCanvasDraftFallbackDownload(project, stored.fileName);
-        }
-        return null;
-    }
+    if (!stored?.handle) return null;
     try {
         return await saveCanvasDraftToHandle(project, stored.handle);
     } catch (error) {
         if (error instanceof Error && error.message === "FILE_PERMISSION_DENIED") throw error;
-        // Handle may be stale after browser restart; clear and force rebind.
+        // Handle may be stale after browser restart; drop it so the user must rebind the same file.
         await draftStore.setItem(draftKey(project.id), { projectId: project.id, fileName: stored.fileName, lastSavedAt: stored.lastSavedAt });
         throw error;
     }

@@ -23,6 +23,15 @@ export function isCanvasTextInteractionTarget(target: EventTarget | null) {
     return Boolean(target.closest(`${SELECTABLE_SELECTOR},${EDITABLE_SELECTOR}`));
 }
 
+/** Blur canvas text fields so shortcuts are not typed into a stale focused input. */
+export function blurActiveCanvasTextInput(exceptTarget?: EventTarget | null) {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return;
+    if (!active.matches(EDITABLE_SELECTOR) && !active.isContentEditable) return;
+    if (exceptTarget instanceof Node && (active === exceptTarget || active.contains(exceptTarget))) return;
+    active.blur();
+}
+
 export function CanvasTextClipboardMenu() {
     const { t } = useTranslation();
     const { message } = App.useApp();

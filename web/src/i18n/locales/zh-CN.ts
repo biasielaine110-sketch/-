@@ -847,7 +847,7 @@ export default {
             pickPath: "选择保存位置",
             pathUnset: "尚未选择文件位置",
             fallbackHint: "当前浏览器不支持指定本地路径，将下载为 ZIP 草稿文件。",
-            autoSaveHint: "绑定草稿后，每 10 分钟会自动覆盖保存一次。",
+            autoSaveHint: "绑定本地草稿文件后，每 10 分钟会自动覆盖同一文件（不会重新下载新文件）。",
             save: "保存草稿",
             saving: "正在保存草稿…",
             saved: "草稿已覆盖保存：{{name}}",

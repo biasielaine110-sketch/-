@@ -848,7 +848,7 @@ export default {
             pickPath: "Choose save location",
             pathUnset: "No file location selected",
             fallbackHint: "This browser cannot bind a local path. The draft will be downloaded as a ZIP file.",
-            autoSaveHint: "After binding a draft, it will auto-overwrite every 10 minutes.",
+            autoSaveHint: "After binding a local draft file, it auto-overwrites that same file every 10 minutes (never downloads a new copy).",
             save: "Save draft",
             saving: "Saving draft…",
             saved: "Draft overwritten: {{name}}",
