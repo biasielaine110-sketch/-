@@ -9,6 +9,7 @@ import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { exportAppBackup, importAppBackup } from "@/services/backup-restore";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
 import {
+    channelProtocolSummary,
     createModelChannel,
     modelOptionsFromChannels,
     normalizeModelOptionValue,
@@ -126,7 +127,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                             <div className="min-w-0">
                                                 <div className="truncate text-sm font-semibold">{channel.name || t("config.channels.unnamed")}</div>
                                                 <div className="mt-1 truncate text-xs text-stone-500">
-                                                    {apiFormatLabel(channel.apiFormat)} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.baseUrl || t("config.channels.missingUrl")}
+                                                    {channelProtocolLabel(channel, t)} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.baseUrl || t("config.channels.missingUrl")}
                                                 </div>
                                             </div>
                                             <div className="flex shrink-0 gap-2">
@@ -268,6 +269,12 @@ function normalizeImageCount(value: string) {
 function apiFormatLabel(apiFormat: ApiCallFormat) {
     if (apiFormat === "gemini") return "Gemini";
     return "OpenAI";
+}
+
+function channelProtocolLabel(channel: ModelChannel, t: (key: string) => string) {
+    const summary = channelProtocolSummary(channel);
+    if (summary === "mixed") return t("config.channels.mixedProtocol");
+    return apiFormatLabel(summary);
 }
 
 function ConfigBackupTab() {

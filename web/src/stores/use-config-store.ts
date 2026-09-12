@@ -12,6 +12,8 @@ export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 export type ChannelModel = {
     name: string;
     capability: ModelCapability;
+    /** Per-model protocol; falls back to the channel default when omitted. */
+    apiFormat?: ApiCallFormat;
     script?: string;
 };
 
@@ -247,7 +249,8 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         seen.add(name);
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
-        result.push({ name, capability, script });
+        const apiFormat = typeof item === "string" || item.apiFormat == null ? undefined : normalizeApiFormat(item.apiFormat);
+        result.push(apiFormat ? { name, capability, apiFormat, script } : { name, capability, script });
     }
     return result;
 }
@@ -314,13 +317,26 @@ export function resolveModelChannel(config: AiConfig, value: string) {
 
 export function resolveModelRequestConfig(config: AiConfig, value: string) {
     const channel = resolveModelChannel(config, value);
+    const modelName = modelOptionName(value || config.model);
+    const model = channel.models.find((item) => item.name === modelName);
     return {
         ...config,
-        model: modelOptionName(value || config.model),
+        model: modelName,
         baseUrl: channel.baseUrl,
         apiKey: channel.apiKey,
-        apiFormat: channel.apiFormat,
+        apiFormat: resolveChannelModelApiFormat(channel, model),
     };
+}
+
+/** Effective protocol for a channel model: model override, else channel default. */
+export function resolveChannelModelApiFormat(channel: Pick<ModelChannel, "apiFormat">, model?: Pick<ChannelModel, "apiFormat"> | null): ApiCallFormat {
+    return model?.apiFormat ? normalizeApiFormat(model.apiFormat) : normalizeApiFormat(channel.apiFormat);
+}
+
+export function channelProtocolSummary(channel: ModelChannel): ApiCallFormat | "mixed" {
+    const formats = new Set(channel.models.map((model) => resolveChannelModelApiFormat(channel, model)));
+    if (formats.size > 1) return "mixed";
+    return formats.values().next().value || channel.apiFormat;
 }
 
 function normalizeChannels(config: AiConfig) {
@@ -353,7 +369,7 @@ export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
     return OPENAI_BASE_URL;
 }
 
-function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
+export function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
     return apiFormat === "gemini" ? apiFormat : "openai";
 }
 
