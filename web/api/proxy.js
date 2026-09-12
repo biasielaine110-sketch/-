@@ -1,13 +1,20 @@
 // Production CORS bypass for remote API / media fetches.
 // Browser calls same-origin /api/proxy?target=<url>; this function fetches server-side.
+// Streams the upstream body through (required for SSE chat); do not buffer the full response.
+
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 export const config = {
     api: {
         bodyParser: false,
         responseLimit: false,
     },
-    maxDuration: 60,
+    // Pro/Fluid: up to 300s. Hobby plans are capped by Vercel at their plan maximum.
+    maxDuration: 300,
 };
+
+const PROXY_TIMEOUT_MS = 290_000;
 
 /**
  * @param {import('http').IncomingMessage} req
@@ -63,7 +70,7 @@ export default async function handler(req, res) {
             method,
             headers,
             body: body ? new Uint8Array(body) : undefined,
-            signal: AbortSignal.timeout(55_000),
+            signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
         });
 
         res.statusCode = upstream.status;
@@ -73,11 +80,23 @@ export default async function handler(req, res) {
             res.setHeader(key, value);
         });
 
-        const buffer = Buffer.from(await upstream.arrayBuffer());
-        res.end(buffer);
+        if (!upstream.body) {
+            res.end();
+            return;
+        }
+
+        // Stream through so SSE / long LLM replies are not held until completion.
+        const stream = Readable.fromWeb(/** @type {import('node:stream/web').ReadableStream} */ (upstream.body));
+        await pipeline(stream, res);
     } catch (error) {
-        res.statusCode = 502;
-        res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        const timedOut = /aborted due to timeout|TimeoutError|timed out/i.test(message);
+        if (!res.headersSent) {
+            res.statusCode = 502;
+            res.end(timedOut ? `proxy error: upstream timed out after ${Math.round(PROXY_TIMEOUT_MS / 1000)}s` : `proxy error: ${message}`);
+            return;
+        }
+        res.destroy(error instanceof Error ? error : undefined);
     }
 }
 
