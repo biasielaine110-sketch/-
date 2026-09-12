@@ -66,6 +66,7 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, isMiniMapOpe
                     <Shortcut label={t("canvas.shortcut.drag")} value={t("canvas.shortcut.boxSelect")} />
                     <Shortcut label={`Shift / Cmd + ${t("canvas.shortcut.click")}`} value={t("canvas.shortcut.addSelection")} />
                     <Shortcut label="Ctrl / Cmd + C / V" value={t("canvas.shortcut.copyPasteNodes")} />
+                    <Shortcut label={`Alt + ${t("canvas.shortcut.drag")}`} value={t("canvas.shortcut.altDragCopy")} />
                     <Shortcut label="C" value={t("canvas.shortcut.copyImage")} />
                     <Shortcut label="Ctrl / Cmd + S" value={t("canvas.shortcut.saveDraft")} />
                     <Shortcut label="Q" value={t("canvas.shortcut.createChat")} />

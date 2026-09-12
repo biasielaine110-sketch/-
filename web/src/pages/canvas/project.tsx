@@ -177,12 +177,16 @@ function AtelierCanvasPage() {
     const dragRef = useRef<{
         isDraggingNode: boolean;
         hasMoved: boolean;
+        isAltCopyDrag: boolean;
+        copySpawned: boolean;
         startX: number;
         startY: number;
         initialSelectedNodes: { id: string; x: number; y: number }[];
     }>({
         isDraggingNode: false,
         hasMoved: false,
+        isAltCopyDrag: false,
+        copySpawned: false,
         startX: 0,
         startY: 0,
         initialSelectedNodes: [],
@@ -1250,6 +1254,8 @@ function AtelierCanvasPage() {
         dragRef.current = {
             isDraggingNode: true,
             hasMoved: false,
+            isAltCopyDrag: event.altKey,
+            copySpawned: false,
             startX: event.clientX,
             startY: event.clientY,
             initialSelectedNodes: currentNodes.filter((node) => dragIds.has(node.id)).map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
@@ -1259,6 +1265,62 @@ function AtelierCanvasPage() {
         setIsNodeDragging(true);
     }, []);
 
+    const spawnAltCopyDragNodes = useCallback(() => {
+        const sourceIds = new Set(dragRef.current.initialSelectedNodes.map((item) => item.id));
+        if (!sourceIds.size) return false;
+
+        const sources = nodesRef.current.filter((node) => sourceIds.has(node.id));
+        if (!sources.length) return false;
+
+        const idMap = new Map<string, string>();
+        const stamped = Date.now();
+        const clones = sources.map((node, index) => {
+            const id = `${node.type}-${stamped}-${index}-${Math.random().toString(36).slice(2, 7)}`;
+            idMap.set(node.id, id);
+            return {
+                ...node,
+                id,
+                title: node.title.endsWith(" Copy") ? node.title : `${node.title} Copy`,
+                position: { ...node.position },
+                metadata: node.metadata ? { ...node.metadata } : undefined,
+            };
+        });
+
+        const pastedNodes = clones.map((node) => {
+            const groupId = node.metadata?.groupId;
+            if (!groupId) return node;
+            const remapped = idMap.get(groupId);
+            return remapped ? { ...node, metadata: { ...node.metadata, groupId: remapped } } : node;
+        });
+
+        const nextConnections = connectionsRef.current.flatMap((connection, index) => {
+            if (!sourceIds.has(connection.fromNodeId) || !sourceIds.has(connection.toNodeId)) return [];
+            const fromNodeId = idMap.get(connection.fromNodeId);
+            const toNodeId = idMap.get(connection.toNodeId);
+            if (!fromNodeId || !toNodeId) return [];
+            return [
+                {
+                    ...connection,
+                    id: `conn-${stamped}-${index}-${Math.random().toString(36).slice(2, 7)}`,
+                    fromNodeId,
+                    toNodeId,
+                },
+            ];
+        });
+
+        nodesRef.current = [...nodesRef.current, ...pastedNodes];
+        if (nextConnections.length) {
+            connectionsRef.current = [...connectionsRef.current, ...nextConnections];
+            setConnections((prev) => [...prev, ...nextConnections]);
+        }
+        setSelectedNodeIds(new Set(pastedNodes.map((node) => node.id)));
+        setSelectedConnectionId(null);
+        setDialogNodeId(null);
+        dragRef.current.initialSelectedNodes = pastedNodes.map((node) => ({ id: node.id, x: node.position.x, y: node.position.y }));
+        dragRef.current.copySpawned = true;
+        return true;
+    }, []);
+
     const finishNodeDrag = useCallback((clientX?: number, clientY?: number) => {
         if (rafRef.current) {
             cancelAnimationFrame(rafRef.current);
@@ -1266,7 +1328,9 @@ function AtelierCanvasPage() {
         }
         if (!dragRef.current.isDraggingNode) return;
 
-        const wasClick = !dragRef.current.hasMoved && dragRef.current.initialSelectedNodes.length === 1;
+        const wasAltCopy = dragRef.current.isAltCopyDrag;
+        const copySpawned = dragRef.current.copySpawned;
+        const wasClick = !dragRef.current.hasMoved && dragRef.current.initialSelectedNodes.length === 1 && !(wasAltCopy && copySpawned);
         const clickedNodeId = dragRef.current.initialSelectedNodes[0]?.id;
         const currentViewport = viewportRef.current;
         const dx = clientX == null ? 0 : (clientX - dragRef.current.startX) / currentViewport.k;
@@ -1277,10 +1341,13 @@ function AtelierCanvasPage() {
         nodeDraggingRef.current = false;
         setIsNodeDragging(false);
         setDropTargetGroupId(null);
-        if (dragRef.current.hasMoved && clientX != null && clientY != null) {
+        if (dragRef.current.hasMoved && clientX != null && clientY != null && (!wasAltCopy || copySpawned)) {
             const movedIds = new Set(initialPositions.map((item) => item.id));
             setNodes((prev) => {
-                const moved = prev.map((node) => {
+                const ids = new Set(prev.map((node) => node.id));
+                const missing = nodesRef.current.filter((node) => movedIds.has(node.id) && !ids.has(node.id));
+                const base = missing.length ? [...prev, ...missing] : prev;
+                const moved = base.map((node) => {
                     const initial = initialPositions.find((item) => item.id === node.id);
                     return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
                 });
@@ -1297,6 +1364,8 @@ function AtelierCanvasPage() {
 
         dragRef.current.isDraggingNode = false;
         dragRef.current.hasMoved = false;
+        dragRef.current.isAltCopyDrag = false;
+        dragRef.current.copySpawned = false;
         dragRef.current.initialSelectedNodes = [];
         if (wasClick && clickedNodeId) {
             const clickedNode = nodesRef.current.find((node) => node.id === clickedNodeId);
@@ -1319,11 +1388,17 @@ function AtelierCanvasPage() {
             if (dragRef.current.isDraggingNode) {
                 const dx = (event.clientX - dragRef.current.startX) / currentViewport.k;
                 const dy = (event.clientY - dragRef.current.startY) / currentViewport.k;
-                const initialPositions = dragRef.current.initialSelectedNodes;
                 if (Math.abs(event.clientX - dragRef.current.startX) > 3 || Math.abs(event.clientY - dragRef.current.startY) > 3) {
                     dragRef.current.hasMoved = true;
                 }
 
+                // Alt+drag: keep originals still until the copy is spawned past the move threshold.
+                if (dragRef.current.isAltCopyDrag && !dragRef.current.copySpawned) {
+                    if (!dragRef.current.hasMoved) return;
+                    if (!spawnAltCopyDragNodes()) return;
+                }
+
+                const initialPositions = dragRef.current.initialSelectedNodes;
                 const movedIds = new Set(initialPositions.map((item) => item.id));
                 const previewNodes = nodesRef.current.map((node) => {
                     const initial = initialPositions.find((item) => item.id === node.id);
@@ -1333,12 +1408,16 @@ function AtelierCanvasPage() {
 
                 if (rafRef.current) cancelAnimationFrame(rafRef.current);
                 rafRef.current = requestAnimationFrame(() => {
-                    setNodes((prev) =>
-                        prev.map((node) => {
-                            const initial = initialPositions.find((item) => item.id === node.id);
+                    const positions = dragRef.current.initialSelectedNodes;
+                    setNodes((prev) => {
+                        const ids = new Set(prev.map((node) => node.id));
+                        const missing = nodesRef.current.filter((node) => positions.some((item) => item.id === node.id) && !ids.has(node.id));
+                        const base = missing.length ? [...prev, ...missing] : prev;
+                        return base.map((node) => {
+                            const initial = positions.find((item) => item.id === node.id);
                             return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
-                        }),
-                    );
+                        });
+                    });
                     rafRef.current = null;
                 });
                 return;
@@ -1351,7 +1430,7 @@ function AtelierCanvasPage() {
                 setMouseWorld(nextWorld);
             }
         },
-        [finishNodeDrag, getConnectionDropTarget, screenToCanvas],
+        [finishNodeDrag, getConnectionDropTarget, screenToCanvas, spawnAltCopyDragNodes],
     );
 
     const handleGlobalPointerMove = useCallback(

@@ -817,6 +817,7 @@ export default {
             selectAll: "全选节点",
             copyPaste: "复制 / 粘贴节点，或粘贴剪切板文本/图片",
             copyPasteNodes: "复制 / 粘贴节点",
+            altDragCopy: "按住 Alt 拖动复制节点",
             delete: "删除选中",
             escape: "取消选择并关闭浮层",
             dropMedia: "拖入图片/视频/音频",

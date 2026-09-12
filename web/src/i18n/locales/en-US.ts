@@ -818,6 +818,7 @@ export default {
             selectAll: "Select all nodes",
             copyPaste: "Copy/paste nodes or paste clipboard text/images",
             copyPasteNodes: "Copy/paste nodes",
+            altDragCopy: "Hold Alt and drag to duplicate nodes",
             delete: "Delete selection",
             escape: "Clear selection and close overlays",
             dropMedia: "Drop images/videos/audio",
