@@ -206,6 +206,8 @@ export default {
             "This provider's OpenAI image endpoint only supports Imagen models. Switch to imagen-*, or confirm the relay supports your Gemini image model. Current model: {{model}}",
         geminiImageUseOpenAi:
             "This Gemini image model requires the OpenAI image endpoint /v1/images/generations (not generateContent). Set the channel API format to OpenAI. Current model: {{model}}",
+        unsupportedAspectRatio:
+            "This aspect ratio is not supported by the model. Use a common ratio such as 1:1, 16:9, 3:2, or 9:16 and try again. Current model: {{model}}",
         noContent: "No content returned",
         modelReadFailed: "Failed to load models",
         videoTimeout: "{{provider}}video generation timed out. Try again later.",

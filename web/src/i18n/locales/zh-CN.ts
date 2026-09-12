@@ -206,6 +206,8 @@ export default {
             "当前中转的 OpenAI 生图接口仅支持 Imagen 模型。请将图片模型改为 imagen-*，或确认该中转是否支持当前 Gemini 图片模型。当前模型：{{model}}",
         geminiImageUseOpenAi:
             "该 Gemini 图片模型需走 OpenAI 生图接口 /v1/images/generations（不要用 generateContent）。请将渠道调用格式设为 OpenAI。当前模型：{{model}}",
+        unsupportedAspectRatio:
+            "当前尺寸比例不被模型支持，已尽量映射到标准比例；请改用 1:1、16:9、3:2、9:16 等常见比例后重试。当前模型：{{model}}",
         noContent: "没有返回内容",
         modelReadFailed: "读取模型失败",
         videoTimeout: "{{provider}}视频生成超时，请稍后重试",

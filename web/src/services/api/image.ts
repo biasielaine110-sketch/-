@@ -129,7 +129,7 @@ const IMAGE_MAX_RATIO = 3;
 const IMAGE_OUTPUT_FORMAT = "png";
 const IMAGE_RESPONSE_FORMAT = "b64_json";
 
-const GEMINI_SUPPORTED_RATIOS = ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"];
+const GEMINI_SUPPORTED_RATIOS = ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "9:21", "16:9", "21:9"];
 const GEMINI_IMAGE_SIZE_BY_QUALITY: Record<string, string> = { low: "1K", medium: "2K", high: "4K", standard: "1K", hd: "2K" };
 
 function normalizeQuality(quality: string) {
@@ -178,6 +178,9 @@ function normalizeImageApiErrorMessage(message: string, model?: string) {
     if (/generateContent/i.test(message) && /\/v1\/images\/generations/i.test(message)) {
         return apiText("geminiImageUseOpenAi", { model: model || "?" });
     }
+    if (/aspect_ratio\s+\S+\s+is not supported/i.test(message)) {
+        return apiText("unsupportedAspectRatio", { model: model || "?" });
+    }
     return message;
 }
 
@@ -195,6 +198,12 @@ function isDalleModel(model: string) {
 }
 
 function resolveOpenAiImageParams(config: AiConfig, count: number) {
+    // Gemini/Imagen relays often convert WxH into a reduced aspect_ratio and reject
+    // non-whitelisted ratios like 85:48 (from 2720x1536). Send a supported ratio instead.
+    if (prefersOpenAiImagesEndpoint(config.model)) {
+        return resolveGeminiRelayImageParams(config, count);
+    }
+
     const quality = normalizeQuality(config.quality);
     const requestSize = isGptImageModel(config.model) ? resolveGptImageRequestSize(config.model, quality, config.size) : resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
@@ -217,6 +226,29 @@ function resolveOpenAiImageParams(config: AiConfig, count: number) {
     }
 
     return params;
+}
+
+/** OpenAI-compatible /images/* params for Gemini flash-image / Imagen relays. */
+function resolveGeminiRelayImageParams(config: AiConfig, count: number) {
+    const quality = normalizeQuality(config.quality);
+    const aspectRatio = resolveGeminiAspectRatioForSize(config.size);
+    const background = normalizeBackground(config.background);
+    return {
+        n: Math.max(1, Math.min(count, 10)),
+        ...(quality ? { quality } : {}),
+        ...(aspectRatio ? { size: aspectRatio, aspect_ratio: aspectRatio } : {}),
+        ...(background ? { background } : {}),
+        response_format: IMAGE_RESPONSE_FORMAT,
+        output_format: IMAGE_OUTPUT_FORMAT,
+    } satisfies Record<string, string | number>;
+}
+
+function resolveGeminiAspectRatioForSize(size: string) {
+    const value = size.trim();
+    if (!value || value.toLowerCase() === "auto") return undefined;
+    const dimensions = parseImageDimensions(value);
+    const ratioText = dimensions ? `${dimensions.width}:${dimensions.height}` : value;
+    return closestGeminiAspectRatio(ratioText);
 }
 
 function appendOpenAiImageParams(formData: FormData, params: Record<string, string | number>) {
@@ -388,7 +420,7 @@ function resolveGeminiImageConfig(config: AiConfig) {
 }
 
 function closestGeminiAspectRatio(value: string) {
-    const ratio = parseImageRatio(value);
+    const ratio = parseRatioValue(value.includes("x") || value.includes("X") ? value.replace(/x/i, ":") : value);
     const target = ratio.width / ratio.height;
     return GEMINI_SUPPORTED_RATIOS.reduce((best, item) => {
         const current = parseRatioValue(item);
