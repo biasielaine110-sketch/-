@@ -17,14 +17,21 @@ type TextClipboardMenuState = {
 
 const SELECTABLE_SELECTOR = "[data-canvas-selectable-text]";
 const EDITABLE_SELECTOR = "textarea,input:not([type='button']):not([type='submit']):not([type='checkbox']):not([type='radio']),[contenteditable='true'],[data-canvas-text-input]";
+const FOCUS_SAFE_SELECTOR = ".ant-select,.ant-select-dropdown,.ant-picker,.ant-picker-dropdown,.ant-dropdown,.ant-modal,.ant-popover,[role='listbox'],[role='option']";
 
 export function isCanvasTextInteractionTarget(target: EventTarget | null) {
     if (!(target instanceof Element)) return false;
     return Boolean(target.closest(`${SELECTABLE_SELECTOR},${EDITABLE_SELECTOR}`));
 }
 
+function isFocusSafeTarget(target: EventTarget | null | undefined) {
+    return target instanceof Element && Boolean(target.closest(FOCUS_SAFE_SELECTOR));
+}
+
 /** Blur canvas text fields so shortcuts are not typed into a stale focused input. */
 export function blurActiveCanvasTextInput(exceptTarget?: EventTarget | null) {
+    // Blurring during mousedown on Select/option cancels the click and blocks model switching.
+    if (isFocusSafeTarget(exceptTarget)) return;
     const active = document.activeElement;
     if (!(active instanceof HTMLElement)) return;
     if (!active.matches(EDITABLE_SELECTOR) && !active.isContentEditable) return;

@@ -63,8 +63,17 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 popupMatchSelectWidth={false}
                 options={selectOptions}
                 optionLabelProp="title"
+                getPopupContainer={() => document.body}
+                popupClassName="canvas-model-picker-dropdown"
                 popupRender={(menu) => (
-                    <div data-canvas-no-zoom className="w-80 max-w-[calc(100vw-24px)]" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+                    <div
+                        data-canvas-no-zoom
+                        data-canvas-shortcuts-ignore
+                        className="w-80 max-w-[calc(100vw-24px)]"
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => event.stopPropagation()}
+                    >
                         {menu}
                     </div>
                 )}
@@ -73,11 +82,14 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                     if (nextOpen) window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
                     setOpen(nextOpen);
                 }}
+                onSelect={(model) => {
+                    if (model && model !== "__empty__") onChange(String(model));
+                }}
                 onChange={(model) => {
-                    if (model && model !== "__empty__") onChange(model);
+                    if (model && model !== "__empty__") onChange(String(model));
                 }}
                 labelRender={(props) => {
-                    const model = String(props.value || "");
+                    const model = String(props.value || current || "");
                     const titleText = model && model !== "__empty__" ? modelOptionLabel(config, model) : "";
                     const fallback = typeof props.label === "string" || typeof props.label === "number" ? String(props.label) : pickerPlaceholder;
                     const text: ReactNode = titleText || fallback;
