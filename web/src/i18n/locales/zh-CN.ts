@@ -1046,7 +1046,7 @@ export default {
             apiTransport: "API 请求方式",
             apiTransportDirect: "浏览器直连",
             apiTransportProxy: "经站点代理",
-            apiTransportDescription: "直连不受 Vercel 约 60 秒限制，适合长对话；若对方接口禁止跨域再改用代理。",
+            apiTransportDescription: "默认经站点代理以绕过跨域。仅当对方接口允许 CORS 时再改用直连（可规避 Vercel 约 60 秒限制，适合长对话）。",
         },
         channelEditor: {
             title: "编辑渠道",

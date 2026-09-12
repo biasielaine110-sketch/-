@@ -219,10 +219,10 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 <Form.Item label={t("config.preferences.apiTransport")} extra={t("config.preferences.apiTransportDescription")} className="mb-6">
                                     <Segmented
                                         block
-                                        value={config.apiTransport || "direct"}
+                                        value={config.apiTransport || "proxy"}
                                         options={[
-                                            { label: t("config.preferences.apiTransportDirect"), value: "direct" },
                                             { label: t("config.preferences.apiTransportProxy"), value: "proxy" },
+                                            { label: t("config.preferences.apiTransportDirect"), value: "direct" },
                                         ]}
                                         onChange={(value) => updateConfig("apiTransport", value as ApiTransport)}
                                     />

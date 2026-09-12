@@ -1,25 +1,25 @@
 // Routes cross-origin API/media calls through a same-origin proxy to bypass CORS.
 // Dev: Vite middleware at /api-proxy (long timeout)
-// Production: Vercel serverless /api/proxy (Hobby capped ~60s — too short for many LLM chats)
+// Production: Vercel serverless /api/proxy (Hobby capped ~60s)
 //
-// Default API transport is "direct" so browser talks to the provider without the
-// Vercel duration cap. Use "proxy" only when the provider blocks CORS.
-// Remote media always goes through the proxy (canvas / tainted-image safety).
+// Default transport is "proxy" because most relay APIs omit Access-Control-Allow-Origin.
+// Users can switch to "direct" in preferences when the provider allows CORS (avoids the
+// Vercel duration cap for long chats). Remote media always uses the proxy.
 
 import { CONFIG_STORE_KEY, type ApiTransport } from "@/stores/use-config-store";
 
 export function resolveApiTransport(): ApiTransport {
     try {
-        if (typeof window === "undefined") return "direct";
+        if (typeof window === "undefined") return "proxy";
         const raw = window.localStorage.getItem(CONFIG_STORE_KEY);
-        if (!raw) return "direct";
+        if (!raw) return "proxy";
         const parsed = JSON.parse(raw) as { state?: { config?: { apiTransport?: string } } };
         const mode = parsed?.state?.config?.apiTransport;
         if (mode === "proxy" || mode === "direct") return mode;
     } catch {
         // ignore corrupt storage
     }
-    return "direct";
+    return "proxy";
 }
 
 export function proxyApiUrl(directUrl: string): string {

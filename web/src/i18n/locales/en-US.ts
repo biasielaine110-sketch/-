@@ -1047,7 +1047,7 @@ export default {
             apiTransport: "API transport",
             apiTransportDirect: "Browser direct",
             apiTransportProxy: "Site proxy",
-            apiTransportDescription: "Direct avoids the Vercel ~60s limit (best for long chats). Switch to proxy only if the provider blocks CORS.",
+            apiTransportDescription: "Proxy is the default (bypasses CORS). Use Direct only when the provider allows CORS — it avoids the Vercel ~60s limit for long chats.",
         },
         channelEditor: {
             title: "Edit provider",

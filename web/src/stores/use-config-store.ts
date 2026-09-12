@@ -100,7 +100,8 @@ export const defaultConfig: AiConfig = {
     videoWatermark: "false",
     systemPrompt: "",
     reasoningEffort: "auto",
-    apiTransport: "direct",
+    // Default via same-origin proxy — most relay APIs block browser CORS.
+    apiTransport: "proxy",
     models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
     quality: "medium",
     size: "2048x1152",
@@ -200,7 +201,16 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
+            version: 2,
             partialize: (state) => ({ config: state.config }),
+            migrate: (persisted, version) => {
+                const state = (persisted || {}) as Partial<ConfigStore> & { config?: Partial<AiConfig> };
+                // v1 briefly defaulted apiTransport to "direct", which broke CORS for most relays.
+                if (version < 2 && state.config) {
+                    state.config = { ...state.config, apiTransport: "proxy" };
+                }
+                return state as ConfigStore;
+            },
             merge: (persisted, current) => {
                 const persistedState = (persisted || {}) as Partial<ConfigStore>;
                 const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
@@ -225,7 +235,7 @@ export const useConfigStore = create<ConfigStore>()(
                         audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
                         audioInstructions: config.audioInstructions || "",
                         reasoningEffort: config.reasoningEffort || "auto",
-                        apiTransport: config.apiTransport === "proxy" ? "proxy" : "direct",
+                        apiTransport: config.apiTransport === "direct" ? "direct" : "proxy",
                         videoSeconds: config.videoSeconds || "6",
                         vquality: config.vquality || "720",
                         videoGenerateAudio: config.videoGenerateAudio || "true",
