@@ -37,7 +37,7 @@ function apiProxyPlugin(): Plugin {
                             method: req.method,
                             headers,
                             body: body ? new Uint8Array(body) : undefined,
-                            signal: AbortSignal.timeout(300_000),
+                            signal: AbortSignal.timeout(500_000),
                         });
                         res.statusCode = upstream.status;
                         upstream.headers.forEach((value, key) => {

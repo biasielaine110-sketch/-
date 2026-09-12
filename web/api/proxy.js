@@ -10,11 +10,11 @@ export const config = {
         bodyParser: false,
         responseLimit: false,
     },
-    // Pro/Fluid: up to 300s. Hobby plans are capped by Vercel at their plan maximum.
-    maxDuration: 300,
+    // Pro/Fluid: plan max may still cap below this value on Hobby.
+    maxDuration: 500,
 };
 
-const PROXY_TIMEOUT_MS = 290_000;
+const PROXY_TIMEOUT_MS = 500_000;
 
 /**
  * @param {import('http').IncomingMessage} req
