@@ -197,7 +197,8 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
         const container = containerRef.current;
         if (!container) return;
 
-        // Prevent canvas scrolling from moving the page while preserving native scrolling inside overlays and dialogs.
+        // Prevent page scroll while zooming the canvas, but allow native scrolling inside
+        // node panels marked data-canvas-no-zoom (chat history, text editors, dialogs).
         const preventWheelScroll = (event: WheelEvent) => {
             const target = event.target instanceof Element ? event.target : null;
             if (target?.closest("[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown,.ant-picker-dropdown")) return;

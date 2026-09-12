@@ -86,6 +86,18 @@ export function CanvasChatContent({
         list.scrollTop = list.scrollHeight;
     }, [messages, loading, contextText]);
 
+    // Canvas container preventDefaults wheel (for zoom). Stop it on the list target
+    // so overflow scrolling works — same pattern as text-node textarea.
+    useEffect(() => {
+        const list = listRef.current;
+        if (!list) return;
+        const handleWheel = (event: WheelEvent) => {
+            event.stopPropagation();
+        };
+        list.addEventListener("wheel", handleWheel, { passive: true });
+        return () => list.removeEventListener("wheel", handleWheel);
+    }, []);
+
     const submit = () => {
         const text = draft.trim() || contextText;
         if (!text || loading || (!textEnabled && !imageEnabled)) return;
@@ -166,7 +178,8 @@ export function CanvasChatContent({
 
             <div
                 ref={listRef}
-                className="thin-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto px-3 pb-2 pt-1"
+                data-canvas-no-zoom
+                className="thin-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain px-3 pb-2 pt-1"
                 onWheel={(event) => event.stopPropagation()}
                 onMouseDown={stopIfInteractive}
                 onPointerDown={stopIfInteractive}
@@ -296,30 +309,14 @@ function ChatBubble({ message, theme, onInsertImage }: { message: CanvasAssistan
         <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
             <div
                 data-canvas-selectable-text
-                className="group/bubble relative max-w-[92%] cursor-text select-text rounded-2xl px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words"
+                className="relative max-w-[92%] cursor-text select-text rounded-2xl px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words"
                 style={{
                     background: isError ? `${theme.node.activeStroke}22` : isUser ? theme.toolbar.activeBg : theme.node.panel,
                     color: isError ? theme.node.activeStroke : theme.node.text,
                     border: `1px solid ${isUser ? "transparent" : theme.node.stroke}`,
                 }}
             >
-                <div className="mb-1 flex items-center justify-between gap-2">
-                    <div className="text-[10px] font-semibold uppercase opacity-50">{isUser ? t("canvas.chat.you") : isError ? t("common.error") : t("canvas.chat.assistant")}</div>
-                    {text ? (
-                        <button
-                            type="button"
-                            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md opacity-0 transition group-hover/bubble:opacity-100 focus-visible:opacity-100"
-                            style={{ color: theme.node.text, background: `${theme.node.fill}cc` }}
-                            title={t("canvas.chat.copyReply")}
-                            aria-label={t("canvas.chat.copyReply")}
-                            onMouseDown={(event) => event.stopPropagation()}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={handleCopy}
-                        >
-                            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                        </button>
-                    ) : null}
-                </div>
+                <div className="mb-1 text-[10px] font-semibold uppercase opacity-50">{isUser ? t("canvas.chat.you") : isError ? t("common.error") : t("canvas.chat.assistant")}</div>
                 {text ? <div>{message.text}</div> : message.role === "assistant" && !images.length ? "…" : null}
                 {images.length ? (
                     <div className={`mt-2 grid gap-2 ${images.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
@@ -342,6 +339,23 @@ function ChatBubble({ message, theme, onInsertImage }: { message: CanvasAssistan
                                 ) : null}
                             </div>
                         ))}
+                    </div>
+                ) : null}
+                {text ? (
+                    <div className={`mt-2 flex ${isUser ? "justify-end" : "justify-start"} border-t pt-1.5`} style={{ borderColor: `${theme.node.stroke}66` }}>
+                        <button
+                            type="button"
+                            className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium opacity-70 transition hover:opacity-100"
+                            style={{ color: theme.node.text, background: `${theme.node.fill}99` }}
+                            title={t("canvas.chat.copyReply")}
+                            aria-label={t("canvas.chat.copyReply")}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={handleCopy}
+                        >
+                            {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+                            {copied ? t("common.copied") : t("canvas.chat.copyReply")}
+                        </button>
                     </div>
                 ) : null}
             </div>
