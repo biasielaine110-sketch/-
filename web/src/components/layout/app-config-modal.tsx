@@ -1,6 +1,6 @@
 import { App, Button, Form, Input, Modal, Select, Tabs } from "antd";
-import { Download, FileUp, Pencil, Plus, Trash2, Upload } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Download, FileUp, GripVertical, Pencil, Plus, Trash2, Upload } from "lucide-react";
+import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -41,6 +41,8 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const configInputRef = useRef<HTMLInputElement>(null);
     const [activeTab, setActiveTab] = useState<ConfigTabKey>(initialTab);
     const [editingChannelId, setEditingChannelId] = useState("");
+    const [draggingChannelId, setDraggingChannelId] = useState("");
+    const [dragOverChannelId, setDragOverChannelId] = useState("");
     const config = useConfigStore((state) => state.config);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const shouldPromptContinue = useConfigStore((state) => state.shouldPromptContinue);
@@ -92,6 +94,42 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         updateChannels(config.channels.map((item) => (item.id === channel.id ? channel : item)));
     };
 
+    const reorderChannels = (fromId: string, toId: string) => {
+        if (!fromId || !toId || fromId === toId) return;
+        const fromIndex = config.channels.findIndex((channel) => channel.id === fromId);
+        const toIndex = config.channels.findIndex((channel) => channel.id === toId);
+        if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return;
+        const next = [...config.channels];
+        const [moved] = next.splice(fromIndex, 1);
+        next.splice(toIndex, 0, moved);
+        updateChannels(next);
+    };
+
+    const handleChannelDragStart = (event: ReactDragEvent<HTMLElement>, channelId: string) => {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", channelId);
+        setDraggingChannelId(channelId);
+    };
+
+    const handleChannelDragOver = (event: ReactDragEvent<HTMLElement>, channelId: string) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        if (dragOverChannelId !== channelId) setDragOverChannelId(channelId);
+    };
+
+    const handleChannelDrop = (event: ReactDragEvent<HTMLElement>, channelId: string) => {
+        event.preventDefault();
+        const fromId = event.dataTransfer.getData("text/plain") || draggingChannelId;
+        reorderChannels(fromId, channelId);
+        setDraggingChannelId("");
+        setDragOverChannelId("");
+    };
+
+    const clearChannelDrag = () => {
+        setDraggingChannelId("");
+        setDragOverChannelId("");
+    };
+
     return (
         <>
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3 dark:border-stone-800">
@@ -116,18 +154,40 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                         children: (
                             <div>
                                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                                    <div className="text-xs text-stone-500">{t("config.channels.description")}</div>
+                                    <div className="text-xs text-stone-500">
+                                        <div>{t("config.channels.description")}</div>
+                                        <div className="mt-1">{t("config.channels.reorderHint")}</div>
+                                    </div>
                                     <Button type="primary" icon={<Plus className="size-4" />} onClick={addChannel}>
                                         {t("config.channels.add")}
                                     </Button>
                                 </div>
                                 <div className="space-y-2">
                                     {config.channels.map((channel) => (
-                                        <div key={channel.id} className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 px-4 py-3 dark:border-stone-800">
-                                            <div className="min-w-0">
-                                                <div className="truncate text-sm font-semibold">{channel.name || t("config.channels.unnamed")}</div>
-                                                <div className="mt-1 truncate text-xs text-stone-500">
-                                                    {channelProtocolLabel(channel, t)} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.baseUrl || t("config.channels.missingUrl")}
+                                        <div
+                                            key={channel.id}
+                                            onDragOver={(event) => handleChannelDragOver(event, channel.id)}
+                                            onDrop={(event) => handleChannelDrop(event, channel.id)}
+                                            className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-3 transition-colors dark:border-stone-800 ${
+                                                draggingChannelId === channel.id ? "opacity-50" : ""
+                                            } ${dragOverChannelId === channel.id && draggingChannelId !== channel.id ? "border-sky-400 bg-sky-50 dark:border-sky-500 dark:bg-sky-950/40" : "border-stone-200"}`}
+                                        >
+                                            <div className="flex min-w-0 flex-1 items-center gap-2">
+                                                <span
+                                                    draggable
+                                                    onDragStart={(event) => handleChannelDragStart(event, channel.id)}
+                                                    onDragEnd={clearChannelDrag}
+                                                    className="inline-flex shrink-0 cursor-grab touch-none text-stone-400 active:cursor-grabbing"
+                                                    title={t("config.channels.dragHandle")}
+                                                    aria-label={t("config.channels.dragHandle")}
+                                                >
+                                                    <GripVertical className="size-4" />
+                                                </span>
+                                                <div className="min-w-0">
+                                                    <div className="truncate text-sm font-semibold">{channel.name || t("config.channels.unnamed")}</div>
+                                                    <div className="mt-1 truncate text-xs text-stone-500">
+                                                        {channelProtocolLabel(channel, t)} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.baseUrl || t("config.channels.missingUrl")}
+                                                    </div>
                                                 </div>
                                             </div>
                                             <div className="flex shrink-0 gap-2">

@@ -996,6 +996,8 @@ export default {
         savedContinue: "配置已保存，请继续刚才的请求",
         channels: {
             description: "每个渠道选择一个协议并拉取模型，为每个模型指定能力（生图/视频/文本/音频），并可自定义调用脚本。",
+            reorderHint: "拖动渠道可调整顺序；选择模型时会按此顺序排列。",
+            dragHandle: "拖动排序",
             add: "新增渠道",
             unnamed: "未命名渠道",
             numberedName: "渠道 {{count}}",

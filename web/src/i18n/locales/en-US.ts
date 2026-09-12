@@ -997,6 +997,8 @@ export default {
         savedContinue: "Settings saved. Continue with your previous request.",
         channels: {
             description: "Choose a protocol for each provider, fetch its models, assign capabilities, and optionally customize request scripts.",
+            reorderHint: "Drag providers to reorder them; model pickers follow this order.",
+            dragHandle: "Drag to reorder",
             add: "Add provider",
             unnamed: "Unnamed provider",
             numberedName: "Provider {{count}}",
