@@ -377,6 +377,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
             return;
         }
         if (!image) return;
+        // Bake shapes onto a new image so the canvas gets a concrete marked-image copy.
         const bakedDataUrl = await bakeAnnotations(dataUrl, image, current);
         onSave({ annotations: current, bakedDataUrl });
     };
@@ -475,9 +476,9 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
                         <Button icon={<X className="size-4" />} onClick={onClose}>
                             {t("canvas.editors.cancel")}
                         </Button>
-                        <Button onClick={() => void handleSave(false)}>{t("canvas.editors.annotateSave")}</Button>
+                        <Button onClick={() => void handleSave(false)}>{t("canvas.editors.annotateSaveOnly")}</Button>
                         <Button type="primary" icon={<Maximize2 className="size-4" />} onClick={() => void handleSave(true)}>
-                            {t("canvas.editors.annotateBake")}
+                            {t("canvas.editors.annotateConfirm")}
                         </Button>
                     </div>
                 </div>
@@ -620,32 +621,41 @@ function ToolButton({ active, icon, label, onClick }: { active: boolean; icon: R
 }
 
 function AnnotationShape({ item, selected }: { item: CanvasAnnotation; selected: boolean }) {
-    const stroke = item.stroke;
-    const width = Math.max(0.002, item.strokeWidth / 400);
-    const highlight = selected ? { strokeDasharray: "0.02 0.01" } : {};
+    // Coordinates are normalized to viewBox 0..1. With non-scaling-stroke, strokeWidth is in CSS pixels
+    // (the stored annotation value), not viewBox units — dividing by 400 made marks invisible.
+    const width = Math.max(1, item.strokeWidth);
+    const highlight = selected ? { strokeDasharray: "6 4" } : {};
     if (item.kind === "rect") {
-        return <rect x={item.x} y={item.y} width={item.w} height={item.h} fill="none" stroke={stroke} strokeWidth={width} vectorEffect="non-scaling-stroke" {...highlight} />;
+        return <rect x={item.x} y={item.y} width={item.w} height={item.h} fill="none" stroke={item.stroke} strokeWidth={width} vectorEffect="non-scaling-stroke" {...highlight} />;
     }
     if (item.kind === "ellipse") {
-        return <ellipse cx={item.x + item.w / 2} cy={item.y + item.h / 2} rx={item.w / 2} ry={item.h / 2} fill="none" stroke={stroke} strokeWidth={width} vectorEffect="non-scaling-stroke" {...highlight} />;
+        return <ellipse cx={item.x + item.w / 2} cy={item.y + item.h / 2} rx={item.w / 2} ry={item.h / 2} fill="none" stroke={item.stroke} strokeWidth={width} vectorEffect="non-scaling-stroke" {...highlight} />;
     }
     if (item.kind === "arrow") {
         const angle = Math.atan2(item.y2 - item.y1, item.x2 - item.x1);
-        const head = 0.03;
+        const head = arrowHeadNorm(item.strokeWidth);
         const left = { x: item.x2 - head * Math.cos(angle - Math.PI / 6), y: item.y2 - head * Math.sin(angle - Math.PI / 6) };
         const right = { x: item.x2 - head * Math.cos(angle + Math.PI / 6), y: item.y2 - head * Math.sin(angle + Math.PI / 6) };
+        // vectorEffect is not inherited — must be set on each stroked child, otherwise
+        // strokeWidth is interpreted in viewBox units (0..1) and the arrow looks huge.
+        const strokeProps = { stroke: item.stroke, strokeWidth: width, fill: "none" as const, vectorEffect: "non-scaling-stroke" as const, ...highlight };
         return (
-            <g stroke={stroke} strokeWidth={width} fill="none" vectorEffect="non-scaling-stroke" {...highlight}>
-                <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} />
-                <polyline points={`${left.x},${left.y} ${item.x2},${item.y2} ${right.x},${right.y}`} />
+            <g>
+                <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} {...strokeProps} />
+                <polyline points={`${left.x},${left.y} ${item.x2},${item.y2} ${right.x},${right.y}`} {...strokeProps} />
             </g>
         );
     }
     return (
-        <text x={item.x} y={item.y} fill={item.color} fontSize={item.fontSize / 800} fontWeight={600} style={{ userSelect: "none" }}>
+        <text x={item.x} y={item.y} fill={item.color} fontSize={Math.max(0.02, item.fontSize / 800)} fontWeight={600} style={{ userSelect: "none" }}>
             {item.text}
         </text>
     );
+}
+
+/** Arrowhead length in normalized 0..1 coords (~0.8% of side at default stroke). */
+function arrowHeadNorm(strokeWidth: number) {
+    return Math.max(0.005, Math.min(0.012, strokeWidth * 0.0025));
 }
 
 function draftAsAnnotation(draft: Exclude<DraftShape, null>, stroke: string, strokeWidth: number): CanvasAnnotation {
@@ -707,7 +717,7 @@ async function bakeAnnotations(dataUrl: string, size: { width: number; height: n
             const x2 = item.x2 * size.width;
             const y2 = item.y2 * size.height;
             const angle = Math.atan2(y2 - y1, x2 - x1);
-            const head = Math.max(12, item.strokeWidth * 4);
+            const head = arrowHeadNorm(item.strokeWidth) * Math.min(size.width, size.height);
             ctx.beginPath();
             ctx.moveTo(x1, y1);
             ctx.lineTo(x2, y2);

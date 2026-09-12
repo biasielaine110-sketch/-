@@ -17,7 +17,7 @@ import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, mergeDataUrls, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
-import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
+import { fitNodeSize, nodeSizeFromRatio, sizeFromDisplayScalePercent } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
@@ -32,6 +32,7 @@ import { CanvasNodeAnnotateDialog, type CanvasAnnotateInpaintPayload, type Canva
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasNodeMergeDialog, type CanvasImageMergeParams, type MergeCandidateImage } from "@/components/canvas/canvas-node-merge-dialog";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
+import { CanvasNodeScaleDialog } from "@/components/canvas/canvas-node-scale-dialog";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { AtelierCanvas } from "@/components/canvas/atelier-canvas";
@@ -246,6 +247,7 @@ function AtelierCanvasPage() {
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [mergeDialogOpen, setMergeDialogOpen] = useState(false);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
+    const [scaleNodeId, setScaleNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [panoramaNodeId, setPanoramaNodeId] = useState<string | null>(null);
@@ -657,6 +659,7 @@ function AtelierCanvasPage() {
     }, [nodes, selectedNodeIds]);
     const mergeCandidateCount = mergeCandidates.length;
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
+    const scaleNode = scaleNodeId ? nodeById.get(scaleNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
     const panoramaNode = panoramaNodeId ? nodeById.get(panoramaNodeId) || null : null;
@@ -1794,6 +1797,36 @@ function AtelierCanvasPage() {
             }),
         );
     }, []);
+
+    const scaleImageNodeDisplay = useCallback(
+        (node: CanvasNodeData, percent: number) => {
+            if (!node.metadata?.content) return;
+            const naturalWidth = node.metadata.naturalWidth || node.width;
+            const naturalHeight = node.metadata.naturalHeight || node.height;
+            const size = sizeFromDisplayScalePercent(naturalWidth, naturalHeight, percent);
+            const childId = nanoid();
+            const child: CanvasNodeData = {
+                id: childId,
+                type: CanvasNodeType.Image,
+                title: t("canvas.projectPage.scaleCopyTitle", { percent }),
+                position: { x: node.position.x + node.width + 96, y: node.position.y },
+                width: size.width,
+                height: size.height,
+                metadata: {
+                    ...node.metadata,
+                    freeResize: false,
+                    images: undefined,
+                    primaryImageId: undefined,
+                },
+            };
+            setNodes((prev) => [...prev, child]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setScaleNodeId(null);
+            message.success(t("canvas.projectPage.scaleApplied", { percent }));
+        },
+        [message, t],
+    );
 
     const handleNodeContentChange = useCallback((nodeId: string, content: string) => {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, content } } : node)));
@@ -3754,6 +3787,7 @@ function AtelierCanvasPage() {
                     onReversePrompt={createImageReversePromptNodes}
                     onRetry={(node) => void handleRetryNode(node)}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
+                    onScale={(node) => setScaleNodeId(node.id)}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                 />
 
@@ -3873,6 +3907,18 @@ function AtelierCanvasPage() {
 
                 {upscaleNode?.metadata?.content ? (
                     <CanvasNodeUpscaleDialog dataUrl={upscaleNode.metadata.content} open={Boolean(upscaleNode)} onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode!, params)} />
+                ) : null}
+
+                {scaleNode ? (
+                    <CanvasNodeScaleDialog
+                        open={Boolean(scaleNode)}
+                        nodeWidth={scaleNode.width}
+                        nodeHeight={scaleNode.height}
+                        naturalWidth={scaleNode.metadata?.naturalWidth}
+                        naturalHeight={scaleNode.metadata?.naturalHeight}
+                        onClose={() => setScaleNodeId(null)}
+                        onConfirm={(percent) => scaleImageNodeDisplay(scaleNode, percent)}
+                    />
                 ) : null}
 
                 <Modal title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode?.metadata?.content)} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>

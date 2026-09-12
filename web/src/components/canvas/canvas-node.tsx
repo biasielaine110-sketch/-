@@ -514,10 +514,23 @@ function AnnotateNodeContent({ node, theme }: NodeContentRendererProps) {
             {annotations.length ? (
                 <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
                     {annotations.map((item) => {
-                        if (item.kind === "rect") return <rect key={item.id} x={item.x} y={item.y} width={item.w} height={item.h} fill="none" stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
-                        if (item.kind === "ellipse") return <ellipse key={item.id} cx={item.x + item.w / 2} cy={item.y + item.h / 2} rx={item.w / 2} ry={item.h / 2} fill="none" stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
+                        const sw = Math.max(1, item.strokeWidth);
+                        const strokeProps = { stroke: item.stroke, strokeWidth: sw, fill: "none" as const, vectorEffect: "non-scaling-stroke" as const };
+                        if (item.kind === "rect") return <rect key={item.id} x={item.x} y={item.y} width={item.w} height={item.h} {...strokeProps} />;
+                        if (item.kind === "ellipse") return <ellipse key={item.id} cx={item.x + item.w / 2} cy={item.y + item.h / 2} rx={item.w / 2} ry={item.h / 2} {...strokeProps} />;
                         if (item.kind === "arrow") {
-                            return <line key={item.id} x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
+                            const angle = Math.atan2(item.y2 - item.y1, item.x2 - item.x1);
+                            const head = Math.max(0.005, Math.min(0.012, item.strokeWidth * 0.0025));
+                            const lx = item.x2 - head * Math.cos(angle - Math.PI / 6);
+                            const ly = item.y2 - head * Math.sin(angle - Math.PI / 6);
+                            const rx = item.x2 - head * Math.cos(angle + Math.PI / 6);
+                            const ry = item.y2 - head * Math.sin(angle + Math.PI / 6);
+                            return (
+                                <g key={item.id}>
+                                    <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} {...strokeProps} />
+                                    <polyline points={`${lx},${ly} ${item.x2},${item.y2} ${rx},${ry}`} {...strokeProps} />
+                                </g>
+                            );
                         }
                         return (
                             <text key={item.id} x={item.x} y={item.y} fill={item.color} fontSize={item.fontSize / 700} fontWeight={600}>
@@ -830,9 +843,24 @@ function ImageContent({
                         {(node.metadata?.annotations?.length || 0) > 0 ? (
                             <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
                                 {node.metadata!.annotations!.map((item) => {
-                                    if (item.kind === "rect") return <rect key={item.id} x={item.x} y={item.y} width={item.w} height={item.h} fill="none" stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
-                                    if (item.kind === "ellipse") return <ellipse key={item.id} cx={item.x + item.w / 2} cy={item.y + item.h / 2} rx={item.w / 2} ry={item.h / 2} fill="none" stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
-                                    if (item.kind === "arrow") return <line key={item.id} x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} stroke={item.stroke} strokeWidth={Math.max(0.004, item.strokeWidth / 300)} />;
+                                    const sw = Math.max(1, item.strokeWidth);
+                                    const strokeProps = { stroke: item.stroke, strokeWidth: sw, fill: "none" as const, vectorEffect: "non-scaling-stroke" as const };
+                                    if (item.kind === "rect") return <rect key={item.id} x={item.x} y={item.y} width={item.w} height={item.h} {...strokeProps} />;
+                                    if (item.kind === "ellipse") return <ellipse key={item.id} cx={item.x + item.w / 2} cy={item.y + item.h / 2} rx={item.w / 2} ry={item.h / 2} {...strokeProps} />;
+                                    if (item.kind === "arrow") {
+                                        const angle = Math.atan2(item.y2 - item.y1, item.x2 - item.x1);
+                                        const head = Math.max(0.005, Math.min(0.012, item.strokeWidth * 0.0025));
+                                        const lx = item.x2 - head * Math.cos(angle - Math.PI / 6);
+                                        const ly = item.y2 - head * Math.sin(angle - Math.PI / 6);
+                                        const rx = item.x2 - head * Math.cos(angle + Math.PI / 6);
+                                        const ry = item.y2 - head * Math.sin(angle + Math.PI / 6);
+                                        return (
+                                            <g key={item.id}>
+                                                <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} {...strokeProps} />
+                                                <polyline points={`${lx},${ly} ${item.x2},${item.y2} ${rx},${ry}`} {...strokeProps} />
+                                            </g>
+                                        );
+                                    }
                                     return (
                                         <text key={item.id} x={item.x} y={item.y} fill={item.color} fontSize={item.fontSize / 700} fontWeight={600}>
                                             {item.text}

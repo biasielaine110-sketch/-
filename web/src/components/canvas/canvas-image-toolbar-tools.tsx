@@ -1,15 +1,16 @@
 import type { ReactNode } from "react";
-import { Brush, Camera, Copy, FileText, Globe2, Grid2x2, Highlighter, Lock, LockOpen, Maximize2, Scissors, Sparkles, Upload, ZoomIn } from "lucide-react";
+import { Brush, Camera, Copy, FileText, Globe2, Grid2x2, Highlighter, Lock, LockOpen, Maximize2, Scaling, Scissors, Sparkles, Upload, ZoomIn } from "lucide-react";
 
 import type { CanvasNodeData } from "@/types/canvas";
 import i18n from "@/i18n";
 
-export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "annotate" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "panorama" | "view";
+export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "scale" | "maskEdit" | "annotate" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "panorama" | "view";
 export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | ImageNodeActionToolId;
 
 export type ImageToolHandlers = {
     onUpload: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
+    onScale: (node: CanvasNodeData) => void;
     onMaskEdit: (node: CanvasNodeData) => void;
     onAnnotate: (node: CanvasNodeData) => void;
     onCrop: (node: CanvasNodeData) => void;
@@ -38,7 +39,7 @@ export type ImageQuickToolsConfig = {
     showLabels: boolean;
 };
 
-export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v9";
+export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v10";
 
 const defaultBaseToolIds: ImageQuickToolId[] = ["info", "delete", "saveAsset", "download"];
 
@@ -75,6 +76,14 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         icon: (node) => (node.metadata?.freeResize ? <LockOpen className="size-[10px]" /> : <Lock className="size-[10px]" />),
         active: (node) => Boolean(node.metadata?.freeResize),
         run: (node, handlers) => handlers.onToggleFreeResize(node),
+    },
+    {
+        id: "scale",
+        defaultVisible: true,
+        label: () => i18n.t("canvas.imageTools.scale"),
+        title: () => i18n.t("canvas.imageTools.scaleTitle"),
+        icon: () => <Scaling className="size-[10px]" />,
+        run: (node, handlers) => handlers.onScale(node),
     },
     {
         id: "maskEdit",

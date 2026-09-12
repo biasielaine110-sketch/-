@@ -49,13 +49,14 @@ export function CanvasTextClipboardMenu() {
         const handleContextMenu = (event: MouseEvent) => {
             const target = event.target;
             if (!(target instanceof Element)) return;
-            if (target.closest(".ant-select-dropdown,.ant-picker-dropdown")) return;
+            if (target.closest(".ant-select-dropdown,.ant-picker-dropdown,[data-canvas-text-clipboard-menu]")) return;
 
             const editable = target.closest(EDITABLE_SELECTOR) as HTMLElement | null;
             const selectable = target.closest(SELECTABLE_SELECTOR) as HTMLElement | null;
             if (!editable && !selectable) return;
 
-            const selectedText = readSelectedText(editable);
+            // Capture selection immediately — some browsers clear it during contextmenu.
+            const selectedText = readSelectedText(editable, selectable);
             if (!selectedText && !editable) return;
 
             event.preventDefault();
@@ -139,13 +140,23 @@ function MenuButton({ icon, label, onClick }: { icon: ReactNode; label: string; 
     );
 }
 
-function readSelectedText(editable: HTMLElement | null) {
+function readSelectedText(editable: HTMLElement | null, selectable?: HTMLElement | null) {
     if (editable instanceof HTMLInputElement || editable instanceof HTMLTextAreaElement) {
         const start = editable.selectionStart ?? 0;
         const end = editable.selectionEnd ?? 0;
         if (end > start) return editable.value.slice(start, end);
     }
-    return window.getSelection()?.toString() || "";
+
+    const selection = window.getSelection();
+    const selected = selection?.toString() || "";
+    if (!selected || !selection || selection.rangeCount === 0) return "";
+
+    const anchor = selection.anchorNode;
+    const focus = selection.focusNode;
+    const scope = editable || selectable;
+    if (!scope) return selected;
+    if ((anchor && scope.contains(anchor)) || (focus && scope.contains(focus))) return selected;
+    return "";
 }
 
 function insertTextIntoEditable(editable: HTMLElement, text: string) {

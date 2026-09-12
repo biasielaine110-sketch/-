@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { Image as ImageIcon, LoaderCircle, MessageSquareText, SendHorizontal } from "lucide-react";
+import { App } from "antd";
+import copy from "copy-to-clipboard";
+import { Check, Copy, Image as ImageIcon, LoaderCircle, MessageSquareText, SendHorizontal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -273,22 +275,52 @@ function ModeToggle({ active, label, icon, theme, onClick }: { active: boolean; 
 
 function ChatBubble({ message, theme, onInsertImage }: { message: CanvasAssistantMessage; theme: CanvasTheme; onInsertImage?: (image: CanvasAssistantImage) => void }) {
     const { t } = useTranslation();
+    const { message: toast } = App.useApp();
+    const [copied, setCopied] = useState(false);
     const isUser = message.role === "user";
     const isError = message.role === "error";
     const images = message.images || [];
+    const text = (message.text || "").trim();
+
+    const handleCopy = (event: ReactMouseEvent | ReactPointerEvent) => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (!text) return;
+        copy(text);
+        setCopied(true);
+        toast.success(t("common.copied"));
+        window.setTimeout(() => setCopied(false), 1500);
+    };
+
     return (
         <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
             <div
                 data-canvas-selectable-text
-                className="max-w-[92%] cursor-text select-text rounded-2xl px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words"
+                className="group/bubble relative max-w-[92%] cursor-text select-text rounded-2xl px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words"
                 style={{
                     background: isError ? `${theme.node.activeStroke}22` : isUser ? theme.toolbar.activeBg : theme.node.panel,
                     color: isError ? theme.node.activeStroke : theme.node.text,
                     border: `1px solid ${isUser ? "transparent" : theme.node.stroke}`,
                 }}
             >
-                <div className="mb-1 text-[10px] font-semibold uppercase opacity-50">{isUser ? t("canvas.chat.you") : isError ? t("common.error") : t("canvas.chat.assistant")}</div>
-                {message.text ? <div>{message.text}</div> : message.role === "assistant" && !images.length ? "…" : null}
+                <div className="mb-1 flex items-center justify-between gap-2">
+                    <div className="text-[10px] font-semibold uppercase opacity-50">{isUser ? t("canvas.chat.you") : isError ? t("common.error") : t("canvas.chat.assistant")}</div>
+                    {text ? (
+                        <button
+                            type="button"
+                            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md opacity-0 transition group-hover/bubble:opacity-100 focus-visible:opacity-100"
+                            style={{ color: theme.node.text, background: `${theme.node.fill}cc` }}
+                            title={t("canvas.chat.copyReply")}
+                            aria-label={t("canvas.chat.copyReply")}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={handleCopy}
+                        >
+                            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                        </button>
+                    ) : null}
+                </div>
+                {text ? <div>{message.text}</div> : message.role === "assistant" && !images.length ? "…" : null}
                 {images.length ? (
                     <div className={`mt-2 grid gap-2 ${images.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
                         {images.map((image) => (
