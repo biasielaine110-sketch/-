@@ -151,16 +151,22 @@ function isImagenModel(model: string) {
     return /imagen/i.test(model.trim());
 }
 
-/** Gemini native image models must use generateContent, not OpenAI /images/generations. */
-function isGeminiNativeImageModel(model: string) {
+/**
+ * Some relays expose Gemini / Imagen image models only on OpenAI
+ * `/v1/images/generations` (not `generateContent`).
+ * e.g. gemini-3.1-flash-image-preview, imagen-3.0-generate-002
+ */
+function prefersOpenAiImagesEndpoint(model: string) {
     const value = model.trim().toLowerCase();
-    return value.includes("gemini") && !isImagenModel(value);
+    if (isImagenModel(value)) return true;
+    if (!value.includes("gemini")) return false;
+    return /flash-image|image-preview|image-generation|nano-banana/.test(value);
 }
 
 function resolveImageRequestConfig(config: AiConfig) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
-    if (requestConfig.apiFormat === "openai" && isGeminiNativeImageModel(requestConfig.model)) {
-        return { ...requestConfig, apiFormat: "gemini" as const };
+    if (prefersOpenAiImagesEndpoint(requestConfig.model)) {
+        return { ...requestConfig, apiFormat: "openai" as const };
     }
     return requestConfig;
 }
@@ -168,6 +174,9 @@ function resolveImageRequestConfig(config: AiConfig) {
 function normalizeImageApiErrorMessage(message: string, model?: string) {
     if (/only imagen models are supported/i.test(message)) {
         return apiText("imagenOnlyModel", { model: model || "?" });
+    }
+    if (/generateContent/i.test(message) && /\/v1\/images\/generations/i.test(message)) {
+        return apiText("geminiImageUseOpenAi", { model: model || "?" });
     }
     return message;
 }
