@@ -267,7 +267,7 @@ return (data.candidates || [])
             script: `// ${i18n.t("modelPlugin.templates.videoOpenai")}
 const headers = { "Content-Type": "application/json", Authorization: \`Bearer \${apiKey}\` };
 const ratio = params.ratio || "16:9";
-const seconds = Number(params.seconds) || 5;
+const seconds = String(params.seconds || "5");
 const task = await request({
   method: "post",
   url: \`\${baseUrl}/v1/videos\`,

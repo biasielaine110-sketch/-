@@ -86,7 +86,7 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
             images: refs,
             params: {
                 seconds,
-                duration: Number(seconds),
+                duration: seconds,
                 size: seedance ? ratio : pixelSize,
                 pixelSize,
                 resolution,
@@ -142,8 +142,9 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
         const payload: Record<string, unknown> = {
             model: modelName,
             prompt,
-            seconds: Number(seconds),
-            duration: Number(seconds),
+            // OpenAI / New API Go bindings expect seconds as a string enum (e.g. "5").
+            seconds,
+            duration: seconds,
             ratio,
             aspect_ratio: ratio,
             size: seedance ? ratio : normalizeVideoSize(config.size) || ratio,
