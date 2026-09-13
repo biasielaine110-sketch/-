@@ -301,7 +301,7 @@ const VIDEO_RATIO_PRESETS = [
 ] as const;
 
 function nearestVideoRatio(ratio: number) {
-    let best = VIDEO_RATIO_PRESETS[1];
+    let best: (typeof VIDEO_RATIO_PRESETS)[number] = VIDEO_RATIO_PRESETS[1];
     let bestDistance = Number.POSITIVE_INFINITY;
     for (const preset of VIDEO_RATIO_PRESETS) {
         const distance = Math.abs(Math.log(ratio) - Math.log(preset.value));
