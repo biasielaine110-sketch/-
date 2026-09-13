@@ -191,10 +191,10 @@ export function CanvasImagePreviewModal({ open, src, title, fileName, projectId,
                     },
                 }}
             >
-                <div className="grid min-h-[min(78vh,820px)] lg:grid-cols-[minmax(0,1fr)_280px]" data-canvas-no-zoom data-canvas-shortcuts-ignore>
+                <div className="grid max-h-[min(82vh,860px)] lg:h-[min(78vh,820px)] lg:grid-cols-[minmax(0,1fr)_280px]" data-canvas-no-zoom data-canvas-shortcuts-ignore>
                     <div
                         data-canvas-image-preview-stage=""
-                        className="relative flex min-h-[360px] items-center justify-center overflow-hidden bg-black/5 select-none"
+                        className="relative h-[min(56vh,560px)] min-h-[280px] overflow-hidden bg-black/5 select-none lg:h-auto lg:min-h-0"
                         onContextMenu={handleContextMenu}
                         onPointerDown={handlePointerDown}
                         onPointerMove={handlePointerMove}
@@ -202,24 +202,27 @@ export function CanvasImagePreviewModal({ open, src, title, fileName, projectId,
                         onPointerCancel={endDrag}
                         style={{ cursor: zoom > 1.01 ? "grab" : "default" }}
                     >
-                        <img
-                            src={src}
-                            alt={displayTitle}
-                            draggable={false}
-                            className="max-h-[min(78vh,820px)] max-w-full object-contain will-change-transform"
-                            style={{
-                                transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
-                                transformOrigin: "center center",
-                            }}
-                        />
+                        {/* Absolute fill + max-h-full avoids flex overflow clipping the top when the image is taller than the stage. */}
+                        <div className="absolute inset-0 flex items-center justify-center p-3">
+                            <img
+                                src={src}
+                                alt={displayTitle}
+                                draggable={false}
+                                className="max-h-full max-w-full object-contain will-change-transform"
+                                style={{
+                                    transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+                                    transformOrigin: "center center",
+                                }}
+                            />
+                        </div>
                         <div className="pointer-events-none absolute bottom-3 left-3 rounded-full bg-black/55 px-2.5 py-1 text-[11px] font-medium text-white/90">{Math.round(zoom * 100)}%</div>
                     </div>
 
-                    <aside className="flex flex-col border-t lg:border-l lg:border-t-0" style={{ borderColor: theme.node.stroke, background: theme.node.panel, color: theme.node.text }}>
+                    <aside className="flex min-h-0 flex-col border-t lg:border-l lg:border-t-0" style={{ borderColor: theme.node.stroke, background: theme.node.panel, color: theme.node.text }}>
                         <div className="border-b px-4 py-3 text-sm font-semibold" style={{ borderColor: theme.node.stroke }}>
                             {t("canvas.imagePreview.infoTitle")}
                         </div>
-                        <div className="thin-scrollbar flex-1 space-y-3 overflow-auto px-4 py-3 text-sm">
+                        <div className="thin-scrollbar min-h-0 flex-1 space-y-3 overflow-auto px-4 py-3 text-sm">
                             <InfoRow label={t("canvas.nodeToolbar.name")} value={info?.title || displayTitle} />
                             {info?.nodeType ? <InfoRow label={t("canvas.nodeToolbar.type")} value={info.nodeType} /> : null}
                             {info?.nodeId ? <InfoRow label="ID" value={info.nodeId} /> : null}

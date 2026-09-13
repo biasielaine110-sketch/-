@@ -22,6 +22,7 @@ export function CanvasToolbar({
     onAddChat,
     onAddAnnotate,
     onAddConfig,
+    onAddMerge,
     onAddGroup,
     onAddDirector,
     onUndo,
@@ -47,6 +48,7 @@ export function CanvasToolbar({
     onAddChat: () => void;
     onAddAnnotate: () => void;
     onAddConfig: () => void;
+    onAddMerge?: () => void;
     onAddGroup: () => void;
     onAddDirector: () => void;
     onUndo: () => void;
@@ -121,6 +123,11 @@ export function CanvasToolbar({
                 <ToolbarButton id="tool-config" label={t("canvas.toolbar.config")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddConfig}>
                     <Settings2 className="size-4.5" />
                 </ToolbarButton>
+                {onAddMerge || onMergeGrid ? (
+                    <ToolbarButton id="tool-merge" label={t("canvas.toolbar.merge")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddMerge || onMergeGrid}>
+                        <Grid2x2 className="size-4.5" />
+                    </ToolbarButton>
+                ) : null}
                 <ToolbarButton id="tool-group" label={t("canvas.toolbar.group")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onAddGroup}>
                     <Group className="size-4.5" />
                 </ToolbarButton>
@@ -151,11 +158,6 @@ export function CanvasToolbar({
                 {selectedCount ? (
                     <>
                         <Divider theme={theme} />
-                        {selectedCount >= 2 && onMergeGrid ? (
-                            <ToolbarButton id="tool-merge-grid" label={t("canvas.toolbar.mergeGrid")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onMergeGrid}>
-                                <Grid2x2 className="size-4.5" />
-                            </ToolbarButton>
-                        ) : null}
                         <ToolbarButton id="tool-delete" label={t("canvas.deleteSelected")} hovered={hovered} hoverStyle={hoverStyle} wrapRef={wrapRef} onTipX={setTipX} onHover={setHovered} onClick={onDelete} danger>
                             <Trash2 className="size-4.5" />
                         </ToolbarButton>
@@ -325,12 +327,12 @@ function toolLabel(id: string, t: (key: string) => string) {
     if (id === "tool-video") return t("canvas.toolbar.video");
     if (id === "tool-audio") return t("canvas.toolbar.audio");
     if (id === "tool-config") return t("canvas.toolbar.config");
+    if (id === "tool-merge" || id === "tool-merge-grid") return t("canvas.toolbar.merge");
     if (id === "tool-group") return t("canvas.toolbar.group");
     if (id === "tool-director") return t("canvas.toolbar.director");
     if (id === "tool-upload") return t("canvas.toolbar.upload");
     if (id === "tool-style") return t("canvas.toolbar.appearance");
     if (id === "tool-delete") return t("canvas.deleteSelected");
-    if (id === "tool-merge-grid") return t("canvas.toolbar.mergeGrid");
     if (id === "tool-clear") return t("canvas.toolbar.clear");
     return "";
 }

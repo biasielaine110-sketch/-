@@ -69,6 +69,7 @@ export function normalizeConnection(firstNodeId: string, secondNodeId: string, n
     if (!first || !second || first.id === second.id) return null;
     if (first.type === CanvasNodeType.Group || second.type === CanvasNodeType.Group) return null;
     if (first.type === CanvasNodeType.Config && second.type === CanvasNodeType.Config) return null;
+    if (first.type === CanvasNodeType.Merge && second.type === CanvasNodeType.Merge) return null;
     // Input handle / keyboard X on the receiver: clicked node outputs into the first node.
     if (firstHandleType === "target") return { fromNodeId: second.id, toNodeId: first.id };
     // Output handle: first node outputs into the clicked node.

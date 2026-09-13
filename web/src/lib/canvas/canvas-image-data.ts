@@ -40,6 +40,9 @@ export type ImageMergePiece = {
     row: number;
     column: number;
     dataUrl: string;
+    /** Cover focus point in 0..1. Defaults to center (0.5). */
+    offsetX?: number;
+    offsetY?: number;
 };
 
 export async function cropDataUrl(dataUrl: string, crop?: ImageCropRect) {
@@ -107,9 +110,9 @@ export async function mergeDataUrls(params: ImageMergeParams) {
     loaded.forEach((piece) => {
         const column = Math.min(columns - 1, Math.max(0, piece.column));
         const row = Math.min(rows - 1, Math.max(0, piece.row));
-        const x = column * cellWidth + Math.floor((cellWidth - piece.image.width) / 2);
-        const y = row * cellHeight + Math.floor((cellHeight - piece.image.height) / 2);
-        context.drawImage(piece.image, x, y);
+        const x = column * cellWidth;
+        const y = row * cellHeight;
+        drawImageCover(context, piece.image, x, y, cellWidth, cellHeight, piece.offsetX, piece.offsetY);
     });
 
     const merged = canvas.toDataURL("image/png");
@@ -136,6 +139,28 @@ export function resolveGridPreset(cells: 3 | 4 | 6 | 9, aspectRatio?: string | n
     if (cells === 4) return { rows: 2, columns: 2 };
     if (cells === 6) return portrait ? { rows: 3, columns: 2 } : { rows: 2, columns: 3 };
     return { rows: 3, columns: 3 };
+}
+
+function drawImageCover(
+    context: CanvasRenderingContext2D,
+    image: CanvasImageSource & { width: number; height: number },
+    dx: number,
+    dy: number,
+    dw: number,
+    dh: number,
+    focusX = 0.5,
+    focusY = 0.5,
+) {
+    const width = Math.max(1, image.width || 1);
+    const height = Math.max(1, image.height || 1);
+    const scale = Math.max(dw / width, dh / height);
+    const sw = Math.min(width, dw / scale);
+    const sh = Math.min(height, dh / scale);
+    const ox = Math.min(1, Math.max(0, Number.isFinite(focusX) ? focusX : 0.5));
+    const oy = Math.min(1, Math.max(0, Number.isFinite(focusY) ? focusY : 0.5));
+    const sx = Math.min(Math.max(0, (width - sw) * ox), Math.max(0, width - sw));
+    const sy = Math.min(Math.max(0, (height - sh) * oy), Math.max(0, height - sh));
+    context.drawImage(image, sx, sy, sw, sh, dx, dy, dw, dh);
 }
 
 function cropImageToAspect(image: HTMLImageElement, ratio: number | null) {

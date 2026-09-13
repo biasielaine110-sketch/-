@@ -19,6 +19,7 @@ export enum CanvasNodeType {
     Director = "director",
     Chat = "chat",
     Annotate = "annotate",
+    Merge = "merge",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -133,6 +134,15 @@ export type CanvasNodeMetadata = {
     imageModel?: string;
     annotations?: CanvasAnnotation[];
     grid?: CanvasGridMeta;
+    /** Merge node: layout direction. */
+    mergeOrientation?: "horizontal" | "vertical" | "grid";
+    mergeRows?: number;
+    mergeColumns?: number;
+    mergeAspectRatio?: string | null;
+    /** Ordered source node ids filling merge slots (null = empty). */
+    mergeSlotIds?: Array<string | null>;
+    /** Cover focus 0..1 keyed by source node id. */
+    mergeOffsets?: Record<string, { x: number; y: number }>;
 };
 
 export type CanvasNodeData = {

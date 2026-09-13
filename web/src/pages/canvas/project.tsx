@@ -32,7 +32,7 @@ import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/can
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import { CanvasNodeAnnotateDialog, type CanvasAnnotateInpaintPayload, type CanvasAnnotateSavePayload } from "@/components/canvas/canvas-node-annotate-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
-import { CanvasNodeMergeDialog, type CanvasImageMergeParams, type MergeCandidateImage } from "@/components/canvas/canvas-node-merge-dialog";
+import { CanvasMergeNodeContent } from "@/components/canvas/canvas-merge-node-content";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { CanvasNodeScaleDialog } from "@/components/canvas/canvas-node-scale-dialog";
 import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
@@ -276,7 +276,6 @@ function AtelierCanvasPage() {
     const [draftPickerHandle, setDraftPickerHandle] = useState<FileSystemFileHandle | null>(null);
     const [draftPickerDirectory, setDraftPickerDirectory] = useState<FileSystemDirectoryHandle | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
-    const [mergeDialogOpen, setMergeDialogOpen] = useState(false);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
     const [scaleNodeId, setScaleNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
@@ -596,7 +595,7 @@ function AtelierCanvasPage() {
     );
 
     const createConnectedNode = useCallback(
-        (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio, pending: PendingConnectionCreate) => {
+        (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio | CanvasNodeType.Merge, pending: PendingConnectionCreate) => {
             const metadata = type === CanvasNodeType.Config ? { model: effectiveConfig.imageModel || effectiveConfig.model, size: effectiveConfig.size, count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count) } : undefined;
             const newNode = createCanvasNode(type, pending.position, metadata);
             const connection = normalizeConnection(pending.connection.nodeId, newNode.id, [...nodesRef.current, newNode], pending.connection.handleType);
@@ -608,7 +607,7 @@ function AtelierCanvasPage() {
             setConnections((prev) => [...prev, { id: nanoid(), ...connection }]);
             setSelectedNodeIds(new Set([newNode.id]));
             setSelectedConnectionId(null);
-            if (type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio) setDialogNodeId(newNode.id);
+            if (type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Merge) setDialogNodeId(newNode.id);
             setPendingConnectionCreate(null);
             setConnecting(null);
         },
@@ -678,21 +677,6 @@ function AtelierCanvasPage() {
     const annotateNode = annotateNodeId ? nodeById.get(annotateNodeId) || null : null;
     const textEditNode = textEditNodeId ? nodeById.get(textEditNodeId) || null : null;
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
-    const mergeCandidates = useMemo<MergeCandidateImage[]>(() => {
-        const selected = nodes.filter((node) => selectedNodeIds.has(node.id) && node.type === CanvasNodeType.Image && node.metadata?.content);
-        if (selected.length < 2) return [];
-        const groupId = selected.find((node) => node.metadata?.grid?.groupId)?.metadata?.grid?.groupId;
-        const grouped = groupId ? selected.filter((node) => node.metadata?.grid?.groupId === groupId) : selected;
-        const source = grouped.length >= 2 ? grouped : selected;
-        return source.map((node) => ({
-            id: node.id,
-            title: node.title || node.id,
-            dataUrl: node.metadata!.content!,
-            grid: node.metadata?.grid,
-            position: node.position,
-        }));
-    }, [nodes, selectedNodeIds]);
-    const mergeCandidateCount = mergeCandidates.length;
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
     const scaleNode = scaleNodeId ? nodeById.get(scaleNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
@@ -730,7 +714,7 @@ function AtelierCanvasPage() {
     const configInputsById = useMemo(() => {
         const map = new Map<string, NodeGenerationInput[]>();
         nodes.forEach((node) => {
-            if (node.type !== CanvasNodeType.Config) return;
+            if (node.type !== CanvasNodeType.Config && node.type !== CanvasNodeType.Merge) return;
             map.set(node.id, buildNodeGenerationInputs(node.id, nodes, connections));
         });
         return map;
@@ -769,10 +753,45 @@ function AtelierCanvasPage() {
             // Display-only plugin nodes with hidePanel do not open a panel; custom Panels require autoOpenPanel on creation.
             // Plugin nodes declaring useBuiltinPanel open the built-in generation panel on creation, like image nodes.
             // Built-in image, video, and config nodes retain their existing open-on-create behavior.
-            const wantsPanel = definition?.hidePanel ? false : definition?.useBuiltinPanel ? true : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group && type !== CanvasNodeType.Chat;
+            const wantsPanel = definition?.hidePanel ? false : definition?.useBuiltinPanel ? true : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group && type !== CanvasNodeType.Chat && type !== CanvasNodeType.Merge;
             if (wantsPanel) setDialogNodeId(newNode.id);
+            return newNode.id;
         },
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, effectiveConfig.textModel, getCreateNodePosition],
+    );
+
+    const createMergeNode = useCallback(
+        (position?: Position, sourceImageIds?: string[]) => {
+            const mergeId = createNode(CanvasNodeType.Merge, position);
+            const sources =
+                sourceImageIds ||
+                nodesRef.current.filter((node) => selectedNodeIds.has(node.id) && node.type === CanvasNodeType.Image && node.metadata?.content).map((node) => node.id);
+            if (sources.length) {
+                const layoutCount = Math.max(4, sources.length);
+                const columns = Math.ceil(Math.sqrt(layoutCount));
+                const rows = Math.ceil(layoutCount / columns);
+                const slotIds = Array.from({ length: rows * columns }, (_, index) => sources[index] || null);
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === mergeId
+                            ? {
+                                  ...node,
+                                  metadata: {
+                                      ...node.metadata,
+                                      mergeOrientation: "grid",
+                                      mergeRows: rows,
+                                      mergeColumns: columns,
+                                      mergeSlotIds: slotIds,
+                                  },
+                              }
+                            : node,
+                    ),
+                );
+                setConnections((prev) => [...prev, ...sources.map((fromNodeId) => ({ id: nanoid(), fromNodeId, toNodeId: mergeId }))]);
+            }
+            return mergeId;
+        },
+        [createNode, selectedNodeIds],
     );
 
     const deleteNodes = useCallback(
@@ -1982,11 +2001,13 @@ function AtelierCanvasPage() {
         const image = node.metadata?.images?.find((item) => item.id === imageId);
         if (!image?.content) return;
         const id = nanoid();
-        const edge = Math.max(node.width, node.height);
-        const size = fitNodeSize(image.naturalWidth, image.naturalHeight, edge, edge);
+        const isVideo = node.type === CanvasNodeType.Video;
+        const size = isVideo
+            ? fitNodeSize(image.naturalWidth || node.width, image.naturalHeight || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT)
+            : fitNodeSize(image.naturalWidth, image.naturalHeight, Math.max(node.width, node.height), Math.max(node.width, node.height));
         const copy: CanvasNodeData = {
             id,
-            type: CanvasNodeType.Image,
+            type: isVideo ? CanvasNodeType.Video : CanvasNodeType.Image,
             title: node.title,
             position: { x: node.position.x + node.width * 2 + 96, y: node.position.y + node.height / 2 - size.height / 2 },
             ...size,
@@ -2005,6 +2026,10 @@ function AtelierCanvasPage() {
                 quality: node.metadata?.quality,
                 background: node.metadata?.background,
                 references: node.metadata?.references,
+                seconds: node.metadata?.seconds,
+                vquality: node.metadata?.vquality,
+                generateAudio: node.metadata?.generateAudio,
+                watermark: node.metadata?.watermark,
             },
         };
         setNodes((prev) => [...prev, copy]);
@@ -2195,58 +2220,97 @@ function AtelierCanvasPage() {
         [message, t],
     );
 
-    const mergeSelectedGridImages = useCallback(
-        async (params: CanvasImageMergeParams) => {
-            if (params.pieces.length < 2) {
+    const runMergeNode = useCallback(
+        async (nodeId: string) => {
+            const node = nodesRef.current.find((item) => item.id === nodeId);
+            if (!node || node.type !== CanvasNodeType.Merge) return;
+            const inputs = buildNodeGenerationInputs(nodeId, nodesRef.current, connectionsRef.current).filter((input) => input.type === "image" && input.image?.dataUrl);
+            if (inputs.length < 2) {
+                message.warning(t("canvas.projectPage.mergeNeedImages"));
+                return;
+            }
+            const rows = Math.max(1, node.metadata?.mergeRows || 2);
+            const columns = Math.max(1, node.metadata?.mergeColumns || 2);
+            const capacity = rows * columns;
+            const preferred = (node.metadata?.mergeSlotIds || []).slice(0, capacity);
+            const used = new Set<string>();
+            const slots: Array<string | null> = Array.from({ length: capacity }, (_, index) => {
+                const id = preferred[index] || null;
+                if (id && inputs.some((input) => input.nodeId === id) && !used.has(id)) {
+                    used.add(id);
+                    return id;
+                }
+                return null;
+            });
+            for (const input of inputs) {
+                if (used.has(input.nodeId)) continue;
+                const empty = slots.findIndex((item) => !item);
+                if (empty < 0) break;
+                slots[empty] = input.nodeId;
+                used.add(input.nodeId);
+            }
+            const inputById = new Map(inputs.map((input) => [input.nodeId, input]));
+            const offsets = node.metadata?.mergeOffsets || {};
+            const pieces = slots
+                .map((sourceId, index) => {
+                    if (!sourceId) return null;
+                    const input = inputById.get(sourceId);
+                    if (!input?.image?.dataUrl) return null;
+                    const focus = offsets[sourceId] || { x: 0.5, y: 0.5 };
+                    return {
+                        row: Math.floor(index / columns),
+                        column: index % columns,
+                        dataUrl: input.image.dataUrl,
+                        offsetX: focus.x,
+                        offsetY: focus.y,
+                    };
+                })
+                .filter(Boolean) as Array<{ row: number; column: number; dataUrl: string; offsetX: number; offsetY: number }>;
+            if (pieces.length < 2) {
                 message.warning(t("canvas.projectPage.mergeNeedImages"));
                 return;
             }
 
-            const sourceIds = new Set(params.sourceNodeIds.length ? params.sourceNodeIds : params.pieces.map((piece) => piece.nodeId).filter(Boolean));
-            const source = nodesRef.current.filter((node) => sourceIds.has(node.id));
-            const rows = Math.max(1, params.rows);
-            const columns = Math.max(1, params.columns);
-            const pieces = params.pieces.map((piece) => ({
-                row: piece.row,
-                column: piece.column,
-                dataUrl: piece.dataUrl,
-            }));
-
+            setRunningNodeId(nodeId);
+            setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined } } : item)));
             try {
-                const merged = await mergeDataUrls({ rows, columns, pieces, aspectRatio: params.aspectRatio });
+                const merged = await mergeDataUrls({
+                    rows,
+                    columns,
+                    pieces,
+                    aspectRatio: node.metadata?.mergeAspectRatio || null,
+                });
                 const uploaded = await uploadImage(merged);
                 const size = fitNodeSize(uploaded.width, uploaded.height);
-                const anchor =
-                    source[0] ||
-                    nodesRef.current.find((node) => selectedNodeIds.has(node.id)) ||
-                    nodesRef.current[0];
-                if (!anchor) return;
                 const childId = nanoid();
                 const child: CanvasNodeData = {
                     id: childId,
                     type: CanvasNodeType.Image,
                     title: t("canvas.projectPage.mergeResult"),
-                    position: { x: anchor.position.x + anchor.width + 96, y: anchor.position.y },
+                    position: { x: node.position.x + node.width + 96, y: node.position.y },
                     width: size.width,
                     height: size.height,
                     metadata: {
                         ...imageMetadata(uploaded),
-                        prompt: anchor.metadata?.prompt,
                     },
                 };
-                setNodes((prev) => [...prev, child]);
-                if (source.length) {
-                    setConnections((prev) => [...prev, ...source.map((node) => ({ id: nanoid(), fromNodeId: node.id, toNodeId: childId }))]);
-                }
+                const sourceIds = pieces
+                    .map((_, index) => slots[index])
+                    .filter((id): id is string => Boolean(id));
+                setNodes((prev) => [...prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : item)), child]);
+                setConnections((prev) => [...prev, ...sourceIds.map((fromNodeId) => ({ id: nanoid(), fromNodeId, toNodeId: childId }))]);
                 setSelectedNodeIds(new Set([childId]));
                 setSelectedConnectionId(null);
-                setMergeDialogOpen(false);
                 message.success(t("canvas.projectPage.mergeSuccess", { count: pieces.length }));
             } catch (error) {
-                message.error(error instanceof Error ? error.message : t("canvas.projectPage.mergeFailed"));
+                const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.mergeFailed");
+                message.error(errorDetails);
+                setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item)));
+            } finally {
+                setRunningNodeId(null);
             }
         },
-        [message, selectedNodeIds, t],
+        [message, t],
     );
 
     const maskEditImageNode = useCallback(
@@ -2969,6 +3033,17 @@ function AtelierCanvasPage() {
                         (ref) => ref.id !== nodeId && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.dataUrl !== selfContent,
                     );
                     const videoId = writeVideoToSelf ? nodeId : nanoid();
+                    const versionId = nanoid();
+                    const previousVideos = writeVideoToSelf ? collectSuccessfulImageHistory(sourceNode) : [];
+                    const appendVideoHistory = writeVideoToSelf && previousVideos.length > 0;
+                    const retainedVideos =
+                        appendVideoHistory && previousVideos.length + 1 > MAX_IMAGE_NODE_HISTORY
+                            ? previousVideos.slice(Math.max(0, previousVideos.length - (MAX_IMAGE_NODE_HISTORY - 1)))
+                            : previousVideos;
+                    const loadingVideo: CanvasNodeImage = { id: versionId, status: NODE_STATUS_LOADING, content: "", storageKey: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" };
+                    const nextImages = appendVideoHistory ? [...retainedVideos, loadingVideo] : [loadingVideo];
+                    const retainedPrimaryId = appendVideoHistory ? sourceNode?.metadata?.primaryImageId || retainedVideos[0]?.id : undefined;
+                    const retainedPrimary = retainedPrimaryId ? retainedVideos.find((image) => image.id === retainedPrimaryId) || retainedVideos[0] : undefined;
                     const parent = sourceNode?.position || { x: 0, y: 0 };
                     const videoNode: CanvasNodeData = {
                         id: videoId,
@@ -2987,14 +3062,50 @@ function AtelierCanvasPage() {
                             generateAudio: generationConfig.videoGenerateAudio,
                             watermark: generationConfig.videoWatermark,
                             references: generationReferenceUrls({ ...generationContext, referenceImages }),
-                            content: undefined,
-                            storageKey: undefined,
+                            images: nextImages,
+                            ...(appendVideoHistory && retainedPrimary
+                                ? {
+                                      content: retainedPrimary.content,
+                                      storageKey: retainedPrimary.storageKey,
+                                      naturalWidth: retainedPrimary.naturalWidth,
+                                      naturalHeight: retainedPrimary.naturalHeight,
+                                      bytes: retainedPrimary.bytes,
+                                      mimeType: retainedPrimary.mimeType,
+                                      primaryImageId: retainedPrimary.id,
+                                  }
+                                : { content: undefined, storageKey: undefined, primaryImageId: undefined }),
                         },
                     };
                     pendingChildIds = [videoId];
+                    if (appendVideoHistory) {
+                        setExpandedImageNodeIds((current) => {
+                            if (!current.has(nodeId)) return current;
+                            const next = new Set(current);
+                            next.delete(nodeId);
+                            return next;
+                        });
+                    }
                     setNodes((prev) =>
                         writeVideoToSelf
-                            ? prev.map((node) => (node.id === nodeId ? { ...node, ...videoNode, metadata: { ...node.metadata, ...videoNode.metadata } } : node))
+                            ? prev.map((node) =>
+                                  node.id === nodeId
+                                      ? {
+                                            ...node,
+                                            ...videoNode,
+                                            metadata: appendVideoHistory
+                                                ? {
+                                                      ...node.metadata,
+                                                      ...videoNode.metadata,
+                                                      content: retainedPrimary?.content || node.metadata?.content,
+                                                      storageKey: retainedPrimary?.storageKey || node.metadata?.storageKey,
+                                                      primaryImageId: retainedPrimary?.id || node.metadata?.primaryImageId,
+                                                      images: nextImages,
+                                                      errorDetails: undefined,
+                                                  }
+                                                : { ...node.metadata, ...videoNode.metadata, content: undefined, storageKey: undefined, primaryImageId: undefined, errorDetails: undefined },
+                                        }
+                                      : node,
+                              )
                             : [...prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } } : node)), videoNode],
                     );
                     if (!writeVideoToSelf) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: videoId }]);
@@ -3003,6 +3114,17 @@ function AtelierCanvasPage() {
                     try {
                         const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, effectivePrompt, referenceImages, { signal: controller.signal }));
                         const videoSize = fitNodeSize(video.width || spec.width, video.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                        const meta = videoMetadata(video);
+                        const version: CanvasNodeImage = {
+                            id: versionId,
+                            status: NODE_STATUS_SUCCESS,
+                            content: meta.content || "",
+                            storageKey: meta.storageKey || "",
+                            naturalWidth: meta.naturalWidth || 0,
+                            naturalHeight: meta.naturalHeight || 0,
+                            bytes: meta.bytes || 0,
+                            mimeType: meta.mimeType || "video/mp4",
+                        };
                         setNodes((prev) =>
                             prev.map((node) =>
                                 node.id === videoId
@@ -3013,7 +3135,7 @@ function AtelierCanvasPage() {
                                           position: { x: node.position.x + node.width / 2 - videoSize.width / 2, y: node.position.y + node.height / 2 - videoSize.height / 2 },
                                           metadata: {
                                               ...node.metadata,
-                                              ...videoMetadata(video),
+                                              ...meta,
                                               prompt: effectivePrompt,
                                               model: generationConfig.model,
                                               size: generationConfig.size,
@@ -3022,11 +3144,34 @@ function AtelierCanvasPage() {
                                               generateAudio: generationConfig.videoGenerateAudio,
                                               watermark: generationConfig.videoWatermark,
                                               references: generationReferenceUrls({ ...generationContext, referenceImages }),
+                                              images: (node.metadata?.images || []).map((image) => (image.id === versionId ? version : image)),
+                                              primaryImageId: versionId,
+                                              errorDetails: undefined,
                                           },
                                       }
                                     : node,
                             ),
                         );
+                    } catch (error) {
+                        if (!isGenerationCanceled(error)) {
+                            const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                            setNodes((prev) =>
+                                prev.map((node) =>
+                                    node.id === videoId
+                                        ? {
+                                              ...node,
+                                              metadata: {
+                                                  ...node.metadata,
+                                                  status: appendVideoHistory ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR,
+                                                  errorDetails: appendVideoHistory ? undefined : errorDetails,
+                                                  images: (node.metadata?.images || []).map((image) => (image.id === versionId ? { ...image, status: NODE_STATUS_ERROR, errorDetails } : image)),
+                                              },
+                                          }
+                                        : node,
+                                ),
+                            );
+                            message.error(errorDetails);
+                        }
                     } finally {
                         if (videoId !== nodeId) finishGenerationRequest(videoId, controller);
                     }
@@ -3241,28 +3386,51 @@ function AtelierCanvasPage() {
                 if (node.type === CanvasNodeType.Video) {
                     const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, prompt, retryImages, { signal: controller.signal }));
                     const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                    const meta = videoMetadata(video);
+                    const retryVideo: CanvasNodeImage = {
+                        id: imageId || node.metadata?.primaryImageId || nanoid(),
+                        status: NODE_STATUS_SUCCESS,
+                        content: meta.content || "",
+                        storageKey: meta.storageKey || "",
+                        naturalWidth: meta.naturalWidth || 0,
+                        naturalHeight: meta.naturalHeight || 0,
+                        bytes: meta.bytes || 0,
+                        mimeType: meta.mimeType || "video/mp4",
+                    };
                     setNodes((prev) =>
-                        prev.map((item) =>
-                            item.id === node.id
-                                ? {
-                                      ...item,
-                                      width: videoSize.width,
-                                      height: videoSize.height,
-                                      position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 },
-                                      metadata: {
-                                          ...item.metadata,
-                                          ...videoMetadata(video),
-                                          prompt,
-                                          model: generationConfig.model,
-                                          size: generationConfig.size,
-                                          seconds: generationConfig.videoSeconds,
-                                          vquality: generationConfig.vquality,
-                                          generateAudio: generationConfig.videoGenerateAudio,
-                                          watermark: generationConfig.videoWatermark,
-                                      },
-                                  }
-                                : item,
-                        ),
+                        prev.map((item) => {
+                            if (item.id !== node.id) return item;
+                            const makePrimary = !imageId || !item.metadata?.content || item.metadata?.primaryImageId === retryVideo.id;
+                            const images = item.metadata?.images?.some((current) => current.id === retryVideo.id)
+                                ? item.metadata.images.map((current) => (current.id === retryVideo.id ? retryVideo : current))
+                                : item.metadata?.images?.length
+                                  ? [...item.metadata.images, retryVideo]
+                                  : [retryVideo];
+                            return {
+                                ...item,
+                                ...(makePrimary
+                                    ? {
+                                          width: videoSize.width,
+                                          height: videoSize.height,
+                                          position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 },
+                                      }
+                                    : {}),
+                                metadata: {
+                                    ...item.metadata,
+                                    ...(makePrimary ? meta : { status: NODE_STATUS_SUCCESS }),
+                                    prompt,
+                                    model: generationConfig.model,
+                                    size: generationConfig.size,
+                                    seconds: generationConfig.videoSeconds,
+                                    vquality: generationConfig.vquality,
+                                    generateAudio: generationConfig.videoGenerateAudio,
+                                    watermark: generationConfig.videoWatermark,
+                                    images,
+                                    primaryImageId: makePrimary ? retryVideo.id : item.metadata?.primaryImageId,
+                                    errorDetails: undefined,
+                                },
+                            };
+                        }),
                     );
                     return;
                 }
@@ -3353,14 +3521,67 @@ function AtelierCanvasPage() {
         [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest, t],
     );
 
-    const deleteBatchImage = useCallback((nodeId: string, imageId: string) => {
+    const deleteBatchImage = useCallback((nodeId: string, imageId: string | string[]) => {
+        const removeIds = new Set(Array.isArray(imageId) ? imageId : [imageId]);
+        if (!removeIds.size) return;
         const node = nodesRef.current.find((item) => item.id === nodeId);
-        if ((node?.metadata?.images?.length || 0) <= 2) setExpandedImageNodeIds((current) => new Set([...current].filter((id) => id !== nodeId)));
+        const remaining = (node?.metadata?.images || []).filter((image) => !removeIds.has(image.id));
+        if (remaining.length <= 1) setExpandedImageNodeIds((current) => new Set([...current].filter((id) => id !== nodeId)));
         setNodes((prev) =>
             prev.map((item) => {
                 if (item.id !== nodeId) return item;
-                const images = item.metadata?.images?.filter((image) => image.id !== imageId) || [];
-                return { ...item, metadata: { ...item.metadata, images, count: images.length, primaryImageId: item.metadata?.primaryImageId === imageId ? images[0]?.id : item.metadata?.primaryImageId } };
+                const images = (item.metadata?.images || []).filter((image) => !removeIds.has(image.id));
+                if (!images.length) {
+                    return {
+                        ...item,
+                        metadata: {
+                            ...item.metadata,
+                            images: undefined,
+                            count: undefined,
+                            primaryImageId: undefined,
+                            content: undefined,
+                            storageKey: undefined,
+                            naturalWidth: undefined,
+                            naturalHeight: undefined,
+                            bytes: undefined,
+                            mimeType: undefined,
+                            status: NODE_STATUS_IDLE,
+                            errorDetails: undefined,
+                        },
+                    };
+                }
+                const currentPrimaryId = item.metadata?.primaryImageId || images[0]?.id;
+                const primaryRemoved = !images.some((image) => image.id === currentPrimaryId);
+                const nextPrimary = primaryRemoved ? images.find((image) => image.content) || images[0] : images.find((image) => image.id === currentPrimaryId) || images[0];
+                if (!primaryRemoved && nextPrimary.id === item.metadata?.primaryImageId) {
+                    return { ...item, metadata: { ...item.metadata, images, count: images.length, primaryImageId: nextPrimary.id } };
+                }
+                const edge = Math.max(item.width, item.height);
+                const size =
+                    item.metadata?.freeResize || !nextPrimary.naturalWidth || !nextPrimary.naturalHeight
+                        ? { width: item.width, height: item.height }
+                        : item.type === CanvasNodeType.Video
+                          ? fitNodeSize(nextPrimary.naturalWidth, nextPrimary.naturalHeight, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT)
+                          : fitNodeSize(nextPrimary.naturalWidth, nextPrimary.naturalHeight, edge, edge);
+                return {
+                    ...item,
+                    position: { x: item.position.x + item.width / 2 - size.width / 2, y: item.position.y + item.height / 2 - size.height / 2 },
+                    ...size,
+                    metadata: {
+                        ...item.metadata,
+                        images,
+                        count: images.length,
+                        primaryImageId: nextPrimary.id,
+                        content: nextPrimary.content || undefined,
+                        storageKey: nextPrimary.storageKey || undefined,
+                        naturalWidth: nextPrimary.naturalWidth || undefined,
+                        naturalHeight: nextPrimary.naturalHeight || undefined,
+                        bytes: nextPrimary.bytes || undefined,
+                        mimeType: nextPrimary.mimeType || undefined,
+                        status: nextPrimary.content ? NODE_STATUS_SUCCESS : nextPrimary.status === NODE_STATUS_ERROR ? NODE_STATUS_ERROR : item.metadata?.status,
+                        errorDetails: nextPrimary.errorDetails,
+                    },
+                };
             }),
         );
     }, []);
@@ -3816,21 +4037,34 @@ function AtelierCanvasPage() {
     );
 
     const renderNodeContentPanel = useCallback(
-        (contentNode: CanvasNodeData) => (
-            <CanvasConfigNodePanel
-                node={contentNode}
-                isRunning={runningNodeId === contentNode.id}
-                inputSummary={getInputSummary(configInputsById.get(contentNode.id) || [])}
-                onConfigChange={handleConfigNodeChange}
-                onComposerToggle={() => setDialogNodeId((current) => (current === contentNode.id ? null : contentNode.id))}
-                onStop={confirmStopGeneration}
-                onGenerate={(nodeId) => {
-                    const target = nodesRef.current.find((item) => item.id === nodeId);
-                    void handleGenerateNode(nodeId, target?.metadata?.generationMode || "image", target?.metadata?.composerContent ?? target?.metadata?.prompt ?? "");
-                }}
-            />
-        ),
-        [configInputsById, confirmStopGeneration, handleConfigNodeChange, handleGenerateNode, runningNodeId],
+        (contentNode: CanvasNodeData) => {
+            if (contentNode.type === CanvasNodeType.Merge) {
+                return (
+                    <CanvasMergeNodeContent
+                        node={contentNode}
+                        inputs={configInputsById.get(contentNode.id) || []}
+                        isRunning={runningNodeId === contentNode.id}
+                        onConfigChange={handleConfigNodeChange}
+                        onMerge={(nodeId) => void runMergeNode(nodeId)}
+                    />
+                );
+            }
+            return (
+                <CanvasConfigNodePanel
+                    node={contentNode}
+                    isRunning={runningNodeId === contentNode.id}
+                    inputSummary={getInputSummary(configInputsById.get(contentNode.id) || [])}
+                    onConfigChange={handleConfigNodeChange}
+                    onComposerToggle={() => setDialogNodeId((current) => (current === contentNode.id ? null : contentNode.id))}
+                    onStop={confirmStopGeneration}
+                    onGenerate={(nodeId) => {
+                        const target = nodesRef.current.find((item) => item.id === nodeId);
+                        void handleGenerateNode(nodeId, target?.metadata?.generationMode || "image", target?.metadata?.composerContent ?? target?.metadata?.prompt ?? "");
+                    }}
+                />
+            );
+        },
+        [configInputsById, confirmStopGeneration, handleConfigNodeChange, handleGenerateNode, runMergeNode, runningNodeId],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;
@@ -3980,7 +4214,8 @@ function AtelierCanvasPage() {
                         <NodeCreateMenu
                             position={nodeCreatePosition}
                             onCreate={(type) => {
-                                createNode(type, nodeCreatePosition);
+                                if (type === CanvasNodeType.Merge) createMergeNode(nodeCreatePosition);
+                                else createNode(type, nodeCreatePosition);
                                 setNodeCreatePosition(null);
                             }}
                             onClose={() => setNodeCreatePosition(null)}
@@ -4041,19 +4276,13 @@ function AtelierCanvasPage() {
                     onAddChat={() => createNode(CanvasNodeType.Chat)}
                     onAddAnnotate={() => createNode(CanvasNodeType.Annotate)}
                     onAddConfig={() => createNode(CanvasNodeType.Config)}
+                    onAddMerge={() => createMergeNode()}
                     onAddGroup={() => createNode(CanvasNodeType.Group)}
                     onAddDirector={() => createNode(CanvasNodeType.Director)}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                     onUpload={() => handleUploadRequest()}
                     onDelete={() => deleteNodes(new Set(selectedNodeIds))}
-                    onMergeGrid={() => {
-                        if (mergeCandidateCount < 2) {
-                            message.warning(t("canvas.projectPage.mergeNeedImages"));
-                            return;
-                        }
-                        setMergeDialogOpen(true);
-                    }}
                     onClear={() => setClearConfirmOpen(true)}
                     onCanvasToolChange={setCanvasTool}
                     onBackgroundModeChange={setBackgroundMode}
@@ -4142,13 +4371,6 @@ function AtelierCanvasPage() {
                 <CanvasTextClipboardMenu />
 
                 {splitNode?.metadata?.content ? <CanvasNodeSplitDialog dataUrl={splitNode.metadata.content} open={Boolean(splitNode)} onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode!, params)} /> : null}
-
-                <CanvasNodeMergeDialog
-                    open={mergeDialogOpen}
-                    candidates={mergeCandidates}
-                    onClose={() => setMergeDialogOpen(false)}
-                    onConfirm={(params) => void mergeSelectedGridImages(params)}
-                />
 
                 {upscaleNode?.metadata?.content ? (
                     <CanvasNodeUpscaleDialog dataUrl={upscaleNode.metadata.content} open={Boolean(upscaleNode)} onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode!, params)} />

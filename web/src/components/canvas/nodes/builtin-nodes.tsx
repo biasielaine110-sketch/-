@@ -1,4 +1,4 @@
-import { Clapperboard, FileText, Group, Highlighter, Image as ImageIcon, MessageSquareText, Music2, Settings2, Video } from "lucide-react";
+import { Clapperboard, FileText, Group, Grid2x2, Highlighter, Image as ImageIcon, MessageSquareText, Music2, Settings2, Video } from "lucide-react";
 
 import i18n from "@/i18n";
 
@@ -31,6 +31,7 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
     { type: CanvasNodeType.Video, title: i18n.t("assets.kinds.video"), icon: <Video className={iconClass} />, minimapColor: "#f97316", keepAspectRatio: () => true, resource: builtinResource },
     { type: CanvasNodeType.Audio, title: i18n.t("assets.kinds.audio"), icon: <Music2 className={iconClass} />, minimapColor: "#a855f7", resource: builtinResource },
     { type: CanvasNodeType.Config, title: i18n.t("canvas.configNode.title"), icon: <Settings2 className={iconClass} />, minimapColor: "#60a5fa", hasSourceHandle: false },
+    { type: CanvasNodeType.Merge, title: i18n.t("canvas.nodeTypes.merge"), icon: <Grid2x2 className={iconClass} />, minimapColor: "#0ea5e9", hasSourceHandle: false, hidePanel: true },
     { type: CanvasNodeType.Group, title: i18n.t("canvas.node.group"), icon: <Group className={iconClass} />, minimapColor: "#94a3b8" },
     { type: CanvasNodeType.Director, title: i18n.t("canvas.nodeTypes.director"), icon: <Clapperboard className={iconClass} />, hasSourceHandle: false, hasTargetHandle: false, minimapColor: "#14b8a6" },
     { type: CanvasNodeType.Chat, title: i18n.t("canvas.nodeTypes.chat"), icon: <MessageSquareText className={iconClass} />, minimapColor: "#38bdf8", resource: builtinResource, hidePanel: true },

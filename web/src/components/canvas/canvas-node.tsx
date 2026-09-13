@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Clapperboard, Copy, Group, Highlighter, Image as ImageIcon, MessageSquareText, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Clapperboard, Copy, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -46,7 +46,7 @@ type CanvasNodeProps = {
     onSetBatchPrimary?: (nodeId: string, imageId: string) => void;
     onDuplicateBatchImage?: (node: CanvasNodeData, imageId: string) => void;
     onRetryBatchImage?: (node: CanvasNodeData, imageId: string) => void;
-    onDeleteBatchImage?: (nodeId: string, imageId: string) => void;
+    onDeleteBatchImage?: (nodeId: string, imageId: string | string[]) => void;
     onRetry?: (node: CanvasNodeData) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onCreateChat?: (node: CanvasNodeData) => void;
@@ -86,7 +86,7 @@ type NodeContentRendererProps = {
     onSetBatchPrimary?: (imageId: string) => void;
     onDuplicateBatchImage?: (imageId: string) => void;
     onRetryBatchImage?: (imageId: string) => void;
-    onDeleteBatchImage?: (imageId: string) => void;
+    onDeleteBatchImage?: (imageId: string | string[]) => void;
     onViewBatchImage?: (imageId: string) => void;
     groupChildCount: number;
 };
@@ -146,7 +146,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content);
     const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
     const isGroup = data.type === CanvasNodeType.Group;
-    const batchCount = data.type === CanvasNodeType.Image ? data.metadata?.images?.length || 0 : 0;
+    const batchCount = data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Video ? data.metadata?.images?.length || 0 : 0;
     const isBatchRoot = batchCount > 1;
     // Nodes with the interaction/move toggle ignore content pointer events in move mode and allow interaction in interactive mode.
     // forceInteractive states such as editing stay interactive, as do empty nodes so their upload and generation actions remain usable.
@@ -469,8 +469,11 @@ export const CanvasNode = React.memo(function CanvasNode({
 
 function NodeContent(props: NodeContentRendererProps) {
     if (props.node.type === CanvasNodeType.Config && props.renderNodeContent) return props.renderNodeContent(props.node);
+    if (props.node.type === CanvasNodeType.Merge && props.renderNodeContent) return props.renderNodeContent(props.node);
     if (props.node.type === CanvasNodeType.Chat) return <ChatNodeContent {...props} />;
-    if (props.isBatchRoot) return <ImageNodeContent {...props} />;
+    if (props.isBatchRoot || ((props.node.type === CanvasNodeType.Image || props.node.type === CanvasNodeType.Video) && (props.node.metadata?.images?.length || 0) > 0)) {
+        return props.node.type === CanvasNodeType.Video ? <VideoBatchContent {...props} /> : <ImageNodeContent {...props} />;
+    }
     if (props.node.metadata?.status === "loading") return <LoadingContent theme={props.theme} />;
     if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
 
@@ -490,7 +493,18 @@ const nodeContentRenderers = {
     [CanvasNodeType.Group]: GroupNodeContent,
     [CanvasNodeType.Director]: DirectorNodeContent,
     [CanvasNodeType.Chat]: ChatNodeContent,
+    [CanvasNodeType.Merge]: EmptyMergeContent,
 } satisfies Record<CanvasNodeType, (props: NodeContentRendererProps) => ReactNode>;
+
+function EmptyMergeContent({ theme }: NodeContentRendererProps) {
+    const { t } = useTranslation();
+    return (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 text-center" style={{ color: theme.node.placeholder }}>
+            <Grid2x2 className="size-7 opacity-35" />
+            <span className="text-sm">{t("canvas.mergeNode.empty")}</span>
+        </div>
+    );
+}
 
 function AnnotateNodeContent({ node, theme }: NodeContentRendererProps) {
     const { t } = useTranslation();
@@ -728,8 +742,23 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
     );
 }
 
+function VideoBatchContent(props: NodeContentRendererProps) {
+    return (
+        <ImageContent
+            node={props.node}
+            batchExpanded={props.batchExpanded}
+            onToggleBatch={props.onToggleBatch}
+            onSetBatchPrimary={props.onSetBatchPrimary}
+            onDuplicateBatchImage={props.onDuplicateBatchImage}
+            onRetryBatchImage={props.onRetryBatchImage}
+            onDeleteBatchImage={props.onDeleteBatchImage}
+            onViewBatchImage={props.onViewBatchImage}
+        />
+    );
+}
+
 function ImageNodeContent(props: NodeContentRendererProps) {
-    if (!props.node.metadata?.content && !props.isBatchRoot) return <EmptyImageContent {...props} />;
+    if (!props.node.metadata?.content && !props.isBatchRoot && !(props.node.metadata?.images?.length || 0)) return <EmptyImageContent {...props} />;
 
     return (
         <ImageContent
@@ -805,17 +834,38 @@ function ImageContent({
     onSetBatchPrimary?: (imageId: string) => void;
     onDuplicateBatchImage?: (imageId: string) => void;
     onRetryBatchImage?: (imageId: string) => void;
-    onDeleteBatchImage?: (imageId: string) => void;
+    onDeleteBatchImage?: (imageId: string | string[]) => void;
     onViewBatchImage?: (imageId: string) => void;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
+    const isVideo = node.type === CanvasNodeType.Video;
     const images = node.metadata?.images || [];
     const batchCount = images.length;
     const isBatchRoot = batchCount > 1;
     const primaryImageId = node.metadata?.primaryImageId || images[0]?.id;
     const primaryImage = images.find((image) => image.id === primaryImageId);
     const primaryContent = primaryImage?.content || node.metadata?.content;
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+    useEffect(() => {
+        if (!batchExpanded) setSelectedIds(new Set());
+    }, [batchExpanded]);
+
+    const toggleSelected = (imageId: string) => {
+        setSelectedIds((current) => {
+            const next = new Set(current);
+            if (next.has(imageId)) next.delete(imageId);
+            else next.add(imageId);
+            return next;
+        });
+    };
+
+    const deleteSelected = () => {
+        if (!selectedIds.size) return;
+        onDeleteBatchImage?.([...selectedIds]);
+        setSelectedIds(new Set());
+    };
 
     return (
         <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded}>
@@ -828,6 +878,9 @@ function ImageContent({
                               node={node}
                               image={image}
                               index={index}
+                              isVideo={isVideo}
+                              selected={selectedIds.has(image.id)}
+                              onToggleSelect={() => toggleSelected(image.id)}
                               onView={() => onViewBatchImage?.(image.id)}
                               onSetPrimary={() => onSetBatchPrimary?.(image.id)}
                               onDuplicate={() => onDuplicateBatchImage?.(image.id)}
@@ -838,49 +891,76 @@ function ImageContent({
                 : null}
             <div className="relative h-full w-full overflow-hidden rounded-3xl">
                 {primaryContent ? (
-                    <>
-                        <img
-                            src={primaryContent}
-                            alt={node.title}
-                            draggable={false}
-                            onDragStart={(event) => event.preventDefault()}
-                            className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
-                        />
-                        {(node.metadata?.annotations?.length || 0) > 0 ? (
-                            <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
-                                {node.metadata!.annotations!.map((item) => {
-                                    const sw = Math.max(1, item.strokeWidth);
-                                    const strokeProps = { stroke: item.stroke, strokeWidth: sw, fill: "none" as const, vectorEffect: "non-scaling-stroke" as const };
-                                    if (item.kind === "rect") return <rect key={item.id} x={item.x} y={item.y} width={item.w} height={item.h} {...strokeProps} />;
-                                    if (item.kind === "ellipse") return <ellipse key={item.id} cx={item.x + item.w / 2} cy={item.y + item.h / 2} rx={item.w / 2} ry={item.h / 2} {...strokeProps} />;
-                                    if (item.kind === "arrow") {
-                                        const angle = Math.atan2(item.y2 - item.y1, item.x2 - item.x1);
-                                        const head = Math.max(0.005, Math.min(0.012, item.strokeWidth * 0.0025));
-                                        const lx = item.x2 - head * Math.cos(angle - Math.PI / 6);
-                                        const ly = item.y2 - head * Math.sin(angle - Math.PI / 6);
-                                        const rx = item.x2 - head * Math.cos(angle + Math.PI / 6);
-                                        const ry = item.y2 - head * Math.sin(angle + Math.PI / 6);
+                    isVideo ? (
+                        <video src={primaryContent} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-no-zoom />
+                    ) : (
+                        <>
+                            <img
+                                src={primaryContent}
+                                alt={node.title}
+                                draggable={false}
+                                onDragStart={(event) => event.preventDefault()}
+                                className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
+                            />
+                            {(node.metadata?.annotations?.length || 0) > 0 ? (
+                                <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
+                                    {node.metadata!.annotations!.map((item) => {
+                                        const sw = Math.max(1, item.strokeWidth);
+                                        const strokeProps = { stroke: item.stroke, strokeWidth: sw, fill: "none" as const, vectorEffect: "non-scaling-stroke" as const };
+                                        if (item.kind === "rect") return <rect key={item.id} x={item.x} y={item.y} width={item.w} height={item.h} {...strokeProps} />;
+                                        if (item.kind === "ellipse") return <ellipse key={item.id} cx={item.x + item.w / 2} cy={item.y + item.h / 2} rx={item.w / 2} ry={item.h / 2} {...strokeProps} />;
+                                        if (item.kind === "arrow") {
+                                            const angle = Math.atan2(item.y2 - item.y1, item.x2 - item.x1);
+                                            const head = Math.max(0.005, Math.min(0.012, item.strokeWidth * 0.0025));
+                                            const lx = item.x2 - head * Math.cos(angle - Math.PI / 6);
+                                            const ly = item.y2 - head * Math.sin(angle - Math.PI / 6);
+                                            const rx = item.x2 - head * Math.cos(angle + Math.PI / 6);
+                                            const ry = item.y2 - head * Math.sin(angle + Math.PI / 6);
+                                            return (
+                                                <g key={item.id}>
+                                                    <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} {...strokeProps} />
+                                                    <polyline points={`${lx},${ly} ${item.x2},${item.y2} ${rx},${ry}`} {...strokeProps} />
+                                                </g>
+                                            );
+                                        }
                                         return (
-                                            <g key={item.id}>
-                                                <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2} {...strokeProps} />
-                                                <polyline points={`${lx},${ly} ${item.x2},${item.y2} ${rx},${ry}`} {...strokeProps} />
-                                            </g>
+                                            <text key={item.id} x={item.x} y={item.y} fill={item.color} fontSize={item.fontSize / 700} fontWeight={600}>
+                                                {item.text}
+                                            </text>
                                         );
-                                    }
-                                    return (
-                                        <text key={item.id} x={item.x} y={item.y} fill={item.color} fontSize={item.fontSize / 700} fontWeight={600}>
-                                            {item.text}
-                                        </text>
-                                    );
-                                })}
-                            </svg>
-                        ) : null}
-                    </>
+                                    })}
+                                </svg>
+                            ) : null}
+                        </>
+                    )
                 ) : (
                     <ImageSlotStatus image={primaryImage} />
                 )}
             </div>
             {primaryImage?.status === "error" ? <BatchImageFailureActions placement="left" onRetry={() => onRetryBatchImage?.(primaryImage.id)} onDelete={() => onDeleteBatchImage?.(primaryImage.id)} /> : null}
+            {isBatchRoot && primaryImage?.content && primaryImage.status !== "error" ? (
+                <button
+                    type="button"
+                    className="absolute bottom-2.5 left-2.5 z-30 grid size-8 place-items-center rounded-full border shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                    title={t("common.delete")}
+                    aria-label={t("common.delete")}
+                    onClick={(event) => (event.stopPropagation(), onDeleteBatchImage?.(primaryImage.id))}
+                >
+                    <Trash2 className="size-3.5" />
+                </button>
+            ) : null}
+            {batchExpanded && selectedIds.size > 0 ? (
+                <button
+                    type="button"
+                    className="absolute bottom-2.5 left-1/2 z-40 flex h-9 -translate-x-1/2 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
+                    onClick={(event) => (event.stopPropagation(), deleteSelected())}
+                >
+                    <Trash2 className="size-3.5" />
+                    {t("canvas.node.deleteSelected", { count: selectedIds.size })}
+                </button>
+            ) : null}
             {isBatchRoot ? (
                 <button
                     type="button"
@@ -894,7 +974,7 @@ function ImageContent({
                     onMouseDown={(event) => event.stopPropagation()}
                     onPointerDown={(event) => event.stopPropagation()}
                 >
-                    <span className="leading-none">{t("canvas.controls.images", { count: batchCount })}</span>
+                    <span className="leading-none">{t(isVideo ? "canvas.controls.videos" : "canvas.controls.images", { count: batchCount })}</span>
                     <ChevronRight className={`size-3.5 opacity-80 transition-transform ${batchExpanded ? "rotate-90" : ""}`} />
                 </button>
             ) : null}
@@ -906,6 +986,9 @@ function ExpandedImageCard({
     node,
     image,
     index,
+    isVideo,
+    selected,
+    onToggleSelect,
     onView,
     onSetPrimary,
     onDuplicate,
@@ -915,6 +998,9 @@ function ExpandedImageCard({
     node: CanvasNodeData;
     image: CanvasNodeImage;
     index: number;
+    isVideo: boolean;
+    selected: boolean;
+    onToggleSelect: () => void;
     onView: () => void;
     onSetPrimary: () => void;
     onDuplicate: () => void;
@@ -943,7 +1029,8 @@ function ExpandedImageCard({
                     width: node.width,
                     height: node.height,
                     background: theme.node.panel,
-                    borderColor: theme.node.stroke,
+                    borderColor: selected ? selectionBlue : theme.node.stroke,
+                    boxShadow: selected ? `0 0 0 2px ${selectionBlue}` : undefined,
                     "--batch-from-x": `${-x}px`,
                     "--batch-from-y": `${-y}px`,
                     "--batch-from-rotate": `${4 + index * 2}deg`,
@@ -958,9 +1045,27 @@ function ExpandedImageCard({
                 onView();
             }}
         >
-            {image.content ? <img src={image.content} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
+            {image.content ? (
+                isVideo ? (
+                    <video src={image.content} className="pointer-events-none h-full w-full select-none object-contain" muted playsInline />
+                ) : (
+                    <img src={image.content} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" />
+                )
+            ) : (
+                <ImageSlotStatus image={image} />
+            )}
             {image.content ? (
                 <div className="absolute inset-x-2 top-2 flex items-center gap-1">
+                    <button
+                        type="button"
+                        className="grid size-8 shrink-0 place-items-center rounded-lg border shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                        style={{ background: selected ? selectionBlue : theme.toolbar.panel, borderColor: selected ? selectionBlue : theme.toolbar.border, color: selected ? "#fff" : theme.toolbar.activeText }}
+                        title={t("canvas.node.selectVersion")}
+                        aria-label={t("canvas.node.selectVersion")}
+                        onClick={(event) => (event.stopPropagation(), onToggleSelect())}
+                    >
+                        <span className="text-sm font-bold leading-none">{selected ? "✓" : ""}</span>
+                    </button>
                     <button
                         type="button"
                         className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
@@ -975,11 +1080,21 @@ function ExpandedImageCard({
                         type="button"
                         className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
                         style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
-                        title={t("canvas.node.setPrimary")}
+                        title={t(isVideo ? "canvas.node.setPrimaryVideo" : "canvas.node.setPrimary")}
                         onClick={(event) => (event.stopPropagation(), onSetPrimary())}
                     >
                         <Star className="size-3 shrink-0" style={{ color: selectionBlue }} />
-                        <span className="truncate">{t("canvas.node.setPrimary")}</span>
+                        <span className="truncate">{t(isVideo ? "canvas.node.setPrimaryVideo" : "canvas.node.setPrimary")}</span>
+                    </button>
+                    <button
+                        type="button"
+                        className="grid size-8 shrink-0 place-items-center rounded-lg border shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                        style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                        title={t("common.delete")}
+                        aria-label={t("common.delete")}
+                        onClick={(event) => (event.stopPropagation(), onDelete())}
+                    >
+                        <Trash2 className="size-3.5" />
                     </button>
                 </div>
             ) : null}
