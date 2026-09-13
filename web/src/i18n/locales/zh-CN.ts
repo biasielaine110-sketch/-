@@ -205,12 +205,13 @@ export default {
         geminiMaskUnsupported: "Gemini 调用格式暂不支持蒙版编辑",
         maskModelUnsupported: "蒙版编辑暂不支持该模型，请使用其他渠道",
         imagenOnlyModel:
-            "当前中转的 OpenAI 生图接口仅支持 Imagen 模型。请将图片模型改为 imagen-*，或确认该中转是否支持当前 Gemini 图片模型。当前模型：{{model}}",
+            "当前中转的 OpenAI 生图接口仅支持 Imagen。已尝试改用 Gemini generateContent；若仍失败，请在渠道里将调用格式设为 Gemini，或改用 imagen-* / 支持 Gemini 图片的中转。当前模型：{{model}}",
         geminiImageUseOpenAi:
             "该 Gemini 图片模型需走 OpenAI 生图接口 /v1/images/generations（不要用 generateContent）。请将渠道调用格式设为 OpenAI。当前模型：{{model}}",
         unsupportedAspectRatio:
             "当前尺寸比例不被模型支持，已尽量映射到标准比例；请改用 1:1、16:9、3:2、9:16 等常见比例后重试。当前模型：{{model}}",
         providerImageUploadFailed: "参考图上传到接口失败，无法进行图生图。请检查渠道是否支持 /v1/uploads/images，或稍后重试",
+        providerImageUploadUnsupported: "当前渠道不支持 /v1/uploads/images（如 New API）。已尝试改用标准改图接口；若仍失败，请换支持参考图上传的渠道，或使用无参考图的文生图。",
         noContent: "没有返回内容",
         modelReadFailed: "读取模型失败",
         videoTimeout: "{{provider}}视频生成超时，请稍后重试",

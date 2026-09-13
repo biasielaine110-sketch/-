@@ -128,25 +128,57 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
 }
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
-    const body = new FormData();
     const ratio = normalizeVideoRatio(config.size);
     const seedance = isSeedanceVideoModel(model);
     const seconds = seedance ? normalizeSeedanceSeconds(config.videoSeconds) : normalizeVideoSeconds(config.videoSeconds);
-    body.append("model", modelOptionName(model));
+    const resolution = normalizeVideoResolution(config.vquality);
+    const modelName = modelOptionName(model);
+    const generateAudio = boolConfig(config.videoGenerateAudio, true);
+    const watermark = boolConfig(config.videoWatermark, false);
+
+    // Most CN video relays (Seedance / Doubao / New API) expect JSON for text-to-video.
+    // Multipart FormData with pixel `size` is a common source of HTTP 400.
+    if (!references.length) {
+        const payload: Record<string, unknown> = {
+            model: modelName,
+            prompt,
+            seconds: Number(seconds),
+            duration: Number(seconds),
+            ratio,
+            aspect_ratio: ratio,
+            size: seedance ? ratio : normalizeVideoSize(config.size) || ratio,
+            resolution,
+            resolution_name: resolution,
+            generate_audio: generateAudio,
+            watermark,
+        };
+        try {
+            const created = unwrapVideoResponse(
+                (await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data,
+            );
+            if (!created.id) throw new Error(apiText("noVideoTaskId"));
+            return { id: created.id, provider: "openai", model };
+        } catch (error) {
+            throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+        }
+    }
+
+    const body = new FormData();
+    body.append("model", modelName);
     body.append("prompt", prompt);
     body.append("seconds", seconds);
     body.append("duration", seconds);
     body.append("ratio", ratio);
     body.append("aspect_ratio", ratio);
-    body.append("resolution", normalizeVideoResolution(config.vquality));
-    body.append("resolution_name", normalizeVideoResolution(config.vquality));
+    body.append("resolution", resolution);
+    body.append("resolution_name", resolution);
+    body.append("generate_audio", String(generateAudio));
+    body.append("watermark", String(watermark));
     body.append("preset", "normal");
-    // Seedance rejects WxH values (e.g. 1280x720 / 2048x1152) when relays map `size` → `ratio`.
-    if (!seedance) {
+    if (seedance) body.append("size", ratio);
+    else {
         const size = normalizeVideoSize(config.size);
         if (size) body.append("size", size);
-    } else {
-        body.append("size", ratio);
     }
     const files = await Promise.all(references.slice(0, 7).map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
     files.forEach((file) => body.append("input_reference[]", file));

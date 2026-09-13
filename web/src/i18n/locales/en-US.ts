@@ -205,12 +205,13 @@ export default {
         geminiMaskUnsupported: "The Gemini API format does not support mask editing",
         maskModelUnsupported: "This model does not support mask editing. Use another provider.",
         imagenOnlyModel:
-            "This provider's OpenAI image endpoint only supports Imagen models. Switch to imagen-*, or confirm the relay supports your Gemini image model. Current model: {{model}}",
+            "This provider's OpenAI image endpoint only supports Imagen. Retried via Gemini generateContent; if it still fails, set the channel API format to Gemini, or switch to imagen-* / a Gemini-capable image relay. Current model: {{model}}",
         geminiImageUseOpenAi:
             "This Gemini image model requires the OpenAI image endpoint /v1/images/generations (not generateContent). Set the channel API format to OpenAI. Current model: {{model}}",
         unsupportedAspectRatio:
             "This aspect ratio is not supported by the model. Use a common ratio such as 1:1, 16:9, 3:2, or 9:16 and try again. Current model: {{model}}",
         providerImageUploadFailed: "Failed to upload the reference image to the provider. Check that the channel supports /v1/uploads/images, then try again.",
+        providerImageUploadUnsupported: "This channel does not support /v1/uploads/images (e.g. New API). Fell back to the standard image-edit endpoint; if it still fails, use a relay with image upload support or text-to-image without references.",
         noContent: "No content returned",
         modelReadFailed: "Failed to load models",
         videoTimeout: "{{provider}}video generation timed out. Try again later.",

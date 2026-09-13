@@ -234,11 +234,25 @@ for (const dataUrl of images) {
   const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
   if (match) parts.push({ inline_data: { mime_type: match[1], data: match[2] } });
 }
+const imageConfig = {};
+if (params.size && params.size !== "auto") {
+  const ratio = String(params.size).includes("x") ? String(params.size).replace(/[xX]/, ":") : String(params.size);
+  imageConfig.aspectRatio = ratio;
+}
+if (params.quality === "high") imageConfig.imageSize = "4K";
+else if (params.quality === "medium" || params.quality === "hd") imageConfig.imageSize = "2K";
+else if (params.quality) imageConfig.imageSize = "1K";
 const data = await request({
   method: "post",
   url: \`\${baseUrl}/v1beta/models/\${model}:generateContent\`,
-  headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-  data: { contents: [{ role: "user", parts }], generationConfig: { responseModalities: ["IMAGE"] } },
+  headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey, Authorization: \`Bearer \${apiKey}\` },
+  data: {
+    contents: [{ role: "user", parts }],
+    generationConfig: {
+      responseModalities: ["TEXT", "IMAGE"],
+      ...(Object.keys(imageConfig).length ? { imageConfig } : {}),
+    },
+  },
 });
 return (data.candidates || [])
   .flatMap((c) => c.content?.parts || [])

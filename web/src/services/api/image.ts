@@ -152,22 +152,23 @@ function isImagenModel(model: string) {
 }
 
 /**
- * Some relays expose Gemini / Imagen image models only on OpenAI
- * `/v1/images/generations` (not `generateContent`).
- * e.g. gemini-3.1-flash-image-preview, imagen-3.0-generate-002
+ * Some relays expose Gemini / Imagen image models on OpenAI `/v1/images/generations`
+ * (e.g. ToAPIs). Others (New API) only accept Imagen there and serve Gemini via generateContent.
  */
-function prefersOpenAiImagesEndpoint(model: string) {
+function isGeminiNativeImageModel(model: string) {
     const value = model.trim().toLowerCase();
-    if (isImagenModel(value)) return true;
     if (!value.includes("gemini")) return false;
     return /flash-image|image-preview|image-generation|nano-banana/.test(value);
 }
 
+function prefersOpenAiImagesEndpoint(model: string) {
+    if (isImagenModel(model)) return true;
+    return isGeminiNativeImageModel(model);
+}
+
 /** Gemini flash-image relays expect reference images as public URLs on /images/generations. */
 function usesImageUrlReferences(model: string) {
-    const value = model.trim().toLowerCase();
-    if (!value.includes("gemini")) return false;
-    return /flash-image|image-preview|image-generation|nano-banana/.test(value);
+    return isGeminiNativeImageModel(model);
 }
 
 function isPublicHttpUrl(value: string) {
@@ -176,14 +177,21 @@ function isPublicHttpUrl(value: string) {
 
 function resolveImageRequestConfig(config: AiConfig) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
-    if (prefersOpenAiImagesEndpoint(requestConfig.model)) {
+    // Imagen is always called through the OpenAI-compatible images endpoint on CN relays.
+    if (isImagenModel(requestConfig.model)) {
         return { ...requestConfig, apiFormat: "openai" as const };
     }
+    // Do not force Gemini flash-image onto OpenAI format: Gemini-format channels must use
+    // generateContent. OpenAI-format channels still try /images/generations first.
     return requestConfig;
 }
 
+function isImagenOnlyEndpointError(message: string) {
+    return /only imagen models are supported|仅支持\s*Imagen|only supports Imagen/i.test(message);
+}
+
 function normalizeImageApiErrorMessage(message: string, model?: string) {
-    if (/only imagen models are supported/i.test(message)) {
+    if (isImagenOnlyEndpointError(message)) {
         return apiText("imagenOnlyModel", { model: model || "?" });
     }
     if (/generateContent/i.test(message) && /\/v1\/images\/generations/i.test(message)) {
@@ -288,8 +296,20 @@ async function uploadProviderReferenceImage(config: AiConfig, image: ReferenceIm
         throw new Error(apiText("providerImageUploadFailed"));
     } catch (error) {
         if (error instanceof Error && !axios.isAxiosError(error)) throw error;
-        throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("providerImageUploadFailed")), config.model));
+        if (axios.isAxiosError(error) && (error.response?.status === 404 || error.response?.status === 405)) {
+            throw new Error(apiText("providerImageUploadUnsupported"));
+        }
+        const message = normalizeImageApiErrorMessage(readAxiosError(error, apiText("providerImageUploadFailed")), config.model);
+        if (/404|not\s*found|invalid url|uploads\/images/i.test(message)) {
+            throw new Error(apiText("providerImageUploadUnsupported"));
+        }
+        throw new Error(message);
     }
+}
+
+function isProviderUploadUnsupported(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return /providerImageUploadUnsupported|uploads\/images|参考图上传.*不支持|does not support image upload/i.test(message);
 }
 
 async function resolveReferenceImageUrls(config: AiConfig, references: ReferenceImage[], options?: RequestOptions) {
@@ -330,7 +350,10 @@ async function requestGeminiRelayImageToImage(config: AiConfig, prompt: string, 
         );
         return await resolveImageApiResponse(config, response.data, options);
     } catch (error) {
-        throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), config.model));
+        const message = readAxiosError(error, apiText("requestFailed"));
+        // Keep the raw Imagen-only signal so callers can fall back to generateContent.
+        if (isImagenOnlyEndpointError(message)) throw new Error(message);
+        throw new Error(normalizeImageApiErrorMessage(message, config.model));
     }
 }
 
@@ -493,17 +516,23 @@ function readSizeAspectRatio(size: string) {
 }
 
 function resolveGeminiImageConfig(config: AiConfig) {
-    const value = config.size.trim();
+    const value = (config.size || "").trim();
     const dimensions = parseImageDimensions(value);
-    const ratio = dimensions ? `${dimensions.width}:${dimensions.height}` : value;
-    const aspectRatio = value && value.toLowerCase() !== "auto" ? closestGeminiAspectRatio(ratio) : undefined;
+    const ratioText = dimensions ? `${dimensions.width}:${dimensions.height}` : value;
+    const aspectRatio = value && value.toLowerCase() !== "auto" ? closestGeminiAspectRatio(ratioText) : undefined;
     const imageSize = supportsGeminiImageSize(config.model) ? resolveGeminiImageSize(config.quality, dimensions) : undefined;
-    const image = { ...(aspectRatio ? { aspectRatio } : {}), ...(imageSize ? { imageSize } : {}) };
-    return Object.keys(image).length ? { responseFormat: { image } } : {};
+    const imageConfig = {
+        ...(aspectRatio ? { aspectRatio } : {}),
+        ...(imageSize ? { imageSize } : {}),
+    };
+    // Official Gemini image API expects generationConfig.imageConfig.{aspectRatio,imageSize}.
+    // Older mistaken shape responseFormat.image was ignored → always defaulted to 1:1.
+    return Object.keys(imageConfig).length ? { imageConfig } : {};
 }
 
 function closestGeminiAspectRatio(value: string) {
-    const ratio = parseRatioValue(value.includes("x") || value.includes("X") ? value.replace(/x/i, ":") : value);
+    const normalized = value.includes("x") || value.includes("X") ? value.replace(/[xX×]/g, ":") : value;
+    const ratio = parseRatioValue(normalized);
     const target = ratio.width / ratio.height;
     return GEMINI_SUPPORTED_RATIOS.reduce((best, item) => {
         const current = parseRatioValue(item);
@@ -759,7 +788,9 @@ function geminiApiUrl(config: Pick<AiConfig, "baseUrl" | "model">, action?: "gen
 
 function geminiHeaders(config: Pick<AiConfig, "apiKey">) {
     return {
+        // Google native uses x-goog-api-key; New API / most CN relays expect Bearer.
         "x-goog-api-key": config.apiKey,
+        Authorization: `Bearer ${config.apiKey}`,
         "Content-Type": "application/json",
     };
 }
@@ -1098,7 +1129,7 @@ async function requestGeminiImagesOnce(config: AiConfig, prompt: string, referen
 
 function parseGeminiImagePayload(payload: GeminiPayload) {
     validateGeminiPayload(payload);
-    const images =
+    const dataUrls =
         payload.candidates
             ?.flatMap((candidate) => candidate.content?.parts || [])
             .map((part) => {
@@ -1106,8 +1137,10 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
                 if (inlineData?.data) return `data:${inlineData.mimeType || "image/png"};base64,${inlineData.data}`;
                 return part.fileData?.fileUri || null;
             })
-            .filter((value): value is string => Boolean(value))
-            .map((dataUrl) => ({ id: nanoid(), dataUrl })) || [];
+            .filter((value): value is string => Boolean(value)) || [];
+    // Higher resolutions may return a 1K preview first, then the final image — prefer the last.
+    const selected = dataUrls.length ? [dataUrls[dataUrls.length - 1]] : [];
+    const images = selected.map((dataUrl) => ({ id: nanoid(), dataUrl }));
     if (!images.length) throw new Error(apiText("geminiNoImage"));
     return images;
 }
@@ -1159,7 +1192,16 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         const images = await resolveImageApiResponse(requestConfig, response.data, options);
         return images;
     } catch (error) {
-        throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        const message = readAxiosError(error, apiText("requestFailed"));
+        // New API OpenAI image route often only accepts Imagen — retry Gemini models via generateContent.
+        if (isGeminiNativeImageModel(requestConfig.model) && isImagenOnlyEndpointError(message)) {
+            try {
+                return await requestGeminiImages({ ...requestConfig, apiFormat: "gemini" }, prompt, [], n, options);
+            } catch (fallbackError) {
+                throw new Error(normalizeImageApiErrorMessage(readAxiosError(fallbackError, message), requestConfig.model));
+            }
+        }
+        throw new Error(normalizeImageApiErrorMessage(message, requestConfig.model));
     }
 }
 
@@ -1198,8 +1240,24 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
 
     // ToAPIs / similar relays: Gemini flash-image refs must be public URLs on /images/generations.
+    // New API (hfsyapi etc.) often lacks /v1/uploads/images — fall back to multipart /images/edits,
+    // then to native Gemini generateContent when the OpenAI image route only accepts Imagen.
     if (usesImageUrlReferences(requestConfig.model) && references.length && !mask) {
-        return requestGeminiRelayImageToImage(requestConfig, requestPrompt, references, n, options);
+        try {
+            return await requestGeminiRelayImageToImage(requestConfig, requestPrompt, references, n, options);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : apiText("requestFailed");
+            if (isImagenOnlyEndpointError(message)) {
+                try {
+                    return await requestGeminiImages({ ...requestConfig, apiFormat: "gemini" }, requestPrompt, references, n, options);
+                } catch (fallbackError) {
+                    throw new Error(normalizeImageApiErrorMessage(readAxiosError(fallbackError, message), requestConfig.model));
+                }
+            }
+            if (!isProviderUploadUnsupported(error)) {
+                throw new Error(normalizeImageApiErrorMessage(message, requestConfig.model));
+            }
+        }
     }
 
     const imageParams = resolveOpenAiImageParams(requestConfig, n);
@@ -1225,7 +1283,15 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         const images = await resolveImageApiResponse(requestConfig, response.data, options);
         return images;
     } catch (error) {
-        throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        const message = readAxiosError(error, apiText("requestFailed"));
+        if (isGeminiNativeImageModel(requestConfig.model) && isImagenOnlyEndpointError(message) && !mask) {
+            try {
+                return await requestGeminiImages({ ...requestConfig, apiFormat: "gemini" }, requestPrompt, references, n, options);
+            } catch (fallbackError) {
+                throw new Error(normalizeImageApiErrorMessage(readAxiosError(fallbackError, message), requestConfig.model));
+            }
+        }
+        throw new Error(normalizeImageApiErrorMessage(message, requestConfig.model));
     }
 }
 
