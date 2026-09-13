@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { Button, Input, Modal } from "antd";
 import { useTranslation } from "react-i18next";
 
+import { CanvasTextPromptPicker } from "./canvas-text-prompt-picker";
+
 type CanvasTextEditDialogProps = {
     open: boolean;
     value: string;
@@ -55,6 +57,10 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, onClose,
                     </Button>,
                 ]}
             >
+                <div className="mb-3 flex items-center justify-between gap-2">
+                    <span className="text-xs text-stone-500">{t("canvas.textPromptLibrary.hint")}</span>
+                    <CanvasTextPromptPicker size="small" className="inline-flex h-7 items-center gap-1 rounded-full border border-stone-200 px-2.5 text-xs font-medium dark:border-stone-700" onSelect={(prompt) => setDraft(prompt.content)} />
+                </div>
                 <Input.TextArea
                     value={draft}
                     rows={14}

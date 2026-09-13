@@ -8,6 +8,7 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasChatContent } from "./canvas-chat-content";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
+import { CanvasTextPromptPicker } from "./canvas-text-prompt-picker";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type Position } from "@/types/canvas";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useTranslation } from "react-i18next";
@@ -646,14 +647,19 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
     const { t } = useTranslation();
     const fontSize = node.metadata?.fontSize || 14;
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
+    const actionButtonStyle = { background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text };
 
     return (
         <div className="flex h-full w-full flex-col overflow-hidden pt-8">
             <div className="absolute right-3 top-3 z-20 flex items-center gap-1.5">
+                <CanvasTextPromptPicker
+                    buttonStyle={actionButtonStyle}
+                    onSelect={(prompt) => onContentChange(node.id, prompt.content)}
+                />
                 <button
                     type="button"
                     className="inline-flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
-                    style={{ background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text }}
+                    style={actionButtonStyle}
                     onClick={(event) => {
                         event.stopPropagation();
                         onCreateChat?.(node);
@@ -669,7 +675,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                 <button
                     type="button"
                     className="inline-flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
-                    style={{ background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text }}
+                    style={actionButtonStyle}
                     onClick={(event) => {
                         event.stopPropagation();
                         onGenerateImage?.(node);

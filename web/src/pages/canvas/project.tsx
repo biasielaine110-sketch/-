@@ -368,7 +368,11 @@ function AtelierCanvasPage() {
 
         const restore = async () => {
             const restoredNodes = (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes))).map((node) =>
-                node.type === CanvasNodeType.Chat && node.height === 520 ? { ...node, height: 1040 } : node,
+                node.type === CanvasNodeType.Chat && node.height === 520
+                    ? { ...node, height: 1040 }
+                    : node.type === CanvasNodeType.Text && node.height === 240
+                      ? { ...node, height: 480 }
+                      : node,
             );
             const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
             setNodes(restoredNodes);

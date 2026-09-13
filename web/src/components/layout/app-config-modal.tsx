@@ -2,12 +2,14 @@ import { App, Button, Form, Input, Modal, Segmented, Select, Tabs } from "antd";
 import { Download, FileUp, GripVertical, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
+import { nanoid } from "nanoid";
 
 import { ModelPicker } from "@/components/model-picker";
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { exportAppBackup, importAppBackup } from "@/services/backup-restore";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
+import { defaultTextPrompts } from "@/constant/text-prompt-library";
 import {
     channelProtocolSummary,
     createModelChannel,
@@ -22,6 +24,7 @@ import {
     type ConfigTabKey,
     type ModelCapability,
     type ModelChannel,
+    type TextPromptEntry,
 } from "@/stores/use-config-store";
 
 type ModelGroup = {
@@ -261,9 +264,10 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 <Form.Item label={t("config.preferences.audioInstructions")} className="mb-4">
                                     <Input.TextArea rows={2} value={config.audioInstructions} placeholder={t("config.preferences.audioInstructionsPlaceholder")} onChange={(event) => updateConfig("audioInstructions", event.target.value)} />
                                 </Form.Item>
-                                <Form.Item label={t("config.preferences.systemPrompt")} className="mb-0">
+                                <Form.Item label={t("config.preferences.systemPrompt")} className="mb-6">
                                     <Input.TextArea rows={4} value={config.systemPrompt} placeholder={t("config.preferences.systemPromptPlaceholder")} onChange={(event) => updateConfig("systemPrompt", event.target.value)} />
                                 </Form.Item>
+                                <TextPromptLibraryPreferences prompts={config.textPrompts || []} onChange={(textPrompts) => updateConfig("textPrompts", textPrompts)} />
                             </Form>
                         ),
                     },
@@ -353,6 +357,87 @@ function channelProtocolLabel(channel: ModelChannel, t: (key: string) => string)
     const summary = channelProtocolSummary(channel);
     if (summary === "mixed") return t("config.channels.mixedProtocol");
     return apiFormatLabel(summary);
+}
+
+function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextPromptEntry[]; onChange: (prompts: TextPromptEntry[]) => void }) {
+    const { t } = useTranslation();
+
+    const updatePrompt = (id: string, patch: Partial<TextPromptEntry>) => {
+        onChange(prompts.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+    };
+
+    const addPrompt = () => {
+        onChange([
+            ...prompts,
+            {
+                id: nanoid(8),
+                title: t("config.preferences.textPromptNewTitle"),
+                content: "",
+            },
+        ]);
+    };
+
+    const removePrompt = (id: string) => onChange(prompts.filter((item) => item.id !== id));
+
+    const resetDefaults = () => onChange(defaultTextPrompts.map((item) => ({ ...item })));
+
+    const movePrompt = (from: number, to: number) => {
+        if (to < 0 || to >= prompts.length) return;
+        const next = [...prompts];
+        const [item] = next.splice(from, 1);
+        next.splice(to, 0, item);
+        onChange(next);
+    };
+
+    return (
+        <div className="mb-0">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                    <div className="text-sm font-semibold">{t("config.preferences.textPromptLibrary")}</div>
+                    <div className="mt-0.5 text-xs text-stone-500">{t("config.preferences.textPromptLibraryDescription")}</div>
+                </div>
+                <div className="flex gap-2">
+                    <Button size="small" onClick={resetDefaults}>
+                        {t("config.preferences.textPromptReset")}
+                    </Button>
+                    <Button size="small" type="primary" icon={<Plus className="size-3.5" />} onClick={addPrompt}>
+                        {t("config.preferences.textPromptAdd")}
+                    </Button>
+                </div>
+            </div>
+            <div className="space-y-3">
+                {prompts.length ? (
+                    prompts.map((prompt, index) => (
+                        <div key={prompt.id} className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
+                            <div className="mb-2 flex flex-wrap items-center gap-2">
+                                <Input
+                                    className="min-w-0 flex-1"
+                                    value={prompt.title}
+                                    placeholder={t("config.preferences.textPromptTitlePlaceholder")}
+                                    onChange={(event) => updatePrompt(prompt.id, { title: event.target.value })}
+                                />
+                                <Button size="small" disabled={index === 0} onClick={() => movePrompt(index, index - 1)}>
+                                    ↑
+                                </Button>
+                                <Button size="small" disabled={index === prompts.length - 1} onClick={() => movePrompt(index, index + 1)}>
+                                    ↓
+                                </Button>
+                                <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removePrompt(prompt.id)} />
+                            </div>
+                            <Input.TextArea
+                                rows={3}
+                                value={prompt.content}
+                                placeholder={t("config.preferences.textPromptContentPlaceholder")}
+                                onChange={(event) => updatePrompt(prompt.id, { content: event.target.value })}
+                            />
+                        </div>
+                    ))
+                ) : (
+                    <div className="rounded-lg border border-dashed border-stone-200 px-3 py-6 text-center text-sm text-stone-500 dark:border-stone-800">{t("config.preferences.textPromptEmpty")}</div>
+                )}
+            </div>
+        </div>
+    );
 }
 
 function ConfigBackupTab() {

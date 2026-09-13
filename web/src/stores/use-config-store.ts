@@ -4,6 +4,9 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { defaultTextPrompts, normalizeTextPrompts, type TextPromptEntry } from "@/constant/text-prompt-library";
+
+export type { TextPromptEntry };
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ApiTransport = "direct" | "proxy";
@@ -56,6 +59,7 @@ export type AiConfig = {
     background: string;
     count: string;
     canvasImageCount: string;
+    textPrompts: TextPromptEntry[];
 };
 
 export type ConfigTabKey = "channels" | "preferences" | "backup";
@@ -108,6 +112,7 @@ export const defaultConfig: AiConfig = {
     background: "",
     count: "1",
     canvasImageCount: "1",
+    textPrompts: defaultTextPrompts.map((item) => ({ ...item })),
 };
 
 type ConfigStore = {
@@ -224,7 +229,7 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
-            version: 3,
+            version: 4,
             partialize: (state) => ({ config: state.config }),
             migrate: (persisted, version) => {
                 const state = (persisted || {}) as Partial<ConfigStore> & { config?: Partial<AiConfig> };
@@ -235,6 +240,10 @@ export const useConfigStore = create<ConfigStore>()(
                 // v3: prefer deepseek-flash as the default chat/text model when available.
                 if (version < 3 && state.config) {
                     state.config = { ...state.config, textModel: "" };
+                }
+                // v4: seed text-node prompt library defaults when missing.
+                if (version < 4 && state.config && !Array.isArray(state.config.textPrompts)) {
+                    state.config = { ...state.config, textPrompts: defaultTextPrompts.map((item) => ({ ...item })) };
                 }
                 return state as ConfigStore;
             },
@@ -270,6 +279,7 @@ export const useConfigStore = create<ConfigStore>()(
                         canvasImageCount: config.canvasImageCount || "1",
                         quality: config.quality || "medium",
                         size: config.size || "2048x1152",
+                        textPrompts: normalizeTextPrompts(config.textPrompts),
                     },
                 };
             },
