@@ -147,6 +147,28 @@ const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
+/** Soft cap so same-panel re-generations do not grow without bound. */
+const MAX_IMAGE_NODE_HISTORY = 24;
+
+function collectSuccessfulImageHistory(node: CanvasNodeData | undefined): CanvasNodeImage[] {
+    if (!node) return [];
+    const listed = (node.metadata?.images || []).filter((image) => Boolean(image.content) && image.status !== NODE_STATUS_LOADING);
+    if (listed.length) return listed;
+    if (!node.metadata?.content) return [];
+    return [
+        {
+            id: node.metadata.primaryImageId || `legacy-${node.id}`,
+            status: NODE_STATUS_SUCCESS,
+            content: node.metadata.content,
+            storageKey: node.metadata.storageKey || "",
+            naturalWidth: node.metadata.naturalWidth || 0,
+            naturalHeight: node.metadata.naturalHeight || 0,
+            bytes: node.metadata.bytes || 0,
+            mimeType: node.metadata.mimeType || "",
+        },
+    ];
+}
+
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
 
@@ -2712,6 +2734,16 @@ function AtelierCanvasPage() {
                     const parentPosition = sourceNode?.position || { x: 0, y: 0 };
                     const rootId = writeImageToSelf ? nodeId : nanoid();
                     const imageIds = Array.from({ length: count }, () => nanoid());
+                    const previousImages = writeImageToSelf ? collectSuccessfulImageHistory(sourceNode) : [];
+                    const appendImageHistory = writeImageToSelf && previousImages.length > 0;
+                    const retainedImages =
+                        appendImageHistory && previousImages.length + count > MAX_IMAGE_NODE_HISTORY
+                            ? previousImages.slice(Math.max(0, previousImages.length - (MAX_IMAGE_NODE_HISTORY - count)))
+                            : previousImages;
+                    const loadingImages: CanvasNodeImage[] = imageIds.map((id) => ({ id, status: NODE_STATUS_LOADING, content: "", storageKey: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" }));
+                    const nextImages = appendImageHistory ? [...retainedImages, ...loadingImages] : loadingImages;
+                    const retainedPrimaryId = appendImageHistory ? sourceNode?.metadata?.primaryImageId || retainedImages[0]?.id : undefined;
+                    const retainedPrimary = retainedPrimaryId ? retainedImages.find((image) => image.id === retainedPrimaryId) || retainedImages[0] : undefined;
                     pendingChildIds = [rootId];
                     const rootNode: CanvasNodeData = {
                         id: rootId,
@@ -2726,10 +2758,31 @@ function AtelierCanvasPage() {
                         metadata: {
                             prompt: effectivePrompt,
                             status: NODE_STATUS_LOADING,
-                            images: imageIds.map((id) => ({ id, status: NODE_STATUS_LOADING, content: "", storageKey: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" })),
+                            images: nextImages,
+                            ...(appendImageHistory && retainedPrimary
+                                ? {
+                                      content: retainedPrimary.content,
+                                      storageKey: retainedPrimary.storageKey,
+                                      naturalWidth: retainedPrimary.naturalWidth,
+                                      naturalHeight: retainedPrimary.naturalHeight,
+                                      bytes: retainedPrimary.bytes,
+                                      mimeType: retainedPrimary.mimeType,
+                                      primaryImageId: retainedPrimary.id,
+                                  }
+                                : {}),
                             ...generationMetadata,
                         },
                     };
+
+                    if (appendImageHistory) {
+                        // Keep prior versions folded so the user can expand and switch later.
+                        setExpandedImageNodeIds((current) => {
+                            if (!current.has(nodeId)) return current;
+                            const next = new Set(current);
+                            next.delete(nodeId);
+                            return next;
+                        });
+                    }
 
                     setNodes((prev) => [
                         ...prev.map((node) =>
@@ -2746,7 +2799,17 @@ function AtelierCanvasPage() {
                                             width: rootNode.width,
                                             height: rootNode.height,
                                             title: rootNode.title,
-                                            metadata: { ...node.metadata, ...rootNode.metadata, content: undefined, storageKey: undefined, primaryImageId: undefined, errorDetails: undefined },
+                                            metadata: appendImageHistory
+                                                ? {
+                                                      ...node.metadata,
+                                                      ...rootNode.metadata,
+                                                      content: retainedPrimary?.content || node.metadata?.content,
+                                                      storageKey: retainedPrimary?.storageKey || node.metadata?.storageKey,
+                                                      primaryImageId: retainedPrimary?.id || node.metadata?.primaryImageId,
+                                                      images: nextImages,
+                                                      errorDetails: undefined,
+                                                  }
+                                                : { ...node.metadata, ...rootNode.metadata, content: undefined, storageKey: undefined, primaryImageId: undefined, errorDetails: undefined },
                                         }
                                       : {
                                             ...node,
@@ -2770,6 +2833,7 @@ function AtelierCanvasPage() {
                     let hasFailure = false;
                     let firstError = "";
                     const succeededImages: GenerationHistoryImage[] = [];
+                    const newImageIdSet = new Set(imageIds);
                     await Promise.all(
                         imageIds.map(async (imageId) => {
                             try {
@@ -2792,7 +2856,9 @@ function AtelierCanvasPage() {
                                     prev.map((node) => {
                                         if (node.id !== rootId) return node;
                                         const images = node.metadata?.images?.map((image) => (image.id === imageId ? item : image)) || [];
-                                        if (node.metadata?.primaryImageId) return { ...node, metadata: { ...node.metadata, images } };
+                                        // New round results become primary so the latest fill is shown; older versions stay in the folded batch.
+                                        const promoteNew = newImageIdSet.has(imageId);
+                                        if (!promoteNew && node.metadata?.primaryImageId) return { ...node, metadata: { ...node.metadata, images } };
                                         const center = { x: node.position.x + node.width / 2, y: node.position.y + node.height / 2 };
                                         return {
                                             ...node,
@@ -2808,6 +2874,7 @@ function AtelierCanvasPage() {
                                                 mimeType: item.mimeType,
                                                 images,
                                                 primaryImageId: imageId,
+                                                status: NODE_STATUS_SUCCESS,
                                             },
                                         };
                                     }),
@@ -2852,7 +2919,15 @@ function AtelierCanvasPage() {
                             node.id === nodeId && isConfigNode
                                 ? { ...node, metadata: { ...node.metadata, status: hasSuccess ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR, errorDetails: hasSuccess ? undefined : t("canvas.projectPage.generationFailed") } }
                                 : node.id === rootId
-                                  ? { ...node, metadata: { ...node.metadata, status: hasSuccess ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR, errorDetails: hasSuccess ? undefined : t("canvas.projectPage.allFailed") } }
+                                  ? {
+                                        ...node,
+                                        metadata: {
+                                            ...node.metadata,
+                                            // Keep prior versions visible if this round failed entirely.
+                                            status: hasSuccess || appendImageHistory ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR,
+                                            errorDetails: hasSuccess || appendImageHistory ? undefined : t("canvas.projectPage.allFailed"),
+                                        },
+                                    }
                                   : node,
                         ),
                     );

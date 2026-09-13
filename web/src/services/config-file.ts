@@ -1,5 +1,5 @@
 import i18n from "@/i18n";
-import { saveBlobAs } from "@/lib/fs/save-blob";
+import { resolveCanvasProjectIdFromLocation, saveBlobAs } from "@/lib/fs/save-blob";
 import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
 
 type AppConfigFile = {
@@ -27,9 +27,7 @@ export async function exportAppConfig(options?: ExportAppConfigOptions) {
     const data: AppConfigFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), config: exportConfig };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
     await saveBlobAs(blob, "infinite-canvas-config.json", {
-        projectId: options?.projectId,
-        description: "Infinite Atelier Config",
-        accept: { "application/json": [".json"] },
+        projectId: options?.projectId ?? resolveCanvasProjectIdFromLocation(),
     });
 }
 

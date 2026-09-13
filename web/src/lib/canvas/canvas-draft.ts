@@ -14,6 +14,8 @@ export type CanvasDraftMeta = {
 
 type StoredDraft = CanvasDraftMeta & {
     handle?: FileSystemFileHandle;
+    /** Parent folder of the bound draft zip — used for silent asset/config exports. */
+    directoryHandle?: FileSystemDirectoryHandle;
 };
 
 const draftStore = localforage.createInstance({ name: "infinite-canvas", storeName: "draft_files" });
@@ -31,6 +33,30 @@ export function safeDraftFileName(value: string) {
     return cleaned.toLowerCase().endsWith(".zip") ? cleaned : `${cleaned}.zip`;
 }
 
+export function safeExportFileName(value: string) {
+    return value.trim().replace(/[\\/:*?"<>|]/g, "_") || "download.bin";
+}
+
+async function resolveDirectoryFromFileHandle(handle: FileSystemFileHandle) {
+    if (typeof handle.getParent !== "function") return null;
+    try {
+        return (await handle.getParent()) || null;
+    } catch {
+        return null;
+    }
+}
+
+export async function getCanvasDraftDirectory(projectId: string) {
+    const stored = await draftStore.getItem<StoredDraft>(draftKey(projectId));
+    if (stored?.directoryHandle) return stored.directoryHandle;
+    if (!stored?.handle) return null;
+    const directory = await resolveDirectoryFromFileHandle(stored.handle);
+    if (directory) {
+        await draftStore.setItem(draftKey(projectId), { ...stored, directoryHandle: directory });
+    }
+    return directory;
+}
+
 export async function getCanvasDraftMeta(projectId: string): Promise<CanvasDraftMeta | null> {
     const stored = await draftStore.getItem<StoredDraft>(draftKey(projectId));
     if (!stored) return null;
@@ -46,7 +72,7 @@ export async function clearCanvasDraft(projectId: string) {
     await draftStore.removeItem(draftKey(projectId));
 }
 
-async function ensureWritePermission(handle: FileSystemFileHandle) {
+async function ensureWritePermission(handle: FileSystemFileHandle | FileSystemDirectoryHandle) {
     const permission = await handle.queryPermission({ mode: "readwrite" });
     if (permission === "granted") return true;
     const next = await handle.requestPermission({ mode: "readwrite" });
@@ -80,14 +106,28 @@ export async function writeBlobToFileHandle(handle: FileSystemFileHandle, blob: 
     }
 }
 
+/** Write a file next to the bound draft zip without opening a save picker. */
+export async function writeBlobToDraftDirectory(projectId: string, fileName: string, blob: Blob) {
+    const directory = await getCanvasDraftDirectory(projectId);
+    if (!directory) return null;
+    const allowed = await ensureWritePermission(directory);
+    if (!allowed) throw new Error("FILE_PERMISSION_DENIED");
+    const safeName = safeExportFileName(fileName);
+    const fileHandle = await directory.getFileHandle(safeName, { create: true });
+    await writeBlobToFileHandle(fileHandle, blob);
+    return { fileName: safeName, folderName: directory.name };
+}
+
 export async function saveCanvasDraftToHandle(project: CanvasProject, handle: FileSystemFileHandle) {
     const zip = await buildCanvasProjectsZip([project]);
     await writeBlobToFileHandle(handle, zip);
+    const directoryHandle = (await resolveDirectoryFromFileHandle(handle)) || undefined;
     const meta: StoredDraft = {
         projectId: project.id,
         fileName: handle.name || safeDraftFileName(project.title),
         lastSavedAt: new Date().toISOString(),
         handle,
+        directoryHandle,
     };
     await draftStore.setItem(draftKey(project.id), meta);
     return { projectId: meta.projectId, fileName: meta.fileName, lastSavedAt: meta.lastSavedAt, hasHandle: true };

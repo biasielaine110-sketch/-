@@ -7,6 +7,14 @@ type FileSystemHandlePermissionDescriptor = {
 interface FileSystemHandle {
     readonly kind: "file" | "directory";
     readonly name: string;
+    getParent?: () => Promise<FileSystemDirectoryHandle | null>;
+}
+
+interface FileSystemDirectoryHandle extends FileSystemHandle {
+    readonly kind: "directory";
+    getFileHandle(name: string, options?: { create?: boolean }): Promise<FileSystemFileHandle>;
+    queryPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<PermissionState>;
+    requestPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<PermissionState>;
 }
 
 interface FileSystemFileHandle extends FileSystemHandle {
