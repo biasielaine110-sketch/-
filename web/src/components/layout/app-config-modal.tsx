@@ -1,4 +1,4 @@
-import { App, Button, Form, Input, Modal, Segmented, Select, Tabs } from "antd";
+import { App, Button, Checkbox, Form, Input, Modal, Segmented, Select, Tabs } from "antd";
 import { Download, FileUp, GripVertical, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -48,6 +48,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const [editingChannelId, setEditingChannelId] = useState("");
     const [draggingChannelId, setDraggingChannelId] = useState("");
     const [dragOverChannelId, setDragOverChannelId] = useState("");
+    const [exportOpen, setExportOpen] = useState(false);
+    const [exportIncludeTextPrompts, setExportIncludeTextPrompts] = useState(true);
+    const [exporting, setExporting] = useState(false);
     const config = useConfigStore((state) => state.config);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const shouldPromptContinue = useConfigStore((state) => state.shouldPromptContinue);
@@ -76,6 +79,19 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
             message.error(error instanceof Error ? error.message : t("config.importFailed"));
         } finally {
             if (configInputRef.current) configInputRef.current.value = "";
+        }
+    };
+
+    const confirmExportConfig = async () => {
+        setExporting(true);
+        try {
+            await exportAppConfig({ includeTextPrompts: exportIncludeTextPrompts });
+            message.success(t("config.exported"));
+            setExportOpen(false);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : t("config.exportFailed"));
+        } finally {
+            setExporting(false);
         }
     };
 
@@ -143,12 +159,33 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                     <Button icon={<Upload className="size-4" />} onClick={() => configInputRef.current?.click()}>
                         {t("config.import")}
                     </Button>
-                    <Button icon={<Download className="size-4" />} onClick={() => void exportAppConfig()}>
+                    <Button
+                        icon={<Download className="size-4" />}
+                        onClick={() => {
+                            setExportIncludeTextPrompts(true);
+                            setExportOpen(true);
+                        }}
+                    >
                         {t("config.export")}
                     </Button>
                     <input ref={configInputRef} type="file" accept="application/json,.json" className="hidden" onChange={(event) => event.target.files?.[0] && void loadConfigFile(event.target.files[0])} />
                 </div>
             </div>
+            <Modal
+                title={t("config.exportTitle")}
+                open={exportOpen}
+                onCancel={() => !exporting && setExportOpen(false)}
+                onOk={() => void confirmExportConfig()}
+                okText={t("config.exportConfirm")}
+                cancelText={t("common.cancel")}
+                confirmLoading={exporting}
+                destroyOnHidden
+            >
+                <p className="mb-3 text-sm text-stone-600 dark:text-stone-400">{t("config.exportDescription")}</p>
+                <Checkbox checked={exportIncludeTextPrompts} onChange={(event) => setExportIncludeTextPrompts(event.target.checked)}>
+                    {t("config.exportIncludeTextPrompts")}
+                </Checkbox>
+            </Modal>
             <Tabs
                 activeKey={activeTab}
                 onChange={(key) => setActiveTab(key as ConfigTabKey)}

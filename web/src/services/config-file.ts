@@ -6,15 +6,28 @@ type AppConfigFile = {
     app: "infinite-canvas";
     version: 1;
     exportedAt: string;
-    config: AiConfig;
+    config: AiConfig | Omit<AiConfig, "textPrompts">;
 };
 
-export async function exportAppConfig(projectId?: string | null) {
+export type ExportAppConfigOptions = {
+    projectId?: string | null;
+    /** When false, omit the text prompt library from the exported JSON. Default true. */
+    includeTextPrompts?: boolean;
+};
+
+export async function exportAppConfig(options?: ExportAppConfigOptions) {
     const { config } = useConfigStore.getState();
-    const data: AppConfigFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), config };
+    const includeTextPrompts = options?.includeTextPrompts !== false;
+    const exportConfig = includeTextPrompts
+        ? config
+        : (() => {
+              const { textPrompts: _textPrompts, ...rest } = config;
+              return rest;
+          })();
+    const data: AppConfigFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), config: exportConfig };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
     await saveBlobAs(blob, "infinite-canvas-config.json", {
-        projectId,
+        projectId: options?.projectId,
         description: "Infinite Atelier Config",
         accept: { "application/json": [".json"] },
     });
@@ -28,5 +41,14 @@ export async function importAppConfig(file: File) {
         throw new Error(i18n.t("config.invalidFile"));
     }
     if (data.app !== "infinite-canvas" || data.version !== 1 || !data.config) throw new Error(i18n.t("config.invalidFile"));
-    useConfigStore.setState({ config: data.config });
+    const current = useConfigStore.getState().config;
+    const imported = data.config as Partial<AiConfig>;
+    // Configs exported without the library omit textPrompts — keep the local library in that case.
+    useConfigStore.setState({
+        config: {
+            ...current,
+            ...imported,
+            textPrompts: Array.isArray(imported.textPrompts) ? imported.textPrompts : current.textPrompts,
+        } as AiConfig,
+    });
 }

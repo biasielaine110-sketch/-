@@ -82,7 +82,6 @@ import {
     isGenerationCanceled,
     resetInterruptedGeneration,
     resolveMetadataReferences,
-    sourceNodeReferenceImages,
 } from "@/lib/canvas/canvas-generation-helpers";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType } from "@/lib/canvas/node-registry";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
@@ -2632,24 +2631,28 @@ function AtelierCanvasPage() {
                     const count = getGenerationCount(generationConfig.count);
                     const isConfigNode = sourceNode?.type === CanvasNodeType.Config;
                     const isImageNode = sourceNode?.type === CanvasNodeType.Image;
-                    const isEmptyImageNode = isImageNode && !sourceNode?.metadata?.content;
-                    // Same-panel re-generate: follow original prompt mode (text / upstream refs),
-                    // never treat this node's already-generated image as a new edit reference.
-                    let referenceImages = generationContext.referenceImages;
-                    if (isImageNode && sourceNode?.metadata?.content) {
-                        if (sourceNode.metadata.generationType === "edit") {
-                            const savedRefs = await resolveMetadataReferences(sourceNode.metadata);
-                            referenceImages = savedRefs.length ? savedRefs : [];
-                        } else {
-                            referenceImages = [];
-                        }
+                    // Image nodes always write back into themselves so the same panel can re-run
+                    // without chaining a new node off the previous result.
+                    const writeImageToSelf = isImageNode;
+                    // Only upstream connected images count as references — never this node's own result
+                    // or nodes previously generated from this panel.
+                    const selfStorageKey = sourceNode?.metadata?.storageKey;
+                    const selfContent = sourceNode?.metadata?.content;
+                    const generatedChildIds = new Set(connectionsRef.current.filter((connection) => connection.fromNodeId === nodeId).map((connection) => connection.toNodeId));
+                    let referenceImages = generationContext.referenceImages.filter(
+                        (ref) => ref.id !== nodeId && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.dataUrl !== selfContent,
+                    );
+                    if (isImageNode && sourceNode?.metadata?.content && !referenceImages.length && sourceNode.metadata.generationType === "edit") {
+                        // Upstream may have been disconnected; reuse original edit refs but still exclude self.
+                        const savedRefs = (await resolveMetadataReferences(sourceNode.metadata)) || [];
+                        referenceImages = savedRefs.filter((ref) => ref.storageKey !== selfStorageKey && ref.dataUrl !== selfContent);
                     }
                     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
                     const generationMetadata = buildImageGenerationMetadata(generationType, generationConfig, count, referenceImages);
                     const parentConfig = NODE_DEFAULT_SIZE[isConfigNode ? CanvasNodeType.Config : isImageNode ? CanvasNodeType.Image : CanvasNodeType.Text];
                     const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                     const parentPosition = sourceNode?.position || { x: 0, y: 0 };
-                    const rootId = isEmptyImageNode ? nodeId : nanoid();
+                    const rootId = writeImageToSelf ? nodeId : nanoid();
                     const imageIds = Array.from({ length: count }, () => nanoid());
                     pendingChildIds = [rootId];
                     const rootNode: CanvasNodeData = {
@@ -2657,11 +2660,11 @@ function AtelierCanvasPage() {
                         type: CanvasNodeType.Image,
                         title: effectivePrompt.slice(0, 32) || "Generated Image",
                         position: {
-                            x: isEmptyImageNode ? parentPosition.x : parentPosition.x + parentConfig.width + 96,
-                            y: parentPosition.y + parentConfig.height / 2 - imageConfig.height / 2,
+                            x: writeImageToSelf ? parentPosition.x : parentPosition.x + parentConfig.width + 96,
+                            y: writeImageToSelf ? parentPosition.y : parentPosition.y + parentConfig.height / 2 - imageConfig.height / 2,
                         },
-                        width: isEmptyImageNode ? sourceNode?.width || imageConfig.width : imageConfig.width,
-                        height: isEmptyImageNode ? sourceNode?.height || imageConfig.height : imageConfig.height,
+                        width: writeImageToSelf ? sourceNode?.width || imageConfig.width : imageConfig.width,
+                        height: writeImageToSelf ? sourceNode?.height || imageConfig.height : imageConfig.height,
                         metadata: {
                             prompt: effectivePrompt,
                             status: NODE_STATUS_LOADING,
@@ -2678,33 +2681,28 @@ function AtelierCanvasPage() {
                                           ...node,
                                           metadata: { ...node.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined },
                                       }
-                                    : isEmptyImageNode
+                                    : writeImageToSelf
                                       ? {
                                             ...node,
                                             position: rootNode.position,
                                             width: rootNode.width,
                                             height: rootNode.height,
                                             title: rootNode.title,
-                                            metadata: { ...node.metadata, ...rootNode.metadata, errorDetails: undefined },
+                                            metadata: { ...node.metadata, ...rootNode.metadata, content: undefined, storageKey: undefined, primaryImageId: undefined, errorDetails: undefined },
                                         }
-                                      : isImageNode
-                                        ? {
-                                              ...node,
-                                              metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined },
-                                          }
-                                        : {
-                                              ...node,
-                                              type: CanvasNodeType.Text,
-                                              title: prompt.slice(0, 32) || "Prompt",
-                                              width: parentConfig.width,
-                                              height: parentConfig.height,
-                                              metadata: { ...node.metadata, content: prompt, prompt, status: NODE_STATUS_SUCCESS, fontSize: 14, errorDetails: undefined },
-                                          }
+                                      : {
+                                            ...node,
+                                            type: CanvasNodeType.Text,
+                                            title: prompt.slice(0, 32) || "Prompt",
+                                            width: parentConfig.width,
+                                            height: parentConfig.height,
+                                            metadata: { ...node.metadata, content: prompt, prompt, status: NODE_STATUS_SUCCESS, fontSize: 14, errorDetails: undefined },
+                                        }
                                 : node,
                         ),
-                        ...(isEmptyImageNode ? [] : [rootNode]),
+                        ...(writeImageToSelf ? [] : [rootNode]),
                     ]);
-                    if (!isEmptyImageNode) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: rootId }]);
+                    if (!writeImageToSelf) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: rootId }]);
                     setSelectedNodeIds(new Set([nodeId]));
                     setSelectedConnectionId(null);
                     setDialogNodeId(nodeId);
@@ -2805,16 +2803,24 @@ function AtelierCanvasPage() {
 
                 if (mode === "video") {
                     const spec = nodeSizeFromRatio(generationConfig.size, NODE_DEFAULT_SIZE[CanvasNodeType.Video].width, NODE_DEFAULT_SIZE[CanvasNodeType.Video].height) || NODE_DEFAULT_SIZE[CanvasNodeType.Video];
-                    const isEmptyVideoNode = sourceNode?.type === CanvasNodeType.Video && !sourceNode.metadata?.content;
-                    const videoId = isEmptyVideoNode ? nodeId : nanoid();
+                    const isVideoNode = sourceNode?.type === CanvasNodeType.Video;
+                    // Same panel re-generate: write back into the video node; never use its own result as a reference.
+                    const writeVideoToSelf = isVideoNode;
+                    const selfStorageKey = sourceNode?.metadata?.storageKey;
+                    const selfContent = sourceNode?.metadata?.content;
+                    const generatedChildIds = new Set(connectionsRef.current.filter((connection) => connection.fromNodeId === nodeId).map((connection) => connection.toNodeId));
+                    const referenceImages = generationContext.referenceImages.filter(
+                        (ref) => ref.id !== nodeId && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.dataUrl !== selfContent,
+                    );
+                    const videoId = writeVideoToSelf ? nodeId : nanoid();
                     const parent = sourceNode?.position || { x: 0, y: 0 };
                     const videoNode: CanvasNodeData = {
                         id: videoId,
                         type: CanvasNodeType.Video,
                         title: effectivePrompt.slice(0, 32) || "Generated Video",
-                        position: isEmptyVideoNode ? sourceNode.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y },
-                        width: isEmptyVideoNode ? sourceNode.width : spec.width,
-                        height: isEmptyVideoNode ? sourceNode.height : spec.height,
+                        position: writeVideoToSelf && sourceNode ? sourceNode.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y },
+                        width: writeVideoToSelf && sourceNode ? sourceNode.width : spec.width,
+                        height: writeVideoToSelf && sourceNode ? sourceNode.height : spec.height,
                         metadata: {
                             prompt: effectivePrompt,
                             status: NODE_STATUS_LOADING,
@@ -2824,19 +2830,22 @@ function AtelierCanvasPage() {
                             vquality: generationConfig.vquality,
                             generateAudio: generationConfig.videoGenerateAudio,
                             watermark: generationConfig.videoWatermark,
-                            references: generationReferenceUrls(generationContext),
+                            references: generationReferenceUrls({ ...generationContext, referenceImages }),
+                            content: undefined,
+                            storageKey: undefined,
                         },
                     };
                     pendingChildIds = [videoId];
                     setNodes((prev) =>
-                        isEmptyVideoNode
-                            ? prev.map((node) => (node.id === nodeId ? { ...node, ...videoNode } : node))
+                        writeVideoToSelf
+                            ? prev.map((node) => (node.id === nodeId ? { ...node, ...videoNode, metadata: { ...node.metadata, ...videoNode.metadata } } : node))
                             : [...prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } } : node)), videoNode],
                     );
-                    if (!isEmptyVideoNode) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: videoId }]);
-                    const controller = startGenerationRequest(videoId, nodeId, nodeId, runController);
+                    if (!writeVideoToSelf) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: videoId }]);
+                    setDialogNodeId(nodeId);
+                    const controller = videoId === nodeId ? runController : startGenerationRequest(videoId, nodeId, nodeId, runController);
                     try {
-                        const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, effectivePrompt, generationContext.referenceImages, { signal: controller.signal }));
+                        const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, effectivePrompt, referenceImages, { signal: controller.signal }));
                         const videoSize = fitNodeSize(video.width || spec.width, video.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                         setNodes((prev) =>
                             prev.map((node) =>
@@ -2856,14 +2865,14 @@ function AtelierCanvasPage() {
                                               vquality: generationConfig.vquality,
                                               generateAudio: generationConfig.videoGenerateAudio,
                                               watermark: generationConfig.videoWatermark,
-                                              references: generationReferenceUrls(generationContext),
+                                              references: generationReferenceUrls({ ...generationContext, referenceImages }),
                                           },
                                       }
                                     : node,
                             ),
                         );
                     } finally {
-                        finishGenerationRequest(videoId, controller);
+                        if (videoId !== nodeId) finishGenerationRequest(videoId, controller);
                     }
                     return;
                 }
@@ -3010,9 +3019,16 @@ function AtelierCanvasPage() {
             }
             const generationType = savedImageMetadata?.generationType;
             const useReferenceImages = generationType ? generationType === "edit" : Boolean(context?.referenceImages.length);
-            const retryReferenceImages =
-                hasSavedImageMetadata && savedImageMetadata ? await resolveMetadataReferences(savedImageMetadata) : useReferenceImages ? (context?.referenceImages.length ? context.referenceImages : sourceNodeReferenceImages(sourceNode)) : [];
-            if (useReferenceImages && !retryReferenceImages) {
+            const resolvedRetryRefs =
+                hasSavedImageMetadata && savedImageMetadata
+                    ? await resolveMetadataReferences(savedImageMetadata)
+                    : useReferenceImages
+                      ? context?.referenceImages || []
+                      : [];
+            const retryImages = (resolvedRetryRefs || []).filter(
+                (ref) => ref.id !== node.id && ref.storageKey !== node.metadata?.storageKey && ref.dataUrl !== node.metadata?.content,
+            );
+            if (useReferenceImages && !retryImages.length) {
                 message.error(t("canvas.projectPage.referenceMissing"));
                 setNodes((prev) =>
                     prev.map((item) =>
@@ -3031,7 +3047,6 @@ function AtelierCanvasPage() {
                 );
                 return;
             }
-            const retryImages = retryReferenceImages || [];
 
             setRunningNodeId(node.id);
             setNodes((prev) =>
