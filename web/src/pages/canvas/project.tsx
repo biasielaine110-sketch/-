@@ -83,6 +83,7 @@ import {
     resetInterruptedGeneration,
     resolveMetadataReferences,
 } from "@/lib/canvas/canvas-generation-helpers";
+import { isDocumentFile, readDocumentAsText } from "@/lib/canvas/document-text";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType } from "@/lib/canvas/node-registry";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
 import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
@@ -1590,6 +1591,57 @@ function AtelierCanvasPage() {
         setSelectedConnectionId(null);
     }, []);
 
+    const createDocumentTextNode = useCallback(
+        async (file: File, position: Position) => {
+            try {
+                const content = await readDocumentAsText(file);
+                const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Text];
+                const node = {
+                    ...createCanvasNode(CanvasNodeType.Text, position, { content, status: NODE_STATUS_SUCCESS, fontSize: 14 }),
+                    title: file.name.replace(/\.[^.]+$/, "").slice(0, 48) || file.name,
+                    position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
+                };
+                setNodes((prev) => [...prev, node]);
+                setSelectedNodeIds(new Set([node.id]));
+                setSelectedConnectionId(null);
+                setDialogNodeId(node.id);
+                return true;
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("canvas.projectPage.documentReadFailed"));
+                return false;
+            }
+        },
+        [message, t],
+    );
+
+    const applyDocumentToTextNode = useCallback(
+        async (nodeId: string, file: File) => {
+            try {
+                const content = await readDocumentAsText(file);
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === nodeId
+                            ? {
+                                  ...node,
+                                  type: CanvasNodeType.Text,
+                                  title: file.name.replace(/\.[^.]+$/, "").slice(0, 48) || file.name,
+                                  metadata: { ...node.metadata, content, status: NODE_STATUS_SUCCESS, errorDetails: undefined },
+                              }
+                            : node,
+                    ),
+                );
+                setSelectedNodeIds(new Set([nodeId]));
+                setSelectedConnectionId(null);
+                setDialogNodeId(nodeId);
+                return true;
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("canvas.projectPage.documentReadFailed"));
+                return false;
+            }
+        },
+        [message, t],
+    );
+
     const createTextNodeFromClipboard = useCallback(
         (text: string) => {
             const trimmed = text.trim();
@@ -2386,7 +2438,7 @@ function AtelierCanvasPage() {
 
     const handleImageInputChange = useCallback(
         async (event: ReactChangeEvent<HTMLInputElement>) => {
-            const files = Array.from(event.target.files || []).filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/") || isAudioFile(f));
+            const files = Array.from(event.target.files || []).filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/") || isAudioFile(f) || isDocumentFile(f));
             if (!files.length) {
                 uploadTargetRef.current = null;
                 event.target.value = "";
@@ -2397,12 +2449,22 @@ function AtelierCanvasPage() {
             const basePosition = target?.position || screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
             const STAGGER = 40; // Offset between multiple imported files.
 
+            const createByFile = (file: File, position: Position) => {
+                if (isDocumentFile(file)) void createDocumentTextNode(file, position);
+                else if (isAudioFile(file)) void createAudioFileNode(file, position);
+                else if (file.type.startsWith("video/")) void createVideoFileNode(file, position);
+                else void createImageFileNode(file, position);
+            };
+
             // When replacing a target node, use the first file as the replacement and create the rest nearby.
             if (target?.nodeId) {
                 const [first, ...rest] = files;
+                const targetNode = nodesRef.current.find((node) => node.id === target.nodeId);
 
-                // Replace the target node with the first file.
-                if (isAudioFile(first)) {
+                if (isDocumentFile(first)) {
+                    if (targetNode?.type === CanvasNodeType.Text) await applyDocumentToTextNode(target.nodeId, first);
+                    else await createDocumentTextNode(first, basePosition);
+                } else if (isAudioFile(first)) {
                     const audio = await uploadMediaFile(first, "audio");
                     const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
                     setNodes((prev) =>
@@ -2445,7 +2507,6 @@ function AtelierCanvasPage() {
                 } else {
                     const image = await uploadImage(first);
                     const s = fitNodeSize(image.width, image.height);
-                    const targetNode = nodesRef.current.find((node) => node.id === target.nodeId);
                     const keepAnnotate = targetNode?.type === CanvasNodeType.Annotate;
                     setNodes((prev) =>
                         prev.map((node) => {
@@ -2481,58 +2542,55 @@ function AtelierCanvasPage() {
 
                 // Create the remaining files near the target node.
                 for (let i = 0; i < rest.length; i++) {
-                    const offsetPos = { x: basePosition.x + (i + 1) * STAGGER, y: basePosition.y + (i + 1) * STAGGER };
-                    const f = rest[i];
-                    if (isAudioFile(f)) {
-                        void createAudioFileNode(f, offsetPos);
-                    } else if (f.type.startsWith("video/")) {
-                        void createVideoFileNode(f, offsetPos);
-                    } else {
-                        void createImageFileNode(f, offsetPos);
-                    }
+                    createByFile(rest[i], { x: basePosition.x + (i + 1) * STAGGER, y: basePosition.y + (i + 1) * STAGGER });
                 }
             } else {
                 // Without a replacement target, create all files near the canvas center.
                 for (let i = 0; i < files.length; i++) {
-                    const offsetPos = { x: basePosition.x + i * STAGGER, y: basePosition.y + i * STAGGER };
-                    const f = files[i];
-                    if (isAudioFile(f)) {
-                        void createAudioFileNode(f, offsetPos);
-                    } else if (f.type.startsWith("video/")) {
-                        void createVideoFileNode(f, offsetPos);
-                    } else {
-                        void createImageFileNode(f, offsetPos);
-                    }
+                    createByFile(files[i], { x: basePosition.x + i * STAGGER, y: basePosition.y + i * STAGGER });
                 }
             }
 
             uploadTargetRef.current = null;
             event.target.value = "";
         },
-        [createAudioFileNode, createImageFileNode, createVideoFileNode, screenToCanvas, size.height, size.width],
+        [applyDocumentToTextNode, createAudioFileNode, createDocumentTextNode, createImageFileNode, createVideoFileNode, screenToCanvas, size.height, size.width],
     );
 
     const handleDrop = useCallback(
         (event: ReactDragEvent<HTMLDivElement>) => {
             event.preventDefault();
-            const files = Array.from(event.dataTransfer.files).filter((item) => item.type.startsWith("image/") || item.type.startsWith("video/") || isAudioFile(item));
-            if (!files.length) return;
+            const files = Array.from(event.dataTransfer.files).filter((item) => item.type.startsWith("image/") || item.type.startsWith("video/") || isAudioFile(item) || isDocumentFile(item));
+            if (!files.length) {
+                const plainText = event.dataTransfer.getData("text/plain")?.trim();
+                if (plainText) {
+                    const pos = screenToCanvas(event.clientX, event.clientY);
+                    const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Text];
+                    const node = {
+                        ...createCanvasNode(CanvasNodeType.Text, pos, { content: plainText, status: NODE_STATUS_SUCCESS, fontSize: 14 }),
+                        title: plainText.slice(0, 32) || t("canvas.projectPage.clipboardText"),
+                        position: { x: pos.x - spec.width / 2, y: pos.y - spec.height / 2 },
+                    };
+                    setNodes((prev) => [...prev, node]);
+                    setSelectedNodeIds(new Set([node.id]));
+                    setSelectedConnectionId(null);
+                    setDialogNodeId(node.id);
+                }
+                return;
+            }
 
             const basePos = screenToCanvas(event.clientX, event.clientY);
             const STAGGER = 40;
             for (let i = 0; i < files.length; i++) {
                 const pos = { x: basePos.x + i * STAGGER, y: basePos.y + i * STAGGER };
                 const f = files[i];
-                if (isAudioFile(f)) {
-                    void createAudioFileNode(f, pos);
-                } else if (f.type.startsWith("video/")) {
-                    void createVideoFileNode(f, pos);
-                } else {
-                    void createImageFileNode(f, pos);
-                }
+                if (isDocumentFile(f)) void createDocumentTextNode(f, pos);
+                else if (isAudioFile(f)) void createAudioFileNode(f, pos);
+                else if (f.type.startsWith("video/")) void createVideoFileNode(f, pos);
+                else void createImageFileNode(f, pos);
             }
         },
-        [createAudioFileNode, createImageFileNode, createVideoFileNode, screenToCanvas],
+        [createAudioFileNode, createDocumentTextNode, createImageFileNode, createVideoFileNode, screenToCanvas, t],
     );
 
     const startTitleEditing = useCallback(() => {
@@ -3933,7 +3991,7 @@ function AtelierCanvasPage() {
                     />
                 ) : null}
 
-                <input ref={imageInputRef} type="file" multiple accept="image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" className="hidden" onChange={handleImageInputChange} />
+                <input ref={imageInputRef} type="file" multiple accept="image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav,text/*,.txt,.md,.markdown,.csv,.json,.docx,.pdf,.rtf,.html,.xml,.yaml,.yml" className="hidden" onChange={handleImageInputChange} />
 
                 <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} />
 
