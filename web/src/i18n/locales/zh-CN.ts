@@ -156,7 +156,7 @@ export default {
             formDataHeader: "不要手动设 Content-Type，交给浏览器带 boundary",
             imageGemini: "Gemini 文生图 / 图生图：都走 generateContent，参考图放进 parts 的 inline_data。",
             availableImageGemini: "可用：prompt、images(dataURL[])、model、baseUrl、apiKey",
-            videoOpenai: "视频（脚本内部自行轮询）。可用：prompt、images(dataURL[])、params{seconds,size,resolution,ratio}",
+            videoOpenai: "视频（脚本内部自行轮询）。请使用 params.ratio（如 16:9），不要把 1280x720 这类像素尺寸当作 ratio。可用：prompt、images、params{seconds,duration,resolution,ratio,size}",
             videoGemini: "Gemini(Veo) 视频：predictLongRunning 提交，轮询 operation 拿视频 URI。",
             availableVideoGemini: "可用：prompt、images(dataURL[])、params、model、baseUrl、apiKey",
             geminiNoVideoUri: "Gemini 未返回视频 URI",

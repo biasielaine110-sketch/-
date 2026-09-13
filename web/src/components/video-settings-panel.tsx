@@ -12,11 +12,11 @@ const resolutionOptions = [
 ];
 
 const sizeOptions = [
-    { value: "1280x720", labelKey: "landscape", width: 1280, height: 720 },
-    { value: "720x1280", labelKey: "portrait", width: 720, height: 1280 },
-    { value: "1024x1024", labelKey: "square", width: 1024, height: 1024 },
-    { value: "1792x1024", labelKey: "widescreen", width: 1792, height: 1024 },
-    { value: "1024x1792", labelKey: "tall", width: 1024, height: 1792 },
+    { value: "16:9", labelKey: "landscape", width: 1280, height: 720 },
+    { value: "9:16", labelKey: "portrait", width: 720, height: 1280 },
+    { value: "1:1", labelKey: "square", width: 1024, height: 1024 },
+    { value: "21:9", labelKey: "widescreen", width: 1792, height: 768 },
+    { value: "3:4", labelKey: "tall", width: 768, height: 1024 },
     { value: "auto", labelKey: "auto", width: 0, height: 0 },
 ];
 
@@ -61,9 +61,9 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.size")} color={theme.node.muted}>
                     <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
-                        <DimensionInput prefix="W" value={dimensions.width} disabled={size === "auto"} theme={theme} onChange={(value) => updateDimension("width", value)} />
+                        <DimensionInput prefix="W" value={dimensions.width} disabled={size === "auto" || size.includes(":")} theme={theme} onChange={(value) => updateDimension("width", value)} />
                         <span className="text-lg opacity-45">↔</span>
-                        <DimensionInput prefix="H" value={dimensions.height} disabled={size === "auto"} theme={theme} onChange={(value) => updateDimension("height", value)} />
+                        <DimensionInput prefix="H" value={dimensions.height} disabled={size === "auto" || size.includes(":")} theme={theme} onChange={(value) => updateDimension("height", value)} />
                     </div>
                     <div className="grid grid-cols-3 gap-2.5">
                         {sizeOptions.map((item) => (
@@ -119,11 +119,27 @@ export function videoSecondsLabel(value: string) {
 
 export function normalizeVideoSizeValue(value: string) {
     if (value === "auto" || value === "adaptive") return "auto";
-    if (/^\d+x\d+$/i.test(value || "")) return value;
-    if (value === "1:1") return "1024x1024";
-    if (["9:16", "2:3", "3:4"].includes(value)) return "720x1280";
-    if (["16:9", "3:2", "4:3", "21:9"].includes(value)) return "1280x720";
-    return "1280x720";
+    if (/^\d+:\d+$/.test(value || "")) return value;
+    if (/^\d+x\d+$/i.test(value || "")) {
+        const match = value.match(/^(\d+)x(\d+)$/i);
+        if (!match) return "16:9";
+        const width = Number(match[1]);
+        const height = Number(match[2]);
+        const ratio = width / Math.max(1, height);
+        const presets = [
+            { value: "21:9", ratio: 21 / 9 },
+            { value: "16:9", ratio: 16 / 9 },
+            { value: "4:3", ratio: 4 / 3 },
+            { value: "1:1", ratio: 1 },
+            { value: "3:4", ratio: 3 / 4 },
+            { value: "9:16", ratio: 9 / 16 },
+        ];
+        return presets.reduce((best, item) => (Math.abs(Math.log(ratio) - Math.log(item.ratio)) < Math.abs(Math.log(ratio) - Math.log(best.ratio)) ? item : best)).value;
+    }
+    if (value === "1:1") return "1:1";
+    if (["9:16", "2:3", "3:4"].includes(value)) return value === "2:3" ? "3:4" : value;
+    if (["16:9", "3:2", "4:3", "21:9"].includes(value)) return value === "3:2" ? "16:9" : value;
+    return "16:9";
 }
 
 export function normalizeVideoResolutionValue(value: string) {
@@ -187,6 +203,13 @@ function SizePreview({ width, height, color }: { width: number; height: number; 
 
 function readSizeDimensions(size: string) {
     if (size === "auto") return { width: 0, height: 0 };
-    const match = size.match(/^(\d+)x(\d+)$/);
+    const ratioMatch = size.match(/^(\d+):(\d+)$/);
+    if (ratioMatch) {
+        const widthRatio = Number(ratioMatch[1]);
+        const heightRatio = Number(ratioMatch[2]);
+        if (widthRatio >= heightRatio) return { width: 1280, height: Math.max(1, Math.round((1280 * heightRatio) / widthRatio)) };
+        return { width: Math.max(1, Math.round((1280 * widthRatio) / heightRatio)), height: 1280 };
+    }
+    const match = size.match(/^(\d+)x(\d+)$/i);
     return { width: Number(match?.[1]) || 1280, height: Number(match?.[2]) || 720 };
 }

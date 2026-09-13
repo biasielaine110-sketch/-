@@ -156,7 +156,7 @@ export default {
             formDataHeader: "Do not set Content-Type manually; let the browser add the boundary",
             imageGemini: "Gemini image generation and editing both use generateContent, with references in parts.inline_data.",
             availableImageGemini: "Available: prompt, images(dataURL[]), model, baseUrl, apiKey",
-            videoOpenai: "Video with polling handled inside the script. Available: prompt, images(dataURL[]), params{seconds,size,resolution,ratio}",
+            videoOpenai: "Video with polling inside the script. Use params.ratio (e.g. 16:9); do not send pixel sizes like 1280x720 as ratio. Available: prompt, images, params{seconds,duration,resolution,ratio,size}",
             videoGemini: "Gemini (Veo) video: submit with predictLongRunning and poll the operation for the video URI.",
             availableVideoGemini: "Available: prompt, images(dataURL[]), params, model, baseUrl, apiKey",
             geminiNoVideoUri: "Gemini did not return a video URI",

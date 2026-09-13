@@ -70,6 +70,13 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
     if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
     if (!config.apiKey.trim()) throw new Error(apiText("apiKeyRequired"));
     const refs = await Promise.all(references.map((image) => imageToDataUrl(image)));
+    const ratio = normalizeVideoRatio(config.size);
+    const pixelSize = normalizeVideoSize(config.size);
+    const seconds = isSeedanceVideoModel(model) ? normalizeSeedanceSeconds(config.videoSeconds) : normalizeVideoSeconds(config.videoSeconds);
+    const resolution = normalizeVideoResolution(config.vquality);
+    // Seedance / Doubao scripts often bind `size` into the API `ratio` field by mistake.
+    // For those models, pass the ratio enum in both `ratio` and `size`.
+    const seedance = isSeedanceVideoModel(model);
     const result = videoPluginResult(
         await runModelPlugin({
             capability: "video",
@@ -78,10 +85,13 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
             prompt,
             images: refs,
             params: {
-                seconds: normalizeVideoSeconds(config.videoSeconds),
-                size: normalizeVideoSize(config.size),
-                resolution: normalizeVideoResolution(config.vquality),
-                ratio: normalizeVideoRatio(config.size),
+                seconds,
+                duration: Number(seconds),
+                size: seedance ? ratio : pixelSize,
+                pixelSize,
+                resolution,
+                ratio,
+                aspect_ratio: ratio,
                 generateAudio: boolConfig(config.videoGenerateAudio, true),
                 watermark: boolConfig(config.videoWatermark, false),
             },
@@ -119,12 +129,25 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     const body = new FormData();
+    const ratio = normalizeVideoRatio(config.size);
+    const seedance = isSeedanceVideoModel(model);
+    const seconds = seedance ? normalizeSeedanceSeconds(config.videoSeconds) : normalizeVideoSeconds(config.videoSeconds);
     body.append("model", modelOptionName(model));
     body.append("prompt", prompt);
-    body.append("seconds", normalizeVideoSeconds(config.videoSeconds));
-    if (normalizeVideoSize(config.size)) body.append("size", normalizeVideoSize(config.size)!);
+    body.append("seconds", seconds);
+    body.append("duration", seconds);
+    body.append("ratio", ratio);
+    body.append("aspect_ratio", ratio);
+    body.append("resolution", normalizeVideoResolution(config.vquality));
     body.append("resolution_name", normalizeVideoResolution(config.vquality));
     body.append("preset", "normal");
+    // Seedance rejects WxH values (e.g. 1280x720 / 2048x1152) when relays map `size` → `ratio`.
+    if (!seedance) {
+        const size = normalizeVideoSize(config.size);
+        if (size) body.append("size", size);
+    } else {
+        body.append("size", ratio);
+    }
     const files = await Promise.all(references.slice(0, 7).map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
     files.forEach((file) => body.append("input_reference[]", file));
     try {
@@ -176,6 +199,17 @@ function normalizeVideoSeconds(value: string) {
     return String(Math.max(1, Math.min(20, seconds)));
 }
 
+/** Seedance Mini T2V accepts duration 4–15 only. */
+function normalizeSeedanceSeconds(value: string) {
+    const seconds = Math.floor(Number(value) || 5);
+    return String(Math.max(4, Math.min(15, seconds)));
+}
+
+function isSeedanceVideoModel(model: string) {
+    const value = modelOptionName(model).toLowerCase();
+    return /seedance|doubao-seedance/.test(value);
+}
+
 function normalizeVideoSize(value: string) {
     if (value === "auto" || value === "adaptive") return null;
     const size = value || "1280x720";
@@ -188,18 +222,25 @@ function normalizeVideoSize(value: string) {
 }
 
 function normalizeVideoResolution(value: string) {
-    if (value === "low") return "480p";
-    if (value === "auto" || value === "high" || value === "medium") return "720p";
+    if (value === "low" || value === "480") return "480p";
+    if (value === "auto" || value === "high" || value === "medium" || value === "720") return "720p";
+    // Mini does not support 1080p / 4k — clamp upward qualities down to 720p for Seedance callers.
     const resolution = value.replace(/p$/i, "") || "720";
+    const numeric = Number(resolution);
+    if (Number.isFinite(numeric) && numeric > 720) return "720p";
     return `${resolution}p`;
 }
 
-/** Map UI size (WxH / ratio / auto) to Seedance-style ratio enums used by Doubao video plugins. */
+/**
+ * Map UI size (WxH / ratio / auto) to Seedance-compatible ratio enums.
+ * Prefer fixed ratios: some T2V relays reject `adaptive` even though docs list it.
+ */
 export function normalizeVideoRatio(value: string) {
     const raw = (value || "").trim();
-    if (!raw || raw === "auto" || raw === "adaptive") return "adaptive";
-    const allowed = new Set(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"]);
+    if (!raw || raw === "auto" || raw === "adaptive") return "16:9";
+    const allowed = new Set(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]);
     if (allowed.has(raw)) return raw;
+    if (raw === "adaptive") return "16:9";
 
     const ratioMatch = raw.match(/^(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)$/);
     if (ratioMatch) {

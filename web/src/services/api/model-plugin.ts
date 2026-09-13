@@ -252,11 +252,22 @@ return (data.candidates || [])
             label: i18n.t("modelPlugin.templates.openai"),
             script: `// ${i18n.t("modelPlugin.templates.videoOpenai")}
 const headers = { "Content-Type": "application/json", Authorization: \`Bearer \${apiKey}\` };
+const ratio = params.ratio || "16:9";
+const seconds = Number(params.seconds) || 5;
 const task = await request({
   method: "post",
   url: \`\${baseUrl}/v1/videos\`,
   headers,
-  data: { model, prompt, seconds: params.seconds },
+  data: {
+    model,
+    prompt,
+    seconds,
+    duration: seconds,
+    ratio,
+    aspect_ratio: ratio,
+    size: ratio,
+    resolution: params.resolution || "720p",
+  },
 });
 return await poll(
   () => request({ method: "get", url: \`\${baseUrl}/v1/videos/\${task.id}\`, headers }),
@@ -276,7 +287,7 @@ const op = await request({
   method: "post",
   url: \`\${baseUrl}/v1beta/models/\${model}:predictLongRunning\`,
   headers,
-  data: { instances: [instance], parameters: { aspectRatio: params.ratio } },
+  data: { instances: [instance], parameters: { aspectRatio: params.ratio || "16:9" } },
 });
 return await poll(
   () => request({ method: "get", url: \`\${baseUrl}/v1beta/\${op.name}\`, headers }),
