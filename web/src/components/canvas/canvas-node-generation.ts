@@ -158,7 +158,7 @@ function generationLabel(type: NodeGenerationInput["type"], index: number) {
 }
 
 function readReferenceImage(node: CanvasNodeData): ReferenceImage | null {
-    if (node.type !== CanvasNodeType.Image || !node.metadata?.content) return null;
+    if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) || !node.metadata?.content) return null;
     return {
         id: node.id,
         name: `${node.title || node.id}.png`,

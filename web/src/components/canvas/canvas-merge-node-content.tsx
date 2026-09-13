@@ -1,4 +1,4 @@
-import { useMemo, useRef, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { Button, Segmented } from "antd";
 import { Columns2, Grid2x2, ImagePlus, LoaderCircle, Rows2, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -15,21 +15,25 @@ type CanvasMergeNodeContentProps = {
     isRunning: boolean;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
     onMerge: (nodeId: string) => void;
+    onNodeSizeChange?: (nodeId: string, width: number, height: number) => void;
 };
 
-export function CanvasMergeNodeContent({ node, inputs, isRunning, onConfigChange, onMerge }: CanvasMergeNodeContentProps) {
+const CHROME_HEIGHT = 196;
+const PREVIEW_MAX_WIDTH = 560;
+const PREVIEW_MAX_HEIGHT = 480;
+const PREVIEW_MIN_WIDTH = 240;
+const NODE_MIN_WIDTH = 360;
+const NODE_MAX_WIDTH = 720;
+const NODE_MIN_HEIGHT = 360;
+const NODE_MAX_HEIGHT = 920;
+
+export function CanvasMergeNodeContent({ node, inputs, isRunning, onConfigChange, onMerge, onNodeSizeChange }: CanvasMergeNodeContentProps) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const panRef = useRef<{
-        nodeId: string;
-        pointerId: number;
-        startX: number;
-        startY: number;
-        originX: number;
-        originY: number;
-        cellWidth: number;
-        cellHeight: number;
-    } | null>(null);
+    const [naturalSizes, setNaturalSizes] = useState<Record<string, { width: number; height: number }>>({});
+    const [dragSlotIndex, setDragSlotIndex] = useState<number | null>(null);
+    const [dropSlotIndex, setDropSlotIndex] = useState<number | null>(null);
+    const lastAutoSizeRef = useRef({ width: 0, height: 0 });
 
     const imageInputs = useMemo(() => inputs.filter((input) => input.type === "image" && input.image?.dataUrl), [inputs]);
     const inputById = useMemo(() => new Map(imageInputs.map((input) => [input.nodeId, input])), [imageInputs]);
@@ -37,7 +41,6 @@ export function CanvasMergeNodeContent({ node, inputs, isRunning, onConfigChange
     const rows = Math.max(1, node.metadata?.mergeRows || 2);
     const columns = Math.max(1, node.metadata?.mergeColumns || 2);
     const capacity = rows * columns;
-    const offsets = node.metadata?.mergeOffsets || {};
 
     const slots = useMemo(() => {
         const preferred = (node.metadata?.mergeSlotIds || []).slice(0, capacity);
@@ -63,57 +66,133 @@ export function CanvasMergeNodeContent({ node, inputs, isRunning, onConfigChange
     const filledCount = slots.filter(Boolean).length;
     const canMerge = filledCount >= 2 && !isRunning;
 
+    useEffect(() => {
+        let cancelled = false;
+        const missing = imageInputs.filter((input) => input.image?.dataUrl && !naturalSizes[input.nodeId]);
+        if (!missing.length) return;
+        void Promise.all(
+            missing.map(
+                (input) =>
+                    new Promise<{ id: string; width: number; height: number }>((resolve) => {
+                        const image = new Image();
+                        image.onload = () => resolve({ id: input.nodeId, width: image.naturalWidth || 1, height: image.naturalHeight || 1 });
+                        image.onerror = () => resolve({ id: input.nodeId, width: 1, height: 1 });
+                        image.src = input.image!.dataUrl;
+                    }),
+            ),
+        ).then((results) => {
+            if (cancelled) return;
+            setNaturalSizes((current) => {
+                const next = { ...current };
+                results.forEach((item) => {
+                    next[item.id] = { width: item.width, height: item.height };
+                });
+                return next;
+            });
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [imageInputs, naturalSizes]);
+
+    const cellAspect = useMemo(() => {
+        const sized = slots.map((id) => (id ? naturalSizes[id] : null)).filter((item): item is { width: number; height: number } => Boolean(item && item.width > 0 && item.height > 0));
+        if (!sized.length) return 1;
+        const maxW = Math.max(...sized.map((item) => item.width));
+        const maxH = Math.max(...sized.map((item) => item.height));
+        return maxW / Math.max(1, maxH);
+    }, [naturalSizes, slots]);
+
+    const previewAspectValue = useMemo(() => {
+        if (node.metadata?.mergeAspectRatio && node.metadata.mergeAspectRatio !== "original") {
+            const [w, h] = node.metadata.mergeAspectRatio.split(":").map(Number);
+            if (w > 0 && h > 0) return w / h;
+        }
+        return (columns * cellAspect) / Math.max(1, rows);
+    }, [cellAspect, columns, node.metadata?.mergeAspectRatio, rows]);
+
+    useEffect(() => {
+        if (!onNodeSizeChange) return;
+        let previewWidth = Math.min(PREVIEW_MAX_WIDTH, Math.max(PREVIEW_MIN_WIDTH, node.width - 24));
+        let previewHeight = previewWidth / Math.max(0.2, previewAspectValue);
+        if (previewHeight > PREVIEW_MAX_HEIGHT) {
+            previewHeight = PREVIEW_MAX_HEIGHT;
+            previewWidth = previewHeight * previewAspectValue;
+        }
+        if (previewWidth < PREVIEW_MIN_WIDTH) {
+            previewWidth = PREVIEW_MIN_WIDTH;
+            previewHeight = previewWidth / Math.max(0.2, previewAspectValue);
+        }
+        const nextWidth = Math.round(clamp(previewWidth + 24, NODE_MIN_WIDTH, NODE_MAX_WIDTH));
+        const nextHeight = Math.round(clamp(previewHeight + CHROME_HEIGHT, NODE_MIN_HEIGHT, NODE_MAX_HEIGHT));
+        if (Math.abs(nextWidth - lastAutoSizeRef.current.width) < 10 && Math.abs(nextHeight - lastAutoSizeRef.current.height) < 10) return;
+        if (Math.abs(nextWidth - node.width) < 10 && Math.abs(nextHeight - node.height) < 10) {
+            lastAutoSizeRef.current = { width: nextWidth, height: nextHeight };
+            return;
+        }
+        lastAutoSizeRef.current = { width: nextWidth, height: nextHeight };
+        onNodeSizeChange(node.id, nextWidth, nextHeight);
+    }, [node.height, node.id, node.width, onNodeSizeChange, previewAspectValue, filledCount, rows, columns]);
+
     const patch = (next: Partial<CanvasNodeMetadata>) => onConfigChange(node.id, next);
+
+    const persistSlots = (nextSlots: Array<string | null>) => {
+        patch({ mergeSlotIds: nextSlots });
+    };
 
     const applyOrientation = (next: MergeOrientation) => {
         const layout = resolveMergeLayout(Math.max(filledCount || imageInputs.length || 4, 2), next);
-        const remapped = remapSlotIds(slots, layout.rows * layout.columns);
-        patch({ mergeOrientation: next, mergeRows: layout.rows, mergeColumns: layout.columns, mergeSlotIds: remapped });
+        patch({ mergeOrientation: next, mergeRows: layout.rows, mergeColumns: layout.columns, mergeSlotIds: remapSlotIds(slots, layout.rows * layout.columns) });
     };
 
     const setLayoutSize = (nextRows: number, nextColumns: number) => {
         const safeRows = clamp(nextRows, 1, 12);
         const safeColumns = clamp(nextColumns, 1, 12);
-        patch({ mergeOrientation: "grid", mergeRows: safeRows, mergeColumns: safeColumns, mergeSlotIds: remapSlotIds(slots, safeRows * safeColumns) });
+        const remapped = remapSlotIds(slots, safeRows * safeColumns);
+        patch({ mergeOrientation: "grid", mergeRows: safeRows, mergeColumns: safeColumns, mergeSlotIds: remapped });
     };
 
-    const beginPan = (event: ReactPointerEvent<HTMLDivElement>, sourceId: string) => {
-        if (event.button !== 0) return;
-        const rect = event.currentTarget.getBoundingClientRect();
-        if (rect.width < 8 || rect.height < 8) return;
+    const swapSlots = (from: number, to: number) => {
+        if (from === to || from < 0 || to < 0 || from >= slots.length || to >= slots.length) return;
+        const next = [...slots];
+        const temp = next[from];
+        next[from] = next[to];
+        next[to] = temp;
+        persistSlots(next);
+    };
+
+    const handleDragStart = (event: ReactDragEvent<HTMLDivElement>, index: number, sourceId: string) => {
+        event.stopPropagation();
+        setDragSlotIndex(index);
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/merge-slot", String(index));
+        event.dataTransfer.setData("text/merge-source", sourceId);
+    };
+
+    const handleDragOver = (event: ReactDragEvent<HTMLDivElement>, index: number) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        if (dropSlotIndex !== index) setDropSlotIndex(index);
+    };
+
+    const handleDrop = (event: ReactDragEvent<HTMLDivElement>, index: number) => {
         event.preventDefault();
         event.stopPropagation();
-        event.currentTarget.setPointerCapture(event.pointerId);
-        const current = offsets[sourceId] || { x: 0.5, y: 0.5 };
-        panRef.current = {
-            nodeId: sourceId,
-            pointerId: event.pointerId,
-            startX: event.clientX,
-            startY: event.clientY,
-            originX: current.x,
-            originY: current.y,
-            cellWidth: rect.width,
-            cellHeight: rect.height,
-        };
+        const from = Number(event.dataTransfer.getData("text/merge-slot"));
+        if (Number.isFinite(from)) swapSlots(from, index);
+        setDragSlotIndex(null);
+        setDropSlotIndex(null);
     };
 
-    const movePan = (event: ReactPointerEvent<HTMLDivElement>) => {
-        const pan = panRef.current;
-        if (!pan || pan.pointerId !== event.pointerId) return;
-        event.stopPropagation();
-        const nextX = clamp01(pan.originX - (event.clientX - pan.startX) / pan.cellWidth);
-        const nextY = clamp01(pan.originY - (event.clientY - pan.startY) / pan.cellHeight);
-        patch({ mergeOffsets: { ...offsets, [pan.nodeId]: { x: nextX, y: nextY } } });
+    const handleDragEnd = () => {
+        setDragSlotIndex(null);
+        setDropSlotIndex(null);
     };
 
-    const endPan = (event: ReactPointerEvent<HTMLDivElement>) => {
-        if (panRef.current?.pointerId === event.pointerId) panRef.current = null;
-    };
-
-    const previewAspect =
+    const previewAspectCss =
         node.metadata?.mergeAspectRatio && node.metadata.mergeAspectRatio !== "original"
             ? node.metadata.mergeAspectRatio.replace(":", " / ")
-            : `${columns} / ${rows}`;
+            : `${previewAspectValue}`;
 
     return (
         <div className="flex h-full w-full cursor-move flex-col gap-2 px-3 pb-3 pt-7 text-sm" style={{ color: theme.node.text }} data-canvas-no-zoom onWheel={(event) => event.stopPropagation()}>
@@ -125,7 +204,7 @@ export function CanvasMergeNodeContent({ node, inputs, isRunning, onConfigChange
                 <span className="shrink-0 text-[11px] opacity-50">{t("canvas.editors.pieces", { count: filledCount })}</span>
             </div>
 
-            <div className="cursor-default" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            <div className="flex min-h-0 flex-1 cursor-default flex-col" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
                 <div className="mb-2 grid grid-cols-3 gap-1">
                     <Button size="small" type={orientation === "horizontal" ? "primary" : "default"} icon={<Columns2 className="size-3.5" />} onClick={() => applyOrientation("horizontal")} />
                     <Button size="small" type={orientation === "vertical" ? "primary" : "default"} icon={<Rows2 className="size-3.5" />} onClick={() => applyOrientation("vertical")} />
@@ -174,31 +253,34 @@ export function CanvasMergeNodeContent({ node, inputs, isRunning, onConfigChange
                     />
                 </div>
 
-                <div className="w-full overflow-hidden rounded-xl border" style={{ aspectRatio: previewAspect, borderColor: theme.node.stroke, background: theme.node.fill }}>
+                <div className="min-h-0 w-full flex-1 overflow-hidden rounded-xl border" style={{ aspectRatio: previewAspectCss, borderColor: theme.node.stroke, background: theme.node.fill }}>
                     <div className="grid h-full w-full gap-1 p-1" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))` }}>
                         {slots.map((sourceId, index) => {
                             const input = sourceId ? inputById.get(sourceId) : null;
-                            const focus = sourceId ? offsets[sourceId] || { x: 0.5, y: 0.5 } : { x: 0.5, y: 0.5 };
                             const row = Math.floor(index / columns) + 1;
                             const column = (index % columns) + 1;
+                            const isDragging = dragSlotIndex === index;
+                            const isDropTarget = dropSlotIndex === index && dragSlotIndex != null && dragSlotIndex !== index;
                             return (
-                                <div key={`merge-slot-${index}`} className="relative overflow-hidden rounded-md border" style={{ borderColor: theme.node.stroke }}>
+                                <div
+                                    key={`merge-slot-${index}`}
+                                    className={`relative overflow-hidden rounded-md border transition ${isDropTarget ? "ring-2 ring-sky-500" : ""} ${isDragging ? "opacity-55" : ""}`}
+                                    style={{ borderColor: isDropTarget ? "#0ea5e9" : theme.node.stroke }}
+                                    onDragOver={(event) => handleDragOver(event, index)}
+                                    onDragLeave={() => {
+                                        if (dropSlotIndex === index) setDropSlotIndex(null);
+                                    }}
+                                    onDrop={(event) => handleDrop(event, index)}
+                                >
                                     {input?.image?.dataUrl ? (
                                         <div
-                                            className="absolute inset-0 touch-none"
+                                            className="absolute inset-0"
                                             style={{ cursor: "grab" }}
-                                            onPointerDown={(event) => beginPan(event, sourceId!)}
-                                            onPointerMove={movePan}
-                                            onPointerUp={endPan}
-                                            onPointerCancel={endPan}
+                                            draggable
+                                            onDragStart={(event) => handleDragStart(event, index, sourceId!)}
+                                            onDragEnd={handleDragEnd}
                                         >
-                                            <img
-                                                src={input.image.dataUrl}
-                                                alt={input.title}
-                                                draggable={false}
-                                                className="pointer-events-none h-full w-full select-none object-cover"
-                                                style={{ objectPosition: `${focus.x * 100}% ${focus.y * 100}%` }}
-                                            />
+                                            <img src={input.image.dataUrl} alt={input.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" />
                                         </div>
                                     ) : (
                                         <div className="flex h-full min-h-[48px] w-full flex-col items-center justify-center gap-0.5 text-[10px] opacity-45">
@@ -233,9 +315,5 @@ function remapSlotIds(slots: Array<string | null>, capacity: number) {
 }
 
 function clamp(value: number, min: number, max: number) {
-    return Math.max(min, Math.min(max, Math.floor(value)));
-}
-
-function clamp01(value: number) {
-    return Math.max(0, Math.min(1, value));
+    return Math.max(min, Math.min(max, value));
 }

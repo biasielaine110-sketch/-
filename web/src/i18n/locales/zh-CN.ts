@@ -342,7 +342,7 @@ export default {
         },
         mergeNode: {
             empty: "将图片节点连到左侧圆点",
-            hint: "用连线接入图片 · 格子内拖动调整取景 · 至少 2 张后可合并",
+            hint: "连线接入图片后，拖动格子里的图片可互换位置；窗口会按图片比例自动适配以完整显示",
         },
         toolbar: {
             select: "选择",
@@ -463,6 +463,9 @@ export default {
             assistant: "助手",
             contextLabel: "参考上下文",
             linkedInputLabel: "链接文本（可直接发送）",
+            linkedMediaLabel: "链接媒体",
+            linkedVideoNote: "已附带 {{count}} 个链接视频的画面帧（{{titles}}）供理解内容。",
+            defaultMediaPrompt: "请结合链接的图片或视频内容进行说明。",
             selectModel: "选择模型",
             selectTextModel: "对话模型",
             selectImageModel: "生图模型",

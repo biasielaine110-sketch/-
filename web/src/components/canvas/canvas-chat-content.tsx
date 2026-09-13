@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { Check, Copy, Image as ImageIcon, LoaderCircle, MessageSquareText, SendHorizontal } from "lucide-react";
+import { Check, Copy, Image as ImageIcon, LoaderCircle, MessageSquareText, Minus, Plus, SendHorizontal, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -13,6 +13,10 @@ import { resolveChatSendOptions, type ChatSendOptions } from "@/lib/canvas/canva
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasAssistantImage, CanvasAssistantMessage, CanvasNodeData } from "@/types/canvas";
 
+const MIN_CHAT_FONT_SIZE = 10;
+const MAX_CHAT_FONT_SIZE = 48;
+const CHAT_FONT_SIZE_STEP = 2;
+
 type CanvasChatContentProps = {
     node: CanvasNodeData;
     theme: CanvasTheme;
@@ -23,6 +27,7 @@ type CanvasChatContentProps = {
     onImageModelChange?: (nodeId: string, model: string) => void;
     onModesChange?: (nodeId: string, options: ChatSendOptions) => void;
     onInsertImage?: (image: CanvasAssistantImage) => void;
+    onFontSizeChange?: (nodeId: string, fontSize: number) => void;
 };
 
 export function CanvasChatContent({
@@ -35,6 +40,7 @@ export function CanvasChatContent({
     onImageModelChange,
     onModesChange,
     onInsertImage,
+    onFontSizeChange,
 }: CanvasChatContentProps) {
     const { t } = useTranslation();
     const globalConfig = useConfigStore((state) => state.config);
@@ -58,10 +64,20 @@ export function CanvasChatContent({
     );
     const seededContent = (node.metadata?.content || "").trim();
     const contextText = connectedText || seededContent;
+    const activeReferences = mentionReferences.filter((reference) => reference.active);
+    const linkedMedia = useMemo(() => activeReferences.filter((reference) => reference.kind === "image" || reference.kind === "video"), [activeReferences]);
     const textModel = resolveModelForCapability(globalConfig, node.metadata?.model, "text");
     const imageModel = resolveModelForCapability(globalConfig, node.metadata?.imageModel, "image");
-    const canSend = Boolean(draft.trim() || contextText) && !loading && (textEnabled || imageEnabled);
-    const activeReferences = mentionReferences.filter((reference) => reference.active);
+    const canSend = Boolean(draft.trim() || contextText || linkedMedia.length) && !loading && (textEnabled || imageEnabled);
+    const fontSize = Math.max(MIN_CHAT_FONT_SIZE, Math.min(MAX_CHAT_FONT_SIZE, node.metadata?.fontSize || 14));
+    const bodyTextStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.55)}px` } as const;
+    const metaTextStyle = { fontSize: `${Math.max(10, Math.round(fontSize * 0.75))}px` } as const;
+
+    const adjustFontSize = (delta: number) => {
+        const next = Math.max(MIN_CHAT_FONT_SIZE, Math.min(MAX_CHAT_FONT_SIZE, fontSize + delta));
+        if (next === fontSize) return;
+        onFontSizeChange?.(node.id, next);
+    };
 
     const placeholder = useMemo(() => {
         if (textEnabled && imageEnabled) return t("canvas.chat.placeholderBoth");
@@ -100,7 +116,7 @@ export function CanvasChatContent({
 
     const submit = () => {
         const text = draft.trim() || contextText;
-        if (!text || loading || (!textEnabled && !imageEnabled)) return;
+        if ((!text && !linkedMedia.length) || loading || (!textEnabled && !imageEnabled)) return;
         setDraft("");
         onSend(node.id, text, sendOptions);
     };
@@ -184,24 +200,47 @@ export function CanvasChatContent({
                 onMouseDown={stopIfInteractive}
                 onPointerDown={stopIfInteractive}
             >
-                {contextText ? (
-                    <div
-                        data-canvas-selectable-text
-                        className="cursor-text select-text rounded-xl border px-3 py-2 text-[11px] leading-relaxed opacity-80"
-                        style={{ background: theme.node.panel, borderColor: theme.node.stroke }}
-                    >
-                        <div className="mb-1 text-[10px] font-semibold uppercase opacity-50">{t("canvas.chat.linkedInputLabel")}</div>
-                        <div className="line-clamp-4 whitespace-pre-wrap break-words">{contextText}</div>
+                {contextText || linkedMedia.length ? (
+                    <div className="space-y-2 rounded-xl border px-3 py-2 leading-relaxed opacity-80" style={{ ...bodyTextStyle, background: theme.node.panel, borderColor: theme.node.stroke }}>
+                        {contextText ? (
+                            <div data-canvas-selectable-text className="cursor-text select-text">
+                                <div className="mb-1 font-semibold uppercase opacity-50" style={metaTextStyle}>{t("canvas.chat.linkedInputLabel")}</div>
+                                <div className="line-clamp-4 whitespace-pre-wrap break-words">{contextText}</div>
+                            </div>
+                        ) : null}
+                        {linkedMedia.length ? (
+                            <div>
+                                <div className="mb-1.5 text-[10px] font-semibold uppercase opacity-50">{t("canvas.chat.linkedMediaLabel")}</div>
+                                <div className="flex flex-wrap gap-1.5">
+                                    {linkedMedia.map((reference) => (
+                                        <div key={reference.id} className="relative h-14 w-14 overflow-hidden rounded-lg border" style={{ borderColor: theme.node.stroke }} title={reference.title}>
+                                            {reference.kind === "image" && reference.previewUrl ? (
+                                                <img src={reference.previewUrl} alt={reference.title} className="h-full w-full object-cover" />
+                                            ) : reference.kind === "video" && reference.previewUrl ? (
+                                                <video src={reference.previewUrl} muted playsInline preload="metadata" className="h-full w-full object-cover" />
+                                            ) : (
+                                                <div className="flex h-full w-full items-center justify-center opacity-50">{reference.kind === "video" ? <Video className="size-4" /> : <ImageIcon className="size-4" />}</div>
+                                            )}
+                                            {reference.kind === "video" ? (
+                                                <span className="absolute bottom-0.5 right-0.5 rounded bg-black/65 px-1 text-[9px] text-white">
+                                                    <Video className="inline size-2.5" />
+                                                </span>
+                                            ) : null}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ) : null}
                     </div>
                 ) : null}
 
                 {messages.length === 0 ? (
-                    <div className="flex h-full min-h-32 flex-col items-center justify-center gap-2 px-4 text-center text-xs opacity-55">
+                    <div className="flex h-full min-h-32 flex-col items-center justify-center gap-2 px-4 text-center opacity-55" style={bodyTextStyle}>
                         <MessageSquareText className="size-6 opacity-40" />
-                        <span>{contextText ? t("canvas.chat.emptyWithLinked") : t("canvas.chat.empty")}</span>
+                        <span>{contextText || linkedMedia.length ? t("canvas.chat.emptyWithLinked") : t("canvas.chat.empty")}</span>
                     </div>
                 ) : (
-                    messages.map((message) => <ChatBubble key={message.id} message={message} theme={theme} onInsertImage={onInsertImage} />)
+                    messages.map((message) => <ChatBubble key={message.id} message={message} theme={theme} fontSize={fontSize} onInsertImage={onInsertImage} />)
                 )}
             </div>
 
@@ -212,6 +251,7 @@ export function CanvasChatContent({
                         {activeReferences.slice(0, 6).map((reference) => (
                             <span key={reference.id} className="inline-flex max-w-28 items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px]" style={{ borderColor: theme.node.stroke, background: theme.node.panel }} title={reference.title}>
                                 {reference.kind === "image" && reference.previewUrl ? <img src={reference.previewUrl} alt="" className="size-4 rounded object-cover" /> : null}
+                                {reference.kind === "video" ? <Video className="size-3.5 opacity-70" /> : null}
                                 <span className="truncate">{reference.label}</span>
                             </span>
                         ))}
@@ -221,6 +261,35 @@ export function CanvasChatContent({
                 <div className="mb-1.5 flex items-center gap-1">
                     <ModeToggle active={textEnabled} label={t("canvas.chat.modeText")} icon={<MessageSquareText className="size-3.5" />} theme={theme} onClick={toggleText} />
                     <ModeToggle active={imageEnabled} label={t("canvas.chat.modeImage")} icon={<ImageIcon className="size-3.5" />} theme={theme} onClick={toggleImage} />
+                    {onFontSizeChange ? (
+                        <div className="ml-auto inline-flex items-center gap-0.5 rounded-full border px-1 py-0.5" style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa` }}>
+                            <button
+                                type="button"
+                                className="grid size-6 place-items-center rounded-full opacity-80 transition hover:opacity-100 disabled:opacity-35"
+                                style={{ color: theme.node.text }}
+                                disabled={fontSize <= MIN_CHAT_FONT_SIZE}
+                                title={t("canvas.nodeToolbar.decreaseFont")}
+                                aria-label={t("canvas.nodeToolbar.decreaseFont")}
+                                onClick={() => adjustFontSize(-CHAT_FONT_SIZE_STEP)}
+                            >
+                                <Minus className="size-3" />
+                            </button>
+                            <span className="min-w-7 text-center text-[10px] font-medium tabular-nums opacity-70" style={{ color: theme.node.text }}>
+                                {fontSize}
+                            </span>
+                            <button
+                                type="button"
+                                className="grid size-6 place-items-center rounded-full opacity-80 transition hover:opacity-100 disabled:opacity-35"
+                                style={{ color: theme.node.text }}
+                                disabled={fontSize >= MAX_CHAT_FONT_SIZE}
+                                title={t("canvas.nodeToolbar.increaseFont")}
+                                aria-label={t("canvas.nodeToolbar.increaseFont")}
+                                onClick={() => adjustFontSize(CHAT_FONT_SIZE_STEP)}
+                            >
+                                <Plus className="size-3" />
+                            </button>
+                        </div>
+                    ) : null}
                 </div>
 
                 <div className="flex items-end gap-2 rounded-2xl border px-2 py-1.5" style={{ background: theme.node.fill, borderColor: theme.node.stroke }}>
@@ -236,8 +305,8 @@ export function CanvasChatContent({
                             references={mentionReferences}
                             onChange={setDraft}
                             onSubmit={submit}
-                            className="thin-scrollbar max-h-24 min-h-[44px] w-full cursor-text overflow-y-auto px-1 py-1 text-xs leading-5 outline-none"
-                            style={{ color: theme.node.text, background: "transparent" }}
+                            className="thin-scrollbar max-h-24 min-h-[44px] w-full cursor-text overflow-y-auto px-1 py-1 outline-none"
+                            style={{ ...bodyTextStyle, color: theme.node.text, background: "transparent" }}
                             placeholder={placeholder}
                         />
                     </div>
@@ -260,6 +329,8 @@ export function CanvasChatContent({
                 value={draft}
                 title={t("canvas.chat.editMessageTitle")}
                 placeholder={placeholder}
+                fontSize={fontSize}
+                onFontSizeChange={(next) => onFontSizeChange?.(node.id, next)}
                 onClose={() => setDraftEditorOpen(false)}
                 onSave={setDraft}
             />
@@ -286,7 +357,7 @@ function ModeToggle({ active, label, icon, theme, onClick }: { active: boolean; 
     );
 }
 
-function ChatBubble({ message, theme, onInsertImage }: { message: CanvasAssistantMessage; theme: CanvasTheme; onInsertImage?: (image: CanvasAssistantImage) => void }) {
+function ChatBubble({ message, theme, fontSize, onInsertImage }: { message: CanvasAssistantMessage; theme: CanvasTheme; fontSize: number; onInsertImage?: (image: CanvasAssistantImage) => void }) {
     const { t } = useTranslation();
     const { message: toast } = App.useApp();
     const [copied, setCopied] = useState(false);
@@ -294,6 +365,8 @@ function ChatBubble({ message, theme, onInsertImage }: { message: CanvasAssistan
     const isError = message.role === "error";
     const images = message.images || [];
     const text = (message.text || "").trim();
+    const bodyStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.55)}px` };
+    const metaStyle = { fontSize: `${Math.max(10, Math.round(fontSize * 0.75))}px` };
 
     const handleCopy = (event: ReactMouseEvent | ReactPointerEvent) => {
         event.stopPropagation();
@@ -309,14 +382,15 @@ function ChatBubble({ message, theme, onInsertImage }: { message: CanvasAssistan
         <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
             <div
                 data-canvas-selectable-text
-                className="relative max-w-[92%] cursor-text select-text rounded-2xl px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words"
+                className="relative max-w-[92%] cursor-text select-text rounded-2xl px-3 py-2 leading-relaxed whitespace-pre-wrap break-words"
                 style={{
+                    ...bodyStyle,
                     background: isError ? `${theme.node.activeStroke}22` : isUser ? theme.toolbar.activeBg : theme.node.panel,
                     color: isError ? theme.node.activeStroke : theme.node.text,
                     border: `1px solid ${isUser ? "transparent" : theme.node.stroke}`,
                 }}
             >
-                <div className="mb-1 text-[10px] font-semibold uppercase opacity-50">{isUser ? t("canvas.chat.you") : isError ? t("common.error") : t("canvas.chat.assistant")}</div>
+                <div className="mb-1 font-semibold uppercase opacity-50" style={metaStyle}>{isUser ? t("canvas.chat.you") : isError ? t("common.error") : t("canvas.chat.assistant")}</div>
                 {text ? <div>{message.text}</div> : message.role === "assistant" && !images.length ? "…" : null}
                 {images.length ? (
                     <div className={`mt-2 grid gap-2 ${images.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>

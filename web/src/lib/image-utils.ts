@@ -167,3 +167,59 @@ export async function compressReferenceDataUrl(dataUrl: string, referenceCount =
     const maxBytes = options?.maxBytes ?? Math.min(1_200_000, Math.floor(3_200_000 / count));
     return compressDataUrlForApi(dataUrl, { ...options, maxBytes });
 }
+
+/** Grab a still frame from a video URL for multimodal chat / vision models. */
+export function captureVideoFrameDataUrl(url: string, seekRatio = 0.1): Promise<string | null> {
+    if (!url) return Promise.resolve(null);
+    return new Promise((resolve) => {
+        const video = document.createElement("video");
+        let settled = false;
+        const finish = (value: string | null) => {
+            if (settled) return;
+            settled = true;
+            video.removeAttribute("src");
+            video.load();
+            resolve(value);
+        };
+        const timer = window.setTimeout(() => finish(null), 8000);
+        video.crossOrigin = "anonymous";
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = "auto";
+        video.onerror = () => {
+            window.clearTimeout(timer);
+            finish(null);
+        };
+        video.onloadeddata = () => {
+            try {
+                const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 1;
+                video.currentTime = Math.min(Math.max(0.05, duration * seekRatio), Math.max(0.05, duration - 0.05));
+            } catch {
+                window.clearTimeout(timer);
+                finish(null);
+            }
+        };
+        video.onseeked = () => {
+            try {
+                const width = video.videoWidth || 640;
+                const height = video.videoHeight || 360;
+                const canvas = document.createElement("canvas");
+                canvas.width = width;
+                canvas.height = height;
+                const context = canvas.getContext("2d");
+                if (!context) {
+                    window.clearTimeout(timer);
+                    finish(null);
+                    return;
+                }
+                context.drawImage(video, 0, 0, width, height);
+                window.clearTimeout(timer);
+                finish(canvas.toDataURL("image/jpeg", 0.85));
+            } catch {
+                window.clearTimeout(timer);
+                finish(null);
+            }
+        };
+        video.src = url;
+    });
+}

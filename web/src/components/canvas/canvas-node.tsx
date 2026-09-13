@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Clapperboard, Copy, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Clapperboard, Copy, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Plus, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -55,6 +55,7 @@ type CanvasNodeProps = {
     onChatImageModelChange?: (nodeId: string, model: string) => void;
     onChatModesChange?: (nodeId: string, options: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
     onInsertChatImage?: (image: import("@/types/canvas").CanvasAssistantImage) => void;
+    onFontSizeChange?: (nodeId: string, fontSize: number) => void;
     onEditText?: (node: CanvasNodeData) => void;
     onViewImage?: (node: CanvasNodeData, imageId?: string) => void;
     onAnnotate?: (node: CanvasNodeData) => void;
@@ -81,6 +82,7 @@ type NodeContentRendererProps = {
     onChatImageModelChange?: (nodeId: string, model: string) => void;
     onChatModesChange?: (nodeId: string, options: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
     onInsertChatImage?: (image: import("@/types/canvas").CanvasAssistantImage) => void;
+    onFontSizeChange?: (nodeId: string, fontSize: number) => void;
     onEditText?: (node: CanvasNodeData) => void;
     onToggleBatch?: () => void;
     onSetBatchPrimary?: (imageId: string) => void;
@@ -130,6 +132,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onChatImageModelChange,
     onChatModesChange,
     onInsertChatImage,
+    onFontSizeChange,
     onEditText,
     onViewImage,
     onAnnotate,
@@ -434,6 +437,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onChatImageModelChange={onChatImageModelChange}
                         onChatModesChange={onChatModesChange}
                         onInsertChatImage={onInsertChatImage}
+                        onFontSizeChange={onFontSizeChange}
                         onEditText={onEditText}
                         onToggleBatch={() => onToggleBatch?.(data.id)}
                         onSetBatchPrimary={(imageId) => onSetBatchPrimary?.(data.id, imageId)}
@@ -562,7 +566,7 @@ function AnnotateNodeContent({ node, theme }: NodeContentRendererProps) {
     );
 }
 
-function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onInsertChatImage }: NodeContentRendererProps) {
+function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onInsertChatImage, onFontSizeChange }: NodeContentRendererProps) {
     // Exclude this chat node itself: its resource text is the latest reply and must not fill the composer.
     const upstreamReferences = mentionReferences.filter((reference) => reference.nodeId !== node.id);
     const connectedTexts = upstreamReferences.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim()).map((reference) => reference.text!.trim());
@@ -577,6 +581,7 @@ function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatMod
             onImageModelChange={(nodeId, model) => onChatImageModelChange?.(nodeId, model)}
             onModesChange={(nodeId, options) => onChatModesChange?.(nodeId, options)}
             onInsertImage={onInsertChatImage}
+            onFontSizeChange={onFontSizeChange}
         />
     );
 }
@@ -657,15 +662,57 @@ function MissingPluginContent({ theme, type }: Pick<NodeContentRendererProps, "t
     );
 }
 
-function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing, onGenerateImage, onCreateChat, onEditText }: NodeContentRendererProps) {
+function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing, onGenerateImage, onCreateChat, onEditText, onFontSizeChange }: NodeContentRendererProps) {
     const { t } = useTranslation();
-    const fontSize = node.metadata?.fontSize || 14;
+    const fontSize = Math.max(10, Math.min(48, node.metadata?.fontSize || 14));
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
     const actionButtonStyle = { background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text };
+
+    const adjustFontSize = (delta: number) => {
+        if (!onFontSizeChange) return;
+        const next = Math.max(10, Math.min(48, fontSize + delta));
+        if (next === fontSize) return;
+        onFontSizeChange(node.id, next);
+    };
 
     return (
         <div className="flex h-full w-full flex-col overflow-hidden pt-8">
             <div className="absolute right-3 top-3 z-20 flex items-center gap-1.5">
+                {onFontSizeChange ? (
+                    <div className="inline-flex h-8 items-center gap-0.5 rounded-full border px-1 backdrop-blur-md" style={actionButtonStyle}>
+                        <button
+                            type="button"
+                            className="grid size-6 place-items-center rounded-full opacity-85 transition hover:opacity-100 disabled:opacity-35"
+                            disabled={fontSize <= 10}
+                            title={t("canvas.nodeToolbar.decreaseFont")}
+                            aria-label={t("canvas.nodeToolbar.decreaseFont")}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                adjustFontSize(-2);
+                            }}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                        >
+                            <Minus className="size-3" />
+                        </button>
+                        <span className="min-w-7 text-center text-[10px] font-medium tabular-nums opacity-70">{fontSize}</span>
+                        <button
+                            type="button"
+                            className="grid size-6 place-items-center rounded-full opacity-85 transition hover:opacity-100 disabled:opacity-35"
+                            disabled={fontSize >= 48}
+                            title={t("canvas.nodeToolbar.increaseFont")}
+                            aria-label={t("canvas.nodeToolbar.increaseFont")}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                adjustFontSize(2);
+                            }}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                        >
+                            <Plus className="size-3" />
+                        </button>
+                    </div>
+                ) : null}
                 <CanvasTextPromptPicker
                     buttonStyle={actionButtonStyle}
                     onSelect={(prompt) => onContentChange(node.id, prompt.content)}

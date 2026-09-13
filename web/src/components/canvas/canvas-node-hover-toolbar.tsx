@@ -122,6 +122,7 @@ export function CanvasNodeHoverToolbar({
     const hasVideo = isVideo && Boolean(node.metadata?.content);
     const hasAudio = isAudio && Boolean(node.metadata?.content);
     const isText = node.type === CanvasNodeType.Text;
+    const isChat = node.type === CanvasNodeType.Chat;
     const isConfig = node.type === CanvasNodeType.Config;
     const canRetry = node.metadata?.status === "error";
     const quickImageToolIdSet = new Set(quickImageToolIds);
@@ -157,8 +158,8 @@ export function CanvasNodeHoverToolbar({
         ...(isConfig ? [{ id: "config", title: t("canvas.configNode.title"), label: t("canvas.configNode.title"), icon: <Settings2 className="size-[10px]" />, onClick: () => onToggleDialog(node) }] : []),
         ...(node.type === CanvasNodeType.Director ? [{ id: "director", title: t("canvas.director.title"), label: t("canvas.director.title"), icon: <Clapperboard className="size-[10px]" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isAnnotate && hasImage ? [{ id: "annotate", title: t("canvas.annotate.openTitle"), label: t("canvas.annotate.open"), icon: <Highlighter className="size-[10px]" />, onClick: () => onAnnotate(node) }] : []),
-        ...(isText ? [{ id: "decreaseFont", title: t("canvas.nodeToolbar.decreaseFont"), label: t("canvas.nodeToolbar.zoomOut"), icon: <Minus className="size-[10px]" />, onClick: () => onDecreaseFont(node) }] : []),
-        ...(isText ? [{ id: "increaseFont", title: t("canvas.nodeToolbar.increaseFont"), label: t("canvas.nodeToolbar.zoomIn"), icon: <Plus className="size-[10px]" />, onClick: () => onIncreaseFont(node) }] : []),
+        ...(isText || isChat ? [{ id: "decreaseFont", title: t("canvas.nodeToolbar.decreaseFont"), label: t("canvas.nodeToolbar.zoomOut"), icon: <Minus className="size-[10px]" />, onClick: () => onDecreaseFont(node) }] : []),
+        ...(isText || isChat ? [{ id: "increaseFont", title: t("canvas.nodeToolbar.increaseFont"), label: t("canvas.nodeToolbar.zoomIn"), icon: <Plus className="size-[10px]" />, onClick: () => onIncreaseFont(node) }] : []),
         ...((isImage || isAnnotate) && !hasImage ? [{ id: "uploadImage", title: t("canvas.nodeToolbar.uploadImage"), label: t("canvas.nodeToolbar.uploadImage"), icon: <Upload className="size-[10px]" />, onClick: () => onUpload(node) }] : []),
         ...(isAnnotate && hasImage ? [{ id: "replaceImage", title: t("canvas.editors.annotateReplace"), label: t("canvas.editors.annotateReplace"), icon: <Upload className="size-[10px]" />, onClick: () => onUpload(node) }] : []),
         ...(isVideo ? [{ id: "uploadVideo", title: t(hasVideo ? "canvas.nodeToolbar.replaceVideo" : "canvas.nodeToolbar.uploadVideo"), label: t(hasVideo ? "canvas.nodeToolbar.replaceVideo" : "canvas.nodeToolbar.uploadVideo"), icon: <Video className="size-[10px]" />, onClick: () => onUpload(node) }] : []),

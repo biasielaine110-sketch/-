@@ -342,7 +342,7 @@ export default {
         },
         mergeNode: {
             empty: "Connect image nodes to the left handle",
-            hint: "Link images with connections · Drag inside a cell to reframe · Merge when 2+ images are linked",
+            hint: "After linking images, drag them between cells to swap. The node auto-fits image aspect ratios so everything stays visible.",
         },
         toolbar: {
             select: "Select",
@@ -463,6 +463,9 @@ export default {
             assistant: "Assistant",
             contextLabel: "Reference context",
             linkedInputLabel: "Linked text (ready to send)",
+            linkedMediaLabel: "Linked media",
+            linkedVideoNote: "Attached {{count}} linked video frame(s) ({{titles}}) for understanding.",
+            defaultMediaPrompt: "Please analyze the linked image or video content.",
             selectModel: "Select model",
             selectTextModel: "Text model",
             selectImageModel: "Image model",

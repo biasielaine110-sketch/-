@@ -54,7 +54,7 @@ export const NODE_SPECS = {
     },
     [CanvasNodeType.Chat]: {
         width: 420, height: 1040, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Chat].title; },
-        metadata: { status: "idle", messages: [] },
+        metadata: { status: "idle", messages: [], fontSize: 14 },
     },
     [CanvasNodeType.Annotate]: {
         width: 420, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Annotate].title; },

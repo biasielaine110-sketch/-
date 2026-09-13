@@ -11,7 +11,7 @@ import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveC
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
-import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
+import { captureVideoFrameDataUrl, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -2537,7 +2537,8 @@ function AtelierCanvasPage() {
     );
 
     const handleFontSizeChange = useCallback((nodeId: string, fontSize: number) => {
-        setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, fontSize } } : node)));
+        const next = Math.max(10, Math.min(48, Math.round(fontSize)));
+        setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, fontSize: next } } : node)));
     }, []);
 
     const handleUploadRequest = useCallback((nodeId?: string, position?: Position) => {
@@ -3672,7 +3673,8 @@ function AtelierCanvasPage() {
             const linkedContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, ""));
             const linkedText = linkedContext.prompt.trim() || (sourceNode.metadata?.content || "").trim();
             const typedText = text.trim();
-            const userText = typedText || linkedText;
+            const hasLinkedMedia = (linkedContext.imageCount || 0) > 0 || (linkedContext.videoCount || 0) > 0;
+            const userText = typedText || linkedText || (hasLinkedMedia ? t("canvas.chat.defaultMediaPrompt") : "");
             if (!userText) return;
 
             const userMessage: CanvasAssistantMessage = { id: nanoid(), role: "user", text: userText };
@@ -3749,10 +3751,59 @@ function AtelierCanvasPage() {
                 const historyMessages: AiTextMessage[] = previousMessages
                     .filter((message) => message.role === "user" || message.role === "assistant")
                     .map((message) => ({ role: message.role as "user" | "assistant", content: message.text }));
+
+                const mentionRefs = buildNodeMentionReferences(sourceNode, nodesRef.current, connectionsRef.current).filter((reference) => reference.active);
+                const mentionedImages = mentionRefs.filter((reference) => reference.kind === "image" && userText.includes(reference.label));
+                const mentionedVideos = mentionRefs.filter((reference) => reference.kind === "video" && userText.includes(reference.label));
+                const linkedImages = linkedContext.referenceImages || [];
+                const linkedVideos = linkedContext.referenceVideos || [];
+                const resolvedMentionImages = mentionedImages.length ? await resolveCanvasReferenceImages(mentionedImages, nodesRef.current) : [];
+
+                const videoSources = [
+                    ...linkedVideos.map((video) => ({ id: video.id, title: video.name || video.id, url: video.url })),
+                    ...mentionedVideos
+                        .map((reference) => {
+                            const videoNode = nodesRef.current.find((item) => item.id === reference.nodeId);
+                            return videoNode?.metadata?.content ? { id: reference.nodeId, title: reference.title, url: videoNode.metadata.content } : null;
+                        })
+                        .filter((item): item is { id: string; title: string; url: string } => Boolean(item)),
+                ];
+                const uniqueVideos = Array.from(new Map(videoSources.map((item) => [item.id, item])).values());
+                const videoFrames = (
+                    await Promise.all(
+                        uniqueVideos.map(async (video) => {
+                            const frame = await captureVideoFrameDataUrl(video.url);
+                            if (!frame) return null;
+                            return {
+                                id: `video-frame:${video.id}`,
+                                name: `${video.title}.jpg`,
+                                type: "image/jpeg",
+                                dataUrl: frame,
+                            } satisfies ReferenceImage;
+                        }),
+                    )
+                ).filter((item): item is ReferenceImage => Boolean(item));
+
+                const referenceImages = Array.from(
+                    new Map(
+                        [...linkedImages, ...resolvedMentionImages, ...videoFrames]
+                            .filter((image) => Boolean(image?.dataUrl))
+                            .map((image) => [image.id || image.dataUrl, image]),
+                    ).values(),
+                );
+
+                const videoNote = uniqueVideos.length
+                    ? `\n\n${t("canvas.chat.linkedVideoNote", { count: uniqueVideos.length, titles: uniqueVideos.map((item) => item.title).join("、") })}`
+                    : "";
+                const promptText = `${userText}${videoNote}`;
+                const userContent: AiTextMessage["content"] = referenceImages.length
+                    ? [{ type: "text" as const, text: promptText }, ...referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
+                    : promptText;
+
                 const requestMessages: AiTextMessage[] = [
                     ...(typedText && linkedText && typedText !== linkedText ? [{ role: "system" as const, content: `${t("canvas.chat.contextLabel")}:\n${linkedText}` }] : []),
                     ...historyMessages,
-                    { role: "user", content: userText },
+                    { role: "user", content: userContent },
                 ];
                 const answer = await requestImageQuestion(textConfig!, requestMessages, (streamed) => updateAssistantMessage({ text: streamed }), { signal: controller.signal });
                 updateAssistantMessage({ text: answer });
@@ -3761,10 +3812,36 @@ function AtelierCanvasPage() {
 
             const runImageTask = async () => {
                 const imageContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, userText));
-                const mentionRefs = buildNodeMentionReferences(sourceNode, nodesRef.current, connectionsRef.current).filter((reference) => reference.active && reference.kind === "image");
-                const mentioned = mentionRefs.filter((reference) => userText.includes(reference.label));
-                const resolvedMentions = mentioned.length ? await resolveCanvasReferenceImages(mentioned, nodesRef.current) : [];
-                const referenceImages = resolvedMentions.length ? resolvedMentions : imageContext.referenceImages;
+                const mentionRefs = buildNodeMentionReferences(sourceNode, nodesRef.current, connectionsRef.current).filter((reference) => reference.active);
+                const mentionedImages = mentionRefs.filter((reference) => reference.kind === "image" && userText.includes(reference.label));
+                const mentionedVideos = mentionRefs.filter((reference) => reference.kind === "video" && userText.includes(reference.label));
+                const resolvedMentions = mentionedImages.length ? await resolveCanvasReferenceImages(mentionedImages, nodesRef.current) : [];
+                const videoSources = [
+                    ...(imageContext.referenceVideos || []).map((video) => ({ id: video.id, title: video.name || video.id, url: video.url })),
+                    ...mentionedVideos
+                        .map((reference) => {
+                            const videoNode = nodesRef.current.find((item) => item.id === reference.nodeId);
+                            return videoNode?.metadata?.content ? { id: reference.nodeId, title: reference.title, url: videoNode.metadata.content } : null;
+                        })
+                        .filter((item): item is { id: string; title: string; url: string } => Boolean(item)),
+                ];
+                const uniqueVideos = Array.from(new Map(videoSources.map((item) => [item.id, item])).values());
+                const videoFrames = (
+                    await Promise.all(
+                        uniqueVideos.map(async (video) => {
+                            const frame = await captureVideoFrameDataUrl(video.url);
+                            if (!frame) return null;
+                            return { id: `video-frame:${video.id}`, name: `${video.title}.jpg`, type: "image/jpeg", dataUrl: frame } satisfies ReferenceImage;
+                        }),
+                    )
+                ).filter((item): item is ReferenceImage => Boolean(item));
+                const referenceImages = Array.from(
+                    new Map(
+                        [...(resolvedMentions.length ? resolvedMentions : imageContext.referenceImages), ...videoFrames]
+                            .filter((image) => Boolean(image?.dataUrl))
+                            .map((image) => [image.id || image.dataUrl, image]),
+                    ).values(),
+                );
                 const results = referenceImages.length
                     ? await requestEdit({ ...imageConfig!, count: "1" }, imageContext.prompt || userText, referenceImages, undefined, { signal: controller.signal })
                     : await requestGeneration({ ...imageConfig!, count: "1" }, imageContext.prompt || userText, { signal: controller.signal });
@@ -4046,6 +4123,23 @@ function AtelierCanvasPage() {
                         isRunning={runningNodeId === contentNode.id}
                         onConfigChange={handleConfigNodeChange}
                         onMerge={(nodeId) => void runMergeNode(nodeId)}
+                        onNodeSizeChange={(nodeId, width, height) => {
+                            setNodes((prev) =>
+                                prev.map((item) =>
+                                    item.id === nodeId
+                                        ? {
+                                              ...item,
+                                              width,
+                                              height,
+                                              position: {
+                                                  x: item.position.x + item.width / 2 - width / 2,
+                                                  y: item.position.y + item.height / 2 - height / 2,
+                                              },
+                                          }
+                                        : item,
+                                ),
+                            );
+                        }}
                     />
                 );
             }
@@ -4183,6 +4277,7 @@ function AtelierCanvasPage() {
                             onChatImageModelChange={(nodeId, model) => handleConfigNodeChange(nodeId, { imageModel: model })}
                             onChatModesChange={(nodeId, options) => handleConfigNodeChange(nodeId, { chatTextEnabled: options.text, chatImageEnabled: options.image })}
                             onInsertChatImage={(image) => void insertAssistantImage(image)}
+                            onFontSizeChange={handleFontSizeChange}
                             onEditText={(node) => setTextEditNodeId(node.id)}
                             onViewImage={handleNodeViewImage}
                             onAnnotate={(node) => {
@@ -4232,7 +4327,7 @@ function AtelierCanvasPage() {
                     onLeave={hideNodeToolbar}
                     onInfo={(node) => setInfoNodeId(node.id)}
                     onDecreaseFont={(node) => handleFontSizeChange(node.id, Math.max(10, (node.metadata?.fontSize || 14) - 2))}
-                    onIncreaseFont={(node) => handleFontSizeChange(node.id, Math.min(32, (node.metadata?.fontSize || 14) + 2))}
+                    onIncreaseFont={(node) => handleFontSizeChange(node.id, Math.min(48, (node.metadata?.fontSize || 14) + 2))}
                     onToggleDialog={(node) => setDialogNodeId((current) => (current === node.id ? null : node.id))}
                     onGenerateImage={generateImageFromTextNode}
                     onCreateChat={createChatFromTextNode}
@@ -4344,6 +4439,11 @@ function AtelierCanvasPage() {
                 <CanvasTextEditDialog
                     open={Boolean(textEditNode)}
                     value={textEditNode?.metadata?.content || ""}
+                    fontSize={textEditNode?.metadata?.fontSize || 14}
+                    onFontSizeChange={(fontSize) => {
+                        if (!textEditNode) return;
+                        handleFontSizeChange(textEditNode.id, fontSize);
+                    }}
                     onClose={() => setTextEditNodeId(null)}
                     onSave={(content) => {
                         if (!textEditNode) return;
