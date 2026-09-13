@@ -1,6 +1,6 @@
 export default {
     meta: {
-        title: "Infinite Atelier",
+        title: "Nww-无限画布",
         description: "A desktop AI visual creation workspace",
     },
     theme: {
@@ -300,7 +300,7 @@ export default {
     canvas: {
         defaultTitle: "Creative Canvas {{count}}",
         library: "Canvas library",
-        title: "Infinite Atelier",
+        title: "Nww-无限画布",
         imported: "Imported {{count}} canvases",
         importFailed: "Import failed. Select a valid canvas package.",
         opening: "Opening canvas...",
@@ -1106,6 +1106,12 @@ export default {
             systemPromptPlaceholder: "For example: You are a visual director specializing in cinematic, photorealistic imagery.",
             textPromptLibrary: "Text node prompt library",
             textPromptLibraryDescription: "These prompts can be applied from text nodes. Add, edit, remove, and reorder them here.",
+            textPromptReorderHint: "Drag the handle to reorder quickly, or use ⇈↑↓⇊ to nudge / move to ends.",
+            textPromptDragHandle: "Drag to reorder",
+            textPromptMoveTop: "Move to top",
+            textPromptMoveUp: "Move up",
+            textPromptMoveDown: "Move down",
+            textPromptMoveBottom: "Move to bottom",
             textPromptAdd: "Add prompt",
             textPromptReset: "Reset defaults",
             textPromptNewTitle: "New prompt",

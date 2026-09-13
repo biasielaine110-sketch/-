@@ -402,6 +402,8 @@ function channelProtocolLabel(channel: ModelChannel, t: (key: string) => string)
 
 function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextPromptEntry[]; onChange: (prompts: TextPromptEntry[]) => void }) {
     const { t } = useTranslation();
+    const [draggingPromptId, setDraggingPromptId] = useState("");
+    const [dragOverPromptId, setDragOverPromptId] = useState("");
 
     const updatePrompt = (id: string, patch: Partial<TextPromptEntry>) => {
         onChange(prompts.map((item) => (item.id === id ? { ...item, ...patch } : item)));
@@ -423,11 +425,43 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
     const resetDefaults = () => onChange(defaultTextPrompts.map((item) => ({ ...item })));
 
     const movePrompt = (from: number, to: number) => {
-        if (to < 0 || to >= prompts.length) return;
+        if (to < 0 || to >= prompts.length || from === to) return;
         const next = [...prompts];
         const [item] = next.splice(from, 1);
         next.splice(to, 0, item);
         onChange(next);
+    };
+
+    const reorderPrompts = (fromId: string, toId: string) => {
+        if (!fromId || !toId || fromId === toId) return;
+        const fromIndex = prompts.findIndex((item) => item.id === fromId);
+        const toIndex = prompts.findIndex((item) => item.id === toId);
+        movePrompt(fromIndex, toIndex);
+    };
+
+    const handlePromptDragStart = (event: ReactDragEvent<HTMLElement>, promptId: string) => {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", promptId);
+        setDraggingPromptId(promptId);
+    };
+
+    const handlePromptDragOver = (event: ReactDragEvent<HTMLElement>, promptId: string) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        if (dragOverPromptId !== promptId) setDragOverPromptId(promptId);
+    };
+
+    const handlePromptDrop = (event: ReactDragEvent<HTMLElement>, promptId: string) => {
+        event.preventDefault();
+        const fromId = event.dataTransfer.getData("text/plain") || draggingPromptId;
+        reorderPrompts(fromId, promptId);
+        setDraggingPromptId("");
+        setDragOverPromptId("");
+    };
+
+    const clearPromptDrag = () => {
+        setDraggingPromptId("");
+        setDragOverPromptId("");
     };
 
     return (
@@ -436,6 +470,7 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
                 <div>
                     <div className="text-sm font-semibold">{t("config.preferences.textPromptLibrary")}</div>
                     <div className="mt-0.5 text-xs text-stone-500">{t("config.preferences.textPromptLibraryDescription")}</div>
+                    <div className="mt-0.5 text-xs text-stone-500">{t("config.preferences.textPromptReorderHint")}</div>
                 </div>
                 <div className="flex gap-2">
                     <Button size="small" onClick={resetDefaults}>
@@ -449,19 +484,52 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
             <div className="space-y-3">
                 {prompts.length ? (
                     prompts.map((prompt, index) => (
-                        <div key={prompt.id} className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
+                        <div
+                            key={prompt.id}
+                            onDragOver={(event) => handlePromptDragOver(event, prompt.id)}
+                            onDrop={(event) => handlePromptDrop(event, prompt.id)}
+                            className={`rounded-lg border p-3 transition-colors dark:border-stone-800 ${
+                                draggingPromptId === prompt.id ? "opacity-50" : ""
+                            } ${
+                                dragOverPromptId === prompt.id && draggingPromptId !== prompt.id
+                                    ? "border-sky-400 bg-sky-50 dark:border-sky-500 dark:bg-sky-950/40"
+                                    : "border-stone-200"
+                            }`}
+                        >
                             <div className="mb-2 flex flex-wrap items-center gap-2">
+                                <span
+                                    draggable
+                                    onDragStart={(event) => handlePromptDragStart(event, prompt.id)}
+                                    onDragEnd={clearPromptDrag}
+                                    className="inline-flex shrink-0 cursor-grab touch-none text-stone-400 active:cursor-grabbing"
+                                    title={t("config.preferences.textPromptDragHandle")}
+                                    aria-label={t("config.preferences.textPromptDragHandle")}
+                                >
+                                    <GripVertical className="size-4" />
+                                </span>
+                                <span className="w-6 shrink-0 text-center text-xs text-stone-400 tabular-nums">{index + 1}</span>
                                 <Input
                                     className="min-w-0 flex-1"
                                     value={prompt.title}
                                     placeholder={t("config.preferences.textPromptTitlePlaceholder")}
                                     onChange={(event) => updatePrompt(prompt.id, { title: event.target.value })}
                                 />
-                                <Button size="small" disabled={index === 0} onClick={() => movePrompt(index, index - 1)}>
+                                <Button size="small" disabled={index === 0} title={t("config.preferences.textPromptMoveTop")} onClick={() => movePrompt(index, 0)}>
+                                    ⇈
+                                </Button>
+                                <Button size="small" disabled={index === 0} title={t("config.preferences.textPromptMoveUp")} onClick={() => movePrompt(index, index - 1)}>
                                     ↑
                                 </Button>
-                                <Button size="small" disabled={index === prompts.length - 1} onClick={() => movePrompt(index, index + 1)}>
+                                <Button size="small" disabled={index === prompts.length - 1} title={t("config.preferences.textPromptMoveDown")} onClick={() => movePrompt(index, index + 1)}>
                                     ↓
+                                </Button>
+                                <Button
+                                    size="small"
+                                    disabled={index === prompts.length - 1}
+                                    title={t("config.preferences.textPromptMoveBottom")}
+                                    onClick={() => movePrompt(index, prompts.length - 1)}
+                                >
+                                    ⇊
                                 </Button>
                                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removePrompt(prompt.id)} />
                             </div>

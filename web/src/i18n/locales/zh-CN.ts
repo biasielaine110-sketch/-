@@ -1,6 +1,6 @@
 export default {
     meta: {
-        title: "Infinite Atelier",
+        title: "Nww-无限画布",
         description: "桌面 AI 视觉创作工作台",
     },
     theme: {
@@ -300,7 +300,7 @@ export default {
     canvas: {
         defaultTitle: "创作画布 {{count}}",
         library: "画布库",
-        title: "Infinite Atelier",
+        title: "Nww-无限画布",
         imported: "已导入 {{count}} 个画布",
         importFailed: "导入失败，请选择有效的画布压缩包",
         opening: "正在打开画布...",
@@ -1105,6 +1105,12 @@ export default {
             systemPromptPlaceholder: "例如：你是一位擅长电影感写实摄影的视觉导演。",
             textPromptLibrary: "文本节点词库",
             textPromptLibraryDescription: "在文本节点中可一键选用这些提示词；支持增删改与排序。",
+            textPromptReorderHint: "拖动手柄可快速调整顺序；也可用 ⇈↑↓⇊ 微调或置顶/置底。",
+            textPromptDragHandle: "拖动排序",
+            textPromptMoveTop: "移到最前",
+            textPromptMoveUp: "上移一位",
+            textPromptMoveDown: "下移一位",
+            textPromptMoveBottom: "移到最后",
             textPromptAdd: "添加提示词",
             textPromptReset: "恢复默认",
             textPromptNewTitle: "新提示词",
