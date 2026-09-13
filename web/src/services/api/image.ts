@@ -163,6 +163,17 @@ function prefersOpenAiImagesEndpoint(model: string) {
     return /flash-image|image-preview|image-generation|nano-banana/.test(value);
 }
 
+/** Gemini flash-image relays expect reference images as public URLs on /images/generations. */
+function usesImageUrlReferences(model: string) {
+    const value = model.trim().toLowerCase();
+    if (!value.includes("gemini")) return false;
+    return /flash-image|image-preview|image-generation|nano-banana/.test(value);
+}
+
+function isPublicHttpUrl(value: string) {
+    return /^https?:\/\//i.test(value.trim());
+}
+
 function resolveImageRequestConfig(config: AiConfig) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel);
     if (prefersOpenAiImagesEndpoint(requestConfig.model)) {
@@ -233,14 +244,22 @@ function resolveGeminiRelayImageParams(config: AiConfig, count: number) {
     const quality = normalizeQuality(config.quality);
     const aspectRatio = resolveGeminiAspectRatioForSize(config.size);
     const background = normalizeBackground(config.background);
+    const resolution = resolveGeminiRelayResolution(config.quality);
     return {
         n: Math.max(1, Math.min(count, 10)),
         ...(quality ? { quality } : {}),
         ...(aspectRatio ? { size: aspectRatio, aspect_ratio: aspectRatio } : {}),
         ...(background ? { background } : {}),
+        ...(resolution ? { metadata: { resolution } } : {}),
         response_format: IMAGE_RESPONSE_FORMAT,
         output_format: IMAGE_OUTPUT_FORMAT,
-    } satisfies Record<string, string | number>;
+    };
+}
+
+function resolveGeminiRelayResolution(quality: string) {
+    const normalized = normalizeQuality(quality);
+    if (!normalized) return undefined;
+    return GEMINI_IMAGE_SIZE_BY_QUALITY[normalized] || undefined;
 }
 
 function resolveGeminiAspectRatioForSize(size: string) {
@@ -249,6 +268,71 @@ function resolveGeminiAspectRatioForSize(size: string) {
     const dimensions = parseImageDimensions(value);
     const ratioText = dimensions ? `${dimensions.width}:${dimensions.height}` : value;
     return closestGeminiAspectRatio(ratioText);
+}
+
+async function uploadProviderReferenceImage(config: AiConfig, image: ReferenceImage, options?: RequestOptions) {
+    const dataUrl = await imageToDataUrl(image);
+    if (!dataUrl) throw new Error(apiText("referenceImageReadFailed"));
+    const file = dataUrlToFile({ ...image, dataUrl });
+    const formData = new FormData();
+    formData.set("file", file);
+    formData.set("purpose", "generation");
+    try {
+        const response = await axios.post<{ success?: boolean; message?: string; data?: { url?: string }; url?: string }>(aiApiUrl(config, "/uploads/images"), formData, {
+            headers: aiHeaders(config),
+            signal: options?.signal,
+        });
+        const payload = response.data;
+        const url = payload?.data?.url || payload?.url;
+        if (typeof url === "string" && isPublicHttpUrl(url)) return url;
+        if (payload && payload.success === false) throw new Error(payload.message || apiText("providerImageUploadFailed"));
+        throw new Error(apiText("providerImageUploadFailed"));
+    } catch (error) {
+        if (error instanceof Error && !axios.isAxiosError(error)) throw error;
+        throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("providerImageUploadFailed")), config.model));
+    }
+}
+
+async function resolveReferenceImageUrls(config: AiConfig, references: ReferenceImage[], options?: RequestOptions) {
+    const urls: string[] = [];
+    for (const image of references.slice(0, 14)) {
+        if (image.url && isPublicHttpUrl(image.url)) {
+            urls.push(image.url.trim());
+            continue;
+        }
+        if (image.dataUrl && isPublicHttpUrl(image.dataUrl)) {
+            urls.push(image.dataUrl.trim());
+            continue;
+        }
+        urls.push(await uploadProviderReferenceImage(config, image, options));
+    }
+    if (!urls.length) throw new Error(apiText("referenceImageReadFailed"));
+    return urls;
+}
+
+async function requestGeminiRelayImageToImage(config: AiConfig, prompt: string, references: ReferenceImage[], count: number, options?: RequestOptions) {
+    const imageUrls = await resolveReferenceImageUrls(config, references, options);
+    const imageParams = resolveGeminiRelayImageParams(config, count);
+    const { metadata, ...restParams } = imageParams as Record<string, unknown> & { metadata?: { resolution?: string } };
+    try {
+        const response = await axios.post<ImageApiResponse>(
+            aiApiUrl(config, "/images/generations"),
+            {
+                model: config.model,
+                prompt: withSystemPrompt(config, prompt),
+                image_urls: imageUrls,
+                ...restParams,
+                ...(metadata ? { metadata } : {}),
+            },
+            {
+                headers: aiHeaders(config, "application/json"),
+                signal: options?.signal,
+            },
+        );
+        return await resolveImageApiResponse(config, response.data, options);
+    } catch (error) {
+        throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), config.model));
+    }
 }
 
 function appendOpenAiImageParams(formData: FormData, params: Record<string, string | number>) {
@@ -1106,11 +1190,19 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         }
     }
 
+    // ToAPIs / similar relays: Gemini flash-image refs must be public URLs on /images/generations.
+    if (usesImageUrlReferences(requestConfig.model) && references.length && !mask) {
+        return requestGeminiRelayImageToImage(requestConfig, requestPrompt, references, n, options);
+    }
+
     const imageParams = resolveOpenAiImageParams(requestConfig, n);
     const formData = new FormData();
     formData.set("model", requestConfig.model);
     formData.set("prompt", withSystemPrompt(requestConfig, requestPrompt));
-    appendOpenAiImageParams(formData, imageParams);
+    for (const [key, value] of Object.entries(imageParams)) {
+        if (value == null || typeof value === "object") continue;
+        formData.set(key, String(value));
+    }
     const files = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
     files.forEach((file) => formData.append("image", file));
     if (mask) formData.set("mask", dataUrlToFile(mask));
