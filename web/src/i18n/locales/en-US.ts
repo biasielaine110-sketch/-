@@ -9,6 +9,7 @@ export default {
     common: {
         cancel: "Cancel",
         save: "Save",
+        close: "Close",
         edit: "Edit",
         restore: "Restore",
         done: "Done",
@@ -470,6 +471,11 @@ export default {
             selectTextModel: "Text model",
             selectImageModel: "Image model",
             editMessageTitle: "Edit message",
+            viewMessageTitle: "View message",
+            viewUserMessageTitle: "View sent message",
+            viewReplyTitle: "View reply",
+            viewMessageHint: "Double-click a bubble to maximize. Adjust preview font size here.",
+            doubleClickMaximize: "Double-click to maximize",
             copyReply: "Copy reply",
         },
         textClipboard: {

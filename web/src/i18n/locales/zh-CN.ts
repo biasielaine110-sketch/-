@@ -9,6 +9,7 @@ export default {
     common: {
         cancel: "取消",
         save: "保存",
+        close: "关闭",
         edit: "编辑",
         done: "完成",
         delete: "删除",
@@ -470,6 +471,11 @@ export default {
             selectTextModel: "对话模型",
             selectImageModel: "生图模型",
             editMessageTitle: "编辑消息",
+            viewMessageTitle: "查看消息",
+            viewUserMessageTitle: "查看发送内容",
+            viewReplyTitle: "查看回复",
+            viewMessageHint: "双击气泡可最大化阅读，可在此调整预览字号",
+            doubleClickMaximize: "双击最大化查看",
             copyReply: "复制回复",
         },
         textClipboard: {

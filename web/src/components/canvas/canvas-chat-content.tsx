@@ -47,6 +47,7 @@ export function CanvasChatContent({
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const [draft, setDraft] = useState("");
     const [draftEditorOpen, setDraftEditorOpen] = useState(false);
+    const [previewMessageId, setPreviewMessageId] = useState<string | null>(null);
     const listRef = useRef<HTMLDivElement>(null);
     const syncedConnectedRef = useRef("");
     const messages = (node.metadata?.messages || []) as CanvasAssistantMessage[];
@@ -72,6 +73,15 @@ export function CanvasChatContent({
     const fontSize = Math.max(MIN_CHAT_FONT_SIZE, Math.min(MAX_CHAT_FONT_SIZE, node.metadata?.fontSize || 14));
     const bodyTextStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.55)}px` } as const;
     const metaTextStyle = { fontSize: `${Math.max(10, Math.round(fontSize * 0.75))}px` } as const;
+    const previewMessage = previewMessageId ? messages.find((message) => message.id === previewMessageId) || null : null;
+    const previewText = (previewMessage?.text || "").trim();
+    const previewTitle = previewMessage
+        ? previewMessage.role === "user"
+            ? t("canvas.chat.viewUserMessageTitle")
+            : previewMessage.role === "error"
+              ? t("common.error")
+              : t("canvas.chat.viewReplyTitle")
+        : t("canvas.chat.viewMessageTitle");
 
     const adjustFontSize = (delta: number) => {
         const next = Math.max(MIN_CHAT_FONT_SIZE, Math.min(MAX_CHAT_FONT_SIZE, fontSize + delta));
@@ -240,7 +250,16 @@ export function CanvasChatContent({
                         <span>{contextText || linkedMedia.length ? t("canvas.chat.emptyWithLinked") : t("canvas.chat.empty")}</span>
                     </div>
                 ) : (
-                    messages.map((message) => <ChatBubble key={message.id} message={message} theme={theme} fontSize={fontSize} onInsertImage={onInsertImage} />)
+                    messages.map((message) => (
+                        <ChatBubble
+                            key={message.id}
+                            message={message}
+                            theme={theme}
+                            fontSize={fontSize}
+                            onInsertImage={onInsertImage}
+                            onMaximize={() => setPreviewMessageId(message.id)}
+                        />
+                    ))
                 )}
             </div>
 
@@ -334,6 +353,15 @@ export function CanvasChatContent({
                 onClose={() => setDraftEditorOpen(false)}
                 onSave={setDraft}
             />
+
+            <CanvasTextEditDialog
+                open={Boolean(previewMessage && previewText)}
+                value={previewMessage?.text || ""}
+                title={previewTitle}
+                fontSize={Math.max(fontSize, 16)}
+                readOnly
+                onClose={() => setPreviewMessageId(null)}
+            />
         </div>
     );
 }
@@ -357,7 +385,19 @@ function ModeToggle({ active, label, icon, theme, onClick }: { active: boolean; 
     );
 }
 
-function ChatBubble({ message, theme, fontSize, onInsertImage }: { message: CanvasAssistantMessage; theme: CanvasTheme; fontSize: number; onInsertImage?: (image: CanvasAssistantImage) => void }) {
+function ChatBubble({
+    message,
+    theme,
+    fontSize,
+    onInsertImage,
+    onMaximize,
+}: {
+    message: CanvasAssistantMessage;
+    theme: CanvasTheme;
+    fontSize: number;
+    onInsertImage?: (image: CanvasAssistantImage) => void;
+    onMaximize: () => void;
+}) {
     const { t } = useTranslation();
     const { message: toast } = App.useApp();
     const [copied, setCopied] = useState(false);
@@ -378,6 +418,13 @@ function ChatBubble({ message, theme, fontSize, onInsertImage }: { message: Canv
         window.setTimeout(() => setCopied(false), 1500);
     };
 
+    const openPreview = (event: ReactMouseEvent) => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (!text) return;
+        onMaximize();
+    };
+
     return (
         <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
             <div
@@ -389,11 +436,16 @@ function ChatBubble({ message, theme, fontSize, onInsertImage }: { message: Canv
                     color: isError ? theme.node.activeStroke : theme.node.text,
                     border: `1px solid ${isUser ? "transparent" : theme.node.stroke}`,
                 }}
+                title={text ? t("canvas.chat.doubleClickMaximize") : undefined}
+                onDoubleClick={openPreview}
             >
                 <div className="mb-1 font-semibold uppercase opacity-50" style={metaStyle}>{isUser ? t("canvas.chat.you") : isError ? t("common.error") : t("canvas.chat.assistant")}</div>
                 {text ? <div>{message.text}</div> : message.role === "assistant" && !images.length ? "…" : null}
                 {images.length ? (
-                    <div className={`mt-2 grid gap-2 ${images.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}>
+                    <div
+                        className={`mt-2 grid gap-2 ${images.length > 1 ? "grid-cols-2" : "grid-cols-1"}`}
+                        onDoubleClick={(event) => event.stopPropagation()}
+                    >
                         {images.map((image) => (
                             <div key={image.id} className="overflow-hidden rounded-xl border" style={{ borderColor: theme.node.stroke }}>
                                 <img src={image.dataUrl} alt={image.prompt || t("canvas.chat.generatedImage")} className="block max-h-56 w-full object-contain" draggable={false} />
@@ -426,6 +478,7 @@ function ChatBubble({ message, theme, fontSize, onInsertImage }: { message: Canv
                             onMouseDown={(event) => event.stopPropagation()}
                             onPointerDown={(event) => event.stopPropagation()}
                             onClick={handleCopy}
+                            onDoubleClick={(event) => event.stopPropagation()}
                         >
                             {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
                             {copied ? t("common.copied") : t("canvas.chat.copyReply")}
