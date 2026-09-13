@@ -81,7 +81,7 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
                 seconds: normalizeVideoSeconds(config.videoSeconds),
                 size: normalizeVideoSize(config.size),
                 resolution: normalizeVideoResolution(config.vquality),
-                ratio: config.size,
+                ratio: normalizeVideoRatio(config.size),
                 generateAudio: boolConfig(config.videoGenerateAudio, true),
                 watermark: boolConfig(config.videoWatermark, false),
             },
@@ -177,9 +177,13 @@ function normalizeVideoSeconds(value: string) {
 }
 
 function normalizeVideoSize(value: string) {
-    if (value === "auto") return null;
+    if (value === "auto" || value === "adaptive") return null;
     const size = value || "1280x720";
-    if (/^\d+x\d+$/.test(size)) return size;
+    if (/^\d+x\d+$/i.test(size)) return size;
+    if (/^\d+(?:\.\d+)?\s*[:/]\s*\d+(?:\.\d+)?$/.test(size)) {
+        const ratio = normalizeVideoRatio(size);
+        return ["9:16", "3:4"].includes(ratio) ? "720x1280" : ratio === "1:1" ? "1024x1024" : "1280x720";
+    }
     return ["9:16", "2:3", "3:4"].includes(size) ? "720x1280" : "1280x720";
 }
 
@@ -188,6 +192,52 @@ function normalizeVideoResolution(value: string) {
     if (value === "auto" || value === "high" || value === "medium") return "720p";
     const resolution = value.replace(/p$/i, "") || "720";
     return `${resolution}p`;
+}
+
+/** Map UI size (WxH / ratio / auto) to Seedance-style ratio enums used by Doubao video plugins. */
+export function normalizeVideoRatio(value: string) {
+    const raw = (value || "").trim();
+    if (!raw || raw === "auto" || raw === "adaptive") return "adaptive";
+    const allowed = new Set(["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"]);
+    if (allowed.has(raw)) return raw;
+
+    const ratioMatch = raw.match(/^(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)$/);
+    if (ratioMatch) {
+        const width = Number(ratioMatch[1]);
+        const height = Number(ratioMatch[2]);
+        if (width > 0 && height > 0) return nearestVideoRatio(width / height);
+    }
+
+    const sizeMatch = raw.match(/^(\d+)\s*[xX×]\s*(\d+)$/);
+    if (sizeMatch) {
+        const width = Number(sizeMatch[1]);
+        const height = Number(sizeMatch[2]);
+        if (width > 0 && height > 0) return nearestVideoRatio(width / height);
+    }
+
+    return "16:9";
+}
+
+const VIDEO_RATIO_PRESETS = [
+    { label: "21:9", value: 21 / 9 },
+    { label: "16:9", value: 16 / 9 },
+    { label: "4:3", value: 4 / 3 },
+    { label: "1:1", value: 1 },
+    { label: "3:4", value: 3 / 4 },
+    { label: "9:16", value: 9 / 16 },
+] as const;
+
+function nearestVideoRatio(ratio: number) {
+    let best = VIDEO_RATIO_PRESETS[1];
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const preset of VIDEO_RATIO_PRESETS) {
+        const distance = Math.abs(Math.log(ratio) - Math.log(preset.value));
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = preset;
+        }
+    }
+    return best.label;
 }
 
 function unwrapVideoResponse(payload: ApiVideoResponse) {

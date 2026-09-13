@@ -747,7 +747,7 @@ export default {
             maskRequired: "请先涂抹局部区域",
             aiEdit: "AI 修改",
             annotateTitle: "全屏图片标记",
-            annotateHint: "滚轮缩放 · 空格/中键拖动画布 · 矩形/圆形/箭头/文本标记 · 画笔做局部重绘 · Delete 删除选中",
+            annotateHint: "滚轮缩放 · 空格/中键拖动画布 · 选择工具可拖动已有标记 · 矩形/圆形/箭头/文本标记 · 画笔做局部重绘 · Delete 删除选中",
             annotateSelect: "选择",
             annotateRect: "矩形框",
             annotateEllipse: "圆形框",

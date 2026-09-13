@@ -748,7 +748,7 @@ export default {
             maskRequired: "Paint the area to edit first",
             aiEdit: "Edit with AI",
             annotateTitle: "Fullscreen annotate",
-            annotateHint: "Wheel to zoom · Space/middle drag to pan · Rect/ellipse/arrow/text marks · Brush for inpaint · Delete removes selection",
+            annotateHint: "Wheel to zoom · Space/middle drag to pan · Select tool to drag existing marks · Rect/ellipse/arrow/text marks · Brush for inpaint · Delete removes selection",
             annotateSelect: "Select",
             annotateRect: "Rectangle",
             annotateEllipse: "Ellipse",

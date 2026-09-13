@@ -86,6 +86,13 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
     const maskCanvasRef = useRef<HTMLCanvasElement>(null);
     const previewCanvasRef = useRef<HTMLCanvasElement>(null);
     const drawingRef = useRef<{ active: boolean; stroke: MaskStroke | null; start?: Point }>({ active: false, stroke: null });
+    const dragRef = useRef<{
+        id: string;
+        start: Point;
+        origin: CanvasAnnotation;
+        baseline: CanvasAnnotation[];
+        moved: boolean;
+    } | null>(null);
     const draftRef = useRef<DraftShape>(null);
     const annotationsRef = useRef<CanvasAnnotation[]>([]);
     const maskHistoryRef = useRef<MaskStroke[]>([]);
@@ -118,6 +125,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
         maskHistoryRef.current = [];
         maskRedoRef.current = [];
         drawingRef.current = { active: false, stroke: null };
+        dragRef.current = null;
         void readImageMeta(dataUrl).then(setImage);
         // Only reset when the dialog opens or the image changes — not when parent re-renders with a new [] reference.
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -239,14 +247,13 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
         clearCanvas(previewCanvasRef.current);
     };
 
-    const toNorm = (clientX: number, clientY: number) => {
+    const toNorm = (clientX: number, clientY: number, clamp = true) => {
         const stage = viewport.stageRef.current;
         if (!stage || !image) return null;
         const rect = stage.getBoundingClientRect();
-        return {
-            x: clamp01((clientX - rect.left) / Math.max(1, rect.width)),
-            y: clamp01((clientY - rect.top) / Math.max(1, rect.height)),
-        };
+        const x = (clientX - rect.left) / Math.max(1, rect.width);
+        const y = (clientY - rect.top) / Math.max(1, rect.height);
+        return clamp ? { x: clamp01(x), y: clamp01(y) } : { x, y };
     };
 
     const startShape = (event: ReactPointerEvent<SVGSVGElement>) => {
@@ -257,8 +264,22 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
         if (!point) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         drawingRef.current = { active: true, stroke: null, start: point };
+        dragRef.current = null;
         if (tool === "select") {
-            setSelectedId(hitTest(annotationsRef.current, point));
+            const hitId = hitTest(annotationsRef.current, point);
+            setSelectedId(hitId);
+            if (hitId) {
+                const origin = annotationsRef.current.find((item) => item.id === hitId);
+                if (origin) {
+                    dragRef.current = {
+                        id: hitId,
+                        start: point,
+                        origin: { ...origin },
+                        baseline: annotationsRef.current.map((item) => ({ ...item })),
+                        moved: false,
+                    };
+                }
+            }
             return;
         }
         if (tool === "text") {
@@ -285,8 +306,20 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
 
     const moveShape = (event: ReactPointerEvent<SVGSVGElement>) => {
         if (!drawingRef.current.active || !drawingRef.current.start || isBrushTool) return;
+        const drag = dragRef.current;
+        if (drag) {
+            const point = toNorm(event.clientX, event.clientY, false);
+            if (!point) return;
+            const dx = point.x - drag.start.x;
+            const dy = point.y - drag.start.y;
+            if (Math.hypot(dx, dy) > 0.001) drag.moved = true;
+            const next = translateAnnotation(drag.origin, dx, dy);
+            setAnnotations(drag.baseline.map((item) => (item.id === drag.id ? next : item)));
+            return;
+        }
         const point = toNorm(event.clientX, event.clientY);
         if (!point) return;
+        if (tool === "select" || tool === "text") return;
         const start = drawingRef.current.start;
         if (tool === "arrow") {
             setDraftShape({ kind: "arrow", x1: start.x, y1: start.y, x2: point.x, y2: point.y });
@@ -304,10 +337,17 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
     };
 
     const endShape = () => {
+        const drag = dragRef.current;
+        dragRef.current = null;
         const current = draftRef.current;
         draftRef.current = null;
         drawingRef.current = { active: false, stroke: null };
         setDraft(null);
+        if (drag?.moved) {
+            setHistory((historyState) => [...historyState.slice(-40), drag.baseline]);
+            setRedo([]);
+            return;
+        }
         if (!current) return;
         if (current.kind === "arrow") {
             if (Math.hypot(current.x2 - current.x1, current.y2 - current.y1) < 0.01) return;
@@ -495,7 +535,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
                                     <div className="absolute left-0 top-0" style={viewport.mediaStyle}>
                                         <img src={dataUrl} alt="" className="absolute inset-0 block h-full w-full object-contain" draggable={false} />
                                         <svg
-                                            className={`absolute inset-0 z-10 h-full w-full ${isBrushTool ? "pointer-events-none" : "cursor-crosshair touch-none"}`}
+                                            className={`absolute inset-0 z-10 h-full w-full touch-none ${isBrushTool ? "pointer-events-none" : tool === "select" ? "cursor-move" : "cursor-crosshair"}`}
                                             viewBox="0 0 1 1"
                                             preserveAspectRatio="none"
                                             onPointerDown={startShape}
@@ -678,6 +718,36 @@ function hitTest(annotations: CanvasAnnotation[], point: Point) {
         if (point.x >= item.x && point.x <= item.x + item.w && point.y >= item.y && point.y <= item.y + item.h) return item.id;
     }
     return null;
+}
+
+function translateAnnotation(item: CanvasAnnotation, dx: number, dy: number): CanvasAnnotation {
+    if (item.kind === "text") {
+        return { ...item, x: clamp01(item.x + dx), y: clamp01(item.y + dy) };
+    }
+    if (item.kind === "arrow") {
+        let x1 = item.x1 + dx;
+        let y1 = item.y1 + dy;
+        let x2 = item.x2 + dx;
+        let y2 = item.y2 + dy;
+        const minX = Math.min(x1, x2);
+        const maxX = Math.max(x1, x2);
+        const minY = Math.min(y1, y2);
+        const maxY = Math.max(y1, y2);
+        let offsetX = 0;
+        let offsetY = 0;
+        if (minX < 0) offsetX = -minX;
+        else if (maxX > 1) offsetX = 1 - maxX;
+        if (minY < 0) offsetY = -minY;
+        else if (maxY > 1) offsetY = 1 - maxY;
+        return { ...item, x1: x1 + offsetX, y1: y1 + offsetY, x2: x2 + offsetX, y2: y2 + offsetY };
+    }
+    const maxX = Math.max(0, 1 - item.w);
+    const maxY = Math.max(0, 1 - item.h);
+    return {
+        ...item,
+        x: Math.min(maxX, Math.max(0, item.x + dx)),
+        y: Math.min(maxY, Math.max(0, item.y + dy)),
+    };
 }
 
 function pointToSegmentDistance(point: Point, a: Point, b: Point) {
