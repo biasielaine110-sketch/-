@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Button, Modal } from "antd";
+import { Button, App, Modal } from "antd";
 import { Download } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -39,6 +39,7 @@ const PREVIEW_STAGE_ATTR = "data-canvas-image-preview-stage";
 
 export function CanvasImagePreviewModal({ open, src, title, fileName, projectId, info, onClose }: CanvasImagePreviewModalProps) {
     const { t } = useTranslation();
+    const { message } = App.useApp();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [zoom, setZoom] = useState(1);
     const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -138,7 +139,11 @@ export function CanvasImagePreviewModal({ open, src, title, fileName, projectId,
 
     const handleDownload = () => {
         const name = fileName || `image.${imageExtension(src)}`;
-        void saveBlobAs(src, name, { projectId });
+        void saveBlobAs(src, name, { projectId }).then((result) => {
+            if (result.method === "draft") {
+                message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
+            }
+        });
         setMenu(null);
     };
 

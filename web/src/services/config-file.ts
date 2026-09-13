@@ -26,7 +26,7 @@ export async function exportAppConfig(options?: ExportAppConfigOptions) {
           })();
     const data: AppConfigFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), config: exportConfig };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
-    await saveBlobAs(blob, "infinite-canvas-config.json", {
+    return saveBlobAs(blob, "infinite-canvas-config.json", {
         projectId: options?.projectId ?? resolveCanvasProjectIdFromLocation(),
     });
 }

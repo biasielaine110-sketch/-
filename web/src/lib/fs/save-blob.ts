@@ -5,8 +5,11 @@ import { supportsFileSystemAccess, writeBlobToDraftDirectory } from "@/lib/canva
 export type SaveBlobOptions = {
     /** When set, try writing into this project's bound draft folder first. */
     projectId?: string | null;
-    description?: string;
 };
+
+export type SaveBlobResult =
+    | { method: "draft"; fileName: string; folderName?: string }
+    | { method: "download"; fileName: string };
 
 export async function resolveBlobSource(source: Blob | string): Promise<Blob> {
     if (typeof source !== "string") return source;
@@ -23,9 +26,9 @@ export function resolveCanvasProjectIdFromLocation() {
 
 /**
  * Save a blob/url into the bound draft folder when available (no picker).
- * Falls back to browser download when draft storage is unavailable.
+ * Falls back to browser download when draft folder is unavailable.
  */
-export async function saveBlobAs(source: Blob | string, suggestedName: string, options?: SaveBlobOptions) {
+export async function saveBlobAs(source: Blob | string, suggestedName: string, options?: SaveBlobOptions): Promise<SaveBlobResult> {
     const fileName = suggestedName.trim() || "download.bin";
     const blob = await resolveBlobSource(source);
     const projectId = options?.projectId || resolveCanvasProjectIdFromLocation();
@@ -33,14 +36,12 @@ export async function saveBlobAs(source: Blob | string, suggestedName: string, o
     if (projectId && supportsFileSystemAccess()) {
         try {
             const saved = await writeBlobToDraftDirectory(projectId, fileName, blob);
-            if (saved) return { method: "draft" as const, fileName: saved.fileName, folderName: saved.folderName };
+            if (saved) return { method: "draft", fileName: saved.fileName, folderName: saved.folderName };
         } catch (error) {
-            if (error instanceof Error && error.message === "FILE_PERMISSION_DENIED") {
-                // Fall back to browser download below.
-            }
+            console.warn("draft folder save failed", error);
         }
     }
 
     saveAs(blob, fileName);
-    return { method: "download" as const, fileName };
+    return { method: "download", fileName };
 }

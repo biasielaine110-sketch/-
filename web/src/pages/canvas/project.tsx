@@ -47,9 +47,13 @@ import { CanvasTextClipboardMenu, blurActiveCanvasTextInput, isCanvasTextInterac
 import {
     getCanvasDraftMeta,
     overwriteCanvasDraft,
+    pickCanvasDraftDirectory,
     pickCanvasDraftFile,
+    safeDraftFileName,
     saveCanvasDraftFallbackDownload,
+    saveCanvasDraftToDirectory,
     saveCanvasDraftToHandle,
+    supportsDirectoryPicker,
     supportsFileSystemAccess,
     type CanvasDraftMeta,
 } from "@/lib/canvas/canvas-draft";
@@ -270,6 +274,7 @@ function AtelierCanvasPage() {
     const [draftSaving, setDraftSaving] = useState(false);
     const [draftMeta, setDraftMeta] = useState<CanvasDraftMeta | null>(null);
     const [draftPickerHandle, setDraftPickerHandle] = useState<FileSystemFileHandle | null>(null);
+    const [draftPickerDirectory, setDraftPickerDirectory] = useState<FileSystemDirectoryHandle | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [mergeDialogOpen, setMergeDialogOpen] = useState(false);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
@@ -1130,8 +1135,15 @@ function AtelierCanvasPage() {
     const handleDraftPickPath = useCallback(
         async (draftName: string) => {
             try {
+                if (supportsDirectoryPicker()) {
+                    const directory = await pickCanvasDraftDirectory();
+                    setDraftPickerDirectory(directory);
+                    setDraftPickerHandle(null);
+                    return;
+                }
                 const handle = await pickCanvasDraftFile(draftName || currentProject?.title || t("canvas.project.untitled"));
                 setDraftPickerHandle(handle);
+                setDraftPickerDirectory(null);
             } catch (error) {
                 if (error instanceof DOMException && error.name === "AbortError") return;
                 console.error(error);
@@ -1153,7 +1165,12 @@ function AtelierCanvasPage() {
             const hide = message.loading(t("canvas.draft.saving"), 0);
             try {
                 let meta: CanvasDraftMeta;
-                if (supportsFileSystemAccess()) {
+                if (supportsDirectoryPicker() || draftPickerDirectory) {
+                    const directory = draftPickerDirectory || (await pickCanvasDraftDirectory());
+                    meta = await saveCanvasDraftToDirectory(project, directory, draftName || project.title);
+                    setDraftPickerDirectory(directory);
+                    setDraftPickerHandle(null);
+                } else if (supportsFileSystemAccess()) {
                     const handle = draftPickerHandle || (await pickCanvasDraftFile(draftName || project.title));
                     meta = await saveCanvasDraftToHandle(project, handle);
                     setDraftPickerHandle(handle);
@@ -1162,7 +1179,7 @@ function AtelierCanvasPage() {
                 }
                 setDraftMeta(meta);
                 setDraftDialogOpen(false);
-                message.success(t("canvas.draft.bound", { name: meta.fileName }));
+                message.success(t("canvas.draft.bound", { name: meta.folderName ? `${meta.folderName}/${meta.fileName}` : meta.fileName }));
             } catch (error) {
                 if (error instanceof DOMException && error.name === "AbortError") return;
                 console.error(error);
@@ -1178,13 +1195,14 @@ function AtelierCanvasPage() {
                         console.error(fallbackError);
                     }
                 }
-                message.error(error instanceof Error ? error.message : t("canvas.draft.saveFailed"));
+                if (code === "FILE_PERMISSION_DENIED") message.warning(t("canvas.draft.permissionDenied"));
+                else message.error(error instanceof Error ? error.message : t("canvas.draft.saveFailed"));
             } finally {
                 hide();
                 setDraftSaving(false);
             }
         },
-        [buildLiveProjectSnapshot, draftPickerHandle, message, t],
+        [buildLiveProjectSnapshot, draftPickerDirectory, draftPickerHandle, message, t],
     );
 
     const handleDraftShortcut = useCallback(async () => {
@@ -2004,12 +2022,17 @@ function AtelierCanvasPage() {
     }, []);
 
     const downloadNodeImage = useCallback(
-        (node: CanvasNodeData) => {
+        async (node: CanvasNodeData) => {
             if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
             const extension = node.type === CanvasNodeType.Video ? "mp4" : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content);
-            void saveBlobAs(node.metadata.content, `canvas-${node.type}-${node.id}.${extension}`, { projectId });
+            const result = await saveBlobAs(node.metadata.content, `canvas-${node.type}-${node.id}.${extension}`, { projectId });
+            if (result.method === "draft") {
+                message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
+            } else if (result.method === "download" && draftMeta && !draftMeta.hasDirectory) {
+                message.warning(t("canvas.draft.rebindForFolderSave"));
+            }
         },
-        [projectId],
+        [draftMeta, message, projectId, t],
     );
 
     const saveNodeAsset = useCallback(
@@ -4102,7 +4125,11 @@ function AtelierCanvasPage() {
                 <CanvasDraftSaveDialog
                     open={draftDialogOpen}
                     defaultName={draftMeta?.fileName?.replace(/\.zip$/i, "") || currentProject?.title || t("canvas.project.untitled")}
-                    selectedFileName={draftPickerHandle?.name || draftMeta?.fileName}
+                    selectedFileName={
+                        draftPickerDirectory
+                            ? `${draftPickerDirectory.name}/${safeDraftFileName(draftMeta?.fileName?.replace(/\.zip$/i, "") || currentProject?.title || t("canvas.project.untitled"))}`
+                            : draftPickerHandle?.name || (draftMeta?.folderName ? `${draftMeta.folderName}/${draftMeta.fileName}` : draftMeta?.fileName)
+                    }
                     saving={draftSaving}
                     onClose={() => {
                         if (draftSaving) return;

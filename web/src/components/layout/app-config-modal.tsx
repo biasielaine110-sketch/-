@@ -85,8 +85,12 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const confirmExportConfig = async () => {
         setExporting(true);
         try {
-            await exportAppConfig({ includeTextPrompts: exportIncludeTextPrompts });
-            message.success(t("config.exported"));
+            const result = await exportAppConfig({ includeTextPrompts: exportIncludeTextPrompts });
+            message.success(
+                result.method === "draft"
+                    ? t("config.exportedToFolder", { name: result.fileName, folder: result.folderName || "" })
+                    : t("config.exported"),
+            );
             setExportOpen(false);
         } catch (error) {
             message.error(error instanceof Error ? error.message : t("config.exportFailed"));

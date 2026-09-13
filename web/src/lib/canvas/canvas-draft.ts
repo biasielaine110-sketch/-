@@ -7,9 +7,13 @@ import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 export type CanvasDraftMeta = {
     projectId: string;
     fileName: string;
+    /** Bound folder name when draft storage is a directory. */
+    folderName?: string;
     lastSavedAt?: string;
     /** True when a File System Access handle is bound for in-place overwrite. */
     hasHandle?: boolean;
+    /** True when the draft folder can receive silent downloads/exports. */
+    hasDirectory?: boolean;
 };
 
 type StoredDraft = CanvasDraftMeta & {
@@ -22,6 +26,10 @@ const draftStore = localforage.createInstance({ name: "infinite-canvas", storeNa
 
 export function supportsFileSystemAccess() {
     return typeof window !== "undefined" && typeof window.showSaveFilePicker === "function";
+}
+
+export function supportsDirectoryPicker() {
+    return typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
 }
 
 function draftKey(projectId: string) {
@@ -37,35 +45,27 @@ export function safeExportFileName(value: string) {
     return value.trim().replace(/[\\/:*?"<>|]/g, "_") || "download.bin";
 }
 
-async function resolveDirectoryFromFileHandle(handle: FileSystemFileHandle) {
-    if (typeof handle.getParent !== "function") return null;
-    try {
-        return (await handle.getParent()) || null;
-    } catch {
-        return null;
-    }
-}
-
-export async function getCanvasDraftDirectory(projectId: string) {
-    const stored = await draftStore.getItem<StoredDraft>(draftKey(projectId));
-    if (stored?.directoryHandle) return stored.directoryHandle;
-    if (!stored?.handle) return null;
-    const directory = await resolveDirectoryFromFileHandle(stored.handle);
-    if (directory) {
-        await draftStore.setItem(draftKey(projectId), { ...stored, directoryHandle: directory });
-    }
-    return directory;
-}
-
 export async function getCanvasDraftMeta(projectId: string): Promise<CanvasDraftMeta | null> {
     const stored = await draftStore.getItem<StoredDraft>(draftKey(projectId));
     if (!stored) return null;
-    return { projectId: stored.projectId, fileName: stored.fileName, lastSavedAt: stored.lastSavedAt, hasHandle: Boolean(stored.handle) };
+    return {
+        projectId: stored.projectId,
+        fileName: stored.fileName,
+        folderName: stored.folderName || stored.directoryHandle?.name,
+        lastSavedAt: stored.lastSavedAt,
+        hasHandle: Boolean(stored.handle),
+        hasDirectory: Boolean(stored.directoryHandle),
+    };
 }
 
 export async function getCanvasDraftHandle(projectId: string) {
     const stored = await draftStore.getItem<StoredDraft>(draftKey(projectId));
     return stored?.handle || null;
+}
+
+export async function getCanvasDraftDirectory(projectId: string) {
+    const stored = await draftStore.getItem<StoredDraft>(draftKey(projectId));
+    return stored?.directoryHandle || null;
 }
 
 export async function clearCanvasDraft(projectId: string) {
@@ -79,6 +79,15 @@ async function ensureWritePermission(handle: FileSystemFileHandle | FileSystemDi
     return next === "granted";
 }
 
+/** Ask the user to choose a folder used as draft storage (zip + downloads/exports). */
+export async function pickCanvasDraftDirectory() {
+    if (!supportsDirectoryPicker() || !window.showDirectoryPicker) {
+        throw new Error("FILE_SYSTEM_ACCESS_UNSUPPORTED");
+    }
+    return window.showDirectoryPicker({ mode: "readwrite" });
+}
+
+/** Legacy file picker kept as fallback when directory picker is unavailable. */
 export async function pickCanvasDraftFile(suggestedName: string) {
     if (!supportsFileSystemAccess() || !window.showSaveFilePicker) {
         throw new Error("FILE_SYSTEM_ACCESS_UNSUPPORTED");
@@ -106,7 +115,7 @@ export async function writeBlobToFileHandle(handle: FileSystemFileHandle, blob: 
     }
 }
 
-/** Write a file next to the bound draft zip without opening a save picker. */
+/** Write a file into the bound draft folder without opening a save picker. */
 export async function writeBlobToDraftDirectory(projectId: string, fileName: string, blob: Blob) {
     const directory = await getCanvasDraftDirectory(projectId);
     if (!directory) return null;
@@ -118,19 +127,57 @@ export async function writeBlobToDraftDirectory(projectId: string, fileName: str
     return { fileName: safeName, folderName: directory.name };
 }
 
-export async function saveCanvasDraftToHandle(project: CanvasProject, handle: FileSystemFileHandle) {
+export async function saveCanvasDraftToDirectory(project: CanvasProject, directory: FileSystemDirectoryHandle, draftName: string) {
+    const allowed = await ensureWritePermission(directory);
+    if (!allowed) throw new Error("FILE_PERMISSION_DENIED");
+    const fileName = safeDraftFileName(draftName || project.title);
+    const handle = await directory.getFileHandle(fileName, { create: true });
     const zip = await buildCanvasProjectsZip([project]);
     await writeBlobToFileHandle(handle, zip);
-    const directoryHandle = (await resolveDirectoryFromFileHandle(handle)) || undefined;
+    const meta: StoredDraft = {
+        projectId: project.id,
+        fileName: handle.name || fileName,
+        folderName: directory.name,
+        lastSavedAt: new Date().toISOString(),
+        handle,
+        directoryHandle: directory,
+        hasHandle: true,
+        hasDirectory: true,
+    };
+    await draftStore.setItem(draftKey(project.id), meta);
+    return {
+        projectId: meta.projectId,
+        fileName: meta.fileName,
+        folderName: meta.folderName,
+        lastSavedAt: meta.lastSavedAt,
+        hasHandle: true,
+        hasDirectory: true,
+    };
+}
+
+export async function saveCanvasDraftToHandle(project: CanvasProject, handle: FileSystemFileHandle, directory?: FileSystemDirectoryHandle | null) {
+    const zip = await buildCanvasProjectsZip([project]);
+    await writeBlobToFileHandle(handle, zip);
+    const directoryHandle = directory || undefined;
     const meta: StoredDraft = {
         projectId: project.id,
         fileName: handle.name || safeDraftFileName(project.title),
+        folderName: directoryHandle?.name,
         lastSavedAt: new Date().toISOString(),
         handle,
         directoryHandle,
+        hasHandle: true,
+        hasDirectory: Boolean(directoryHandle),
     };
     await draftStore.setItem(draftKey(project.id), meta);
-    return { projectId: meta.projectId, fileName: meta.fileName, lastSavedAt: meta.lastSavedAt, hasHandle: true };
+    return {
+        projectId: meta.projectId,
+        fileName: meta.fileName,
+        folderName: meta.folderName,
+        lastSavedAt: meta.lastSavedAt,
+        hasHandle: true,
+        hasDirectory: Boolean(directoryHandle),
+    };
 }
 
 export async function saveCanvasDraftFallbackDownload(project: CanvasProject, fileName: string) {
@@ -143,7 +190,7 @@ export async function saveCanvasDraftFallbackDownload(project: CanvasProject, fi
         lastSavedAt: new Date().toISOString(),
     };
     await draftStore.setItem(draftKey(project.id), meta);
-    return { projectId: meta.projectId, fileName: meta.fileName, lastSavedAt: meta.lastSavedAt, hasHandle: false };
+    return { projectId: meta.projectId, fileName: meta.fileName, lastSavedAt: meta.lastSavedAt, hasHandle: false, hasDirectory: false };
 }
 
 /** Overwrite the bound draft file in place. Never downloads a new file. */
@@ -151,11 +198,16 @@ export async function overwriteCanvasDraft(project: CanvasProject) {
     const stored = await draftStore.getItem<StoredDraft>(draftKey(project.id));
     if (!stored?.handle) return null;
     try {
-        return await saveCanvasDraftToHandle(project, stored.handle);
+        return await saveCanvasDraftToHandle(project, stored.handle, stored.directoryHandle);
     } catch (error) {
         if (error instanceof Error && error.message === "FILE_PERMISSION_DENIED") throw error;
         // Handle may be stale after browser restart; drop it so the user must rebind the same file.
-        await draftStore.setItem(draftKey(project.id), { projectId: project.id, fileName: stored.fileName, lastSavedAt: stored.lastSavedAt });
+        await draftStore.setItem(draftKey(project.id), {
+            projectId: project.id,
+            fileName: stored.fileName,
+            folderName: stored.folderName,
+            lastSavedAt: stored.lastSavedAt,
+        });
         throw error;
     }
 }

@@ -45,6 +45,13 @@ interface SaveFilePickerOptions {
     excludeAcceptAllOption?: boolean;
 }
 
+interface DirectoryPickerOptions {
+    id?: string;
+    mode?: "read" | "readwrite";
+    startIn?: FileSystemHandle | "desktop" | "documents" | "downloads" | "music" | "pictures" | "videos";
+}
+
 interface Window {
     showSaveFilePicker?: (options?: SaveFilePickerOptions) => Promise<FileSystemFileHandle>;
+    showDirectoryPicker?: (options?: DirectoryPickerOptions) => Promise<FileSystemDirectoryHandle>;
 }
