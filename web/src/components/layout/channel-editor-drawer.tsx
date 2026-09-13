@@ -1,6 +1,6 @@
 import { Button, Drawer, Input, Segmented, Select, Space } from "antd";
-import { ListPlus, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { GripVertical, ListPlus, Trash2 } from "lucide-react";
+import { useEffect, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { defaultBaseUrlForApiFormat, guessCapability, normalizeChannelModels, resolveChannelModelApiFormat, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
@@ -14,6 +14,8 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const [draft, setDraft] = useState<ModelChannel | null>(channel);
     const [selectOpen, setSelectOpen] = useState(false);
     const [scriptTarget, setScriptTarget] = useState<ScriptTarget | null>(null);
+    const [draggingModelName, setDraggingModelName] = useState<string | null>(null);
+    const [dragOverModelName, setDragOverModelName] = useState<string | null>(null);
     const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
         { label: "OpenAI", value: "openai" },
         { label: "Gemini", value: "gemini" },
@@ -21,7 +23,11 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const capabilityOptions: Array<{ label: string; value: ModelCapability }> = ["image", "video", "text", "audio"].map((value) => ({ label: t(`config.channelEditor.capabilities.${value}`), value: value as ModelCapability }));
 
     useEffect(() => {
-        if (open && channel) setDraft(channel);
+        if (open && channel) {
+            setDraft(channel);
+            setDraggingModelName(null);
+            setDragOverModelName(null);
+        }
     }, [open, channel]);
 
     if (!draft) return null;
@@ -36,13 +42,51 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
 
     const applySelection = (names: string[]) => {
         const map = new Map(draft.models.map((model) => [model.name, model]));
-        setModels(names.map((name) => map.get(name) || { name, capability: guessCapability(name), apiFormat: draft.apiFormat }));
+        const selected = new Set(names);
+        // Keep the current order for models that remain selected, then append newly added ones.
+        const kept = draft.models.filter((model) => selected.has(model.name));
+        const keptNames = new Set(kept.map((model) => model.name));
+        const added = names
+            .filter((name) => !keptNames.has(name))
+            .map((name) => map.get(name) || { name, capability: guessCapability(name), apiFormat: draft.apiFormat });
+        setModels([...kept, ...added]);
     };
 
     const setCapability = (name: string, capability: ModelCapability) => setModels(draft.models.map((model) => (model.name === name ? { ...model, capability } : model)));
     const setModelApiFormat = (name: string, apiFormat: ApiCallFormat) => setModels(draft.models.map((model) => (model.name === name ? { ...model, apiFormat } : model)));
     const setScript = (name: string, script: string) => setModels(draft.models.map((model) => (model.name === name ? { ...model, script: script || undefined } : model)));
     const removeModel = (name: string) => setModels(draft.models.filter((model) => model.name !== name));
+
+    const clearModelDrag = () => {
+        setDraggingModelName(null);
+        setDragOverModelName(null);
+    };
+
+    const handleModelDragStart = (event: ReactDragEvent, name: string) => {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", name);
+        setDraggingModelName(name);
+    };
+
+    const handleModelDragOver = (event: ReactDragEvent, name: string) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        if (dragOverModelName !== name) setDragOverModelName(name);
+    };
+
+    const handleModelDrop = (event: ReactDragEvent, targetName: string) => {
+        event.preventDefault();
+        const sourceName = draggingModelName || event.dataTransfer.getData("text/plain");
+        clearModelDrag();
+        if (!sourceName || sourceName === targetName) return;
+        const fromIndex = draft.models.findIndex((model) => model.name === sourceName);
+        const toIndex = draft.models.findIndex((model) => model.name === targetName);
+        if (fromIndex < 0 || toIndex < 0) return;
+        const next = [...draft.models];
+        const [moved] = next.splice(fromIndex, 1);
+        next.splice(toIndex, 0, moved);
+        setModels(next);
+    };
 
     const save = () => {
         onSave({ ...draft, name: draft.name.trim() || t("config.channels.unnamed"), models: normalizeChannelModels(draft.models) });
@@ -89,6 +133,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                 <div>
                     <div className="text-sm font-semibold">{t("config.channelEditor.models")}</div>
                     <div className="mt-0.5 text-xs text-stone-500">{t("config.channelEditor.modelDescription", { count: draft.models.length })}</div>
+                    <div className="mt-0.5 text-xs text-stone-500">{t("config.channelEditor.reorderHint")}</div>
                 </div>
                 <Button type="primary" icon={<ListPlus className="size-4" />} onClick={() => setSelectOpen(true)}>
                     {t("config.channelEditor.selectModels")}
@@ -98,7 +143,24 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
             <div className="space-y-2 rounded-lg border border-stone-200 p-2 dark:border-stone-800">
                 {draft.models.length ? (
                     draft.models.map((model) => (
-                        <div key={model.name} className="flex flex-wrap items-center gap-3 rounded-md px-2 py-1.5 hover:bg-stone-50 dark:hover:bg-stone-900/40">
+                        <div
+                            key={model.name}
+                            onDragOver={(event) => handleModelDragOver(event, model.name)}
+                            onDrop={(event) => handleModelDrop(event, model.name)}
+                            className={`flex flex-wrap items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-stone-50 dark:hover:bg-stone-900/40 ${
+                                draggingModelName === model.name ? "opacity-50" : ""
+                            } ${dragOverModelName === model.name && draggingModelName !== model.name ? "bg-sky-50 ring-1 ring-sky-400 dark:bg-sky-950/40 dark:ring-sky-500" : ""}`}
+                        >
+                            <span
+                                draggable
+                                onDragStart={(event) => handleModelDragStart(event, model.name)}
+                                onDragEnd={clearModelDrag}
+                                className="inline-flex shrink-0 cursor-grab touch-none text-stone-400 active:cursor-grabbing"
+                                title={t("config.channelEditor.dragHandle")}
+                                aria-label={t("config.channelEditor.dragHandle")}
+                            >
+                                <GripVertical className="size-4" />
+                            </span>
                             <span className="min-w-0 flex-1 truncate text-sm" title={model.name}>
                                 {model.name}
                             </span>

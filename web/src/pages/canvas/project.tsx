@@ -721,8 +721,8 @@ function AtelierCanvasPage() {
                       }
                     : type === CanvasNodeType.Chat
                       ? {
-                            model: effectiveConfig.textModel || effectiveConfig.model,
-                            imageModel: effectiveConfig.imageModel || effectiveConfig.model,
+                            model: resolveModelForCapability(effectiveConfig, effectiveConfig.textModel, "text"),
+                            imageModel: resolveModelForCapability(effectiveConfig, effectiveConfig.imageModel, "image"),
                             chatTextEnabled: true,
                             chatImageEnabled: false,
                             status: NODE_STATUS_IDLE,
@@ -3235,8 +3235,8 @@ function AtelierCanvasPage() {
                     messages: [],
                     chatTextEnabled: true,
                     chatImageEnabled: false,
-                    model: effectiveConfig.textModel || effectiveConfig.model,
-                    imageModel: effectiveConfig.imageModel || effectiveConfig.model,
+                    model: resolveModelForCapability(effectiveConfig, effectiveConfig.textModel, "text"),
+                    imageModel: resolveModelForCapability(effectiveConfig, effectiveConfig.imageModel, "image"),
                     content: context,
                 },
             );

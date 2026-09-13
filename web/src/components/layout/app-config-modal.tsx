@@ -11,6 +11,7 @@ import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from 
 import {
     channelProtocolSummary,
     createModelChannel,
+    findPreferredModelOption,
     modelOptionsFromChannels,
     normalizeModelOptionValue,
     selectableModelsByCapability,
@@ -331,7 +332,12 @@ function withChannels(config: AiConfig, channels: ModelChannel[]): AiConfig {
 function pickDefaultModel(config: AiConfig, capability: ModelCapability, current: string) {
     const options = selectableModelsByCapability(config, capability);
     const normalized = normalizeModelOptionValue(current, config.channels);
-    return options.includes(normalized) ? normalized : options[0] || "";
+    if (options.includes(normalized)) return normalized;
+    if (capability === "text") {
+        const preferred = findPreferredModelOption(config.channels, "text", ["deepseek-flash"]);
+        if (preferred && options.includes(preferred)) return preferred;
+    }
+    return options[0] || "";
 }
 
 function normalizeImageCount(value: string) {

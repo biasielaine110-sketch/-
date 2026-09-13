@@ -129,6 +129,8 @@ export function boolConfig(value: string, fallback: boolean) {
 }
 const AUDIO_KEYWORDS = ["audio", "tts", "speech", "voice", "music", "sound"];
 const IMAGE_KEYWORDS = ["seedream", "gpt-image", "image", "dall-e", "dalle", "imagen", "flux", "sdxl", "stable-diffusion", "midjourney"];
+/** Preferred chat/text model when present in any channel (e.g. deepseek-flash). */
+const PREFERRED_TEXT_MODEL_NAMES = ["deepseek-flash"];
 
 /** Best-effort default capability for a freshly fetched model name; user can override in the channel editor. */
 export function guessCapability(name: string): ModelCapability {
@@ -137,6 +139,16 @@ export function guessCapability(name: string): ModelCapability {
     if (AUDIO_KEYWORDS.some((keyword) => value.includes(keyword))) return "audio";
     if (IMAGE_KEYWORDS.some((keyword) => value.includes(keyword))) return "image";
     return "text";
+}
+
+export function findPreferredModelOption(channels: ModelChannel[], capability: ModelCapability, preferredNames: string[]) {
+    for (const preferred of preferredNames) {
+        for (const channel of channels) {
+            const model = channel.models.find((item) => item.name === preferred && item.capability === capability);
+            if (model) return encodeChannelModel(channel.id, model.name);
+        }
+    }
+    return "";
 }
 
 function findChannelModel(config: AiConfig, value: string): { channel: ModelChannel; model: ChannelModel } | null {
@@ -162,7 +174,18 @@ export function resolveModelForCapability(config: AiConfig, currentModel: string
     const selectable = selectableModelsByCapability(config, capability);
     if (currentModel && (selectable.includes(currentModel) || modelMatchesCapability(config, currentModel, capability))) return currentModel;
     if (defaultModel && (selectable.includes(defaultModel) || modelMatchesCapability(config, defaultModel, capability))) return defaultModel;
+    if (capability === "text") {
+        const preferred = findPreferredModelOption(config.channels, "text", PREFERRED_TEXT_MODEL_NAMES);
+        if (preferred) return preferred;
+    }
     return selectable[0] || fallbackModel;
+}
+
+function resolvePersistedTextModel(config: Partial<AiConfig>, channels: ModelChannel[]) {
+    const preferred = findPreferredModelOption(channels, "text", PREFERRED_TEXT_MODEL_NAMES);
+    const current = normalizeModelOptionValue(config.textModel || config.model, channels);
+    if (preferred && (!current || modelOptionName(current) === "gpt-5.5")) return preferred;
+    return current || preferred || "";
 }
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
@@ -201,13 +224,17 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
-            version: 2,
+            version: 3,
             partialize: (state) => ({ config: state.config }),
             migrate: (persisted, version) => {
                 const state = (persisted || {}) as Partial<ConfigStore> & { config?: Partial<AiConfig> };
                 // v1 briefly defaulted apiTransport to "direct", which broke CORS for most relays.
                 if (version < 2 && state.config) {
                     state.config = { ...state.config, apiTransport: "proxy" };
+                }
+                // v3: prefer deepseek-flash as the default chat/text model when available.
+                if (version < 3 && state.config) {
+                    state.config = { ...state.config, textModel: "" };
                 }
                 return state as ConfigStore;
             },
@@ -228,7 +255,7 @@ export const useConfigStore = create<ConfigStore>()(
                         models,
                         imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
                         videoModel: normalizeModelOptionValue(config.videoModel, channels),
-                        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
+                        textModel: resolvePersistedTextModel(config, channels),
                         audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
                         audioVoice: config.audioVoice || defaultConfig.audioVoice,
                         audioFormat: config.audioFormat || defaultConfig.audioFormat,
