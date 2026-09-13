@@ -174,6 +174,7 @@ export default {
         corsRequired: "The browser blocked this cross-origin request. Route it through your own server",
         networkFailed: "Cannot reach the API server (cross-origin block, unreachable address, or network issue). Check the Base URL and network",
         proxyTimedOut: "Proxy timed out (Vercel Hobby ~60s cap). In Settings → Preferences, set API transport to Direct, or upgrade to Vercel Pro.",
+        payloadTooLarge: "Request body too large (HTTP 413). Image-edit uploads through the site proxy are size-limited. Use fewer/smaller reference images, or set API transport to Direct in Settings → Preferences.",
         baseUrlRequired: "Configure the Base URL first",
         apiKeyRequired: "Configure the API key first",
         authenticationFailed: "Authentication failed. Check the API key, plan permissions, and model permissions.",

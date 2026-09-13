@@ -5,7 +5,7 @@ import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConf
 import { proxyApiUrl } from "@/lib/api-proxy";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
-import { dataUrlToFile } from "@/lib/image-utils";
+import { compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
@@ -271,8 +271,7 @@ function resolveGeminiAspectRatioForSize(size: string) {
 }
 
 async function uploadProviderReferenceImage(config: AiConfig, image: ReferenceImage, options?: RequestOptions) {
-    const dataUrl = await imageToDataUrl(image);
-    if (!dataUrl) throw new Error(apiText("referenceImageReadFailed"));
+    const dataUrl = await prepareReferenceDataUrl(image, 1);
     const file = dataUrlToFile({ ...image, dataUrl });
     const formData = new FormData();
     formData.set("file", file);
@@ -712,11 +711,18 @@ function readNetworkMessage(message: string) {
 
 function readStatusError(status: number | undefined, fallback: string) {
     if (status === 401 || status === 403) return apiText("authenticationFailed");
+    if (status === 413) return apiText("payloadTooLarge");
     if (status === 429) return apiText("rateLimited");
     if (status === 404) return apiText("notFound");
     if (status === 502) return apiText("badGateway");
     if (status === 503) return apiText("serviceBusy");
     return status ? apiText("httpFailed", { status }) : fallback;
+}
+
+async function prepareReferenceDataUrl(image: ReferenceImage, referenceCount = 1, options?: { preserveAlpha?: boolean }) {
+    const dataUrl = await imageToDataUrl(image);
+    if (!dataUrl) throw new Error(apiText("referenceImageReadFailed"));
+    return compressReferenceDataUrl(dataUrl, referenceCount, { preserveAlpha: options?.preserveAlpha });
 }
 
 function withSystemPrompt(config: AiConfig, prompt: string) {
@@ -1075,8 +1081,9 @@ async function requestGeminiImages(config: AiConfig, prompt: string, references:
 
 async function requestGeminiImagesOnce(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
     const parts: GeminiPart[] = [{ text: prompt }];
+    const count = Math.max(1, references.length);
     for (const image of references) {
-        parts.push(toGeminiImagePart(await imageToDataUrl(image)));
+        parts.push(toGeminiImagePart(await prepareReferenceDataUrl(image, count)));
     }
     const response = await axios.post<GeminiPayload>(
         geminiApiUrl(config, "generateContent"),
@@ -1165,7 +1172,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         const quality = normalizeQuality(config.quality);
         const requestSize = isGptImageModel(requestConfig.model) ? resolveGptImageRequestSize(requestConfig.model, quality, config.size) : resolveRequestSize(quality, config.size);
         const background = normalizeBackground(config.background);
-        const refs = await Promise.all(references.map((image) => imageToDataUrl(image)));
+        const refs = await Promise.all(references.map((image) => prepareReferenceDataUrl(image, Math.max(1, references.length))));
         try {
             const result = await runModelPlugin({
                 capability: "image",
@@ -1203,9 +1210,15 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         if (value == null || typeof value === "object") continue;
         formData.set(key, String(value));
     }
-    const files = await Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
+    const refCount = Math.max(1, references.length + (mask ? 1 : 0));
+    const files = await Promise.all(
+        references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await prepareReferenceDataUrl(image, refCount) })),
+    );
     files.forEach((file) => formData.append("image", file));
-    if (mask) formData.set("mask", dataUrlToFile(mask));
+    if (mask) {
+        const maskDataUrl = await prepareReferenceDataUrl(mask, refCount, { preserveAlpha: true });
+        formData.set("mask", dataUrlToFile({ ...mask, dataUrl: maskDataUrl }));
+    }
 
     try {
         const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: aiHeaders(requestConfig), signal: options?.signal });
