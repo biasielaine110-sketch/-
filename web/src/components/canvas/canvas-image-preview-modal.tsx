@@ -3,11 +3,11 @@ import { createPortal } from "react-dom";
 import { Button, Modal } from "antd";
 import { Download } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { saveAs } from "file-saver";
 
 import { imageExtension } from "@/lib/canvas/canvas-generation-helpers";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
+import { saveBlobAs } from "@/lib/fs/save-blob";
 import { useThemeStore } from "@/stores/use-theme-store";
 
 export type CanvasImagePreviewInfo = {
@@ -30,13 +30,14 @@ type CanvasImagePreviewModalProps = {
     src: string | null | undefined;
     title?: string;
     fileName?: string;
+    projectId?: string | null;
     info?: CanvasImagePreviewInfo | null;
     onClose: () => void;
 };
 
 const PREVIEW_STAGE_ATTR = "data-canvas-image-preview-stage";
 
-export function CanvasImagePreviewModal({ open, src, title, fileName, info, onClose }: CanvasImagePreviewModalProps) {
+export function CanvasImagePreviewModal({ open, src, title, fileName, projectId, info, onClose }: CanvasImagePreviewModalProps) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [zoom, setZoom] = useState(1);
@@ -137,7 +138,7 @@ export function CanvasImagePreviewModal({ open, src, title, fileName, info, onCl
 
     const handleDownload = () => {
         const name = fileName || `image.${imageExtension(src)}`;
-        saveAs(src, name);
+        void saveBlobAs(src, name, { projectId });
         setMenu(null);
     };
 

@@ -1,6 +1,5 @@
-import { saveAs } from "file-saver";
-
 import i18n from "@/i18n";
+import { saveBlobAs } from "@/lib/fs/save-blob";
 import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
 
 type AppConfigFile = {
@@ -10,10 +9,15 @@ type AppConfigFile = {
     config: AiConfig;
 };
 
-export function exportAppConfig() {
+export async function exportAppConfig(projectId?: string | null) {
     const { config } = useConfigStore.getState();
     const data: AppConfigFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), config };
-    saveAs(new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" }), "infinite-canvas-config.json");
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
+    await saveBlobAs(blob, "infinite-canvas-config.json", {
+        projectId,
+        description: "Infinite Atelier Config",
+        accept: { "application/json": [".json"] },
+    });
 }
 
 export async function importAppConfig(file: File) {
