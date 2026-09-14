@@ -47,6 +47,10 @@ export type CanvasNodeImage = {
     naturalHeight: number;
     bytes: number;
     mimeType: string;
+    /** Midjourney Imagine parent task id — used for manual Upscale (U1–U4). */
+    midjourneyTaskId?: string;
+    /** Midjourney tile index 1–4 when this image is a specific Imagine tile. */
+    midjourneyIndex?: number;
 };
 
 export type CanvasAnnotationKind = "rect" | "ellipse" | "arrow" | "text";
@@ -143,6 +147,10 @@ export type CanvasNodeMetadata = {
     mergeSlotIds?: Array<string | null>;
     /** Cover focus 0..1 keyed by source node id. */
     mergeOffsets?: Record<string, { x: number; y: number }>;
+    /** Midjourney Imagine parent task id — enables manual Upscale (U1–U4). */
+    midjourneyTaskId?: string;
+    /** Midjourney tile index 1–4 when the primary image is a specific Imagine tile. */
+    midjourneyIndex?: number;
 };
 
 export type CanvasNodeData = {

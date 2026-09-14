@@ -228,21 +228,25 @@ async function probeText(config: ReturnType<typeof resolveModelRequestConfig>, s
 
 async function probeImage(config: ReturnType<typeof resolveModelRequestConfig>, signal?: AbortSignal) {
     // Empty prompt should fail validation after auth/model routing — avoids billing a real image.
-    try {
-        const response = await axios.post(
-            proxyApiUrl(buildApiUrl(config.baseUrl, "/images/generations")),
-            {
+    const isMidjourney = /midjourney|\bmj[-_]?/i.test(config.model);
+    const isSeedance = /seedance\.nz/i.test(config.baseUrl);
+    const path = isMidjourney ? "/midjourney/generations" : isSeedance ? "/image/generations" : "/images/generations";
+    const body = isMidjourney
+        ? { prompt: "" }
+        : isSeedance
+          ? { model: config.model, prompt: "", metadata: { resolution: "1k" } }
+          : {
                 model: config.model,
                 prompt: "",
                 ...(isSeedreamLike(config.model) || isVolcArk(config.baseUrl) ? { size: "2K", watermark: false } : { n: 1 }),
-            },
-            {
-                headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
-                signal,
-                timeout: HEALTH_TIMEOUT_MS,
-                validateStatus: () => true,
-            },
-        );
+            };
+    try {
+        const response = await axios.post(proxyApiUrl(buildApiUrl(config.baseUrl, path)), body, {
+            headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+            signal,
+            timeout: HEALTH_TIMEOUT_MS,
+            validateStatus: () => true,
+        });
         return interpretNonTextProbe(response.status, response.data);
     } catch (error) {
         return failFromError(error);
@@ -375,15 +379,28 @@ function readMessage(value: unknown): string {
         message?: unknown;
         msg?: unknown;
         error?: unknown;
+        code?: unknown;
         header?: { message?: unknown; msg?: unknown };
     };
-    const nested =
-        typeof payload.error === "string"
-            ? payload.error
-            : payload.error && typeof payload.error === "object"
-              ? (payload.error as { message?: unknown }).message
-              : undefined;
-    return String(payload.header?.message || payload.header?.msg || payload.message || payload.msg || nested || "").trim();
+    const nested = payload.error;
+    const nestedObj = nested && typeof nested === "object" ? (nested as { message?: unknown; code?: unknown; msg?: unknown }) : null;
+    const codeHint =
+        typeof payload.code === "string"
+            ? payload.code
+            : typeof nestedObj?.code === "string"
+              ? nestedObj.code
+              : "";
+    const text =
+        readMessage(payload.msg) ||
+        readMessage(payload.message) ||
+        (typeof nested === "string" ? nested : "") ||
+        readMessage(nestedObj?.message) ||
+        readMessage(nestedObj?.msg) ||
+        readMessage(payload.header?.message) ||
+        readMessage(payload.header?.msg) ||
+        "";
+    if (codeHint && text && !text.includes(codeHint)) return `${text} (${codeHint})`;
+    return text || codeHint;
 }
 
 function readOpenSpeechMessage(raw: string) {
@@ -397,7 +414,7 @@ function isAuthFailure(status: number, message: string) {
 }
 
 function isModelMissing(message: string) {
-    return /model[^\n]{0,40}(not\s*found|does\s*not\s*exist|invalid|unknown)|unknown model|模型.*(不存在|无效|未找到)/i.test(message);
+    return /model_not_found|model[^\n]{0,40}(not\s*found|does\s*not\s*exist|invalid|unknown)|unknown model|模型.*(不存在|无效|未找到)/i.test(message);
 }
 
 function isValidationFailure(message: string) {

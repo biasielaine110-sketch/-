@@ -77,8 +77,8 @@ type ImageApiResponse = {
     status?: string;
     progress?: number;
     url?: string;
-    result?: { type?: string; url?: string; data?: Array<Record<string, unknown>> };
-    data?: Array<Record<string, unknown>>;
+    result?: { type?: string; url?: string; data?: Array<Record<string, unknown>>; images?: Array<Record<string, unknown>> };
+    data?: Array<Record<string, unknown>> | Record<string, unknown>;
     images?: Array<Record<string, unknown>>;
     results?: Array<Record<string, unknown>>;
     error?: { message?: string; code?: string | number };
@@ -131,6 +131,25 @@ const IMAGE_RESPONSE_FORMAT = "b64_json";
 
 const GEMINI_SUPPORTED_RATIOS = ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "9:21", "16:9", "21:9"];
 const GEMINI_IMAGE_SIZE_BY_QUALITY: Record<string, string> = { low: "1K", medium: "2K", high: "4K", standard: "1K", hd: "2K" };
+const APIMART_GPT_IMAGE_1_RATIOS = ["1:1", "3:2", "2:3"];
+const APIMART_GPT_IMAGE_2_RATIOS = ["1:1", "3:2", "2:3", "4:3", "3:4", "5:4", "4:5", "16:9", "9:16", "2:1", "1:2", "3:1", "1:3", "21:9", "9:21"];
+const APIMART_QWEN_RATIOS = ["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"];
+const APIMART_SEEDREAM_RATIOS = ["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "2:1", "1:2", "21:9"];
+const APIMART_GEMINI_RATIOS = ["1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16", "5:4", "4:5", "21:9", "1:4", "4:1", "1:8", "8:1"];
+const APIMART_DEFAULT_RATIOS = ["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9", "9:21"];
+
+function isApimartBaseUrl(baseUrl: string) {
+    return /apimart\.ai/i.test(baseUrl.trim());
+}
+
+function isSeedanceNzBaseUrl(baseUrl: string) {
+    return /seedance\.nz/i.test(baseUrl.trim());
+}
+
+function isApiSuccessCode(code: number) {
+    // OpenAI-compatible CN relays commonly use 0; APIMart / Seedance use HTTP-style 200.
+    return code === 0 || code === 200;
+}
 
 function normalizeQuality(quality: string) {
     const value = quality.trim().toLowerCase();
@@ -200,6 +219,12 @@ function normalizeImageApiErrorMessage(message: string, model?: string) {
     if (/aspect_ratio\s+\S+\s+is not supported/i.test(message)) {
         return apiText("unsupportedAspectRatio", { model: model || "?" });
     }
+    if (/get_channel_failed|Please wait and try again later/i.test(message)) {
+        return apiText("providerChannelFailed");
+    }
+    if (/model_not_found|model[^\n]{0,40}(not\s*found|does\s*not\s*exist)/i.test(message)) {
+        return apiText("modelNotFoundOnProvider", { model: model || "?" });
+    }
     return message;
 }
 
@@ -224,6 +249,17 @@ function isVolcengineArkBaseUrl(baseUrl: string) {
 function isSeedreamModel(model: string) {
     return /seedream/i.test(model.trim());
 }
+
+export function isMidjourneyModel(model: string) {
+    return /midjourney|\bmj[-_]?/i.test(model.trim());
+}
+
+export type GeneratedImageResult = {
+    id: string;
+    dataUrl: string;
+    midjourneyTaskId?: string;
+    midjourneyIndex?: number;
+};
 
 /** Agent Plan / Ark Seedream: OpenAI-shaped /images/generations with Volcengine-specific size rules. */
 function usesVolcengineImageApi(config: AiConfig) {
@@ -282,6 +318,10 @@ function resolveVolcengineImageParams(config: AiConfig, count: number) {
 }
 
 function resolveOpenAiImageParams(config: AiConfig, count: number) {
+    // APIMart expects size as aspect ratio + optional resolution tier (not arbitrary WxH / response_format).
+    if (isApimartBaseUrl(config.baseUrl)) {
+        return resolveApimartImageParams(config, count);
+    }
     // Gemini/Imagen relays often convert WxH into a reduced aspect_ratio and reject
     // non-whitelisted ratios like 85:48 (from 2720x1536). Send a supported ratio instead.
     if (prefersOpenAiImagesEndpoint(config.model)) {
@@ -313,6 +353,108 @@ function resolveOpenAiImageParams(config: AiConfig, count: number) {
     }
 
     return params;
+}
+
+/** APIMart: https://docs.apimart.ai — size is ratio (16:9), resolution tier varies by model. */
+function resolveApimartImageParams(config: AiConfig, count: number) {
+    const model = config.model.trim();
+    const size = resolveApimartSize(model, config.size);
+    const params: Record<string, string | number | boolean> = {
+        ...(size ? { size } : {}),
+    };
+
+    // Seedream on APIMart is single-image only; n>1 / group params → 400.
+    if (isSeedreamModel(model)) {
+        const resolution = resolveApimartResolution(model, config.quality);
+        if (resolution) params.resolution = resolution;
+        return params;
+    }
+
+    params.n = Math.max(1, Math.min(count, resolveApimartMaxImages(model)));
+
+    if (isGptImageFixedSizeModel(model) || /^gpt-image-1(?!.*2)/i.test(model)) {
+        const quality = normalizeQuality(config.quality);
+        params.quality = quality || "auto";
+        const background = normalizeBackground(config.background);
+        if (background) params.background = background;
+        params.output_format = IMAGE_OUTPUT_FORMAT;
+        return params;
+    }
+
+    const resolution = resolveApimartResolution(model, config.quality);
+    if (resolution) params.resolution = resolution;
+    return params;
+}
+
+function resolveApimartMaxImages(model: string) {
+    if (isSeedreamModel(model)) return 1;
+    if (/gpt-image-2/i.test(model)) return 4;
+    if (isGptImageModel(model)) return 4;
+    if (/qwen/i.test(model)) return 6;
+    if (isGeminiNativeImageModel(model) || isImagenModel(model)) return 4;
+    return 4;
+}
+
+function resolveApimartResolution(model: string, quality: string) {
+    const normalized = normalizeQuality(quality);
+    // Seedream: 1K / 1.5K / 2K only — 3K/4K → 400.
+    if (isSeedreamModel(model)) {
+        if (normalized === "low" || normalized === "standard") return "1K";
+        if (normalized === "medium" || normalized === "hd") return "1.5K";
+        return "2K";
+    }
+    // Qwen / Gemini family: uppercase K.
+    if (/qwen/i.test(model) || isGeminiNativeImageModel(model) || isImagenModel(model)) {
+        if (normalized === "low" || normalized === "standard") return "1K";
+        if (normalized === "high") return /qwen/i.test(model) ? "2K" : "4K";
+        return "2K";
+    }
+    // GPT-Image-2 family: lowercase k.
+    if (normalized === "low" || normalized === "standard") return "1k";
+    if (normalized === "high") return "4k";
+    return "2k";
+}
+
+function resolveApimartSize(model: string, size: string) {
+    const value = size.trim();
+    if (!value || value.toLowerCase() === "auto") return "auto";
+    // Seedream also accepts tier tokens in `size`; keep them as-is.
+    if (isSeedreamModel(model) && /^(1k|1\.5k|2k|auto)$/i.test(value)) {
+        if (/^auto$/i.test(value)) return "auto";
+        return value.toUpperCase();
+    }
+    const allowed = /^gpt-image-1(?!.*2)/i.test(model) || isGptImageFixedSizeModel(model)
+        ? APIMART_GPT_IMAGE_1_RATIOS
+        : /gpt-image-2/i.test(model)
+          ? APIMART_GPT_IMAGE_2_RATIOS
+          : /qwen/i.test(model)
+            ? APIMART_QWEN_RATIOS
+            : isSeedreamModel(model)
+              ? APIMART_SEEDREAM_RATIOS
+              : isGeminiNativeImageModel(model) || isImagenModel(model)
+                ? APIMART_GEMINI_RATIOS
+                : APIMART_DEFAULT_RATIOS;
+    const dimensions = parseImageDimensions(value);
+    const ratioText = dimensions
+        ? `${dimensions.width}:${dimensions.height}`
+        : value.includes("x") || value.includes("X") || value.includes("×")
+          ? value.replace(/[xX×]/g, ":")
+          : value;
+    return closestAspectRatioLabel(ratioText, allowed);
+}
+
+function closestAspectRatioLabel(value: string, allowed: string[]) {
+    try {
+        const ratio = parseRatioValue(value.includes("x") || value.includes("X") ? value.replace(/[xX×]/g, ":") : value);
+        const target = ratio.width / ratio.height;
+        return allowed.reduce((best, item) => {
+            const current = parseRatioValue(item);
+            const bestRatio = parseRatioValue(best);
+            return Math.abs(current.width / current.height - target) < Math.abs(bestRatio.width / bestRatio.height - target) ? item : best;
+        });
+    } catch {
+        return allowed[0] || "1:1";
+    }
 }
 
 /** OpenAI-compatible /images/* params for Gemini flash-image / Imagen relays. */
@@ -644,6 +786,10 @@ function resolveImageDataUrl(item: Record<string, unknown>) {
     if (typeof item.url === "string" && item.url) {
         return item.url;
     }
+    if (Array.isArray(item.url)) {
+        const first = item.url.find((value): value is string => typeof value === "string" && Boolean(value));
+        if (first) return first;
+    }
     if (typeof item.dataUrl === "string" && item.dataUrl) {
         return item.dataUrl;
     }
@@ -652,10 +798,112 @@ function resolveImageDataUrl(item: Record<string, unknown>) {
 
 function collectImageList(payload: ImageApiResponse) {
     const nestedResult = payload.result;
-    const lists = [payload.data, payload.images, payload.results, nestedResult?.data].filter((list): list is Array<Record<string, unknown>> => Array.isArray(list));
+    const dataObject = payload.data && !Array.isArray(payload.data) ? (payload.data as Record<string, unknown>) : null;
+    const dataResult = dataObject && typeof dataObject.result === "object" && dataObject.result ? (dataObject.result as { images?: Array<Record<string, unknown>>; data?: Array<Record<string, unknown>>; url?: string }) : null;
+    const lists = [
+        Array.isArray(payload.data) ? payload.data : null,
+        payload.images,
+        payload.results,
+        nestedResult?.data,
+        nestedResult?.images,
+        dataResult?.images,
+        dataResult?.data,
+        Array.isArray(dataObject?.images) ? (dataObject.images as Array<Record<string, unknown>>) : null,
+    ].filter((list): list is Array<Record<string, unknown>> => Array.isArray(list));
     const fromLists = lists.flatMap((list) => list.map(resolveImageDataUrl).filter((value): value is string => Boolean(value)));
-    const singles = [payload.url, nestedResult?.url].filter((value): value is string => typeof value === "string" && Boolean(value));
+    const resultUrl = typeof (payload as { result_url?: unknown }).result_url === "string" ? (payload as { result_url: string }).result_url : undefined;
+    const dataResultUrl = typeof dataObject?.result_url === "string" ? dataObject.result_url : undefined;
+    const singles = [payload.url, nestedResult?.url, typeof dataResult?.url === "string" ? dataResult.url : undefined, resultUrl, dataResultUrl].filter(
+        (value): value is string => typeof value === "string" && Boolean(value),
+    );
     return [...singles, ...fromLists];
+}
+
+/** Normalize APIMart / Seedance / relay envelopes into a flat OpenAI-like task or image payload. */
+function normalizeImageApiPayload(payload: ImageApiResponse): ImageApiResponse {
+    const record = payload as ImageApiResponse & {
+        task_id?: string;
+        image_urls?: unknown;
+        grid_image_url?: unknown;
+        result_url?: unknown;
+        progress?: unknown;
+    };
+
+    // Create: { code:200, data:[{ status:"submitted", task_id:"..." }] }
+    if (Array.isArray(payload.data) && payload.data.length === 1) {
+        const item = payload.data[0] as Record<string, unknown>;
+        const taskId = typeof item.task_id === "string" ? item.task_id : typeof item.id === "string" ? item.id : "";
+        const looksLikeTask = Boolean(taskId) && (typeof item.status === "string" || item.object === "generation.task");
+        const looksLikeImage = typeof item.b64_json === "string" || typeof item.url === "string" || Array.isArray(item.url);
+        if (looksLikeTask && !looksLikeImage) {
+            return {
+                ...payload,
+                id: taskId,
+                status: typeof item.status === "string" ? item.status : "submitted",
+                object: "generation.task",
+                progress: typeof item.progress === "number" ? item.progress : payload.progress,
+            };
+        }
+    }
+
+    // Poll: { code:200, data:{ id, status, result / image_urls / result_url } }
+    if (payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)) {
+        const data = payload.data as Record<string, unknown>;
+        const nestedResult =
+            data.result && typeof data.result === "object"
+                ? (data.result as ImageApiResponse["result"])
+                : payload.result;
+        const imageUrls = collectStringUrls(data.image_urls) || collectStringUrls((nestedResult as { image_urls?: unknown } | undefined)?.image_urls);
+        const gridUrl =
+            typeof data.grid_image_url === "string"
+                ? data.grid_image_url
+                : typeof (nestedResult as { grid_image_url?: unknown } | undefined)?.grid_image_url === "string"
+                  ? (nestedResult as { grid_image_url: string }).grid_image_url
+                  : typeof data.result_url === "string"
+                    ? data.result_url
+                    : undefined;
+        return {
+            ...payload,
+            id: typeof data.id === "string" ? data.id : typeof data.task_id === "string" ? data.task_id : payload.id,
+            status: typeof data.status === "string" ? data.status : payload.status,
+            progress: typeof data.progress === "number" ? data.progress : payload.progress,
+            result: nestedResult,
+            url: gridUrl || payload.url,
+            images: imageUrls.length
+                ? imageUrls.map((url) => ({ url }))
+                : Array.isArray(data.images)
+                  ? (data.images as Array<Record<string, unknown>>)
+                  : payload.images,
+        };
+    }
+
+    // Seedance image submit: { id, task_id, status:"queued" }
+    if (!payload.id && typeof record.task_id === "string" && record.task_id) {
+        payload = { ...payload, id: record.task_id };
+    }
+
+    // Midjourney / Seedance SUCCESS at top level: image_urls / grid_image_url / result_url
+    const topUrls = collectStringUrls(record.image_urls);
+    const topGrid =
+        typeof record.grid_image_url === "string"
+            ? record.grid_image_url
+            : typeof record.result_url === "string"
+              ? record.result_url
+              : undefined;
+    if (topUrls.length || topGrid) {
+        return {
+            ...payload,
+            url: topGrid || payload.url,
+            images: topUrls.length ? topUrls.map((url) => ({ url })) : payload.images,
+        };
+    }
+
+    return payload;
+}
+
+function collectStringUrls(value: unknown) {
+    if (!Array.isArray(value)) return [] as string[];
+    return value.filter((item): item is string => typeof item === "string" && Boolean(item));
 }
 
 function isAsyncImageTask(payload: ImageApiResponse) {
@@ -664,9 +912,26 @@ function isAsyncImageTask(payload: ImageApiResponse) {
     // Sync OpenAI-style payloads already contain image data; do not treat them as tasks.
     if (collectImageList(payload).length > 0) return false;
     const status = payload.status.trim().toLowerCase();
-    return ["queued", "submitted", "pending", "in_progress", "processing", "running", "completed", "failed", "cancelled", "canceled"].includes(status)
+    return ["queued", "submitted", "pending", "in_progress", "processing", "running", "completed", "succeeded", "success", "failed", "failure", "cancelled", "canceled"].includes(status)
         || payload.object === "generation.task"
-        || typeof payload.progress === "number";
+        || typeof payload.progress === "number"
+        || typeof (payload as { progress?: unknown }).progress === "string";
+}
+
+function resolveImagePollPaths(config: AiConfig, taskId: string) {
+    const id = encodeURIComponent(taskId);
+    // Seedance / APIMart Midjourney: https://api.seedance.nz/docs/#mj-overview
+    if (isMidjourneyModel(config.model)) {
+        return [`/midjourney/tasks/${id}`, `/midjourney/${id}`, `/tasks/${id}`];
+    }
+    // Seedance image API uses singular /image/generations (not /images/...).
+    if (isSeedanceNzBaseUrl(config.baseUrl)) {
+        return [`/image/generations/${id}`, `/tasks/${id}`];
+    }
+    if (isApimartBaseUrl(config.baseUrl)) {
+        return [`/tasks/${id}`, `/images/generations/${id}`];
+    }
+    return [`/images/generations/${id}`, `/tasks/${id}`];
 }
 
 function sleep(ms: number, signal?: AbortSignal) {
@@ -687,9 +952,11 @@ function sleep(ms: number, signal?: AbortSignal) {
     });
 }
 
-async function pollAsyncImageTask(config: AiConfig, taskId: string, options?: RequestOptions) {
+async function pollAsyncImageTaskPayload(config: AiConfig, taskId: string, options?: RequestOptions) {
     const deadline = performance.now() + IMAGE_TASK_POLL_TIMEOUT_MS;
-    let pollPath: `/images/generations/${string}` | `/tasks/${string}` = `/images/generations/${encodeURIComponent(taskId)}`;
+    const paths = resolveImagePollPaths(config, taskId);
+    let pathIndex = 0;
+    let pollPath = paths[0];
     while (performance.now() < deadline) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         try {
@@ -697,21 +964,21 @@ async function pollAsyncImageTask(config: AiConfig, taskId: string, options?: Re
                 headers: aiHeaders(config),
                 signal: options?.signal,
             });
-            const payload = response.data;
-            if (typeof payload.code === "number" && payload.code !== 0) {
+            const payload = normalizeImageApiPayload(response.data);
+            if (typeof payload.code === "number" && !isApiSuccessCode(payload.code)) {
                 throw new Error(payload.msg || readApiErrorMessage(payload) || apiText("requestFailed"));
             }
             const status = String(payload.status || "").trim().toLowerCase();
             if (status === "completed" || status === "succeeded" || status === "success") {
-                return parseImagePayload(payload);
+                return payload;
             }
-            if (status === "failed" || status === "cancelled" || status === "canceled" || status === "expired") {
+            if (status === "failed" || status === "cancelled" || status === "canceled" || status === "expired" || status === "failure") {
                 throw new Error(readApiErrorMessage(payload.error) || readApiErrorMessage(payload) || apiText("imageTaskFailed"));
             }
         } catch (error) {
-            if (axios.isAxiosError(error) && error.response?.status === 404 && pollPath.startsWith("/images/generations/")) {
-                // Some relays expose async image jobs under /tasks/{id} instead.
-                pollPath = `/tasks/${encodeURIComponent(taskId)}`;
+            if (axios.isAxiosError(error) && error.response?.status === 404 && pathIndex < paths.length - 1) {
+                pathIndex += 1;
+                pollPath = paths[pathIndex];
                 continue;
             }
             throw error;
@@ -721,22 +988,32 @@ async function pollAsyncImageTask(config: AiConfig, taskId: string, options?: Re
     throw new Error(apiText("imageTaskPollTimeout"));
 }
 
-async function resolveImageApiResponse(config: AiConfig, payload: ImageApiResponse, options?: RequestOptions) {
-    if (isAsyncImageTask(payload)) {
-        const status = String(payload.status || "").trim().toLowerCase();
-        if (status === "failed" || status === "cancelled" || status === "canceled" || status === "expired") {
-            throw new Error(readApiErrorMessage(payload.error) || readApiErrorMessage(payload) || apiText("imageTaskFailed"));
+async function pollAsyncImageTask(config: AiConfig, taskId: string, options?: RequestOptions) {
+    return parseImagePayload(await pollAsyncImageTaskPayload(config, taskId, options));
+}
+
+async function resolveImageTaskPayload(config: AiConfig, payload: ImageApiResponse, options?: RequestOptions) {
+    const normalized = normalizeImageApiPayload(payload);
+    if (isAsyncImageTask(normalized)) {
+        const status = String(normalized.status || "").trim().toLowerCase();
+        if (status === "failed" || status === "cancelled" || status === "canceled" || status === "expired" || status === "failure") {
+            throw new Error(readApiErrorMessage(normalized.error) || readApiErrorMessage(normalized) || apiText("imageTaskFailed"));
         }
         if (status === "completed" || status === "succeeded" || status === "success") {
-            return parseImagePayload(payload);
+            return normalized;
         }
-        return pollAsyncImageTask(config, payload.id!, options);
+        if (!normalized.id) throw new Error(apiText("imageTaskFailed"));
+        return pollAsyncImageTaskPayload(config, normalized.id, options);
     }
-    return parseImagePayload(payload);
+    return normalized;
+}
+
+async function resolveImageApiResponse(config: AiConfig, payload: ImageApiResponse, options?: RequestOptions) {
+    return parseImagePayload(await resolveImageTaskPayload(config, payload, options));
 }
 
 function parseImagePayload(payload: ImageApiResponse, options?: { allowEmpty?: boolean }) {
-    if (typeof payload.code === "number" && payload.code !== 0) {
+    if (typeof payload.code === "number" && !isApiSuccessCode(payload.code)) {
         throw new Error(payload.msg || apiText("requestFailed"));
     }
     const images = collectImageList(payload).map((dataUrl) => ({ id: nanoid(), dataUrl }));
@@ -770,19 +1047,25 @@ function readApiErrorMessage(value: unknown): string {
         }
     }
     if (typeof value !== "object") return "";
-    const payload = value as { msg?: unknown; message?: unknown; error?: unknown; detail?: unknown };
+    const payload = value as { msg?: unknown; message?: unknown; error?: unknown; detail?: unknown; code?: unknown };
     // error may be a string or an object containing a message.
-    const errorMsg =
-        typeof payload.error === "string"
-            ? payload.error
-            : (payload.error as { message?: unknown })?.message;
-    return (
+    const nestedError = payload.error;
+    const nestedObj = nestedError && typeof nestedError === "object" ? (nestedError as { message?: unknown; code?: unknown }) : null;
+    const errorMsg = typeof nestedError === "string" ? nestedError : nestedObj?.message;
+    const codeHint =
+        typeof payload.code === "string"
+            ? payload.code
+            : typeof nestedObj?.code === "string"
+              ? nestedObj.code
+              : "";
+    const text =
         readApiErrorMessage(payload.msg) ||
         readApiErrorMessage(payload.message) ||
         readApiErrorMessage(errorMsg) ||
         readApiErrorMessage(payload.detail) ||
-        ""
-    );
+        "";
+    if (codeHint && text && !text.includes(codeHint)) return `${text} (${codeHint})`;
+    return text || codeHint;
 }
 
 function readAxiosError(error: unknown, fallback: string) {
@@ -802,7 +1085,11 @@ function readAxiosError(error: unknown, fallback: string) {
         if (apiMsg) return requestUrl && error.response?.status === 404 ? `${apiMsg}\n${requestUrl}` : apiMsg;
         // Infer the error from the HTTP status when the response body has no usable message.
         const statusMsg = readStatusError(error.response?.status, fallback, requestUrl);
-        if (statusMsg) return requestUrl ? `${statusMsg}\n${requestUrl}` : statusMsg;
+        if (statusMsg) {
+            const raw = typeof responseData === "string" ? responseData.slice(0, 300) : "";
+            const detail = raw && !/^\s*</.test(raw) ? `\n${raw}` : "";
+            return requestUrl ? `${statusMsg}\n${requestUrl}${detail}` : `${statusMsg}${detail}`;
+        }
         // Fall back to Axios's own error message.
         return error.message || fallback;
     }
@@ -838,6 +1125,177 @@ async function prepareReferenceDataUrl(image: ReferenceImage, referenceCount = 1
 function withSystemPrompt(config: AiConfig, prompt: string) {
     const systemPrompt = config.systemPrompt.trim();
     return systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
+}
+
+/** Midjourney (Seedance / APIMart): Imagine only — Upscale is manual. See seedance.nz/docs/#mj-overview */
+async function requestMidjourneyGeneration(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    const size = closestAspectRatioLabel(
+        (() => {
+            const value = config.size.trim();
+            if (!value || value.toLowerCase() === "auto") return "1:1";
+            const dimensions = parseImageDimensions(value);
+            return dimensions ? `${dimensions.width}:${dimensions.height}` : value.replace(/[xX×]/g, ":");
+        })(),
+        APIMART_DEFAULT_RATIOS,
+    );
+    const speed = resolveMidjourneySpeed(config.quality);
+    const body: Record<string, unknown> = {
+        // Path decides billing SKU (midjourney-imagine); body.model is optional / ignored for routing.
+        prompt: withSystemPrompt(config, prompt),
+        size,
+        speed,
+        version: "6.1",
+    };
+    if (references.length) {
+        const urls: string[] = [];
+        for (const image of references.slice(0, 5)) {
+            if (image.url && isPublicHttpUrl(image.url)) {
+                urls.push(image.url.trim());
+                continue;
+            }
+            if (image.dataUrl && (isPublicHttpUrl(image.dataUrl) || image.dataUrl.startsWith("data:"))) {
+                urls.push(image.dataUrl.trim());
+                continue;
+            }
+            urls.push(await prepareReferenceDataUrl(image, references.length));
+        }
+        body.image_urls = urls;
+    }
+
+    const mjConfig = { ...config, model: config.model || "midjourney" };
+    const imagineResponse = await postImageJson<ImageApiResponse>(mjConfig, "/midjourney/generations", body, options);
+    const imagineTask = await resolveImageTaskPayload(mjConfig, imagineResponse.data, options);
+    const parentTaskId = imagineTask.id;
+    if (!parentTaskId) throw new Error(apiText("imageTaskFailed"));
+
+    // Do not auto-Upscale. Return Imagine previews (tiles or grid) and keep task id for manual U1–U4.
+    const count = Math.max(1, Math.min(4, Math.floor(Math.abs(Number(config.count)) || 1)));
+    return parseMidjourneyImagineImages(imagineTask, parentTaskId, count);
+}
+
+function readMidjourneyGridUrl(payload: ImageApiResponse) {
+    const record = payload as ImageApiResponse & { grid_image_url?: unknown; result_url?: unknown; data?: unknown };
+    const data = record.data && !Array.isArray(record.data) ? (record.data as Record<string, unknown>) : null;
+    const nestedResult = data && typeof data.result === "object" && data.result ? (data.result as Record<string, unknown>) : null;
+    const candidates = [
+        typeof record.grid_image_url === "string" ? record.grid_image_url : "",
+        typeof record.result_url === "string" ? record.result_url : "",
+        typeof data?.grid_image_url === "string" ? data.grid_image_url : "",
+        typeof data?.result_url === "string" ? data.result_url : "",
+        typeof nestedResult?.grid_image_url === "string" ? nestedResult.grid_image_url : "",
+        typeof payload.url === "string" ? payload.url : "",
+    ];
+    return candidates.find((url) => Boolean(url)) || "";
+}
+
+function readMidjourneyTileUrls(payload: ImageApiResponse) {
+    const record = payload as ImageApiResponse & { image_urls?: unknown; data?: unknown };
+    const data = record.data && !Array.isArray(record.data) ? (record.data as Record<string, unknown>) : null;
+    const nestedResult = data && typeof data.result === "object" && data.result ? (data.result as Record<string, unknown>) : null;
+    const fromArrays = [
+        collectStringUrls(record.image_urls),
+        collectStringUrls(data?.image_urls),
+        collectStringUrls(nestedResult?.image_urls),
+    ].find((urls) => urls.length > 0);
+    if (fromArrays?.length) return fromArrays;
+    if (Array.isArray(payload.images) && payload.images.length) {
+        return payload.images.map(resolveImageDataUrl).filter((value): value is string => Boolean(value));
+    }
+    return [] as string[];
+}
+
+function parseMidjourneyImagineImages(payload: ImageApiResponse, parentTaskId: string, count: number): GeneratedImageResult[] {
+    const tiles = readMidjourneyTileUrls(payload);
+    const grid = readMidjourneyGridUrl(payload);
+    const limit = Math.max(1, Math.min(4, count));
+
+    // Prefer separate tile previews when the relay provides them (still Imagine quality; Upscale is manual).
+    if (tiles.length >= 2) {
+        return tiles.slice(0, limit).map((dataUrl, index) => ({
+            id: nanoid(),
+            dataUrl,
+            midjourneyTaskId: parentTaskId,
+            midjourneyIndex: index + 1,
+        }));
+    }
+
+    if (grid) {
+        return [{ id: nanoid(), dataUrl: grid, midjourneyTaskId: parentTaskId }];
+    }
+
+    if (tiles.length === 1) {
+        return [{ id: nanoid(), dataUrl: tiles[0], midjourneyTaskId: parentTaskId, midjourneyIndex: 1 }];
+    }
+
+    return parseImagePayload(payload).map((image) => ({ ...image, midjourneyTaskId: parentTaskId }));
+}
+
+/** Manual Midjourney Upscale (U1–U4). Billing uses the upscale path SKU. */
+export async function requestMidjourneyUpscale(config: AiConfig, parentTaskId: string, index: number, options?: RequestOptions) {
+    const requestConfig = resolveImageRequestConfig(config);
+    const mjConfig = { ...requestConfig, model: requestConfig.model || "midjourney" };
+    const safeIndex = Math.max(1, Math.min(4, Math.floor(index) || 1));
+    try {
+        const response = await postImageJson<ImageApiResponse>(
+            mjConfig,
+            "/midjourney/generations/upscale",
+            { task_id: parentTaskId, index: safeIndex },
+            options,
+        );
+        const task = await resolveImageTaskPayload(mjConfig, response.data, options);
+        const images = parseImagePayload(task, { allowEmpty: true });
+        // Upscale SUCCESS usually has a single URL in image_urls; prefer non-grid singles.
+        if (images.length <= 1) return images;
+        // If a relay still returns multiple, keep the first (selected tile).
+        return images.slice(0, 1);
+    } catch (error) {
+        throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), mjConfig.model));
+    }
+}
+
+function resolveMidjourneySpeed(quality: string) {
+    const normalized = normalizeQuality(quality);
+    if (normalized === "high") return "turbo";
+    if (normalized === "low" || normalized === "standard") return "relax";
+    return "fast";
+}
+
+/** Seedance.nz non-MJ images: POST /v1/image/generations (singular) + metadata.resolution */
+async function requestSeedanceNzImage(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    const resolution = resolveSeedanceNzResolution(config.model, config.quality);
+    const body: Record<string, unknown> = {
+        model: config.model,
+        prompt: withSystemPrompt(config, prompt),
+        metadata: {
+            ...(resolution ? { resolution } : {}),
+            output_format: "png",
+        },
+    };
+    if (references.length) {
+        const urls: string[] = [];
+        for (const image of references.slice(0, 10)) {
+            if (image.url && isPublicHttpUrl(image.url)) {
+                urls.push(image.url.trim());
+                continue;
+            }
+            if (image.dataUrl && (isPublicHttpUrl(image.dataUrl) || image.dataUrl.startsWith("data:"))) {
+                urls.push(image.dataUrl.trim());
+                continue;
+            }
+            urls.push(await prepareReferenceDataUrl(image, references.length));
+        }
+        body.images = urls;
+    }
+    const response = await postImageJson<ImageApiResponse>(config, "/image/generations", body, options);
+    return resolveImageApiResponse(config, response.data, options);
+}
+
+function resolveSeedanceNzResolution(model: string, quality: string) {
+    const normalized = normalizeQuality(quality);
+    if (/zhenzhen-image-g2/i.test(model)) return "1k";
+    if (normalized === "low" || normalized === "standard") return "1k";
+    if (normalized === "high" && /zhenzhen-image-g-v2-lowprice/i.test(model)) return "4k";
+    return "2k";
 }
 
 function aiApiUrl(config: AiConfig, path: string) {
@@ -1299,6 +1757,22 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
     }
+    // Midjourney relays (Seedance / APIMart): POST /v1/midjourney/generations
+    if (isMidjourneyModel(requestConfig.model)) {
+        try {
+            return await requestMidjourneyGeneration(requestConfig, prompt, [], options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+    // Seedance.nz image API is /v1/image/generations (singular), not OpenAI /images/generations.
+    if (isSeedanceNzBaseUrl(requestConfig.baseUrl)) {
+        try {
+            return await requestSeedanceNzImage(requestConfig, prompt, [], options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
     const imageParams = resolveOpenAiImageParams(requestConfig, n);
     try {
         const response = await postImageJson<ImageApiResponse>(
@@ -1356,6 +1830,24 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         if (mask) throw new Error(apiText("geminiMaskUnsupported"));
         try {
             return await requestGeminiImages(requestConfig, requestPrompt, references, n, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+
+    if (isMidjourneyModel(requestConfig.model)) {
+        if (mask) throw new Error(apiText("geminiMaskUnsupported"));
+        try {
+            return await requestMidjourneyGeneration(requestConfig, requestPrompt, references, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+
+    if (isSeedanceNzBaseUrl(requestConfig.baseUrl)) {
+        if (mask) throw new Error(apiText("geminiMaskUnsupported"));
+        try {
+            return await requestSeedanceNzImage(requestConfig, requestPrompt, references, options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }

@@ -4,7 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { Group, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { requestEdit, requestGeneration, requestImageQuestion, type AiTextMessage } from "@/services/api/image";
+import { isMidjourneyModel, requestEdit, requestGeneration, requestImageQuestion, requestMidjourneyUpscale, type AiTextMessage } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
 import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -34,6 +34,7 @@ import { CanvasNodeAnnotateDialog, type CanvasAnnotateInpaintPayload, type Canva
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasMergeNodeContent } from "@/components/canvas/canvas-merge-node-content";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
+import { CanvasNodeMjUpscaleDialog } from "@/components/canvas/canvas-node-mj-upscale-dialog";
 import { CanvasNodeScaleDialog } from "@/components/canvas/canvas-node-scale-dialog";
 import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
@@ -277,6 +278,7 @@ function AtelierCanvasPage() {
     const [draftPickerDirectory, setDraftPickerDirectory] = useState<FileSystemDirectoryHandle | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
+    const [mjUpscaleNodeId, setMjUpscaleNodeId] = useState<string | null>(null);
     const [scaleNodeId, setScaleNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
@@ -678,6 +680,7 @@ function AtelierCanvasPage() {
     const textEditNode = textEditNodeId ? nodeById.get(textEditNodeId) || null : null;
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
+    const mjUpscaleNode = mjUpscaleNodeId ? nodeById.get(mjUpscaleNodeId) || null : null;
     const scaleNode = scaleNodeId ? nodeById.get(scaleNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
@@ -2454,6 +2457,87 @@ function AtelierCanvasPage() {
         setDialogNodeId(childId);
     }, []);
 
+    const openImageUpscale = useCallback((node: CanvasNodeData) => {
+        const primary = node.metadata?.primaryImageId ? node.metadata.images?.find((image) => image.id === node.metadata?.primaryImageId) : undefined;
+        const taskId = node.metadata?.midjourneyTaskId || primary?.midjourneyTaskId || node.metadata?.images?.find((image) => image.midjourneyTaskId)?.midjourneyTaskId;
+        if (taskId) {
+            setMjUpscaleNodeId(node.id);
+            return;
+        }
+        setUpscaleNodeId(node.id);
+    }, []);
+
+    const midjourneyUpscaleImageNode = useCallback(
+        async (node: CanvasNodeData, index: number) => {
+            const primary = node.metadata?.primaryImageId ? node.metadata.images?.find((image) => image.id === node.metadata?.primaryImageId) : undefined;
+            const taskId = node.metadata?.midjourneyTaskId || primary?.midjourneyTaskId || node.metadata?.images?.find((image) => image.midjourneyTaskId)?.midjourneyTaskId;
+            if (!taskId) return;
+            const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1" };
+            if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+            setMjUpscaleNodeId(null);
+            const childId = nanoid();
+            const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            setRunningNodeId(childId);
+            setNodes((prev) => [
+                ...prev,
+                {
+                    id: childId,
+                    type: CanvasNodeType.Image,
+                    title: `Upscale U${index}`,
+                    position: { x: node.position.x + node.width + 96, y: node.position.y },
+                    width: imageConfig.width,
+                    height: imageConfig.height,
+                    metadata: { prompt: node.metadata?.prompt, status: NODE_STATUS_LOADING, model: generationConfig.model },
+                },
+            ]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setDialogNodeId(childId);
+            const controller = startGenerationRequest(childId, node.id, childId);
+            try {
+                const image = await requestMidjourneyUpscale(generationConfig, taskId, index, { signal: controller.signal }).then((items) => items[0]);
+                if (!image?.dataUrl) throw new Error(t("canvas.projectPage.generationFailed"));
+                const uploaded = await uploadImage(image.dataUrl);
+                const size = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
+                setNodes((prev) =>
+                    prev.map((item) =>
+                        item.id === childId
+                            ? {
+                                  ...item,
+                                  ...size,
+                                  position: {
+                                      x: node.position.x + node.width + 96,
+                                      y: node.position.y + node.height / 2 - size.height / 2,
+                                  },
+                                  metadata: {
+                                      ...item.metadata,
+                                      ...imageMetadata(uploaded),
+                                      prompt: node.metadata?.prompt,
+                                      model: generationConfig.model,
+                                      status: NODE_STATUS_SUCCESS,
+                                      errorDetails: undefined,
+                                  },
+                              }
+                            : item,
+                    ),
+                );
+                message.success(t("canvas.projectPage.mjUpscaleSuccess", { index }));
+            } catch (error) {
+                if (isGenerationCanceled(error)) return;
+                const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item)));
+                message.error(errorDetails);
+            } finally {
+                finishGenerationRequest(childId, controller);
+                setRunningNodeId(null);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest, t],
+    );
+
     const generateAngleNode = useCallback(
         async (node: CanvasNodeData, params: CanvasImageAngleParams) => {
             if (!node.metadata?.content) return;
@@ -2922,69 +3006,146 @@ function AtelierCanvasPage() {
                     let firstError = "";
                     const succeededImages: GenerationHistoryImage[] = [];
                     const newImageIdSet = new Set(imageIds);
-                    await Promise.all(
-                        imageIds.map(async (imageId) => {
-                            try {
-                                const image = referenceImages.length
-                                    ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, undefined, { signal: controller.signal }).then((items) => items[0])
-                                    : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
-                                const uploaded = await uploadImage(image.dataUrl);
-                                const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
-                                const item: CanvasNodeImage = {
-                                    id: imageId,
-                                    status: NODE_STATUS_SUCCESS,
-                                    content: uploaded.url,
-                                    storageKey: uploaded.storageKey,
-                                    naturalWidth: uploaded.width,
-                                    naturalHeight: uploaded.height,
-                                    bytes: uploaded.bytes,
-                                    mimeType: uploaded.mimeType,
+                    const applyGeneratedSlot = async (
+                        imageId: string,
+                        image: { dataUrl: string; midjourneyTaskId?: string; midjourneyIndex?: number },
+                    ) => {
+                        const uploaded = await uploadImage(image.dataUrl);
+                        const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
+                        const item: CanvasNodeImage = {
+                            id: imageId,
+                            status: NODE_STATUS_SUCCESS,
+                            content: uploaded.url,
+                            storageKey: uploaded.storageKey,
+                            naturalWidth: uploaded.width,
+                            naturalHeight: uploaded.height,
+                            bytes: uploaded.bytes,
+                            mimeType: uploaded.mimeType,
+                            midjourneyTaskId: image.midjourneyTaskId,
+                            midjourneyIndex: image.midjourneyIndex,
+                        };
+                        setNodes((prev) =>
+                            prev.map((node) => {
+                                if (node.id !== rootId) return node;
+                                const images = node.metadata?.images?.map((current) => (current.id === imageId ? item : current)) || [];
+                                // New round results become primary so the latest fill is shown; older versions stay in the folded batch.
+                                const promoteNew = newImageIdSet.has(imageId);
+                                if (!promoteNew && node.metadata?.primaryImageId) return { ...node, metadata: { ...node.metadata, images } };
+                                const center = { x: node.position.x + node.width / 2, y: node.position.y + node.height / 2 };
+                                return {
+                                    ...node,
+                                    position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 },
+                                    ...imageSize,
+                                    metadata: {
+                                        ...node.metadata,
+                                        content: item.content,
+                                        storageKey: item.storageKey,
+                                        naturalWidth: item.naturalWidth,
+                                        naturalHeight: item.naturalHeight,
+                                        bytes: item.bytes,
+                                        mimeType: item.mimeType,
+                                        midjourneyTaskId: item.midjourneyTaskId,
+                                        midjourneyIndex: item.midjourneyIndex,
+                                        images,
+                                        primaryImageId: imageId,
+                                        status: NODE_STATUS_SUCCESS,
+                                    },
                                 };
-                                setNodes((prev) =>
-                                    prev.map((node) => {
-                                        if (node.id !== rootId) return node;
-                                        const images = node.metadata?.images?.map((image) => (image.id === imageId ? item : image)) || [];
-                                        // New round results become primary so the latest fill is shown; older versions stay in the folded batch.
-                                        const promoteNew = newImageIdSet.has(imageId);
-                                        if (!promoteNew && node.metadata?.primaryImageId) return { ...node, metadata: { ...node.metadata, images } };
-                                        const center = { x: node.position.x + node.width / 2, y: node.position.y + node.height / 2 };
-                                        return {
-                                            ...node,
-                                            position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 },
-                                            ...imageSize,
-                                            metadata: {
-                                                ...node.metadata,
-                                                content: item.content,
-                                                storageKey: item.storageKey,
-                                                naturalWidth: item.naturalWidth,
-                                                naturalHeight: item.naturalHeight,
-                                                bytes: item.bytes,
-                                                mimeType: item.mimeType,
-                                                images,
-                                                primaryImageId: imageId,
-                                                status: NODE_STATUS_SUCCESS,
-                                            },
-                                        };
-                                    }),
-                                );
-                                hasSuccess = true;
-                                succeededImages.push({ storageKey: uploaded.storageKey, mimeType: uploaded.mimeType, width: uploaded.width, height: uploaded.height, bytes: uploaded.bytes });
-                                if (isConfigNode) setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));
-                                return true;
-                            } catch (error) {
-                                if (isGenerationCanceled(error)) return false;
-                                const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
-                                if (!firstError) firstError = errorDetails;
-                                hasFailure = true;
+                            }),
+                        );
+                        hasSuccess = true;
+                        succeededImages.push({ storageKey: uploaded.storageKey, mimeType: uploaded.mimeType, width: uploaded.width, height: uploaded.height, bytes: uploaded.bytes });
+                        if (isConfigNode) setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));
+                    };
+                    const markSlotError = (imageId: string, errorDetails: string) => {
+                        if (!firstError) firstError = errorDetails;
+                        hasFailure = true;
+                        setNodes((prev) =>
+                            prev.map((node) =>
+                                node.id === rootId
+                                    ? {
+                                          ...node,
+                                          metadata: {
+                                              ...node.metadata,
+                                              images: node.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_ERROR, errorDetails } : image)),
+                                          },
+                                      }
+                                    : node,
+                            ),
+                        );
+                    };
+                    const useMidjourneyBatch = isMidjourneyModel(generationConfig.model || "") && !referenceImages.length;
+                    if (useMidjourneyBatch) {
+                        try {
+                            const items = await requestGeneration({ ...generationConfig, count: String(count) }, effectivePrompt, { signal: controller.signal });
+                            const pairCount = Math.min(imageIds.length, items.length);
+                            if (items.length < imageIds.length) {
+                                const keepIds = new Set(imageIds.slice(0, pairCount));
                                 setNodes((prev) =>
                                     prev.map((node) =>
-                                        node.id === rootId ? { ...node, metadata: { ...node.metadata, images: node.metadata?.images?.map((image) => (image.id === imageId ? { ...image, status: NODE_STATUS_ERROR, errorDetails } : image)) } } : node,
+                                        node.id === rootId
+                                            ? {
+                                                  ...node,
+                                                  metadata: {
+                                                      ...node.metadata,
+                                                      images: node.metadata?.images?.filter((image) => !newImageIdSet.has(image.id) || keepIds.has(image.id)),
+                                                  },
+                                              }
+                                            : node,
                                     ),
                                 );
                             }
-                            return false;
-                        }),
-                    );
+                            await Promise.all(
+                                imageIds.slice(0, pairCount).map(async (imageId, index) => {
+                                    try {
+                                        await applyGeneratedSlot(imageId, items[index]);
+                                    } catch (error) {
+                                        if (isGenerationCanceled(error)) return;
+                                        markSlotError(imageId, error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+                                    }
+                                }),
+                            );
+                            if (!pairCount) {
+                                hasFailure = true;
+                                if (!firstError) firstError = t("canvas.projectPage.generationFailed");
+                            }
+                        } catch (error) {
+                            if (!isGenerationCanceled(error)) {
+                                const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                                firstError = errorDetails;
+                                hasFailure = true;
+                                setNodes((prev) =>
+                                    prev.map((node) =>
+                                        node.id === rootId
+                                            ? {
+                                                  ...node,
+                                                  metadata: {
+                                                      ...node.metadata,
+                                                      images: node.metadata?.images?.map((image) =>
+                                                          newImageIdSet.has(image.id) ? { ...image, status: NODE_STATUS_ERROR, errorDetails } : image,
+                                                      ),
+                                                  },
+                                              }
+                                            : node,
+                                    ),
+                                );
+                            }
+                        }
+                    } else {
+                        await Promise.all(
+                            imageIds.map(async (imageId) => {
+                                try {
+                                    const image = referenceImages.length
+                                        ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, undefined, { signal: controller.signal }).then((items) => items[0])
+                                        : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
+                                    await applyGeneratedSlot(imageId, image);
+                                } catch (error) {
+                                    if (isGenerationCanceled(error)) return;
+                                    markSlotError(imageId, error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+                                }
+                            }),
+                        );
+                    }
                     if (rootId !== nodeId) finishGenerationRequest(rootId, controller);
                     if (succeededImages.length) {
                         useGenerationHistoryStore.getState().addRecord({
@@ -4043,7 +4204,7 @@ function AtelierCanvasPage() {
             },
             onCrop: (node) => setCropNodeId(node.id),
             onSplit: (node) => setSplitNodeId(node.id),
-            onUpscale: (node) => setUpscaleNodeId(node.id),
+            onUpscale: openImageUpscale,
             onSuperResolve: (node) => setSuperResolveNodeId(node.id),
             onAngle: (node) => setAngleNodeId(node.id),
             onPanorama: (node) => setPanoramaNodeId(node.id),
@@ -4058,7 +4219,7 @@ function AtelierCanvasPage() {
             },
             onReversePrompt: createImageReversePromptNodes,
         }),
-        [copyText, createImageReversePromptNodes, handleNodeViewImage, handleUploadRequest, message, t, toggleNodeFreeResize],
+        [copyText, createImageReversePromptNodes, handleNodeViewImage, handleUploadRequest, message, openImageUpscale, t, toggleNodeFreeResize],
     );
 
     const renderNodePanel = useCallback(
@@ -4345,7 +4506,7 @@ function AtelierCanvasPage() {
                     }}
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
-                    onUpscale={(node) => setUpscaleNodeId(node.id)}
+                    onUpscale={openImageUpscale}
                     onSuperResolve={(node) => setSuperResolveNodeId(node.id)}
                     onAngle={(node) => setAngleNodeId(node.id)}
                     onPanorama={(node) => setPanoramaNodeId(node.id)}
@@ -4474,6 +4635,20 @@ function AtelierCanvasPage() {
 
                 {upscaleNode?.metadata?.content ? (
                     <CanvasNodeUpscaleDialog dataUrl={upscaleNode.metadata.content} open={Boolean(upscaleNode)} onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode!, params)} />
+                ) : null}
+
+                {mjUpscaleNode ? (
+                    <CanvasNodeMjUpscaleDialog
+                        open={Boolean(mjUpscaleNode)}
+                        previewUrl={mjUpscaleNode.metadata?.content}
+                        defaultIndex={
+                            mjUpscaleNode.metadata?.midjourneyIndex ||
+                            mjUpscaleNode.metadata?.images?.find((image) => image.id === mjUpscaleNode.metadata?.primaryImageId)?.midjourneyIndex ||
+                            1
+                        }
+                        onClose={() => setMjUpscaleNodeId(null)}
+                        onConfirm={(index) => void midjourneyUpscaleImageNode(mjUpscaleNode, index)}
+                    />
                 ) : null}
 
                 {scaleNode ? (

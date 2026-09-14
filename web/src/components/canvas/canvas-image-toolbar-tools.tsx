@@ -120,8 +120,8 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
     {
         id: "upscale",
         defaultVisible: true,
-        label: () => i18n.t("canvas.imageTools.upscale"),
-        title: () => i18n.t("canvas.imageTools.upscaleTitle"),
+        label: (node) => (node.metadata?.midjourneyTaskId ? i18n.t("canvas.imageTools.mjUpscale") : i18n.t("canvas.imageTools.upscale")),
+        title: (node) => (node.metadata?.midjourneyTaskId ? i18n.t("canvas.imageTools.mjUpscaleTitle") : i18n.t("canvas.imageTools.upscaleTitle")),
         icon: () => <ZoomIn className="size-[10px]" />,
         run: (node, handlers) => handlers.onUpscale(node),
     },
@@ -162,14 +162,20 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
 export const defaultImageQuickToolIds: ImageQuickToolId[] = [...defaultBaseToolIds, ...imageToolDefinitions.filter((tool) => tool.defaultVisible).map((tool) => tool.id)];
 
 export function buildImageToolbarTools(node: CanvasNodeData, handlers: ImageToolHandlers) {
-    return imageToolDefinitions.map((tool) => ({
-        id: tool.id,
-        label: resolveToolText(tool.label, node),
-        title: resolveToolText(tool.title, node),
-        icon: tool.icon(node),
-        active: tool.active?.(node),
-        onClick: () => tool.run(node, handlers),
-    }));
+    const hasMjTask =
+        Boolean(node.metadata?.midjourneyTaskId) ||
+        Boolean(node.metadata?.images?.some((image) => image.midjourneyTaskId));
+    return imageToolDefinitions.map((tool) => {
+        const useMjLabel = tool.id === "upscale" && hasMjTask;
+        return {
+            id: tool.id,
+            label: useMjLabel ? i18n.t("canvas.imageTools.mjUpscale") : resolveToolText(tool.label, node),
+            title: useMjLabel ? i18n.t("canvas.imageTools.mjUpscaleTitle") : resolveToolText(tool.title, node),
+            icon: tool.icon(node),
+            active: tool.active?.(node),
+            onClick: () => tool.run(node, handlers),
+        };
+    });
 }
 
 export function normalizeImageQuickToolIds(value: unknown[]) {

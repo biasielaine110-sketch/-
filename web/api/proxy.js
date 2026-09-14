@@ -5,6 +5,8 @@
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+import { outboundFetch } from "./outbound-fetch.js";
+
 export const config = {
     api: {
         bodyParser: false,
@@ -67,7 +69,7 @@ export default async function handler(req, res) {
         const method = req.method || "GET";
         const body = ["POST", "PUT", "PATCH", "DELETE"].includes(method) ? await readRequestBody(req) : undefined;
 
-        const upstream = await fetch(targetUrl, {
+        const upstream = await outboundFetch(targetUrl, {
             method,
             headers,
             body: body ? new Uint8Array(body) : undefined,

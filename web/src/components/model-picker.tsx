@@ -102,7 +102,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                     options={selectOptions}
                     optionLabelProp="title"
                     getPopupContainer={() => document.body}
-                    popupClassName="canvas-model-picker-dropdown"
+                    classNames={{ popup: { root: "canvas-model-picker-dropdown" } }}
                     popupRender={(menu) => (
                         <div
                             data-canvas-no-zoom
