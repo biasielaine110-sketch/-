@@ -328,6 +328,55 @@ return await request({
 });`,
         },
         {
+            label: i18n.t("modelPlugin.templates.volcOpenSpeech"),
+            script: `// ${i18n.t("modelPlugin.templates.audioVolcOpenSpeech")}
+const root = String(baseUrl || "").replace(/\\/+$/, "").replace(/\\/api\\/v3\\/plan\\/tts\\//i, "/api/v3/tts/");
+const url = /tts\\/unidirectional/i.test(root)
+  ? root
+  : /\\/api\\/v3$/i.test(root)
+    ? \`\${root}/tts/unidirectional\`
+    : root.includes("openspeech.bytedance.com")
+      ? \`\${root}/api/v3/tts/unidirectional\`
+      : "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
+const resourceId = /^seed-(tts|icl)/i.test(String(model || "")) ? model : "seed-tts-2.0";
+const speaker = String(params.instructions || "").trim() || "zh_female_vv_uranus_bigtts";
+const format = params.format === "opus" ? "ogg_opus" : params.format === "pcm" ? "pcm" : "mp3";
+const speechRate = Math.max(-50, Math.min(100, Math.round((Number(params.speed) - 1) * 50)));
+const text = await request({
+  method: "post",
+  url,
+  headers: {
+    "Content-Type": "application/json",
+    "X-Api-Key": apiKey,
+    "X-Api-Resource-Id": resourceId,
+    "X-Api-Request-Id": crypto.randomUUID(),
+  },
+  responseType: "text",
+  data: {
+    user: { uid: "infinite-atelier" },
+    req_params: {
+      text: prompt,
+      speaker,
+      audio_params: { format, sample_rate: 24000, speech_rate: speechRate },
+    },
+  },
+});
+const chunks = [];
+let depth = 0, start = -1, raw = String(text || "");
+for (let i = 0; i < raw.length; i++) {
+  if (raw[i] === "{") { if (!depth) start = i; depth++; continue; }
+  if (raw[i] !== "}" || !depth) continue;
+  depth--;
+  if (depth || start < 0) continue;
+  const item = JSON.parse(raw.slice(start, i + 1));
+  start = -1;
+  if (item.code && item.code !== 0 && !item.data) throw new Error(item.message || item.msg || "TTS failed");
+  if (item.data) chunks.push(item.data);
+}
+if (!chunks.length) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.geminiNoAudio"))});
+return { data: chunks.join("") };`,
+        },
+        {
             label: i18n.t("modelPlugin.templates.gemini"),
             script: `// ${i18n.t("modelPlugin.templates.audioGemini")}
 // ${i18n.t("modelPlugin.templates.availableAudioGemini")}

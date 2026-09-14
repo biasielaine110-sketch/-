@@ -313,7 +313,7 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
     return {
         id: channel?.id?.trim() || nanoid(),
         name: channel?.name?.trim() || i18n.t("config.channels.newName"),
-        baseUrl: channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat),
+        baseUrl: normalizeProviderBaseUrl(channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat)),
         apiKey: channel?.apiKey || "",
         apiFormat,
         models: normalizeChannelModels(channel?.models),
@@ -375,8 +375,8 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
     return {
         ...config,
         model: modelName,
-        baseUrl: channel.baseUrl,
-        apiKey: channel.apiKey,
+        baseUrl: normalizeProviderBaseUrl(channel.baseUrl),
+        apiKey: sanitizeApiKey(channel.apiKey),
         apiFormat: resolveChannelModelApiFormat(channel, model),
     };
 }
@@ -430,9 +430,46 @@ function uniqueModelOptions(models: string[]) {
     return Array.from(new Set((models || []).map((model) => model.trim()).filter(Boolean)));
 }
 
+export function sanitizeApiKey(apiKey: string) {
+    return apiKey.trim().replace(/^Bearer\s+/i, "").replace(/^["']|["']$/g, "").trim();
+}
+
+export function normalizeProviderBaseUrl(baseUrl: string) {
+    let value = baseUrl.trim().replace(/\/+$/, "");
+    if (!value) return value;
+    // Users often paste a full endpoint; strip back to the API root.
+    value = value.replace(/\/(chat\/completions|responses|images\/generations|images\/edits|audio\/speech|models)(\/.*)?$/i, "");
+    value = value.replace(/\/+$/, "");
+    try {
+        const parsed = new URL(value);
+        const host = parsed.hostname.toLowerCase();
+        const isArkHost = /^ark\.[a-z0-9-]+\.(volces|bytepluses)\.com$/i.test(host);
+        if (isArkHost) {
+            const path = parsed.pathname.replace(/\/+$/, "") || "/";
+            if (path === "/") return `${parsed.origin}/api/plan/v3`;
+            if (/^\/api\/plan$/i.test(path)) return `${parsed.origin}/api/plan/v3`;
+            if (/^\/api\/coding$/i.test(path)) return `${parsed.origin}/api/coding/v3`;
+            if (/^\/api$/i.test(path)) return `${parsed.origin}/api/v3`;
+            // Drop a mistaken trailing /v1 on versioned Ark roots.
+            if (/^\/api\/(plan|coding)\/v\d+\/v1$/i.test(path) || /^\/api\/v\d+\/v1$/i.test(path)) {
+                return `${parsed.origin}${path.replace(/\/v1$/i, "")}`;
+            }
+        }
+    } catch {
+        // keep original when not a valid absolute URL
+    }
+    return value;
+}
+
 export function buildApiUrl(baseUrl: string, path: string) {
-    const normalizedBaseUrl = baseUrl.trim().replace(/\/+$/, "");
+    const normalizedBaseUrl = normalizeProviderBaseUrl(baseUrl);
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
-    const apiBaseUrl = lowerBaseUrl.endsWith("/v1") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
-    return `${apiBaseUrl}${path}`;
+    // Keep provider versioned roots as-is (OpenAI /v1, Gemini /v1beta, Volcengine Ark /api/v3|/api/plan/v3|/api/coding/v3, etc.).
+    const hasVersionSuffix =
+        /\/(v\d+[a-z0-9._-]*)$/i.test(lowerBaseUrl) ||
+        /\/api\/v\d+[a-z0-9._-]*$/i.test(lowerBaseUrl) ||
+        /\/api\/(plan|coding)\/v\d+[a-z0-9._-]*$/i.test(lowerBaseUrl);
+    const apiBaseUrl = hasVersionSuffix ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
+    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+    return `${apiBaseUrl}${normalizedPath}`;
 }

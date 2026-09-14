@@ -1,10 +1,10 @@
 // Routes cross-origin API/media calls through a same-origin proxy to bypass CORS.
-// Dev: Vite middleware at /api-proxy (long timeout)
-// Production: Vercel serverless /api/proxy (Hobby capped ~60s)
+// Dev: Vite middleware at /api-proxy (long timeout ~500s)
+// Production: Vercel serverless /api/proxy (Fluid Compute Hobby/Pro default up to ~300s)
 //
-// Default transport is "proxy" because most relay APIs omit Access-Control-Allow-Origin.
-// Users can switch to "direct" in preferences when the provider allows CORS (avoids the
-// Vercel duration cap for long chats). Remote media always uses the proxy.
+// Default transport is "proxy" because most relay APIs omit Access-Control-Allow-Origin
+// (Ark CORS allow-headers also omit Authorization, so browser Direct usually fails).
+// Users can switch to "direct" in preferences when the provider allows CORS.
 
 import { CONFIG_STORE_KEY, type ApiTransport } from "@/stores/use-config-store";
 

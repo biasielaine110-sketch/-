@@ -10,11 +10,12 @@ export const config = {
         bodyParser: false,
         responseLimit: false,
     },
-    // Hobby plan max is 60s; higher values fail deployment ("计划的 maxDuration 无效").
-    maxDuration: 60,
+    // Fluid Compute: Hobby max 300s, Pro up to 800s. Keep under Hobby max so deploys stay valid.
+    maxDuration: 300,
 };
 
-const PROXY_TIMEOUT_MS = 55_000;
+// Abort a few seconds before the platform kills the function.
+const PROXY_TIMEOUT_MS = 290_000;
 
 /**
  * @param {import('http').IncomingMessage} req

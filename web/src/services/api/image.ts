@@ -216,17 +216,85 @@ function isDalleModel(model: string) {
     return value.startsWith("dall-e") || value.startsWith("dalle");
 }
 
+function isVolcengineArkBaseUrl(baseUrl: string) {
+    const value = baseUrl.trim();
+    return /ark\.cn-beijing\.volces\.com/i.test(value) || /volces\.com\/api\/(plan|coding)\/v\d+/i.test(value);
+}
+
+function isSeedreamModel(model: string) {
+    return /seedream/i.test(model.trim());
+}
+
+/** Agent Plan / Ark Seedream: OpenAI-shaped /images/generations with Volcengine-specific size rules. */
+function usesVolcengineImageApi(config: AiConfig) {
+    if (isSeedreamModel(config.model)) return true;
+    if (!isVolcengineArkBaseUrl(config.baseUrl)) return false;
+    return !isGptImageModel(config.model) && !isDalleModel(config.model) && !isGeminiNativeImageModel(config.model) && !prefersOpenAiImagesEndpoint(config.model);
+}
+
+const VOLC_SEEDREAM_PIXEL_SIZES = [
+    { ratio: 1, size: "2048x2048" },
+    { ratio: 16 / 9, size: "2560x1440" },
+    { ratio: 9 / 16, size: "1440x2560" },
+    { ratio: 4 / 3, size: "2304x1728" },
+    { ratio: 3 / 4, size: "1728x2304" },
+    { ratio: 3 / 2, size: "2496x1664" },
+    { ratio: 2 / 3, size: "1664x2496" },
+    { ratio: 21 / 9, size: "3136x1344" },
+];
+
+function resolveVolcengineImageSize(quality: string | undefined, size: string) {
+    const value = size.trim();
+    const tier = quality === "high" ? "3K" : "2K";
+    if (!value || value.toLowerCase() === "auto") return tier;
+    if (/^[1234]k$/i.test(value)) return value.toUpperCase();
+    const dimensions = parseImageDimensions(value);
+    if (dimensions && dimensions.width * dimensions.height >= 3_686_400) {
+        return `${dimensions.width}x${dimensions.height}`;
+    }
+    const target = readSizeAspectRatio(value);
+    let best = VOLC_SEEDREAM_PIXEL_SIZES[0];
+    let bestDelta = Number.POSITIVE_INFINITY;
+    for (const item of VOLC_SEEDREAM_PIXEL_SIZES) {
+        const delta = Math.abs(item.ratio - target);
+        if (delta < bestDelta) {
+            best = item;
+            bestDelta = delta;
+        }
+    }
+    return best.size;
+}
+
+function resolveVolcengineImageParams(config: AiConfig, count: number) {
+    const size = resolveVolcengineImageSize(normalizeQuality(config.quality), config.size);
+    const n = Math.max(1, Math.min(count, 15));
+    return {
+        size,
+        response_format: IMAGE_RESPONSE_FORMAT,
+        watermark: false,
+        ...(n > 1
+            ? {
+                  sequential_image_generation: "auto",
+                  sequential_image_generation_options: { max_images: n },
+              }
+            : {}),
+    } as Record<string, unknown>;
+}
+
 function resolveOpenAiImageParams(config: AiConfig, count: number) {
     // Gemini/Imagen relays often convert WxH into a reduced aspect_ratio and reject
     // non-whitelisted ratios like 85:48 (from 2720x1536). Send a supported ratio instead.
     if (prefersOpenAiImagesEndpoint(config.model)) {
         return resolveGeminiRelayImageParams(config, count);
     }
+    if (usesVolcengineImageApi(config)) {
+        return resolveVolcengineImageParams(config, count);
+    }
 
     const quality = normalizeQuality(config.quality);
     const requestSize = isGptImageModel(config.model) ? resolveGptImageRequestSize(config.model, quality, config.size) : resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
-    const params: Record<string, string | number> = {
+    const params: Record<string, string | number | boolean | Record<string, unknown>> = {
         n: isGptImageModel(config.model) ? Math.min(count, 10) : count,
         ...(quality ? { quality } : {}),
         ...(requestSize ? { size: requestSize } : {}),
@@ -334,8 +402,9 @@ async function requestGeminiRelayImageToImage(config: AiConfig, prompt: string, 
     const imageParams = resolveGeminiRelayImageParams(config, count);
     const { metadata, ...restParams } = imageParams as Record<string, unknown> & { metadata?: { resolution?: string } };
     try {
-        const response = await axios.post<ImageApiResponse>(
-            aiApiUrl(config, "/images/generations"),
+        const response = await postImageJson<ImageApiResponse>(
+            config,
+            "/images/generations",
             {
                 model: config.model,
                 prompt: withSystemPrompt(config, prompt),
@@ -343,10 +412,7 @@ async function requestGeminiRelayImageToImage(config: AiConfig, prompt: string, 
                 ...restParams,
                 ...(metadata ? { metadata } : {}),
             },
-            {
-                headers: aiHeaders(config, "application/json"),
-                signal: options?.signal,
-            },
+            options,
         );
         return await resolveImageApiResponse(config, response.data, options);
     } catch (error) {
@@ -357,10 +423,24 @@ async function requestGeminiRelayImageToImage(config: AiConfig, prompt: string, 
     }
 }
 
-function appendOpenAiImageParams(formData: FormData, params: Record<string, string | number>) {
+function appendOpenAiImageParams(formData: FormData, params: Record<string, unknown>) {
     for (const [key, value] of Object.entries(params)) {
+        if (value == null || typeof value === "object") continue;
         formData.set(key, String(value));
     }
+}
+
+async function requestVolcengineImageGeneration(config: AiConfig, prompt: string, references: ReferenceImage[], count: number, options?: RequestOptions) {
+    const refs = await Promise.all(references.map((image) => prepareReferenceDataUrl(image, Math.max(1, references.length || 1))));
+    const body: Record<string, unknown> = {
+        model: config.model,
+        prompt: withSystemPrompt(config, prompt),
+        ...resolveVolcengineImageParams(config, count),
+    };
+    if (refs.length === 1) body.image = refs[0];
+    else if (refs.length > 1) body.image = refs;
+    const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
+    return resolveImageApiResponse(config, response.data, options);
 }
 
 /** Map "quality + ratio" to an explicit pixel dimension like "3840x2160". */
@@ -717,11 +797,12 @@ function readAxiosError(error: unknown, fallback: string) {
         }
         const responseData = error.response?.data;
         // Prefer the API error from the response body.
-        const apiMsg = readApiErrorMessage(responseData);
-        if (apiMsg) return apiMsg;
+        const apiMsg = clarifyAuthError(readApiErrorMessage(responseData));
+        const requestUrl = readRequestTargetUrl(typeof error.config?.url === "string" ? error.config.url : "");
+        if (apiMsg) return requestUrl && error.response?.status === 404 ? `${apiMsg}\n${requestUrl}` : apiMsg;
         // Infer the error from the HTTP status when the response body has no usable message.
         const statusMsg = readStatusError(error.response?.status, fallback);
-        if (statusMsg) return statusMsg;
+        if (statusMsg) return requestUrl ? `${statusMsg}\n${requestUrl}` : statusMsg;
         // Fall back to Axios's own error message.
         return error.message || fallback;
     }
@@ -761,6 +842,25 @@ function withSystemPrompt(config: AiConfig, prompt: string) {
 
 function aiApiUrl(config: AiConfig, path: string) {
     return proxyApiUrl(buildApiUrl(config.baseUrl, path));
+}
+
+/** Seedream / image APIs often take 1–3 minutes; keep client wait aligned with the site proxy (Hobby ≤300s). */
+const IMAGE_REQUEST_TIMEOUT_MS = 300_000;
+
+async function postImageJson<T>(config: AiConfig, path: string, data: unknown, options?: RequestOptions) {
+    return axios.post<T>(aiApiUrl(config, path), data, {
+        headers: aiHeaders(config, "application/json"),
+        signal: options?.signal,
+        timeout: IMAGE_REQUEST_TIMEOUT_MS,
+    });
+}
+
+async function postImageForm<T>(config: AiConfig, path: string, data: FormData, options?: RequestOptions) {
+    return axios.post<T>(aiApiUrl(config, path), data, {
+        headers: aiHeaders(config),
+        signal: options?.signal,
+        timeout: IMAGE_REQUEST_TIMEOUT_MS,
+    });
 }
 
 function aiHeaders(config: AiConfig, contentType?: string) {
@@ -869,12 +969,36 @@ function validateGeminiPayload(payload: GeminiPayload) {
 }
 
 async function readFetchError(response: Response, fallback: string) {
+    const requestUrl = readRequestTargetUrl(response.url);
     const text = await response.text();
-    if (!text) return readStatusError(response.status, fallback);
+    let message = "";
+    if (!text) message = readStatusError(response.status, fallback);
+    else {
+        try {
+            message = responseErrorMessage(JSON.parse(text)) || readStatusError(response.status, fallback);
+        } catch {
+            message = text.slice(0, 300) || readStatusError(response.status, fallback);
+        }
+    }
+    if (response.status === 404 && requestUrl && !message.includes(requestUrl)) return `${message}\n${requestUrl}`;
+    return clarifyAuthError(message);
+}
+
+function clarifyAuthError(message: string) {
+    if (!message) return message;
+    if (/api key or ak\/sk|missing or invalid|invalidauthorization|unauthorized|鉴权失败/i.test(message)) {
+        return `${apiText("authenticationFailed")}\n${message}`;
+    }
+    return message;
+}
+
+function readRequestTargetUrl(url: string) {
+    if (!url) return "";
     try {
-        return responseErrorMessage(JSON.parse(text)) || readStatusError(response.status, fallback);
+        const parsed = new URL(url, typeof window !== "undefined" ? window.location.origin : "http://localhost");
+        return parsed.searchParams.get("target") || url;
     } catch {
-        return text.slice(0, 300) || readStatusError(response.status, fallback);
+        return url;
     }
 }
 
@@ -1177,17 +1301,15 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     }
     const imageParams = resolveOpenAiImageParams(requestConfig, n);
     try {
-        const response = await axios.post<ImageApiResponse>(
-            aiApiUrl(requestConfig, "/images/generations"),
+        const response = await postImageJson<ImageApiResponse>(
+            requestConfig,
+            "/images/generations",
             {
                 model: requestConfig.model,
                 prompt: withSystemPrompt(requestConfig, prompt),
                 ...imageParams,
             },
-            {
-                headers: aiHeaders(requestConfig, "application/json"),
-                signal: options?.signal,
-            },
+            options,
         );
         const images = await resolveImageApiResponse(requestConfig, response.data, options);
         return images;
@@ -1260,6 +1382,15 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         }
     }
 
+    // Volcengine Ark / Seedream image-to-image uses JSON /images/generations + `image`, not multipart /images/edits.
+    if (usesVolcengineImageApi(requestConfig) && !mask) {
+        try {
+            return await requestVolcengineImageGeneration(requestConfig, requestPrompt, references, n, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+
     const imageParams = resolveOpenAiImageParams(requestConfig, n);
     const formData = new FormData();
     formData.set("model", requestConfig.model);
@@ -1279,7 +1410,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
 
     try {
-        const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: aiHeaders(requestConfig), signal: options?.signal });
+        const response = await postImageForm<ImageApiResponse>(requestConfig, "/images/edits", formData, options);
         const images = await resolveImageApiResponse(requestConfig, response.data, options);
         return images;
     } catch (error) {
@@ -1321,16 +1452,143 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
             if (answer === apiText("noContent")) onDelta(answer);
             return answer;
         }
-        const answer = (await requestStreamingResponse(requestConfig, {
-            model: requestConfig.model,
-            input: toResponseInput(withSystemMessage(requestConfig, messages)),
-            ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
-        }, onDelta, options)).content || apiText("noContent");
-        if (answer === apiText("noContent")) onDelta(answer);
-        return answer;
+        const inputMessages = withSystemMessage(requestConfig, messages);
+        const preferChatCompletions = isVolcengineArkBaseUrl(requestConfig.baseUrl);
+        if (preferChatCompletions) {
+            try {
+                const answer = (await requestStreamingChatCompletions(requestConfig, inputMessages, onDelta, options)).content || apiText("noContent");
+                if (answer === apiText("noContent")) onDelta(answer);
+                return answer;
+            } catch (chatError) {
+                try {
+                    const answer =
+                        (
+                            await requestStreamingResponse(
+                                requestConfig,
+                                {
+                                    model: requestConfig.model,
+                                    input: toResponseInput(inputMessages),
+                                    ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
+                                },
+                                onDelta,
+                                options,
+                            )
+                        ).content || apiText("noContent");
+                    if (answer === apiText("noContent")) onDelta(answer);
+                    return answer;
+                } catch {
+                    throw chatError;
+                }
+            }
+        }
+        try {
+            const answer =
+                (
+                    await requestStreamingResponse(
+                        requestConfig,
+                        {
+                            model: requestConfig.model,
+                            input: toResponseInput(inputMessages),
+                            ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
+                        },
+                        onDelta,
+                        options,
+                    )
+                ).content || apiText("noContent");
+            if (answer === apiText("noContent")) onDelta(answer);
+            return answer;
+        } catch (responsesError) {
+            // Volcengine Ark / many CN relays expose Chat Completions more reliably than Responses.
+            if (!shouldFallbackToChatCompletions(responsesError)) throw responsesError;
+            const answer = (await requestStreamingChatCompletions(requestConfig, inputMessages, onDelta, options)).content || apiText("noContent");
+            if (answer === apiText("noContent")) onDelta(answer);
+            return answer;
+        }
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("requestFailed")));
     }
+}
+
+function shouldFallbackToChatCompletions(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error || "");
+    return /404|not\s*found|接口地址不存在|unsupported|not\s*support|unknown\s*url|invalid\s*url|responses?/i.test(message);
+}
+
+async function requestStreamingChatCompletions(config: AiConfig, messages: ResponseInputMessage[], onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
+    const response = await fetch(aiApiUrl(config, "/chat/completions"), {
+        method: "POST",
+        headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
+        body: JSON.stringify({
+            model: config.model,
+            messages: toChatCompletionMessages(messages),
+            stream: true,
+        }),
+        signal: options?.signal,
+    });
+    if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
+    if (!response.body) {
+        const payload = (await response.json()) as Record<string, unknown>;
+        const content = readChatCompletionContent(payload);
+        if (content) onDelta?.(content);
+        return { content, toolCalls: [] };
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let text = "";
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        for (;;) {
+            const match = buffer.match(/\r?\n/);
+            if (!match) break;
+            const index = match.index ?? 0;
+            const line = buffer.slice(0, index).trim();
+            buffer = buffer.slice(index + match[0].length);
+            if (!line.startsWith("data:")) continue;
+            const data = line.slice(5).trim();
+            if (!data || data === "[DONE]") continue;
+            try {
+                const payload = JSON.parse(data) as Record<string, unknown>;
+                const delta = readChatCompletionDelta(payload);
+                if (!delta) continue;
+                text += delta;
+                onDelta?.(text);
+            } catch {
+                // ignore malformed SSE chunks
+            }
+        }
+    }
+    return { content: text, toolCalls: [] };
+}
+
+function toChatCompletionMessages(messages: ResponseInputMessage[]) {
+    const result: Array<{ role: string; content: ResponseMessageContent; tool_call_id?: string }> = [];
+    for (const message of messages) {
+        if ("type" in message) continue;
+        if (message.role === "tool") {
+            result.push({ role: "tool", tool_call_id: message.tool_call_id, content: message.content });
+            continue;
+        }
+        result.push({ role: message.role, content: message.content || "" });
+    }
+    return result;
+}
+
+function readChatCompletionContent(payload: Record<string, unknown>) {
+    const choices = Array.isArray(payload.choices) ? payload.choices : [];
+    const first = choices[0] && typeof choices[0] === "object" ? (choices[0] as Record<string, unknown>) : null;
+    const message = first && typeof first.message === "object" && first.message ? (first.message as Record<string, unknown>) : null;
+    return typeof message?.content === "string" ? message.content : "";
+}
+
+function readChatCompletionDelta(payload: Record<string, unknown>) {
+    const choices = Array.isArray(payload.choices) ? payload.choices : [];
+    const first = choices[0] && typeof choices[0] === "object" ? (choices[0] as Record<string, unknown>) : null;
+    const delta = first && typeof first.delta === "object" && first.delta ? (first.delta as Record<string, unknown>) : null;
+    return typeof delta?.content === "string" ? delta.content : "";
 }
 
 export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat">) {
