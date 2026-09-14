@@ -118,7 +118,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                     </Tooltip>
                     {mode === "image" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
+                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[260px]" />
                             <CanvasImageSettingsPopover
                                 config={config}
                                 placement="topLeft"
