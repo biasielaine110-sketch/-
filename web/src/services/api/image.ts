@@ -801,7 +801,7 @@ function readAxiosError(error: unknown, fallback: string) {
         const requestUrl = readRequestTargetUrl(typeof error.config?.url === "string" ? error.config.url : "");
         if (apiMsg) return requestUrl && error.response?.status === 404 ? `${apiMsg}\n${requestUrl}` : apiMsg;
         // Infer the error from the HTTP status when the response body has no usable message.
-        const statusMsg = readStatusError(error.response?.status, fallback);
+        const statusMsg = readStatusError(error.response?.status, fallback, requestUrl);
         if (statusMsg) return requestUrl ? `${statusMsg}\n${requestUrl}` : statusMsg;
         // Fall back to Axios's own error message.
         return error.message || fallback;
@@ -819,11 +819,11 @@ function readNetworkMessage(message: string) {
     return /failed to fetch|network error|load failed|net::err_/i.test(message) ? apiText("networkFailed") : null;
 }
 
-function readStatusError(status: number | undefined, fallback: string) {
+function readStatusError(status: number | undefined, fallback: string, requestUrl = "") {
     if (status === 401 || status === 403) return apiText("authenticationFailed");
     if (status === 413) return apiText("payloadTooLarge");
     if (status === 429) return apiText("rateLimited");
-    if (status === 404) return apiText("notFound");
+    if (status === 404) return /\/models(\/|\?|$)/i.test(requestUrl) ? apiText("notFoundModels") : apiText("notFound");
     if (status === 502) return apiText("badGateway");
     if (status === 503) return apiText("serviceBusy");
     return status ? apiText("httpFailed", { status }) : fallback;
@@ -972,12 +972,12 @@ async function readFetchError(response: Response, fallback: string) {
     const requestUrl = readRequestTargetUrl(response.url);
     const text = await response.text();
     let message = "";
-    if (!text) message = readStatusError(response.status, fallback);
+    if (!text) message = readStatusError(response.status, fallback, requestUrl);
     else {
         try {
-            message = responseErrorMessage(JSON.parse(text)) || readStatusError(response.status, fallback);
+            message = responseErrorMessage(JSON.parse(text)) || readStatusError(response.status, fallback, requestUrl);
         } catch {
-            message = text.slice(0, 300) || readStatusError(response.status, fallback);
+            message = text.slice(0, 300) || readStatusError(response.status, fallback, requestUrl);
         }
     }
     if (response.status === 404 && requestUrl && !message.includes(requestUrl)) return `${message}\n${requestUrl}`;
@@ -1593,6 +1593,9 @@ function readChatCompletionDelta(payload: Record<string, unknown>) {
 
 export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat">) {
     try {
+        if (isVolcenginePlanBaseUrl(config.baseUrl)) {
+            return [...VOLCENGINE_PLAN_MODELS];
+        }
         if (config.apiFormat === "gemini") {
             const response = await axios.get<GeminiPayload>(geminiApiUrl({ ...defaultGeminiConfig, ...config }), { headers: geminiHeaders({ ...defaultGeminiConfig, ...config }) });
             validateGeminiPayload(response.data);
@@ -1614,6 +1617,25 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
         throw new Error(readAxiosError(error, apiText("modelReadFailed")));
     }
 }
+
+function isVolcenginePlanBaseUrl(baseUrl: string) {
+    return /volces\.com\/api\/(plan|coding)\/v\d+/i.test(baseUrl.trim());
+}
+
+const VOLCENGINE_PLAN_MODELS = [
+    "doubao-seed-2.1-turbo",
+    "doubao-seed-2.0-pro",
+    "doubao-seed-2.0-lite",
+    "doubao-seed-2.0-code",
+    "ark-code-latest",
+    "doubao-seedream-5.0-lite",
+    "doubao-seedream-5.0-pro",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "kimi-k2.6",
+    "glm-5.2",
+    "minimax-m2.7",
+];
 
 export async function fetchChannelModels(channel: ModelChannel) {
     return fetchImageModels({ baseUrl: channel.baseUrl, apiKey: channel.apiKey, apiFormat: channel.apiFormat });

@@ -142,7 +142,7 @@ async function requestOpenSpeechTts(
         {
             headers: {
                 "Content-Type": "application/json",
-                "X-Api-Key": config.apiKey,
+                "X-Api-Key": config.apiKey.trim().replace(/^Bearer\s+/i, "").replace(/^["']|["']$/g, "").trim(),
                 "X-Api-Resource-Id": resourceId,
                 "X-Api-Request-Id": typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}`,
             },
@@ -256,18 +256,29 @@ function readApiErrorMessage(value: unknown): string {
         }
     }
     if (typeof value !== "object") return "";
-    const payload = value as { msg?: unknown; message?: unknown; error?: unknown; detail?: unknown };
+    const payload = value as {
+        msg?: unknown;
+        message?: unknown;
+        error?: unknown;
+        detail?: unknown;
+        header?: { code?: unknown; message?: unknown; msg?: unknown };
+    };
+    const headerMsg = payload.header?.message || payload.header?.msg;
     const errorMsg =
         typeof payload.error === "string"
             ? payload.error
             : (payload.error as { message?: unknown })?.message;
-    return (
+    const raw =
         readApiErrorMessage(payload.msg) ||
         readApiErrorMessage(payload.message) ||
+        readApiErrorMessage(headerMsg) ||
         readApiErrorMessage(errorMsg) ||
         readApiErrorMessage(payload.detail) ||
-        ""
-    );
+        "";
+    if (/invalid\s*x-api-key/i.test(raw)) {
+        return `${apiText("openSpeechInvalidKey")}\n${raw}`;
+    }
+    return raw;
 }
 
 function readAxiosError(error: unknown, fallback: string) {

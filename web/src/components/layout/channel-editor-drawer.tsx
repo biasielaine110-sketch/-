@@ -3,7 +3,9 @@ import { GripVertical, ListPlus, Trash2 } from "lucide-react";
 import { useEffect, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
 
-import { defaultBaseUrlForApiFormat, guessCapability, normalizeChannelModels, resolveChannelModelApiFormat, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { HealthDot } from "@/components/model-picker";
+import { encodeChannelModel, defaultBaseUrlForApiFormat, defaultConfig, guessCapability, normalizeChannelModels, resolveChannelModelApiFormat, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { getModelHealth, modelHealthKey, subscribeModelHealth } from "@/services/api/model-health";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
 
@@ -16,6 +18,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const [scriptTarget, setScriptTarget] = useState<ScriptTarget | null>(null);
     const [draggingModelName, setDraggingModelName] = useState<string | null>(null);
     const [dragOverModelName, setDragOverModelName] = useState<string | null>(null);
+    const [, bumpHealth] = useState(0);
     const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
         { label: "OpenAI", value: "openai" },
         { label: "Gemini", value: "gemini" },
@@ -29,6 +32,8 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
             setDragOverModelName(null);
         }
     }, [open, channel]);
+
+    useEffect(() => subscribeModelHealth(() => bumpHealth((value) => value + 1)), []);
 
     if (!draft) return null;
 
@@ -163,7 +168,10 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                                 <GripVertical className="size-4" />
                             </span>
                             <span className="min-w-0 flex-1 truncate text-sm" title={model.name}>
-                                {model.name}
+                                <span className="inline-flex max-w-full items-center gap-2">
+                                    <ChannelModelHealth draft={draft} model={model} />
+                                    <span className="truncate">{model.name}</span>
+                                </span>
                             </span>
                             <div className="flex shrink-0 flex-wrap items-center gap-2">
                                 <Select
@@ -198,4 +206,10 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
             />
         </Drawer>
     );
+}
+
+function ChannelModelHealth({ draft, model }: { draft: ModelChannel; model: ChannelModel }) {
+    const configLike = { ...defaultConfig, channels: [draft], baseUrl: draft.baseUrl, apiKey: draft.apiKey, apiFormat: draft.apiFormat };
+    const health = getModelHealth(modelHealthKey(configLike, encodeChannelModel(draft.id, model.name), model.capability));
+    return <HealthDot status={health.status} message={health.message} />;
 }

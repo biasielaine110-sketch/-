@@ -1,0 +1,368 @@
+import axios from "axios";
+
+import i18n from "@/i18n";
+import { proxyApiUrl } from "@/lib/api-proxy";
+import { buildApiUrl, resolveModelRequestConfig, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+
+export type ModelHealthStatus = "idle" | "checking" | "ok" | "fail";
+
+export type ModelHealthEntry = {
+    status: ModelHealthStatus;
+    message?: string;
+    checkedAt: number;
+};
+
+const HEALTH_TTL_MS = 5 * 60_000;
+const HEALTH_TIMEOUT_MS = 12_000;
+const MAX_CONCURRENT = 2;
+
+const cache = new Map<string, ModelHealthEntry>();
+const inflight = new Map<string, Promise<ModelHealthEntry>>();
+const listeners = new Set<() => void>();
+let activeProbes = 0;
+const queue: Array<() => void> = [];
+
+const apiText = (key: string) => i18n.t(`apiErrors.${key}`);
+
+export function modelHealthKey(config: AiConfig, encodedModel: string, capability: ModelCapability) {
+    const request = resolveModelRequestConfig(config, encodedModel);
+    return `${request.baseUrl}\0${request.apiKey.slice(0, 16)}\0${request.model}\0${capability}`;
+}
+
+export function getModelHealth(key: string): ModelHealthEntry {
+    return cache.get(key) || { status: "idle", checkedAt: 0 };
+}
+
+export function subscribeModelHealth(listener: () => void) {
+    listeners.add(listener);
+    return () => {
+        listeners.delete(listener);
+    };
+}
+
+function emitHealth() {
+    listeners.forEach((listener) => listener());
+}
+
+function setHealth(key: string, entry: ModelHealthEntry) {
+    cache.set(key, entry);
+    emitHealth();
+}
+
+function runQueued() {
+    while (activeProbes < MAX_CONCURRENT && queue.length) {
+        const next = queue.shift();
+        next?.();
+    }
+}
+
+function enqueue<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const start = () => {
+            activeProbes += 1;
+            task()
+                .then(resolve, reject)
+                .finally(() => {
+                    activeProbes -= 1;
+                    runQueued();
+                });
+        };
+        if (activeProbes < MAX_CONCURRENT) start();
+        else queue.push(start);
+    });
+}
+
+export async function ensureModelHealth(config: AiConfig, encodedModel: string, capability: ModelCapability, options?: { force?: boolean; signal?: AbortSignal }) {
+    const key = modelHealthKey(config, encodedModel, capability);
+    const cached = cache.get(key);
+    if (!options?.force && cached && cached.status !== "checking" && cached.status !== "idle" && Date.now() - cached.checkedAt < HEALTH_TTL_MS) {
+        return cached;
+    }
+    const pending = inflight.get(key);
+    if (pending && !options?.force) return pending;
+
+    setHealth(key, { status: "checking", checkedAt: Date.now(), message: cached?.message });
+    const run = enqueue(async () => {
+        try {
+            const result = await probeModelHealth(config, encodedModel, capability, options?.signal);
+            if (options?.signal?.aborted) return getModelHealth(key);
+            const entry: ModelHealthEntry = { status: result.ok ? "ok" : "fail", message: "message" in result ? result.message : undefined, checkedAt: Date.now() };
+            setHealth(key, entry);
+            return entry;
+        } catch (error) {
+            if (options?.signal?.aborted || axios.isCancel(error)) return getModelHealth(key);
+            const entry: ModelHealthEntry = {
+                status: "fail",
+                message: error instanceof Error ? error.message : apiText("requestFailed"),
+                checkedAt: Date.now(),
+            };
+            setHealth(key, entry);
+            return entry;
+        } finally {
+            inflight.delete(key);
+        }
+    });
+    inflight.set(key, run);
+    return run;
+}
+
+export async function probeModelHealth(config: AiConfig, encodedModel: string, capability: ModelCapability, signal?: AbortSignal) {
+    const request = resolveModelRequestConfig(config, encodedModel);
+    if (!request.baseUrl.trim()) return { ok: false, message: apiText("baseUrlRequired") };
+    if (!request.apiKey.trim()) return { ok: false, message: apiText("apiKeyRequired") };
+    if (!request.model.trim()) return { ok: false, message: apiText("requestFailed") };
+
+    if (capability === "text") return probeText(request, signal);
+    if (capability === "image") return probeImage(request, signal);
+    if (capability === "audio") return probeAudio(request, signal);
+    if (capability === "video") return probeVideo(request, signal);
+    return { ok: false, message: apiText("requestFailed") };
+}
+
+async function probeText(config: ReturnType<typeof resolveModelRequestConfig>, signal?: AbortSignal) {
+    if (config.apiFormat === "gemini") {
+        try {
+            await axios.post(
+                proxyApiUrl(`${geminiRoot(config.baseUrl)}/models/${encodeURIComponent(config.model.replace(/^models\//, ""))}:generateContent`),
+                {
+                    contents: [{ role: "user", parts: [{ text: "ping" }] }],
+                    generationConfig: { maxOutputTokens: 1 },
+                },
+                {
+                    headers: { "Content-Type": "application/json", "x-goog-api-key": config.apiKey, Authorization: `Bearer ${config.apiKey}` },
+                    signal,
+                    timeout: HEALTH_TIMEOUT_MS,
+                    validateStatus: () => true,
+                },
+            ).then((response) => assertProbeResponse(response.status, response.data));
+            return { ok: true as const };
+        } catch (error) {
+            return failFromError(error);
+        }
+    }
+
+    try {
+        const response = await axios.post(
+            proxyApiUrl(buildApiUrl(config.baseUrl, "/chat/completions")),
+            {
+                model: config.model,
+                messages: [{ role: "user", content: "ping" }],
+                max_tokens: 1,
+                stream: false,
+            },
+            {
+                headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+                signal,
+                timeout: HEALTH_TIMEOUT_MS,
+                validateStatus: () => true,
+            },
+        );
+        assertProbeResponse(response.status, response.data);
+        return { ok: true as const };
+    } catch (error) {
+        return failFromError(error);
+    }
+}
+
+async function probeImage(config: ReturnType<typeof resolveModelRequestConfig>, signal?: AbortSignal) {
+    // Empty prompt should fail validation after auth/model routing — avoids billing a real image.
+    try {
+        const response = await axios.post(
+            proxyApiUrl(buildApiUrl(config.baseUrl, "/images/generations")),
+            {
+                model: config.model,
+                prompt: "",
+                ...(isSeedreamLike(config.model) || isVolcArk(config.baseUrl) ? { size: "2K", watermark: false } : { n: 1 }),
+            },
+            {
+                headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+                signal,
+                timeout: HEALTH_TIMEOUT_MS,
+                validateStatus: () => true,
+            },
+        );
+        return interpretNonTextProbe(response.status, response.data);
+    } catch (error) {
+        return failFromError(error);
+    }
+}
+
+async function probeAudio(config: ReturnType<typeof resolveModelRequestConfig>, signal?: AbortSignal) {
+    if (/openspeech\.bytedance\.com/i.test(config.baseUrl)) {
+        try {
+            const response = await axios.post(
+                proxyApiUrl(resolveOpenSpeechUrl(config.baseUrl)),
+                {
+                    user: { uid: "health-check" },
+                    req_params: {
+                        text: "",
+                        speaker: "zh_female_vv_uranus_bigtts",
+                        audio_params: { format: "mp3", sample_rate: 24000 },
+                    },
+                },
+                {
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-Api-Key": config.apiKey,
+                        "X-Api-Resource-Id": /^seed-(tts|icl)/i.test(config.model) ? config.model : "seed-tts-2.0",
+                        "X-Api-Request-Id": typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}`,
+                    },
+                    signal,
+                    timeout: HEALTH_TIMEOUT_MS,
+                    validateStatus: () => true,
+                    responseType: "text",
+                    transformResponse: [(data) => data],
+                },
+            );
+            return interpretOpenSpeechProbe(response.status, String(response.data || ""));
+        } catch (error) {
+            return failFromError(error);
+        }
+    }
+
+    try {
+        const response = await axios.post(
+            proxyApiUrl(buildApiUrl(config.baseUrl, "/audio/speech")),
+            { model: config.model, input: "", voice: "alloy" },
+            {
+                headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+                signal,
+                timeout: HEALTH_TIMEOUT_MS,
+                validateStatus: () => true,
+            },
+        );
+        return interpretNonTextProbe(response.status, response.data);
+    } catch (error) {
+        return failFromError(error);
+    }
+}
+
+async function probeVideo(config: ReturnType<typeof resolveModelRequestConfig>, signal?: AbortSignal) {
+    // Only verify the channel accepts authenticated video task routes without starting a billable job when possible.
+    try {
+        const response = await axios.post(
+            proxyApiUrl(buildApiUrl(config.baseUrl, "/videos")),
+            { model: config.model, prompt: "" },
+            {
+                headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+                signal,
+                timeout: HEALTH_TIMEOUT_MS,
+                validateStatus: () => true,
+            },
+        );
+        return interpretNonTextProbe(response.status, response.data);
+    } catch (error) {
+        return failFromError(error);
+    }
+}
+
+function assertProbeResponse(status: number, data: unknown) {
+    if (status >= 200 && status < 300) return;
+    const message = readMessage(data) || `HTTP ${status}`;
+    if (isAuthFailure(status, message) || isModelMissing(message) || status === 404) throw new Error(message);
+    // Other 4xx after auth often still means the route is reachable for this model.
+    if (status >= 400 && status < 500 && !isFatalProbe(message)) return;
+    throw new Error(message);
+}
+
+function interpretNonTextProbe(status: number, data: unknown) {
+    const message = readMessage(data) || `HTTP ${status}`;
+    if (status >= 200 && status < 300) return { ok: true as const };
+    if (isAuthFailure(status, message) || isModelMissing(message) || (status === 404 && !isValidationFailure(message))) {
+        return { ok: false as const, message };
+    }
+    if (isValidationFailure(message) || (status >= 400 && status < 500)) return { ok: true as const, message };
+    return { ok: false as const, message };
+}
+
+function interpretOpenSpeechProbe(status: number, raw: string) {
+    const message = readOpenSpeechMessage(raw) || `HTTP ${status}`;
+    if (/invalid\s*x-api-key|unauthorized|鉴权|permission denied/i.test(message)) return { ok: false as const, message };
+    if (isModelMissing(message)) return { ok: false as const, message };
+    if (status >= 200 && status < 300) {
+        // Empty text may still return JSON error chunks with code != 0.
+        if (/invalid|empty|required|text/i.test(message) && !/invalid\s*x-api-key/i.test(message)) return { ok: true as const, message };
+        if (!message || /code"?\s*:\s*0/.test(raw)) return { ok: true as const };
+    }
+    if (isValidationFailure(message) || /text|empty|required|param/i.test(message)) return { ok: true as const, message };
+    if (status === 404) return { ok: false as const, message };
+    if (status >= 400 && status < 500) return { ok: true as const, message };
+    return { ok: false as const, message };
+}
+
+function failFromError(error: unknown) {
+    if (axios.isCancel(error)) return { ok: false as const, message: apiText("requestCanceled") };
+    if (axios.isAxiosError(error)) {
+        const message = readMessage(error.response?.data) || error.message || apiText("networkFailed");
+        return { ok: false as const, message };
+    }
+    return { ok: false as const, message: error instanceof Error ? error.message : apiText("requestFailed") };
+}
+
+function readMessage(value: unknown): string {
+    if (!value) return "";
+    if (typeof value === "string") {
+        try {
+            return readMessage(JSON.parse(value)) || value.slice(0, 200);
+        } catch {
+            return value.slice(0, 200);
+        }
+    }
+    if (typeof value !== "object") return "";
+    const payload = value as {
+        message?: unknown;
+        msg?: unknown;
+        error?: unknown;
+        header?: { message?: unknown; msg?: unknown };
+    };
+    const nested =
+        typeof payload.error === "string"
+            ? payload.error
+            : payload.error && typeof payload.error === "object"
+              ? (payload.error as { message?: unknown }).message
+              : undefined;
+    return String(payload.header?.message || payload.header?.msg || payload.message || payload.msg || nested || "").trim();
+}
+
+function readOpenSpeechMessage(raw: string) {
+    const match = raw.match(/"message"\s*:\s*"([^"]+)"/);
+    if (match?.[1]) return match[1];
+    return readMessage(raw);
+}
+
+function isAuthFailure(status: number, message: string) {
+    return status === 401 || status === 403 || /api key|unauthorized|authentication|invalid\s*x-api-key|鉴权|ak\/sk/i.test(message);
+}
+
+function isModelMissing(message: string) {
+    return /model[^\n]{0,40}(not\s*found|does\s*not\s*exist|invalid|unknown)|unknown model|模型.*(不存在|无效|未找到)/i.test(message);
+}
+
+function isValidationFailure(message: string) {
+    return /prompt|text|input|required|empty|blank|invalid\s*param|missing|size|voice|speaker|参数|必填|不能为空/i.test(message);
+}
+
+function isFatalProbe(message: string) {
+    return isAuthFailure(0, message) || isModelMissing(message) || /not\s*found|接口地址不存在/i.test(message);
+}
+
+function isSeedreamLike(model: string) {
+    return /seedream/i.test(model);
+}
+
+function isVolcArk(baseUrl: string) {
+    return /ark\.[a-z0-9-]+\.(volces|bytepluses)\.com|volces\.com\/api\/(plan|coding|v\d+)/i.test(baseUrl);
+}
+
+function geminiRoot(baseUrl: string) {
+    const normalized = baseUrl.trim().replace(/\/+$/, "");
+    const lower = normalized.toLowerCase();
+    return lower.endsWith("/v1") || lower.endsWith("/v1beta") ? normalized : `${normalized}/v1beta`;
+}
+
+function resolveOpenSpeechUrl(baseUrl: string) {
+    const normalized = baseUrl.trim().replace(/\/+$/, "").replace(/\/api\/v3\/plan\/tts\//i, "/api/v3/tts/");
+    if (/\/tts\/unidirectional(\/sse)?$/i.test(normalized)) return normalized;
+    if (/\/api\/v3$/i.test(normalized)) return `${normalized}/tts/unidirectional`;
+    return `${normalized}/api/v3/tts/unidirectional`;
+}
