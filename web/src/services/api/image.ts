@@ -1209,22 +1209,19 @@ function parseMidjourneyImagineImages(payload: ImageApiResponse, parentTaskId: s
     const grid = readMidjourneyGridUrl(payload);
     const limit = Math.max(1, Math.min(4, count));
 
-    // Prefer separate tile previews when the relay provides them (still Imagine quality; Upscale is manual).
-    if (tiles.length >= 2) {
+    // Prefer the classic 2×2 grid so the canvas shows one Imagine result; Upscale (U1–U4) is manual.
+    if (grid) {
+        return [{ id: nanoid(), dataUrl: grid, midjourneyTaskId: parentTaskId }];
+    }
+
+    // Fallback when the relay only returns separate tiles (no grid_image_url).
+    if (tiles.length >= 1) {
         return tiles.slice(0, limit).map((dataUrl, index) => ({
             id: nanoid(),
             dataUrl,
             midjourneyTaskId: parentTaskId,
             midjourneyIndex: index + 1,
         }));
-    }
-
-    if (grid) {
-        return [{ id: nanoid(), dataUrl: grid, midjourneyTaskId: parentTaskId }];
-    }
-
-    if (tiles.length === 1) {
-        return [{ id: nanoid(), dataUrl: tiles[0], midjourneyTaskId: parentTaskId, midjourneyIndex: 1 }];
     }
 
     return parseImagePayload(payload).map((image) => ({ ...image, midjourneyTaskId: parentTaskId }));
