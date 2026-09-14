@@ -112,17 +112,17 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             />
 
             <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-2">
+                <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
                     <Tooltip title={t("canvas.promptPanel.expandEditor")}>
                         <Button type="text" className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0" style={{ color: theme.node.text }} icon={<Maximize2 className="size-3.5" />} onClick={openExpandedEditor} aria-label={t("canvas.promptPanel.expandEditor")} />
                     </Tooltip>
                     {mode === "image" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[260px]" />
+                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[200px]" />
                             <CanvasImageSettingsPopover
                                 config={config}
                                 placement="topLeft"
-                                buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3"
+                                buttonClassName="!h-10 !max-w-[150px] !shrink-0 !justify-start !rounded-full !px-3"
                                 onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
                                 onMissingConfig={() => openConfigDialog(true)}
                                 onOpenChange={onImageSettingsOpenChange}
@@ -130,17 +130,17 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         </>
                     ) : mode === "video" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
+                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} className="max-w-[160px]" />
+                            <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[150px] !shrink-0 !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
                         </>
                     ) : mode === "audio" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="audio" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
+                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="audio" onMissingConfig={() => openConfigDialog(true)} className="max-w-[160px]" />
+                            <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[150px] !shrink-0 !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
                         </>
                     ) : (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="text" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
+                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="text" onMissingConfig={() => openConfigDialog(true)} className="max-w-[160px]" />
                             <CanvasTextSettingsPopover config={config} count={node.metadata?.textCount || 1} onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })} onCountChange={(textCount) => onConfigChange(node.id, { textCount })} />
                         </>
                     )}

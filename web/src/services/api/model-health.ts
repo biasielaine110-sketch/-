@@ -15,12 +15,20 @@ export type ModelHealthEntry = {
 const HEALTH_TTL_MS = 5 * 60_000;
 const HEALTH_TIMEOUT_MS = 12_000;
 const MAX_CONCURRENT = 2;
+const PRIORITY_SELECTED = 100;
 
 const cache = new Map<string, ModelHealthEntry>();
 const inflight = new Map<string, Promise<ModelHealthEntry>>();
 const listeners = new Set<() => void>();
 let activeProbes = 0;
-const queue: Array<() => void> = [];
+
+type QueuedProbe = {
+    key: string;
+    priority: number;
+    start: () => void;
+};
+
+const queue: QueuedProbe[] = [];
 
 const apiText = (key: string) => i18n.t(`apiErrors.${key}`);
 
@@ -50,13 +58,24 @@ function setHealth(key: string, entry: ModelHealthEntry) {
 }
 
 function runQueued() {
+    queue.sort((a, b) => b.priority - a.priority);
     while (activeProbes < MAX_CONCURRENT && queue.length) {
         const next = queue.shift();
-        next?.();
+        next?.start();
     }
 }
 
-function enqueue<T>(task: () => Promise<T>): Promise<T> {
+/** Boost a waiting probe so the selected model runs before the rest of a bulk check. */
+export function prioritizeModelHealth(key: string) {
+    const index = queue.findIndex((item) => item.key === key);
+    if (index < 0) return;
+    const [item] = queue.splice(index, 1);
+    item.priority = Math.max(item.priority, PRIORITY_SELECTED);
+    queue.unshift(item);
+    runQueued();
+}
+
+function enqueue<T>(key: string, task: () => Promise<T>, priority = 0): Promise<T> {
     return new Promise<T>((resolve, reject) => {
         const start = () => {
             activeProbes += 1;
@@ -67,43 +86,86 @@ function enqueue<T>(task: () => Promise<T>): Promise<T> {
                     runQueued();
                 });
         };
-        if (activeProbes < MAX_CONCURRENT) start();
-        else queue.push(start);
+
+        // Prefer draining the priority queue when a slot is free so a just-boosted model can jump ahead.
+        if (activeProbes < MAX_CONCURRENT && queue.length === 0) {
+            start();
+            return;
+        }
+
+        queue.push({ key, priority, start });
+        runQueued();
     });
 }
 
-export async function ensureModelHealth(config: AiConfig, encodedModel: string, capability: ModelCapability, options?: { force?: boolean; signal?: AbortSignal }) {
+export async function ensureModelHealth(
+    config: AiConfig,
+    encodedModel: string,
+    capability: ModelCapability,
+    options?: { force?: boolean; priority?: boolean; signal?: AbortSignal },
+) {
     const key = modelHealthKey(config, encodedModel, capability);
+    const priority = options?.priority ? PRIORITY_SELECTED : 0;
     const cached = cache.get(key);
+    const pending = inflight.get(key);
+
+    if (pending) {
+        if (options?.priority) prioritizeModelHealth(key);
+        return pending;
+    }
+
     if (!options?.force && cached && cached.status !== "checking" && cached.status !== "idle" && Date.now() - cached.checkedAt < HEALTH_TTL_MS) {
         return cached;
     }
-    const pending = inflight.get(key);
-    if (pending && !options?.force) return pending;
 
     setHealth(key, { status: "checking", checkedAt: Date.now(), message: cached?.message });
-    const run = enqueue(async () => {
-        try {
-            const result = await probeModelHealth(config, encodedModel, capability, options?.signal);
-            if (options?.signal?.aborted) return getModelHealth(key);
-            const entry: ModelHealthEntry = { status: result.ok ? "ok" : "fail", message: "message" in result ? result.message : undefined, checkedAt: Date.now() };
-            setHealth(key, entry);
-            return entry;
-        } catch (error) {
-            if (options?.signal?.aborted || axios.isCancel(error)) return getModelHealth(key);
-            const entry: ModelHealthEntry = {
-                status: "fail",
-                message: error instanceof Error ? error.message : apiText("requestFailed"),
-                checkedAt: Date.now(),
-            };
-            setHealth(key, entry);
-            return entry;
-        } finally {
-            inflight.delete(key);
-        }
+
+    let resolveRun!: (entry: ModelHealthEntry) => void;
+    let rejectRun!: (error: unknown) => void;
+    const run = new Promise<ModelHealthEntry>((resolve, reject) => {
+        resolveRun = resolve;
+        rejectRun = reject;
     });
+    // Reserve inflight synchronously to avoid duplicate enqueue races.
     inflight.set(key, run);
+
+    enqueue(
+        key,
+        async () => {
+            try {
+                const result = await probeModelHealth(config, encodedModel, capability, options?.signal);
+                if (options?.signal?.aborted) return getModelHealth(key);
+                const entry: ModelHealthEntry = { status: result.ok ? "ok" : "fail", message: "message" in result ? result.message : undefined, checkedAt: Date.now() };
+                setHealth(key, entry);
+                return entry;
+            } catch (error) {
+                if (options?.signal?.aborted || axios.isCancel(error)) return getModelHealth(key);
+                const entry: ModelHealthEntry = {
+                    status: "fail",
+                    message: error instanceof Error ? error.message : apiText("requestFailed"),
+                    checkedAt: Date.now(),
+                };
+                setHealth(key, entry);
+                return entry;
+            } finally {
+                inflight.delete(key);
+            }
+        },
+        priority,
+    ).then(resolveRun, rejectRun);
+
     return run;
+}
+
+/** Queue health checks for many models; selected model can jump ahead via ensureModelHealth(..., { priority: true }). */
+export async function ensureModelsHealth(
+    config: AiConfig,
+    encodedModels: string[],
+    capability: ModelCapability,
+    options?: { force?: boolean; signal?: AbortSignal },
+) {
+    const unique = Array.from(new Set(encodedModels.filter(Boolean)));
+    return Promise.all(unique.map((model) => ensureModelHealth(config, model, capability, { force: options?.force, signal: options?.signal })));
 }
 
 export async function probeModelHealth(config: AiConfig, encodedModel: string, capability: ModelCapability, signal?: AbortSignal) {

@@ -1,12 +1,12 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { Select, Tooltip } from "antd";
 import type { DefaultOptionType } from "antd/es/select";
-import { Cpu, RefreshCw } from "lucide-react";
+import { Cpu, ListChecks, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { cn } from "@/lib/utils";
-import { ensureModelHealth, getModelHealth, modelHealthKey, subscribeModelHealth, type ModelHealthStatus } from "@/services/api/model-health";
+import { ensureModelHealth, ensureModelsHealth, getModelHealth, modelHealthKey, subscribeModelHealth, type ModelHealthStatus } from "@/services/api/model-health";
 import { modelOptionLabel, modelOptionName, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
 type ModelPickerProps = {
@@ -24,6 +24,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     const { t } = useTranslation();
     const pickerId = useId();
     const [open, setOpen] = useState(false);
+    const [bulkChecking, setBulkChecking] = useState(false);
     const [, bump] = useState(0);
     const models = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
     const healthCapability = capability || "text";
@@ -35,7 +36,8 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     useEffect(() => {
         if (!autoHealth || !current || current === "__empty__") return;
         const controller = new AbortController();
-        void ensureModelHealth(config, current, healthCapability, { signal: controller.signal });
+        // Selected model always jumps ahead of any in-progress bulk check.
+        void ensureModelHealth(config, current, healthCapability, { priority: true, signal: controller.signal });
         return () => controller.abort();
     }, [autoHealth, config, current, healthCapability]);
 
@@ -61,10 +63,23 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     const currentHealth = current && current !== "__empty__" ? getModelHealth(modelHealthKey(config, current, healthCapability)) : { status: "idle" as const };
     const canCheck = Boolean(current && current !== "__empty__");
     const checking = currentHealth.status === "checking";
+    const anyChecking = bulkChecking || models.some((model) => getModelHealth(modelHealthKey(config, model, healthCapability)).status === "checking");
 
     const checkCurrent = () => {
         if (!canCheck || !current) return;
-        void ensureModelHealth(config, current, healthCapability, { force: true });
+        void ensureModelHealth(config, current, healthCapability, { force: true, priority: true });
+    };
+
+    const checkAll = () => {
+        if (!models.length || bulkChecking) return;
+        setBulkChecking(true);
+        void ensureModelsHealth(config, models, healthCapability, { force: true })
+            .catch(() => undefined)
+            .finally(() => setBulkChecking(false));
+        // Re-assert selected model at the front of the queue after bulk enqueue.
+        if (current && current !== "__empty__") {
+            void ensureModelHealth(config, current, healthCapability, { priority: true });
+        }
     };
 
     useEffect(() => {
@@ -76,58 +91,79 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     }, [pickerId]);
 
     return (
-        <div className={cn("flex items-center gap-1", fullWidth ? "w-full min-w-0" : "w-fit", className)} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-            <Select
-                open={open}
-                value={current}
-                placeholder={pickerPlaceholder}
-                className={cn("canvas-composer-model-picker h-8 min-w-[9rem] flex-1 max-w-full [&_.ant-select-selector]:!rounded-full [&_.ant-select-selector]:!px-3")}
-                popupMatchSelectWidth={false}
-                options={selectOptions}
-                optionLabelProp="title"
-                getPopupContainer={() => document.body}
-                popupClassName="canvas-model-picker-dropdown"
-                popupRender={(menu) => (
-                    <div
-                        data-canvas-no-zoom
-                        data-canvas-shortcuts-ignore
-                        className="w-80 max-w-[calc(100vw-24px)]"
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => event.stopPropagation()}
+        <div className={cn("flex min-w-0 max-w-full items-center gap-1", fullWidth && "w-full")} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            <div className={cn("min-w-0 overflow-hidden", fullWidth ? "w-full flex-1" : "w-auto", className)}>
+                <Select
+                    open={open}
+                    value={current}
+                    placeholder={pickerPlaceholder}
+                    className={cn("canvas-composer-model-picker h-8 w-full min-w-0 max-w-full [&_.ant-select-selector]:!rounded-full [&_.ant-select-selector]:!px-3")}
+                    popupMatchSelectWidth={false}
+                    options={selectOptions}
+                    optionLabelProp="title"
+                    getPopupContainer={() => document.body}
+                    popupClassName="canvas-model-picker-dropdown"
+                    popupRender={(menu) => (
+                        <div
+                            data-canvas-no-zoom
+                            data-canvas-shortcuts-ignore
+                            className="w-80 max-w-[calc(100vw-24px)]"
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
+                        >
+                            {menu}
+                        </div>
+                    )}
+                    onOpenChange={(nextOpen) => {
+                        if (nextOpen && !models.length && config.channelMode === "local") onMissingConfig?.();
+                        if (nextOpen) window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
+                        setOpen(nextOpen);
+                    }}
+                    onSelect={(model) => {
+                        if (model && model !== "__empty__") onChange(String(model));
+                    }}
+                    onChange={(model) => {
+                        if (model && model !== "__empty__") onChange(String(model));
+                    }}
+                    labelRender={(props) => {
+                        const model = String(props.value || current || "");
+                        const titleText = model && model !== "__empty__" ? modelOptionLabel(config, model) : "";
+                        const fallback = typeof props.label === "string" || typeof props.label === "number" ? String(props.label) : pickerPlaceholder;
+                        const text: ReactNode = titleText || fallback;
+                        return (
+                            <span className="flex min-w-0 items-center gap-2">
+                                <HealthDot
+                                    status={model && model !== "__empty__" ? currentHealth.status : "idle"}
+                                    message={currentHealth.status === "fail" ? currentHealth.message : undefined}
+                                    idleHint={autoHealth ? t("settingsPanels.model.healthIdleAuto") : t("settingsPanels.model.healthIdleManual")}
+                                />
+                                <ModelIcon model={model} />
+                                <span className="canvas-model-picker-text min-w-0 flex-1 truncate text-left">{text}</span>
+                            </span>
+                        );
+                    }}
+                />
+            </div>
+            {autoHealth ? (
+                <Tooltip title={t("settingsPanels.model.healthCheckAll")}>
+                    <button
+                        type="button"
+                        aria-label={t("settingsPanels.model.healthCheckAll")}
+                        disabled={!models.length || bulkChecking}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            checkAll();
+                        }}
+                        className={cn(
+                            "inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-600 transition hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300 dark:hover:bg-stone-800",
+                            anyChecking && "text-amber-500",
+                        )}
                     >
-                        {menu}
-                    </div>
-                )}
-                onOpenChange={(nextOpen) => {
-                    if (nextOpen && !models.length && config.channelMode === "local") onMissingConfig?.();
-                    if (nextOpen) window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
-                    setOpen(nextOpen);
-                }}
-                onSelect={(model) => {
-                    if (model && model !== "__empty__") onChange(String(model));
-                }}
-                onChange={(model) => {
-                    if (model && model !== "__empty__") onChange(String(model));
-                }}
-                labelRender={(props) => {
-                    const model = String(props.value || current || "");
-                    const titleText = model && model !== "__empty__" ? modelOptionLabel(config, model) : "";
-                    const fallback = typeof props.label === "string" || typeof props.label === "number" ? String(props.label) : pickerPlaceholder;
-                    const text: ReactNode = titleText || fallback;
-                    return (
-                        <span className="flex min-w-0 items-center gap-2">
-                            <HealthDot
-                                status={model && model !== "__empty__" ? currentHealth.status : "idle"}
-                                message={currentHealth.status === "fail" ? currentHealth.message : undefined}
-                                idleHint={autoHealth ? t("settingsPanels.model.healthIdleAuto") : t("settingsPanels.model.healthIdleManual")}
-                            />
-                            <ModelIcon model={model} />
-                            <span className="canvas-model-picker-text min-w-0 flex-1 truncate text-left">{text}</span>
-                        </span>
-                    );
-                }}
-            />
+                        <ListChecks className={cn("size-3.5", anyChecking && "animate-pulse")} />
+                    </button>
+                </Tooltip>
+            ) : null}
             <Tooltip title={autoHealth ? t("settingsPanels.model.healthRecheck") : t("settingsPanels.model.healthCheck")}>
                 <button
                     type="button"

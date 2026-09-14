@@ -113,10 +113,11 @@ export default {
             healthFail: "Unreachable — check Base URL, API key, or model name",
             healthChecking: "Checking connection…",
             healthIdle: "Not checked yet",
-            healthIdleAuto: "Checks the selected model automatically",
+            healthIdleAuto: "Checks the selected model automatically; it jumps the queue during a full check",
             healthIdleManual: "Click the button to check the selected model",
             healthCheck: "Check selected model",
             healthRecheck: "Recheck selected model",
+            healthCheckAll: "Check all models (selected model first)",
         },
     },
     generation: {

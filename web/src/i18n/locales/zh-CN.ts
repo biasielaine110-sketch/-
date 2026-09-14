@@ -113,10 +113,11 @@ export default {
             healthFail: "链路不通，请检查 Base URL、API Key 或模型名",
             healthChecking: "正在检测链路…",
             healthIdle: "尚未检测",
-            healthIdleAuto: "选中后自动检测当前模型",
+            healthIdleAuto: "选中后自动检测当前模型；全部检测未完成时可优先插队",
             healthIdleManual: "点击右侧按钮检测当前模型",
             healthCheck: "检测当前模型",
             healthRecheck: "重新检测当前模型",
+            healthCheckAll: "检测全部模型（当前选中优先）",
         },
     },
     generation: {
