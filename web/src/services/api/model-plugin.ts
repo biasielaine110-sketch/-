@@ -254,11 +254,65 @@ const data = await request({
     },
   },
 });
-return (data.candidates || [])
+            return (data.candidates || [])
   .flatMap((c) => c.content?.parts || [])
   .map((p) => p.inlineData || p.inline_data)
   .filter(Boolean)
   .map((img) => \`data:\${img.mimeType || img.mime_type || "image/png"};base64,\${img.data}\`);`,
+        },
+        {
+            label: i18n.t("modelPlugin.templates.autodlComfy"),
+            script: `// ${i18n.t("modelPlugin.templates.imageAutodlComfy")}
+// Base URL: https://autodl.art/api/v1
+// model = workflow_id；Token 分组选 ComfyUI（令牌管理）
+const workflowId = String(model || "").trim();
+if (!workflowId) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.autodlWorkflowRequired"))});
+const token = String(apiKey || "").replace(/^Bearer\\s+/i, "").trim();
+const headers = { Authorization: token, "Content-Type": "application/json" };
+const body = { prompt };
+if (params.duration != null && params.duration !== "") body.duration = Number(params.duration);
+else if (params.seconds != null && params.seconds !== "") body.duration = Number(params.seconds);
+if (params.resolution) body.resolution = params.resolution;
+else if (params.size) body.resolution = params.size;
+const httpImage = images.find((item) => /^https?:\\/\\//i.test(String(item || "")));
+if (httpImage) {
+  body.image = httpImage;
+  body.image_url = httpImage;
+}
+const submit = await request({
+  method: "post",
+  url: \`\${baseUrl}/comfyui/comfyui_workflow/\${encodeURIComponent(workflowId)}\`,
+  headers,
+  data: body,
+});
+if (submit?.code && !/^success$/i.test(String(submit.code))) {
+  throw new Error(submit.msg || submit.message || JSON.stringify(submit));
+}
+const taskId = submit?.data?.task_id || submit?.task_id;
+if (!taskId) throw new Error(submit?.msg || ${JSON.stringify(i18n.t("modelPlugin.templates.autodlNoTaskId"))});
+return await poll(
+  () => request({
+    method: "get",
+    url: \`\${baseUrl}/comfyui/comfyui_workflow/result/\${encodeURIComponent(taskId)}\`,
+    headers: { Authorization: token },
+  }),
+  (state) => {
+    const data = state?.data || state || {};
+    const status = String(data.status || "");
+    if (/^failed|failure$/i.test(status)) throw new Error(state?.msg || data.message || ${JSON.stringify(i18n.t("modelPlugin.templates.autodlTaskFailed"))});
+    if (!/^success$/i.test(status)) return null;
+    const urls = (Array.isArray(data.results) ? data.results : [])
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (!item || typeof item !== "object") return "";
+        return item.url || item.image_url || item.video_url || item.file_url || "";
+      })
+      .filter(Boolean);
+    if (!urls.length) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.autodlNoResults"))});
+    return urls;
+  },
+  { intervalMs: 2000, timeoutMs: 15 * 60 * 1000 },
+);`,
         },
     ],
     video: [
@@ -313,6 +367,61 @@ return await poll(
   },
   { intervalMs: 5000, timeoutMs: 300000 },
 );`,
+        },
+        {
+            label: i18n.t("modelPlugin.templates.autodlComfy"),
+            script: `// ${i18n.t("modelPlugin.templates.videoAutodlComfy")}
+// Base URL: https://autodl.art/api/v1
+// model = workflow_id；Token 分组选 ComfyUI
+const workflowId = String(model || "").trim();
+if (!workflowId) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.autodlWorkflowRequired"))});
+const token = String(apiKey || "").replace(/^Bearer\\s+/i, "").trim();
+const headers = { Authorization: token, "Content-Type": "application/json" };
+const body = { prompt };
+if (params.duration != null && params.duration !== "") body.duration = Number(params.duration);
+else if (params.seconds != null && params.seconds !== "") body.duration = Number(params.seconds);
+if (params.resolution) body.resolution = params.resolution;
+else if (params.size) body.resolution = params.size;
+const httpImage = images.find((item) => /^https?:\\/\\//i.test(String(item || "")));
+if (httpImage) {
+  body.image = httpImage;
+  body.image_url = httpImage;
+}
+const submit = await request({
+  method: "post",
+  url: \`\${baseUrl}/comfyui/comfyui_workflow/\${encodeURIComponent(workflowId)}\`,
+  headers,
+  data: body,
+});
+if (submit?.code && !/^success$/i.test(String(submit.code))) {
+  throw new Error(submit.msg || submit.message || JSON.stringify(submit));
+}
+const taskId = submit?.data?.task_id || submit?.task_id;
+if (!taskId) throw new Error(submit?.msg || ${JSON.stringify(i18n.t("modelPlugin.templates.autodlNoTaskId"))});
+const urls = await poll(
+  () => request({
+    method: "get",
+    url: \`\${baseUrl}/comfyui/comfyui_workflow/result/\${encodeURIComponent(taskId)}\`,
+    headers: { Authorization: token },
+  }),
+  (state) => {
+    const data = state?.data || state || {};
+    const status = String(data.status || "");
+    if (/^failed|failure$/i.test(status)) throw new Error(state?.msg || data.message || ${JSON.stringify(i18n.t("modelPlugin.templates.autodlTaskFailed"))});
+    if (!/^success$/i.test(status)) return null;
+    const list = (Array.isArray(data.results) ? data.results : [])
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (!item || typeof item !== "object") return "";
+        return item.url || item.video_url || item.image_url || item.file_url || "";
+      })
+      .filter(Boolean);
+    if (!list.length) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.autodlNoResults"))});
+    return list;
+  },
+  { intervalMs: 2000, timeoutMs: 20 * 60 * 1000 },
+);
+return { url: urls[0] };`,
         },
     ],
     audio: [

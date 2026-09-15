@@ -345,7 +345,7 @@ async function resolveMetasoH3ImageUrl(config: AiConfig, image: ReferenceImage, 
     if (image.dataUrl && isPublicHttpUrl(image.dataUrl)) return image.dataUrl.trim();
     const dataUrl = await imageToDataUrl(image);
     if (dataUrl && isPublicHttpUrl(dataUrl)) return dataUrl.trim();
-    // Prefer provider upload when available (Seedance-compatible relays); fall back to data URL.
+    // Prefer provider upload when available; otherwise send data URL (Metaso accepts it on some relays).
     if (dataUrl?.startsWith("data:image/")) {
         try {
             const blob = await (await fetch(dataUrl)).blob();
@@ -354,7 +354,7 @@ async function resolveMetasoH3ImageUrl(config: AiConfig, image: ReferenceImage, 
             return dataUrl;
         }
     }
-    throw new Error(apiText("metasoH3ImageRequired"));
+    throw new Error(apiText("metasoH3ImageUnreadable"));
 }
 
 function isPublicHttpUrl(value: string) {
