@@ -417,6 +417,8 @@ export default {
             config: "配置节点",
             configDescription: "模型、尺寸、数量和输入顺序",
             select: "选择节点",
+            reorderHint: "拖动手柄可调整按钮顺序（会写入配置，可导出/导入）",
+            dragHandle: "拖动排序",
         },
         node: {
             node: "节点",
@@ -650,6 +652,7 @@ export default {
             stop: "停止",
             continue: "继续生成",
             configConnection: "配置节点之间不能连接",
+            emptyGroupConnection: "组内没有可连接的节点",
             notFound: "未找到当前画布",
             exporting: "正在导出当前画布…",
             exported: "已导出当前画布",
@@ -881,6 +884,10 @@ export default {
             generations: "{{count}} 次",
             reasoning: "推理",
         },
+        contextMenu: {
+            reorderHint: "拖动手柄可调整按钮顺序（会写入配置，可导出/导入）",
+            dragHandle: "拖动排序",
+        },
         generation: {
             interrupted: "页面刷新后生成已中断，请重新生成。",
             front: "正面视角",
@@ -925,8 +932,8 @@ export default {
             copyImageDone: "图片已复制到剪贴板",
             copyImageNodeDone: "已复制到新节点",
             copyImageFailed: "复制图片失败",
-            connect: "选中节点后按 X，可连续点击多个节点连线；再按 X 或 Esc 结束",
-            connectHint: "连线中：锚点已固定，可连续点击多个节点；再按 X 或 Esc 结束",
+            connect: "选中节点后按 X，可连续点击多个节点或组连线；Shift+点击组内节点=连整组；再按 X 或 Esc 结束",
+            connectHint: "连线中：可点节点/组，或 Shift+点组内节点以连接整组；再按 X 或 Esc 结束",
             connectCanceled: "已结束连线",
             selectNodeToConnect: "请先选中一个节点，再按 X 连线",
             deleteSelected: "删除当前选中的节点",

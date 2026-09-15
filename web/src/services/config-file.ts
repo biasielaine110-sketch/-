@@ -47,6 +47,9 @@ export async function importAppConfig(file: File) {
             ...current,
             ...imported,
             textPrompts: Array.isArray(imported.textPrompts) ? imported.textPrompts : current.textPrompts,
+            imageQuickTools: imported.imageQuickTools || current.imageQuickTools,
+            nodeCreateMenuOrder: Array.isArray(imported.nodeCreateMenuOrder) ? imported.nodeCreateMenuOrder : current.nodeCreateMenuOrder,
+            imageContextMenuOrder: Array.isArray(imported.imageContextMenuOrder) ? imported.imageContextMenuOrder : current.imageContextMenuOrder,
         } as AiConfig,
     });
 }

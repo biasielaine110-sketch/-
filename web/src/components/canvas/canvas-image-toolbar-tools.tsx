@@ -180,8 +180,15 @@ export function buildImageToolbarTools(node: CanvasNodeData, handlers: ImageTool
 
 export function normalizeImageQuickToolIds(value: unknown[]) {
     const allIds: ImageQuickToolId[] = [...defaultBaseToolIds, ...imageToolDefinitions.map((tool) => tool.id)];
-    const ids = new Set(allIds);
-    return allIds.filter((id) => value.includes(id) && ids.has(id));
+    const allowed = new Set(allIds);
+    const seen = new Set<string>();
+    const ordered: ImageQuickToolId[] = [];
+    for (const item of value) {
+        if (typeof item !== "string" || !allowed.has(item as ImageQuickToolId) || seen.has(item)) continue;
+        seen.add(item);
+        ordered.push(item as ImageQuickToolId);
+    }
+    return ordered;
 }
 
 export function readImageQuickToolsConfig(value: unknown): ImageQuickToolsConfig {

@@ -30,6 +30,11 @@ export type ModelChannel = {
     models: ChannelModel[];
 };
 
+export type ImageQuickToolsPreference = {
+    ids: string[];
+    showLabels: boolean;
+};
+
 export type AiConfig = {
     channelMode: "remote" | "local";
     baseUrl: string;
@@ -60,6 +65,12 @@ export type AiConfig = {
     count: string;
     canvasImageCount: string;
     textPrompts: TextPromptEntry[];
+    /** Image node quick-toolbar visibility + order (also used by image context menu). */
+    imageQuickTools: ImageQuickToolsPreference;
+    /** Canvas blank create-menu button order. */
+    nodeCreateMenuOrder: string[];
+    /** Image node right-click menu button order. */
+    imageContextMenuOrder: string[];
 };
 
 export type ConfigTabKey = "channels" | "preferences" | "backup";
@@ -113,6 +124,9 @@ export const defaultConfig: AiConfig = {
     count: "1",
     canvasImageCount: "1",
     textPrompts: defaultTextPrompts.map((item) => ({ ...item })),
+    imageQuickTools: { ids: [], showLabels: false },
+    nodeCreateMenuOrder: [],
+    imageContextMenuOrder: [],
 };
 
 type ConfigStore = {
@@ -136,6 +150,57 @@ const AUDIO_KEYWORDS = ["audio", "tts", "speech", "voice", "music", "sound"];
 const IMAGE_KEYWORDS = ["seedream", "gpt-image", "image", "dall-e", "dalle", "imagen", "flux", "sdxl", "stable-diffusion", "midjourney"];
 /** Preferred chat/text model when present in any channel (e.g. deepseek-flash). */
 const PREFERRED_TEXT_MODEL_NAMES = ["deepseek-flash"];
+const LEGACY_IMAGE_QUICK_TOOLS_KEY = "canvas-image-quick-tools-v10";
+
+function readLegacyStringArray(storageKey: string): string[] {
+    try {
+        const raw = window.localStorage.getItem(storageKey);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw) as unknown;
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter((item): item is string => typeof item === "string" && Boolean(item.trim()));
+    } catch {
+        return [];
+    }
+}
+
+function readLegacyImageQuickTools(): ImageQuickToolsPreference {
+    try {
+        const raw = window.localStorage.getItem(LEGACY_IMAGE_QUICK_TOOLS_KEY);
+        if (!raw) return { ids: [], showLabels: false };
+        const parsed = JSON.parse(raw) as unknown;
+        if (Array.isArray(parsed)) return { ids: parsed.filter((item): item is string => typeof item === "string"), showLabels: false };
+        if (!parsed || typeof parsed !== "object") return { ids: [], showLabels: false };
+        const data = parsed as Partial<ImageQuickToolsPreference>;
+        return {
+            ids: Array.isArray(data.ids) ? data.ids.filter((item): item is string => typeof item === "string") : [],
+            showLabels: data.showLabels === true,
+        };
+    } catch {
+        return { ids: [], showLabels: false };
+    }
+}
+
+function normalizeStringIdList(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const item of value) {
+        if (typeof item !== "string" || !item.trim() || seen.has(item)) continue;
+        seen.add(item);
+        result.push(item);
+    }
+    return result;
+}
+
+function normalizeImageQuickToolsPreference(value: unknown): ImageQuickToolsPreference {
+    if (!value || typeof value !== "object") return { ids: [], showLabels: false };
+    const data = value as Partial<ImageQuickToolsPreference>;
+    return {
+        ids: normalizeStringIdList(data.ids),
+        showLabels: data.showLabels === true,
+    };
+}
 
 /** Best-effort default capability for a freshly fetched model name; user can override in the channel editor. */
 export function guessCapability(name: string): ModelCapability {
@@ -229,7 +294,7 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
-            version: 4,
+            version: 5,
             partialize: (state) => ({ config: state.config }),
             migrate: (persisted, version) => {
                 const state = (persisted || {}) as Partial<ConfigStore> & { config?: Partial<AiConfig> };
@@ -244,6 +309,15 @@ export const useConfigStore = create<ConfigStore>()(
                 // v4: seed text-node prompt library defaults when missing.
                 if (version < 4 && state.config && !Array.isArray(state.config.textPrompts)) {
                     state.config = { ...state.config, textPrompts: defaultTextPrompts.map((item) => ({ ...item })) };
+                }
+                // v5: fold canvas menu / quick-tool order into exportable config (migrate from localStorage).
+                if (version < 5 && state.config) {
+                    state.config = {
+                        ...state.config,
+                        imageQuickTools: state.config.imageQuickTools || readLegacyImageQuickTools(),
+                        nodeCreateMenuOrder: Array.isArray(state.config.nodeCreateMenuOrder) ? state.config.nodeCreateMenuOrder : readLegacyStringArray("canvas-node-create-menu-order-v1"),
+                        imageContextMenuOrder: Array.isArray(state.config.imageContextMenuOrder) ? state.config.imageContextMenuOrder : readLegacyStringArray("canvas-image-context-menu-order-v1"),
+                    };
                 }
                 return state as ConfigStore;
             },
@@ -280,6 +354,18 @@ export const useConfigStore = create<ConfigStore>()(
                         quality: config.quality || "medium",
                         size: config.size || "2048x1152",
                         textPrompts: normalizeTextPrompts(config.textPrompts),
+                        imageQuickTools: (() => {
+                            const normalized = normalizeImageQuickToolsPreference(config.imageQuickTools);
+                            return normalized.ids.length ? normalized : readLegacyImageQuickTools();
+                        })(),
+                        nodeCreateMenuOrder: (() => {
+                            const normalized = normalizeStringIdList(config.nodeCreateMenuOrder);
+                            return normalized.length ? normalized : readLegacyStringArray("canvas-node-create-menu-order-v1");
+                        })(),
+                        imageContextMenuOrder: (() => {
+                            const normalized = normalizeStringIdList(config.imageContextMenuOrder);
+                            return normalized.length ? normalized : readLegacyStringArray("canvas-image-context-menu-order-v1");
+                        })(),
                     },
                 };
             },

@@ -8,9 +8,10 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useConfigStore } from "@/stores/use-config-store";
 import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
-import { IMAGE_QUICK_TOOLS_STORAGE_KEY, buildImageToolbarTools, defaultImageQuickToolIds, readImageQuickToolsConfig, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
+import { buildImageToolbarTools, defaultImageQuickToolIds, normalizeImageQuickToolIds, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
 
 type CanvasNodeHoverToolbarProps = {
     node: CanvasNodeData | null;
@@ -83,27 +84,19 @@ export function CanvasNodeHoverToolbar({
     onScale,
     onDelete,
 }: CanvasNodeHoverToolbarProps) {
-    const [quickImageToolIds, setQuickImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
-    const [showImageToolLabels, setShowImageToolLabels] = useState(false);
+    const imageQuickTools = useConfigStore((state) => state.config.imageQuickTools);
+    const updateConfig = useConfigStore((state) => state.updateConfig);
+    const quickImageToolIds = useMemo(() => {
+        const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
+        return normalized.length ? normalized : defaultImageQuickToolIds;
+    }, [imageQuickTools?.ids]);
+    const showImageToolLabels = Boolean(imageQuickTools?.showLabels);
     const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
     const [draftShowImageToolLabels, setDraftShowImageToolLabels] = useState(false);
     const [imageToolSettingsOpen, setImageToolSettingsOpen] = useState(false);
     const { message } = App.useApp();
     const { t } = useTranslation();
     const copyText = useCopyText();
-
-    useEffect(() => {
-        try {
-            const stored = window.localStorage.getItem(IMAGE_QUICK_TOOLS_STORAGE_KEY);
-            if (!stored) return;
-            const parsed = JSON.parse(stored) as unknown;
-            const config = readImageQuickToolsConfig(parsed);
-            setQuickImageToolIds(config.ids);
-            setShowImageToolLabels(config.showLabels);
-        } catch {
-            window.localStorage.removeItem(IMAGE_QUICK_TOOLS_STORAGE_KEY);
-        }
-    }, []);
 
     useEffect(() => {
         setImageToolSettingsOpen(false);
@@ -167,7 +160,16 @@ export function CanvasNodeHoverToolbar({
         ...(hasImage && isImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
     // Keep deletion available even when an older saved quick-tool configuration hid it.
-    const toolbarTools = hasImage && isImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id === "delete" || quickImageToolIdSet.has(tool.id as ImageQuickToolId)) : [...baseToolbarTools, ...nodeToolbarTools];
+    const toolbarTools = (() => {
+        const tools = hasImage && isImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id === "delete" || quickImageToolIdSet.has(tool.id as ImageQuickToolId)) : [...baseToolbarTools, ...nodeToolbarTools];
+        if (!(hasImage && isImage)) return tools;
+        const order = new Map(quickImageToolIds.map((id, index) => [id, index]));
+        return [...tools].sort((a, b) => {
+            const ai = order.has(a.id as ImageQuickToolId) ? order.get(a.id as ImageQuickToolId)! : Number.MAX_SAFE_INTEGER - (a.id === "delete" ? 0 : 1);
+            const bi = order.has(b.id as ImageQuickToolId) ? order.get(b.id as ImageQuickToolId)! : Number.MAX_SAFE_INTEGER - (b.id === "delete" ? 0 : 1);
+            return ai - bi;
+        });
+    })();
     const selectableImageToolbarTools = [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => tool.id !== "retry") as ImageToolbarSettingsTool[];
 
     const closeImageToolSettings = () => {
@@ -185,10 +187,7 @@ export function CanvasNodeHoverToolbar({
     };
 
     const saveImageToolSettings = () => {
-        const config = { ids: draftImageToolIds, showLabels: draftShowImageToolLabels };
-        setQuickImageToolIds(config.ids);
-        setShowImageToolLabels(config.showLabels);
-        window.localStorage.setItem(IMAGE_QUICK_TOOLS_STORAGE_KEY, JSON.stringify(config));
+        updateConfig("imageQuickTools", { ids: draftImageToolIds, showLabels: draftShowImageToolLabels });
         closeImageToolSettings();
     };
 

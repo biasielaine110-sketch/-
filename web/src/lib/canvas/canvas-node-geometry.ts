@@ -63,6 +63,48 @@ export function getConnectionTargetAnchor(node: CanvasNodeData, current: Connect
     };
 }
 
+/** Non-group nodes that belong to a group frame. */
+export function getGroupMemberNodes(groupId: string, nodes: CanvasNodeData[]) {
+    return nodes.filter((node) => node.type !== CanvasNodeType.Group && node.metadata?.groupId === groupId);
+}
+
+function connectionEndpointIds(nodeId: string, nodes: CanvasNodeData[]) {
+    const node = nodes.find((item) => item.id === nodeId);
+    if (!node) return [];
+    if (node.type !== CanvasNodeType.Group) return [node.id];
+    return getGroupMemberNodes(node.id, nodes).map((member) => member.id);
+}
+
+/**
+ * Resolve one or many from→to pairs. Group endpoints expand to every member node
+ * so linking a group links all of its children.
+ */
+export function resolveConnectionPairs(firstNodeId: string, secondNodeId: string, nodes: CanvasNodeData[], firstHandleType: "source" | "target") {
+    if (firstNodeId === secondNodeId) return [] as Array<{ fromNodeId: string; toNodeId: string }>;
+    const firstIds = connectionEndpointIds(firstNodeId, nodes);
+    const secondIds = connectionEndpointIds(secondNodeId, nodes);
+    if (!firstIds.length || !secondIds.length) return [];
+
+    const pairs: Array<{ fromNodeId: string; toNodeId: string }> = [];
+    const seen = new Set<string>();
+    for (const firstId of firstIds) {
+        for (const secondId of secondIds) {
+            if (firstId === secondId) continue;
+            const connection = normalizeConnection(firstId, secondId, nodes, firstHandleType);
+            if (!connection) continue;
+            const key = `${connection.fromNodeId}->${connection.toNodeId}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            pairs.push(connection);
+        }
+    }
+    return pairs;
+}
+
+export function canConnectNodes(firstNodeId: string, secondNodeId: string, nodes: CanvasNodeData[], firstHandleType: "source" | "target") {
+    return resolveConnectionPairs(firstNodeId, secondNodeId, nodes, firstHandleType).length > 0;
+}
+
 export function normalizeConnection(firstNodeId: string, secondNodeId: string, nodes: CanvasNodeData[], firstHandleType: "source" | "target") {
     const first = nodes.find((node) => node.id === firstNodeId);
     const second = nodes.find((node) => node.id === secondNodeId);

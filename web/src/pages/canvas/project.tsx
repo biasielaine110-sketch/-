@@ -70,7 +70,7 @@ import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasRe
 import type { ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
-import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
+import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, getGroupMemberNodes, normalizeConnection, resolveConnectionPairs, canConnectNodes, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
     audioExtension,
     buildAngleLabel,
@@ -645,33 +645,41 @@ function AtelierCanvasPage() {
         (current: ConnectionHandle, targetNodeId: string) => {
             if (current.nodeId === targetNodeId) return;
 
-            const connection = normalizeConnection(current.nodeId, targetNodeId, nodesRef.current, current.handleType);
-            if (!connection) {
-                message.warning(t("canvas.projectPage.configConnection"));
+            const nodesSnapshot = nodesRef.current;
+            const pairs = resolveConnectionPairs(current.nodeId, targetNodeId, nodesSnapshot, current.handleType);
+            if (!pairs.length) {
+                const anchor = nodesSnapshot.find((node) => node.id === current.nodeId);
+                const target = nodesSnapshot.find((node) => node.id === targetNodeId);
+                const emptyGroup =
+                    (anchor?.type === CanvasNodeType.Group && getGroupMemberNodes(anchor.id, nodesSnapshot).length === 0) ||
+                    (target?.type === CanvasNodeType.Group && getGroupMemberNodes(target.id, nodesSnapshot).length === 0);
+                message.warning(t(emptyGroup ? "canvas.projectPage.emptyGroupConnection" : "canvas.projectPage.configConnection"));
                 return;
             }
-            const { fromNodeId, toNodeId } = connection;
-            const exists = connectionsRef.current.some((conn) => conn.fromNodeId === fromNodeId && conn.toNodeId === toNodeId);
-            if (!exists) {
-                setConnections((prev) => [...prev, { id: `conn-${Date.now()}`, fromNodeId, toNodeId }]);
-            }
-            // Annotate ↔ Image: load the image into the annotate node (either connection direction).
-            const fromNode = nodesRef.current.find((node) => node.id === fromNodeId);
-            const toNode = nodesRef.current.find((node) => node.id === toNodeId);
-            const annotateTarget = toNode?.type === CanvasNodeType.Annotate ? toNode : fromNode?.type === CanvasNodeType.Annotate ? fromNode : null;
-            const imageSource = annotateTarget
-                ? annotateTarget.id === toNodeId
-                    ? fromNode
-                    : toNode
-                : null;
-            const sourceMeta = imageSource?.metadata;
-            const canLoadIntoAnnotate =
-                annotateTarget &&
-                imageSource &&
-                imageSource.id !== annotateTarget.id &&
-                (imageSource.type === CanvasNodeType.Image || imageSource.type === CanvasNodeType.Annotate) &&
-                Boolean(sourceMeta?.content);
-            if (canLoadIntoAnnotate && sourceMeta) {
+
+            setConnections((prev) => {
+                const existing = new Set(prev.map((conn) => `${conn.fromNodeId}->${conn.toNodeId}`));
+                const additions = pairs
+                    .filter((pair) => !existing.has(`${pair.fromNodeId}->${pair.toNodeId}`))
+                    .map((pair) => ({ id: nanoid(), fromNodeId: pair.fromNodeId, toNodeId: pair.toNodeId }));
+                return additions.length ? [...prev, ...additions] : prev;
+            });
+
+            // Annotate ↔ Image: load the first linked image into the annotate node.
+            for (const { fromNodeId, toNodeId } of pairs) {
+                const fromNode = nodesSnapshot.find((node) => node.id === fromNodeId);
+                const toNode = nodesSnapshot.find((node) => node.id === toNodeId);
+                const annotateTarget = toNode?.type === CanvasNodeType.Annotate ? toNode : fromNode?.type === CanvasNodeType.Annotate ? fromNode : null;
+                const imageSource = annotateTarget ? (annotateTarget.id === toNodeId ? fromNode : toNode) : null;
+                const sourceMeta = imageSource?.metadata;
+                const canLoadIntoAnnotate =
+                    annotateTarget &&
+                    imageSource &&
+                    imageSource.id !== annotateTarget.id &&
+                    (imageSource.type === CanvasNodeType.Image || imageSource.type === CanvasNodeType.Annotate) &&
+                    Boolean(sourceMeta?.content);
+                if (!canLoadIntoAnnotate || !sourceMeta) continue;
+
                 const primary = sourceMeta.images?.find((image) => image.id === (sourceMeta.primaryImageId || sourceMeta.images?.[0]?.id) && image.content);
                 const content = primary?.content || sourceMeta.content;
                 const storageKey = primary?.storageKey || sourceMeta.storageKey;
@@ -706,13 +714,13 @@ function AtelierCanvasPage() {
                                       mimeType,
                                       status: NODE_STATUS_SUCCESS,
                                       errorDetails: undefined,
-                                      // New source image replaces prior annotations.
                                       annotations: content === node.metadata?.content ? node.metadata?.annotations || [] : [],
                                   },
                               }
                             : node,
                     ),
                 );
+                break;
             }
             setContextMenu(null);
         },
@@ -764,7 +772,7 @@ function AtelierCanvasPage() {
 
                 if (!hitsHandle && !hitsInside && !hitsExpanded) return;
                 isNearNode = true;
-                if (node.id === current.nodeId || !normalizeConnection(current.nodeId, node.id, nodesRef.current, current.handleType)) return;
+                if (node.id === current.nodeId || !canConnectNodes(current.nodeId, node.id, nodesRef.current, current.handleType)) return;
 
                 const priority = hitsInside ? 0 : hitsHandle ? 1 : 2;
                 if (priority < bestPriority) {
@@ -1533,9 +1541,16 @@ function AtelierCanvasPage() {
             setSelectedConnectionId(null);
             const currentConnection = connectingParamsRef.current;
             // Sticky X mode: keep the anchor node selected and link every clicked peer until X/Esc.
+            // Shift+click a group member expands to the whole group (same as clicking the group frame).
             if (currentConnection?.sticky) {
                 if (currentConnection.nodeId !== nodeId) {
-                    connectNodes(currentConnection, nodeId);
+                    let targetId = nodeId;
+                    if (event.shiftKey) {
+                        const clicked = nodesRef.current.find((node) => node.id === nodeId);
+                        const groupId = clicked?.type === CanvasNodeType.Group ? clicked.id : clicked?.metadata?.groupId;
+                        if (groupId) targetId = groupId;
+                    }
+                    connectNodes(currentConnection, targetId);
                 }
                 const keep = new Set([currentConnection.nodeId]);
                 setSelectedNodeIds(keep);
@@ -3055,12 +3070,17 @@ function AtelierCanvasPage() {
         setTitleEditing(false);
     }, [projectId, renameProject, titleDraft]);
 
-    const preventCanvasContextMenu = useCallback((event: ReactMouseEvent) => {
-        if (isCanvasTextInteractionTarget(event.target)) return;
-        if ((event.target as HTMLElement).closest("[data-node-id]")) return;
-        event.preventDefault();
-        setContextMenu(null);
-    }, []);
+    const handleCanvasContextMenu = useCallback(
+        (event: ReactMouseEvent) => {
+            if (isCanvasTextInteractionTarget(event.target)) return;
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.closest("[data-canvas-no-zoom],[data-node-id],[data-connection-id]")) return;
+            event.preventDefault();
+            setContextMenu(null);
+            setNodeCreatePosition(screenToCanvas(event.clientX, event.clientY));
+        },
+        [screenToCanvas],
+    );
 
     const handleGenerateNode = useCallback(
         async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => {
@@ -4611,7 +4631,7 @@ function AtelierCanvasPage() {
                         setContextMenu(null);
                         setNodeCreatePosition(screenToCanvas(event.clientX, event.clientY));
                     }}
-                    onContextMenu={preventCanvasContextMenu}
+                    onContextMenu={handleCanvasContextMenu}
                     onDrop={handleDrop}
                 >
                     <svg className="absolute left-0 top-0 h-[10000px] w-[10000px] overflow-visible" style={{ pointerEvents: "none", transform: "translateZ(0)", zIndex: 0 }}>

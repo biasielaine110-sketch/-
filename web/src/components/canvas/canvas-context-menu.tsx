@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Download, FolderPlus, Info, Plus, Trash2, Unlink2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Download, FolderPlus, GripVertical, Info, Plus, Trash2, Unlink2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useConfigStore } from "@/stores/use-config-store";
+import { mergeOrderedIds, reorderIds, sortByOrder } from "@/lib/canvas/menu-order";
 import { CanvasNodeType, type CanvasNodeData, type ContextMenuState } from "@/types/canvas";
 import {
-    IMAGE_QUICK_TOOLS_STORAGE_KEY,
     buildImageToolbarTools,
     defaultImageQuickToolIds,
-    readImageQuickToolsConfig,
+    normalizeImageQuickToolIds,
     type ImageQuickToolId,
     type ImageToolHandlers,
 } from "@/components/canvas/canvas-image-toolbar-tools";
@@ -46,19 +47,19 @@ export function CanvasNodeContextMenu({
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const [quickImageToolIds, setQuickImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
+    const imageQuickTools = useConfigStore((state) => state.config.imageQuickTools);
+    const imageContextMenuOrder = useConfigStore((state) => state.config.imageContextMenuOrder);
+    const updateConfig = useConfigStore((state) => state.updateConfig);
+    const [draggingId, setDraggingId] = useState<string | null>(null);
+    const [dragOverId, setDragOverId] = useState<string | null>(null);
+    const suppressClickRef = useRef(false);
+    const suppressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const hasImage = Boolean(node && node.type === CanvasNodeType.Image && node.metadata?.content);
 
-    useEffect(() => {
-        try {
-            const stored = window.localStorage.getItem(IMAGE_QUICK_TOOLS_STORAGE_KEY);
-            if (!stored) return;
-            const parsed = JSON.parse(stored) as unknown;
-            setQuickImageToolIds(readImageQuickToolsConfig(parsed).ids);
-        } catch {
-            // ignore invalid localStorage payload
-        }
-    }, [menu]);
+    const quickImageToolIds = useMemo(() => {
+        const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
+        return normalized.length ? normalized : defaultImageQuickToolIds;
+    }, [imageQuickTools?.ids]);
 
     const tools = useMemo<ContextMenuTool[]>(() => {
         if (menu.type !== "node" || !node) {
@@ -96,7 +97,7 @@ export function CanvasNodeContextMenu({
                 onClick: () => runAndClose(tool.onClick),
             }));
 
-        const baseTools: ContextMenuTool[] = [
+        return [
             ...(onInfo && quickSet.has("info")
                 ? [
                       {
@@ -142,9 +143,11 @@ export function CanvasNodeContextMenu({
                 onClick: () => runAndClose(onDelete),
             },
         ];
-
-        return baseTools;
     }, [hasImage, imageHandlers, menu.type, node, onClose, onDelete, onDownload, onDuplicate, onInfo, onSaveAsset, quickImageToolIds, t]);
+
+    const menuOrder = useMemo(() => mergeOrderedIds(imageContextMenuOrder || [], tools.map((tool) => tool.id)), [imageContextMenuOrder, tools]);
+    const orderedTools = useMemo(() => sortByOrder(tools, menuOrder), [menuOrder, tools]);
+    const canReorder = hasImage && menu.type === "node" && orderedTools.length > 1;
 
     useEffect(() => {
         const close = (event: PointerEvent) => {
@@ -156,16 +159,103 @@ export function CanvasNodeContextMenu({
         return () => window.removeEventListener("pointerdown", close);
     }, [onClose]);
 
+    useEffect(
+        () => () => {
+            if (suppressTimerRef.current) clearTimeout(suppressTimerRef.current);
+        },
+        [],
+    );
+
+    const armClickSuppress = () => {
+        suppressClickRef.current = true;
+        if (suppressTimerRef.current) clearTimeout(suppressTimerRef.current);
+        suppressTimerRef.current = setTimeout(() => {
+            suppressClickRef.current = false;
+            suppressTimerRef.current = null;
+        }, 250);
+    };
+
+    const persistOrder = (nextOrder: string[]) => {
+        updateConfig("imageContextMenuOrder", nextOrder);
+        const quickSet = new Set(quickImageToolIds);
+        const nextQuick = nextOrder.filter((id): id is ImageQuickToolId => quickSet.has(id as ImageQuickToolId));
+        for (const id of quickImageToolIds) {
+            if (!nextQuick.includes(id)) nextQuick.push(id);
+        }
+        updateConfig("imageQuickTools", { ids: nextQuick, showLabels: Boolean(imageQuickTools?.showLabels) });
+    };
+
+    const clearDrag = () => {
+        setDraggingId(null);
+        setDragOverId(null);
+    };
+
     return (
         <div
             data-canvas-node-context-menu
-            className="fixed z-[80] max-h-[min(70vh,520px)] min-w-48 overflow-y-auto rounded-xl border py-1 shadow-2xl thin-scrollbar"
+            className="fixed z-[80] max-h-[min(70vh,520px)] min-w-52 overflow-y-auto rounded-xl border py-1 shadow-2xl thin-scrollbar"
             style={{ left: menu.x, top: menu.y, background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
         >
-            {tools.map((tool) => (
-                <MenuButton key={tool.id} icon={tool.icon} label={tool.label} active={tool.active} danger={tool.danger} onClick={tool.onClick} />
+            {canReorder ? (
+                <div className="px-3 pb-1 pt-1.5 text-[10px] opacity-45">{t("canvas.contextMenu.reorderHint")}</div>
+            ) : null}
+            {orderedTools.map((tool) => (
+                <div
+                    key={tool.id}
+                    className={`flex items-stretch ${draggingId === tool.id ? "opacity-45" : ""} ${dragOverId === tool.id && draggingId && draggingId !== tool.id ? "bg-sky-500/10" : ""}`}
+                    onDragOver={(event) => {
+                        if (!canReorder || !draggingId) return;
+                        event.preventDefault();
+                        setDragOverId(tool.id);
+                    }}
+                    onDrop={(event) => {
+                        if (!canReorder || !draggingId) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        armClickSuppress();
+                        persistOrder(reorderIds(menuOrder, draggingId, tool.id));
+                        clearDrag();
+                    }}
+                >
+                    {canReorder ? (
+                        <span
+                            draggable
+                            className="inline-flex shrink-0 cursor-grab items-center self-stretch px-2 opacity-45 transition hover:opacity-90 active:cursor-grabbing"
+                            title={t("canvas.contextMenu.dragHandle")}
+                            aria-label={t("canvas.contextMenu.dragHandle")}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onDragStart={(event) => {
+                                event.stopPropagation();
+                                event.dataTransfer.effectAllowed = "move";
+                                event.dataTransfer.setData("text/plain", tool.id);
+                                setDraggingId(tool.id);
+                            }}
+                            onDragEnd={() => {
+                                armClickSuppress();
+                                clearDrag();
+                            }}
+                            onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                            }}
+                        >
+                            <GripVertical className="size-3.5" />
+                        </span>
+                    ) : null}
+                    <MenuButton
+                        icon={tool.icon}
+                        label={tool.label}
+                        active={tool.active}
+                        danger={tool.danger}
+                        onClick={() => {
+                            if (draggingId || suppressClickRef.current) return;
+                            tool.onClick();
+                        }}
+                    />
+                </div>
             ))}
         </div>
     );
@@ -177,7 +267,7 @@ function MenuButton({ icon, label, onClick, danger = false, active = false }: { 
     return (
         <button
             type="button"
-            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:opacity-80 [&_svg]:size-4 ${active ? "opacity-100" : ""}`}
+            className={`flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:opacity-80 [&_svg]:size-4 ${active ? "opacity-100" : ""}`}
             style={{ color: danger ? "#f87171" : theme.node.text, background: active ? `${theme.node.fill}` : undefined }}
             onClick={onClick}
         >

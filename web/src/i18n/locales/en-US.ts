@@ -417,6 +417,8 @@ export default {
             config: "Configuration node",
             configDescription: "Model, size, count, and input order",
             select: "Select a node",
+            reorderHint: "Drag the handle to reorder buttons (saved to config for export/import)",
+            dragHandle: "Drag to reorder",
         },
         node: {
             node: "Node",
@@ -650,6 +652,7 @@ export default {
             stop: "Stop",
             continue: "Continue generating",
             configConnection: "Configuration nodes cannot be connected to each other",
+            emptyGroupConnection: "This group has no connectable nodes",
             notFound: "Current canvas not found",
             exporting: "Exporting current canvas…",
             exported: "Current canvas exported",
@@ -882,6 +885,10 @@ export default {
             generations: "{{count}} runs",
             reasoning: "Reasoning",
         },
+        contextMenu: {
+            reorderHint: "Drag the handle to reorder buttons (saved to config for export/import)",
+            dragHandle: "Drag to reorder",
+        },
         generation: {
             interrupted: "Generation was interrupted by a page refresh. Generate again.",
             front: "front view",
@@ -926,8 +933,8 @@ export default {
             copyImageDone: "Image copied to clipboard",
             copyImageNodeDone: "Copied into a new node",
             copyImageFailed: "Failed to copy image",
-            connect: "Select a node, press X, click multiple nodes to link; press X or Esc to finish",
-            connectHint: "Linking: anchor stays fixed — click multiple nodes; press X or Esc to finish",
+            connect: "Select a node, press X, click nodes or groups; Shift+click a group member to link the whole group; press X or Esc to finish",
+            connectHint: "Linking: click nodes/groups, or Shift+click a member to link the whole group; press X or Esc to finish",
             connectCanceled: "Linking ended",
             selectNodeToConnect: "Select a node first, then press X to connect",
             deleteSelected: "Delete the currently selected nodes",
