@@ -113,7 +113,8 @@ export default {
             seedSpeaker: "Speaker",
             seedSpeakerCustom: "Custom speaker ID",
             seedSpeakerPlaceholder: "e.g. zh_male_shaonianzixin_uranus_bigtts",
-            seedHint: "Put the spoken text in the prompt (at least 5 characters). Speakers are Doubao speaker IDs. Base URL should be https://api.seedance.nz/v1.",
+            seedHint: "A fixed Doubao speaker is locked; put spoken lines in the prompt. To describe multiple voices in text, choose “Text describe”.",
+            seedHintAuto: "“Text describe” omits speaker. Describe each character’s voice and dialogue in the prompt. You can also connect other audio nodes as voice references.",
         },
         text: {
             title: "Text settings",

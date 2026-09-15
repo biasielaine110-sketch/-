@@ -153,6 +153,7 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
         const format = normalizeSeedAudioFormatValue(config.audioFormat);
         const speed = normalizeAudioSpeedValue(config.audioSpeed);
         const presetSelected = seedAudioSpeakerOptions.some((item) => item.value === speaker);
+        const speakerAuto = speaker === "auto";
 
         return (
             <ImageSettingsTheme theme={theme}>
@@ -167,17 +168,19 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             ))}
                         </div>
                     </SettingGroup>
-                    <SettingGroup title={t("settingsPanels.audio.seedSpeakerCustom")} color={theme.node.muted}>
-                        <input
-                            value={presetSelected ? "" : speaker}
-                            placeholder={t("settingsPanels.audio.seedSpeakerPlaceholder")}
-                            className="h-9 w-full rounded-full border bg-transparent px-3 text-sm outline-none"
-                            style={{ borderColor: theme.node.stroke, color: theme.node.text, WebkitTextFillColor: theme.node.text }}
-                            onChange={(event) => onConfigChange("audioVoice", event.target.value)}
-                            onBlur={(event) => onConfigChange("audioVoice", normalizeSeedAudioSpeakerValue(event.target.value || speaker))}
-                            onMouseDown={(event) => event.stopPropagation()}
-                        />
-                    </SettingGroup>
+                    {!speakerAuto ? (
+                        <SettingGroup title={t("settingsPanels.audio.seedSpeakerCustom")} color={theme.node.muted}>
+                            <input
+                                value={presetSelected ? "" : speaker}
+                                placeholder={t("settingsPanels.audio.seedSpeakerPlaceholder")}
+                                className="h-9 w-full rounded-full border bg-transparent px-3 text-sm outline-none"
+                                style={{ borderColor: theme.node.stroke, color: theme.node.text, WebkitTextFillColor: theme.node.text }}
+                                onChange={(event) => onConfigChange("audioVoice", event.target.value)}
+                                onBlur={(event) => onConfigChange("audioVoice", normalizeSeedAudioSpeakerValue(event.target.value || speaker))}
+                                onMouseDown={(event) => event.stopPropagation()}
+                            />
+                        </SettingGroup>
+                    ) : null}
                     <SettingGroup title={t("settingsPanels.audio.format")} color={theme.node.muted}>
                         <div className="grid grid-cols-4 gap-2.5">
                             {seedAudioFormatOptions.map((item) => (
@@ -209,7 +212,7 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         />
                     </SettingGroup>
                     <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
-                        {t("settingsPanels.audio.seedHint")}
+                        {speakerAuto ? t("settingsPanels.audio.seedHintAuto") : t("settingsPanels.audio.seedHint")}
                     </div>
                 </div>
             </ImageSettingsTheme>

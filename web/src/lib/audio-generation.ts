@@ -45,7 +45,10 @@ export const sunoFormatOptions = [
 ];
 
 /** Doubao Seed Audio / Seedance `/v1/audio/generations` speaker presets. */
+export const SEED_AUDIO_SPEAKER_AUTO = "auto";
+
 export const seedAudioSpeakerOptions = [
+    { value: SEED_AUDIO_SPEAKER_AUTO, label: "文字描述" },
     { value: "zh_male_shaonianzixin_uranus_bigtts", label: "少年梓辛" },
     { value: "zh_female_vv_uranus_bigtts", label: "VV" },
     { value: "zh_female_shuangkuaisisi_moon_bigtts", label: "爽快思思" },
@@ -63,7 +66,8 @@ export const seedAudioFormatOptions = [
     { value: "opus", label: "Opus" },
 ];
 
-export const SEED_AUDIO_DEFAULT_SPEAKER = "zh_male_shaonianzixin_uranus_bigtts";
+/** Default: let the prompt describe voices (Seed Audio scene mode). */
+export const SEED_AUDIO_DEFAULT_SPEAKER = SEED_AUDIO_SPEAKER_AUTO;
 
 export function isSunoAudioModel(model: string) {
     return /suno/i.test(model.trim());
@@ -80,13 +84,17 @@ export function normalizeAudioVoiceValue(value: string) {
 
 export function normalizeSeedAudioSpeakerValue(value: string) {
     const trimmed = value.trim();
-    if (!trimmed) return SEED_AUDIO_DEFAULT_SPEAKER;
+    if (!trimmed || /^(auto|none|free|prompt)$/i.test(trimmed)) return SEED_AUDIO_SPEAKER_AUTO;
     if (seedAudioSpeakerOptions.some((item) => item.value === trimmed)) return trimmed;
     // Allow custom Doubao speaker / clone IDs.
     if (/^(zh_|en_|multi_|saturn_|ICL_)/i.test(trimmed) || /_bigtts|_tob|_uranus|_moon|_mars/i.test(trimmed)) return trimmed;
-    // OpenAI voice names are invalid for Seed Audio.
-    if (audioVoiceOptions.some((item) => item.value === trimmed)) return SEED_AUDIO_DEFAULT_SPEAKER;
-    return trimmed || SEED_AUDIO_DEFAULT_SPEAKER;
+    // OpenAI voice names are invalid for Seed Audio — fall back to prompt-described voices.
+    if (audioVoiceOptions.some((item) => item.value === trimmed)) return SEED_AUDIO_SPEAKER_AUTO;
+    return trimmed || SEED_AUDIO_SPEAKER_AUTO;
+}
+
+export function isSeedAudioSpeakerAuto(value: string) {
+    return normalizeSeedAudioSpeakerValue(value) === SEED_AUDIO_SPEAKER_AUTO;
 }
 
 export function normalizeAudioFormatValue(value: string) {

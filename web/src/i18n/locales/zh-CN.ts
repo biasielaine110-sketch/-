@@ -113,7 +113,8 @@ export default {
             seedSpeaker: "音色",
             seedSpeakerCustom: "自定义音色 ID",
             seedSpeakerPlaceholder: "例如 zh_male_shaonianzixin_uranus_bigtts",
-            seedHint: "输入框填写要朗读的文本（至少 5 个字）。音色使用豆包 speaker ID（与 OpenAI Alloy 等无关）。渠道 Base URL 需为 https://api.seedance.nz/v1。",
+            seedHint: "已锁定单个豆包音色：提示词主要写台词。若要用文字描述多人声音，请改选「文字描述」。",
+            seedHintAuto: "已选「文字描述」：不要锁定音色。在提示词里写清角色声音特点与台词，例如「低沉男声说：…；温柔女声答：…」。也可连入其他音频节点作参考音色。",
         },
         text: {
             title: "文本设置",

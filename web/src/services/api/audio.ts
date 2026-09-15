@@ -162,7 +162,9 @@ async function requestSeedanceAudioGenerations(config: AiConfig, prompt: string,
     if (referenceUrls.length) {
         metadata.audio_url = referenceUrls.length === 1 ? referenceUrls[0] : referenceUrls;
     } else {
-        metadata.speaker = resolveSeedanceSpeaker(normalizeSeedAudioSpeakerValue(config.audioVoice || ""), config.audioInstructions || "");
+        const speaker = resolveSeedanceSpeaker(normalizeSeedAudioSpeakerValue(config.audioVoice || ""), config.audioInstructions || "");
+        // Omit speaker for prompt-described / multi-character Seed Audio scenes.
+        if (speaker && !/^(auto|none)$/i.test(speaker)) metadata.speaker = speaker;
     }
 
     const body: Record<string, unknown> = {
@@ -290,7 +292,9 @@ function resolveSeedanceAudioModel(model: string) {
 function resolveSeedanceSpeaker(voice: string, instructions: string) {
     const hint = instructions.trim();
     if (hint && (/^(zh_|en_|multi_|saturn_|ICL_)/i.test(hint) || /_bigtts|_tob|_uranus|_moon|_mars/i.test(hint))) return hint;
-    return normalizeSeedAudioSpeakerValue(voice);
+    const normalized = normalizeSeedAudioSpeakerValue(voice);
+    if (/^(auto|none)$/i.test(normalized)) return "";
+    return normalized;
 }
 
 function mapSeedanceAudioFormat(format: string) {
