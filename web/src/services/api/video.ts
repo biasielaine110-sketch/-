@@ -221,6 +221,10 @@ function unwrapVideoTaskResponse(payload: ApiVideoResponse): VideoResponse {
 }
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    if (isMetasoH3Video(config, model)) {
+        return createMetasoH3VideoTask(config, model, prompt, references, options);
+    }
+
     const ratio = normalizeVideoRatio(config.size);
     const seedance = isSeedanceVideoModel(model);
     const seconds = seedance ? normalizeSeedanceSeconds(config.videoSeconds) : normalizeVideoSeconds(config.videoSeconds);
@@ -283,6 +287,78 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
     }
+}
+
+/**
+ * Metaso MiniMax-H3 via OpenAI-compatible /v1/videos.
+ * Docs: https://metaso.cn/minimax-h3/new-api-guide
+ * Body must stay minimal: model, prompt, seconds, size, input_reference.image_url (single image required).
+ */
+async function createMetasoH3VideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    if (!references.length) throw new Error(apiText("metasoH3ImageRequired"));
+    const modelName = modelOptionName(model) || "sora-2";
+    const seconds = normalizeMetasoH3Seconds(config.videoSeconds);
+    const size = normalizeMetasoH3Size(config.size, config.vquality);
+    const imageUrl = await resolveMetasoH3ImageUrl(config, references[0], options);
+    const payload = {
+        model: modelName,
+        prompt,
+        seconds,
+        size,
+        input_reference: { image_url: imageUrl },
+    };
+    try {
+        const created = unwrapVideoResponse(
+            (await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data,
+        );
+        if (!created.id) throw new Error(apiText("noVideoTaskId"));
+        return { id: created.id, provider: "openai", model };
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    }
+}
+
+function isMetasoH3Video(config: AiConfig, model: string) {
+    const base = config.baseUrl.trim().toLowerCase();
+    const name = modelOptionName(model).toLowerCase();
+    if (/metaso\.cn/i.test(base)) return true;
+    return /minimax[-_]?h3|^h3$|minimax\/h3/i.test(name);
+}
+
+/** Metaso examples use 4 / 8 / 12 seconds. */
+function normalizeMetasoH3Seconds(value: string) {
+    const seconds = Math.floor(Number(value) || 4);
+    const allowed = [4, 8, 12];
+    return allowed.reduce((best, current) => (Math.abs(current - seconds) < Math.abs(best - seconds) ? current : best));
+}
+
+/** Metaso documented sizes: 1280x720, 720x1280, 1792x1024, 1024x1792. */
+function normalizeMetasoH3Size(size: string, quality: string) {
+    const ratio = normalizeVideoRatio(size);
+    const high = /high|2k|1080|1792|1024x1792|1792x1024/i.test(quality || "") || /1792|1024x1792|1792x1024/i.test(size || "");
+    if (ratio === "9:16" || ratio === "3:4" || ratio === "2:3") return high ? "1024x1792" : "720x1280";
+    return high ? "1792x1024" : "1280x720";
+}
+
+async function resolveMetasoH3ImageUrl(config: AiConfig, image: ReferenceImage, options?: RequestOptions) {
+    if (image.url && isPublicHttpUrl(image.url)) return image.url.trim();
+    if (image.dataUrl && isPublicHttpUrl(image.dataUrl)) return image.dataUrl.trim();
+    const dataUrl = await imageToDataUrl(image);
+    if (dataUrl && isPublicHttpUrl(dataUrl)) return dataUrl.trim();
+    // Prefer provider upload when available (Seedance-compatible relays); fall back to data URL.
+    if (dataUrl?.startsWith("data:image/")) {
+        try {
+            const blob = await (await fetch(dataUrl)).blob();
+            return await uploadProviderMediaFile(config, blob, "reference.png", options);
+        } catch {
+            return dataUrl;
+        }
+    }
+    throw new Error(apiText("metasoH3ImageRequired"));
+}
+
+function isPublicHttpUrl(value: string) {
+    return /^https?:\/\//i.test((value || "").trim());
 }
 
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -414,7 +490,8 @@ function unwrapVideoResponse(payload: ApiVideoResponse) {
 function unwrapEnvelope<T>(payload: ApiEnvelope<T>, emptyMessage: string): T {
     if (!payload) throw new Error(emptyMessage);
     if (typeof payload === "object" && "code" in payload && payload.code !== undefined) {
-        if (payload.code !== 0 && payload.code !== "0") throw new Error(readApiErrorMessage(payload) || apiText("requestFailed"));
+        const ok = payload.code === 0 || payload.code === "0" || payload.code === 200 || payload.code === "200" || payload.code === "success" || payload.code === "ok";
+        if (!ok) throw new Error(readApiErrorMessage(payload) || apiText("requestFailed"));
         if (!payload.data) throw new Error(emptyMessage);
         return payload.data;
     }

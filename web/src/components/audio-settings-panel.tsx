@@ -6,14 +6,19 @@ import {
     audioFormatOptions,
     audioSpeedLabel,
     audioVoiceOptions,
+    isSeedAudioModel,
     isSunoAudioModel,
     normalizeAudioFormatValue,
     normalizeAudioSpeedValue,
     normalizeAudioVoiceValue,
+    normalizeSeedAudioFormatValue,
+    normalizeSeedAudioSpeakerValue,
     normalizeSunoFlagValue,
     normalizeSunoFormatValue,
     normalizeSunoVersionValue,
     normalizeSunoVocalGenderValue,
+    seedAudioFormatOptions,
+    seedAudioSpeakerOptions,
     sunoFormatOptions,
     sunoVersionOptions,
     sunoVocalGenderOptions,
@@ -45,7 +50,9 @@ type AudioSettingsPanelProps = {
 
 export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: AudioSettingsPanelProps) {
     const { t } = useTranslation();
-    const suno = isSunoAudioModel(config.model || config.audioModel || "");
+    const model = config.model || config.audioModel || "";
+    const suno = isSunoAudioModel(model);
+    const seedAudio = !suno && isSeedAudioModel(model);
 
     if (suno) {
         const version = normalizeSunoVersionValue(config.sunoVersion || "");
@@ -135,6 +142,74 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     ) : null}
                     <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
                         {custom ? t("settingsPanels.audio.sunoCustomHint") : t("settingsPanels.audio.sunoInspoHint")}
+                    </div>
+                </div>
+            </ImageSettingsTheme>
+        );
+    }
+
+    if (seedAudio) {
+        const speaker = normalizeSeedAudioSpeakerValue(config.audioVoice || "");
+        const format = normalizeSeedAudioFormatValue(config.audioFormat);
+        const speed = normalizeAudioSpeedValue(config.audioSpeed);
+        const presetSelected = seedAudioSpeakerOptions.some((item) => item.value === speaker);
+
+        return (
+            <ImageSettingsTheme theme={theme}>
+                <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+                    {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.audio.seedTitle")}</div> : null}
+                    <SettingGroup title={t("settingsPanels.audio.seedSpeaker")} color={theme.node.muted}>
+                        <div className="grid grid-cols-2 gap-2.5">
+                            {seedAudioSpeakerOptions.map((item) => (
+                                <OptionPill key={item.value} selected={speaker === item.value} theme={theme} onClick={() => onConfigChange("audioVoice", item.value)}>
+                                    {item.label}
+                                </OptionPill>
+                            ))}
+                        </div>
+                    </SettingGroup>
+                    <SettingGroup title={t("settingsPanels.audio.seedSpeakerCustom")} color={theme.node.muted}>
+                        <input
+                            value={presetSelected ? "" : speaker}
+                            placeholder={t("settingsPanels.audio.seedSpeakerPlaceholder")}
+                            className="h-9 w-full rounded-full border bg-transparent px-3 text-sm outline-none"
+                            style={{ borderColor: theme.node.stroke, color: theme.node.text, WebkitTextFillColor: theme.node.text }}
+                            onChange={(event) => onConfigChange("audioVoice", event.target.value)}
+                            onBlur={(event) => onConfigChange("audioVoice", normalizeSeedAudioSpeakerValue(event.target.value || speaker))}
+                            onMouseDown={(event) => event.stopPropagation()}
+                        />
+                    </SettingGroup>
+                    <SettingGroup title={t("settingsPanels.audio.format")} color={theme.node.muted}>
+                        <div className="grid grid-cols-4 gap-2.5">
+                            {seedAudioFormatOptions.map((item) => (
+                                <OptionPill key={item.value} selected={format === item.value} theme={theme} onClick={() => onConfigChange("audioFormat", item.value)}>
+                                    {item.label}
+                                </OptionPill>
+                            ))}
+                        </div>
+                    </SettingGroup>
+                    <SettingGroup title={t("settingsPanels.audio.speed")} color={theme.node.muted}>
+                        <div className="grid grid-cols-4 gap-2.5">
+                            {speedOptions.map((value) => (
+                                <OptionPill key={value} selected={speed === value} theme={theme} onClick={() => onConfigChange("audioSpeed", value)}>
+                                    {audioSpeedLabel(value)}
+                                </OptionPill>
+                            ))}
+                        </div>
+                        <input
+                            type="number"
+                            min={0.25}
+                            max={4}
+                            step={0.05}
+                            className="h-9 w-full rounded-full border bg-transparent px-3 text-center text-sm outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                            style={{ borderColor: theme.node.stroke, color: theme.node.text, WebkitTextFillColor: theme.node.text }}
+                            value={config.audioSpeed || "1"}
+                            onChange={(event) => onConfigChange("audioSpeed", event.target.value)}
+                            onBlur={(event) => onConfigChange("audioSpeed", normalizeAudioSpeedValue(event.target.value))}
+                            onMouseDown={(event) => event.stopPropagation()}
+                        />
+                    </SettingGroup>
+                    <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
+                        {t("settingsPanels.audio.seedHint")}
                     </div>
                 </div>
             </ImageSettingsTheme>

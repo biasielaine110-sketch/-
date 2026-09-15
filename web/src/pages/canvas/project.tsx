@@ -3722,37 +3722,76 @@ function AtelierCanvasPage() {
 
                 if (mode === "audio") {
                     const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
-                    const isEmptyAudioNode = sourceNode?.type === CanvasNodeType.Audio && !sourceNode.metadata?.content;
-                    const audioId = isEmptyAudioNode ? nodeId : nanoid();
+                    const isAudioNode = sourceNode?.type === CanvasNodeType.Audio;
+                    // Same panel re-generate: write back into the audio node; never use its own result as a reference.
+                    const writeAudioToSelf = isAudioNode;
+                    const selfStorageKey = sourceNode?.metadata?.storageKey;
+                    const selfContent = sourceNode?.metadata?.content;
+                    const generatedChildIds = new Set(connectionsRef.current.filter((connection) => connection.fromNodeId === nodeId).map((connection) => connection.toNodeId));
+                    const referenceAudios = (generationContext.referenceAudios || []).filter(
+                        (ref) => ref.id !== nodeId && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.url !== selfContent,
+                    );
+                    const audioId = writeAudioToSelf ? nodeId : nanoid();
                     const parent = sourceNode?.position || { x: 0, y: 0 };
                     const audioNode: CanvasNodeData = {
                         id: audioId,
                         type: CanvasNodeType.Audio,
                         title: effectivePrompt.slice(0, 32) || "Generated Audio",
-                        position: isEmptyAudioNode ? sourceNode.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y + ((sourceNode?.height || spec.height) - spec.height) / 2 },
-                        width: isEmptyAudioNode ? sourceNode.width : spec.width,
-                        height: isEmptyAudioNode ? sourceNode.height : spec.height,
-                        metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, ...buildAudioGenerationMetadata(generationConfig) },
+                        position: writeAudioToSelf && sourceNode ? sourceNode.position : { x: parent.x + (sourceNode?.width || spec.width) + 96, y: parent.y + ((sourceNode?.height || spec.height) - spec.height) / 2 },
+                        width: writeAudioToSelf && sourceNode ? sourceNode.width : spec.width,
+                        height: writeAudioToSelf && sourceNode ? sourceNode.height : spec.height,
+                        metadata: {
+                            prompt: effectivePrompt,
+                            status: NODE_STATUS_LOADING,
+                            ...buildAudioGenerationMetadata(generationConfig),
+                            references: generationReferenceUrls({ referenceImages: [], referenceVideos: [], referenceAudios }),
+                            // Keep previous playback until the new clip arrives when rewriting self.
+                            ...(writeAudioToSelf && sourceNode?.metadata?.content
+                                ? {
+                                      content: sourceNode.metadata.content,
+                                      storageKey: sourceNode.metadata.storageKey,
+                                      mimeType: sourceNode.metadata.mimeType,
+                                      bytes: sourceNode.metadata.bytes,
+                                      durationMs: sourceNode.metadata.durationMs,
+                                  }
+                                : {}),
+                        },
                     };
                     pendingChildIds = [audioId];
                     setNodes((prev) =>
-                        isEmptyAudioNode
-                            ? prev.map((node) => (node.id === nodeId ? { ...node, ...audioNode } : node))
+                        writeAudioToSelf
+                            ? prev.map((node) => (node.id === nodeId ? { ...node, ...audioNode, metadata: { ...node.metadata, ...audioNode.metadata, errorDetails: undefined } } : node))
                             : [...prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } } : node)), audioNode],
                     );
-                    if (!isEmptyAudioNode) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: audioId }]);
-                    const controller = startGenerationRequest(audioId, nodeId, nodeId, runController);
+                    if (!writeAudioToSelf) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: audioId }]);
+                    const controller = audioId === nodeId ? runController : startGenerationRequest(audioId, nodeId, nodeId, runController);
                     try {
-                        const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, effectivePrompt, { signal: controller.signal }), generationConfig.audioFormat);
-                        setNodes((prev) => prev.map((node) => (node.id === audioId ? { ...node, metadata: { ...node.metadata, ...audioMetadata(audio), prompt: effectivePrompt, ...buildAudioGenerationMetadata(generationConfig), status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));
+                        const audio = await storeGeneratedAudio(
+                            await requestAudioGeneration(generationConfig, effectivePrompt, { signal: controller.signal, referenceAudios }),
+                            generationConfig.audioFormat,
+                        );
+                        setNodes((prev) => prev.map((node) => (node.id === audioId ? { ...node, metadata: { ...node.metadata, ...audioMetadata(audio), prompt: effectivePrompt, ...buildAudioGenerationMetadata(generationConfig), references: generationReferenceUrls({ referenceImages: [], referenceVideos: [], referenceAudios }), status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));
                     } catch (error) {
                         if (!isGenerationCanceled(error)) {
                             const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
-                            setNodes((prev) => prev.map((node) => (node.id === audioId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
+                            setNodes((prev) =>
+                                prev.map((node) =>
+                                    node.id === audioId
+                                        ? {
+                                              ...node,
+                                              metadata: {
+                                                  ...node.metadata,
+                                                  status: writeAudioToSelf && node.metadata?.content ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR,
+                                                  errorDetails: writeAudioToSelf && node.metadata?.content ? undefined : errorDetails,
+                                              },
+                                          }
+                                        : node,
+                                ),
+                            );
                             message.error(errorDetails);
                         }
                     } finally {
-                        finishGenerationRequest(audioId, controller);
+                        if (audioId !== nodeId) finishGenerationRequest(audioId, controller);
                     }
                     return;
                 }
@@ -3984,12 +4023,51 @@ function AtelierCanvasPage() {
                 }
                 if (node.type === CanvasNodeType.Audio) {
                     try {
-                        const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, prompt, { signal: controller.signal }), generationConfig.audioFormat);
-                        setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, ...audioMetadata(audio), prompt, ...buildAudioGenerationMetadata(generationConfig), status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : item)));
+                        const selfStorageKey = node.metadata?.storageKey;
+                        const selfContent = node.metadata?.content;
+                        const generatedChildIds = new Set(connectionsRef.current.filter((connection) => connection.fromNodeId === node.id).map((connection) => connection.toNodeId));
+                        const referenceAudios = (context?.referenceAudios || []).filter(
+                            (ref) => ref.id !== node.id && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.url !== selfContent,
+                        );
+                        const audio = await storeGeneratedAudio(
+                            await requestAudioGeneration(generationConfig, prompt, { signal: controller.signal, referenceAudios }),
+                            generationConfig.audioFormat,
+                        );
+                        setNodes((prev) =>
+                            prev.map((item) =>
+                                item.id === node.id
+                                    ? {
+                                          ...item,
+                                          metadata: {
+                                              ...item.metadata,
+                                              ...audioMetadata(audio),
+                                              prompt,
+                                              ...buildAudioGenerationMetadata(generationConfig),
+                                              references: generationReferenceUrls({ referenceImages: [], referenceVideos: [], referenceAudios }),
+                                              status: NODE_STATUS_SUCCESS,
+                                              errorDetails: undefined,
+                                          },
+                                      }
+                                    : item,
+                            ),
+                        );
                     } catch (error) {
                         if (!isGenerationCanceled(error)) {
                             const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
-                            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item)));
+                            setNodes((prev) =>
+                                prev.map((item) =>
+                                    item.id === node.id
+                                        ? {
+                                              ...item,
+                                              metadata: {
+                                                  ...item.metadata,
+                                                  status: item.metadata?.content ? NODE_STATUS_SUCCESS : NODE_STATUS_ERROR,
+                                                  errorDetails: item.metadata?.content ? undefined : errorDetails,
+                                              },
+                                          }
+                                        : item,
+                                ),
+                            );
                             message.error(errorDetails);
                         }
                     }

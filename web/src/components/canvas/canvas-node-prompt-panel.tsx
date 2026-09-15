@@ -68,7 +68,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         else onPromptChange(node.id, value);
     };
 
-    const activeReferences = mentionReferences.filter((reference) => reference.active);
+    const activeReferences = mentionReferences.filter((reference) => reference.active && reference.nodeId !== node.id);
     const connectedTextPrompt = activeReferences
         .filter((reference) => reference.kind === "text" && reference.text?.trim())
         .map((reference) => reference.text!.trim())
@@ -119,7 +119,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             ) : null}
             <CanvasPromptChipInput
                 value={prompt}
-                references={mentionReferences}
+                references={activeReferences}
                 onChange={updatePrompt}
                 onSubmit={submit}
                 onDoubleClick={(event) => {
@@ -190,7 +190,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
                     <CanvasPromptChipInput
                         value={prompt}
-                        references={mentionReferences}
+                        references={activeReferences}
                         onChange={updatePrompt}
                         className="thin-scrollbar h-[52dvh] min-h-80 w-full cursor-text overflow-y-auto rounded-xl border p-4 text-[15px] leading-6 outline-none"
                         style={{ background: "transparent", borderColor: theme.toolbar.border, color: theme.node.text }}

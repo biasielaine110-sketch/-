@@ -4,7 +4,7 @@ import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 
 import { AudioSettingsPanel, type AudioSettingKey } from "@/components/audio-settings-panel";
-import { audioFormatLabel, audioSpeedLabel, audioVoiceLabel, isSunoAudioModel, sunoSettingsSummary } from "@/lib/audio-generation";
+import { audioFormatLabel, audioSpeedLabel, audioVoiceLabel, isSeedAudioModel, isSunoAudioModel, seedAudioSettingsSummary, sunoSettingsSummary } from "@/lib/audio-generation";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { AiConfig } from "@/stores/use-config-store";
@@ -24,7 +24,9 @@ export function CanvasAudioSettingsPopover({ config, onConfigChange, buttonClass
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
-    const suno = isSunoAudioModel(config.model || config.audioModel || "");
+    const model = config.model || config.audioModel || "";
+    const suno = isSunoAudioModel(model);
+    const seedAudio = !suno && isSeedAudioModel(model);
 
     useEffect(() => {
         if (!open) return;
@@ -47,10 +49,12 @@ export function CanvasAudioSettingsPopover({ config, onConfigChange, buttonClass
         };
     }, [open]);
 
-    const panel = open && buttonRect ? <AudioSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} suno={suno} /> : null;
+    const panel = open && buttonRect ? <AudioSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} wide={suno || seedAudio} /> : null;
     const summary = suno
         ? `${sunoSettingsSummary({ version: config.sunoVersion, custom: config.sunoCustom, instrumental: config.sunoInstrumental, vocalGender: config.sunoVocalGender })} · ${(config.audioFormat || "mp3").toUpperCase()}`
-        : `${audioVoiceLabel(config.audioVoice)} · ${audioFormatLabel(config.audioFormat)} · ${audioSpeedLabel(config.audioSpeed)}`;
+        : seedAudio
+          ? seedAudioSettingsSummary({ voice: config.audioVoice, format: config.audioFormat, speed: config.audioSpeed })
+          : `${audioVoiceLabel(config.audioVoice)} · ${audioFormatLabel(config.audioFormat)} · ${audioSpeedLabel(config.audioSpeed)}`;
 
     return (
         <>
@@ -71,7 +75,7 @@ function AudioSettingsPortal({
     theme,
     config,
     onConfigChange,
-    suno,
+    wide,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -79,9 +83,9 @@ function AudioSettingsPortal({
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
     onConfigChange: (key: CanvasAudioSettingKey, value: string) => void;
-    suno: boolean;
+    wide: boolean;
 }) {
-    const width = suno ? 380 : 356;
+    const width = wide ? 380 : 356;
     const gap = 8;
     const margin = 12;
     const alignRight = placement?.endsWith("Right");

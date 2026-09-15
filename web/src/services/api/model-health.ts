@@ -1,6 +1,7 @@
 import axios from "axios";
 
 import i18n from "@/i18n";
+import { isSeedAudioModel, isSunoAudioModel } from "@/lib/audio-generation";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import { buildApiUrl, resolveModelRequestConfig, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
@@ -227,6 +228,22 @@ async function probeText(config: ReturnType<typeof resolveModelRequestConfig>, s
 }
 
 async function probeImage(config: ReturnType<typeof resolveModelRequestConfig>, signal?: AbortSignal) {
+    // Prefer a non-billable models list probe so empty-prompt POSTs don't spam 400 in the console.
+    try {
+        const modelsResponse = await axios.get(proxyApiUrl(buildApiUrl(config.baseUrl, "/models")), {
+            headers: { Authorization: `Bearer ${config.apiKey}` },
+            signal,
+            timeout: HEALTH_TIMEOUT_MS,
+            validateStatus: () => true,
+        });
+        if (modelsResponse.status >= 200 && modelsResponse.status < 300) return { ok: true as const };
+        if (isAuthFailure(modelsResponse.status, readMessage(modelsResponse.data))) {
+            return { ok: false as const, message: readMessage(modelsResponse.data) || `HTTP ${modelsResponse.status}` };
+        }
+    } catch {
+        // Fall through to empty-prompt POST probe.
+    }
+
     // Empty prompt should fail validation after auth/model routing — avoids billing a real image.
     const isMidjourney = /midjourney|\bmj[-_]?/i.test(config.model);
     const isSeedance = /seedance\.nz/i.test(config.baseUrl);
@@ -286,12 +303,31 @@ async function probeAudio(config: ReturnType<typeof resolveModelRequestConfig>, 
         }
     }
 
-    // Seedance Suno uses /v1/music/* — probing /audio/speech returns 503 and false negatives.
-    if (/suno/i.test(config.model || "")) {
+    // Seedance Suno uses /v1/music/* — probing /audio/speech returns 404/503 and false negatives.
+    if (isSunoAudioModel(config.model || "")) {
         try {
             const response = await axios.post(
                 proxyApiUrl(buildApiUrl(config.baseUrl, "/music/generations")),
                 { model: "suno", custom: false, version: "v6", prompt: "" },
+                {
+                    headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+                    signal,
+                    timeout: HEALTH_TIMEOUT_MS,
+                    validateStatus: () => true,
+                },
+            );
+            return interpretNonTextProbe(response.status, response.data);
+        } catch (error) {
+            return failFromError(error);
+        }
+    }
+
+    // Seedance TTS / Seed Audio uses async /audio/generations (not OpenAI /audio/speech).
+    if (/seedance\.nz/i.test(config.baseUrl) || isSeedAudioModel(config.model || "")) {
+        try {
+            const response = await axios.post(
+                proxyApiUrl(buildApiUrl(config.baseUrl, "/audio/generations")),
+                { model: /seed[-_]?audio|doubao/i.test(config.model) ? config.model : "doubao-seed-audio-1.0", prompt: "" },
                 {
                     headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
                     signal,

@@ -3,10 +3,13 @@ import axios from "axios";
 import i18n from "@/i18n";
 import {
     audioMimeType,
+    isSeedAudioModel,
     isSunoAudioModel,
     normalizeAudioFormatValue,
     normalizeAudioSpeedValue,
     normalizeAudioVoiceValue,
+    normalizeSeedAudioFormatValue,
+    normalizeSeedAudioSpeakerValue,
     normalizeSunoFlagValue,
     normalizeSunoFormatValue,
     normalizeSunoVersionValue,
@@ -15,9 +18,11 @@ import {
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
+import type { ReferenceAudio } from "@/types/media";
+import { uploadProviderMediaFile } from "./video";
 import { runModelPlugin } from "./model-plugin";
 
-type RequestOptions = { signal?: AbortSignal };
+type RequestOptions = { signal?: AbortSignal; referenceAudios?: ReferenceAudio[] };
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 const SUNO_POLL_INTERVAL_MS = 4_000;
 const SUNO_MAX_WAIT_MS = 15 * 60_000;
@@ -37,24 +42,36 @@ export async function requestAudioGeneration(config: AiConfig, prompt: string, o
     const requestConfig = resolveModelRequestConfig(config, config.model || config.audioModel);
     const model = requestConfig.model.trim();
     const format = normalizeAudioFormatValue(config.audioFormat);
-    // Keep suno settings from the generation config (node + global), not only channel fields.
-    const sunoConfig: AiConfig = {
+    // Keep audio/suno settings from the generation config (node + global), not only channel fields.
+    const audioRequestConfig: AiConfig = {
         ...requestConfig,
+        audioVoice: config.audioVoice,
+        audioFormat: config.audioFormat,
+        audioSpeed: config.audioSpeed,
+        audioInstructions: config.audioInstructions,
         sunoVersion: config.sunoVersion,
         sunoCustom: config.sunoCustom,
         sunoInstrumental: config.sunoInstrumental,
         sunoTitle: config.sunoTitle,
         sunoStyle: config.sunoStyle,
         sunoVocalGender: config.sunoVocalGender,
-        audioFormat: config.audioFormat,
-        audioInstructions: config.audioInstructions,
     };
 
     // Seedance Suno must use /v1/music/* — never scripts that hit /audio/speech.
     if (isSunoAudioModel(model)) {
         assertAudioConfig(requestConfig, model);
         try {
-            return await requestSunoMusic(sunoConfig, prompt, options);
+            return await requestSunoMusic(audioRequestConfig, prompt, options);
+        } catch (error) {
+            throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+        }
+    }
+
+    // Seed Audio / Seedance TTS: async /v1/audio/generations (not OpenAI /audio/speech).
+    if (isSeedanceNzBaseUrl(requestConfig.baseUrl) || isSeedAudioModel(model)) {
+        assertAudioConfig(requestConfig, model);
+        try {
+            return await requestSeedanceAudioGenerations(audioRequestConfig, prompt, options);
         } catch (error) {
             throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
         }
@@ -118,6 +135,199 @@ export async function requestAudioGeneration(config: AiConfig, prompt: string, o
 
 function isOpenSpeechBaseUrl(baseUrl: string) {
     return /openspeech\.bytedance\.com/i.test(baseUrl.trim());
+}
+
+function isSeedanceNzBaseUrl(baseUrl: string) {
+    return /seedance\.nz/i.test(baseUrl.trim());
+}
+
+const SEEDANCE_AUDIO_POLL_INTERVAL_MS = 3_000;
+const SEEDANCE_AUDIO_MAX_WAIT_MS = 10 * 60_000;
+
+/** Seedance: POST /v1/audio/generations + poll (not OpenAI /audio/speech). */
+async function requestSeedanceAudioGenerations(config: AiConfig, prompt: string, options?: RequestOptions): Promise<Blob> {
+    const text = ensureSeedAudioPrompt(prompt);
+    const model = resolveSeedanceAudioModel(config.model);
+    const format = mapSeedanceAudioFormat(normalizeSeedAudioFormatValue(config.audioFormat));
+    const speechRate = mapSeedanceSpeechRate(Number(normalizeAudioSpeedValue(config.audioSpeed)));
+    const referenceAudios = (options?.referenceAudios || []).slice(0, 3);
+    const referenceUrls = referenceAudios.length ? await resolveSeedanceReferenceAudioUrls(config, referenceAudios, options) : [];
+
+    // Docs: speaker / audio_url / images are mutually exclusive. Only use other-node refs as audio_url.
+    const metadata: Record<string, unknown> = {
+        format,
+        sample_rate: "24000",
+        speech_rate: speechRate,
+    };
+    if (referenceUrls.length) {
+        metadata.audio_url = referenceUrls.length === 1 ? referenceUrls[0] : referenceUrls;
+    } else {
+        metadata.speaker = resolveSeedanceSpeaker(normalizeSeedAudioSpeakerValue(config.audioVoice || ""), config.audioInstructions || "");
+    }
+
+    const body: Record<string, unknown> = {
+        model,
+        prompt: text,
+        metadata,
+    };
+
+    let submit;
+    try {
+        submit = await axios.post(aiApiUrl(config, "/audio/generations"), body, {
+            headers: aiHeaders(config),
+            signal: options?.signal,
+            transformResponse: [(data) => data],
+        });
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+    }
+
+    const submitPayload = coerceJsonPayload(submit.data);
+    if (!submitPayload) throw new Error(apiText("audioGenerationFailed"));
+    if (isSunoApiFailureCode(submitPayload.code as number | string | undefined)) {
+        throw new Error(readApiErrorMessage(submitPayload) || apiText("audioGenerationFailed"));
+    }
+
+    const taskId = readSunoTaskId(submitPayload as { data?: Array<{ task_id?: string; id?: string }> | { task_id?: string; id?: string }; task_id?: string; id?: string });
+    if (!taskId) throw new Error(readApiErrorMessage(submitPayload) || apiText("audioGenerationFailed"));
+
+    const started = Date.now();
+    while (Date.now() - started < SEEDANCE_AUDIO_MAX_WAIT_MS) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        await sleep(SEEDANCE_AUDIO_POLL_INTERVAL_MS, options?.signal);
+
+        let poll;
+        try {
+            poll = await axios.get(aiApiUrl(config, `/audio/generations/${encodeURIComponent(taskId)}`), {
+                headers: aiHeaders(config),
+                signal: options?.signal,
+                transformResponse: [(data) => data],
+            });
+        } catch (error) {
+            throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+        }
+
+        const pollPayload = coerceJsonPayload(poll.data);
+        if (!pollPayload) throw new Error(apiText("audioGenerationFailed"));
+        if (isSunoApiFailureCode(pollPayload.code as number | string | undefined)) {
+            throw new Error(readApiErrorMessage(pollPayload) || apiText("audioGenerationFailed"));
+        }
+
+        const data = (pollPayload.data && typeof pollPayload.data === "object" && !Array.isArray(pollPayload.data) ? pollPayload.data : pollPayload) as Record<string, unknown>;
+        const nested = data.data && typeof data.data === "object" && !Array.isArray(data.data) ? (data.data as Record<string, unknown>) : null;
+        const status = String(data.status || nested?.status || "").toLowerCase().replace(/_/g, "");
+        if (["failed", "failure", "error", "cancelled", "canceled"].includes(status)) {
+            const reason =
+                (typeof data.fail_reason === "string" && data.fail_reason) ||
+                (typeof nested?.fail_reason === "string" && nested.fail_reason) ||
+                readApiErrorMessage(pollPayload) ||
+                readApiErrorMessage(data) ||
+                "";
+            throw new Error(reason || apiText("audioGenerationFailed"));
+        }
+
+        const audioUrl = readSeedanceAudioUrl(data) || (nested ? readSeedanceAudioUrl(nested) : "") || readSeedanceAudioUrl(pollPayload);
+        if (audioUrl) {
+            try {
+                const response = await axios.get<Blob>(proxyApiUrl(audioUrl), { responseType: "blob", signal: options?.signal });
+                const mime = audioMimeType(format === "ogg_opus" ? "opus" : format);
+                const blob = response.data.type.startsWith("audio/") ? response.data : new Blob([response.data], { type: mime });
+                await assertAudioBlob(blob);
+                return blob;
+            } catch (error) {
+                // Signed CDN URLs sometimes reject Authorization forwarding; retry direct once.
+                if (axios.isAxiosError(error) && error.response && /^https?:\/\//i.test(audioUrl)) {
+                    const response = await axios.get<Blob>(audioUrl, { responseType: "blob", signal: options?.signal });
+                    const mime = audioMimeType(format === "ogg_opus" ? "opus" : format);
+                    return response.data.type.startsWith("audio/") ? response.data : new Blob([response.data], { type: mime });
+                }
+                throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+            }
+        }
+        if (["success", "succeeded", "completed", "complete"].includes(status)) {
+            throw new Error(apiText("audioGenerationFailed"));
+        }
+    }
+
+    throw new Error(apiText("audioGenerationFailed"));
+}
+
+async function resolveSeedanceReferenceAudioUrls(config: AiConfig, audios: ReferenceAudio[], options?: RequestOptions) {
+    const urls: string[] = [];
+    for (const audio of audios) {
+        const source = (audio.url || "").trim();
+        if (!source) continue;
+        if (/^https?:\/\//i.test(source) && !/^blob:/i.test(source) && !source.startsWith("data:")) {
+            urls.push(source);
+            continue;
+        }
+        const response = await axios.get<Blob>(proxyApiUrl(source), { responseType: "blob", signal: options?.signal });
+        const blob = response.data.type.startsWith("audio/") ? response.data : new Blob([response.data], { type: audio.type || "audio/mpeg" });
+        const uploaded = await uploadProviderMediaFile(config, blob, audio.name || "reference.mp3", options);
+        if (uploaded) urls.push(uploaded);
+    }
+    return urls;
+}
+
+/** Seedance requires prompt length 5–2048; short Chinese TTS lines like「你好」need padding. */
+function ensureSeedAudioPrompt(prompt: string) {
+    const trimmed = prompt.trim();
+    if (!trimmed) throw new Error(apiText("invalidRequest"));
+    if (trimmed.length >= 5) return trimmed.slice(0, 2048);
+    return `${trimmed}${"。".repeat(5 - trimmed.length)}`.slice(0, 2048);
+}
+
+function resolveSeedanceAudioModel(model: string) {
+    const trimmed = model.trim();
+    // Seedance has no OpenAI-compatible /audio/speech; map common OpenAI TTS ids to Seed Audio.
+    if (!trimmed || /^(gpt-.*tts|tts-1(\.hd)?|openai)/i.test(trimmed)) return "doubao-seed-audio-1.0";
+    // Normalize EvoLink-style doubao-seed-audio-1-0 → Seedance doubao-seed-audio-1.0
+    if (/^doubao[-_]?seed[-_]?audio[-_]?1([-_]0)?$/i.test(trimmed)) return "doubao-seed-audio-1.0";
+    if (/^seed[-_]?audio[-_]?1([-_.]0)?$/i.test(trimmed)) return "doubao-seed-audio-1.0";
+    return trimmed;
+}
+
+function resolveSeedanceSpeaker(voice: string, instructions: string) {
+    const hint = instructions.trim();
+    if (hint && (/^(zh_|en_|multi_|saturn_|ICL_)/i.test(hint) || /_bigtts|_tob|_uranus|_moon|_mars/i.test(hint))) return hint;
+    return normalizeSeedAudioSpeakerValue(voice);
+}
+
+function mapSeedanceAudioFormat(format: string) {
+    if (format === "opus") return "ogg_opus";
+    if (format === "wav" || format === "mp3" || format === "pcm") return format;
+    return "mp3";
+}
+
+function mapSeedanceSpeechRate(speed: number) {
+    if (!Number.isFinite(speed)) return 0;
+    return Math.max(-50, Math.min(100, Math.round((speed - 1) * 50)));
+}
+
+function readSeedanceAudioUrl(payload: Record<string, unknown>) {
+    const directKeys = ["result_url", "audio_url", "output_url", "url", "file_url"] as const;
+    for (const key of directKeys) {
+        const value = payload[key];
+        if (typeof value === "string" && /^https?:\/\//i.test(value)) return value;
+    }
+    if (Array.isArray(payload.audio_urls) && typeof payload.audio_urls[0] === "string" && payload.audio_urls[0]) return payload.audio_urls[0];
+
+    const nested = payload.data && typeof payload.data === "object" && !Array.isArray(payload.data) ? (payload.data as Record<string, unknown>) : null;
+    if (nested) {
+        const nestedUrl = readSeedanceAudioUrl(nested);
+        if (nestedUrl) return nestedUrl;
+    }
+
+    const content = payload.content && typeof payload.content === "object" && !Array.isArray(payload.content) ? (payload.content as Record<string, unknown>) : null;
+    if (content) {
+        if (typeof content.audio_url === "string" && content.audio_url) return content.audio_url;
+        if (Array.isArray(content.audio_urls) && typeof content.audio_urls[0] === "string") return content.audio_urls[0];
+        for (const key of directKeys) {
+            const value = content[key];
+            if (typeof value === "string" && /^https?:\/\//i.test(value)) return value;
+        }
+    }
+    return "";
 }
 
 async function requestSunoMusic(config: AiConfig, prompt: string, options?: RequestOptions): Promise<Blob> {

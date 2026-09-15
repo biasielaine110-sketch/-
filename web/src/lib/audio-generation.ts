@@ -44,16 +44,57 @@ export const sunoFormatOptions = [
     { value: "m4a", label: "M4A" },
 ];
 
+/** Doubao Seed Audio / Seedance `/v1/audio/generations` speaker presets. */
+export const seedAudioSpeakerOptions = [
+    { value: "zh_male_shaonianzixin_uranus_bigtts", label: "少年梓辛" },
+    { value: "zh_female_vv_uranus_bigtts", label: "VV" },
+    { value: "zh_female_shuangkuaisisi_moon_bigtts", label: "爽快思思" },
+    { value: "zh_male_wennuanahu_moon_bigtts", label: "温暖阿虎" },
+    { value: "zh_female_tianmeixiaoyuan_moon_bigtts", label: "甜美小源" },
+    { value: "zh_male_yuanboxiaoshu_moon_bigtts", label: "渊博小叔" },
+    { value: "zh_female_linjia_mars_bigtts", label: "邻家女孩" },
+    { value: "zh_male_jingqiangkanye_moon_bigtts", label: "京腔侃爷" },
+];
+
+export const seedAudioFormatOptions = [
+    { value: "mp3", label: "MP3" },
+    { value: "wav", label: "WAV" },
+    { value: "pcm", label: "PCM" },
+    { value: "opus", label: "Opus" },
+];
+
+export const SEED_AUDIO_DEFAULT_SPEAKER = "zh_male_shaonianzixin_uranus_bigtts";
+
 export function isSunoAudioModel(model: string) {
     return /suno/i.test(model.trim());
+}
+
+export function isSeedAudioModel(model: string) {
+    // Seedance: doubao-seed-audio-1.0 · EvoLink: doubao-seed-audio-1-0 · Ark: seed-audio-1.0
+    return /doubao[-_]?seed[-_]?audio|seed[-_]?audio[-_]?\d/i.test(model.trim());
 }
 
 export function normalizeAudioVoiceValue(value: string) {
     return audioVoiceOptions.some((item) => item.value === value) ? value : "alloy";
 }
 
+export function normalizeSeedAudioSpeakerValue(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) return SEED_AUDIO_DEFAULT_SPEAKER;
+    if (seedAudioSpeakerOptions.some((item) => item.value === trimmed)) return trimmed;
+    // Allow custom Doubao speaker / clone IDs.
+    if (/^(zh_|en_|multi_|saturn_|ICL_)/i.test(trimmed) || /_bigtts|_tob|_uranus|_moon|_mars/i.test(trimmed)) return trimmed;
+    // OpenAI voice names are invalid for Seed Audio.
+    if (audioVoiceOptions.some((item) => item.value === trimmed)) return SEED_AUDIO_DEFAULT_SPEAKER;
+    return trimmed || SEED_AUDIO_DEFAULT_SPEAKER;
+}
+
 export function normalizeAudioFormatValue(value: string) {
     return audioFormatOptions.some((item) => item.value === value) ? value : "mp3";
+}
+
+export function normalizeSeedAudioFormatValue(value: string) {
+    return seedAudioFormatOptions.some((item) => item.value === value) ? value : "mp3";
 }
 
 export function normalizeAudioSpeedValue(value: string) {
@@ -90,9 +131,19 @@ export function audioVoiceLabel(value: string) {
     return audioVoiceOptions.find((item) => item.value === voice)?.label || voice;
 }
 
+export function seedAudioSpeakerLabel(value: string) {
+    const speaker = normalizeSeedAudioSpeakerValue(value);
+    return seedAudioSpeakerOptions.find((item) => item.value === speaker)?.label || speaker;
+}
+
 export function audioFormatLabel(value: string) {
     const format = normalizeAudioFormatValue(value);
     return audioFormatOptions.find((item) => item.value === format)?.label || format;
+}
+
+export function seedAudioFormatLabel(value: string) {
+    const format = normalizeSeedAudioFormatValue(value);
+    return seedAudioFormatOptions.find((item) => item.value === format)?.label || format;
 }
 
 export function audioSpeedLabel(value: string) {
@@ -105,6 +156,10 @@ export function sunoSettingsSummary(options: { version?: string; custom?: string
     const instrumental = normalizeSunoFlagValue(options.instrumental) === "true" ? "Instrumental" : "Vocal";
     const gender = normalizeSunoVocalGenderValue(options.vocalGender || "");
     return [version, mode, instrumental, gender || null].filter(Boolean).join(" · ");
+}
+
+export function seedAudioSettingsSummary(options: { voice?: string; format?: string; speed?: string }) {
+    return `${seedAudioSpeakerLabel(options.voice || "")} · ${seedAudioFormatLabel(options.format || "")} · ${audioSpeedLabel(options.speed || "1")}`;
 }
 
 export function audioMimeType(format: string) {
