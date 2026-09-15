@@ -94,6 +94,7 @@ type NodeContentRendererProps = {
     onRetryBatchImage?: (imageId: string) => void;
     onDeleteBatchImage?: (imageId: string | string[]) => void;
     onViewBatchImage?: (imageId: string) => void;
+    onAnnotate?: (node: CanvasNodeData) => void;
     groupChildCount: number;
 };
 
@@ -452,6 +453,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onRetryBatchImage={(imageId) => onRetryBatchImage?.(data, imageId)}
                         onDeleteBatchImage={(imageId) => onDeleteBatchImage?.(data.id, imageId)}
                         onViewBatchImage={(imageId) => onViewImage?.(data, imageId)}
+                        onAnnotate={onAnnotate}
                         groupChildCount={groupChildCount}
                     />
                 </div>
@@ -517,7 +519,7 @@ function EmptyMergeContent({ theme }: NodeContentRendererProps) {
     );
 }
 
-function AnnotateNodeContent({ node, theme }: NodeContentRendererProps) {
+function AnnotateNodeContent({ node, theme, onAnnotate }: NodeContentRendererProps) {
     const { t } = useTranslation();
     const content = node.metadata?.content;
     const annotations = node.metadata?.annotations || [];
@@ -569,6 +571,21 @@ function AnnotateNodeContent({ node, theme }: NodeContentRendererProps) {
             <div className="pointer-events-none absolute left-2 top-2 rounded-full px-2 py-0.5 text-[10px] font-medium text-white" style={{ background: "rgba(15,23,42,.55)" }}>
                 {t("canvas.annotate.badge", { count: annotations.length })}
             </div>
+            <button
+                type="button"
+                className="absolute bottom-2.5 right-2.5 z-30 flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
+                title={t("canvas.annotate.openTitle")}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    onAnnotate?.(node);
+                }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+            >
+                <Highlighter className="size-3.5" />
+                {t("canvas.annotate.open")}
+            </button>
         </div>
     );
 }

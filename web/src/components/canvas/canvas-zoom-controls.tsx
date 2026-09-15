@@ -72,6 +72,9 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, isMiniMapOpe
                     <Shortcut label="Q" value={t("canvas.shortcut.createChat")} />
                     <Shortcut label="R" value={t("canvas.shortcut.createText")} />
                     <Shortcut label="W" value={t("canvas.shortcut.createImage")} />
+                    <Shortcut label="E" value={t("canvas.shortcut.createAnnotate")} />
+                    <Shortcut label="T" value={t("canvas.shortcut.createVideo")} />
+                    <Shortcut label="F" value={t("canvas.shortcut.focusNode")} />
                     <Shortcut label="X" value={t("canvas.shortcut.connect")} />
                     <Shortcut label="Alt + Q" value={t("canvas.shortcut.deleteSelected")} />
                     <Shortcut label="Delete / Backspace" value={t("canvas.shortcut.delete")} />

@@ -655,6 +655,65 @@ function AtelierCanvasPage() {
             if (!exists) {
                 setConnections((prev) => [...prev, { id: `conn-${Date.now()}`, fromNodeId, toNodeId }]);
             }
+            // Annotate ↔ Image: load the image into the annotate node (either connection direction).
+            const fromNode = nodesRef.current.find((node) => node.id === fromNodeId);
+            const toNode = nodesRef.current.find((node) => node.id === toNodeId);
+            const annotateTarget = toNode?.type === CanvasNodeType.Annotate ? toNode : fromNode?.type === CanvasNodeType.Annotate ? fromNode : null;
+            const imageSource = annotateTarget
+                ? annotateTarget.id === toNodeId
+                    ? fromNode
+                    : toNode
+                : null;
+            const sourceMeta = imageSource?.metadata;
+            const canLoadIntoAnnotate =
+                annotateTarget &&
+                imageSource &&
+                imageSource.id !== annotateTarget.id &&
+                (imageSource.type === CanvasNodeType.Image || imageSource.type === CanvasNodeType.Annotate) &&
+                Boolean(sourceMeta?.content);
+            if (canLoadIntoAnnotate && sourceMeta) {
+                const primary = sourceMeta.images?.find((image) => image.id === (sourceMeta.primaryImageId || sourceMeta.images?.[0]?.id) && image.content);
+                const content = primary?.content || sourceMeta.content;
+                const storageKey = primary?.storageKey || sourceMeta.storageKey;
+                const thumbnailContent = primary?.thumbnailContent || sourceMeta.thumbnailContent;
+                const thumbnailStorageKey = primary?.thumbnailStorageKey || sourceMeta.thumbnailStorageKey;
+                const naturalWidth = primary?.naturalWidth || sourceMeta.naturalWidth || imageSource.width;
+                const naturalHeight = primary?.naturalHeight || sourceMeta.naturalHeight || imageSource.height;
+                const bytes = primary?.bytes || sourceMeta.bytes || 0;
+                const mimeType = primary?.mimeType || sourceMeta.mimeType || "image/png";
+                const size = fitNodeSize(
+                    naturalWidth || annotateTarget.width,
+                    naturalHeight || annotateTarget.height,
+                    Math.max(annotateTarget.width, 320),
+                    Math.max(annotateTarget.height, 240),
+                );
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === annotateTarget.id
+                            ? {
+                                  ...node,
+                                  position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 },
+                                  ...size,
+                                  metadata: {
+                                      ...node.metadata,
+                                      content,
+                                      storageKey,
+                                      thumbnailContent,
+                                      thumbnailStorageKey,
+                                      naturalWidth,
+                                      naturalHeight,
+                                      bytes,
+                                      mimeType,
+                                      status: NODE_STATUS_SUCCESS,
+                                      errorDetails: undefined,
+                                      // New source image replaces prior annotations.
+                                      annotations: content === node.metadata?.content ? node.metadata?.annotations || [] : [],
+                                  },
+                              }
+                            : node,
+                    ),
+                );
+            }
             setContextMenu(null);
         },
         [message, t],
@@ -1156,7 +1215,7 @@ function AtelierCanvasPage() {
             if (!node) return;
             const worldX = node.position.x + node.width / 2;
             const worldY = node.position.y + node.height / 2;
-            const k = Math.min(Math.max(Math.min((size.width * 0.6) / node.width, (size.height * 0.6) / node.height), 0.05), 1);
+            const k = Math.min(Math.max(Math.min((size.width * 0.85) / node.width, (size.height * 0.85) / node.height), 0.05), 5);
             const target = { x: size.width / 2 - worldX * k, y: size.height / 2 - worldY * k, k };
             setSelectedNodeIds(new Set([nodeId]));
             setSelectedConnectionId(null);
@@ -1415,6 +1474,15 @@ function AtelierCanvasPage() {
             if (pendingConnectionCreateRef.current) cancelPendingConnectionCreate();
             if (event.button !== 0) return;
 
+            // Sticky X linking stays active until X/Esc — blank-canvas clicks do not cancel it.
+            if (connectingParamsRef.current?.sticky) {
+                const anchorId = connectingParamsRef.current.nodeId;
+                setSelectedNodeIds(new Set([anchorId]));
+                setToolbarNodeId(anchorId);
+                setSelectedConnectionId(null);
+                return;
+            }
+
             const world = screenToCanvas(event.clientX, event.clientY);
             const nextSelectionBox = {
                 startWorldX: world.x,
@@ -1459,19 +1527,26 @@ function AtelierCanvasPage() {
     const handleNodeSelectCapture = useCallback(
         (event: ReactMouseEvent, nodeId: string) => {
             if (event.button !== 0) return;
-            // Leaving a text field by clicking another node (or non-input chrome) must drop focus,
-            // otherwise later shortcuts type into the stale composer/textarea.
             blurActiveCanvasTextInput(event.target);
             setContextMenu(null);
             setHoveredNodeId(null);
             setSelectedConnectionId(null);
             const currentConnection = connectingParamsRef.current;
+            // Sticky X mode: keep the anchor node selected and link every clicked peer until X/Esc.
+            if (currentConnection?.sticky) {
+                if (currentConnection.nodeId !== nodeId) {
+                    connectNodes(currentConnection, nodeId);
+                }
+                const keep = new Set([currentConnection.nodeId]);
+                setSelectedNodeIds(keep);
+                setToolbarNodeId(currentConnection.nodeId);
+                pendingSelectionRef.current = keep;
+                return;
+            }
             if (currentConnection && currentConnection.nodeId !== nodeId) {
                 connectNodes(currentConnection, nodeId);
-                if (!currentConnection.sticky) {
-                    setConnecting(null);
-                    setPendingConnectionCreate(null);
-                }
+                setConnecting(null);
+                setPendingConnectionCreate(null);
             }
             const { nextSelected } = selectNodeByEvent(event, nodeId);
             pendingSelectionRef.current = nextSelected;
@@ -1481,6 +1556,11 @@ function AtelierCanvasPage() {
 
     const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
         event.stopPropagation();
+        // While sticky-linking, clicks only create edges — do not start a drag on the clicked peer.
+        if (connectingParamsRef.current?.sticky) {
+            pendingSelectionRef.current = null;
+            return;
+        }
         // Capture already selected the node; this only starts dragging, with a fallback selection if capture did not run.
         const currentNodes = nodesRef.current;
         const nextSelected = pendingSelectionRef.current ?? selectNodeByEvent(event, nodeId).nextSelected;
@@ -1506,7 +1586,7 @@ function AtelierCanvasPage() {
         historyPausedRef.current = true;
         nodeDraggingRef.current = true;
         setIsNodeDragging(true);
-    }, []);
+    }, [selectNodeByEvent]);
 
     const spawnAltCopyDragNodes = useCallback(() => {
         const sourceIds = new Set(dragRef.current.initialSelectedNodes.map((item) => item.id));
@@ -1704,13 +1784,15 @@ function AtelierCanvasPage() {
 
             const currentConnection = connectingParamsRef.current;
             if (currentConnection) {
+                // Sticky X mode already links on mousedown capture; mouseup must not clear or re-link.
+                if (currentConnection.sticky) return;
                 const dropTarget = getConnectionDropTarget(event.clientX, event.clientY, currentConnection);
                 if (dropTarget.nodeId) {
                     connectNodes(currentConnection, dropTarget.nodeId);
-                    if (!currentConnection.sticky) setConnecting(null);
+                    setConnecting(null);
                 } else if (dropTarget.isNearNode) {
-                    if (!currentConnection.sticky) setConnecting(null);
-                } else if (!currentConnection.sticky) {
+                    setConnecting(null);
+                } else {
                     setMouseWorld(screenToCanvas(event.clientX, event.clientY));
                     setPendingConnectionCreate({ connection: currentConnection, position: screenToCanvas(event.clientX, event.clientY) });
                 }
@@ -1973,6 +2055,28 @@ function AtelierCanvasPage() {
                 return;
             }
 
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "e") {
+                event.preventDefault();
+                createNode(CanvasNodeType.Annotate);
+                return;
+            }
+
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "t") {
+                event.preventDefault();
+                createNode(CanvasNodeType.Video);
+                return;
+            }
+
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "f") {
+                event.preventDefault();
+                if (selectedNodeIdsRef.current.size !== 1) {
+                    message.warning(t("canvas.shortcut.selectNodeToFocus"));
+                    return;
+                }
+                focusNode(Array.from(selectedNodeIdsRef.current)[0]);
+                return;
+            }
+
             if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "c") {
                 event.preventDefault();
                 duplicateSelectedMediaAsNode();
@@ -1997,9 +2101,11 @@ function AtelierCanvasPage() {
                     message.warning(t("canvas.shortcut.selectNodeToConnect"));
                     return;
                 }
-                // X sticky mode: selected node is the receiver; click multiple providers without canceling.
+                // Sticky X: selected node stays the receiver; click many providers until X/Esc.
                 setMouseWorld({ x: outputNode.position.x, y: outputNode.position.y + outputNode.height / 2 });
                 setConnecting({ nodeId: outputNodeId, handleType: "target", sticky: true });
+                setSelectedNodeIds(new Set([outputNodeId]));
+                setToolbarNodeId(outputNodeId);
                 setSelectedConnectionId(null);
                 setPendingConnectionCreate(null);
                 message.info(t("canvas.shortcut.connectHint"));
@@ -2037,7 +2143,7 @@ function AtelierCanvasPage() {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [copySelectedNodes, createNode, deleteConnection, deleteNodes, duplicateSelectedMediaAsNode, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, t, undoCanvas]);
+    }, [copySelectedNodes, createNode, deleteConnection, deleteNodes, duplicateSelectedMediaAsNode, focusNode, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, t, undoCanvas]);
 
     const handleConnectStart = useCallback(
         (event: ReactMouseEvent, nodeId: string, handleType: "source" | "target") => {

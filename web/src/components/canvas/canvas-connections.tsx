@@ -50,6 +50,11 @@ export function ConnectionPath({
                     event.stopPropagation();
                     onSelect();
                 }}
+                onDoubleClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onDelete();
+                }}
                 onContextMenu={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
