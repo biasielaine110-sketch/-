@@ -179,22 +179,47 @@ export function CanvasImagePreviewModal({ open, src, title, fileName, projectId,
             <Modal
                 title={displayTitle}
                 open={open}
-                centered
+                centered={false}
                 onCancel={onClose}
                 footer={null}
-                width="min(96vw, 1180px)"
+                width="100vw"
                 destroyOnHidden
+                rootClassName="canvas-image-preview-fullscreen"
                 styles={{
+                    wrapper: {
+                        overflow: "hidden",
+                    },
+                    container: {
+                        width: "100vw",
+                        maxWidth: "100vw",
+                        height: "100dvh",
+                        margin: 0,
+                        padding: 0,
+                        top: 0,
+                        borderRadius: 0,
+                        display: "flex",
+                        flexDirection: "column",
+                        overflow: "hidden",
+                    },
+                    header: {
+                        margin: 0,
+                        padding: "12px 48px 12px 20px",
+                        flexShrink: 0,
+                    },
                     body: {
+                        flex: 1,
+                        minHeight: 0,
                         padding: 0,
                         overflow: "hidden",
+                        display: "flex",
+                        flexDirection: "column",
                     },
                 }}
             >
-                <div className="grid max-h-[min(82vh,860px)] lg:h-[min(78vh,820px)] lg:grid-cols-[minmax(0,1fr)_280px]" data-canvas-no-zoom data-canvas-shortcuts-ignore>
+                <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto] lg:grid-cols-[minmax(0,1fr)_300px] lg:grid-rows-none" data-canvas-no-zoom data-canvas-shortcuts-ignore>
                     <div
                         data-canvas-image-preview-stage=""
-                        className="relative h-[min(56vh,560px)] min-h-[280px] overflow-hidden bg-black/5 select-none lg:h-auto lg:min-h-0"
+                        className="relative min-h-0 overflow-hidden bg-black/5 select-none"
                         onContextMenu={handleContextMenu}
                         onPointerDown={handlePointerDown}
                         onPointerMove={handlePointerMove}
@@ -203,7 +228,7 @@ export function CanvasImagePreviewModal({ open, src, title, fileName, projectId,
                         style={{ cursor: zoom > 1.01 ? "grab" : "default" }}
                     >
                         {/* Absolute fill + max-h-full avoids flex overflow clipping the top when the image is taller than the stage. */}
-                        <div className="absolute inset-0 flex items-center justify-center p-3">
+                        <div className="absolute inset-0 flex items-center justify-center p-2 sm:p-4">
                             <img
                                 src={src}
                                 alt={displayTitle}
@@ -218,7 +243,7 @@ export function CanvasImagePreviewModal({ open, src, title, fileName, projectId,
                         <div className="pointer-events-none absolute bottom-3 left-3 rounded-full bg-black/55 px-2.5 py-1 text-[11px] font-medium text-white/90">{Math.round(zoom * 100)}%</div>
                     </div>
 
-                    <aside className="flex min-h-0 flex-col border-t lg:border-l lg:border-t-0" style={{ borderColor: theme.node.stroke, background: theme.node.panel, color: theme.node.text }}>
+                    <aside className="flex max-h-[38dvh] min-h-0 flex-col border-t lg:max-h-none lg:border-l lg:border-t-0" style={{ borderColor: theme.node.stroke, background: theme.node.panel, color: theme.node.text }}>
                         <div className="border-b px-4 py-3 text-sm font-semibold" style={{ borderColor: theme.node.stroke }}>
                             {t("canvas.imagePreview.infoTitle")}
                         </div>

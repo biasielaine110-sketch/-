@@ -436,6 +436,38 @@
         top: 21px;
     }
 
+    .canvas-image-preview-fullscreen .ant-modal-wrap {
+        overflow: hidden;
+    }
+
+    .canvas-image-preview-fullscreen .ant-modal {
+        width: 100vw !important;
+        max-width: 100vw !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        top: 0 !important;
+    }
+
+    .canvas-image-preview-fullscreen .ant-modal-container {
+        width: 100vw !important;
+        max-width: 100vw !important;
+        height: 100dvh !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border-radius: 0 !important;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    .canvas-image-preview-fullscreen .ant-modal-body {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
     @keyframes canvas-batch-child-in {
         from {
             opacity: 0;

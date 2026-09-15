@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Clapperboard, Copy, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Plus, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Clapperboard, Copy, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
 
 import { CanvasDisplayImage } from "@/lib/canvas/canvas-display-image";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -52,6 +52,7 @@ type CanvasNodeProps = {
     onRetryBatchImage?: (node: CanvasNodeData, imageId: string) => void;
     onDeleteBatchImage?: (nodeId: string, imageId: string | string[]) => void;
     onRetry?: (node: CanvasNodeData) => void;
+    onCancelGeneration?: (nodeId: string) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onCreateChat?: (node: CanvasNodeData) => void;
     onSendChat?: (nodeId: string, text: string, options?: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
@@ -79,6 +80,7 @@ type NodeContentRendererProps = {
     onStopEditing: () => void;
     mentionReferences: CanvasResourceReference[];
     onRetry?: (node: CanvasNodeData) => void;
+    onCancelGeneration?: (nodeId: string) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onCreateChat?: (node: CanvasNodeData) => void;
     onSendChat?: (nodeId: string, text: string, options?: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
@@ -131,6 +133,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onRetryBatchImage,
     onDeleteBatchImage,
     onRetry,
+    onCancelGeneration,
     onGenerateImage,
     onCreateChat,
     onSendChat,
@@ -438,6 +441,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onContentChange={onContentChange}
                         onStopEditing={() => setIsEditingContent(false)}
                         onRetry={onRetry}
+                        onCancelGeneration={onCancelGeneration}
                         onGenerateImage={onGenerateImage}
                         onCreateChat={onCreateChat}
                         onSendChat={onSendChat}
@@ -489,7 +493,7 @@ function NodeContent(props: NodeContentRendererProps) {
     if (props.isBatchRoot || ((props.node.type === CanvasNodeType.Image || props.node.type === CanvasNodeType.Video) && (props.node.metadata?.images?.length || 0) > 0)) {
         return props.node.type === CanvasNodeType.Video ? <VideoBatchContent {...props} /> : <ImageNodeContent {...props} />;
     }
-    if (props.node.metadata?.status === "loading") return <LoadingContent theme={props.theme} />;
+    if (props.node.metadata?.status === "loading") return <LoadingContent theme={props.theme} onCancel={props.onCancelGeneration ? () => props.onCancelGeneration?.(props.node.id) : undefined} />;
     if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
 
     const Renderer = nodeContentRenderers[props.node.type as CanvasNodeType];
@@ -592,7 +596,7 @@ function AnnotateNodeContent({ node, theme, onAnnotate }: NodeContentRendererPro
     );
 }
 
-function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onInsertChatImage, onFontSizeChange }: NodeContentRendererProps) {
+function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onInsertChatImage, onFontSizeChange, onCancelGeneration }: NodeContentRendererProps) {
     // Exclude this chat node itself: its resource text is the latest reply and must not fill the composer.
     const upstreamReferences = mentionReferences.filter((reference) => reference.nodeId !== node.id);
     const connectedTexts = upstreamReferences.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim()).map((reference) => reference.text!.trim());
@@ -603,6 +607,7 @@ function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatMod
             connectedTexts={connectedTexts}
             mentionReferences={upstreamReferences}
             onSend={(nodeId, text, options) => onSendChat?.(nodeId, text, options)}
+            onStop={onCancelGeneration}
             onModelChange={(nodeId, model) => onChatModelChange?.(nodeId, model)}
             onImageModelChange={(nodeId, model) => onChatImageModelChange?.(nodeId, model)}
             onModesChange={(nodeId, options) => onChatModesChange?.(nodeId, options)}
@@ -645,12 +650,28 @@ function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererP
     );
 }
 
-function LoadingContent({ theme }: Pick<NodeContentRendererProps, "theme">) {
+function LoadingContent({ theme, onCancel }: Pick<NodeContentRendererProps, "theme"> & { onCancel?: () => void }) {
     const { t } = useTranslation();
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.activeStroke }}>
             <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
             <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span>
+            {onCancel ? (
+                <button
+                    type="button"
+                    className="pointer-events-auto inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onCancel();
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                >
+                    <Square className="size-3 fill-current" />
+                    {t("canvas.node.cancel")}
+                </button>
+            ) : null}
         </div>
     );
 }
@@ -843,6 +864,7 @@ function ImageNodeContent(props: NodeContentRendererProps) {
             onRetryBatchImage={props.onRetryBatchImage}
             onDeleteBatchImage={props.onDeleteBatchImage}
             onViewBatchImage={props.onViewBatchImage}
+            onCancelGeneration={props.onCancelGeneration}
         />
     );
 }
@@ -917,6 +939,7 @@ function ImageContent({
     onRetryBatchImage,
     onDeleteBatchImage,
     onViewBatchImage,
+    onCancelGeneration,
 }: {
     node: CanvasNodeData;
     batchExpanded: boolean;
@@ -926,6 +949,7 @@ function ImageContent({
     onRetryBatchImage?: (imageId: string) => void;
     onDeleteBatchImage?: (imageId: string | string[]) => void;
     onViewBatchImage?: (imageId: string) => void;
+    onCancelGeneration?: (nodeId: string) => void;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
@@ -938,6 +962,8 @@ function ImageContent({
     const primaryContent = primaryImage?.content || node.metadata?.content;
     const primaryThumb = primaryImage?.thumbnailContent || node.metadata?.thumbnailContent;
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const isGenerating = node.metadata?.status === "loading" || images.some((image) => image.status === "loading");
+    const canCancel = Boolean(onCancelGeneration) && isGenerating;
 
     useEffect(() => {
         if (!batchExpanded) setSelectedIds(new Set());
@@ -977,6 +1003,7 @@ function ImageContent({
                               onDuplicate={() => onDuplicateBatchImage?.(image.id)}
                               onRetry={() => onRetryBatchImage?.(image.id)}
                               onDelete={() => onDeleteBatchImage?.(image.id)}
+                              onCancel={onCancelGeneration ? () => onCancelGeneration(node.id) : undefined}
                           />
                       ))
                 : null}
@@ -1026,9 +1053,25 @@ function ImageContent({
                         </>
                     )
                 ) : (
-                    <ImageSlotStatus image={primaryImage} />
+                    <ImageSlotStatus image={primaryImage} onCancel={canCancel ? () => onCancelGeneration?.(node.id) : undefined} />
                 )}
             </div>
+            {canCancel && primaryContent ? (
+                <button
+                    type="button"
+                    className="absolute bottom-2.5 left-1/2 z-40 flex h-9 -translate-x-1/2 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onCancelGeneration?.(node.id);
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                >
+                    <Square className="size-3 fill-current" />
+                    {t("canvas.node.cancel")}
+                </button>
+            ) : null}
             {primaryImage?.status === "error" ? <BatchImageFailureActions placement="left" onRetry={() => onRetryBatchImage?.(primaryImage.id)} onDelete={() => onDeleteBatchImage?.(primaryImage.id)} /> : null}
             {primaryContent && primaryImage?.status !== "error" ? (
                 <button
@@ -1090,6 +1133,7 @@ function ExpandedImageCard({
     onDuplicate,
     onRetry,
     onDelete,
+    onCancel,
 }: {
     node: CanvasNodeData;
     image: CanvasNodeImage;
@@ -1102,6 +1146,7 @@ function ExpandedImageCard({
     onDuplicate: () => void;
     onRetry: () => void;
     onDelete: () => void;
+    onCancel?: () => void;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
@@ -1148,7 +1193,7 @@ function ExpandedImageCard({
                     <CanvasDisplayImage src={image.content} previewSrc={image.thumbnailContent} alt={node.title} maxEdge={512} className="pointer-events-none h-full w-full select-none object-contain" />
                 )
             ) : (
-                <ImageSlotStatus image={image} />
+                <ImageSlotStatus image={image} onCancel={onCancel} />
             )}
             {image.content ? (
                 <div className="absolute inset-x-2 top-2 flex items-center gap-1">
@@ -1227,7 +1272,7 @@ function BatchImageFailureActions({ placement, onRetry, onDelete }: { placement:
     );
 }
 
-function ImageSlotStatus({ image }: { image?: CanvasNodeImage }) {
+function ImageSlotStatus({ image, onCancel }: { image?: CanvasNodeImage; onCancel?: () => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
     const failed = image?.status === "error";
@@ -1239,6 +1284,22 @@ function ImageSlotStatus({ image }: { image?: CanvasNodeImage }) {
                 <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
             )}
             {!failed ? <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span> : null}
+            {!failed && onCancel ? (
+                <button
+                    type="button"
+                    className="pointer-events-auto inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onCancel();
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                >
+                    <Square className="size-3 fill-current" />
+                    {t("canvas.node.cancel")}
+                </button>
+            ) : null}
         </div>
     );
 }

@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings2, Square, Video } from "lucide-react";
 import { Button, Segmented } from "antd";
 import { useTranslation } from "react-i18next";
@@ -34,6 +34,29 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const hasAnyInput = Boolean(inputSummary.textCount || inputSummary.imageCount || inputSummary.videoCount || inputSummary.audioCount);
     const hasComposerContent = Boolean((node.metadata?.composerContent ?? node.metadata?.prompt ?? "").trim());
     const canGenerate = hasComposerContent || (mode === "audio" ? inputSummary.textCount > 0 : hasAnyInput);
+    const [localRunning, setLocalRunning] = useState(false);
+    const running = isRunning || localRunning;
+
+    useEffect(() => {
+        if (isRunning) {
+            setLocalRunning(false);
+            return;
+        }
+        if (!localRunning) return;
+        const timer = window.setTimeout(() => setLocalRunning(false), 120);
+        return () => window.clearTimeout(timer);
+    }, [isRunning, localRunning, node.id]);
+
+    const handleGenerate = () => {
+        if (running || !canGenerate) return;
+        setLocalRunning(true);
+        onGenerate(node.id);
+    };
+
+    const handleStop = () => {
+        setLocalRunning(false);
+        onStop(node.id);
+    };
 
     return (
         <div className="flex h-full w-full cursor-move flex-col px-3 pb-3 pt-7 text-sm" style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
@@ -114,13 +137,13 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
             <Button
                 type="primary"
                 className="mt-auto !h-9 !w-full !cursor-pointer !rounded-lg"
-                danger={isRunning}
-                disabled={!isRunning && !canGenerate}
+                danger={running}
+                disabled={!running && !canGenerate}
                 onMouseDown={(event) => event.stopPropagation()}
-                onClick={() => (isRunning ? onStop(node.id) : onGenerate(node.id))}
+                onClick={() => (running ? handleStop() : handleGenerate())}
             >
                 <span className="inline-flex items-center gap-1.5">
-                    {isRunning ? (
+                    {running ? (
                         <>
                             <LoaderCircle className="size-4 animate-spin" />
                             <Square className="size-3.5 fill-current" />

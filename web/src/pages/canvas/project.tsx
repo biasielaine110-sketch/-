@@ -212,7 +212,7 @@ export default function CanvasPage() {
 }
 
 function AtelierCanvasPage() {
-    const { message, modal } = App.useApp();
+    const { message } = App.useApp();
     const { t } = useTranslation();
     const copyText = useCopyText();
     const params = useParams<{ id: string }>();
@@ -281,6 +281,8 @@ function AtelierCanvasPage() {
     const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
     const [nodeCreatePosition, setNodeCreatePosition] = useState<Position | null>(null);
     const [runningNodeId, setRunningNodeId] = useState<string | null>(null);
+    /** Bumped whenever generationRequestsRef changes so isNodeGenerating can re-render. */
+    const [generationEpoch, setGenerationEpoch] = useState(0);
     const [isMiniMapOpen, setIsMiniMapOpen] = useState(false);
     const [backgroundMode, setBackgroundMode] = useState<CanvasBackgroundMode>("lines");
     const [showImageInfo, setShowImageInfo] = useState(false);
@@ -358,34 +360,40 @@ function AtelierCanvasPage() {
         const previous = generationRequestsRef.current.get(targetNodeId);
         if (previous?.controller !== controller) previous?.controller.abort();
         generationRequestsRef.current.set(targetNodeId, { targetNodeId, originNodeId, runningNodeId: runningId, controller });
+        setGenerationEpoch((value) => value + 1);
         return controller;
     }, []);
 
     const finishGenerationRequest = useCallback((targetNodeId: string, controller: AbortController) => {
         const request = generationRequestsRef.current.get(targetNodeId);
-        if (request?.controller === controller) generationRequestsRef.current.delete(targetNodeId);
+        if (request?.controller === controller) {
+            generationRequestsRef.current.delete(targetNodeId);
+            setGenerationEpoch((value) => value + 1);
+        }
     }, []);
 
-    const stopGenerationByRunningId = useCallback(
-        (runningId: string) => {
-            const affectedNodeIds = new Set<string>();
+    const stopGenerationForNode = useCallback(
+        (nodeId: string) => {
+            const affectedNodeIds = new Set<string>([nodeId]);
+            const runningIdsToClear = new Set<string>();
             generationRequestsRef.current.forEach((request) => {
-                if (request.runningNodeId !== runningId) return;
+                if (request.runningNodeId !== nodeId && request.originNodeId !== nodeId && request.targetNodeId !== nodeId) return;
                 request.controller.abort();
                 generationRequestsRef.current.delete(request.targetNodeId);
                 affectedNodeIds.add(request.targetNodeId);
                 affectedNodeIds.add(request.originNodeId);
+                runningIdsToClear.add(request.runningNodeId);
             });
-            setRunningNodeId((current) => (current === runningId ? null : current));
-            if (!affectedNodeIds.size) return;
+            setRunningNodeId((current) => (current && (current === nodeId || runningIdsToClear.has(current) || affectedNodeIds.has(current)) ? null : current));
+            setGenerationEpoch((value) => value + 1);
             setNodes((prev) =>
                 prev.map((node) =>
-                    affectedNodeIds.has(node.id) && node.metadata?.status === NODE_STATUS_LOADING
+                    affectedNodeIds.has(node.id) && (node.metadata?.status === NODE_STATUS_LOADING || node.metadata?.images?.some((image) => image.status === NODE_STATUS_LOADING))
                         ? {
                               ...node,
                               metadata: {
                                   ...node.metadata,
-                                  status: NODE_STATUS_IDLE,
+                                  status: node.metadata?.status === NODE_STATUS_LOADING ? NODE_STATUS_IDLE : node.metadata?.status,
                                   errorDetails: undefined,
                                   images: node.metadata.images?.map((image) => (image.status === NODE_STATUS_LOADING ? { ...image, status: NODE_STATUS_ERROR, errorDetails: t("common.requestCanceled") } : image)),
                               },
@@ -397,18 +405,15 @@ function AtelierCanvasPage() {
         [t],
     );
 
-    const confirmStopGeneration = useCallback(
+    const isNodeGenerating = useCallback(
         (nodeId: string) => {
-            modal.confirm({
-                title: t("canvas.projectPage.stopTitle"),
-                content: t("canvas.projectPage.stopDescription"),
-                okText: t("canvas.projectPage.stop"),
-                cancelText: t("canvas.projectPage.continue"),
-                okButtonProps: { danger: true },
-                onOk: () => stopGenerationByRunningId(nodeId),
-            });
+            if (runningNodeId === nodeId) return true;
+            for (const request of generationRequestsRef.current.values()) {
+                if (request.runningNodeId === nodeId || request.originNodeId === nodeId || request.targetNodeId === nodeId) return true;
+            }
+            return false;
         },
-        [modal, stopGenerationByRunningId, t],
+        [generationEpoch, runningNodeId],
     );
 
     useEffect(() => {
@@ -3139,6 +3144,7 @@ function AtelierCanvasPage() {
                     }
                 } finally {
                     finishGenerationRequest(nodeId, controller);
+                    setRunningNodeId((current) => (current === nodeId ? null : current));
                 }
                 return;
             }
@@ -4168,6 +4174,7 @@ function AtelierCanvasPage() {
             }
 
             const controller = new AbortController();
+            setRunningNodeId(nodeId);
             startGenerationRequest(nodeId, nodeId, nodeId, controller);
 
             const updateAssistantMessage = (patch: Partial<CanvasAssistantMessage>) => {
@@ -4309,13 +4316,19 @@ function AtelierCanvasPage() {
                     runImage ? runImageTask() : Promise.resolve(null),
                 ]);
 
+                if (controller.signal.aborted) return;
+
                 const errors: string[] = [];
                 if (textResult.status === "rejected") {
-                    errors.push(textResult.reason instanceof Error ? textResult.reason.message : String(textResult.reason));
+                    const reason = textResult.reason;
+                    if (!isGenerationCanceled(reason)) errors.push(reason instanceof Error ? reason.message : String(reason));
                 }
                 if (imageResult.status === "rejected") {
-                    errors.push(imageResult.reason instanceof Error ? imageResult.reason.message : String(imageResult.reason));
+                    const reason = imageResult.reason;
+                    if (!isGenerationCanceled(reason)) errors.push(reason instanceof Error ? reason.message : String(reason));
                 }
+
+                if (controller.signal.aborted) return;
 
                 setNodes((prev) =>
                     prev.map((node) => {
@@ -4353,6 +4366,7 @@ function AtelierCanvasPage() {
                     }),
                 );
             } catch (error) {
+                if (isGenerationCanceled(error) || controller.signal.aborted) return;
                 const errorDetails = error instanceof Error ? error.message : String(error);
                 setNodes((prev) =>
                     prev.map((node) => {
@@ -4363,6 +4377,7 @@ function AtelierCanvasPage() {
                 );
             } finally {
                 finishGenerationRequest(nodeId, controller);
+                setRunningNodeId((current) => (current === nodeId ? null : current));
             }
         },
         [effectiveConfig, finishGenerationRequest, isAiConfigReady, openConfigDialog, startGenerationRequest, t],
@@ -4513,12 +4528,12 @@ function AtelierCanvasPage() {
             ) : (
                 <CanvasNodePromptPanel
                     node={panelNode}
-                    isRunning={runningNodeId === panelNode.id}
+                    isRunning={isNodeGenerating(panelNode.id)}
                     mentionReferences={mentionReferencesByNodeId.get(panelNode.id) || EMPTY_REFERENCES}
                     onPromptChange={handleNodePromptChange}
                     onConfigChange={handleConfigNodeChange}
                     onGenerate={handleGenerateNode}
-                    onStop={confirmStopGeneration}
+                    onStop={stopGenerationForNode}
                     modeOverride={getNodeDefinition(panelNode.type)?.useBuiltinPanel?.mode}
                     onImageSettingsOpenChange={(open) => {
                         setNodeImageSettingsOpen(open);
@@ -4526,7 +4541,7 @@ function AtelierCanvasPage() {
                     }}
                 />
             ),
-        [configInputsById, confirmStopGeneration, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, mentionReferencesByNodeId, runningNodeId],
+        [configInputsById, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, isNodeGenerating, mentionReferencesByNodeId, stopGenerationForNode],
     );
 
     const handleDirectorExport = useCallback(
@@ -4560,7 +4575,7 @@ function AtelierCanvasPage() {
                     <CanvasMergeNodeContent
                         node={contentNode}
                         inputs={configInputsById.get(contentNode.id) || []}
-                        isRunning={runningNodeId === contentNode.id}
+                        isRunning={isNodeGenerating(contentNode.id)}
                         onConfigChange={handleConfigNodeChange}
                         onMerge={(nodeId) => void runMergeNode(nodeId)}
                         onNodeSizeChange={(nodeId, width, height) => {
@@ -4586,11 +4601,11 @@ function AtelierCanvasPage() {
             return (
                 <CanvasConfigNodePanel
                     node={contentNode}
-                    isRunning={runningNodeId === contentNode.id}
+                    isRunning={isNodeGenerating(contentNode.id)}
                     inputSummary={getInputSummary(configInputsById.get(contentNode.id) || [])}
                     onConfigChange={handleConfigNodeChange}
                     onComposerToggle={() => setDialogNodeId((current) => (current === contentNode.id ? null : contentNode.id))}
-                    onStop={confirmStopGeneration}
+                    onStop={stopGenerationForNode}
                     onGenerate={(nodeId) => {
                         const target = nodesRef.current.find((item) => item.id === nodeId);
                         void handleGenerateNode(nodeId, target?.metadata?.generationMode || "image", target?.metadata?.composerContent ?? target?.metadata?.prompt ?? "");
@@ -4598,7 +4613,7 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [configInputsById, confirmStopGeneration, handleConfigNodeChange, handleGenerateNode, runMergeNode, runningNodeId],
+        [configInputsById, handleConfigNodeChange, handleGenerateNode, isNodeGenerating, runMergeNode, stopGenerationForNode],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;
@@ -4687,7 +4702,7 @@ function AtelierCanvasPage() {
                             isFocusRelated={activeNodeId === node.id}
                             isConnectionTarget={connectionTargetNodeId === node.id}
                             isConnecting={Boolean(connectingParams)}
-                            showPanel={!isNodeResizing && dialogNodeId === node.id && !selectionBox && !getNodeDefinition(node.type)?.hidePanel}
+                            showPanel={!isNodeResizing && !selectionBox && !getNodeDefinition(node.type)?.hidePanel && (dialogNodeId === node.id || isNodeGenerating(node.id))}
                             groupChildCount={groupChildCountById.get(node.id) || 0}
                             isGroupDropTarget={dropTargetGroupId === node.id}
                             batchExpanded={expandedImageNodeIds.has(node.id)}
@@ -4711,6 +4726,7 @@ function AtelierCanvasPage() {
                             onRetryBatchImage={retryBatchImage}
                             onDeleteBatchImage={deleteBatchImage}
                             onRetry={handleNodeRetry}
+                            onCancelGeneration={stopGenerationForNode}
                             onGenerateImage={generateImageFromTextNode}
                             onCreateChat={createChatFromTextNode}
                             onSendChat={sendChatMessage}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { Check, Copy, Image as ImageIcon, LoaderCircle, MessageSquareText, Minus, Plus, SendHorizontal, Video } from "lucide-react";
+import { Check, Copy, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Square, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -23,6 +23,7 @@ type CanvasChatContentProps = {
     connectedTexts?: string[];
     mentionReferences?: CanvasResourceReference[];
     onSend: (nodeId: string, text: string, options: ChatSendOptions) => void;
+    onStop?: (nodeId: string) => void;
     onModelChange: (nodeId: string, model: string) => void;
     onImageModelChange?: (nodeId: string, model: string) => void;
     onModesChange?: (nodeId: string, options: ChatSendOptions) => void;
@@ -36,6 +37,7 @@ export function CanvasChatContent({
     connectedTexts = [],
     mentionReferences = [],
     onSend,
+    onStop,
     onModelChange,
     onImageModelChange,
     onModesChange,
@@ -331,14 +333,25 @@ export function CanvasChatContent({
                     </div>
                     <button
                         type="button"
-                        disabled={!canSend}
-                        className="grid size-8 shrink-0 place-items-center rounded-full transition disabled:opacity-35"
-                        style={{ background: theme.toolbar.activeBg, color: theme.toolbar.activeText }}
-                        onClick={submit}
-                        aria-label={sendLabel}
-                        title={sendLabel}
+                        disabled={loading ? !onStop : !canSend}
+                        className="inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded-full px-2.5 transition disabled:opacity-35"
+                        style={{ background: loading ? "#dc2626" : theme.toolbar.activeBg, color: "#fff", minWidth: loading ? 64 : 32 }}
+                        onClick={() => (loading ? onStop?.(node.id) : submit())}
+                        aria-label={loading ? t("canvas.chat.stop") : sendLabel}
+                        title={loading ? t("canvas.chat.stop") : sendLabel}
                     >
-                        {loading ? <LoaderCircle className="size-4 animate-spin" /> : textEnabled && imageEnabled ? <SendHorizontal className="size-4" /> : imageEnabled ? <ImageIcon className="size-4" /> : <SendHorizontal className="size-4" />}
+                        {loading ? (
+                            <>
+                                <Square className="size-3 fill-current" />
+                                <span className="text-[11px] font-medium">{t("canvas.chat.stop")}</span>
+                            </>
+                        ) : textEnabled && imageEnabled ? (
+                            <SendHorizontal className="size-4" />
+                        ) : imageEnabled ? (
+                            <ImageIcon className="size-4" />
+                        ) : (
+                            <SendHorizontal className="size-4" />
+                        )}
                     </button>
                 </div>
             </div>

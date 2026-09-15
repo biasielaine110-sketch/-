@@ -41,12 +41,26 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const [prompt, setPrompt] = useState(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
     const [expanded, setExpanded] = useState(false);
+    const [localRunning, setLocalRunning] = useState(false);
+    const running = isRunning || localRunning;
 
     // Restore prompts only when switching nodes; preserve the current input after generation on the same node.
     useEffect(() => {
         setPrompt(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
+        setLocalRunning(false);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [node.id]);
+
+    // Hand off to parent-controlled running, or drop optimistic state if generation never started.
+    useEffect(() => {
+        if (isRunning) {
+            setLocalRunning(false);
+            return;
+        }
+        if (!localRunning) return;
+        const timer = window.setTimeout(() => setLocalRunning(false), 120);
+        return () => window.clearTimeout(timer);
+    }, [isRunning, localRunning]);
 
     const updatePrompt = (value: string) => {
         setPrompt(value);
@@ -63,8 +77,14 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
     const submit = () => {
         const text = prompt.trim() || connectedTextPrompt;
-        if (!text || isRunning) return;
+        if (!text || running) return;
+        setLocalRunning(true);
         onGenerate(node.id, mode, text);
+    };
+
+    const handleStop = () => {
+        setLocalRunning(false);
+        onStop(node.id);
     };
 
     const openExpandedEditor = () => {
@@ -148,13 +168,13 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                 <Button
                     type="primary"
                     className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
-                    danger={isRunning}
-                    disabled={!isRunning && !canSubmit}
-                    onClick={() => (isRunning ? onStop(node.id) : submit())}
-                    aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
+                    danger={running}
+                    disabled={!running && !canSubmit}
+                    onClick={() => (running ? handleStop() : submit())}
+                    aria-label={t(running ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
                 >
                     <span className="flex items-center gap-1.5">
-                        {isRunning ? (
+                        {running ? (
                             <>
                                 <LoaderCircle className="size-4 animate-spin" />
                                 <Square className="size-3.5 fill-current" />
