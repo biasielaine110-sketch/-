@@ -1,5 +1,5 @@
-import { App, Button, Checkbox, Form, Input, Modal, Segmented, Select, Tabs } from "antd";
-import { Download, FileUp, GripVertical, Pencil, Plus, Trash2, Upload } from "lucide-react";
+import { App, Button, Checkbox, Form, Input, Modal, Progress, Segmented, Select, Tabs } from "antd";
+import { Download, FileUp, FolderOpen, GripVertical, HardDrive, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
@@ -8,6 +8,18 @@ import { ModelPicker } from "@/components/model-picker";
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { exportAppBackup, importAppBackup } from "@/services/backup-restore";
+import { listIndexedDbImageEntries, removeIndexedDbImages } from "@/services/image-storage";
+import { listIndexedDbMediaEntries, removeIndexedDbMedia } from "@/services/file-storage";
+import {
+    bindLocalMediaLibraryDirectory,
+    clearLocalMediaLibraryBinding,
+    getLocalMediaLibraryMeta,
+    hasLocalMediaBlob,
+    migrateIndexedDbBlobsToLocalLibrary,
+    supportsLocalMediaLibrary,
+    type LocalMediaLibraryMeta,
+    type LocalMediaMigrateProgress,
+} from "@/services/local-media-library";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
 import { defaultTextPrompts } from "@/constant/text-prompt-library";
 import {
@@ -587,18 +599,195 @@ function ConfigBackupTab() {
     };
 
     return (
+        <div className="space-y-3">
+            <section className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
+                <div className="mb-1 text-sm font-semibold">{t("config.backup.title")}</div>
+                <div className="mb-3 text-xs text-stone-500">{t("config.backup.description")}</div>
+                <div className="flex flex-wrap items-center gap-2">
+                    <Button icon={<Download className="size-4" />} onClick={() => void handleBackup()}>
+                        {t("config.backup.export")}
+                    </Button>
+                    <Button icon={<FileUp className="size-4" />} onClick={() => inputRef.current?.click()}>
+                        {t("config.backup.import")}
+                    </Button>
+                </div>
+                <input ref={inputRef} type="file" accept="application/zip,.zip" className="hidden" onChange={(event) => void handleImport(event.target.files?.[0])} />
+            </section>
+            <LocalMediaLibrarySection />
+        </div>
+    );
+}
+
+function LocalMediaLibrarySection() {
+    const { message, modal } = App.useApp();
+    const { t } = useTranslation();
+    const supported = supportsLocalMediaLibrary();
+    const [meta, setMeta] = useState<LocalMediaLibraryMeta | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [migrating, setMigrating] = useState(false);
+    const [cleaning, setCleaning] = useState(false);
+    const [progress, setProgress] = useState<LocalMediaMigrateProgress | null>(null);
+
+    useEffect(() => {
+        void getLocalMediaLibraryMeta().then(setMeta);
+    }, []);
+
+    const refreshMeta = async () => setMeta(await getLocalMediaLibraryMeta());
+
+    const handleBind = async () => {
+        if (!supported) {
+            message.warning(t("config.mediaLibrary.unsupported"));
+            return;
+        }
+        setLoading(true);
+        try {
+            const next = await bindLocalMediaLibraryDirectory();
+            setMeta(next);
+            message.success(t("config.mediaLibrary.bound", { name: next.folderName }));
+        } catch (error) {
+            const code = error instanceof Error ? error.message : "";
+            const aborted = (error instanceof DOMException && error.name === "AbortError") || code === "AbortError";
+            if (code === "FILE_PERMISSION_DENIED") message.warning(t("config.mediaLibrary.permissionDenied"));
+            else if (!aborted) message.error(error instanceof Error ? error.message : t("config.mediaLibrary.bindFailed"));
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleUnbind = () => {
+        modal.confirm({
+            title: t("config.mediaLibrary.unbindTitle"),
+            content: t("config.mediaLibrary.unbindDescription"),
+            okText: t("config.mediaLibrary.unbind"),
+            cancelText: t("common.cancel"),
+            onOk: async () => {
+                await clearLocalMediaLibraryBinding();
+                setMeta(null);
+                message.success(t("config.mediaLibrary.unbound"));
+            },
+        });
+    };
+
+    const handleMigrate = async () => {
+        if (!meta?.hasDirectory) {
+            message.warning(t("config.mediaLibrary.bindFirst"));
+            return;
+        }
+        setMigrating(true);
+        setProgress({ total: 0, done: 0, bytesCopied: 0 });
+        try {
+            const [images, media] = await Promise.all([listIndexedDbImageEntries(), listIndexedDbMediaEntries()]);
+            const entries = [...images, ...media];
+            if (!entries.length) {
+                message.info(t("config.mediaLibrary.nothingToMigrate"));
+                return;
+            }
+            const result = await migrateIndexedDbBlobsToLocalLibrary(entries, setProgress);
+            message.success(
+                t("config.mediaLibrary.migrateDone", {
+                    copied: result.copied,
+                    skipped: result.skipped,
+                    failed: result.failed,
+                    size: formatBytes(result.bytesCopied),
+                }),
+            );
+            if (result.failed > 0 && result.errors[0]) message.warning(result.errors[0]);
+        } catch (error) {
+            const code = error instanceof Error ? error.message : "";
+            if (code === "FILE_PERMISSION_DENIED") message.warning(t("config.mediaLibrary.permissionDenied"));
+            else message.error(error instanceof Error ? error.message : t("config.mediaLibrary.migrateFailed"));
+        } finally {
+            setMigrating(false);
+            setProgress(null);
+            await refreshMeta();
+        }
+    };
+
+    const handleCleanup = () => {
+        modal.confirm({
+            title: t("config.mediaLibrary.cleanupTitle"),
+            content: t("config.mediaLibrary.cleanupDescription"),
+            okText: t("config.mediaLibrary.cleanup"),
+            cancelText: t("common.cancel"),
+            okButtonProps: { danger: true },
+            onOk: async () => {
+                setCleaning(true);
+                try {
+                    const [images, media] = await Promise.all([listIndexedDbImageEntries(), listIndexedDbMediaEntries()]);
+                    const removableImages: string[] = [];
+                    const removableMedia: string[] = [];
+                    for (const entry of images) {
+                        if (await hasLocalMediaBlob(entry.storageKey)) removableImages.push(entry.storageKey);
+                    }
+                    for (const entry of media) {
+                        if (await hasLocalMediaBlob(entry.storageKey)) removableMedia.push(entry.storageKey);
+                    }
+                    await removeIndexedDbImages(removableImages);
+                    await removeIndexedDbMedia(removableMedia);
+                    message.success(t("config.mediaLibrary.cleanupDone", { count: removableImages.length + removableMedia.length }));
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : t("config.mediaLibrary.cleanupFailed"));
+                } finally {
+                    setCleaning(false);
+                }
+            },
+        });
+    };
+
+    const percent = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : migrating ? 0 : 100;
+
+    return (
         <section className="rounded-lg border border-stone-200 p-3 dark:border-stone-800">
-            <div className="mb-1 text-sm font-semibold">{t("config.backup.title")}</div>
-            <div className="mb-3 text-xs text-stone-500">{t("config.backup.description")}</div>
-            <div className="flex flex-wrap items-center gap-2">
-                <Button icon={<Download className="size-4" />} onClick={() => void handleBackup()}>
-                    {t("config.backup.export")}
-                </Button>
-                <Button icon={<FileUp className="size-4" />} onClick={() => inputRef.current?.click()}>
-                    {t("config.backup.import")}
-                </Button>
+            <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
+                <HardDrive className="size-4" />
+                {t("config.mediaLibrary.title")}
             </div>
-            <input ref={inputRef} type="file" accept="application/zip,.zip" className="hidden" onChange={(event) => void handleImport(event.target.files?.[0])} />
+            <div className="mb-3 text-xs text-stone-500">{t("config.mediaLibrary.description")}</div>
+            {!supported ? <div className="mb-3 text-xs text-amber-600 dark:text-amber-400">{t("config.mediaLibrary.unsupported")}</div> : null}
+            <div className="mb-3 rounded-md border border-dashed border-stone-300 px-3 py-2 text-xs dark:border-stone-700">
+                {meta?.hasDirectory ? t("config.mediaLibrary.boundPath", { name: meta.folderName }) : t("config.mediaLibrary.pathUnset")}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+                <Button type="primary" icon={<FolderOpen className="size-4" />} loading={loading} disabled={!supported || migrating || cleaning} onClick={() => void handleBind()}>
+                    {meta?.hasDirectory ? t("config.mediaLibrary.rebind") : t("config.mediaLibrary.bind")}
+                </Button>
+                <Button loading={migrating} disabled={!supported || !meta?.hasDirectory || cleaning} onClick={() => void handleMigrate()}>
+                    {t("config.mediaLibrary.migrate")}
+                </Button>
+                <Button danger loading={cleaning} disabled={!supported || !meta?.hasDirectory || migrating} onClick={handleCleanup}>
+                    {t("config.mediaLibrary.cleanup")}
+                </Button>
+                {meta?.hasDirectory ? (
+                    <Button type="text" disabled={migrating || cleaning} onClick={handleUnbind}>
+                        {t("config.mediaLibrary.unbind")}
+                    </Button>
+                ) : null}
+            </div>
+            {migrating ? (
+                <div className="mt-3 space-y-1">
+                    <Progress percent={percent} size="small" />
+                    <div className="text-[11px] text-stone-500">
+                        {t("config.mediaLibrary.migrateProgress", {
+                            done: progress?.done || 0,
+                            total: progress?.total || 0,
+                            size: formatBytes(progress?.bytesCopied || 0),
+                        })}
+                    </div>
+                </div>
+            ) : null}
+            <div className="mt-3 text-[11px] leading-5 text-stone-500">{t("config.mediaLibrary.hint")}</div>
         </section>
     );
+}
+
+function formatBytes(bytes: number) {
+    if (!bytes) return "0 B";
+    const units = ["B", "KB", "MB", "GB"];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+    }
+    return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }

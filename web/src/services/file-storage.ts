@@ -2,6 +2,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 
 import { proxyMediaUrl } from "@/lib/api-proxy";
+import { deleteLocalMediaBlob, isLocalMediaLibraryReady, readLocalMediaBlob, writeLocalMediaBlob } from "@/services/local-media-library";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
 
@@ -20,7 +21,7 @@ function proxyRemoteMediaUrl(url: string) {
 export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
     const blob = typeof input === "string" ? await (await fetch(proxyRemoteMediaUrl(input))).blob() : input;
     const storageKey = `${prefix}:${nanoid()}`;
-    await store.setItem(storageKey, blob);
+    await persistMediaBlob(storageKey, blob);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : blob.type.startsWith("audio/") ? await readAudioMeta(url) : {};
@@ -31,7 +32,7 @@ export async function resolveMediaUrl(storageKey?: string, fallback = "") {
     if (!storageKey) return fallback;
     const cached = objectUrls.get(storageKey);
     if (cached) return cached;
-    const blob = await store.getItem<Blob>(storageKey);
+    const blob = await getMediaBlob(storageKey);
     if (!blob) return fallback;
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
@@ -39,11 +40,13 @@ export async function resolveMediaUrl(storageKey?: string, fallback = "") {
 }
 
 export async function getMediaBlob(storageKey: string) {
+    const local = await readLocalMediaBlob(storageKey);
+    if (local) return local;
     return store.getItem<Blob>(storageKey);
 }
 
 export async function setMediaBlob(storageKey: string, blob: Blob) {
-    await store.setItem(storageKey, blob);
+    await persistMediaBlob(storageKey, blob);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     return url;
@@ -56,6 +59,7 @@ export async function deleteStoredMedia(keys: Iterable<string>) {
             if (url) URL.revokeObjectURL(url);
             objectUrls.delete(key);
             await store.removeItem(key);
+            await deleteLocalMediaBlob(key);
         }),
     );
 }
@@ -74,6 +78,34 @@ export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()
     if ("storageKey" in value && typeof value.storageKey === "string" && value.storageKey.includes(":")) keys.add(value.storageKey);
     Object.values(value).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectMediaStorageKeys(child, keys)) : collectMediaStorageKeys(item, keys)));
     return keys;
+}
+
+export async function listIndexedDbMediaEntries() {
+    const entries: Array<{ storageKey: string; blob: Blob }> = [];
+    await store.iterate((value, key) => {
+        if (value instanceof Blob) entries.push({ storageKey: key, blob: value });
+    });
+    return entries;
+}
+
+export async function removeIndexedDbMedia(keys: Iterable<string>) {
+    await Promise.all(
+        Array.from(new Set(keys)).map(async (key) => {
+            const url = objectUrls.get(key);
+            if (url) URL.revokeObjectURL(url);
+            objectUrls.delete(key);
+            await store.removeItem(key);
+        }),
+    );
+}
+
+async function persistMediaBlob(storageKey: string, blob: Blob) {
+    if (await isLocalMediaLibraryReady()) {
+        await writeLocalMediaBlob(storageKey, blob);
+        await store.removeItem(storageKey);
+        return;
+    }
+    await store.setItem(storageKey, blob);
 }
 
 function readVideoMeta(url: string) {

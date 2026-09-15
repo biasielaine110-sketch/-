@@ -4,6 +4,7 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import { readImageMeta } from "@/lib/image-utils";
 import { proxyMediaUrl } from "@/lib/api-proxy";
+import { deleteLocalMediaBlob, isLocalMediaLibraryReady, readLocalMediaBlob, writeLocalMediaBlob } from "@/services/local-media-library";
 
 export type UploadedImage = {
     url: string;
@@ -24,7 +25,7 @@ const objectUrls = new Map<string, string>();
 export async function uploadImage(input: string | Blob): Promise<UploadedImage> {
     const blob = typeof input === "string" ? await (await fetch(proxyRemoteMediaUrl(input))).blob() : input;
     const storageKey = `image:${nanoid()}`;
-    await store.setItem(storageKey, blob);
+    await persistImageBlob(storageKey, blob);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     const meta = await readImageMeta(url);
@@ -62,7 +63,7 @@ async function createAndStoreThumbnail(sourceUrl: string, fullStorageKey: string
         const thumbBlob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
         if (!thumbBlob) return null;
         const storageKey = `${fullStorageKey}:thumb`;
-        await store.setItem(storageKey, thumbBlob);
+        await persistImageBlob(storageKey, thumbBlob);
         const url = URL.createObjectURL(thumbBlob);
         objectUrls.set(storageKey, url);
         return { url, storageKey };
@@ -86,7 +87,7 @@ export async function ensureImageThumbnail(options: {
     if (!options.storageKey) return null;
 
     const expectedKey = `${options.storageKey}:thumb`;
-    const stored = await store.getItem<Blob>(expectedKey);
+    const stored = await getImageBlob(expectedKey);
     if (stored) {
         const url = await resolveImageUrl(expectedKey, "");
         if (url) return { thumbnailUrl: url, thumbnailStorageKey: expectedKey };
@@ -116,7 +117,7 @@ export async function resolveImageUrl(storageKey?: string, fallback = "") {
     if (!storageKey) return fallback;
     const cached = objectUrls.get(storageKey);
     if (cached) return cached;
-    const blob = await store.getItem<Blob>(storageKey);
+    const blob = await getImageBlob(storageKey);
     if (!blob) return fallback;
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
@@ -124,11 +125,13 @@ export async function resolveImageUrl(storageKey?: string, fallback = "") {
 }
 
 export async function getImageBlob(storageKey: string) {
+    const local = await readLocalMediaBlob(storageKey);
+    if (local) return local;
     return store.getItem<Blob>(storageKey);
 }
 
 export async function setImageBlob(storageKey: string, blob: Blob) {
-    await store.setItem(storageKey, blob);
+    await persistImageBlob(storageKey, blob);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     return url;
@@ -147,6 +150,7 @@ export async function deleteStoredImages(keys: Iterable<string>) {
             if (url) URL.revokeObjectURL(url);
             objectUrls.delete(key);
             await store.removeItem(key);
+            await deleteLocalMediaBlob(key);
         }),
     );
 }
@@ -169,6 +173,34 @@ export function collectImageStorageKeys(value: unknown, keys = new Set<string>()
     }
     Object.values(record).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectImageStorageKeys(child, keys)) : collectImageStorageKeys(item, keys)));
     return keys;
+}
+
+export async function listIndexedDbImageEntries() {
+    const entries: Array<{ storageKey: string; blob: Blob }> = [];
+    await store.iterate((value, key) => {
+        if (value instanceof Blob) entries.push({ storageKey: key, blob: value });
+    });
+    return entries;
+}
+
+export async function removeIndexedDbImages(keys: Iterable<string>) {
+    await Promise.all(
+        Array.from(new Set(keys)).map(async (key) => {
+            const url = objectUrls.get(key);
+            if (url) URL.revokeObjectURL(url);
+            objectUrls.delete(key);
+            await store.removeItem(key);
+        }),
+    );
+}
+
+async function persistImageBlob(storageKey: string, blob: Blob) {
+    if (await isLocalMediaLibraryReady()) {
+        await writeLocalMediaBlob(storageKey, blob);
+        await store.removeItem(storageKey);
+        return;
+    }
+    await store.setItem(storageKey, blob);
 }
 
 function blobToDataUrl(blob: Blob) {
