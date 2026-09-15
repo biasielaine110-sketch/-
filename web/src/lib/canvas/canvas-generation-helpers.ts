@@ -1,13 +1,13 @@
 import { defaultConfig, resolveModelForCapability, type AiConfig } from "@/stores/use-config-store";
 import i18n from "@/i18n";
-import { resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { ensureImageThumbnail, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
 import { imageMetadata, referenceUrl } from "@/lib/canvas/canvas-node-factory";
 import type { NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
 import type { ReferenceImage } from "@/types/image";
-import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
+import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeMetadata } from "@/types/canvas";
 
 export function imageExtension(dataUrl: string) {
     return dataUrl.match(/^data:image[/]([^;]+)/)?.[1] || dataUrl.match(/image[/]([^;]+)/)?.[1] || "png";
@@ -47,13 +47,88 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
         nodes.map(async (node) => {
             const content = node.metadata?.content;
             if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveMediaUrl(node.metadata.storageKey, content) } };
-            if (node.type !== CanvasNodeType.Image || !content) return node;
-            const images = await Promise.all((node.metadata?.images || []).map(async (image) => (image.content ? { ...image, content: await resolveImageUrl(image.storageKey, image.content) } : image)));
-            if (node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveImageUrl(node.metadata.storageKey, content), images } };
-            if (!content.startsWith("data:image/")) return node;
-            return { ...node, metadata: { ...node.metadata, ...imageMetadata(await uploadImage(content)) } };
+            if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) || !content) return node;
+            const images = await Promise.all(
+                (node.metadata?.images || []).map(async (image) => {
+                    if (!image.content && !image.storageKey) return image;
+                    const nextContent = image.storageKey ? await resolveImageUrl(image.storageKey, image.content) : image.content;
+                    const thumbnailContent = image.thumbnailStorageKey ? await resolveImageUrl(image.thumbnailStorageKey, image.thumbnailContent || "") : image.thumbnailContent;
+                    return { ...image, content: nextContent, thumbnailContent };
+                }),
+            );
+            if (node.metadata?.storageKey) {
+                const thumbnailContent = node.metadata.thumbnailStorageKey ? await resolveImageUrl(node.metadata.thumbnailStorageKey, node.metadata.thumbnailContent || "") : node.metadata.thumbnailContent;
+                return { ...node, metadata: { ...node.metadata, content: await resolveImageUrl(node.metadata.storageKey, content), thumbnailContent, images } };
+            }
+            if (!content.startsWith("data:image/")) return { ...node, metadata: { ...node.metadata, images } };
+            return { ...node, metadata: { ...node.metadata, ...imageMetadata(await uploadImage(content)), images } };
         }),
     );
+}
+
+function yieldToMain() {
+    return new Promise<void>((resolve) => {
+        const idle = (window as Window & { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback;
+        if (typeof idle === "function") idle(() => resolve(), { timeout: 800 });
+        else setTimeout(resolve, 24);
+    });
+}
+
+async function ensureNodeImageThumb(image: Pick<CanvasNodeImage, "storageKey" | "content" | "thumbnailStorageKey" | "thumbnailContent" | "naturalWidth" | "naturalHeight">) {
+    if (image.thumbnailStorageKey && image.thumbnailContent) return null;
+    if (!image.storageKey) return null;
+    return ensureImageThumbnail({
+        storageKey: image.storageKey,
+        contentUrl: image.content,
+        thumbnailStorageKey: image.thumbnailStorageKey,
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+    });
+}
+
+/** Background-fill persisted thumbnails for legacy nodes missing them. Safe to interrupt. */
+export async function backfillCanvasImageThumbnails(
+    nodes: CanvasNodeData[],
+    onNodePatched?: (nodeId: string, patch: { thumbnailContent?: string; thumbnailStorageKey?: string; images?: CanvasNodeImage[] }) => void,
+    signal?: AbortSignal,
+) {
+    for (const node of nodes) {
+        if (signal?.aborted) return;
+        if (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) continue;
+
+        let imagesChanged = false;
+        const images = node.metadata?.images ? [...node.metadata.images] : undefined;
+        if (images?.length) {
+            for (let index = 0; index < images.length; index += 1) {
+                if (signal?.aborted) return;
+                const image = images[index];
+                const thumb = await ensureNodeImageThumb(image);
+                if (thumb) {
+                    images[index] = { ...image, thumbnailContent: thumb.thumbnailUrl, thumbnailStorageKey: thumb.thumbnailStorageKey };
+                    imagesChanged = true;
+                }
+                await yieldToMain();
+            }
+        }
+
+        let primaryThumb: { thumbnailUrl: string; thumbnailStorageKey: string } | null = null;
+        if (node.metadata?.storageKey && !(node.metadata.thumbnailStorageKey && node.metadata.thumbnailContent)) {
+            primaryThumb = await ensureImageThumbnail({
+                storageKey: node.metadata.storageKey,
+                contentUrl: node.metadata.content,
+                thumbnailStorageKey: node.metadata.thumbnailStorageKey,
+                width: node.metadata.naturalWidth,
+                height: node.metadata.naturalHeight,
+            });
+            await yieldToMain();
+        }
+
+        if (!primaryThumb && !imagesChanged) continue;
+        onNodePatched?.(node.id, {
+            ...(primaryThumb ? { thumbnailContent: primaryThumb.thumbnailUrl, thumbnailStorageKey: primaryThumb.thumbnailStorageKey } : {}),
+            ...(imagesChanged ? { images } : {}),
+        });
+    }
 }
 
 export async function hydrateAssistantImages(sessions: CanvasAssistantSession[]) {

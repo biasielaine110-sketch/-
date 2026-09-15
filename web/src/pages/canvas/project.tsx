@@ -69,7 +69,7 @@ import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import type { ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
-import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
+import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
     audioExtension,
@@ -82,6 +82,7 @@ import {
     getInputSummary,
     hydrateAssistantImages,
     hydrateCanvasImages,
+    backfillCanvasImageThumbnails,
     imageExtension,
     isAudioFile,
     isGenerationCanceled,
@@ -314,6 +315,7 @@ function AtelierCanvasPage() {
     const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
     const [expandedImageNodeIds, setExpandedImageNodeIds] = useState<Set<string>>(new Set());
     const [isNodeDragging, setIsNodeDragging] = useState(false);
+    const [dragPreview, setDragPreview] = useState<{ dx: number; dy: number; ids: string[] } | null>(null);
     const [isNodeResizing, setIsNodeResizing] = useState(false);
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
 
@@ -418,6 +420,7 @@ function AtelierCanvasPage() {
             return;
         }
 
+        const thumbAbort = new AbortController();
         const restore = async () => {
             const restoredNodes = (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes))).map((node) =>
                 node.type === CanvasNodeType.Chat && node.height === 520
@@ -449,8 +452,45 @@ function AtelierCanvasPage() {
             };
             setHistoryState({ canUndo: false, canRedo: false });
             setProjectLoaded(true);
+
+            // Legacy projects: generate missing thumbnails in the background without blocking the canvas.
+            void backfillCanvasImageThumbnails(
+                restoredNodes,
+                (nodeId, patch) => {
+                    if (thumbAbort.signal.aborted) return;
+                    setNodes((prev) =>
+                        prev.map((node) => {
+                            if (node.id !== nodeId) return node;
+                            // Skip if the user already has a newer thumbnail or cleared the media.
+                            if (!node.metadata?.storageKey && !(node.metadata?.images || []).length) return node;
+                            const images = patch.images
+                                ? (node.metadata?.images || []).map((image) => {
+                                      const next = patch.images?.find((item) => item.id === image.id);
+                                      if (!next || image.thumbnailStorageKey) return image;
+                                      return { ...image, thumbnailContent: next.thumbnailContent, thumbnailStorageKey: next.thumbnailStorageKey };
+                                  })
+                                : node.metadata?.images;
+                            return {
+                                ...node,
+                                metadata: {
+                                    ...node.metadata,
+                                    ...(node.metadata?.thumbnailStorageKey
+                                        ? {}
+                                        : {
+                                              thumbnailContent: patch.thumbnailContent ?? node.metadata?.thumbnailContent,
+                                              thumbnailStorageKey: patch.thumbnailStorageKey ?? node.metadata?.thumbnailStorageKey,
+                                          }),
+                                    ...(images ? { images } : {}),
+                                },
+                            };
+                        }),
+                    );
+                },
+                thumbAbort.signal,
+            );
         };
         void restore();
+        return () => thumbAbort.abort();
     }, [hydrated, navigate, openProject, projectId]);
 
     useEffect(() => {
@@ -692,6 +732,38 @@ function AtelierCanvasPage() {
         return nodes.filter((node) => node.position.x + node.width > viewLeft && node.position.x < viewRight && node.position.y + node.height > viewTop && node.position.y < viewBottom);
     }, [nodes, size.height, size.width, viewport.k, viewport.x, viewport.y]);
 
+    const visibleConnections = useMemo(() => {
+        const padding = 320;
+        const rect = containerRef.current?.getBoundingClientRect();
+        const width = rect?.width || size.width;
+        const height = rect?.height || size.height;
+        const viewLeft = -viewport.x / viewport.k - padding;
+        const viewTop = -viewport.y / viewport.k - padding;
+        const viewRight = viewLeft + width / viewport.k + padding * 2;
+        const viewBottom = viewTop + height / viewport.k + padding * 2;
+        const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+
+        return connections.filter((connection) => {
+            const from = nodeMap.get(connection.fromNodeId);
+            const to = nodeMap.get(connection.toNodeId);
+            if (!from || !to) return false;
+            const left = Math.min(from.position.x, to.position.x);
+            const top = Math.min(from.position.y, to.position.y);
+            const right = Math.max(from.position.x + from.width, to.position.x + to.width);
+            const bottom = Math.max(from.position.y + from.height, to.position.y + to.height);
+            return right > viewLeft && left < viewRight && bottom > viewTop && top < viewBottom;
+        });
+    }, [connections, nodes, size.height, size.width, viewport.k, viewport.x, viewport.y]);
+
+    const getViewportScale = useCallback(() => viewportRef.current.k || 1, []);
+    const dragPreviewIdSet = useMemo(() => (dragPreview ? new Set(dragPreview.ids) : null), [dragPreview]);
+    const withDragPreview = useCallback(
+        (node: CanvasNodeData | undefined) => {
+            if (!node || !dragPreview || !dragPreviewIdSet?.has(node.id)) return node;
+            return { ...node, position: { x: node.position.x + dragPreview.dx, y: node.position.y + dragPreview.dy } };
+        },
+        [dragPreview, dragPreviewIdSet],
+    );
     const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
     // The toolbar follows a single selected node selected by click, creation, marquee, or keyboard.
     // It stays hidden for multi-selection and while isNodeDragging is true.
@@ -957,6 +1029,60 @@ function AtelierCanvasPage() {
         } catch (error) {
             message.error(error instanceof Error ? error.message : t("canvas.shortcut.copyImageFailed"));
         }
+    }, [message, t]);
+
+    /** C: spawn a new media node that only carries the selected image/video content. */
+    const duplicateSelectedMediaAsNode = useCallback(() => {
+        if (selectedNodeIdsRef.current.size !== 1) {
+            message.warning(t("canvas.shortcut.copyImageNeedSelect"));
+            return;
+        }
+        const nodeId = Array.from(selectedNodeIdsRef.current)[0];
+        const node = nodesRef.current.find((item) => item.id === nodeId);
+        if (!node || (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Annotate) || !node.metadata?.content) {
+            message.warning(t("canvas.shortcut.copyImageNeedSelect"));
+            return;
+        }
+
+        const metadata = node.metadata;
+        const primary = metadata.images?.find((image) => image.id === (metadata.primaryImageId || metadata.images?.[0]?.id) && image.content) || null;
+        const content = primary?.content || metadata.content;
+        const storageKey = primary?.storageKey || metadata.storageKey;
+        const thumbnailContent = primary?.thumbnailContent || metadata.thumbnailContent;
+        const thumbnailStorageKey = primary?.thumbnailStorageKey || metadata.thumbnailStorageKey;
+        const naturalWidth = primary?.naturalWidth || metadata.naturalWidth || node.width;
+        const naturalHeight = primary?.naturalHeight || metadata.naturalHeight || node.height;
+        const bytes = primary?.bytes || metadata.bytes || 0;
+        const mimeType = primary?.mimeType || metadata.mimeType || (node.type === CanvasNodeType.Video ? "video/mp4" : "image/png");
+        const isVideo = node.type === CanvasNodeType.Video;
+        const size = isVideo
+            ? fitNodeSize(naturalWidth || node.width, naturalHeight || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT)
+            : fitNodeSize(naturalWidth || node.width, naturalHeight || node.height, Math.max(node.width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width), Math.max(node.height, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height));
+        const id = `${isVideo ? CanvasNodeType.Video : CanvasNodeType.Image}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const copy: CanvasNodeData = {
+            id,
+            type: isVideo ? CanvasNodeType.Video : CanvasNodeType.Image,
+            title: node.title,
+            position: { x: node.position.x + node.width + 48, y: node.position.y + node.height / 2 - size.height / 2 },
+            ...size,
+            metadata: {
+                content,
+                storageKey,
+                thumbnailContent,
+                thumbnailStorageKey,
+                naturalWidth,
+                naturalHeight,
+                bytes,
+                mimeType,
+                status: NODE_STATUS_SUCCESS,
+                durationMs: isVideo ? metadata.durationMs : undefined,
+            },
+        };
+        setNodes((prev) => [...prev, copy]);
+        setSelectedNodeIds(new Set([id]));
+        setSelectedConnectionId(null);
+        setDialogNodeId(id);
+        message.success(t("canvas.shortcut.copyImageNodeDone"));
     }, [message, t]);
 
     const pasteCopiedNodes = useCallback(() => {
@@ -1342,8 +1468,10 @@ function AtelierCanvasPage() {
             const currentConnection = connectingParamsRef.current;
             if (currentConnection && currentConnection.nodeId !== nodeId) {
                 connectNodes(currentConnection, nodeId);
-                setConnecting(null);
-                setPendingConnectionCreate(null);
+                if (!currentConnection.sticky) {
+                    setConnecting(null);
+                    setPendingConnectionCreate(null);
+                }
             }
             const { nextSelected } = selectNodeByEvent(event, nodeId);
             pendingSelectionRef.current = nextSelected;
@@ -1446,6 +1574,7 @@ function AtelierCanvasPage() {
         historyPausedRef.current = false;
         nodeDraggingRef.current = false;
         setIsNodeDragging(false);
+        setDragPreview(null);
         setDropTargetGroupId(null);
         if (dragRef.current.hasMoved && clientX != null && clientY != null && (!wasAltCopy || copySpawned)) {
             const movedIds = new Set(initialPositions.map((item) => item.id));
@@ -1512,18 +1641,11 @@ function AtelierCanvasPage() {
                 });
                 setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
 
+                // Preview drag with transform offset only — commit positions once on mouseup.
                 if (rafRef.current) cancelAnimationFrame(rafRef.current);
                 rafRef.current = requestAnimationFrame(() => {
-                    const positions = dragRef.current.initialSelectedNodes;
-                    setNodes((prev) => {
-                        const ids = new Set(prev.map((node) => node.id));
-                        const missing = nodesRef.current.filter((node) => positions.some((item) => item.id === node.id) && !ids.has(node.id));
-                        const base = missing.length ? [...prev, ...missing] : prev;
-                        return base.map((node) => {
-                            const initial = positions.find((item) => item.id === node.id);
-                            return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
-                        });
-                    });
+                    const ids = dragRef.current.initialSelectedNodes.map((item) => item.id);
+                    setDragPreview({ dx, dy, ids });
                     rafRef.current = null;
                 });
                 return;
@@ -1536,7 +1658,7 @@ function AtelierCanvasPage() {
                 setMouseWorld(nextWorld);
             }
         },
-        [finishNodeDrag, getConnectionDropTarget, screenToCanvas, spawnAltCopyDragNodes],
+        [getConnectionDropTarget, screenToCanvas, spawnAltCopyDragNodes],
     );
 
     const handleGlobalPointerMove = useCallback(
@@ -1585,10 +1707,10 @@ function AtelierCanvasPage() {
                 const dropTarget = getConnectionDropTarget(event.clientX, event.clientY, currentConnection);
                 if (dropTarget.nodeId) {
                     connectNodes(currentConnection, dropTarget.nodeId);
-                    setConnecting(null);
+                    if (!currentConnection.sticky) setConnecting(null);
                 } else if (dropTarget.isNearNode) {
-                    setConnecting(null);
-                } else {
+                    if (!currentConnection.sticky) setConnecting(null);
+                } else if (!currentConnection.sticky) {
                     setMouseWorld(screenToCanvas(event.clientX, event.clientY));
                     setPendingConnectionCreate({ connection: currentConnection, position: screenToCanvas(event.clientX, event.clientY) });
                 }
@@ -1853,7 +1975,7 @@ function AtelierCanvasPage() {
 
             if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "c") {
                 event.preventDefault();
-                void copySelectedImageToClipboard();
+                duplicateSelectedMediaAsNode();
                 return;
             }
 
@@ -1862,6 +1984,7 @@ function AtelierCanvasPage() {
                 if (connectingParamsRef.current) {
                     setConnecting(null);
                     setPendingConnectionCreate(null);
+                    message.info(t("canvas.shortcut.connectCanceled"));
                     return;
                 }
                 if (selectedNodeIdsRef.current.size !== 1) {
@@ -1874,9 +1997,9 @@ function AtelierCanvasPage() {
                     message.warning(t("canvas.shortcut.selectNodeToConnect"));
                     return;
                 }
-                // X: selected node is the output/receiver; the next clicked node becomes its input provider.
+                // X sticky mode: selected node is the receiver; click multiple providers without canceling.
                 setMouseWorld({ x: outputNode.position.x, y: outputNode.position.y + outputNode.height / 2 });
-                setConnecting({ nodeId: outputNodeId, handleType: "target" });
+                setConnecting({ nodeId: outputNodeId, handleType: "target", sticky: true });
                 setSelectedConnectionId(null);
                 setPendingConnectionCreate(null);
                 message.info(t("canvas.shortcut.connectHint"));
@@ -1914,7 +2037,7 @@ function AtelierCanvasPage() {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [copySelectedImageToClipboard, copySelectedNodes, createNode, deleteConnection, deleteNodes, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, t, undoCanvas]);
+    }, [copySelectedNodes, createNode, deleteConnection, deleteNodes, duplicateSelectedMediaAsNode, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, t, undoCanvas]);
 
     const handleConnectStart = useCallback(
         (event: ReactMouseEvent, nodeId: string, handleType: "source" | "target") => {
@@ -2013,6 +2136,8 @@ function AtelierCanvasPage() {
                         ...node.metadata,
                         content: image.content,
                         storageKey: image.storageKey,
+                        thumbnailContent: image.thumbnailContent,
+                        thumbnailStorageKey: image.thumbnailStorageKey,
                         naturalWidth: image.naturalWidth,
                         naturalHeight: image.naturalHeight,
                         bytes: image.bytes,
@@ -2041,6 +2166,8 @@ function AtelierCanvasPage() {
             metadata: {
                 content: image.content,
                 storageKey: image.storageKey,
+                thumbnailContent: image.thumbnailContent,
+                thumbnailStorageKey: image.thumbnailStorageKey,
                 naturalWidth: image.naturalWidth,
                 naturalHeight: image.naturalHeight,
                 bytes: image.bytes,
@@ -3036,18 +3163,10 @@ function AtelierCanvasPage() {
                     ) => {
                         const uploaded = await uploadImage(image.dataUrl);
                         const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
-                        const item: CanvasNodeImage = {
-                            id: imageId,
-                            status: NODE_STATUS_SUCCESS,
-                            content: uploaded.url,
-                            storageKey: uploaded.storageKey,
-                            naturalWidth: uploaded.width,
-                            naturalHeight: uploaded.height,
-                            bytes: uploaded.bytes,
-                            mimeType: uploaded.mimeType,
+                        const item = canvasNodeImageFromUpload(imageId, uploaded, {
                             midjourneyTaskId: image.midjourneyTaskId,
                             midjourneyIndex: image.midjourneyIndex,
-                        };
+                        });
                         setNodes((prev) =>
                             prev.map((node) => {
                                 if (node.id !== rootId) return node;
@@ -3064,6 +3183,8 @@ function AtelierCanvasPage() {
                                         ...node.metadata,
                                         content: item.content,
                                         storageKey: item.storageKey,
+                                        thumbnailContent: item.thumbnailContent,
+                                        thumbnailStorageKey: item.thumbnailStorageKey,
                                         naturalWidth: item.naturalWidth,
                                         naturalHeight: item.naturalHeight,
                                         bytes: item.bytes,
@@ -3631,16 +3752,7 @@ function AtelierCanvasPage() {
                     : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
                 const uploadedImage = await uploadImage(image.dataUrl);
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-                const retryImage: CanvasNodeImage = {
-                    id: imageId || node.metadata?.primaryImageId || nanoid(),
-                    status: NODE_STATUS_SUCCESS,
-                    content: uploadedImage.url,
-                    storageKey: uploadedImage.storageKey,
-                    naturalWidth: uploadedImage.width,
-                    naturalHeight: uploadedImage.height,
-                    bytes: uploadedImage.bytes,
-                    mimeType: uploadedImage.mimeType,
-                };
+                const retryImage = canvasNodeImageFromUpload(imageId || node.metadata?.primaryImageId || nanoid(), uploadedImage);
                 const generationMetadata = savedImageMetadata?.generationType
                     ? {
                           generationType: savedImageMetadata.generationType,
@@ -3718,6 +3830,7 @@ function AtelierCanvasPage() {
                 if (item.id !== nodeId) return item;
                 const images = (item.metadata?.images || []).filter((image) => !removeIds.has(image.id));
                 if (!images.length) {
+                    // Also covers single-media nodes that only store content on metadata (no images[]).
                     return {
                         ...item,
                         metadata: {
@@ -3727,10 +3840,13 @@ function AtelierCanvasPage() {
                             primaryImageId: undefined,
                             content: undefined,
                             storageKey: undefined,
+                            thumbnailContent: undefined,
+                            thumbnailStorageKey: undefined,
                             naturalWidth: undefined,
                             naturalHeight: undefined,
                             bytes: undefined,
                             mimeType: undefined,
+                            durationMs: undefined,
                             status: NODE_STATUS_IDLE,
                             errorDetails: undefined,
                         },
@@ -3760,6 +3876,8 @@ function AtelierCanvasPage() {
                         primaryImageId: nextPrimary.id,
                         content: nextPrimary.content || undefined,
                         storageKey: nextPrimary.storageKey || undefined,
+                        thumbnailContent: nextPrimary.thumbnailContent || undefined,
+                        thumbnailStorageKey: nextPrimary.thumbnailStorageKey || undefined,
                         naturalWidth: nextPrimary.naturalWidth || undefined,
                         naturalHeight: nextPrimary.naturalHeight || undefined,
                         bytes: nextPrimary.bytes || undefined,
@@ -4391,9 +4509,9 @@ function AtelierCanvasPage() {
                     onDrop={handleDrop}
                 >
                     <svg className="absolute left-0 top-0 h-[10000px] w-[10000px] overflow-visible" style={{ pointerEvents: "none", transform: "translateZ(0)", zIndex: 0 }}>
-                        {connections.map((connection) => {
-                            const from = nodeById.get(connection.fromNodeId);
-                            const to = nodeById.get(connection.toNodeId);
+                        {visibleConnections.map((connection) => {
+                            const from = withDragPreview(nodeById.get(connection.fromNodeId));
+                            const to = withDragPreview(nodeById.get(connection.toNodeId));
                             if (!from || !to) return null;
 
                             return (
@@ -4418,14 +4536,15 @@ function AtelierCanvasPage() {
                                 />
                             );
                         })}
-                        {connectingParams ? <ActiveConnectionPath node={nodeById.get(connectingParams.nodeId)} handle={connectingParams} mouseWorld={mouseWorld} target={connectionTargetNodeId ? nodeById.get(connectionTargetNodeId) : undefined} /> : null}
+                        {connectingParams ? <ActiveConnectionPath node={withDragPreview(nodeById.get(connectingParams.nodeId))} handle={connectingParams} mouseWorld={mouseWorld} target={connectionTargetNodeId ? withDragPreview(nodeById.get(connectionTargetNodeId)) : undefined} /> : null}
                     </svg>
 
                     {visibleNodes.map((node) => (
                         <CanvasNode
                             key={node.id}
                             data={node}
-                            scale={viewport.k}
+                            getScale={getViewportScale}
+                            previewOffset={dragPreviewIdSet?.has(node.id) && dragPreview ? { x: dragPreview.dx, y: dragPreview.dy } : undefined}
                             isSelected={selectedNodeIds.has(node.id)}
                             isRelated={relatedHighlight.nodeIds.has(node.id)}
                             isFocusRelated={activeNodeId === node.id}

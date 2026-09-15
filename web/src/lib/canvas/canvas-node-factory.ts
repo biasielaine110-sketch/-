@@ -4,7 +4,7 @@ import type { AiConfig } from "@/stores/use-config-store";
 import type { UploadedImage } from "@/services/image-storage";
 import type { UploadedFile } from "@/services/file-storage";
 import type { ReferenceImage } from "@/types/image";
-import { CanvasNodeType, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeMetadata, type CanvasNodeTypeId, type Position } from "@/types/canvas";
+import { CanvasNodeType, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeMetadata, type CanvasNodeTypeId, type Position } from "@/types/canvas";
 
 export function createCanvasNode(type: CanvasNodeTypeId, position: Position, metadata?: CanvasNodeMetadata): CanvasNodeData {
     const spec = getNodeSpec(type);
@@ -25,7 +25,33 @@ export function createCanvasNode(type: CanvasNodeTypeId, position: Position, met
 }
 
 export function imageMetadata(image: UploadedImage): CanvasNodeMetadata {
-    return { content: image.url, storageKey: image.storageKey, status: "success", naturalWidth: image.width, naturalHeight: image.height, bytes: image.bytes, mimeType: image.mimeType };
+    return {
+        content: image.url,
+        storageKey: image.storageKey,
+        thumbnailContent: image.thumbnailUrl,
+        thumbnailStorageKey: image.thumbnailStorageKey,
+        status: "success",
+        naturalWidth: image.width,
+        naturalHeight: image.height,
+        bytes: image.bytes,
+        mimeType: image.mimeType,
+    };
+}
+
+export function canvasNodeImageFromUpload(id: string, image: UploadedImage, extras?: Partial<CanvasNodeImage>): CanvasNodeImage {
+    return {
+        id,
+        status: "success",
+        content: image.url,
+        storageKey: image.storageKey,
+        thumbnailContent: image.thumbnailUrl,
+        thumbnailStorageKey: image.thumbnailStorageKey,
+        naturalWidth: image.width,
+        naturalHeight: image.height,
+        bytes: image.bytes,
+        mimeType: image.mimeType,
+        ...extras,
+    };
 }
 
 export function videoMetadata(video: UploadedFile): CanvasNodeMetadata {

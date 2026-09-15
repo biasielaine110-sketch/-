@@ -8,11 +8,15 @@ import { proxyMediaUrl } from "@/lib/api-proxy";
 export type UploadedImage = {
     url: string;
     storageKey: string;
+    thumbnailUrl?: string;
+    thumbnailStorageKey?: string;
     width: number;
     height: number;
     bytes: number;
     mimeType: string;
 };
+
+const THUMB_MAX_EDGE = 1024;
 
 const store = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
 const objectUrls = new Map<string, string>();
@@ -24,7 +28,88 @@ export async function uploadImage(input: string | Blob): Promise<UploadedImage> 
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     const meta = await readImageMeta(url);
-    return { url, storageKey, width: meta.width, height: meta.height, bytes: blob.size, mimeType: blob.type || meta.mimeType };
+    const thumb = await createAndStoreThumbnail(url, storageKey, meta.width, meta.height);
+    return {
+        url,
+        storageKey,
+        thumbnailUrl: thumb?.url,
+        thumbnailStorageKey: thumb?.storageKey,
+        width: meta.width,
+        height: meta.height,
+        bytes: blob.size,
+        mimeType: blob.type || meta.mimeType,
+    };
+}
+
+async function createAndStoreThumbnail(sourceUrl: string, fullStorageKey: string, width: number, height: number) {
+    if (!width || !height || Math.max(width, height) <= THUMB_MAX_EDGE) return null;
+    try {
+        const image = new Image();
+        image.decoding = "async";
+        image.src = sourceUrl;
+        await image.decode();
+        const scale = THUMB_MAX_EDGE / Math.max(width, height);
+        const targetW = Math.max(1, Math.round(width * scale));
+        const targetH = Math.max(1, Math.round(height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "medium";
+        ctx.drawImage(image, 0, 0, targetW, targetH);
+        const thumbBlob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+        if (!thumbBlob) return null;
+        const storageKey = `${fullStorageKey}:thumb`;
+        await store.setItem(storageKey, thumbBlob);
+        const url = URL.createObjectURL(thumbBlob);
+        objectUrls.set(storageKey, url);
+        return { url, storageKey };
+    } catch {
+        return null;
+    }
+}
+
+/** Create or reuse a persisted thumbnail for an existing full-size image. */
+export async function ensureImageThumbnail(options: {
+    storageKey?: string;
+    contentUrl?: string;
+    thumbnailStorageKey?: string;
+    width?: number;
+    height?: number;
+}): Promise<{ thumbnailUrl: string; thumbnailStorageKey: string } | null> {
+    if (options.thumbnailStorageKey) {
+        const existing = await resolveImageUrl(options.thumbnailStorageKey, "");
+        if (existing) return { thumbnailUrl: existing, thumbnailStorageKey: options.thumbnailStorageKey };
+    }
+    if (!options.storageKey) return null;
+
+    const expectedKey = `${options.storageKey}:thumb`;
+    const stored = await store.getItem<Blob>(expectedKey);
+    if (stored) {
+        const url = await resolveImageUrl(expectedKey, "");
+        if (url) return { thumbnailUrl: url, thumbnailStorageKey: expectedKey };
+    }
+
+    const sourceUrl = options.contentUrl || (await resolveImageUrl(options.storageKey, ""));
+    if (!sourceUrl) return null;
+
+    let width = options.width || 0;
+    let height = options.height || 0;
+    if (!width || !height) {
+        try {
+            const meta = await readImageMeta(sourceUrl);
+            width = meta.width;
+            height = meta.height;
+        } catch {
+            return null;
+        }
+    }
+
+    const thumb = await createAndStoreThumbnail(sourceUrl, options.storageKey, width, height);
+    if (!thumb) return null;
+    return { thumbnailUrl: thumb.url, thumbnailStorageKey: thumb.storageKey };
 }
 
 export async function resolveImageUrl(storageKey?: string, fallback = "") {
@@ -77,8 +162,12 @@ export async function cleanupUnusedImages(usedData: unknown) {
 
 export function collectImageStorageKeys(value: unknown, keys = new Set<string>()) {
     if (!value || typeof value !== "object") return keys;
-    if ("storageKey" in value && typeof value.storageKey === "string" && value.storageKey.startsWith("image:")) keys.add(value.storageKey);
-    Object.values(value).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectImageStorageKeys(child, keys)) : collectImageStorageKeys(item, keys)));
+    const record = value as Record<string, unknown>;
+    for (const field of ["storageKey", "thumbnailStorageKey"] as const) {
+        const key = record[field];
+        if (typeof key === "string" && key.startsWith("image:")) keys.add(key);
+    }
+    Object.values(record).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectImageStorageKeys(child, keys)) : collectImageStorageKeys(item, keys)));
     return keys;
 }
 

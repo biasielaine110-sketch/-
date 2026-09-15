@@ -43,6 +43,9 @@ export type CanvasNodeImage = {
     errorDetails?: string;
     content: string;
     storageKey: string;
+    /** Optional on-canvas preview; full `content` stays for export/edit. */
+    thumbnailContent?: string;
+    thumbnailStorageKey?: string;
     naturalWidth: number;
     naturalHeight: number;
     bytes: number;
@@ -127,6 +130,8 @@ export type CanvasNodeMetadata = {
     images?: CanvasNodeImage[];
     primaryImageId?: string;
     storageKey?: string;
+    thumbnailContent?: string;
+    thumbnailStorageKey?: string;
     mimeType?: string;
     bytes?: number;
     durationMs?: number;
@@ -207,6 +212,8 @@ export type CanvasAssistantSession = {
 export type ConnectionHandle = {
     nodeId: string;
     handleType: "source" | "target";
+    /** Keep linking after each successful connect until X/Esc cancels (keyboard X mode). */
+    sticky?: boolean;
 };
 
 export type SelectionBox = {

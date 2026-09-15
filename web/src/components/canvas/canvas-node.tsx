@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react";
 import { ChevronRight, Clapperboard, Copy, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Plus, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
 
+import { CanvasDisplayImage } from "@/lib/canvas/canvas-display-image";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
@@ -18,7 +19,10 @@ const selectionBlue = "#2f80ff";
 
 type CanvasNodeProps = {
     data: CanvasNodeData;
-    scale: number;
+    /** Read current viewport scale without forcing a re-render on every zoom tick. */
+    getScale: () => number;
+    /** Temporary drag translate; kept out of node state until mouseup. */
+    previewOffset?: Position;
     isSelected: boolean;
     isRelated: boolean;
     isFocusRelated: boolean;
@@ -95,7 +99,8 @@ type NodeContentRendererProps = {
 
 export const CanvasNode = React.memo(function CanvasNode({
     data,
-    scale,
+    getScale,
+    previewOffset,
     isSelected,
     isRelated,
     isFocusRelated,
@@ -238,6 +243,7 @@ export const CanvasNode = React.memo(function CanvasNode({
         (event: MouseEvent) => {
             if (!resizeRef.current.isResizing) return;
 
+            const scale = getScale() || 1;
             const dx = (event.clientX - resizeRef.current.startX) / scale;
             const dy = (event.clientY - resizeRef.current.startY) / scale;
             const minWidth = 220;
@@ -272,7 +278,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 y: fromTop ? startBottom - height : resizeRef.current.startTop,
             });
         },
-        [data.id, onResize, scale],
+        [data.id, getScale, onResize],
     );
 
     const handleResizeUp = useCallback(() => {
@@ -314,11 +320,12 @@ export const CanvasNode = React.memo(function CanvasNode({
             data-node-id={data.id}
             className={`node-element absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"}`}
             style={{
-                transform: `translate(${data.position.x}px, ${data.position.y}px)`,
+                transform: `translate(${data.position.x + (previewOffset?.x || 0)}px, ${data.position.y + (previewOffset?.y || 0)}px)`,
                 width: data.width,
                 height: data.height,
                 transition: "box-shadow 200ms ease",
                 contain: "layout style",
+                willChange: previewOffset ? "transform" : undefined,
             }}
             onMouseEnter={() => {
                 setHovered(true);
@@ -529,7 +536,7 @@ function AnnotateNodeContent({ node, theme }: NodeContentRendererProps) {
     }
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
-            <img src={content} alt={node.title} draggable={false} className="pointer-events-none block h-full w-full select-none object-contain" />
+            <CanvasDisplayImage src={content} previewSrc={node.metadata?.thumbnailContent} alt={node.title} maxEdge={Math.max(node.width, node.height, 512)} className="pointer-events-none block h-full w-full select-none object-contain" />
             {annotations.length ? (
                 <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
                     {annotations.map((item) => {
@@ -833,7 +840,7 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
-function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
+function VideoNodeContent({ node, theme, onDeleteBatchImage }: NodeContentRendererProps) {
     const { t } = useTranslation();
     if (!node.metadata?.content)
         return (
@@ -842,7 +849,24 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
                 <span className="text-sm">{t("canvas.node.emptyVideo")}</span>
             </div>
         );
-    return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-no-zoom />;
+    return (
+        <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
+            <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-no-zoom />
+            <button
+                type="button"
+                className="absolute bottom-2.5 left-2.5 z-30 grid size-8 place-items-center rounded-full border shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                title={t("common.delete")}
+                aria-label={t("common.delete")}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    onDeleteBatchImage?.(node.metadata?.primaryImageId || node.metadata?.images?.[0]?.id || "__primary__");
+                }}
+            >
+                <Trash2 className="size-3.5" />
+            </button>
+        </div>
+    );
 }
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
@@ -893,6 +917,7 @@ function ImageContent({
     const primaryImageId = node.metadata?.primaryImageId || images[0]?.id;
     const primaryImage = images.find((image) => image.id === primaryImageId);
     const primaryContent = primaryImage?.content || node.metadata?.content;
+    const primaryThumb = primaryImage?.thumbnailContent || node.metadata?.thumbnailContent;
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
     useEffect(() => {
@@ -942,10 +967,11 @@ function ImageContent({
                         <video src={primaryContent} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-no-zoom />
                     ) : (
                         <>
-                            <img
+                            <CanvasDisplayImage
                                 src={primaryContent}
+                                previewSrc={primaryThumb}
                                 alt={node.title}
-                                draggable={false}
+                                maxEdge={Math.max(node.width, node.height, 512)}
                                 onDragStart={(event) => event.preventDefault()}
                                 className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
                             />
@@ -985,14 +1011,18 @@ function ImageContent({
                 )}
             </div>
             {primaryImage?.status === "error" ? <BatchImageFailureActions placement="left" onRetry={() => onRetryBatchImage?.(primaryImage.id)} onDelete={() => onDeleteBatchImage?.(primaryImage.id)} /> : null}
-            {isBatchRoot && primaryImage?.content && primaryImage.status !== "error" ? (
+            {primaryContent && primaryImage?.status !== "error" ? (
                 <button
                     type="button"
                     className="absolute bottom-2.5 left-2.5 z-30 grid size-8 place-items-center rounded-full border shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
                     style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
                     title={t("common.delete")}
                     aria-label={t("common.delete")}
-                    onClick={(event) => (event.stopPropagation(), onDeleteBatchImage?.(primaryImage.id))}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        // Batch slot id when present; otherwise clear the node's sole media payload.
+                        onDeleteBatchImage?.(primaryImage?.id || "__primary__");
+                    }}
                 >
                     <Trash2 className="size-3.5" />
                 </button>
@@ -1096,7 +1126,7 @@ function ExpandedImageCard({
                 isVideo ? (
                     <video src={image.content} className="pointer-events-none h-full w-full select-none object-contain" muted playsInline />
                 ) : (
-                    <img src={image.content} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" />
+                    <CanvasDisplayImage src={image.content} previewSrc={image.thumbnailContent} alt={node.title} maxEdge={512} className="pointer-events-none h-full w-full select-none object-contain" />
                 )
             ) : (
                 <ImageSlotStatus image={image} />
