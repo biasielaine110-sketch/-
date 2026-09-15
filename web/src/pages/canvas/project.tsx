@@ -1535,6 +1535,8 @@ function AtelierCanvasPage() {
     const handleNodeSelectCapture = useCallback(
         (event: ReactMouseEvent, nodeId: string) => {
             if (event.button !== 0) return;
+            // Keep Alt+drag from focusing the browser menu bar (Windows).
+            if (event.altKey) event.preventDefault();
             blurActiveCanvasTextInput(event.target);
             setContextMenu(null);
             setHoveredNodeId(null);
@@ -1576,6 +1578,8 @@ function AtelierCanvasPage() {
             pendingSelectionRef.current = null;
             return;
         }
+        // Windows: Alt+click otherwise focuses the browser menu bar and can cancel the drag.
+        if (event.altKey) event.preventDefault();
         // Capture already selected the node; this only starts dragging, with a fallback selection if capture did not run.
         const currentNodes = nodesRef.current;
         const nextSelected = pendingSelectionRef.current ?? selectNodeByEvent(event, nodeId).nextSelected;
@@ -1633,7 +1637,14 @@ function AtelierCanvasPage() {
 
         const nextConnections = cloneConnectionsForCopiedNodes(connectionsRef.current, idMap, stamped);
 
+        // Must update React state (not only nodesRef): layout sync overwrites nodesRef from state,
+        // and drag-preview only paints nodes present in state.
         nodesRef.current = [...nodesRef.current, ...pastedNodes];
+        setNodes((prev) => {
+            const ids = new Set(prev.map((node) => node.id));
+            const missing = pastedNodes.filter((node) => !ids.has(node.id));
+            return missing.length ? [...prev, ...missing] : prev;
+        });
         if (nextConnections.length) {
             const keys = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
             const uniqueConnections = nextConnections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`));
