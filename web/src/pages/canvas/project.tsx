@@ -155,6 +155,30 @@ const NODE_STATUS_ERROR = "error" as const;
 /** Soft cap so same-panel re-generations do not grow without bound. */
 const MAX_IMAGE_NODE_HISTORY = 24;
 
+/** Remap edges for copied nodes, keeping links to uncopied neighbors (A→B becomes A'→B). */
+function cloneConnectionsForCopiedNodes(connections: CanvasConnection[], idMap: Map<string, string>, stamp = Date.now()): CanvasConnection[] {
+    if (!idMap.size) return [];
+    const seen = new Set<string>();
+    const next: CanvasConnection[] = [];
+    connections.forEach((connection, index) => {
+        const fromCopied = idMap.has(connection.fromNodeId);
+        const toCopied = idMap.has(connection.toNodeId);
+        if (!fromCopied && !toCopied) return;
+        const fromNodeId = idMap.get(connection.fromNodeId) ?? connection.fromNodeId;
+        const toNodeId = idMap.get(connection.toNodeId) ?? connection.toNodeId;
+        if (fromNodeId === toNodeId) return;
+        const key = `${fromNodeId}\0${toNodeId}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        next.push({
+            id: `conn-${stamp}-${index}-${Math.random().toString(36).slice(2, 7)}`,
+            fromNodeId,
+            toNodeId,
+        });
+    });
+    return next;
+}
+
 function collectSuccessfulImageHistory(node: CanvasNodeData | undefined): CanvasNodeImage[] {
     if (!node) return [];
     const listed = (node.metadata?.images || []).filter((image) => Boolean(image.content) && image.status !== NODE_STATUS_LOADING);
@@ -876,8 +900,15 @@ function AtelierCanvasPage() {
             title: `${source.title} Copy`,
             position: { x: source.position.x + 36, y: source.position.y + 36 },
         };
+        const nextConnections = cloneConnectionsForCopiedNodes(connectionsRef.current, new Map([[nodeId, id]]));
 
         setNodes((prev) => [...prev, next]);
+        if (nextConnections.length) {
+            setConnections((prev) => {
+                const keys = new Set(prev.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
+                return [...prev, ...nextConnections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`))];
+            });
+        }
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
         if (next.type !== CanvasNodeType.Group) setDialogNodeId(id);
@@ -899,7 +930,10 @@ function AtelierCanvasPage() {
 
         clipboardRef.current = {
             nodes: copiedNodes,
-            connections: connectionsRef.current.filter((connection) => selectedIds.has(connection.fromNodeId) && selectedIds.has(connection.toNodeId)).map((connection) => ({ ...connection })),
+            // Keep internal edges and edges to unselected neighbors so paste can reattach them.
+            connections: connectionsRef.current
+                .filter((connection) => selectedIds.has(connection.fromNodeId) || selectedIds.has(connection.toNodeId))
+                .map((connection) => ({ ...connection })),
         };
     }, []);
 
@@ -963,22 +997,21 @@ function AtelierCanvasPage() {
             return { ...node, metadata: { ...node.metadata, groupId: idMap.get(groupId) } };
         });
 
-        const nextConnections = clipboard.connections.flatMap((connection, index) => {
-            const fromNodeId = idMap.get(connection.fromNodeId);
-            const toNodeId = idMap.get(connection.toNodeId);
-            if (!fromNodeId || !toNodeId) return [];
-            return [
-                {
-                    ...connection,
-                    id: `conn-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`,
-                    fromNodeId,
-                    toNodeId,
-                },
-            ];
-        });
+        const remappedIds = new Set(idMap.values());
+        const existingIds = new Set(nodesRef.current.map((node) => node.id));
+        const nextConnections = cloneConnectionsForCopiedNodes(clipboard.connections, idMap).filter(
+            (connection) =>
+                (remappedIds.has(connection.fromNodeId) || existingIds.has(connection.fromNodeId)) &&
+                (remappedIds.has(connection.toNodeId) || existingIds.has(connection.toNodeId)),
+        );
 
         setNodes((prev) => [...prev, ...pastedNodes]);
-        setConnections((prev) => [...prev, ...nextConnections]);
+        if (nextConnections.length) {
+            setConnections((prev) => {
+                const keys = new Set(prev.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
+                return [...prev, ...nextConnections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`))];
+            });
+        }
         setSelectedNodeIds(new Set(pastedNodes.map((node) => node.id)));
         setSelectedConnectionId(null);
         setContextMenu(null);
@@ -1375,25 +1408,16 @@ function AtelierCanvasPage() {
             return remapped ? { ...node, metadata: { ...node.metadata, groupId: remapped } } : node;
         });
 
-        const nextConnections = connectionsRef.current.flatMap((connection, index) => {
-            if (!sourceIds.has(connection.fromNodeId) || !sourceIds.has(connection.toNodeId)) return [];
-            const fromNodeId = idMap.get(connection.fromNodeId);
-            const toNodeId = idMap.get(connection.toNodeId);
-            if (!fromNodeId || !toNodeId) return [];
-            return [
-                {
-                    ...connection,
-                    id: `conn-${stamped}-${index}-${Math.random().toString(36).slice(2, 7)}`,
-                    fromNodeId,
-                    toNodeId,
-                },
-            ];
-        });
+        const nextConnections = cloneConnectionsForCopiedNodes(connectionsRef.current, idMap, stamped);
 
         nodesRef.current = [...nodesRef.current, ...pastedNodes];
         if (nextConnections.length) {
-            connectionsRef.current = [...connectionsRef.current, ...nextConnections];
-            setConnections((prev) => [...prev, ...nextConnections]);
+            const keys = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
+            const uniqueConnections = nextConnections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`));
+            if (uniqueConnections.length) {
+                connectionsRef.current = [...connectionsRef.current, ...uniqueConnections];
+                setConnections((prev) => [...prev, ...uniqueConnections]);
+            }
         }
         setSelectedNodeIds(new Set(pastedNodes.map((node) => node.id)));
         setSelectedConnectionId(null);
