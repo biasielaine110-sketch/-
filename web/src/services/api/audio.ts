@@ -304,7 +304,7 @@ function mapSeedanceSpeechRate(speed: number) {
     return Math.max(-50, Math.min(100, Math.round((speed - 1) * 50)));
 }
 
-function readSeedanceAudioUrl(payload: Record<string, unknown>) {
+function readSeedanceAudioUrl(payload: Record<string, unknown>): string {
     const directKeys = ["result_url", "audio_url", "output_url", "url", "file_url"] as const;
     for (const key of directKeys) {
         const value = payload[key];
@@ -314,7 +314,7 @@ function readSeedanceAudioUrl(payload: Record<string, unknown>) {
 
     const nested = payload.data && typeof payload.data === "object" && !Array.isArray(payload.data) ? (payload.data as Record<string, unknown>) : null;
     if (nested) {
-        const nestedUrl = readSeedanceAudioUrl(nested);
+        const nestedUrl: string = readSeedanceAudioUrl(nested);
         if (nestedUrl) return nestedUrl;
     }
 
