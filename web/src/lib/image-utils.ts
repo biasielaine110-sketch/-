@@ -82,9 +82,9 @@ function canvasHasAlpha(ctx: CanvasRenderingContext2D, width: number, height: nu
 }
 
 export type CompressDataUrlOptions = {
-    /** Longest edge in pixels (default 2048). */
+    /** Longest edge in pixels (default 1536). */
     maxEdge?: number;
-    /** Soft byte budget for the encoded image (default ~1.2MB). */
+    /** Soft byte budget for the encoded image (default ~0.75MB). */
     maxBytes?: number;
     /** Keep PNG when the source has transparency (masks). */
     preserveAlpha?: boolean;
@@ -97,8 +97,8 @@ export type CompressDataUrlOptions = {
 export async function compressDataUrlForApi(dataUrl: string, options?: CompressDataUrlOptions) {
     if (!dataUrl?.startsWith("data:")) return dataUrl;
 
-    const maxEdge = options?.maxEdge ?? 2048;
-    const maxBytes = options?.maxBytes ?? 1_200_000;
+    const maxEdge = options?.maxEdge ?? 1536;
+    const maxBytes = options?.maxBytes ?? 900_000;
     const preserveAlpha = options?.preserveAlpha ?? false;
     const originalBytes = getDataUrlByteSize(dataUrl);
 
@@ -129,24 +129,24 @@ export async function compressDataUrlForApi(dataUrl: string, options?: CompressD
     ctx.drawImage(image, 0, 0, width, height);
 
     const keepPng = preserveAlpha && canvasHasAlpha(ctx, width, height);
-    let quality = 0.88;
+    let quality = 0.82;
     let out = keepPng ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", quality);
 
     let guard = 0;
-    while (getDataUrlByteSize(out) > maxBytes && guard < 8) {
+    while (getDataUrlByteSize(out) > maxBytes && guard < 10) {
         guard += 1;
         if (keepPng) {
-            width = Math.max(1, Math.round(width * 0.82));
-            height = Math.max(1, Math.round(height * 0.82));
+            width = Math.max(1, Math.round(width * 0.78));
+            height = Math.max(1, Math.round(height * 0.78));
             canvas.width = width;
             canvas.height = height;
             ctx.drawImage(image, 0, 0, width, height);
             out = canvas.toDataURL("image/png");
         } else {
-            quality = Math.max(0.45, quality - 0.1);
-            if (quality <= 0.55) {
-                width = Math.max(1, Math.round(width * 0.85));
-                height = Math.max(1, Math.round(height * 0.85));
+            quality = Math.max(0.4, quality - 0.08);
+            if (quality <= 0.52 || getDataUrlByteSize(out) > maxBytes * 1.4) {
+                width = Math.max(1, Math.round(width * 0.82));
+                height = Math.max(1, Math.round(height * 0.82));
                 canvas.width = width;
                 canvas.height = height;
                 ctx.drawImage(image, 0, 0, width, height);
@@ -164,8 +164,9 @@ export async function compressDataUrlForApi(dataUrl: string, options?: CompressD
 /** Compress reference images so N files fit under a shared request-body budget. */
 export async function compressReferenceDataUrl(dataUrl: string, referenceCount = 1, options?: CompressDataUrlOptions) {
     const count = Math.max(1, referenceCount);
-    const maxBytes = options?.maxBytes ?? Math.min(1_200_000, Math.floor(3_200_000 / count));
-    return compressDataUrlForApi(dataUrl, { ...options, maxBytes });
+    // Leave headroom for JSON wrappers / multiple refs under Vercel ~4.5MB proxy body limit.
+    const maxBytes = options?.maxBytes ?? Math.min(750_000, Math.floor(2_400_000 / count));
+    return compressDataUrlForApi(dataUrl, { maxEdge: 1536, ...options, maxBytes });
 }
 
 /** Grab a still frame from a video URL for multimodal chat / vision models. */

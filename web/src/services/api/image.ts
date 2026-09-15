@@ -1122,6 +1122,13 @@ async function prepareReferenceDataUrl(image: ReferenceImage, referenceCount = 1
     return compressReferenceDataUrl(dataUrl, referenceCount, { preserveAlpha: options?.preserveAlpha });
 }
 
+/** Prefer public HTTP URLs; always compress local data: URLs before proxy/API upload. */
+async function resolveInlineOrRemoteReferenceUrl(image: ReferenceImage, referenceCount = 1, options?: { preserveAlpha?: boolean }) {
+    if (image.url && isPublicHttpUrl(image.url)) return image.url.trim();
+    if (image.dataUrl && isPublicHttpUrl(image.dataUrl)) return image.dataUrl.trim();
+    return prepareReferenceDataUrl(image, referenceCount, options);
+}
+
 function withSystemPrompt(config: AiConfig, prompt: string) {
     const systemPrompt = config.systemPrompt.trim();
     return systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
@@ -1149,15 +1156,7 @@ async function requestMidjourneyGeneration(config: AiConfig, prompt: string, ref
     if (references.length) {
         const urls: string[] = [];
         for (const image of references.slice(0, 5)) {
-            if (image.url && isPublicHttpUrl(image.url)) {
-                urls.push(image.url.trim());
-                continue;
-            }
-            if (image.dataUrl && (isPublicHttpUrl(image.dataUrl) || image.dataUrl.startsWith("data:"))) {
-                urls.push(image.dataUrl.trim());
-                continue;
-            }
-            urls.push(await prepareReferenceDataUrl(image, references.length));
+            urls.push(await resolveInlineOrRemoteReferenceUrl(image, references.length));
         }
         body.image_urls = urls;
     }
@@ -1271,15 +1270,7 @@ async function requestSeedanceNzImage(config: AiConfig, prompt: string, referenc
     if (references.length) {
         const urls: string[] = [];
         for (const image of references.slice(0, 10)) {
-            if (image.url && isPublicHttpUrl(image.url)) {
-                urls.push(image.url.trim());
-                continue;
-            }
-            if (image.dataUrl && (isPublicHttpUrl(image.dataUrl) || image.dataUrl.startsWith("data:"))) {
-                urls.push(image.dataUrl.trim());
-                continue;
-            }
-            urls.push(await prepareReferenceDataUrl(image, references.length));
+            urls.push(await resolveInlineOrRemoteReferenceUrl(image, references.length));
         }
         body.images = urls;
     }
