@@ -286,6 +286,25 @@ async function probeAudio(config: ReturnType<typeof resolveModelRequestConfig>, 
         }
     }
 
+    // Seedance Suno uses /v1/music/* — probing /audio/speech returns 503 and false negatives.
+    if (/suno/i.test(config.model || "")) {
+        try {
+            const response = await axios.post(
+                proxyApiUrl(buildApiUrl(config.baseUrl, "/music/generations")),
+                { model: "suno", custom: false, version: "v6", prompt: "" },
+                {
+                    headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+                    signal,
+                    timeout: HEALTH_TIMEOUT_MS,
+                    validateStatus: () => true,
+                },
+            );
+            return interpretNonTextProbe(response.status, response.data);
+        } catch (error) {
+            return failFromError(error);
+        }
+    }
+
     try {
         const response = await axios.post(
             proxyApiUrl(buildApiUrl(config.baseUrl, "/audio/speech")),

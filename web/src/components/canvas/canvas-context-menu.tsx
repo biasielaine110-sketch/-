@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Download, FolderPlus, GripVertical, Info, Plus, Trash2, Unlink2 } from "lucide-react";
+import { Download, FolderPlus, GripVertical, Info, Plus, Scissors, Trash2, Unlink2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -34,6 +34,7 @@ export function CanvasNodeContextMenu({
     onInfo,
     onDownload,
     onSaveAsset,
+    onOpenVideoTools,
 }: {
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
@@ -44,6 +45,7 @@ export function CanvasNodeContextMenu({
     onInfo?: (node: CanvasNodeData) => void;
     onDownload?: (node: CanvasNodeData) => void;
     onSaveAsset?: (node: CanvasNodeData) => void;
+    onOpenVideoTools?: (node: CanvasNodeData) => void;
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -55,6 +57,7 @@ export function CanvasNodeContextMenu({
     const suppressClickRef = useRef(false);
     const suppressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const hasImage = Boolean(node && node.type === CanvasNodeType.Image && node.metadata?.content);
+    const hasVideo = Boolean(node && node.type === CanvasNodeType.Video && node.metadata?.content);
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -77,6 +80,19 @@ export function CanvasNodeContextMenu({
         if (!hasImage || !imageHandlers) {
             return [
                 { id: "duplicate", label: t("canvas.controls.duplicate"), icon: <Plus className="size-4" />, onClick: onDuplicate },
+                ...(hasVideo && onOpenVideoTools
+                    ? [
+                          {
+                              id: "videoTools",
+                              label: t("canvas.videoTools.open"),
+                              icon: <Scissors className="size-4" />,
+                              onClick: () => {
+                                  onOpenVideoTools(node);
+                                  onClose();
+                              },
+                          },
+                      ]
+                    : []),
                 { id: "delete", label: t("canvas.controls.delete"), icon: <Trash2 className="size-4" />, danger: true, onClick: onDelete },
             ];
         }
@@ -143,7 +159,7 @@ export function CanvasNodeContextMenu({
                 onClick: () => runAndClose(onDelete),
             },
         ];
-    }, [hasImage, imageHandlers, menu.type, node, onClose, onDelete, onDownload, onDuplicate, onInfo, onSaveAsset, quickImageToolIds, t]);
+    }, [hasImage, hasVideo, imageHandlers, menu.type, node, onClose, onDelete, onDownload, onDuplicate, onInfo, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
 
     const menuOrder = useMemo(() => mergeOrderedIds(imageContextMenuOrder || [], tools.map((tool) => tool.id)), [imageContextMenuOrder, tools]);
     const orderedTools = useMemo(() => sortByOrder(tools, menuOrder), [menuOrder, tools]);

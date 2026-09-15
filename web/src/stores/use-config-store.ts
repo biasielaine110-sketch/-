@@ -5,6 +5,7 @@ import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
 import { defaultTextPrompts, normalizeTextPrompts, type TextPromptEntry } from "@/constant/text-prompt-library";
+import { normalizeSunoVersionValue } from "@/lib/audio-generation";
 
 export type { TextPromptEntry };
 
@@ -50,6 +51,12 @@ export type AiConfig = {
     audioFormat: string;
     audioSpeed: string;
     audioInstructions: string;
+    sunoVersion: string;
+    sunoCustom: string;
+    sunoInstrumental: string;
+    sunoTitle: string;
+    sunoStyle: string;
+    sunoVocalGender: string;
     videoSeconds: string;
     vquality: string;
     videoGenerateAudio: string;
@@ -109,6 +116,12 @@ export const defaultConfig: AiConfig = {
     audioFormat: "mp3",
     audioSpeed: "1",
     audioInstructions: "",
+    sunoVersion: "v6",
+    sunoCustom: "false",
+    sunoInstrumental: "false",
+    sunoTitle: "",
+    sunoStyle: "",
+    sunoVocalGender: "",
     videoSeconds: "6",
     vquality: "720",
     videoGenerateAudio: "true",
@@ -141,13 +154,14 @@ type ConfigStore = {
     clearPromptContinue: () => void;
 };
 
-const VIDEO_KEYWORDS = ["video", "sora", "veo", "kling", "wan", "hailuo"];
+const VIDEO_KEYWORDS = ["video", "sora", "veo", "kling", "wan", "hailuo", "upscaler"];
+const AUDIO_KEYWORDS = ["audio", "tts", "speech", "voice", "music", "sound", "suno"];
+const IMAGE_KEYWORDS = ["seedream", "gpt-image", "image", "dall-e", "dalle", "imagen", "flux", "sdxl", "stable-diffusion", "midjourney"];
 
 export function boolConfig(value: string, fallback: boolean) {
     return value ? value === "true" : fallback;
 }
-const AUDIO_KEYWORDS = ["audio", "tts", "speech", "voice", "music", "sound"];
-const IMAGE_KEYWORDS = ["seedream", "gpt-image", "image", "dall-e", "dalle", "imagen", "flux", "sdxl", "stable-diffusion", "midjourney"];
+
 /** Preferred chat/text model when present in any channel (e.g. deepseek-flash). */
 const PREFERRED_TEXT_MODEL_NAMES = ["deepseek-flash"];
 const LEGACY_IMAGE_QUICK_TOOLS_KEY = "canvas-image-quick-tools-v10";
@@ -344,6 +358,12 @@ export const useConfigStore = create<ConfigStore>()(
                         audioFormat: config.audioFormat || defaultConfig.audioFormat,
                         audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
                         audioInstructions: config.audioInstructions || "",
+                        sunoVersion: normalizeSunoVersionValue(config.sunoVersion || defaultConfig.sunoVersion),
+                        sunoCustom: config.sunoCustom || defaultConfig.sunoCustom,
+                        sunoInstrumental: config.sunoInstrumental || defaultConfig.sunoInstrumental,
+                        sunoTitle: config.sunoTitle || "",
+                        sunoStyle: config.sunoStyle || "",
+                        sunoVocalGender: config.sunoVocalGender || "",
                         reasoningEffort: config.reasoningEffort || "auto",
                         apiTransport: config.apiTransport === "direct" ? "direct" : "proxy",
                         videoSeconds: config.videoSeconds || "6",

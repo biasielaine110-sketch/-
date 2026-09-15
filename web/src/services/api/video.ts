@@ -127,6 +127,99 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
     throw new Error(apiText("noPlayableVideo"));
 }
 
+/** Upload a local media blob to the provider and get a temporary public URL (Seedance /v1/files/upload). */
+export async function uploadProviderMediaFile(config: AiConfig, blob: Blob, filename = "video.mp4", options?: RequestOptions): Promise<string> {
+    const requestConfig = resolveModelRequestConfig(config, config.model || config.videoModel);
+    if (!requestConfig.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    if (!requestConfig.apiKey.trim()) throw new Error(apiText("apiKeyRequired"));
+
+    const form = new FormData();
+    form.append("file", blob, filename);
+    try {
+        const response = await axios.post<{ url?: string; data?: { url?: string } | null; code?: number | string; msg?: string; message?: string }>(
+            aiApiUrl(requestConfig, "/files/upload"),
+            form,
+            { headers: { Authorization: `Bearer ${requestConfig.apiKey}` }, signal: options?.signal },
+        );
+        const url = response.data?.url || (response.data?.data && typeof response.data.data === "object" ? response.data.data.url : "") || "";
+        if (!url || !/^https?:\/\//i.test(url)) {
+            throw new Error(readApiErrorMessage(response.data) || apiText("providerImageUploadFailed"));
+        }
+        return url;
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("providerImageUploadFailed")));
+    }
+}
+
+export type VideoUpscaleOptions = {
+    videoUrl: string;
+    resolution?: string;
+    signal?: AbortSignal;
+};
+
+/** Seedance zhenzhen-upscaler via POST /v1/videos + poll. */
+export async function requestVideoUpscale(config: AiConfig, options: VideoUpscaleOptions): Promise<VideoGenerationResult> {
+    const requestConfig = resolveModelRequestConfig(config, config.model || config.videoModel);
+    const modelName = modelOptionName(requestConfig.model || "zhenzhen-upscaler") || "zhenzhen-upscaler";
+    assertVideoConfig(requestConfig, modelName);
+    if (!options.videoUrl || !/^https?:\/\//i.test(options.videoUrl)) {
+        throw new Error(apiText("videoTaskCreateFailed"));
+    }
+    const resolution = normalizeUpscaleResolution(options.resolution || "1080p");
+    const payload = {
+        model: modelName,
+        prompt: "upscale",
+        metadata: {
+            resolution,
+            content: [{ type: "video_url", video_url: { url: options.videoUrl } }],
+        },
+    };
+    let taskId = "";
+    try {
+        const created = unwrapVideoTaskResponse(
+            (await axios.post<ApiVideoResponse>(aiApiUrl(requestConfig, "/videos"), payload, { headers: aiHeaders(requestConfig, "application/json"), signal: options.signal })).data,
+        );
+        taskId = created.id || "";
+        if (!taskId) throw new Error(apiText("noVideoTaskId"));
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    }
+
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+        if (options.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const state = await pollOpenAIVideoTask(requestConfig, { id: taskId, provider: "openai", model: modelName }, { signal: options.signal });
+        if (state.status === "completed") return state.result;
+        if (state.status === "failed") throw new Error(state.error);
+        await delay(3000, options.signal);
+    }
+    throw new Error(apiText("videoTimeout", { provider: "" }));
+}
+
+function normalizeUpscaleResolution(value: string) {
+    const raw = value.trim().toLowerCase();
+    if (raw === "720" || raw === "720p") return "720p";
+    if (raw === "1080" || raw === "1080p") return "1080p";
+    if (raw === "2k") return "2k";
+    if (raw === "4k") return "4k";
+    return "1080p";
+}
+
+function unwrapVideoTaskResponse(payload: ApiVideoResponse): VideoResponse {
+    if (!payload) throw new Error(apiText("noVideoTask"));
+    if (typeof payload === "object" && "code" in payload && payload.code !== undefined) {
+        const ok = payload.code === 0 || payload.code === "0" || payload.code === 200 || payload.code === "200";
+        if (!ok) throw new Error(readApiErrorMessage(payload) || apiText("requestFailed"));
+        const data = payload.data;
+        if (!data) throw new Error(apiText("noVideoTask"));
+        if (typeof data.id === "string" && data.id) return data;
+        // Some relays return { task_id } instead of { id }.
+        const record = data as VideoResponse & { task_id?: string };
+        return { ...record, id: record.id || record.task_id || "" };
+    }
+    const record = payload as VideoResponse & { task_id?: string };
+    return { ...record, id: record.id || record.task_id || "" };
+}
+
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     const ratio = normalizeVideoRatio(config.size);
     const seedance = isSeedanceVideoModel(model);

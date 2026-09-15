@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { App, Modal, Segmented, Tooltip } from "antd";
-import { Clapperboard, Download, Ellipsis, FolderPlus, Highlighter, Image as ImageIcon, Info, MessageSquare, MessageSquareText, Minus, Music2, Plus, RefreshCw, Settings2, Trash2, Type, Upload, Video } from "lucide-react";
+import { Clapperboard, Download, Ellipsis, FolderPlus, Highlighter, Image as ImageIcon, Info, MessageSquare, MessageSquareText, Minus, Music2, Plus, RefreshCw, Scissors, Settings2, Trash2, Type, Upload, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -42,6 +42,7 @@ type CanvasNodeHoverToolbarProps = {
     onToggleFreeResize: (node: CanvasNodeData) => void;
     onScale: (node: CanvasNodeData) => void;
     onDelete: (node: CanvasNodeData) => void;
+    onOpenVideoTools?: (node: CanvasNodeData) => void;
 };
 
 type ToolbarTool = {
@@ -83,6 +84,7 @@ export function CanvasNodeHoverToolbar({
     onToggleFreeResize,
     onScale,
     onDelete,
+    onOpenVideoTools,
 }: CanvasNodeHoverToolbarProps) {
     const imageQuickTools = useConfigStore((state) => state.config.imageQuickTools);
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -156,6 +158,7 @@ export function CanvasNodeHoverToolbar({
         ...((isImage || isAnnotate) && !hasImage ? [{ id: "uploadImage", title: t("canvas.nodeToolbar.uploadImage"), label: t("canvas.nodeToolbar.uploadImage"), icon: <Upload className="size-[10px]" />, onClick: () => onUpload(node) }] : []),
         ...(isAnnotate && hasImage ? [{ id: "replaceImage", title: t("canvas.editors.annotateReplace"), label: t("canvas.editors.annotateReplace"), icon: <Upload className="size-[10px]" />, onClick: () => onUpload(node) }] : []),
         ...(isVideo ? [{ id: "uploadVideo", title: t(hasVideo ? "canvas.nodeToolbar.replaceVideo" : "canvas.nodeToolbar.uploadVideo"), label: t(hasVideo ? "canvas.nodeToolbar.replaceVideo" : "canvas.nodeToolbar.uploadVideo"), icon: <Video className="size-[10px]" />, onClick: () => onUpload(node) }] : []),
+        ...(hasVideo && onOpenVideoTools ? [{ id: "videoTools", title: t("canvas.videoTools.openTitle"), label: t("canvas.videoTools.open"), icon: <Scissors className="size-[10px]" />, onClick: () => onOpenVideoTools(node) }] : []),
         ...(isAudio ? [{ id: "uploadAudio", title: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), label: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), icon: <Music2 className="size-[10px]" />, onClick: () => onUpload(node) }] : []),
         ...(hasImage && isImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];

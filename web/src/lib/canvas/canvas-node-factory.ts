@@ -85,6 +85,12 @@ export function buildAudioGenerationMetadata(config: AiConfig): CanvasNodeMetada
         audioFormat: config.audioFormat,
         audioSpeed: config.audioSpeed,
         audioInstructions: config.audioInstructions,
+        sunoVersion: config.sunoVersion,
+        sunoCustom: config.sunoCustom,
+        sunoInstrumental: config.sunoInstrumental,
+        sunoTitle: config.sunoTitle,
+        sunoStyle: config.sunoStyle,
+        sunoVocalGender: config.sunoVocalGender,
     };
 }
 

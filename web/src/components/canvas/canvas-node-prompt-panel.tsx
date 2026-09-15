@@ -156,7 +156,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                     ) : mode === "audio" ? (
                         <>
                             <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="audio" onMissingConfig={() => openConfigDialog(true)} className="max-w-[160px]" />
-                            <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[150px] !shrink-0 !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
+                            <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[180px] !shrink-0 !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
                         </>
                     ) : (
                         <>
@@ -222,6 +222,12 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
         audioFormat: node.metadata?.audioFormat || globalConfig.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node.metadata?.audioSpeed || globalConfig.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node.metadata?.audioInstructions || globalConfig.audioInstructions || defaultConfig.audioInstructions,
+        sunoVersion: node.metadata?.sunoVersion || globalConfig.sunoVersion || defaultConfig.sunoVersion,
+        sunoCustom: node.metadata?.sunoCustom || globalConfig.sunoCustom || defaultConfig.sunoCustom,
+        sunoInstrumental: node.metadata?.sunoInstrumental || globalConfig.sunoInstrumental || defaultConfig.sunoInstrumental,
+        sunoTitle: node.metadata?.sunoTitle || globalConfig.sunoTitle || defaultConfig.sunoTitle,
+        sunoStyle: node.metadata?.sunoStyle || globalConfig.sunoStyle || defaultConfig.sunoStyle,
+        sunoVocalGender: node.metadata?.sunoVocalGender || globalConfig.sunoVocalGender || defaultConfig.sunoVocalGender,
         count: String(node.metadata?.count || (mode === "image" ? globalConfig.canvasImageCount || globalConfig.count : globalConfig.count) || defaultConfig.count),
     };
 }
@@ -234,8 +240,5 @@ function videoConfigPatch(key: keyof AiConfig, value: string) {
 }
 
 function audioConfigPatch(key: CanvasAudioSettingKey, value: string) {
-    if (key === "audioVoice") return { audioVoice: value };
-    if (key === "audioFormat") return { audioFormat: value };
-    if (key === "audioSpeed") return { audioSpeed: value };
-    return { audioInstructions: value };
+    return { [key]: value };
 }

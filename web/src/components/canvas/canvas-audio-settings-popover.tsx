@@ -3,13 +3,13 @@ import { createPortal } from "react-dom";
 import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 
-import { AudioSettingsPanel } from "@/components/audio-settings-panel";
-import { audioFormatLabel, audioSpeedLabel, audioVoiceLabel } from "@/lib/audio-generation";
+import { AudioSettingsPanel, type AudioSettingKey } from "@/components/audio-settings-panel";
+import { audioFormatLabel, audioSpeedLabel, audioVoiceLabel, isSunoAudioModel, sunoSettingsSummary } from "@/lib/audio-generation";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { AiConfig } from "@/stores/use-config-store";
 
-export type CanvasAudioSettingKey = "audioVoice" | "audioFormat" | "audioSpeed" | "audioInstructions";
+export type CanvasAudioSettingKey = AudioSettingKey;
 
 type CanvasAudioSettingsPopoverProps = {
     config: AiConfig;
@@ -24,6 +24,7 @@ export function CanvasAudioSettingsPopover({ config, onConfigChange, buttonClass
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
+    const suno = isSunoAudioModel(config.model || config.audioModel || "");
 
     useEffect(() => {
         if (!open) return;
@@ -46,15 +47,16 @@ export function CanvasAudioSettingsPopover({ config, onConfigChange, buttonClass
         };
     }, [open]);
 
-    const panel = open && buttonRect ? <AudioSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} /> : null;
+    const panel = open && buttonRect ? <AudioSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} suno={suno} /> : null;
+    const summary = suno
+        ? `${sunoSettingsSummary({ version: config.sunoVersion, custom: config.sunoCustom, instrumental: config.sunoInstrumental, vocalGender: config.sunoVocalGender })} · ${(config.audioFormat || "mp3").toUpperCase()}`
+        : `${audioVoiceLabel(config.audioVoice)} · ${audioFormatLabel(config.audioFormat)} · ${audioSpeedLabel(config.audioSpeed)}`;
 
     return (
         <>
             <span ref={buttonRef} className="inline-flex min-w-0">
-                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => setOpen((current) => !current)}>
-                    <span className="truncate">
-                        {audioVoiceLabel(config.audioVoice)} · {audioFormatLabel(config.audioFormat)} · {audioSpeedLabel(config.audioSpeed)}
-                    </span>
+                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[220px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => setOpen((current) => !current)}>
+                    <span className="truncate">{summary}</span>
                 </Button>
             </span>
             {panel}
@@ -69,6 +71,7 @@ function AudioSettingsPortal({
     theme,
     config,
     onConfigChange,
+    suno,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -76,8 +79,9 @@ function AudioSettingsPortal({
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
     onConfigChange: (key: CanvasAudioSettingKey, value: string) => void;
+    suno: boolean;
 }) {
-    const width = 356;
+    const width = suno ? 380 : 356;
     const gap = 8;
     const margin = 12;
     const alignRight = placement?.endsWith("Right");

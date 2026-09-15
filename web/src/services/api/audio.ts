@@ -1,7 +1,17 @@
 import axios from "axios";
 
 import i18n from "@/i18n";
-import { audioMimeType, normalizeAudioFormatValue, normalizeAudioSpeedValue, normalizeAudioVoiceValue } from "@/lib/audio-generation";
+import {
+    audioMimeType,
+    isSunoAudioModel,
+    normalizeAudioFormatValue,
+    normalizeAudioSpeedValue,
+    normalizeAudioVoiceValue,
+    normalizeSunoFlagValue,
+    normalizeSunoFormatValue,
+    normalizeSunoVersionValue,
+    normalizeSunoVocalGenderValue,
+} from "@/lib/audio-generation";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
@@ -9,6 +19,8 @@ import { runModelPlugin } from "./model-plugin";
 
 type RequestOptions = { signal?: AbortSignal };
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
+const SUNO_POLL_INTERVAL_MS = 4_000;
+const SUNO_MAX_WAIT_MS = 15 * 60_000;
 
 function aiApiUrl(config: AiConfig, path: string) {
     return proxyApiUrl(buildApiUrl(config.baseUrl, path));
@@ -25,6 +37,29 @@ export async function requestAudioGeneration(config: AiConfig, prompt: string, o
     const requestConfig = resolveModelRequestConfig(config, config.model || config.audioModel);
     const model = requestConfig.model.trim();
     const format = normalizeAudioFormatValue(config.audioFormat);
+    // Keep suno settings from the generation config (node + global), not only channel fields.
+    const sunoConfig: AiConfig = {
+        ...requestConfig,
+        sunoVersion: config.sunoVersion,
+        sunoCustom: config.sunoCustom,
+        sunoInstrumental: config.sunoInstrumental,
+        sunoTitle: config.sunoTitle,
+        sunoStyle: config.sunoStyle,
+        sunoVocalGender: config.sunoVocalGender,
+        audioFormat: config.audioFormat,
+        audioInstructions: config.audioInstructions,
+    };
+
+    // Seedance Suno must use /v1/music/* — never scripts that hit /audio/speech.
+    if (isSunoAudioModel(model)) {
+        assertAudioConfig(requestConfig, model);
+        try {
+            return await requestSunoMusic(sunoConfig, prompt, options);
+        } catch (error) {
+            throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+        }
+    }
+
     const script = resolveModelScript(config, config.model || config.audioModel);
     if (script) {
         if (!model) throw new Error(apiText("audioModelRequired"));
@@ -83,6 +118,153 @@ export async function requestAudioGeneration(config: AiConfig, prompt: string, o
 
 function isOpenSpeechBaseUrl(baseUrl: string) {
     return /openspeech\.bytedance\.com/i.test(baseUrl.trim());
+}
+
+async function requestSunoMusic(config: AiConfig, prompt: string, options?: RequestOptions): Promise<Blob> {
+    const custom = normalizeSunoFlagValue(config.sunoCustom) === "true";
+    const instrumental = normalizeSunoFlagValue(config.sunoInstrumental) === "true";
+    const version = normalizeSunoVersionValue(config.sunoVersion || "");
+    const style = (config.sunoStyle || "").trim();
+    const title = (config.sunoTitle || "").trim();
+    const vocalGender = normalizeSunoVocalGenderValue(config.sunoVocalGender || "");
+    const outputFormat = normalizeSunoFormatValue(config.audioFormat);
+    const maxPrompt = custom ? 5000 : 3000;
+    const text = prompt.trim().slice(0, maxPrompt);
+
+    // Inspo: prompt required. Custom+vocal: lyrics required. Custom+instrumental: prompt optional.
+    if (!custom && !text) throw new Error(apiText("sunoPromptRequired"));
+    if (custom && !instrumental && !text) throw new Error(apiText("sunoLyricsRequired"));
+
+    // Match Seedance Generate music example exactly (inspo).
+    const body: Record<string, unknown> = {
+        model: "suno",
+        custom,
+        version,
+        prompt: text || undefined,
+    };
+    if (!body.prompt) delete body.prompt;
+    if (instrumental) body.instrumental = true;
+    if (custom && title) body.title = title.slice(0, 80);
+    if (custom && style) body.style = style.slice(0, 1000);
+    if (vocalGender && !instrumental) body.vocal_gender = vocalGender;
+    if (outputFormat && outputFormat !== "mp3") body.output_format = outputFormat;
+
+    let submit;
+    try {
+        submit = await axios.post<{ code?: number | string; msg?: string; message?: string; data?: Array<{ task_id?: string; id?: string; status?: string }> | { task_id?: string; id?: string } }>(
+            aiApiUrl(config, "/music/generations"),
+            body,
+            { headers: aiHeaders(config), signal: options?.signal },
+        );
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+    }
+
+    if (isSunoApiFailureCode(submit.data?.code)) {
+        throw new Error(readApiErrorMessage(submit.data) || apiText("audioGenerationFailed"));
+    }
+
+    const taskId = readSunoTaskId(submit.data);
+    if (!taskId) throw new Error(readApiErrorMessage(submit.data) || apiText("audioGenerationFailed"));
+
+    const started = Date.now();
+    while (Date.now() - started < SUNO_MAX_WAIT_MS) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        await sleep(SUNO_POLL_INTERVAL_MS, options?.signal);
+
+        let poll;
+        try {
+            poll = await axios.get<{ code?: number | string; msg?: string; message?: string; data?: SunoTaskPayload }>(aiApiUrl(config, `/music/tasks/${encodeURIComponent(taskId)}`), {
+                headers: aiHeaders(config),
+                signal: options?.signal,
+            });
+        } catch (error) {
+            throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+        }
+
+        if (isSunoApiFailureCode(poll.data?.code)) {
+            throw new Error(readApiErrorMessage(poll.data) || apiText("audioGenerationFailed"));
+        }
+
+        const payload = poll.data?.data;
+        const status = String(payload?.status || "").toLowerCase();
+        if (["failed", "error", "cancelled", "canceled"].includes(status)) {
+            throw new Error(readSunoErrorMessage(payload) || readApiErrorMessage(poll.data) || apiText("audioGenerationFailed"));
+        }
+
+        const audioUrl = readSunoAudioUrl(payload);
+        const finished = ["completed", "complete", "success"].includes(status) || Boolean(payload?.result?.music?.some((track) => track.audio_url || track.audioUrl || track.url));
+        if (!finished) continue;
+        if (!audioUrl) throw new Error(apiText("audioGenerationFailed"));
+
+        const response = await axios.get<Blob>(proxyApiUrl(audioUrl), { responseType: "blob", signal: options?.signal });
+        const mime = audioMimeType(outputFormat);
+        return response.data.type.startsWith("audio/") ? response.data : new Blob([response.data], { type: mime });
+    }
+
+    throw new Error(apiText("audioGenerationFailed"));
+}
+
+function isSunoApiFailureCode(code: number | string | undefined) {
+    if (code === undefined || code === null || code === "") return false;
+    if (typeof code === "number") return code !== 200 && code !== 0;
+    const normalized = String(code).toLowerCase();
+    return normalized !== "200" && normalized !== "0" && normalized !== "ok" && normalized !== "success";
+}
+
+type SunoTrack = { audio_url?: string; audioUrl?: string; url?: string; status?: string };
+type SunoTaskPayload = {
+    status?: string;
+    error?: string | { message?: string };
+    message?: string;
+    result?: { music?: SunoTrack[] };
+    music?: SunoTrack[];
+};
+
+function readSunoErrorMessage(payload: SunoTaskPayload | undefined) {
+    const error = payload?.error;
+    if (typeof error === "string" && error.trim()) return error;
+    if (error && typeof error === "object" && typeof error.message === "string" && error.message.trim()) return error.message;
+    if (typeof payload?.message === "string" && payload.message.trim()) return payload.message;
+    return "";
+}
+
+function readSunoTaskId(payload: { data?: Array<{ task_id?: string; id?: string }> | { task_id?: string; id?: string }; task_id?: string; id?: string } | undefined) {
+    if (!payload) return "";
+    if (typeof payload.task_id === "string" && payload.task_id) return payload.task_id;
+    if (typeof payload.id === "string" && payload.id) return payload.id;
+    const data = payload.data;
+    if (Array.isArray(data)) return data[0]?.task_id || data[0]?.id || "";
+    if (data && typeof data === "object") return data.task_id || data.id || "";
+    return "";
+}
+
+function readSunoAudioUrl(payload: SunoTaskPayload | undefined) {
+    const tracks = payload?.result?.music || payload?.music || [];
+    const ready = tracks.find((track) => {
+        const status = String(track.status || "").toLowerCase();
+        return Boolean(track.audio_url || track.audioUrl || track.url) && (!status || ["complete", "completed", "success"].includes(status));
+    });
+    const track = ready || tracks.find((item) => item.audio_url || item.audioUrl || item.url);
+    return track?.audio_url || track?.audioUrl || track?.url || "";
+}
+
+function sleep(ms: number, signal?: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new DOMException("Aborted", "AbortError"));
+            return;
+        }
+        const timer = globalThis.setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        const onAbort = () => {
+            globalThis.clearTimeout(timer);
+            reject(new DOMException("Aborted", "AbortError"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
 }
 
 function resolveOpenSpeechTtsUrl(baseUrl: string) {
@@ -261,24 +443,30 @@ function readApiErrorMessage(value: unknown): string {
         message?: unknown;
         error?: unknown;
         detail?: unknown;
+        code?: unknown;
         header?: { code?: unknown; message?: unknown; msg?: unknown };
     };
     const headerMsg = payload.header?.message || payload.header?.msg;
     const errorMsg =
         typeof payload.error === "string"
             ? payload.error
-            : (payload.error as { message?: unknown })?.message;
+            : readApiErrorMessage(payload.error);
     const raw =
         readApiErrorMessage(payload.msg) ||
         readApiErrorMessage(payload.message) ||
         readApiErrorMessage(headerMsg) ||
-        readApiErrorMessage(errorMsg) ||
+        (typeof errorMsg === "string" ? errorMsg : "") ||
         readApiErrorMessage(payload.detail) ||
         "";
     if (/invalid\s*x-api-key/i.test(raw)) {
         return `${apiText("openSpeechInvalidKey")}\n${raw}`;
     }
-    return raw;
+    // Prefer explicit message; if only a machine code exists, still surface it.
+    if (raw) return raw;
+    if (typeof payload.code === "string" && payload.code.trim() && !/^\d+$/.test(payload.code.trim())) {
+        return payload.code.trim();
+    }
+    return "";
 }
 
 function readAxiosError(error: unknown, fallback: string) {
@@ -292,6 +480,15 @@ function readAxiosError(error: unknown, fallback: string) {
         const responseData = error.response?.data;
         const apiMsg = readApiErrorMessage(responseData);
         if (apiMsg) return apiMsg;
+        if (typeof responseData === "string" && responseData.trim()) return responseData.trim().slice(0, 500);
+        if (responseData && typeof responseData === "object") {
+            try {
+                const raw = JSON.stringify(responseData);
+                if (raw && raw !== "{}") return raw.slice(0, 500);
+            } catch {
+                // ignore
+            }
+        }
         const statusMsg = statusMessage(error.response?.status, fallback);
         if (statusMsg) return statusMsg;
         return error.message || fallback;
@@ -308,6 +505,7 @@ function statusMessage(status: number | undefined, fallback: string) {
     if (status === 401 || status === 403) return apiText("authenticationFailed");
     if (status === 429) return apiText("rateLimited");
     if (status === 404) return apiText("notFound");
+    if (status === 400) return apiText("invalidRequest");
     if (status === 502) return apiText("badGateway");
     if (status === 503) return apiText("serviceBusy");
     return status ? apiText("httpFailed", { status }) : fallback;

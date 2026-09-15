@@ -2,13 +2,38 @@ import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
-import { audioFormatOptions, audioSpeedLabel, audioVoiceOptions, normalizeAudioFormatValue, normalizeAudioSpeedValue, normalizeAudioVoiceValue } from "@/lib/audio-generation";
+import {
+    audioFormatOptions,
+    audioSpeedLabel,
+    audioVoiceOptions,
+    isSunoAudioModel,
+    normalizeAudioFormatValue,
+    normalizeAudioSpeedValue,
+    normalizeAudioVoiceValue,
+    normalizeSunoFlagValue,
+    normalizeSunoFormatValue,
+    normalizeSunoVersionValue,
+    normalizeSunoVocalGenderValue,
+    sunoFormatOptions,
+    sunoVersionOptions,
+    sunoVocalGenderOptions,
+} from "@/lib/audio-generation";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import type { AiConfig } from "@/stores/use-config-store";
 
 const speedOptions = ["0.75", "1", "1.25", "1.5"];
 
-type AudioSettingKey = "audioVoice" | "audioFormat" | "audioSpeed" | "audioInstructions";
+export type AudioSettingKey =
+    | "audioVoice"
+    | "audioFormat"
+    | "audioSpeed"
+    | "audioInstructions"
+    | "sunoVersion"
+    | "sunoCustom"
+    | "sunoInstrumental"
+    | "sunoTitle"
+    | "sunoStyle"
+    | "sunoVocalGender";
 
 type AudioSettingsPanelProps = {
     config: AiConfig;
@@ -20,6 +45,102 @@ type AudioSettingsPanelProps = {
 
 export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: AudioSettingsPanelProps) {
     const { t } = useTranslation();
+    const suno = isSunoAudioModel(config.model || config.audioModel || "");
+
+    if (suno) {
+        const version = normalizeSunoVersionValue(config.sunoVersion || "");
+        const custom = normalizeSunoFlagValue(config.sunoCustom) === "true";
+        const instrumental = normalizeSunoFlagValue(config.sunoInstrumental) === "true";
+        const format = normalizeSunoFormatValue(config.audioFormat);
+        const vocalGender = normalizeSunoVocalGenderValue(config.sunoVocalGender || "");
+
+        return (
+            <ImageSettingsTheme theme={theme}>
+                <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+                    {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.audio.sunoTitle")}</div> : null}
+                    <SettingGroup title={t("settingsPanels.audio.sunoMode")} color={theme.node.muted}>
+                        <div className="grid grid-cols-2 gap-2.5">
+                            <OptionPill selected={!custom} theme={theme} onClick={() => onConfigChange("sunoCustom", "false")}>
+                                {t("settingsPanels.audio.sunoInspo")}
+                            </OptionPill>
+                            <OptionPill selected={custom} theme={theme} onClick={() => onConfigChange("sunoCustom", "true")}>
+                                {t("settingsPanels.audio.sunoCustom")}
+                            </OptionPill>
+                        </div>
+                    </SettingGroup>
+                    <SettingGroup title={t("settingsPanels.audio.sunoVersion")} color={theme.node.muted}>
+                        <div className="grid grid-cols-3 gap-2.5">
+                            {sunoVersionOptions.map((item) => (
+                                <OptionPill key={item.value} selected={version === item.value} theme={theme} onClick={() => onConfigChange("sunoVersion", item.value)}>
+                                    {item.label}
+                                </OptionPill>
+                            ))}
+                        </div>
+                    </SettingGroup>
+                    <SettingGroup title={t("settingsPanels.audio.sunoInstrumental")} color={theme.node.muted}>
+                        <div className="grid grid-cols-2 gap-2.5">
+                            <OptionPill selected={!instrumental} theme={theme} onClick={() => onConfigChange("sunoInstrumental", "false")}>
+                                {t("settingsPanels.audio.sunoVocal")}
+                            </OptionPill>
+                            <OptionPill selected={instrumental} theme={theme} onClick={() => onConfigChange("sunoInstrumental", "true")}>
+                                {t("settingsPanels.audio.sunoInstrumentalOn")}
+                            </OptionPill>
+                        </div>
+                    </SettingGroup>
+                    {!instrumental ? (
+                        <SettingGroup title={t("settingsPanels.audio.sunoVocalGender")} color={theme.node.muted}>
+                            <div className="grid grid-cols-3 gap-2.5">
+                                {sunoVocalGenderOptions.map((item) => (
+                                    <OptionPill key={item.value || "auto"} selected={vocalGender === item.value} theme={theme} onClick={() => onConfigChange("sunoVocalGender", item.value)}>
+                                        {item.value === "" ? t("settingsPanels.common.auto") : item.value === "Male" ? t("settingsPanels.audio.sunoMale") : t("settingsPanels.audio.sunoFemale")}
+                                    </OptionPill>
+                                ))}
+                            </div>
+                        </SettingGroup>
+                    ) : null}
+                    <SettingGroup title={t("settingsPanels.audio.format")} color={theme.node.muted}>
+                        <div className="grid grid-cols-3 gap-2.5">
+                            {sunoFormatOptions.map((item) => (
+                                <OptionPill key={item.value} selected={format === item.value} theme={theme} onClick={() => onConfigChange("audioFormat", item.value)}>
+                                    {item.label}
+                                </OptionPill>
+                            ))}
+                        </div>
+                    </SettingGroup>
+                    {custom ? (
+                        <>
+                            <SettingGroup title={t("settingsPanels.audio.sunoSongTitle")} color={theme.node.muted}>
+                                <input
+                                    value={config.sunoTitle || ""}
+                                    maxLength={80}
+                                    placeholder={t("settingsPanels.audio.sunoSongTitlePlaceholder")}
+                                    className="h-9 w-full rounded-full border bg-transparent px-3 text-sm outline-none"
+                                    style={{ borderColor: theme.node.stroke, color: theme.node.text, WebkitTextFillColor: theme.node.text }}
+                                    onChange={(event) => onConfigChange("sunoTitle", event.target.value)}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                />
+                            </SettingGroup>
+                            <SettingGroup title={t("settingsPanels.audio.sunoStyle")} color={theme.node.muted}>
+                                <textarea
+                                    value={config.sunoStyle || ""}
+                                    maxLength={1000}
+                                    placeholder={t("settingsPanels.audio.sunoStylePlaceholder")}
+                                    className="thin-scrollbar h-20 w-full resize-none rounded-xl border bg-transparent px-3 py-2 text-sm leading-5 outline-none"
+                                    style={{ borderColor: theme.node.stroke, color: theme.node.text }}
+                                    onChange={(event) => onConfigChange("sunoStyle", event.target.value)}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                />
+                            </SettingGroup>
+                        </>
+                    ) : null}
+                    <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
+                        {custom ? t("settingsPanels.audio.sunoCustomHint") : t("settingsPanels.audio.sunoInspoHint")}
+                    </div>
+                </div>
+            </ImageSettingsTheme>
+        );
+    }
+
     const voice = normalizeAudioVoiceValue(config.audioVoice);
     const format = normalizeAudioFormatValue(config.audioFormat);
     const speed = normalizeAudioSpeedValue(config.audioSpeed);

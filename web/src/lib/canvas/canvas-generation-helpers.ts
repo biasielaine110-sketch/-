@@ -182,6 +182,12 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node?.metadata?.audioInstructions || config.audioInstructions || defaultConfig.audioInstructions,
+        sunoVersion: node?.metadata?.sunoVersion || config.sunoVersion || defaultConfig.sunoVersion,
+        sunoCustom: node?.metadata?.sunoCustom || config.sunoCustom || defaultConfig.sunoCustom,
+        sunoInstrumental: node?.metadata?.sunoInstrumental || config.sunoInstrumental || defaultConfig.sunoInstrumental,
+        sunoTitle: node?.metadata?.sunoTitle || config.sunoTitle || defaultConfig.sunoTitle,
+        sunoStyle: node?.metadata?.sunoStyle || config.sunoStyle || defaultConfig.sunoStyle,
+        sunoVocalGender: node?.metadata?.sunoVocalGender || config.sunoVocalGender || defaultConfig.sunoVocalGender,
         count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
     };
 }

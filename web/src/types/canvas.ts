@@ -123,6 +123,12 @@ export type CanvasNodeMetadata = {
     audioFormat?: string;
     audioSpeed?: string;
     audioInstructions?: string;
+    sunoVersion?: string;
+    sunoCustom?: string;
+    sunoInstrumental?: string;
+    sunoTitle?: string;
+    sunoStyle?: string;
+    sunoVocalGender?: string;
     references?: string[];
     naturalWidth?: number;
     naturalHeight?: number;

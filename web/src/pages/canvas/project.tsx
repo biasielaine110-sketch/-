@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 
 import { isMidjourneyModel, requestEdit, requestGeneration, requestImageQuestion, requestMidjourneyUpscale, type AiTextMessage } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
-import { requestVideoGeneration, storeGeneratedVideo } from "@/services/api/video";
+import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
 import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
@@ -16,6 +16,7 @@ import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, mergeDataUrls, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { loadVideoBlob } from "@/lib/canvas/canvas-video-tools";
 import { fitNodeSize, nodeSizeFromRatio, sizeFromDisplayScalePercent } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
@@ -36,6 +37,7 @@ import { CanvasMergeNodeContent } from "@/components/canvas/canvas-merge-node-co
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { CanvasNodeMjUpscaleDialog } from "@/components/canvas/canvas-node-mj-upscale-dialog";
 import { CanvasNodeScaleDialog } from "@/components/canvas/canvas-node-scale-dialog";
+import { CanvasNodeVideoToolsDialog, type VideoToolsFrameResult, type VideoToolsTrimResult, type VideoToolsUpscaleResult } from "@/components/canvas/canvas-node-video-tools-dialog";
 import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
@@ -307,6 +309,7 @@ function AtelierCanvasPage() {
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
     const [mjUpscaleNodeId, setMjUpscaleNodeId] = useState<string | null>(null);
     const [scaleNodeId, setScaleNodeId] = useState<string | null>(null);
+    const [videoToolsNodeId, setVideoToolsNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [panoramaNodeId, setPanoramaNodeId] = useState<string | null>(null);
@@ -850,6 +853,7 @@ function AtelierCanvasPage() {
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
     const mjUpscaleNode = mjUpscaleNodeId ? nodeById.get(mjUpscaleNodeId) || null : null;
     const scaleNode = scaleNodeId ? nodeById.get(scaleNodeId) || null : null;
+    const videoToolsNode = videoToolsNodeId ? nodeById.get(videoToolsNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
     const panoramaNode = panoramaNodeId ? nodeById.get(panoramaNodeId) || null : null;
@@ -2465,6 +2469,94 @@ function AtelierCanvasPage() {
         setCropNodeId(null);
     }, []);
 
+    const openVideoTools = useCallback((node: CanvasNodeData) => {
+        if (!node.metadata?.content) {
+            message.warning(t("canvas.node.emptyVideo"));
+            return;
+        }
+        setVideoToolsNodeId(node.id);
+    }, [message, t]);
+
+    const createAdjacentVideoNode = useCallback(async (source: CanvasNodeData, videoFile: Awaited<ReturnType<typeof storeGeneratedVideo>>, title: string) => {
+        const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
+        const width = Math.min(Math.max(spec.width, source.width), 640);
+        const height = videoFile.width && videoFile.height ? width * (videoFile.height / videoFile.width) : spec.height;
+        const childId = nanoid();
+        const child: CanvasNodeData = {
+            id: childId,
+            type: CanvasNodeType.Video,
+            title,
+            position: { x: source.position.x + source.width + 96, y: source.position.y },
+            width,
+            height,
+            metadata: {
+                ...videoMetadata(videoFile),
+                prompt: source.metadata?.prompt,
+            },
+        };
+        setNodes((prev) => [...prev, child]);
+        setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: source.id, toNodeId: childId }]);
+        setSelectedNodeIds(new Set([childId]));
+        setVideoToolsNodeId(null);
+        return childId;
+    }, []);
+
+    const handleVideoTrim = useCallback(
+        async (result: VideoToolsTrimResult) => {
+            const source = videoToolsNode;
+            if (!source) return;
+            const stored = await storeGeneratedVideo({ blob: result.blob, mimeType: "video/mp4" });
+            await createAdjacentVideoNode(source, stored, t("canvas.videoTools.trimSuccess"));
+            message.success(t("canvas.videoTools.trimSuccess"));
+        },
+        [createAdjacentVideoNode, message, t, videoToolsNode],
+    );
+
+    const handleVideoFrame = useCallback(
+        async (result: VideoToolsFrameResult) => {
+            const source = videoToolsNode;
+            if (!source) return;
+            const image = await uploadImage(result.dataUrl);
+            const width = Math.min(source.width, Math.max(220, image.width));
+            const childId = nanoid();
+            const child: CanvasNodeData = {
+                id: childId,
+                type: CanvasNodeType.Image,
+                title: t("canvas.videoTools.frameSuccess"),
+                position: { x: source.position.x + source.width + 96, y: source.position.y },
+                width,
+                height: width * (image.height / image.width),
+                metadata: {
+                    ...imageMetadata(image),
+                    prompt: source.metadata?.prompt,
+                },
+            };
+            setNodes((prev) => [...prev, child]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: source.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setVideoToolsNodeId(null);
+            message.success(t("canvas.videoTools.frameSuccess"));
+        },
+        [message, t, videoToolsNode],
+    );
+
+    const handleVideoUpscale = useCallback(
+        async (result: VideoToolsUpscaleResult, signal?: AbortSignal) => {
+            const source = videoToolsNode;
+            if (!source?.metadata?.content) return;
+            const blob = await loadVideoBlob(source.metadata.content);
+            const upscaleConfig = { ...effectiveConfig, model: result.model, videoModel: result.model };
+            const publicUrl = /^https?:\/\//i.test(source.metadata.content)
+                ? source.metadata.content
+                : await uploadProviderMediaFile(upscaleConfig, blob, "source.mp4", { signal });
+            const generated = await requestVideoUpscale(upscaleConfig, { videoUrl: publicUrl, resolution: result.resolution, signal });
+            const stored = await storeGeneratedVideo(generated);
+            await createAdjacentVideoNode(source, stored, t("canvas.videoTools.upscaleSuccess"));
+            message.success(t("canvas.videoTools.upscaleSuccess"));
+        },
+        [createAdjacentVideoNode, effectiveConfig, message, t, videoToolsNode],
+    );
+
     const splitImageNode = useCallback(
         async (node: CanvasNodeData, params: CanvasImageSplitParams) => {
             if (!node.metadata?.content) return;
@@ -3652,7 +3744,13 @@ function AtelierCanvasPage() {
                     const controller = startGenerationRequest(audioId, nodeId, nodeId, runController);
                     try {
                         const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, effectivePrompt, { signal: controller.signal }), generationConfig.audioFormat);
-                        setNodes((prev) => prev.map((node) => (node.id === audioId ? { ...node, metadata: { ...node.metadata, ...audioMetadata(audio), prompt: effectivePrompt, ...buildAudioGenerationMetadata(generationConfig) } } : node)));
+                        setNodes((prev) => prev.map((node) => (node.id === audioId ? { ...node, metadata: { ...node.metadata, ...audioMetadata(audio), prompt: effectivePrompt, ...buildAudioGenerationMetadata(generationConfig), status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));
+                    } catch (error) {
+                        if (!isGenerationCanceled(error)) {
+                            const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                            setNodes((prev) => prev.map((node) => (node.id === audioId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
+                            message.error(errorDetails);
+                        }
                     } finally {
                         finishGenerationRequest(audioId, controller);
                     }
@@ -3885,8 +3983,16 @@ function AtelierCanvasPage() {
                     return;
                 }
                 if (node.type === CanvasNodeType.Audio) {
-                    const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, prompt, { signal: controller.signal }), generationConfig.audioFormat);
-                    setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, ...audioMetadata(audio), prompt, ...buildAudioGenerationMetadata(generationConfig) } } : item)));
+                    try {
+                        const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, prompt, { signal: controller.signal }), generationConfig.audioFormat);
+                        setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, ...audioMetadata(audio), prompt, ...buildAudioGenerationMetadata(generationConfig), status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : item)));
+                    } catch (error) {
+                        if (!isGenerationCanceled(error)) {
+                            const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                            setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails } } : item)));
+                            message.error(errorDetails);
+                        }
+                    }
                     return;
                 }
 
@@ -4812,6 +4918,7 @@ function AtelierCanvasPage() {
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
                     onScale={(node) => setScaleNodeId(node.id)}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
+                    onOpenVideoTools={openVideoTools}
                 />
 
                 <CanvasToolbar
@@ -4854,6 +4961,7 @@ function AtelierCanvasPage() {
                         onInfo={(node) => setInfoNodeId(node.id)}
                         onDownload={downloadNodeImage}
                         onSaveAsset={(node) => void saveNodeAsset(node)}
+                        onOpenVideoTools={openVideoTools}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
@@ -4931,6 +5039,19 @@ function AtelierCanvasPage() {
 
                 {upscaleNode?.metadata?.content ? (
                     <CanvasNodeUpscaleDialog dataUrl={upscaleNode.metadata.content} open={Boolean(upscaleNode)} onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode!, params)} />
+                ) : null}
+
+                {videoToolsNode?.metadata?.content ? (
+                    <CanvasNodeVideoToolsDialog
+                        open={Boolean(videoToolsNode)}
+                        videoUrl={videoToolsNode.metadata.content}
+                        config={effectiveConfig}
+                        onClose={() => setVideoToolsNodeId(null)}
+                        onTrim={handleVideoTrim}
+                        onFrame={handleVideoFrame}
+                        onUpscale={handleVideoUpscale}
+                        onMissingConfig={() => openConfigDialog(true)}
+                    />
                 ) : null}
 
                 {mjUpscaleNode ? (
