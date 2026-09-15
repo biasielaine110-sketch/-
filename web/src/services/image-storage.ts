@@ -196,9 +196,11 @@ export async function removeIndexedDbImages(keys: Iterable<string>) {
 
 async function persistImageBlob(storageKey: string, blob: Blob) {
     if (await isLocalMediaLibraryReady()) {
-        await writeLocalMediaBlob(storageKey, blob);
-        await store.removeItem(storageKey);
-        return;
+        const wrote = await writeLocalMediaBlob(storageKey, blob);
+        if (wrote) {
+            await store.removeItem(storageKey);
+            return;
+        }
     }
     await store.setItem(storageKey, blob);
 }

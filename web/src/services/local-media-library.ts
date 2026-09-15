@@ -59,7 +59,7 @@ export async function bindLocalMediaLibraryDirectory(directory?: FileSystemDirec
         throw new Error("FILE_SYSTEM_ACCESS_UNSUPPORTED");
     }
     const handle = directory || (await window.showDirectoryPicker({ mode: "readwrite" }));
-    const allowed = await ensureLibraryPermission(handle);
+    const allowed = await requestLibraryPermission(handle);
     if (!allowed) throw new Error("FILE_PERMISSION_DENIED");
     // Ensure subfolders exist up front.
     await handle.getDirectoryHandle("images", { create: true });
@@ -78,17 +78,25 @@ export async function bindLocalMediaLibraryDirectory(directory?: FileSystemDirec
     } satisfies LocalMediaLibraryMeta;
 }
 
+/** Silent readiness check — never prompts. Safe for background read/write paths. */
 export async function isLocalMediaLibraryReady() {
     const directory = await getLocalMediaLibraryDirectory();
     if (!directory) return false;
-    return ensureLibraryPermission(directory);
+    return hasLibraryPermission(directory);
+}
+
+/** Must be called from a user gesture (button click). */
+export async function requestLocalMediaLibraryAccess() {
+    const directory = await getLocalMediaLibraryDirectory();
+    if (!directory) return false;
+    return requestLibraryPermission(directory);
 }
 
 export async function writeLocalMediaBlob(storageKey: string, blob: Blob) {
     const directory = await getLocalMediaLibraryDirectory();
     if (!directory) return false;
-    const allowed = await ensureLibraryPermission(directory);
-    if (!allowed) throw new Error("FILE_PERMISSION_DENIED");
+    // Background writes must not call requestPermission (requires user activation).
+    if (!(await hasLibraryPermission(directory))) return false;
     const { folder, fileName } = resolveLibraryPath(storageKey);
     const folderHandle = await directory.getDirectoryHandle(folder, { create: true });
     const fileHandle = await folderHandle.getFileHandle(fileName, { create: true });
@@ -104,8 +112,7 @@ export async function writeLocalMediaBlob(storageKey: string, blob: Blob) {
 export async function readLocalMediaBlob(storageKey: string): Promise<Blob | null> {
     const directory = await getLocalMediaLibraryDirectory();
     if (!directory) return null;
-    const allowed = await ensureLibraryPermission(directory);
-    if (!allowed) return null;
+    if (!(await hasLibraryPermission(directory))) return null;
     try {
         const { folder, fileName } = resolveLibraryPath(storageKey);
         const folderHandle = await directory.getDirectoryHandle(folder, { create: false });
@@ -124,8 +131,7 @@ export async function hasLocalMediaBlob(storageKey: string) {
 export async function deleteLocalMediaBlob(storageKey: string) {
     const directory = await getLocalMediaLibraryDirectory();
     if (!directory) return false;
-    const allowed = await ensureLibraryPermission(directory);
-    if (!allowed) return false;
+    if (!(await hasLibraryPermission(directory))) return false;
     try {
         const { folder, fileName } = resolveLibraryPath(storageKey);
         const folderHandle = await directory.getDirectoryHandle(folder, { create: false });
@@ -140,7 +146,7 @@ export async function migrateIndexedDbBlobsToLocalLibrary(
     entries: Array<{ storageKey: string; blob: Blob | null }>,
     onProgress?: (progress: LocalMediaMigrateProgress) => void,
 ): Promise<LocalMediaMigrateResult> {
-    const ready = await isLocalMediaLibraryReady();
+    const ready = await requestLocalMediaLibraryAccess();
     if (!ready) throw new Error("FILE_PERMISSION_DENIED");
 
     const result: LocalMediaMigrateResult = {
@@ -170,7 +176,8 @@ export async function migrateIndexedDbBlobsToLocalLibrary(
                 result.skipped += 1;
                 continue;
             }
-            await writeLocalMediaBlob(entry.storageKey, entry.blob);
+            const wrote = await writeLocalMediaBlob(entry.storageKey, entry.blob);
+            if (!wrote) throw new Error("FILE_PERMISSION_DENIED");
             result.copied += 1;
             result.bytesCopied += entry.blob.size;
         } catch (error) {
@@ -194,9 +201,21 @@ function resolveLibraryPath(storageKey: string) {
     return { folder: "media", fileName: safe };
 }
 
-async function ensureLibraryPermission(handle: FileSystemDirectoryHandle) {
-    const permission = await handle.queryPermission({ mode: "readwrite" });
-    if (permission === "granted") return true;
-    const next = await handle.requestPermission({ mode: "readwrite" });
-    return next === "granted";
+async function hasLibraryPermission(handle: FileSystemDirectoryHandle) {
+    try {
+        return (await handle.queryPermission({ mode: "readwrite" })) === "granted";
+    } catch {
+        return false;
+    }
+}
+
+async function requestLibraryPermission(handle: FileSystemDirectoryHandle) {
+    try {
+        if (await hasLibraryPermission(handle)) return true;
+        const next = await handle.requestPermission({ mode: "readwrite" });
+        return next === "granted";
+    } catch {
+        // SecurityError when called without user activation — treat as denied.
+        return false;
+    }
 }

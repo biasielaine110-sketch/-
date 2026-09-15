@@ -16,6 +16,7 @@ import {
     getLocalMediaLibraryMeta,
     hasLocalMediaBlob,
     migrateIndexedDbBlobsToLocalLibrary,
+    requestLocalMediaLibraryAccess,
     supportsLocalMediaLibrary,
     type LocalMediaLibraryMeta,
     type LocalMediaMigrateProgress,
@@ -676,6 +677,11 @@ function LocalMediaLibrarySection() {
         setMigrating(true);
         setProgress({ total: 0, done: 0, bytesCopied: 0 });
         try {
+            const allowed = await requestLocalMediaLibraryAccess();
+            if (!allowed) {
+                message.warning(t("config.mediaLibrary.permissionDenied"));
+                return;
+            }
             const [images, media] = await Promise.all([listIndexedDbImageEntries(), listIndexedDbMediaEntries()]);
             const entries = [...images, ...media];
             if (!entries.length) {
@@ -713,6 +719,11 @@ function LocalMediaLibrarySection() {
             onOk: async () => {
                 setCleaning(true);
                 try {
+                    const allowed = await requestLocalMediaLibraryAccess();
+                    if (!allowed) {
+                        message.warning(t("config.mediaLibrary.permissionDenied"));
+                        return;
+                    }
                     const [images, media] = await Promise.all([listIndexedDbImageEntries(), listIndexedDbMediaEntries()]);
                     const removableImages: string[] = [];
                     const removableMedia: string[] = [];
@@ -751,6 +762,19 @@ function LocalMediaLibrarySection() {
                 <Button type="primary" icon={<FolderOpen className="size-4" />} loading={loading} disabled={!supported || migrating || cleaning} onClick={() => void handleBind()}>
                     {meta?.hasDirectory ? t("config.mediaLibrary.rebind") : t("config.mediaLibrary.bind")}
                 </Button>
+                {meta?.hasDirectory ? (
+                    <Button
+                        disabled={!supported || migrating || cleaning}
+                        onClick={() => {
+                            void requestLocalMediaLibraryAccess().then((allowed) => {
+                                if (allowed) message.success(t("config.mediaLibrary.accessGranted"));
+                                else message.warning(t("config.mediaLibrary.permissionDenied"));
+                            });
+                        }}
+                    >
+                        {t("config.mediaLibrary.grantAccess")}
+                    </Button>
+                ) : null}
                 <Button loading={migrating} disabled={!supported || !meta?.hasDirectory || cleaning} onClick={() => void handleMigrate()}>
                     {t("config.mediaLibrary.migrate")}
                 </Button>
