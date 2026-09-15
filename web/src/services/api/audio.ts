@@ -151,21 +151,32 @@ async function requestSunoMusic(config: AiConfig, prompt: string, options?: Requ
 
     let submit;
     try {
-        submit = await axios.post<{ code?: number | string; msg?: string; message?: string; data?: Array<{ task_id?: string; id?: string; status?: string }> | { task_id?: string; id?: string } }>(
-            aiApiUrl(config, "/music/generations"),
-            body,
-            { headers: aiHeaders(config), signal: options?.signal },
-        );
+        submit = await axios.post(aiApiUrl(config, "/music/generations"), body, {
+            headers: aiHeaders(config),
+            signal: options?.signal,
+            // Keep raw text so we can recover JSON even if a proxy left a binary prefix.
+            transformResponse: [(data) => data],
+        });
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
     }
 
-    if (isSunoApiFailureCode(submit.data?.code)) {
-        throw new Error(readApiErrorMessage(submit.data) || apiText("audioGenerationFailed"));
+    const submitPayload = coerceJsonPayload(submit.data) as {
+        code?: number | string;
+        msg?: string;
+        message?: string;
+        data?: Array<{ task_id?: string; id?: string; status?: string }> | { task_id?: string; id?: string };
+        task_id?: string;
+        id?: string;
+    } | null;
+    if (!submitPayload) throw new Error(apiText("audioGenerationFailed"));
+
+    if (isSunoApiFailureCode(submitPayload.code)) {
+        throw new Error(readApiErrorMessage(submitPayload) || apiText("audioGenerationFailed"));
     }
 
-    const taskId = readSunoTaskId(submit.data);
-    if (!taskId) throw new Error(readApiErrorMessage(submit.data) || apiText("audioGenerationFailed"));
+    const taskId = readSunoTaskId(submitPayload);
+    if (!taskId) throw new Error(readApiErrorMessage(submitPayload) || apiText("audioGenerationFailed"));
 
     const started = Date.now();
     while (Date.now() - started < SUNO_MAX_WAIT_MS) {
@@ -174,22 +185,31 @@ async function requestSunoMusic(config: AiConfig, prompt: string, options?: Requ
 
         let poll;
         try {
-            poll = await axios.get<{ code?: number | string; msg?: string; message?: string; data?: SunoTaskPayload }>(aiApiUrl(config, `/music/tasks/${encodeURIComponent(taskId)}`), {
+            poll = await axios.get(aiApiUrl(config, `/music/tasks/${encodeURIComponent(taskId)}`), {
                 headers: aiHeaders(config),
                 signal: options?.signal,
+                transformResponse: [(data) => data],
             });
         } catch (error) {
             throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
         }
 
-        if (isSunoApiFailureCode(poll.data?.code)) {
-            throw new Error(readApiErrorMessage(poll.data) || apiText("audioGenerationFailed"));
+        const pollPayload = coerceJsonPayload(poll.data) as {
+            code?: number | string;
+            msg?: string;
+            message?: string;
+            data?: SunoTaskPayload;
+        } | null;
+        if (!pollPayload) throw new Error(apiText("audioGenerationFailed"));
+
+        if (isSunoApiFailureCode(pollPayload.code)) {
+            throw new Error(readApiErrorMessage(pollPayload) || apiText("audioGenerationFailed"));
         }
 
-        const payload = poll.data?.data;
+        const payload = pollPayload.data;
         const status = String(payload?.status || "").toLowerCase();
         if (["failed", "error", "cancelled", "canceled"].includes(status)) {
-            throw new Error(readSunoErrorMessage(payload) || readApiErrorMessage(poll.data) || apiText("audioGenerationFailed"));
+            throw new Error(readSunoErrorMessage(payload) || readApiErrorMessage(pollPayload) || apiText("audioGenerationFailed"));
         }
 
         const audioUrl = readSunoAudioUrl(payload);
@@ -203,6 +223,41 @@ async function requestSunoMusic(config: AiConfig, prompt: string, options?: Requ
     }
 
     throw new Error(apiText("audioGenerationFailed"));
+}
+
+/** Normalize axios payloads that may arrive as compressed/binary-prefixed text. */
+function coerceJsonPayload(data: unknown): Record<string, unknown> | null {
+    if (data == null) return null;
+    if (typeof data === "object" && !Array.isArray(data) && !(data instanceof ArrayBuffer) && !(typeof Blob !== "undefined" && data instanceof Blob) && !ArrayBuffer.isView(data)) {
+        return data as Record<string, unknown>;
+    }
+
+    let text = "";
+    if (typeof data === "string") text = data;
+    else if (data instanceof ArrayBuffer) text = new TextDecoder().decode(data);
+    else if (ArrayBuffer.isView(data)) text = new TextDecoder().decode(data as ArrayBufferView);
+    else return null;
+
+    const trimmed = text.replace(/^\uFEFF/, "").trim();
+    if (!trimmed) return null;
+
+    try {
+        const parsed = JSON.parse(trimmed);
+        return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    } catch {
+        // Proxy/compression bugs can leave binary bytes before the JSON object.
+        const start = trimmed.indexOf("{");
+        const end = trimmed.lastIndexOf("}");
+        if (start >= 0 && end > start) {
+            try {
+                const parsed = JSON.parse(trimmed.slice(start, end + 1));
+                return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+            } catch {
+                return null;
+            }
+        }
+        return null;
+    }
 }
 
 function isSunoApiFailureCode(code: number | string | undefined) {
@@ -478,9 +533,19 @@ function readAxiosError(error: unknown, fallback: string) {
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
         }
         const responseData = error.response?.data;
-        const apiMsg = readApiErrorMessage(responseData);
+        const apiMsg = readApiErrorMessage(coerceJsonPayload(responseData) || responseData);
         if (apiMsg) return apiMsg;
-        if (typeof responseData === "string" && responseData.trim()) return responseData.trim().slice(0, 500);
+        if (typeof responseData === "string" && responseData.trim()) {
+            const coerced = coerceJsonPayload(responseData);
+            if (coerced) {
+                const fromJson = readApiErrorMessage(coerced);
+                if (fromJson) return fromJson;
+            }
+            // Avoid showing binary garbage prefixes from mis-decoded proxy bodies.
+            const start = responseData.indexOf("{");
+            if (start >= 0) return responseData.slice(start, start + 500);
+            return responseData.trim().slice(0, 500);
+        }
         if (responseData && typeof responseData === "object") {
             try {
                 const raw = JSON.stringify(responseData);

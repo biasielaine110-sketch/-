@@ -50,6 +50,9 @@ function apiProxyPlugin(): Plugin {
                             headers[key] = Array.isArray(value) ? value.join(", ") : value;
                         }
                         headers.host = targetUrl.host;
+                        // Ask upstream for plain bodies. Stripping content-encoding while
+                        // still receiving gzip bytes makes JSON clients see binary garbage.
+                        headers["accept-encoding"] = "identity";
                         const body = ["POST", "PUT", "PATCH"].includes(req.method || "") ? await readRequestBody(req) : undefined;
                         const upstream = await outboundFetch(targetUrl, {
                             method: req.method,

@@ -65,6 +65,8 @@ export default async function handler(req, res) {
             headers[key] = Array.isArray(value) ? value.join(", ") : value;
         }
         headers.host = targetUrl.host;
+        // Prefer uncompressed upstream bodies; we strip content-encoding when forwarding.
+        headers["accept-encoding"] = "identity";
 
         const method = req.method || "GET";
         const body = ["POST", "PUT", "PATCH", "DELETE"].includes(method) ? await readRequestBody(req) : undefined;
