@@ -573,7 +573,7 @@ export default {
             maskTitle: "添加蒙版遮罩后局部修改",
             crop: "裁剪",
             cropTitle: "裁剪并生成新节点",
-            split: "宫格",
+            split: "宫格拆分",
             splitTitle: "宫格拆分与编辑",
             upscale: "放大",
             upscaleTitle: "放大图片分辨率",

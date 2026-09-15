@@ -573,7 +573,7 @@ export default {
             maskTitle: "Paint a mask and edit the selected area",
             crop: "Crop",
             cropTitle: "Crop into a new node",
-            split: "Grid",
+            split: "Grid Split",
             splitTitle: "Split and edit image grid",
             upscale: "Upscale",
             upscaleTitle: "Increase image resolution",
