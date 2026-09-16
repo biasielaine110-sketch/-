@@ -5,11 +5,11 @@ import i18n from "@/i18n";
 import {
     AUTODL_H3_BLANK_AUDIO_URL,
     autodlH3DurationSeconds,
-    autodlH3RequiresRefAudio,
     autodlH3SupportsRefAudio,
     isAutodlH3ComfyVideoModel,
     normalizeAutodlH3Duration,
     normalizeAutodlH3Resolution,
+    shouldUseAutodlComfyVideoBuiltin,
 } from "@/lib/autodl-h3-comfy";
 import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/lib/image-utils";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
@@ -60,11 +60,12 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationTask> {
     const selectedModel = (config.model || config.videoModel).trim();
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
-    // Built-in AutoDL H3 path owns resolution/ref_audio mapping; prefer it over a generic plugin script.
-    if (isAutodlH3ComfyVideoModel(selectedModel, requestConfig.baseUrl)) {
+    const script = resolveModelScript(config, selectedModel);
+    // Built-in AutoDL ComfyUI path owns resolution/ref_audio mapping. Never let a stale
+    // channel script omit ref_audio_0 and surface "模型调用脚本执行失败".
+    if (shouldUseAutodlComfyVideoBuiltin(selectedModel, requestConfig.baseUrl, script)) {
         return createAutodlComfyVideoTask(requestConfig, selectedModel, prompt, references, options);
     }
-    const script = resolveModelScript(config, selectedModel);
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);
     return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
@@ -159,10 +160,11 @@ async function createAutodlComfyVideoTask(config: AiConfig, model: string, promp
         }
     });
     const supportsAudio = autodlH3SupportsRefAudio(workflowId);
-    const requiresAudio = autodlH3RequiresRefAudio(workflowId);
-    if (supportsAudio || audioUrls.length || requiresAudio) {
+    // Audio-capable workflows (z09 / zm / image+audio) always send ref_audio_0.
+    // Do NOT send ref_audio to lightx2v-style workflows — they have no such input.
+    if (supportsAudio || audioUrls.length) {
         const slots = [audioUrls[0], audioUrls[1], audioUrls[2]];
-        if (requiresAudio && !slots[0]) slots[0] = AUTODL_H3_BLANK_AUDIO_URL;
+        if (supportsAudio && !slots[0]) slots[0] = AUTODL_H3_BLANK_AUDIO_URL;
         slots.forEach((url, index) => {
             const value = String(url || "").trim();
             if (!value) return;

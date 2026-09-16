@@ -450,6 +450,100 @@ const urls = await poll(
 );
 return { url: urls[0] };`,
         },
+        {
+            label: i18n.t("modelPlugin.templates.autodlH3Z0903"),
+            script: `// ${i18n.t("modelPlugin.templates.videoAutodlH3Z0903")}
+// Base URL: https://autodl.art/api/v1
+// 仅绑定模型名 minimax_h3_z0903；Token 分组选 ComfyUI
+const workflowId = "minimax_h3_z0903";
+const token = String(apiKey || "").replace(/^Bearer\\s+/i, "").trim();
+const headers = { Authorization: token, "Content-Type": "application/json" };
+const BLANK_AUDIO = "https://codewithgpu.ks3-cn-beijing.ksyuncs.com/comfyui_api/blank/blank.wav";
+const RESOLUTION_MAP = {
+  "480p竖": "480p竖(480*864)",
+  "480p横": "480p横(864*480)",
+  "768p竖": "768p竖(768*1376)",
+  "768p横": "768p横(1376*768)",
+  "1080p竖": "1088p竖(1088*1920)",
+  "1080p横": "1088p横(1920*1088)",
+  "1088p竖": "1088p竖(1088*1920)",
+  "1088p横": "1088p横(1920*1088)",
+  "1440p竖": "1440p竖(1440*2560)",
+  "1440p横": "1440p横(2560*1440)",
+  "480p竖(480*864)": "480p竖(480*864)",
+  "480p横(864*480)": "480p横(864*480)",
+  "768p竖(768*1376)": "768p竖(768*1376)",
+  "768p横(1376*768)": "768p横(1376*768)",
+  "1088p竖(1088*1920)": "1088p竖(1088*1920)",
+  "1088p横(1920*1088)": "1088p横(1920*1088)",
+  "1440p竖(1440*2560)": "1440p竖(1440*2560)",
+  "1440p横(2560*1440)": "1440p横(2560*1440)",
+};
+function mapResolution(value) {
+  const raw = String(value || "").trim();
+  if (RESOLUTION_MAP[raw]) return RESOLUTION_MAP[raw];
+  const lower = raw.toLowerCase();
+  const orient = /横|landscape|16\\s*:\\s*9/i.test(raw) ? "横" : /1\\s*:\\s*1|\\(1:1\\)/i.test(raw) ? "竖" : "竖";
+  if (/1440|2k/i.test(lower)) return orient === "横" ? "1440p横(2560*1440)" : "1440p竖(1440*2560)";
+  if (/1088|1080|fhd/i.test(lower)) return orient === "横" ? "1088p横(1920*1088)" : "1088p竖(1088*1920)";
+  if (/480/i.test(lower)) return orient === "横" ? "480p横(864*480)" : "480p竖(480*864)";
+  return orient === "横" ? "768p横(1376*768)" : "768p竖(768*1376)";
+}
+const duration = Math.min(15, Math.max(1, Math.round(Number(params.duration ?? params.seconds ?? 5) || 5)));
+const resolution = mapResolution(params.resolution || params.size || "768p竖");
+const body = { prompt, duration, resolution };
+images.slice(0, 6).forEach((item, index) => {
+  const url = String(item || "").trim();
+  if (!url) return;
+  body[\`ref_image_\${index}\`] = url;
+  if (index === 0 && /^https?:\\/\\//i.test(url)) {
+    body.image = url;
+    body.image_url = url;
+  }
+});
+const audios = Array.isArray(params.audios) ? params.audios : [];
+const audio0 = String(audios[0] || params.ref_audio_0 || params.audio || "").trim();
+body.ref_audio_0 = audio0 || BLANK_AUDIO;
+[1, 2].forEach((index) => {
+  const url = String(audios[index] || "").trim();
+  if (url) body[\`ref_audio_\${index}\`] = url;
+});
+const submit = await request({
+  method: "post",
+  url: \`\${baseUrl}/comfyui/comfyui_workflow/\${encodeURIComponent(workflowId)}\`,
+  headers,
+  data: body,
+});
+if (submit?.code && !/^success$/i.test(String(submit.code))) {
+  throw new Error(submit.msg || submit.message || JSON.stringify(submit));
+}
+const taskId = submit?.data?.task_id || submit?.task_id;
+if (!taskId) throw new Error(submit?.msg || ${JSON.stringify(i18n.t("modelPlugin.templates.autodlNoTaskId"))});
+const urls = await poll(
+  () => request({
+    method: "get",
+    url: \`\${baseUrl}/comfyui/comfyui_workflow/result/\${encodeURIComponent(taskId)}\`,
+    headers: { Authorization: token },
+  }),
+  (state) => {
+    const data = state?.data || state || {};
+    const status = String(data.status || "");
+    if (/^failed|failure$/i.test(status)) throw new Error(state?.msg || data.message || ${JSON.stringify(i18n.t("modelPlugin.templates.autodlTaskFailed"))});
+    if (!/^success|completed$/i.test(status)) return null;
+    const list = (Array.isArray(data.results) ? data.results : [])
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (!item || typeof item !== "object") return "";
+        return item.url || item.video_url || item.image_url || item.file_url || "";
+      })
+      .filter(Boolean);
+    if (!list.length) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.autodlNoResults"))});
+    return list;
+  },
+  { intervalMs: 2000, timeoutMs: 20 * 60 * 1000 },
+);
+return { url: urls[0] };`,
+        },
     ],
     audio: [
         {

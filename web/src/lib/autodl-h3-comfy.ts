@@ -63,9 +63,22 @@ function workflowId(model: string): string {
 export function isAutodlH3ComfyVideoModel(model: string, baseUrl = ""): boolean {
     const name = workflowId(model);
     if (!name) return false;
-    if (/minimax[_-]?h3|h3comfyui|h3[_-]?comfy|lightx2v|h3_image_audio|image_audio_to_video|z09\d{2}/i.test(name)) return true;
-    if (/autodl\.art/i.test(baseUrl) && /(^|[_-])h3([_-]|$)/i.test(name)) return true;
+    if (/minimax[_-]?h3|h3comfyui|h3[_-]?comfy|lightx2v|h3_image_audio|image_audio_to_video|z09\d{2}|(?:^|[_-])zm(?:[_-]|$)/i.test(name)) return true;
+    if (/autodl\.art/i.test(baseUrl) && /(^|[_-])h3([_-]|$)|minimax|comfyui/i.test(name)) return true;
     return false;
+}
+
+/**
+ * Prefer the built-in ComfyUI submit path over a channel-saved plugin script.
+ * Saved AutoDL templates often omit ref_audio_*; those scripts must not win.
+ * Scripts that already send ref_audio_* are honored (e.g. z0903 dedicated template).
+ */
+export function shouldUseAutodlComfyVideoBuiltin(model: string, baseUrl = "", script = ""): boolean {
+    if (script && /ref_audio/i.test(script) && /comfyui/i.test(script)) return false;
+    if (isAutodlH3ComfyVideoModel(model, baseUrl)) return true;
+    if (!/autodl\.art/i.test(baseUrl)) return false;
+    if (/comfyui_workflow|comfyui\/comfyui/i.test(script)) return true;
+    return /minimax|h3|comfy|lightx2v|z09|zm_/i.test(workflowId(model));
 }
 
 /** Workflows whose resolution enum embeds pixel sizes and uses 1088p (not 1080p). */
@@ -89,9 +102,9 @@ export function autodlH3SupportsRefAudio(model = ""): boolean {
     return isAutodlH3Z09Workflow(model) || isAutodlH3ZmWorkflow(model) || isImageAudioWorkflow(model);
 }
 
-/** z0903 marks ref_audio_0 as required; others usually optional with a blank default. */
+/** z0903 marks ref_audio_0 as required; audio-capable workflows always get a slot-0 value. */
 export function autodlH3RequiresRefAudio(model = ""): boolean {
-    return isAutodlH3Z09Workflow(model);
+    return autodlH3SupportsRefAudio(model);
 }
 
 /** AutoDL blank wav used as workflow default when no reference audio is connected. */
