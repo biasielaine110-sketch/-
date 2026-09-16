@@ -16,7 +16,7 @@ import { captureVideoFrameDataUrl, getDataUrlByteSize, readImageMeta } from "@/l
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { cropDataUrl, mergeDataUrls, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { cropDataUrl, mergeDataUrls, resizeDataUrlByPercent, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { loadVideoBlob } from "@/lib/canvas/canvas-video-tools";
 import { fitNodeSize, nodeSizeFromRatio, sizeFromDisplayScalePercent } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Modal } from "antd";
@@ -2372,35 +2372,69 @@ function AtelierCanvasPage() {
     }, []);
 
     const scaleImageNodeDisplay = useCallback(
-        (node: CanvasNodeData, percent: number) => {
-            const natural = resolveNodeMediaNaturalSize(node);
-            if (!natural) {
+        async (node: CanvasNodeData, percent: number) => {
+            if (!node.metadata?.content) {
                 message.warning(t("canvas.shortcut.resetSizeNeedMedia"));
                 return;
             }
-            const size = sizeFromDisplayScalePercent(natural.width, natural.height, percent);
-            const centerX = node.position.x + node.width / 2;
-            const centerY = node.position.y + node.height / 2;
-            setNodes((prev) =>
-                prev.map((item) =>
-                    item.id === node.id
-                        ? {
-                              ...item,
-                              width: size.width,
-                              height: size.height,
-                              position: { x: centerX - size.width / 2, y: centerY - size.height / 2 },
-                              metadata: {
-                                  ...item.metadata,
-                                  freeResize: false,
-                                  naturalWidth: item.metadata?.naturalWidth || natural.width,
-                                  naturalHeight: item.metadata?.naturalHeight || natural.height,
-                              },
-                          }
-                        : item,
-                ),
-            );
-            setScaleNodeId(null);
-            message.success(t("canvas.projectPage.scaleApplied", { percent }));
+            if (percent >= 100) {
+                message.info(t("canvas.editors.scaleAlreadyFull"));
+                setScaleNodeId(null);
+                return;
+            }
+            try {
+                const resized = await resizeDataUrlByPercent(node.metadata.content, percent);
+                if (!resized.changed) {
+                    message.info(t("canvas.editors.scaleAlreadyFull"));
+                    setScaleNodeId(null);
+                    return;
+                }
+                const uploaded = await uploadImage(resized.dataUrl);
+                const size = fitNodeSize(uploaded.width, uploaded.height);
+                const centerX = node.position.x + node.width / 2;
+                const centerY = node.position.y + node.height / 2;
+                setNodes((prev) =>
+                    prev.map((item) => {
+                        if (item.id !== node.id) return item;
+                        const primaryId = item.metadata?.primaryImageId;
+                        const images = item.metadata?.images?.map((image) =>
+                            image.id === primaryId || (!primaryId && image.content === item.metadata?.content)
+                                ? {
+                                      ...image,
+                                      content: uploaded.url,
+                                      storageKey: uploaded.storageKey,
+                                      naturalWidth: uploaded.width,
+                                      naturalHeight: uploaded.height,
+                                      bytes: uploaded.bytes,
+                                      mimeType: uploaded.mimeType || image.mimeType,
+                                      thumbnailContent: undefined,
+                                      thumbnailStorageKey: undefined,
+                                  }
+                                : image,
+                        );
+                        return {
+                            ...item,
+                            width: size.width,
+                            height: size.height,
+                            position: { x: centerX - size.width / 2, y: centerY - size.height / 2 },
+                            metadata: {
+                                ...item.metadata,
+                                ...imageMetadata(uploaded),
+                                freeResize: false,
+                                images,
+                                primaryImageId: primaryId || item.metadata?.primaryImageId,
+                                prompt: item.metadata?.prompt,
+                                status: NODE_STATUS_SUCCESS,
+                                errorDetails: undefined,
+                            },
+                        };
+                    }),
+                );
+                setScaleNodeId(null);
+                message.success(t("canvas.projectPage.scaleApplied", { percent, width: uploaded.width, height: uploaded.height }));
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("canvas.editors.scaleFailed"));
+            }
         },
         [message, t],
     );
@@ -5473,10 +5507,9 @@ function AtelierCanvasPage() {
                 {scaleNode ? (
                     <CanvasNodeScaleDialog
                         open={Boolean(scaleNode)}
-                        nodeWidth={scaleNode.width}
-                        nodeHeight={scaleNode.height}
                         naturalWidth={resolveNodeMediaNaturalSize(scaleNode)?.width || scaleNode.metadata?.naturalWidth}
                         naturalHeight={resolveNodeMediaNaturalSize(scaleNode)?.height || scaleNode.metadata?.naturalHeight}
+                        bytes={scaleNode.metadata?.bytes}
                         onClose={() => setScaleNodeId(null)}
                         onConfirm={(percent) => scaleImageNodeDisplay(scaleNode, percent)}
                     />

@@ -239,6 +239,42 @@ export async function upscaleDataUrl(dataUrl: string, params: ImageUpscaleParams
     return params.algorithm === "high" ? drawStepUpscale(image, width, height) : drawResize(image, image.width, image.height, width, height, params.algorithm);
 }
 
+/** Downscale image pixels by percent of natural size (100 = unchanged). Prefers JPEG to shrink file size. */
+export async function resizeDataUrlByPercent(dataUrl: string, percent: number) {
+    const image = await loadImage(dataUrl);
+    const factor = Math.max(0.05, Math.min(1, (Number(percent) || 100) / 100));
+    const width = Math.max(1, Math.round(image.width * factor));
+    const height = Math.max(1, Math.round(image.height * factor));
+    if (width >= image.width && height >= image.height) {
+        return { dataUrl, width: image.width, height: image.height, changed: false as const };
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return { dataUrl, width: image.width, height: image.height, changed: false as const };
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    context.drawImage(image, 0, 0, image.width, image.height, 0, 0, width, height);
+
+    const keepPng = /^data:image\/png/i.test(dataUrl) && canvasHasAlpha(context, width, height);
+    const nextDataUrl = keepPng ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", 0.88);
+    return { dataUrl: nextDataUrl, width, height, changed: true as const };
+}
+
+function canvasHasAlpha(context: CanvasRenderingContext2D, width: number, height: number) {
+    try {
+        const sample = context.getImageData(0, 0, Math.min(width, 64), Math.min(height, 64)).data;
+        for (let i = 3; i < sample.length; i += 4) {
+            if (sample[i] < 250) return true;
+        }
+    } catch {
+        return false;
+    }
+    return false;
+}
+
 export function resolveUpscaleSize(width: number, height: number, targetLongEdge: number) {
     const longEdge = Math.max(1, width, height);
     const target = Math.min(MAX_UPSCALE_LONG_EDGE, Math.max(1, Math.round(targetLongEdge)));
