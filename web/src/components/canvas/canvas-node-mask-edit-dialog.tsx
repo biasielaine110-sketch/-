@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { Button, Input, Modal, Slider, Tooltip } from "antd";
+import { Button, Modal, Slider, Tooltip } from "antd";
 import { Brush, Eraser, Redo2, RotateCcw, Undo2, WandSparkles, X, ZoomIn, ZoomOut } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { readImageMeta } from "@/lib/image-utils";
 import { useImageEditorViewport } from "@/components/canvas/use-image-editor-viewport";
+import { CanvasFindReplaceTextArea } from "@/components/canvas/canvas-find-replace-textarea";
 
 export type CanvasImageMaskEditPayload = {
     prompt: string;
@@ -303,13 +304,14 @@ export function CanvasNodeMaskEditDialog({ dataUrl, open, onClose, onConfirm }: 
 
                     <div className="space-y-2">
                         <div className="text-sm font-medium opacity-75">{t("canvas.editors.editInstructions")}</div>
-                        <Input.TextArea
+                        <CanvasFindReplaceTextArea
                             rows={6}
                             value={prompt}
+                            resetKey={open}
                             status={error && !prompt.trim() ? "error" : undefined}
                             placeholder={t("canvas.editors.maskPlaceholder")}
-                            onChange={(event) => {
-                                setPrompt(event.target.value);
+                            onChange={(value) => {
+                                setPrompt(value);
                                 setError("");
                             }}
                         />

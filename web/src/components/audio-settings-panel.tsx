@@ -1,6 +1,7 @@
 import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
+import { CanvasExpandableTextarea } from "@/components/canvas/canvas-expandable-textarea";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import {
     audioFormatOptions,
@@ -128,14 +129,14 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
                                 />
                             </SettingGroup>
                             <SettingGroup title={t("settingsPanels.audio.sunoStyle")} color={theme.node.muted}>
-                                <textarea
+                                <CanvasExpandableTextarea
                                     value={config.sunoStyle || ""}
                                     maxLength={1000}
+                                    editTitle={t("settingsPanels.audio.sunoStyle")}
                                     placeholder={t("settingsPanels.audio.sunoStylePlaceholder")}
                                     className="thin-scrollbar h-20 w-full resize-none rounded-xl border bg-transparent px-3 py-2 text-sm leading-5 outline-none"
                                     style={{ borderColor: theme.node.stroke, color: theme.node.text }}
-                                    onChange={(event) => onConfigChange("sunoStyle", event.target.value)}
-                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onChange={(value) => onConfigChange("sunoStyle", value)}
                                 />
                             </SettingGroup>
                         </>
@@ -267,13 +268,13 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     />
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.audio.instructions")} color={theme.node.muted}>
-                    <textarea
+                    <CanvasExpandableTextarea
                         value={config.audioInstructions || ""}
+                        editTitle={t("settingsPanels.audio.instructions")}
                         placeholder={t("settingsPanels.audio.instructionsPlaceholder")}
                         className="thin-scrollbar h-20 w-full resize-none rounded-xl border bg-transparent px-3 py-2 text-sm leading-5 outline-none"
                         style={{ borderColor: theme.node.stroke, color: theme.node.text }}
-                        onChange={(event) => onConfigChange("audioInstructions", event.target.value)}
-                        onMouseDown={(event) => event.stopPropagation()}
+                        onChange={(value) => onConfigChange("audioInstructions", value)}
                     />
                 </SettingGroup>
             </div>

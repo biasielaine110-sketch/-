@@ -2,11 +2,13 @@ import { forwardRef, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent, PointerEvent, TextareaHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { FileText, Image as ImageIcon, Music2, Video } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { isImeComposing, isPlainEnterKey } from "@/lib/keyboard-event";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { useCanvasTextEditDialog } from "./use-canvas-text-edit-dialog";
 
 type MentionState = {
     start: number;
@@ -20,15 +22,40 @@ type Props = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "onChange" | "val
     onSubmit?: () => void;
     containerClassName?: string;
     highlightLabels?: boolean;
+    /** When true (default), double-click opens the shared text edit dialog unless onDoubleClick is provided. */
+    enableDoubleClickEdit?: boolean;
+    editDialogTitle?: string;
 };
 
-export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Props>(function CanvasResourceMentionTextarea({ value, references, onChange, onSubmit, onKeyDown, className, containerClassName, style, highlightLabels = true, ...props }, forwardedRef) {
+export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Props>(function CanvasResourceMentionTextarea({
+    value,
+    references,
+    onChange,
+    onSubmit,
+    onKeyDown,
+    onDoubleClick,
+    className,
+    containerClassName,
+    style,
+    highlightLabels = true,
+    enableDoubleClickEdit = true,
+    editDialogTitle,
+    placeholder,
+    ...props
+}, forwardedRef) {
+    const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
     const overlayRef = useRef<HTMLDivElement | null>(null);
     const [mention, setMention] = useState<MentionState | null>(null);
     const [activeIndex, setActiveIndex] = useState(0);
     const [hasSelection, setHasSelection] = useState(false);
+    const textEdit = useCanvasTextEditDialog({
+        value,
+        onChange,
+        title: editDialogTitle || t("canvas.nodeToolbar.editTextTitle"),
+        placeholder: typeof placeholder === "string" ? placeholder : undefined,
+    });
     const candidates = useMemo(() => {
         if (!mention) return [];
         const query = mention.query.trim().toLowerCase();
@@ -99,7 +126,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
         <div className={`relative h-full w-full ${containerClassName || ""}`}>
             {showOverlay ? (
                 <div ref={overlayRef} className={`${className || ""} pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words`} style={{ ...style, color: theme.node.text }}>
-                    <MentionHighlightText value={value || props.placeholder?.toString() || ""} labels={activeLabels} placeholder={!value} />
+                    <MentionHighlightText value={value || (typeof placeholder === "string" ? placeholder : "") || ""} labels={activeLabels} placeholder={!value} />
                 </div>
             ) : null}
             <textarea
@@ -110,6 +137,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                     else if (forwardedRef) forwardedRef.current = node;
                 }}
                 value={value}
+                placeholder={placeholder}
                 data-canvas-text-input
                 data-canvas-shortcuts-ignore
                 className={className}
@@ -117,6 +145,13 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                 onCopy={(event) => event.stopPropagation()}
                 onCut={(event) => event.stopPropagation()}
                 onPaste={(event) => event.stopPropagation()}
+                onDoubleClick={(event) => {
+                    if (onDoubleClick) {
+                        onDoubleClick(event);
+                        return;
+                    }
+                    if (enableDoubleClickEdit) textEdit.handleDoubleClick(event);
+                }}
                 onChange={(event) => {
                     const next = event.target.value;
                     onChange(next);
@@ -195,6 +230,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                 }}
             />
             {menu}
+            {!onDoubleClick && enableDoubleClickEdit ? textEdit.dialog : null}
         </div>
     );
 });

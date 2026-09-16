@@ -3,6 +3,7 @@ import { App, Button, Input, Modal, Select } from "antd";
 import { BookmarkPlus, Check, Copy, Edit3, ImagePlus, Plus, RotateCcw, Search, Sparkles, UploadCloud, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { CanvasFindReplaceTextArea } from "@/components/canvas/canvas-find-replace-textarea";
 import { brandPrompts, getPromptLocale, promptCategories, type PromptCategoryId } from "@/constant/prompt-library";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { readFileAsDataUrl } from "@/lib/image-utils";
@@ -351,7 +352,15 @@ export function PromptLibrarySection() {
                 </div>
                 <label className="mt-5 grid gap-1.5 text-sm font-medium">
                     {t("home.promptLibrary.fields.prompt")}
-                    <Input.TextArea value={draft.prompt} onChange={(event) => setDraft((current) => ({ ...current, prompt: event.target.value }))} rows={7} maxLength={4000} showCount placeholder={t("home.promptLibrary.fields.promptPlaceholder")} />
+                    <CanvasFindReplaceTextArea
+                        value={draft.prompt}
+                        resetKey={editorOpen}
+                        onChange={(prompt) => setDraft((current) => ({ ...current, prompt }))}
+                        rows={7}
+                        maxLength={4000}
+                        showCount
+                        placeholder={t("home.promptLibrary.fields.promptPlaceholder")}
+                    />
                 </label>
                 <div className="mt-6 flex justify-end gap-2">
                     <Button onClick={() => setEditorOpen(false)}>{t("common.cancel")}</Button>

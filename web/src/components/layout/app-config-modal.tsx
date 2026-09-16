@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
 
 import { ModelPicker } from "@/components/model-picker";
+import { CanvasFindReplaceTextArea } from "@/components/canvas/canvas-find-replace-textarea";
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { exportAppBackup, importAppBackup } from "@/services/backup-restore";
@@ -316,10 +317,10 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                     </Form.Item>
                                 </div>
                                 <Form.Item label={t("config.preferences.audioInstructions")} className="mb-4">
-                                    <Input.TextArea rows={2} value={config.audioInstructions} placeholder={t("config.preferences.audioInstructionsPlaceholder")} onChange={(event) => updateConfig("audioInstructions", event.target.value)} />
+                                    <CanvasFindReplaceTextArea rows={2} value={config.audioInstructions} resetKey="audio-instructions" placeholder={t("config.preferences.audioInstructionsPlaceholder")} onChange={(value) => updateConfig("audioInstructions", value)} />
                                 </Form.Item>
                                 <Form.Item label={t("config.preferences.systemPrompt")} className="mb-6">
-                                    <Input.TextArea rows={4} value={config.systemPrompt} placeholder={t("config.preferences.systemPromptPlaceholder")} onChange={(event) => updateConfig("systemPrompt", event.target.value)} />
+                                    <CanvasFindReplaceTextArea rows={4} value={config.systemPrompt} resetKey="system-prompt" placeholder={t("config.preferences.systemPromptPlaceholder")} onChange={(value) => updateConfig("systemPrompt", value)} />
                                 </Form.Item>
                                 <TextPromptLibraryPreferences prompts={config.textPrompts || []} onChange={(textPrompts) => updateConfig("textPrompts", textPrompts)} />
                             </Form>
@@ -528,29 +529,26 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
                                     onChange={(event) => updatePrompt(prompt.id, { title: event.target.value })}
                                 />
                                 <Button size="small" disabled={index === 0} title={t("config.preferences.textPromptMoveTop")} onClick={() => movePrompt(index, 0)}>
-                                    â‡ˆ
-                                </Button>
+                                    â‡?                                </Button>
                                 <Button size="small" disabled={index === 0} title={t("config.preferences.textPromptMoveUp")} onClick={() => movePrompt(index, index - 1)}>
-                                    â†‘
-                                </Button>
+                                    â†?                                </Button>
                                 <Button size="small" disabled={index === prompts.length - 1} title={t("config.preferences.textPromptMoveDown")} onClick={() => movePrompt(index, index + 1)}>
-                                    â†“
-                                </Button>
+                                    â†?                                </Button>
                                 <Button
                                     size="small"
                                     disabled={index === prompts.length - 1}
                                     title={t("config.preferences.textPromptMoveBottom")}
                                     onClick={() => movePrompt(index, prompts.length - 1)}
                                 >
-                                    â‡Š
-                                </Button>
+                                    â‡?                                </Button>
                                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removePrompt(prompt.id)} />
                             </div>
-                            <Input.TextArea
+                            <CanvasFindReplaceTextArea
                                 rows={3}
                                 value={prompt.content}
+                                resetKey={prompt.id}
                                 placeholder={t("config.preferences.textPromptContentPlaceholder")}
-                                onChange={(event) => updatePrompt(prompt.id, { content: event.target.value })}
+                                onChange={(content) => updatePrompt(prompt.id, { content })}
                             />
                         </div>
                     ))

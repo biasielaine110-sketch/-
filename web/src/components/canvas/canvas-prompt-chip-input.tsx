@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, MouseEvent, PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { Image } from "antd";
@@ -9,6 +9,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { isImeComposing, isPlainEnterKey } from "@/lib/keyboard-event";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { selectEditableRange } from "./canvas-text-find-replace";
 
 type Props = {
     value: string;
@@ -19,6 +20,12 @@ type Props = {
     className?: string;
     style?: CSSProperties;
     placeholder?: string;
+};
+
+export type CanvasPromptChipInputHandle = {
+    focus: () => void;
+    getEditor: () => HTMLDivElement | null;
+    selectRange: (start: number, end: number) => void;
 };
 
 type MentionState = {
@@ -32,9 +39,18 @@ type Token =
 
 // Prompt-panel contentEditable input: @ references embed thumbnail chips instead of plain label text.
 // Serialization converts chips back to reference labels so the generated value matches the former textarea semantics.
-export function CanvasPromptChipInput({ value, references, onChange, onSubmit, onDoubleClick, className, style, placeholder }: Props) {
+export const CanvasPromptChipInput = forwardRef<CanvasPromptChipInputHandle, Props>(function CanvasPromptChipInput(
+    { value, references, onChange, onSubmit, onDoubleClick, className, style, placeholder },
+    ref,
+) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const editorRef = useRef<HTMLDivElement>(null);
+
+    useImperativeHandle(ref, () => ({
+        focus: () => editorRef.current?.focus(),
+        getEditor: () => editorRef.current,
+        selectRange: (start, end) => selectEditableRange(editorRef.current, start, end),
+    }));
     const composingRef = useRef(false);
     // Track the last value emitted to the parent. An identical focused value is this component's own echo,
     // so skip rebuilding to preserve the caret and IME. Rebuild external changes even while focused.
@@ -203,7 +219,7 @@ export function CanvasPromptChipInput({ value, references, onChange, onSubmit, o
             {imagePreview ? <Image src={imagePreview} alt={i18n.t("canvas.composer.imagePreview")} style={{ display: "none" }} preview={{ visible: true, src: imagePreview, onVisibleChange: (visible) => !visible && setImagePreview(null) }} /> : null}
         </div>
     );
-}
+});
 
 function MentionMenu({ rect, references, activeIndex, theme, onSelect }: { rect: DOMRect | null; references: CanvasResourceReference[]; activeIndex: number; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; onSelect: (reference: CanvasResourceReference) => void }) {
     const selectedRef = useRef(false);

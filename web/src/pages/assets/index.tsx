@@ -5,6 +5,7 @@ import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { useCopyText } from "@/hooks/use-copy-text";
+import { CanvasFindReplaceTextArea } from "@/components/canvas/canvas-find-replace-textarea";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
 import { uploadImage } from "@/services/image-storage";
 import { cn } from "@/lib/utils";
@@ -306,7 +307,7 @@ export default function AssetsPage() {
                             </Space.Compact>
                         </Form.Item>
                         <Form.Item name="tags" label={t("assets.fields.tags")}>
-                            <Select mode="tags" tokenSeparators={[",", "ï¼Œ"]} placeholder={t("assets.fields.tagsPlaceholder")} />
+                            <Select mode="tags" tokenSeparators={[",", "?"]} placeholder={t("assets.fields.tagsPlaceholder")} />
                         </Form.Item>
                         <div className="grid gap-4 sm:grid-cols-2">
                             <Form.Item name="source" label={t("assets.fields.source")}>
@@ -318,7 +319,7 @@ export default function AssetsPage() {
                         </div>
                         {formKind === "text" ? (
                             <Form.Item name="content" label={t("assets.fields.textContent")} rules={[{ required: true, message: t("assets.fields.textRequired") }]}>
-                                <Input.TextArea rows={8} placeholder={t("assets.fields.textPlaceholder")} />
+                                <CanvasFindReplaceTextArea rows={8} resetKey={isAssetOpen} placeholder={t("assets.fields.textPlaceholder")} />
                             </Form.Item>
                         ) : (
                             <Form.Item label={t("assets.fields.imageContent")} required>
@@ -328,7 +329,7 @@ export default function AssetsPage() {
                                     </Button>
                                     {imageDraft ? (
                                         <Typography.Text type="secondary" className="ml-3 text-xs">
-                                            {imageDraft.width}x{imageDraft.height} Â· {formatBytes(imageDraft.bytes)}
+                                            {imageDraft.width}x{imageDraft.height} · {formatBytes(imageDraft.bytes)}
                                         </Typography.Text>
                                     ) : (
                                         <Typography.Text type="secondary" className="ml-3 text-xs">
@@ -502,7 +503,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                             <video src={asset.data.url} controls className="mt-2 aspect-video w-full rounded-lg bg-black" />
                         ) : (
                             <Typography.Text className="mt-2 block">
-                                {asset.data.width}x{asset.data.height} Â· {formatBytes(asset.data.bytes)} Â· {asset.data.mimeType}
+                                {asset.data.width}x{asset.data.height} · {formatBytes(asset.data.bytes)} · {asset.data.mimeType}
                             </Typography.Text>
                         )}
                     </div>
@@ -532,7 +533,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
 
 function assetSummary(asset: Asset) {
     if (asset.kind === "text") return asset.data.content;
-    return `${asset.data.width}x${asset.data.height} Â· ${formatBytes(asset.data.bytes)} Â· ${asset.data.mimeType}`;
+    return `${asset.data.width}x${asset.data.height} · ${formatBytes(asset.data.bytes)} · ${asset.data.mimeType}`;
 }
 
 function assetSearchText(asset: Asset) {
