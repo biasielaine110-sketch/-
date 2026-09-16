@@ -61,10 +61,17 @@ export function getMentionResourceNodes(nodeId: string, nodes: CanvasNodeData[],
 
 export function getGenerationResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
     const configInputs = getConnectedConfigResourceNodes(nodeId, nodes, connections);
-    if (configInputs.length) return configInputs;
     const ownInputs = getContextResourceNodes(nodeId, nodes, connections);
-    if (ownInputs.length) return ownInputs;
-    return [];
+    // Merge both: config panel refs + resources wired directly into the generating node.
+    // Previously configInputs short-circuited and dropped audio linked only to the source node.
+    const merged: CanvasNodeData[] = [];
+    const seen = new Set<string>();
+    for (const node of [...configInputs, ...ownInputs]) {
+        if (!node || node.id === nodeId || seen.has(node.id)) continue;
+        seen.add(node.id);
+        merged.push(node);
+    }
+    return merged;
 }
 
 function getContextResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
@@ -124,7 +131,7 @@ function resourceKind(node: CanvasNodeData): CanvasResourceKind | null {
     if (node.type === CanvasNodeType.Image && node.metadata?.content) return "image";
     if (node.type === CanvasNodeType.Annotate && node.metadata?.content) return "image";
     if (node.type === CanvasNodeType.Video && node.metadata?.content) return "video";
-    if (node.type === CanvasNodeType.Audio && node.metadata?.content) return "audio";
+    if (node.type === CanvasNodeType.Audio && (node.metadata?.content || node.metadata?.storageKey)) return "audio";
     if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) return "text";
     // Plugin nodes declare their input eligibility through definition.resource.
     return getNodeDefinition(node.type)?.resource?.(node)?.kind || null;

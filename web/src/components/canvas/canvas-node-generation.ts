@@ -180,13 +180,15 @@ function readReferenceVideo(node: CanvasNodeData): ReferenceVideo | null {
 }
 
 function readReferenceAudio(node: CanvasNodeData): ReferenceAudio | null {
-    if (node.type !== CanvasNodeType.Audio || !node.metadata?.content) return null;
+    if (node.type !== CanvasNodeType.Audio) return null;
+    const url = node.metadata?.content || node.metadata?.storageKey || "";
+    if (!url) return null;
     return {
         id: node.id,
         name: `${node.title || node.id}.mp3`,
-        type: node.metadata.mimeType || "audio/mpeg",
-        url: node.metadata.content,
-        storageKey: node.metadata.storageKey,
-        durationMs: node.metadata.durationMs,
+        type: node.metadata?.mimeType || "audio/mpeg",
+        url,
+        storageKey: node.metadata?.storageKey,
+        durationMs: node.metadata?.durationMs,
     };
 }

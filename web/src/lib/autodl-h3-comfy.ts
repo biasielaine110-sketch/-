@@ -84,6 +84,19 @@ function isImageAudioWorkflow(model = ""): boolean {
     return /image[_-]?audio|audio[_-]?to[_-]?video/i.test(name);
 }
 
+/** Workflows that accept / require ref_audio_0… (image+audio / z09 / zm). */
+export function autodlH3SupportsRefAudio(model = ""): boolean {
+    return isAutodlH3Z09Workflow(model) || isAutodlH3ZmWorkflow(model) || isImageAudioWorkflow(model);
+}
+
+/** z0903 marks ref_audio_0 as required; others usually optional with a blank default. */
+export function autodlH3RequiresRefAudio(model = ""): boolean {
+    return isAutodlH3Z09Workflow(model);
+}
+
+/** AutoDL blank wav used as workflow default when no reference audio is connected. */
+export const AUTODL_H3_BLANK_AUDIO_URL = "https://codewithgpu.ks3-cn-beijing.ksyuncs.com/comfyui_api/blank/blank.wav";
+
 /** Allowed resolution strings for the given workflow. */
 export function autodlH3ResolutionOptions(model = ""): readonly string[] {
     if (isAutodlH3Z09Workflow(model)) return AUTODL_H3_Z09_RESOLUTIONS;

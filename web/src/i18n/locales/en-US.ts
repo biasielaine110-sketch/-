@@ -57,7 +57,7 @@ export default {
         video: {
             title: "Video settings",
             h3ComfyTitle: "H3 ComfyUI video settings",
-            h3ComfyHint: "Aligned with AutoDL ComfyUI: resolution must match the workflow enum (z0903 e.g. 1088p横(1920*1088); lightx2v e.g. 1080p横). Duration is an integer in seconds (1–{{max}}, default 5).",
+            h3ComfyHint: "Aligned with AutoDL ComfyUI: resolution must match the workflow enum (z0903 e.g. 1088p横(1920*1088)). Image+audio workflows send connected audio as ref_audio_0…; z0903 falls back to a blank audio placeholder when none is connected. Duration is an integer in seconds (1–{{max}}, default 5).",
             quality: "Quality",
             size: "Size",
             seconds: "Seconds",
@@ -196,7 +196,7 @@ export default {
             videoOpenai: "Video with polling inside the script. Use params.ratio (e.g. 16:9); do not send pixel sizes like 1280x720 as ratio. Available: prompt, images, params{seconds,duration,resolution,ratio,size}",
             videoGemini: "Gemini (Veo) video: submit with predictLongRunning and poll the operation for the video URI.",
             availableVideoGemini: "Available: prompt, images(dataURL[]), params, model, baseUrl, apiKey",
-            videoAutodlComfy: "AutoDL ComfyUI video: submit workflow then poll results. model=workflow_id; Base URL=https://autodl.art/api/v1. Body uses prompt, duration, resolution (e.g. 480p竖), ref_image_0…",
+            videoAutodlComfy: "AutoDL ComfyUI video: submit workflow then poll results. model=workflow_id; Base URL=https://autodl.art/api/v1. Body uses prompt, duration, resolution, ref_image_0…; image+audio workflows also send ref_audio_0… (params.audios).",
             audioAutodlComfy: "AutoDL ComfyUI TTS (e.g. indextts2-v1): submit workflow then poll results. model=workflow_id; Base URL=https://autodl.art/api/v1. indextts2 needs prompt_text + prompt_simple (speaker reference audio URL).",
             autodlWorkflowRequired: "Set the model name to the AutoDL workflow_id",
             autodlNoTaskId: "AutoDL did not return a task_id",

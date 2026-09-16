@@ -57,7 +57,7 @@ export default {
         video: {
             title: "视频设置",
             h3ComfyTitle: "H3 ComfyUI 视频设置",
-            h3ComfyHint: "对齐 AutoDL ComfyUI：resolution 须为工作流 options 原文（z0903 如 1088p横(1920*1088)；lightx2v 如 1080p横）。duration 为整数秒（1–{{max}}，默认 5）。",
+            h3ComfyHint: "对齐 AutoDL ComfyUI：resolution 须为工作流 options 原文（z0903 如 1088p横(1920*1088)）。音画工作流会提交连接的参考音频为 ref_audio_0…；未连接时 z0903 使用空白音频占位。duration 为整数秒（1–{{max}}，默认 5）。",
             quality: "清晰度",
             size: "尺寸",
             seconds: "秒数",
@@ -196,7 +196,7 @@ export default {
             videoOpenai: "视频（脚本内部自行轮询）。请使用 params.ratio（如 16:9），不要把 1280x720 这类像素尺寸当作 ratio。可用：prompt、images、params{seconds,duration,resolution,ratio,size}",
             videoGemini: "Gemini(Veo) 视频：predictLongRunning 提交，轮询 operation 拿视频 URI。",
             availableVideoGemini: "可用：prompt、images(dataURL[])、params、model、baseUrl、apiKey",
-            videoAutodlComfy: "AutoDL ComfyUI 视频：提交工作流后轮询 results。模型名=workflow_id；Base URL=https://autodl.art/api/v1。body 使用 prompt、duration、resolution（如 480p竖）、ref_image_0…。",
+            videoAutodlComfy: "AutoDL ComfyUI 视频：提交工作流后轮询 results。模型名=workflow_id；Base URL=https://autodl.art/api/v1。body 使用 prompt、duration、resolution、ref_image_0…，音画工作流另传 ref_audio_0…（params.audios）。",
             audioAutodlComfy: "AutoDL ComfyUI 语音（如 indextts2-v1）：提交工作流后轮询 results。模型名=workflow_id；Base URL=https://autodl.art/api/v1。indextts2 需要 prompt_text + prompt_simple（参考音色音频 URL）。",
             autodlWorkflowRequired: "请把模型名设为 AutoDL 的 workflow_id",
             autodlNoTaskId: "AutoDL 未返回 task_id",

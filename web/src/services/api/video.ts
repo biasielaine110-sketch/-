@@ -2,7 +2,15 @@ import axios from "axios";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
-import { autodlH3DurationSeconds, isAutodlH3ComfyVideoModel, normalizeAutodlH3Duration, normalizeAutodlH3Resolution } from "@/lib/autodl-h3-comfy";
+import {
+    AUTODL_H3_BLANK_AUDIO_URL,
+    autodlH3DurationSeconds,
+    autodlH3RequiresRefAudio,
+    autodlH3SupportsRefAudio,
+    isAutodlH3ComfyVideoModel,
+    normalizeAutodlH3Duration,
+    normalizeAutodlH3Resolution,
+} from "@/lib/autodl-h3-comfy";
 import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/lib/image-utils";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
@@ -10,11 +18,12 @@ import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, re
 import { resolveApiTransport, proxyApiUrl } from "@/lib/api-proxy";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
+import type { ReferenceAudio } from "@/types/media";
 
 type VideoResponse = { id: string; status?: string; error?: { message?: string }; url?: string; result_url?: string; video_url?: string; content?: { video_url?: string; url?: string } | null };
 type ApiVideoResponse = VideoResponse | { code?: number | string; data?: VideoResponse | null; msg?: string; message?: string; error?: { message?: string } };
 type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
-type RequestOptions = { signal?: AbortSignal };
+type RequestOptions = { signal?: AbortSignal; referenceAudios?: ReferenceAudio[] };
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
@@ -51,12 +60,12 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationTask> {
     const selectedModel = (config.model || config.videoModel).trim();
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
-    const script = resolveModelScript(config, selectedModel);
-    if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
-    // AutoDL H3 ComfyUI workflows use /comfyui/comfyui_workflow/{id}, not OpenAI /videos.
+    // Built-in AutoDL H3 path owns resolution/ref_audio mapping; prefer it over a generic plugin script.
     if (isAutodlH3ComfyVideoModel(selectedModel, requestConfig.baseUrl)) {
         return createAutodlComfyVideoTask(requestConfig, selectedModel, prompt, references, options);
     }
+    const script = resolveModelScript(config, selectedModel);
+    if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);
     return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
 }
@@ -109,6 +118,7 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
                 aspect_ratio: ratio,
                 generateAudio: boolConfig(config.videoGenerateAudio, true),
                 watermark: boolConfig(config.videoWatermark, false),
+                audios: await resolveAutodlComfyAudioUrls(options?.referenceAudios || [], options?.signal),
             },
             signal: options?.signal,
         }),
@@ -136,6 +146,7 @@ async function createAutodlComfyVideoTask(config: AiConfig, model: string, promp
     const duration = autodlH3DurationSeconds(config.videoSeconds, workflowId);
     const resolution = normalizeAutodlH3Resolution(config.vquality, workflowId);
     const refs = await Promise.all(references.slice(0, 9).map((image) => resolveAutodlComfyReferenceUrl(image, Math.min(9, references.length || 1))));
+    const audioUrls = await resolveAutodlComfyAudioUrls(options?.referenceAudios || [], options?.signal);
     // AutoDL body: duration must be an integer (seconds), see https://autodl.art/docs/comfyui_api/
     const body: Record<string, unknown> = { prompt, duration, resolution };
     refs.forEach((item, index) => {
@@ -147,6 +158,17 @@ async function createAutodlComfyVideoTask(config: AiConfig, model: string, promp
             body.image_url = url;
         }
     });
+    const supportsAudio = autodlH3SupportsRefAudio(workflowId);
+    const requiresAudio = autodlH3RequiresRefAudio(workflowId);
+    if (supportsAudio || audioUrls.length || requiresAudio) {
+        const slots = [audioUrls[0], audioUrls[1], audioUrls[2]];
+        if (requiresAudio && !slots[0]) slots[0] = AUTODL_H3_BLANK_AUDIO_URL;
+        slots.forEach((url, index) => {
+            const value = String(url || "").trim();
+            if (!value) return;
+            body[`ref_audio_${index}`] = value;
+        });
+    }
     assertProxyBodyFits(body);
 
     try {
@@ -476,6 +498,38 @@ async function resolveAutodlComfyReferenceUrl(image: ReferenceImage, referenceCo
     if (!dataUrl) return "";
     if (isPublicHttpUrl(dataUrl)) return dataUrl.trim();
     return compressReferenceDataUrl(dataUrl, referenceCount, { maxEdge: 1280, maxBytes: Math.min(650_000, Math.floor(2_200_000 / Math.max(1, referenceCount))) });
+}
+
+async function resolveAutodlComfyAudioUrls(audios: ReferenceAudio[], signal?: AbortSignal): Promise<string[]> {
+    const list = audios.slice(0, 3);
+    const resolved = await Promise.all(list.map((audio) => resolveAutodlComfyAudioUrl(audio, signal)));
+    return resolved.filter(Boolean);
+}
+
+async function resolveAutodlComfyAudioUrl(audio: ReferenceAudio, signal?: AbortSignal): Promise<string> {
+    const candidates = [audio.url, audio.storageKey].map((value) => String(value || "").trim()).filter(Boolean);
+    for (const source of candidates) {
+        if (isPublicHttpUrl(source) && !/^blob:/i.test(source)) return source;
+        if (source.startsWith("data:")) return source;
+    }
+    const source = candidates[0];
+    if (!source) return "";
+    try {
+        const response = await axios.get<Blob>(proxyApiUrl(source), { responseType: "blob", signal });
+        const blob = response.data.type.startsWith("audio/") ? response.data : new Blob([response.data], { type: audio.type || "audio/mpeg" });
+        return await blobToDataUrl(blob);
+    } catch {
+        return "";
+    }
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("Failed to read audio"));
+        reader.readAsDataURL(blob);
+    });
 }
 
 /** Fail fast with a clear 413 hint before hitting the site proxy body cap. */

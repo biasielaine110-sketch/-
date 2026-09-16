@@ -3937,7 +3937,12 @@ function AtelierCanvasPage() {
                     setDialogNodeId(nodeId);
                     const controller = videoId === nodeId ? runController : startGenerationRequest(videoId, nodeId, nodeId, runController);
                     try {
-                        const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, effectivePrompt, referenceImages, { signal: controller.signal }));
+                        const video = await storeGeneratedVideo(
+                            await requestVideoGeneration(generationConfig, effectivePrompt, referenceImages, {
+                                signal: controller.signal,
+                                referenceAudios: generationContext.referenceAudios || [],
+                            }),
+                        );
                         const videoSize = fitNodeSize(video.width || spec.width, video.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                         const meta = videoMetadata(video);
                         const version: CanvasNodeImage = {
@@ -4254,7 +4259,12 @@ function AtelierCanvasPage() {
                     return;
                 }
                 if (node.type === CanvasNodeType.Video) {
-                    const video = await storeGeneratedVideo(await requestVideoGeneration(generationConfig, prompt, retryImages, { signal: controller.signal }));
+                    const video = await storeGeneratedVideo(
+                        await requestVideoGeneration(generationConfig, prompt, retryImages, {
+                            signal: controller.signal,
+                            referenceAudios: context?.referenceAudios || [],
+                        }),
+                    );
                     const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                     const meta = videoMetadata(video);
                     const retryVideo: CanvasNodeImage = {
