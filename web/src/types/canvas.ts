@@ -146,6 +146,8 @@ export type CanvasNodeMetadata = {
     messages?: CanvasAssistantMessage[];
     chatTextEnabled?: boolean;
     chatImageEnabled?: boolean;
+    /** Enabled tool-type skill ids for this chat node (e.g. canvas, utils). */
+    chatSkillIds?: string[];
     imageModel?: string;
     annotations?: CanvasAnnotation[];
     grid?: CanvasGridMeta;

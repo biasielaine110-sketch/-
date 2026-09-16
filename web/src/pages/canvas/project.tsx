@@ -5,6 +5,7 @@ import { Group, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { isMidjourneyModel, requestEdit, requestGeneration, requestImageQuestion, requestMidjourneyUpscale, type AiTextMessage } from "@/services/api/image";
+import { chatSkillsSystemHint, executeChatSkillTool, resolveChatSkillTools } from "@/lib/chat-skills";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
 import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -4436,7 +4437,32 @@ function AtelierCanvasPage() {
                     ...historyMessages,
                     { role: "user", content: userContent },
                 ];
-                const answer = await requestImageQuestion(textConfig!, requestMessages, (streamed) => updateAssistantMessage({ text: streamed }), { signal: controller.signal });
+                const skillIds = sourceNode.metadata?.chatSkillIds || [];
+                const skillTools = resolveChatSkillTools(skillIds);
+                const skillsHint = chatSkillsSystemHint(skillIds);
+                const messagesWithSkills: AiTextMessage[] = skillsHint
+                    ? [{ role: "system", content: skillsHint }, ...requestMessages]
+                    : requestMessages;
+                const answer = await requestImageQuestion(
+                    textConfig!,
+                    messagesWithSkills,
+                    (streamed) => updateAssistantMessage({ text: streamed }),
+                    {
+                        signal: controller.signal,
+                        ...(skillTools.length
+                            ? {
+                                  tools: skillTools,
+                                  executeTool: (name, args) =>
+                                      executeChatSkillTool(name, args, {
+                                          chatNodeId: nodeId,
+                                          nodes: nodesRef.current,
+                                          connections: connectionsRef.current,
+                                      }),
+                                  onToolStart: (name) => updateAssistantMessage({ text: t("canvas.chat.skillsUsing", { name }) }),
+                              }
+                            : {}),
+                    },
+                );
                 updateAssistantMessage({ text: answer });
                 return answer;
             };
@@ -4917,6 +4943,7 @@ function AtelierCanvasPage() {
                             onChatModelChange={(nodeId, model) => handleConfigNodeChange(nodeId, { model })}
                             onChatImageModelChange={(nodeId, model) => handleConfigNodeChange(nodeId, { imageModel: model })}
                             onChatModesChange={(nodeId, options) => handleConfigNodeChange(nodeId, { chatTextEnabled: options.text, chatImageEnabled: options.image })}
+                            onChatSkillsChange={(nodeId, skillIds) => handleConfigNodeChange(nodeId, { chatSkillIds: skillIds })}
                             onInsertChatImage={(image) => void insertAssistantImage(image)}
                             onFontSizeChange={handleFontSizeChange}
                             onEditText={(node) => setTextEditNodeId(node.id)}

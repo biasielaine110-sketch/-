@@ -107,6 +107,15 @@ type GeminiPayload = {
 };
 type GeminiStreamState = { buffer: string; text: string; toolCalls: ResponseToolCall[]; error?: string };
 type RequestOptions = { signal?: AbortSignal };
+export type ChatToolDefinition = ResponseFunctionTool;
+export type ChatRequestOptions = RequestOptions & {
+    tools?: ChatToolDefinition[];
+    toolChoice?: ToolChoice;
+    executeTool?: (name: string, args: Record<string, unknown>) => Promise<string>;
+    onToolStart?: (name: string, callId: string) => void;
+    onToolEnd?: (name: string, callId: string, output: string) => void;
+    maxToolRounds?: number;
+};
 
 const QUALITY_BASE: Record<string, number> = {
     low: 1024,
@@ -1906,7 +1915,10 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
 }
 
-export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: RequestOptions) {
+export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: ChatRequestOptions) {
+    if (options?.tools?.length && options.executeTool) {
+        return requestChatWithTools(config, messages, onDelta, options);
+    }
     const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel);
     const script = resolveModelScript(config, config.model || config.textModel);
     if (script) {
@@ -1927,66 +1939,215 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
         }
     }
     try {
-        if (requestConfig.apiFormat === "gemini") {
-            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, messages), onDelta, options)).content || apiText("noContent");
+        const result = await requestChatTurn(requestConfig, withSystemMessage(requestConfig, messages), onDelta, options);
+        const answer = result.content || apiText("noContent");
+        if (answer === apiText("noContent")) onDelta(answer);
+        return answer;
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("requestFailed")));
+    }
+}
+
+/** Multi-round chat with function tools (skills). */
+export async function requestChatWithTools(
+    config: AiConfig,
+    messages: AiTextMessage[],
+    onDelta: (text: string) => void,
+    options: ChatRequestOptions,
+): Promise<string> {
+    const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel);
+    const tools = options.tools || [];
+    const executeTool = options.executeTool;
+    if (!tools.length || !executeTool) {
+        return requestImageQuestion(config, messages, onDelta, { signal: options.signal });
+    }
+
+    const script = resolveModelScript(config, config.model || config.textModel);
+    if (script) {
+        // Custom model scripts do not participate in the native tool loop.
+        return requestImageQuestion(config, messages, onDelta, { signal: options.signal });
+    }
+
+    let turnMessages: ResponseInputMessage[] = withSystemMessage(requestConfig, messages);
+    const maxRounds = Math.max(1, Math.min(8, options.maxToolRounds ?? 6));
+    let lastText = "";
+
+    for (let round = 0; round < maxRounds; round += 1) {
+        const result = await requestChatTurn(requestConfig, turnMessages, onDelta, {
+            signal: options.signal,
+            tools,
+            toolChoice: options.toolChoice || "auto",
+        });
+        lastText = result.content || lastText;
+        if (!result.toolCalls.length) {
+            const answer = lastText || apiText("noContent");
             if (answer === apiText("noContent")) onDelta(answer);
             return answer;
         }
-        const inputMessages = withSystemMessage(requestConfig, messages);
-        const preferChatCompletions = isVolcengineArkBaseUrl(requestConfig.baseUrl);
-        if (preferChatCompletions) {
+
+        for (const call of result.toolCalls) {
+            options.onToolStart?.(call.function.name, call.id);
+            turnMessages = [
+                ...turnMessages,
+                {
+                    type: "function_call",
+                    call_id: call.id,
+                    name: call.function.name,
+                    arguments: call.function.arguments || "{}",
+                    ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}),
+                },
+            ];
+            let output = "";
             try {
-                const answer = (await requestStreamingChatCompletions(requestConfig, inputMessages, onDelta, options)).content || apiText("noContent");
-                if (answer === apiText("noContent")) onDelta(answer);
-                return answer;
-            } catch (chatError) {
+                const args = jsonObject(call.function.arguments || "{}");
+                output = await executeTool(call.function.name, args);
+            } catch (error) {
+                output = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
+            }
+            options.onToolEnd?.(call.function.name, call.id, output);
+            turnMessages = [...turnMessages, { role: "tool", tool_call_id: call.id, content: output }];
+        }
+        // Clear streamed assistant text before the follow-up turn so tool-round prose does not stick.
+        onDelta(lastText ? `${lastText}\n\n` : "");
+    }
+
+    const answer = lastText || apiText("noContent");
+    if (answer === apiText("noContent")) onDelta(answer);
+    return answer;
+}
+
+async function requestChatTurn(
+    config: AiConfig,
+    messages: ResponseInputMessage[],
+    onDelta: (text: string) => void,
+    options?: ChatRequestOptions,
+): Promise<ToolResponseResult> {
+    const tools = options?.tools || [];
+    const toolChoice = options?.toolChoice || "auto";
+    const toolPayload =
+        tools.length > 0
+            ? {
+                  tools: tools.map(toResponseTool),
+                  tool_choice: toolChoice,
+              }
+            : {};
+
+    if (config.apiFormat === "gemini") {
+        return requestGeminiStreamingResponse(
+            config,
+            toGeminiBody(config, messages, toGeminiToolOptions(tools, toolChoice)),
+            onDelta,
+            options,
+        );
+    }
+
+    const preferChatCompletions = isVolcengineArkBaseUrl(config.baseUrl);
+    if (preferChatCompletions) {
+        try {
+            return await requestChatCompletionsTurn(config, messages, onDelta, options);
+        } catch (chatError) {
+            if (!tools.length) {
                 try {
-                    const answer =
-                        (
-                            await requestStreamingResponse(
-                                requestConfig,
-                                {
-                                    model: requestConfig.model,
-                                    input: toResponseInput(inputMessages),
-                                    ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
-                                },
-                                onDelta,
-                                options,
-                            )
-                        ).content || apiText("noContent");
-                    if (answer === apiText("noContent")) onDelta(answer);
-                    return answer;
+                    return await requestStreamingResponse(
+                        config,
+                        {
+                            model: config.model,
+                            input: toResponseInput(messages),
+                            ...(config.reasoningEffort === "auto" ? {} : { reasoning: { effort: config.reasoningEffort } }),
+                            ...toolPayload,
+                        },
+                        onDelta,
+                        options,
+                    );
                 } catch {
                     throw chatError;
                 }
             }
+            throw chatError;
         }
-        try {
-            const answer =
-                (
-                    await requestStreamingResponse(
-                        requestConfig,
-                        {
-                            model: requestConfig.model,
-                            input: toResponseInput(inputMessages),
-                            ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
-                        },
-                        onDelta,
-                        options,
-                    )
-                ).content || apiText("noContent");
-            if (answer === apiText("noContent")) onDelta(answer);
-            return answer;
-        } catch (responsesError) {
-            // Volcengine Ark / many CN relays expose Chat Completions more reliably than Responses.
-            if (!shouldFallbackToChatCompletions(responsesError)) throw responsesError;
-            const answer = (await requestStreamingChatCompletions(requestConfig, inputMessages, onDelta, options)).content || apiText("noContent");
-            if (answer === apiText("noContent")) onDelta(answer);
-            return answer;
-        }
-    } catch (error) {
-        throw new Error(readAxiosError(error, apiText("requestFailed")));
     }
+
+    try {
+        return await requestStreamingResponse(
+            config,
+            {
+                model: config.model,
+                input: toResponseInput(messages),
+                ...(config.reasoningEffort === "auto" ? {} : { reasoning: { effort: config.reasoningEffort } }),
+                ...toolPayload,
+            },
+            onDelta,
+            options,
+        );
+    } catch (responsesError) {
+        if (!shouldFallbackToChatCompletions(responsesError)) throw responsesError;
+        return requestChatCompletionsTurn(config, messages, onDelta, options);
+    }
+}
+
+async function requestChatCompletionsTurn(
+    config: AiConfig,
+    messages: ResponseInputMessage[],
+    onDelta: (text: string) => void,
+    options?: ChatRequestOptions,
+): Promise<ToolResponseResult> {
+    const tools = options?.tools || [];
+    const toolChoice = options?.toolChoice || "auto";
+    const chatTools = tools.map((tool) => ({
+        type: "function" as const,
+        function: {
+            name: tool.function.name,
+            description: tool.function.description,
+            parameters: tool.function.parameters,
+        },
+    }));
+
+    // Tool rounds are more reliable non-streaming on many CN relays.
+    if (tools.length) {
+        const response = await fetch(aiApiUrl(config, "/chat/completions"), {
+            method: "POST",
+            headers: aiHeaders(config, "application/json"),
+            body: JSON.stringify({
+                model: config.model,
+                messages: toChatCompletionMessages(messages),
+                tools: chatTools,
+                tool_choice: toolChoice,
+                stream: false,
+            }),
+            signal: options?.signal,
+        });
+        if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
+        const payload = (await response.json()) as Record<string, unknown>;
+        const message = readChatCompletionMessage(payload);
+        const content = typeof message?.content === "string" ? message.content : "";
+        if (content) onDelta(content);
+        const toolCalls = readChatCompletionToolCalls(message);
+        return { content, toolCalls };
+    }
+
+    return requestStreamingChatCompletions(config, messages, onDelta, options);
+}
+
+function readChatCompletionMessage(payload: Record<string, unknown>) {
+    const choices = Array.isArray(payload.choices) ? payload.choices : [];
+    const first = choices[0] && typeof choices[0] === "object" ? (choices[0] as Record<string, unknown>) : null;
+    return first && typeof first.message === "object" && first.message ? (first.message as Record<string, unknown>) : null;
+}
+
+function readChatCompletionToolCalls(message: Record<string, unknown> | null): ResponseToolCall[] {
+    if (!message || !Array.isArray(message.tool_calls)) return [];
+    return message.tool_calls
+        .map((item) => {
+            if (!item || typeof item !== "object") return null;
+            const record = item as Record<string, unknown>;
+            const fn = record.function && typeof record.function === "object" ? (record.function as Record<string, unknown>) : null;
+            const id = typeof record.id === "string" ? record.id : "";
+            const name = typeof fn?.name === "string" ? fn.name : "";
+            const args = typeof fn?.arguments === "string" ? fn.arguments : "{}";
+            if (!id || !name) return null;
+            return { id, type: "function" as const, function: { name, arguments: args } };
+        })
+        .filter((item): item is ResponseToolCall => Boolean(item));
 }
 
 function shouldFallbackToChatCompletions(error: unknown) {
@@ -2045,22 +2206,41 @@ async function requestStreamingChatCompletions(config: AiConfig, messages: Respo
 }
 
 function toChatCompletionMessages(messages: ResponseInputMessage[]) {
-    const result: Array<{ role: string; content: ResponseMessageContent; tool_call_id?: string }> = [];
+    const result: Array<{ role: string; content: ResponseMessageContent | null; tool_call_id?: string; tool_calls?: unknown[] }> = [];
+    let pendingCalls: Array<{ type: "function_call"; call_id: string; name: string; arguments: string }> = [];
+
+    const flushCalls = () => {
+        if (!pendingCalls.length) return;
+        result.push({
+            role: "assistant",
+            content: null,
+            tool_calls: pendingCalls.map((call) => ({
+                id: call.call_id,
+                type: "function",
+                function: { name: call.name, arguments: call.arguments },
+            })),
+        });
+        pendingCalls = [];
+    };
+
     for (const message of messages) {
-        if ("type" in message) continue;
+        if ("type" in message) {
+            pendingCalls.push(message);
+            continue;
+        }
+        flushCalls();
         if (message.role === "tool") {
             result.push({ role: "tool", tool_call_id: message.tool_call_id, content: message.content });
             continue;
         }
         result.push({ role: message.role, content: message.content || "" });
     }
+    flushCalls();
     return result;
 }
 
 function readChatCompletionContent(payload: Record<string, unknown>) {
-    const choices = Array.isArray(payload.choices) ? payload.choices : [];
-    const first = choices[0] && typeof choices[0] === "object" ? (choices[0] as Record<string, unknown>) : null;
-    const message = first && typeof first.message === "object" && first.message ? (first.message as Record<string, unknown>) : null;
+    const message = readChatCompletionMessage(payload);
     return typeof message?.content === "string" ? message.content : "";
 }
 

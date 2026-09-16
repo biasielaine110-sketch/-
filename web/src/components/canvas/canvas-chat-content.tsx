@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { Check, Copy, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Square, Video } from "lucide-react";
+import { Check, Copy, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Square, Video, Wrench } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -10,6 +10,7 @@ import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialo
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { resolveChatSendOptions, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
+import { listChatSkills } from "@/lib/chat-skills";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasAssistantImage, CanvasAssistantMessage, CanvasNodeData } from "@/types/canvas";
 
@@ -27,6 +28,7 @@ type CanvasChatContentProps = {
     onModelChange: (nodeId: string, model: string) => void;
     onImageModelChange?: (nodeId: string, model: string) => void;
     onModesChange?: (nodeId: string, options: ChatSendOptions) => void;
+    onSkillsChange?: (nodeId: string, skillIds: string[]) => void;
     onInsertImage?: (image: CanvasAssistantImage) => void;
     onFontSizeChange?: (nodeId: string, fontSize: number) => void;
 };
@@ -41,6 +43,7 @@ export function CanvasChatContent({
     onModelChange,
     onImageModelChange,
     onModesChange,
+    onSkillsChange,
     onInsertImage,
     onFontSizeChange,
 }: CanvasChatContentProps) {
@@ -57,6 +60,9 @@ export function CanvasChatContent({
     const sendOptions = resolveChatSendOptions(node.metadata);
     const textEnabled = sendOptions.text;
     const imageEnabled = sendOptions.image;
+    const enabledSkillIds = node.metadata?.chatSkillIds || [];
+    const skills = listChatSkills();
+    const [skillsOpen, setSkillsOpen] = useState(false);
     const connectedText = useMemo(
         () =>
             connectedTexts
@@ -151,6 +157,13 @@ export function CanvasChatContent({
             const nextModel = resolveModelForCapability(globalConfig, undefined, "image");
             if (nextModel) onImageModelChange?.(node.id, nextModel);
         }
+    };
+
+    const toggleSkill = (skillId: string) => {
+        const selected = new Set(enabledSkillIds);
+        if (selected.has(skillId)) selected.delete(skillId);
+        else selected.add(skillId);
+        onSkillsChange?.(node.id, Array.from(selected));
     };
 
     const stopIfInteractive = (event: ReactMouseEvent | ReactPointerEvent) => {
@@ -279,9 +292,59 @@ export function CanvasChatContent({
                     </div>
                 ) : null}
 
-                <div className="mb-1.5 flex items-center gap-1">
+                <div className="mb-1.5 flex flex-wrap items-center gap-1">
                     <ModeToggle active={textEnabled} label={t("canvas.chat.modeText")} icon={<MessageSquareText className="size-3.5" />} theme={theme} onClick={toggleText} />
                     <ModeToggle active={imageEnabled} label={t("canvas.chat.modeImage")} icon={<ImageIcon className="size-3.5" />} theme={theme} onClick={toggleImage} />
+                    {textEnabled ? (
+                        <div className="relative">
+                            <ModeToggle
+                                active={enabledSkillIds.length > 0 || skillsOpen}
+                                label={enabledSkillIds.length ? `${t("canvas.chat.skills")} ${enabledSkillIds.length}` : t("canvas.chat.skills")}
+                                icon={<Wrench className="size-3.5" />}
+                                theme={theme}
+                                onClick={() => setSkillsOpen((open) => !open)}
+                            />
+                            {skillsOpen ? (
+                                <div
+                                    className="absolute bottom-full left-0 z-30 mb-1 w-56 rounded-xl border p-2 shadow-lg"
+                                    style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                >
+                                    <div className="mb-1.5 text-[10px] font-semibold uppercase opacity-55">{t("canvas.chat.skillsTitle")}</div>
+                                    <div className="space-y-1">
+                                        {skills.map((skill) => {
+                                            const active = enabledSkillIds.includes(skill.id);
+                                            return (
+                                                <button
+                                                    key={skill.id}
+                                                    type="button"
+                                                    className="flex w-full items-start gap-2 rounded-lg border px-2 py-1.5 text-left transition"
+                                                    style={{
+                                                        borderColor: active ? theme.toolbar.activeBg : theme.node.stroke,
+                                                        background: active ? `${theme.toolbar.activeBg}22` : "transparent",
+                                                    }}
+                                                    onClick={() => toggleSkill(skill.id)}
+                                                    title={t(`canvas.chat.${skill.descriptionKey}`)}
+                                                >
+                                                    <span
+                                                        className="mt-0.5 grid size-4 shrink-0 place-items-center rounded border text-[10px]"
+                                                        style={{ borderColor: active ? theme.toolbar.activeBg : theme.node.stroke, background: active ? theme.toolbar.activeBg : "transparent", color: active ? "#fff" : theme.node.text }}
+                                                    >
+                                                        {active ? <Check className="size-2.5" /> : null}
+                                                    </span>
+                                                    <span className="min-w-0">
+                                                        <span className="block text-[11px] font-medium">{t(`canvas.chat.${skill.nameKey}`)}</span>
+                                                        <span className="block text-[10px] opacity-60">{t(`canvas.chat.${skill.descriptionKey}`)}</span>
+                                                    </span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            ) : null}
+                        </div>
+                    ) : null}
                     {onFontSizeChange ? (
                         <div className="ml-auto inline-flex items-center gap-0.5 rounded-full border px-1 py-0.5" style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa` }}>
                             <button

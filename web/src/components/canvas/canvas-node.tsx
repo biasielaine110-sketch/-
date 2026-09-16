@@ -59,6 +59,7 @@ type CanvasNodeProps = {
     onChatModelChange?: (nodeId: string, model: string) => void;
     onChatImageModelChange?: (nodeId: string, model: string) => void;
     onChatModesChange?: (nodeId: string, options: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
+    onChatSkillsChange?: (nodeId: string, skillIds: string[]) => void;
     onInsertChatImage?: (image: import("@/types/canvas").CanvasAssistantImage) => void;
     onFontSizeChange?: (nodeId: string, fontSize: number) => void;
     onEditText?: (node: CanvasNodeData) => void;
@@ -87,6 +88,7 @@ type NodeContentRendererProps = {
     onChatModelChange?: (nodeId: string, model: string) => void;
     onChatImageModelChange?: (nodeId: string, model: string) => void;
     onChatModesChange?: (nodeId: string, options: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
+    onChatSkillsChange?: (nodeId: string, skillIds: string[]) => void;
     onInsertChatImage?: (image: import("@/types/canvas").CanvasAssistantImage) => void;
     onFontSizeChange?: (nodeId: string, fontSize: number) => void;
     onEditText?: (node: CanvasNodeData) => void;
@@ -140,6 +142,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onChatModelChange,
     onChatImageModelChange,
     onChatModesChange,
+    onChatSkillsChange,
     onInsertChatImage,
     onFontSizeChange,
     onEditText,
@@ -448,6 +451,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onChatModelChange={onChatModelChange}
                         onChatImageModelChange={onChatImageModelChange}
                         onChatModesChange={onChatModesChange}
+                        onChatSkillsChange={onChatSkillsChange}
                         onInsertChatImage={onInsertChatImage}
                         onFontSizeChange={onFontSizeChange}
                         onEditText={onEditText}
@@ -596,7 +600,7 @@ function AnnotateNodeContent({ node, theme, onAnnotate }: NodeContentRendererPro
     );
 }
 
-function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onInsertChatImage, onFontSizeChange, onCancelGeneration }: NodeContentRendererProps) {
+function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onChatSkillsChange, onInsertChatImage, onFontSizeChange, onCancelGeneration }: NodeContentRendererProps) {
     // Exclude this chat node itself: its resource text is the latest reply and must not fill the composer.
     const upstreamReferences = mentionReferences.filter((reference) => reference.nodeId !== node.id);
     const connectedTexts = upstreamReferences.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim()).map((reference) => reference.text!.trim());
@@ -611,6 +615,7 @@ function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatMod
             onModelChange={(nodeId, model) => onChatModelChange?.(nodeId, model)}
             onImageModelChange={(nodeId, model) => onChatImageModelChange?.(nodeId, model)}
             onModesChange={(nodeId, options) => onChatModesChange?.(nodeId, options)}
+            onSkillsChange={(nodeId, skillIds) => onChatSkillsChange?.(nodeId, skillIds)}
             onInsertImage={onInsertChatImage}
             onFontSizeChange={onFontSizeChange}
         />
@@ -722,11 +727,20 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
         onFontSizeChange(node.id, next);
     };
 
+    // Align with Chat: chrome/empty areas drag the node; only real text widgets block bubbling.
+    const stopIfInteractive = (event: React.MouseEvent | React.PointerEvent) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        if (target.closest("[data-canvas-text-input],textarea,button,input,[contenteditable='true']")) {
+            event.stopPropagation();
+        }
+    };
+
     return (
-        <div className="flex h-full w-full flex-col overflow-hidden pt-8">
-            <div className="absolute right-3 top-3 z-20 flex items-center gap-1.5">
+        <div className="relative flex h-full w-full cursor-move flex-col overflow-hidden" onMouseDown={stopIfInteractive} onPointerDown={stopIfInteractive}>
+            <div className="relative z-20 flex shrink-0 flex-wrap items-center justify-end gap-1.5 px-3 pb-2 pt-2">
                 {onFontSizeChange ? (
-                    <div className="inline-flex h-8 items-center gap-0.5 rounded-full border px-1 backdrop-blur-md" style={actionButtonStyle}>
+                    <div className="inline-flex h-7 shrink-0 items-center gap-0.5 rounded-full border px-1 backdrop-blur-md" style={actionButtonStyle}>
                         <button
                             type="button"
                             className="grid size-6 place-items-center rounded-full opacity-85 transition hover:opacity-100 disabled:opacity-35"
@@ -762,11 +776,12 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                 ) : null}
                 <CanvasTextPromptPicker
                     buttonStyle={actionButtonStyle}
+                    className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
                     onSelect={(prompt) => onContentChange(node.id, prompt.content)}
                 />
                 <button
                     type="button"
-                    className="inline-flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
+                    className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
                     style={actionButtonStyle}
                     onClick={(event) => {
                         event.stopPropagation();
@@ -777,12 +792,12 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     title={t("canvas.node.createChatTitle")}
                     aria-label={t("canvas.node.createChat")}
                 >
-                    <MessageSquareText className="size-3.5" />
+                    <MessageSquareText className="size-3.5 shrink-0" />
                     {t("canvas.node.createChat")}
                 </button>
                 <button
                     type="button"
-                    className="inline-flex h-8 items-center gap-1 rounded-full border px-2.5 text-xs font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
+                    className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
                     style={actionButtonStyle}
                     onClick={(event) => {
                         event.stopPropagation();
@@ -793,14 +808,14 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     title={t("canvas.node.generateImage")}
                     aria-label={t("canvas.node.generateImage")}
                 >
-                    <ImageIcon className="size-3.5" />
+                    <ImageIcon className="size-3.5 shrink-0" />
                     {t("canvas.node.generate")}
                 </button>
             </div>
             {isEditingContent ? (
                 <CanvasResourceMentionTextarea
                     ref={textareaRef}
-                    className="thin-scrollbar block h-full w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-none bg-transparent pl-4 pr-14 pt-0 pb-4 m-0 font-mono outline-none select-text appearance-none"
+                    className="thin-scrollbar block min-h-0 w-full flex-1 resize-none overflow-y-auto whitespace-pre-wrap break-words border-none bg-transparent pl-4 pr-4 pt-0 pb-4 m-0 font-mono outline-none select-text appearance-none"
                     style={textStyle}
                     value={node.metadata?.content || ""}
                     references={mentionReferences}
@@ -821,15 +836,14 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     }}
                 />
             ) : (
-                <div
-                    data-canvas-selectable-text
-                    className="thin-scrollbar block h-full w-full cursor-text select-text overflow-y-auto whitespace-pre-wrap break-words bg-transparent pl-4 pr-14 pt-0 pb-4 font-mono"
-                    style={textStyle}
-                    onWheel={(event) => event.stopPropagation()}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onPointerDown={(event) => event.stopPropagation()}
-                >
-                    {node.metadata?.content || <span style={{ color: theme.node.placeholder }}>{t("canvas.node.editText")}</span>}
+                <div className="min-h-0 flex-1 overflow-y-auto" onWheel={(event) => event.stopPropagation()}>
+                    <div
+                        data-canvas-selectable-text
+                        className="block w-full cursor-text select-text whitespace-pre-wrap break-words bg-transparent pl-4 pr-4 pt-0 pb-4 font-mono"
+                        style={textStyle}
+                    >
+                        {node.metadata?.content || <span style={{ color: theme.node.placeholder }}>{t("canvas.node.editText")}</span>}
+                    </div>
                 </div>
             )}
         </div>
