@@ -185,18 +185,13 @@ async function requestAutodlComfyAudio(config: AiConfig, prompt: string, format:
 
     const body: Record<string, unknown> = isAutodlIndexTtsWorkflow(workflowId)
         ? {
+              // Schema: https://autodl.art/api/v1/comfyui/workflows/indextts2-v1
+              // emo_control_method / emo_surprised are enums → must be strings.
               prompt_text: text.slice(0, 2048),
               prompt_simple: speakerAudio,
               emo_control_method: AUTODL_INDEXTTS_EMO_CONTROL_SAME_AS_VOICE,
+              emo_surprised: "0",
               emo_random: false,
-              emo_happy: 0,
-              emo_angry: 0,
-              emo_sad: 0,
-              emo_afraid: 0,
-              emo_disgusted: 0,
-              emo_melancholic: 0,
-              emo_calm: 0,
-              emo_surprised: 0,
           }
         : {
               prompt: text,
