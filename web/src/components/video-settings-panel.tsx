@@ -6,6 +6,7 @@ import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import {
     autodlH3DurationMax,
     autodlH3DurationOptions,
+    autodlH3ResolutionDisplay,
     autodlH3ResolutionLabel,
     autodlH3ResolutionOptions,
     isAutodlH3ComfyVideoModel,
@@ -62,10 +63,10 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         {t("settingsPanels.video.h3ComfyHint", { max: durationMax })}
                     </div>
                     <SettingGroup title={t("settingsPanels.video.resolution")} color={theme.node.muted}>
-                        <div className="grid grid-cols-3 gap-2">
+                        <div className={`grid gap-2 ${resolutionChoices.some((value) => value.includes("(")) ? "grid-cols-2" : "grid-cols-3"}`}>
                             {resolutionChoices.map((value) => (
                                 <OptionPill key={value} selected={resolution === value} theme={theme} onClick={() => onConfigChange("vquality", value)}>
-                                    {value}
+                                    {autodlH3ResolutionDisplay(value, model)}
                                 </OptionPill>
                             ))}
                         </div>

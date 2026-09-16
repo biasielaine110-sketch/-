@@ -57,7 +57,7 @@ export default {
         video: {
             title: "视频设置",
             h3ComfyTitle: "H3 ComfyUI 视频设置",
-            h3ComfyHint: "对齐 AutoDL ComfyUI：resolution 如 480p竖 / 1080p横 / 1440p横（定价页的 1088p 会映射为 1080p）；duration 为整数秒（1–{{max}}，默认 5）。参考图作为 ref_image_0… 提交。",
+            h3ComfyHint: "对齐 AutoDL ComfyUI：resolution 须为工作流 options 原文（z0903 如 1088p横(1920*1088)；lightx2v 如 1080p横）。duration 为整数秒（1–{{max}}，默认 5）。",
             quality: "清晰度",
             size: "尺寸",
             seconds: "秒数",
