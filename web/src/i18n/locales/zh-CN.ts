@@ -491,6 +491,17 @@ export default {
             manage: "管理词库",
             empty: "词库为空，请先在偏好设置中添加",
         },
+        textFindReplace: {
+            open: "查找替换",
+            findPlaceholder: "查找内容",
+            replacePlaceholder: "替换为",
+            replace: "替换",
+            replaceAll: "全部替换",
+            next: "下一个",
+            prev: "上一个",
+            noMatches: "无匹配",
+            caseSensitive: "区分大小写",
+        },
         annotate: {
             emptyHint: "连接图片节点或上传图片后，双击或点按钮进入全屏标记",
             badge: "{{count}} 个标记",

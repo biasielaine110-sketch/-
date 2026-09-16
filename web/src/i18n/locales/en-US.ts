@@ -491,6 +491,17 @@ export default {
             manage: "Manage library",
             empty: "Library is empty. Add prompts in Preferences first.",
         },
+        textFindReplace: {
+            open: "Find & replace",
+            findPlaceholder: "Find",
+            replacePlaceholder: "Replace with",
+            replace: "Replace",
+            replaceAll: "Replace all",
+            next: "Next",
+            prev: "Previous",
+            noMatches: "No matches",
+            caseSensitive: "Match case",
+        },
         annotate: {
             emptyHint: "Link an image node or upload an image, then double-click or use the button for fullscreen annotate",
             badge: "{{count}} marks",
