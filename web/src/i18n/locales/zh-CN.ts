@@ -219,7 +219,7 @@ export default {
         corsRequired: "请求被浏览器跨域策略拦截，请通过自己的服务转发请求",
         networkFailed: "无法连接接口服务器（可能是跨域拦截、地址不可达或网络问题），请检查 Base URL 与网络",
         proxyTimedOut: "代理请求超时。线上代理最长约 5 分钟；若刚改过超时配置，请重新部署后再试。也可在本机 npm run dev 生图。",
-        payloadTooLarge: "请求体过大（HTTP 413）。图生图参考图经站点代理时受体积限制。请减少参考图数量/分辨率，或到「配置 → 偏好设置」将「API 请求方式」改为「浏览器直连」。",
+        payloadTooLarge: "请求体过大（HTTP 413）。经站点代理上传参考图/音频时受体积限制（约 4.5MB）。请减少参考数量、先裁短音频，或到「配置 → 偏好设置」将「API 请求方式」改为「浏览器直连」。",
         baseUrlRequired: "请先配置 Base URL",
         apiKeyRequired: "请先配置 API Key",
         authenticationFailed: "鉴权失败。Agent Plan 必须用套餐专用 Key（通常以 ark- 开头），不能用语音 Key、AK/SK 或按量 API Key。",

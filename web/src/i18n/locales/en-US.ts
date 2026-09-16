@@ -219,7 +219,7 @@ export default {
         corsRequired: "The browser blocked this cross-origin request. Route it through your own server",
         networkFailed: "Cannot reach the API server (cross-origin block, unreachable address, or network issue). Check the Base URL and network",
         proxyTimedOut: "Proxy timed out. Online proxy allows up to ~5 minutes; redeploy after the timeout fix. Or run npm run dev locally for image generation.",
-        payloadTooLarge: "Request body too large (HTTP 413). Image-edit uploads through the site proxy are size-limited. Use fewer/smaller reference images, or set API transport to Direct in Settings → Preferences.",
+        payloadTooLarge: "Request body too large (HTTP 413). Reference media through the site proxy is size-limited (~4.5MB). Use fewer/smaller references, trim audio first, or set API transport to Direct in Settings → Preferences.",
         baseUrlRequired: "Configure the Base URL first",
         apiKeyRequired: "Configure the API key first",
         authenticationFailed: "Authentication failed. Agent Plan needs a dedicated ark- key, not a speech key, AK/SK, or pay-as-you-go Ark key.",

@@ -3,11 +3,11 @@ import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
 import { autodlH3DurationSeconds, isAutodlH3ComfyVideoModel, normalizeAutodlH3Duration, normalizeAutodlH3Resolution } from "@/lib/autodl-h3-comfy";
-import { dataUrlToFile } from "@/lib/image-utils";
+import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/lib/image-utils";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { proxyApiUrl } from "@/lib/api-proxy";
+import { getApiTransport, proxyApiUrl } from "@/lib/api-proxy";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 
@@ -74,7 +74,12 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
 async function createPluginVideoTask(config: AiConfig, model: string, script: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
     if (!config.apiKey.trim()) throw new Error(apiText("apiKeyRequired"));
-    const refs = await Promise.all(references.map((image) => imageToDataUrl(image)));
+    const refs = await Promise.all(
+        references.slice(0, 9).map(async (image, _index, list) => {
+            const resolved = await resolveAutodlComfyReferenceUrl(image, Math.min(9, list.length || 1));
+            return resolved;
+        }),
+    );
     const ratio = normalizeVideoRatio(config.size);
     const pixelSize = normalizeVideoSize(config.size);
     const h3Comfy = isAutodlH3ComfyVideoModel(model, config.baseUrl);
@@ -130,10 +135,10 @@ async function createAutodlComfyVideoTask(config: AiConfig, model: string, promp
     const headers = { Authorization: token, "Content-Type": "application/json" };
     const duration = autodlH3DurationSeconds(config.videoSeconds, workflowId);
     const resolution = normalizeAutodlH3Resolution(config.vquality);
-    const refs = await Promise.all(references.map((image) => imageToDataUrl(image)));
+    const refs = await Promise.all(references.slice(0, 9).map((image) => resolveAutodlComfyReferenceUrl(image, Math.min(9, references.length || 1))));
     // AutoDL body: duration must be an integer (seconds), see https://autodl.art/docs/comfyui_api/
     const body: Record<string, unknown> = { prompt, duration, resolution };
-    refs.slice(0, 9).forEach((item, index) => {
+    refs.forEach((item, index) => {
         const url = String(item || "").trim();
         if (!url) return;
         body[`ref_image_${index}`] = url;
@@ -142,6 +147,7 @@ async function createAutodlComfyVideoTask(config: AiConfig, model: string, promp
             body.image_url = url;
         }
     });
+    assertProxyBodyFits(body);
 
     try {
         const submit = (
@@ -462,6 +468,38 @@ function isPublicHttpUrl(value: string) {
     return /^https?:\/\//i.test((value || "").trim());
 }
 
+/** Prefer remote URLs; otherwise compress data URLs so /api/proxy stays under Vercel ~4.5MB. */
+async function resolveAutodlComfyReferenceUrl(image: ReferenceImage, referenceCount = 1) {
+    if (image.url && isPublicHttpUrl(image.url)) return image.url.trim();
+    if (image.dataUrl && isPublicHttpUrl(image.dataUrl)) return image.dataUrl.trim();
+    const dataUrl = await imageToDataUrl(image);
+    if (!dataUrl) return "";
+    if (isPublicHttpUrl(dataUrl)) return dataUrl.trim();
+    return compressReferenceDataUrl(dataUrl, referenceCount, { maxEdge: 1280, maxBytes: Math.min(650_000, Math.floor(2_200_000 / Math.max(1, referenceCount))) });
+}
+
+/** Fail fast with a clear 413 hint before hitting the site proxy body cap. */
+function assertProxyBodyFits(body: Record<string, unknown>) {
+    if (getApiTransport() !== "proxy") return;
+    let encoded = "";
+    try {
+        encoded = JSON.stringify(body);
+    } catch {
+        return;
+    }
+    // Vercel Hobby request body limit is ~4.5MB; leave headroom for headers/encoding.
+    if (encoded.length > 3_800_000) {
+        throw new Error(apiText("payloadTooLarge"));
+    }
+    const inlineBytes = Object.values(body).reduce((sum, value) => {
+        if (typeof value !== "string" || !value.startsWith("data:")) return sum;
+        return sum + getDataUrlByteSize(value);
+    }, 0);
+    if (inlineBytes > 3_200_000) {
+        throw new Error(apiText("payloadTooLarge"));
+    }
+}
+
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
         const video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data);
@@ -653,6 +691,7 @@ function readNetworkMessage(message: string) {
 
 function statusMessage(status: number | undefined, fallback: string) {
     if (status === 401 || status === 403) return apiText("authenticationFailed");
+    if (status === 413) return apiText("payloadTooLarge");
     if (status === 429) return apiText("rateLimited");
     return status ? `${fallback}（${status}）` : fallback;
 }
