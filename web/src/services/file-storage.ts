@@ -29,14 +29,21 @@ export async function uploadMediaFile(input: string | Blob, prefix = "file"): Pr
 }
 
 export async function resolveMediaUrl(storageKey?: string, fallback = "") {
-    if (!storageKey) return fallback;
+    if (!storageKey) return usableMediaFallback(fallback);
     const cached = objectUrls.get(storageKey);
     if (cached) return cached;
     const blob = await getMediaBlob(storageKey);
-    if (!blob) return fallback;
+    if (!blob) return usableMediaFallback(fallback);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     return url;
+}
+
+/** Blob object URLs die on refresh; never treat them as a usable fallback. */
+function usableMediaFallback(fallback = "") {
+    const value = String(fallback || "").trim();
+    if (!value || value.startsWith("blob:")) return "";
+    return value;
 }
 
 export async function getMediaBlob(storageKey: string) {

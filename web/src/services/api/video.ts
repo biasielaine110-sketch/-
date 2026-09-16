@@ -215,8 +215,12 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
     if (result.url) {
         try {
             return await uploadMediaFile(result.url, "video");
-        } catch {
-            return { url: result.url, storageKey: "", bytes: 0, mimeType: result.mimeType || "video/mp4" };
+        } catch (error) {
+            // Keep remote https URLs as a temporary fallback, but never persist empty storageKey + dead blob.
+            if (/^https?:\/\//i.test(result.url)) {
+                return { url: result.url, storageKey: "", bytes: 0, mimeType: result.mimeType || "video/mp4" };
+            }
+            throw error instanceof Error ? error : new Error(String(error));
         }
     }
     throw new Error(apiText("noPlayableVideo"));

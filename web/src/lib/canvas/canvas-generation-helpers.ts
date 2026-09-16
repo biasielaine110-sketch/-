@@ -46,7 +46,35 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
     return Promise.all(
         nodes.map(async (node) => {
             const content = node.metadata?.content;
-            if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveMediaUrl(node.metadata.storageKey, content) } };
+            if (node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) {
+                const images = await Promise.all(
+                    (node.metadata?.images || []).map(async (image) => {
+                        if (!image.content && !image.storageKey) return image;
+                        const nextContent = image.storageKey
+                            ? await resolveMediaUrl(image.storageKey, image.content)
+                            : image.content?.startsWith("blob:")
+                              ? ""
+                              : image.content;
+                        return { ...image, content: nextContent };
+                    }),
+                );
+                const nextContent = node.metadata?.storageKey
+                    ? await resolveMediaUrl(node.metadata.storageKey, content)
+                    : content?.startsWith("blob:")
+                      ? images.find((image) => image.id === (node.metadata?.primaryImageId || images[0]?.id))?.content || images[0]?.content || ""
+                      : content;
+                // Prefer a playable primary version when top-level content is still empty.
+                const primary = images.find((image) => image.id === (node.metadata?.primaryImageId || images[0]?.id) && image.content) || images.find((image) => image.content);
+                return {
+                    ...node,
+                    metadata: {
+                        ...node.metadata,
+                        content: nextContent || primary?.content || "",
+                        storageKey: node.metadata?.storageKey || primary?.storageKey,
+                        images,
+                    },
+                };
+            }
             if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) || !content) return node;
             const images = await Promise.all(
                 (node.metadata?.images || []).map(async (image) => {
