@@ -2,6 +2,12 @@ import axios from "axios";
 
 import i18n from "@/i18n";
 import {
+    AUTODL_INDEXTTS_EMO_CONTROL_REF_AUDIO,
+    AUTODL_INDEXTTS_EMO_CONTROL_SAME_AS_VOICE,
+    isAutodlComfyAudioModel,
+    isAutodlIndexTtsWorkflow,
+} from "@/lib/autodl-comfy-audio";
+import {
     audioMimeType,
     isSeedAudioModel,
     isSunoAudioModel,
@@ -16,7 +22,7 @@ import {
     normalizeSunoVocalGenderValue,
 } from "@/lib/audio-generation";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import type { ReferenceAudio } from "@/types/media";
 import { uploadProviderMediaFile } from "./video";
@@ -99,6 +105,15 @@ export async function requestAudioGeneration(config: AiConfig, prompt: string, o
     assertAudioConfig(requestConfig, model);
     const instructions = config.audioInstructions.trim();
 
+    // AutoDL ComfyUI TTS (e.g. indextts2-v1): POST workflow → poll result — not OpenSpeech /audio/speech.
+    if (isAutodlComfyAudioModel(model, requestConfig.baseUrl)) {
+        try {
+            return await requestAutodlComfyAudio(requestConfig, prompt, format, options);
+        } catch (error) {
+            throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+        }
+    }
+
     if (isOpenSpeechBaseUrl(requestConfig.baseUrl)) {
         try {
             return await requestOpenSpeechTts(requestConfig, prompt, {
@@ -139,6 +154,153 @@ function isOpenSpeechBaseUrl(baseUrl: string) {
 
 function isSeedanceNzBaseUrl(baseUrl: string) {
     return /seedance\.nz/i.test(baseUrl.trim());
+}
+
+type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
+
+/**
+ * AutoDL ComfyUI audio (docs: https://autodl.art/docs/comfyui_api/)
+ * POST /comfyui/comfyui_workflow/{workflow_id} → poll /result/{task_id}
+ * indextts2-v1: prompt_text + prompt_simple (参考音色音频)
+ */
+async function requestAutodlComfyAudio(config: AiConfig, prompt: string, format: string, options?: RequestOptions): Promise<Blob> {
+    if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    if (!config.apiKey.trim()) throw new Error(apiText("apiKeyRequired"));
+    if (isOpenSpeechBaseUrl(config.baseUrl)) throw new Error(apiText("autodlComfyWrongBaseUrl"));
+
+    const workflowId = modelOptionName(config.model).trim();
+    if (!workflowId) throw new Error(apiText("autodlWorkflowRequired"));
+
+    const text = prompt.trim();
+    if (!text) throw new Error(apiText("invalidRequest"));
+
+    const refs = options?.referenceAudios || [];
+    if (!refs.length) throw new Error(apiText("autodlIndexTtsRefRequired"));
+
+    const speakerAudio = await resolveAutodlAudioUrl(refs[0], options?.signal);
+    if (!speakerAudio) throw new Error(apiText("autodlIndexTtsRefRequired"));
+
+    const token = String(config.apiKey || "").replace(/^Bearer\s+/i, "").trim();
+    const headers = { Authorization: token, "Content-Type": "application/json" };
+
+    const body: Record<string, unknown> = isAutodlIndexTtsWorkflow(workflowId)
+        ? {
+              prompt_text: text.slice(0, 2048),
+              prompt_simple: speakerAudio,
+              emo_control_method: AUTODL_INDEXTTS_EMO_CONTROL_SAME_AS_VOICE,
+              emo_random: false,
+              emo_happy: 0,
+              emo_angry: 0,
+              emo_sad: 0,
+              emo_afraid: 0,
+              emo_disgusted: 0,
+              emo_melancholic: 0,
+              emo_calm: 0,
+              emo_surprised: 0,
+          }
+        : {
+              prompt: text,
+              prompt_text: text,
+              text,
+              prompt_simple: speakerAudio,
+              audio: speakerAudio,
+              audio_url: speakerAudio,
+          };
+
+    if (refs[1]) {
+        const emoAudio = await resolveAutodlAudioUrl(refs[1], options?.signal);
+        if (emoAudio) {
+            body.emo_ref_audio = emoAudio;
+            if (isAutodlIndexTtsWorkflow(workflowId)) {
+                body.emo_control_method = AUTODL_INDEXTTS_EMO_CONTROL_REF_AUDIO;
+            }
+        }
+    }
+
+    try {
+        const submit = (
+            await axios.post<ApiEnvelope<{ task_id?: string; status?: string; message?: string }>>(
+                aiApiUrl(config, `/comfyui/comfyui_workflow/${encodeURIComponent(workflowId)}`),
+                body,
+                { headers, signal: options?.signal },
+            )
+        ).data;
+        const submitCode = submit && typeof submit === "object" && "code" in submit ? String((submit as { code?: unknown }).code || "") : "";
+        if (submitCode && !/^success$/i.test(submitCode)) {
+            throw new Error(readApiErrorMessage(submit) || apiText("audioGenerationFailed"));
+        }
+        const taskId =
+            (submit && typeof submit === "object" && "data" in submit ? (submit as { data?: { task_id?: string } }).data?.task_id : undefined) ||
+            (submit && typeof submit === "object" && "task_id" in submit ? (submit as { task_id?: string }).task_id : undefined);
+        if (!taskId) throw new Error(readApiErrorMessage(submit) || apiText("autodlNoTaskId"));
+
+        const deadline = performance.now() + 15 * 60 * 1000;
+        for (;;) {
+            if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+            const state = (
+                await axios.get<ApiEnvelope<{ status?: string; results?: unknown[]; message?: string }>>(
+                    aiApiUrl(config, `/comfyui/comfyui_workflow/result/${encodeURIComponent(taskId)}`),
+                    { headers: { Authorization: token }, signal: options?.signal },
+                )
+            ).data;
+            const data =
+                state && typeof state === "object" && "data" in state && (state as { data?: unknown }).data
+                    ? ((state as { data: Record<string, unknown> }).data as Record<string, unknown>)
+                    : (state as Record<string, unknown>);
+            const status = String(data?.status || "");
+            if (/^failed|failure$/i.test(status)) {
+                throw new Error(readApiErrorMessage(state) || readApiErrorMessage(data) || apiText("autodlTaskFailed"));
+            }
+            if (/^success|completed$/i.test(status)) {
+                const url = readAutodlResultUrl(data?.results);
+                if (!url) throw new Error(apiText("autodlNoResults"));
+                const response = await axios.get<Blob>(proxyApiUrl(url), { responseType: "blob", signal: options?.signal });
+                const mime = response.data.type?.startsWith("audio/") ? response.data.type : audioMimeType(format === "wav" ? "wav" : format);
+                return response.data.type.startsWith("audio/") ? response.data : new Blob([response.data], { type: mime });
+            }
+            if (performance.now() >= deadline) throw new Error(apiText("videoTaskTimedOut"));
+            await sleep(2000, options?.signal);
+        }
+    } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") throw error;
+        if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
+            throw new Error(apiText("autodlComfyAuthFailed"));
+        }
+        throw error instanceof Error ? error : new Error(apiText("audioGenerationFailed"));
+    }
+}
+
+function readAutodlResultUrl(results: unknown): string {
+    if (!Array.isArray(results)) return "";
+    for (const item of results) {
+        if (typeof item === "string" && /^https?:\/\//i.test(item)) return item;
+        if (!item || typeof item !== "object") continue;
+        const record = item as Record<string, unknown>;
+        const url = [record.url, record.audio_url, record.file_url, record.video_url, record.image_url].find(
+            (value) => typeof value === "string" && /^https?:\/\//i.test(value),
+        );
+        if (typeof url === "string") return url;
+    }
+    return "";
+}
+
+async function resolveAutodlAudioUrl(audio: ReferenceAudio, signal?: AbortSignal): Promise<string> {
+    const source = (audio.url || "").trim();
+    if (!source) return "";
+    if (/^https?:\/\//i.test(source) && !/^blob:/i.test(source)) return source;
+    if (source.startsWith("data:")) return source;
+    const response = await axios.get<Blob>(proxyApiUrl(source), { responseType: "blob", signal });
+    const blob = response.data.type.startsWith("audio/") ? response.data : new Blob([response.data], { type: audio.type || "audio/mpeg" });
+    return blobToDataUrl(blob);
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("Failed to read audio"));
+        reader.readAsDataURL(blob);
+    });
 }
 
 const SEEDANCE_AUDIO_POLL_INTERVAL_MS = 3_000;
@@ -574,6 +736,12 @@ async function requestOpenSpeechTts(
     options: { model: string; format: string; voice: string; speed: number; instructions: string },
     requestOptions?: RequestOptions,
 ) {
+    const apiKey = config.apiKey.trim().replace(/^Bearer\s+/i, "").replace(/^["']|["']$/g, "").trim();
+    if (!apiKey) throw new Error(apiText("openSpeechInvalidKey"));
+    // AutoDL ComfyUI tokens / Ark keys use different auth; OpenSpeech only accepts Doubao Speech X-Api-Key.
+    if (/^ark-/i.test(apiKey) || /autodl\.art/i.test(config.baseUrl)) {
+        throw new Error(apiText("openSpeechInvalidKey"));
+    }
     const { resourceId, speaker } = resolveOpenSpeechResourceAndSpeaker(options.model, options.voice, options.instructions);
     const audioFormat = mapOpenSpeechFormat(options.format);
     const response = await axios.post<string>(
@@ -593,7 +761,7 @@ async function requestOpenSpeechTts(
         {
             headers: {
                 "Content-Type": "application/json",
-                "X-Api-Key": config.apiKey.trim().replace(/^Bearer\s+/i, "").replace(/^["']|["']$/g, "").trim(),
+                "X-Api-Key": apiKey,
                 "X-Api-Resource-Id": resourceId,
                 "X-Api-Request-Id": typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}`,
             },
@@ -768,7 +936,7 @@ function readAxiosError(error: unknown, fallback: string) {
                 // ignore
             }
         }
-        const statusMsg = statusMessage(error.response?.status, fallback);
+        const statusMsg = statusMessage(error.response?.status, fallback, typeof error.config?.url === "string" ? error.config.url : "");
         if (statusMsg) return statusMsg;
         return error.message || fallback;
     }
@@ -780,8 +948,23 @@ function readNetworkMessage(message: string) {
     return /failed to fetch|network error|load failed|net::err_/i.test(message) ? apiText("networkFailed") : null;
 }
 
-function statusMessage(status: number | undefined, fallback: string) {
-    if (status === 401 || status === 403) return apiText("authenticationFailed");
+function statusMessage(status: number | undefined, fallback: string, requestUrl = "") {
+    if (status === 401 || status === 403) {
+        const decoded = (() => {
+            try {
+                return decodeURIComponent(requestUrl);
+            } catch {
+                return requestUrl;
+            }
+        })();
+        if (/openspeech\.bytedance\.com/i.test(requestUrl) || /openspeech\.bytedance\.com/i.test(decoded)) {
+            return apiText("openSpeechInvalidKey");
+        }
+        if (/autodl\.art/i.test(requestUrl) || /autodl\.art/i.test(decoded)) {
+            return apiText("autodlComfyAuthFailed");
+        }
+        return apiText("authenticationFailed");
+    }
     if (status === 429) return apiText("rateLimited");
     if (status === 404) return apiText("notFound");
     if (status === 400) return apiText("invalidRequest");

@@ -5,6 +5,7 @@ import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import {
     AUTODL_H3_RESOLUTION_OPTIONS,
+    autodlH3DurationMax,
     autodlH3DurationOptions,
     autodlH3ResolutionLabel,
     isAutodlH3ComfyVideoModel,
@@ -29,7 +30,6 @@ const sizeOptions = [
 ];
 
 const secondOptions = [6, 10, 12, 16, 20];
-const h3DurationOptions = autodlH3DurationOptions();
 
 export const videoResolutionOptions = resolutionOptions.map((item) => ({ value: item.value, label: item.label }));
 export const videoSizeOptions = sizeOptions.map((item) => ({ value: item.value, get label() { return i18n.t(`settingsPanels.video.sizes.${item.labelKey}`); } }));
@@ -50,13 +50,15 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
 
     if (h3Comfy) {
         const resolution = normalizeAutodlH3Resolution(config.vquality);
-        const seconds = normalizeAutodlH3Duration(config.videoSeconds);
+        const durationMax = autodlH3DurationMax(model);
+        const seconds = normalizeAutodlH3Duration(config.videoSeconds, model);
+        const durationChoices = autodlH3DurationOptions(model);
         return (
             <ImageSettingsTheme theme={theme}>
                 <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
                     {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.video.h3ComfyTitle")}</div> : null}
                     <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
-                        {t("settingsPanels.video.h3ComfyHint")}
+                        {t("settingsPanels.video.h3ComfyHint", { max: durationMax })}
                     </div>
                     <SettingGroup title={t("settingsPanels.video.resolution")} color={theme.node.muted}>
                         <div className="grid grid-cols-3 gap-2.5">
@@ -67,15 +69,21 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             ))}
                         </div>
                     </SettingGroup>
-                    <SettingGroup title={t("settingsPanels.video.duration")} color={theme.node.muted}>
-                        <div className="grid grid-cols-5 gap-2">
-                            {h3DurationOptions.map((value) => (
+                    <SettingGroup title={`${t("settingsPanels.video.duration")} (duration)`} color={theme.node.muted}>
+                        <div className={`grid gap-2 ${durationMax > 10 ? "grid-cols-5" : "grid-cols-5"}`}>
+                            {durationChoices.map((value) => (
                                 <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                     {value}s
                                 </OptionPill>
                             ))}
                         </div>
-                        <NumberInput value={seconds} min={1} max={10} theme={theme} onChange={(value) => onConfigChange("videoSeconds", normalizeAutodlH3Duration(value))} />
+                        <NumberInput
+                            value={seconds}
+                            min={1}
+                            max={durationMax}
+                            theme={theme}
+                            onChange={(value) => onConfigChange("videoSeconds", normalizeAutodlH3Duration(value, model))}
+                        />
                     </SettingGroup>
                 </div>
             </ImageSettingsTheme>
@@ -150,7 +158,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
 export function videoSettingsSummary(config: AiConfig) {
     const model = config.model || config.videoModel || "";
     if (isAutodlH3ComfyVideoModel(model, config.baseUrl)) {
-        return `${autodlH3ResolutionLabel(config.vquality)} · ${normalizeAutodlH3Duration(config.videoSeconds)}s`;
+        return `${autodlH3ResolutionLabel(config.vquality)} · ${normalizeAutodlH3Duration(config.videoSeconds, model)}s`;
     }
     return `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
 }

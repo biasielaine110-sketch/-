@@ -2,8 +2,10 @@ import axios from "axios";
 
 import i18n from "@/i18n";
 import { isSeedAudioModel, isSunoAudioModel } from "@/lib/audio-generation";
+import { isAutodlComfyAudioModel } from "@/lib/autodl-comfy-audio";
+import { isAutodlH3ComfyVideoModel } from "@/lib/autodl-h3-comfy";
 import { proxyApiUrl } from "@/lib/api-proxy";
-import { buildApiUrl, resolveModelRequestConfig, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { buildApiUrl, modelOptionName, resolveModelRequestConfig, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
 export type ModelHealthStatus = "idle" | "checking" | "ok" | "fail";
 
@@ -271,6 +273,9 @@ async function probeImage(config: ReturnType<typeof resolveModelRequestConfig>, 
 }
 
 async function probeAudio(config: ReturnType<typeof resolveModelRequestConfig>, signal?: AbortSignal) {
+    if (isAutodlComfyAudioModel(config.model, config.baseUrl) || /autodl\.art/i.test(config.baseUrl)) {
+        return probeAutodlComfyVideo(config, signal);
+    }
     if (/openspeech\.bytedance\.com/i.test(config.baseUrl)) {
         try {
             const response = await axios.post(
@@ -286,7 +291,11 @@ async function probeAudio(config: ReturnType<typeof resolveModelRequestConfig>, 
                 {
                     headers: {
                         "Content-Type": "application/json",
-                        "X-Api-Key": config.apiKey,
+                        "X-Api-Key": String(config.apiKey || "")
+                            .trim()
+                            .replace(/^Bearer\s+/i, "")
+                            .replace(/^["']|["']$/g, "")
+                            .trim(),
                         "X-Api-Resource-Id": /^seed-(tts|icl)/i.test(config.model) ? config.model : "seed-tts-2.0",
                         "X-Api-Request-Id": typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}`,
                     },
@@ -359,7 +368,10 @@ async function probeAudio(config: ReturnType<typeof resolveModelRequestConfig>, 
 }
 
 async function probeVideo(config: ReturnType<typeof resolveModelRequestConfig>, signal?: AbortSignal) {
-    // Only verify the channel accepts authenticated video task routes without starting a billable job when possible.
+    // AutoDL ComfyUI has no OpenAI /videos route — probing it always 404s and looks like a dead channel.
+    if (isAutodlH3ComfyVideoModel(config.model, config.baseUrl) || /autodl\.art/i.test(config.baseUrl)) {
+        return probeAutodlComfyVideo(config, signal);
+    }
     try {
         const response = await axios.post(
             proxyApiUrl(buildApiUrl(config.baseUrl, "/videos")),
@@ -372,6 +384,30 @@ async function probeVideo(config: ReturnType<typeof resolveModelRequestConfig>, 
             },
         );
         return interpretNonTextProbe(response.status, response.data);
+    } catch (error) {
+        return failFromError(error);
+    }
+}
+
+async function probeAutodlComfyVideo(config: ReturnType<typeof resolveModelRequestConfig>, signal?: AbortSignal) {
+    try {
+        const workflowId = modelOptionName(config.model).trim() || "health-check";
+        const token = String(config.apiKey || "").replace(/^Bearer\s+/i, "").trim();
+        const response = await axios.post(
+            proxyApiUrl(buildApiUrl(config.baseUrl, `/comfyui/comfyui_workflow/${encodeURIComponent(workflowId)}`)),
+            { prompt: "" },
+            {
+                headers: { Authorization: token, "Content-Type": "application/json" },
+                signal,
+                timeout: HEALTH_TIMEOUT_MS,
+                validateStatus: () => true,
+            },
+        );
+        const message = readMessage(response.data) || `HTTP ${response.status}`;
+        if (response.status === 401 || response.status === 403) return { ok: false as const, message: apiText("autodlComfyAuthFailed") };
+        // Empty prompt / validation errors still mean the route + token are accepted.
+        if (response.status >= 200 && response.status < 500) return { ok: true as const, message };
+        return { ok: false as const, message };
     } catch (error) {
         return failFromError(error);
     }
@@ -398,7 +434,9 @@ function interpretNonTextProbe(status: number, data: unknown) {
 
 function interpretOpenSpeechProbe(status: number, raw: string) {
     const message = readOpenSpeechMessage(raw) || `HTTP ${status}`;
-    if (/invalid\s*x-api-key|unauthorized|鉴权|permission denied/i.test(message)) return { ok: false as const, message };
+    if (status === 401 || status === 403 || /invalid\s*x-api-key|unauthorized|鉴权|permission denied/i.test(message)) {
+        return { ok: false as const, message: apiText("openSpeechInvalidKey") };
+    }
     if (isModelMissing(message)) return { ok: false as const, message };
     if (status >= 200 && status < 300) {
         // Empty text may still return JSON error chunks with code != 0.

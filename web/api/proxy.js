@@ -58,10 +58,28 @@ export default async function handler(req, res) {
         }
 
         const headers = {};
+        const skipHeaders = new Set([
+            "host",
+            "connection",
+            "content-length",
+            "transfer-encoding",
+            "accept-encoding",
+            // Browser identity headers confuse upstream APIs (e.g. AutoDL returns 403).
+            "origin",
+            "referer",
+            "cookie",
+            "sec-fetch-site",
+            "sec-fetch-mode",
+            "sec-fetch-dest",
+            "sec-fetch-user",
+            "sec-ch-ua",
+            "sec-ch-ua-mobile",
+            "sec-ch-ua-platform",
+        ]);
         for (const [key, value] of Object.entries(req.headers)) {
             if (!value) continue;
             const lower = key.toLowerCase();
-            if (["host", "connection", "content-length", "transfer-encoding", "accept-encoding"].includes(lower)) continue;
+            if (skipHeaders.has(lower)) continue;
             headers[key] = Array.isArray(value) ? value.join(", ") : value;
         }
         headers.host = targetUrl.host;

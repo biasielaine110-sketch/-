@@ -2,7 +2,7 @@ import axios from "axios";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
-import { isAutodlH3ComfyVideoModel, normalizeAutodlH3Duration, normalizeAutodlH3Resolution } from "@/lib/autodl-h3-comfy";
+import { autodlH3DurationSeconds, isAutodlH3ComfyVideoModel, normalizeAutodlH3Duration, normalizeAutodlH3Resolution } from "@/lib/autodl-h3-comfy";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
@@ -53,6 +53,10 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
     const script = resolveModelScript(config, selectedModel);
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
+    // AutoDL H3 ComfyUI workflows use /comfyui/comfyui_workflow/{id}, not OpenAI /videos.
+    if (isAutodlH3ComfyVideoModel(selectedModel, requestConfig.baseUrl)) {
+        return createAutodlComfyVideoTask(requestConfig, selectedModel, prompt, references, options);
+    }
     assertVideoConfig(requestConfig, requestConfig.model);
     return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
 }
@@ -75,7 +79,7 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
     const pixelSize = normalizeVideoSize(config.size);
     const h3Comfy = isAutodlH3ComfyVideoModel(model, config.baseUrl);
     const seconds = h3Comfy
-        ? normalizeAutodlH3Duration(config.videoSeconds)
+        ? normalizeAutodlH3Duration(config.videoSeconds, model)
         : isSeedanceVideoModel(model)
           ? normalizeSeedanceSeconds(config.videoSeconds)
           : normalizeVideoSeconds(config.videoSeconds);
@@ -92,7 +96,7 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
             images: refs,
             params: {
                 seconds,
-                duration: seconds,
+                duration: h3Comfy ? autodlH3DurationSeconds(config.videoSeconds, model) : Number(seconds) || seconds,
                 size: seedance ? ratio : pixelSize,
                 pixelSize,
                 resolution,
@@ -107,6 +111,91 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
     const id = nanoid();
     pluginVideoResults.set(id, result);
     return { id, provider: "plugin", model };
+}
+
+/**
+ * AutoDL ComfyUI video (docs: https://autodl.art/docs/comfyui_api/)
+ * POST /comfyui/comfyui_workflow/{workflow_id} → poll /result/{task_id}
+ * Auth: ComfyUI-group token as raw Authorization value (no Bearer).
+ */
+async function createAutodlComfyVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    if (!config.apiKey.trim()) throw new Error(apiText("apiKeyRequired"));
+    if (/openspeech\.bytedance\.com/i.test(config.baseUrl)) {
+        throw new Error(apiText("autodlComfyWrongBaseUrl"));
+    }
+    const workflowId = modelOptionName(model).trim();
+    if (!workflowId) throw new Error(apiText("autodlWorkflowRequired"));
+    const token = String(config.apiKey || "").replace(/^Bearer\s+/i, "").trim();
+    const headers = { Authorization: token, "Content-Type": "application/json" };
+    const duration = autodlH3DurationSeconds(config.videoSeconds, workflowId);
+    const resolution = normalizeAutodlH3Resolution(config.vquality);
+    const refs = await Promise.all(references.map((image) => imageToDataUrl(image)));
+    // AutoDL body: duration must be an integer (seconds), see https://autodl.art/docs/comfyui_api/
+    const body: Record<string, unknown> = { prompt, duration, resolution };
+    refs.slice(0, 9).forEach((item, index) => {
+        const url = String(item || "").trim();
+        if (!url) return;
+        body[`ref_image_${index}`] = url;
+        if (index === 0 && /^https?:\/\//i.test(url)) {
+            body.image = url;
+            body.image_url = url;
+        }
+    });
+
+    try {
+        const submit = (
+            await axios.post<ApiEnvelope<{ task_id?: string; status?: string; message?: string }>>(
+                aiApiUrl(config, `/comfyui/comfyui_workflow/${encodeURIComponent(workflowId)}`),
+                body,
+                { headers, signal: options?.signal },
+            )
+        ).data;
+        const submitCode = submit && typeof submit === "object" && "code" in submit ? String((submit as { code?: unknown }).code || "") : "";
+        if (submitCode && !/^success$/i.test(submitCode)) {
+            throw new Error(readApiErrorMessage(submit) || apiText("videoTaskCreateFailed"));
+        }
+        const taskId =
+            (submit && typeof submit === "object" && "data" in submit ? (submit as { data?: { task_id?: string } }).data?.task_id : undefined) ||
+            (submit && typeof submit === "object" && "task_id" in submit ? (submit as { task_id?: string }).task_id : undefined);
+        if (!taskId) throw new Error(readApiErrorMessage(submit) || apiText("autodlNoTaskId"));
+
+        const deadline = performance.now() + 20 * 60 * 1000;
+        for (;;) {
+            if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+            const state = (
+                await axios.get<ApiEnvelope<{ status?: string; results?: unknown[]; message?: string }>>(
+                    aiApiUrl(config, `/comfyui/comfyui_workflow/result/${encodeURIComponent(taskId)}`),
+                    { headers: { Authorization: token }, signal: options?.signal },
+                )
+            ).data;
+            const data = state && typeof state === "object" && "data" in state && (state as { data?: unknown }).data ? (state as { data: Record<string, unknown> }).data : (state as Record<string, unknown>);
+            const status = String(data?.status || "");
+            if (/^failed|failure$/i.test(status)) throw new Error(readApiErrorMessage(state) || readApiErrorMessage(data) || apiText("autodlTaskFailed"));
+                if (/^success|completed$/i.test(status)) {
+                    const list = (Array.isArray(data.results) ? data.results : [])
+                        .map((item) => {
+                            if (typeof item === "string") return item;
+                            if (!item || typeof item !== "object") return "";
+                            const record = item as Record<string, unknown>;
+                            return [record.url, record.video_url, record.image_url, record.file_url, record.audio_url].find((value) => typeof value === "string" && value) as string | undefined;
+                        })
+                        .filter(Boolean) as string[];
+                    if (!list.length) throw new Error(apiText("autodlNoResults"));
+                    const id = nanoid();
+                    pluginVideoResults.set(id, { url: list[0], mimeType: "video/mp4" });
+                    return { id, provider: "plugin", model: workflowId };
+                }
+            if (performance.now() >= deadline) throw new Error(apiText("videoTaskTimedOut"));
+            await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        }
+    } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") throw error;
+        if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
+            throw new Error(apiText("autodlComfyAuthFailed"));
+        }
+        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    }
 }
 
 function videoPluginResult(result: unknown): VideoGenerationResult {
@@ -327,6 +416,8 @@ async function createMetasoH3VideoTask(config: AiConfig, model: string, prompt: 
 function isMetasoH3Video(config: AiConfig, model: string) {
     const base = config.baseUrl.trim().toLowerCase();
     const name = modelOptionName(model).toLowerCase();
+    // AutoDL ComfyUI workflow ids often contain "minimax_h3" but are not Metaso /videos.
+    if (isAutodlH3ComfyVideoModel(model, config.baseUrl) || /autodl\.art/i.test(base)) return false;
     if (/metaso\.cn/i.test(base)) return true;
     return /minimax[-_]?h3|^h3$|minimax\/h3/i.test(name);
 }

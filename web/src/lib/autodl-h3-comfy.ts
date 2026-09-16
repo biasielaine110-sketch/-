@@ -1,8 +1,12 @@
 /**
  * AutoDL MiniMax H3 ComfyUI workflows
  * Docs: https://autodl.art/docs/comfyui_api/
- * Example workflow params (minimax_h3_lightx2v_v5):
- *   prompt, duration(1-10), resolution(480p竖|480p横|…), ref_image_0..8
+ *
+ * Request body (workflow-dependent; H3 video example):
+ *   { prompt, duration: <int seconds>, resolution: "480p竖", ref_image_0?… }
+ * Example: duration: 1, resolution: "480p竖"
+ * lightx2v_v5: duration 1–10 (default 5)
+ * *_15s workflows: duration 1–15 (default 5)
  */
 
 export const AUTODL_H3_RESOLUTION_OPTIONS = [
@@ -21,7 +25,6 @@ export type AutodlH3Resolution = (typeof AUTODL_H3_RESOLUTION_OPTIONS)[number];
 
 const DEFAULT_H3_RESOLUTION: AutodlH3Resolution = "768p竖";
 const H3_DURATION_MIN = 1;
-const H3_DURATION_MAX = 10;
 const H3_DURATION_DEFAULT = 5;
 
 /** Detect AutoDL H3 / ComfyUI video workflow ids (model name = workflow_id). */
@@ -35,6 +38,18 @@ export function isAutodlH3ComfyVideoModel(model: string, baseUrl = ""): boolean 
     if (/minimax[_-]?h3|h3comfyui|h3[_-]?comfy|lightx2v|h3_image_audio|image_audio_to_video/i.test(name)) return true;
     if (/autodl\.art/i.test(baseUrl) && /(^|[_-])h3([_-]|$)/i.test(name)) return true;
     return false;
+}
+
+/** Max duration in seconds for the given AutoDL H3 workflow. */
+export function autodlH3DurationMax(model = ""): number {
+    const name = String(model || "")
+        .split("::")
+        .pop()
+        ?.trim()
+        .toLowerCase() || "";
+    // e.g. minimax_h3_image_audio_to_video_v2_15s
+    if (/15s|_15(?!\d)|to_video.*15/i.test(name)) return 15;
+    return 10;
 }
 
 export function normalizeAutodlH3Resolution(value: string): AutodlH3Resolution {
@@ -62,14 +77,22 @@ export function normalizeAutodlH3Resolution(value: string): AutodlH3Resolution {
     return DEFAULT_H3_RESOLUTION;
 }
 
-export function normalizeAutodlH3Duration(value: string): string {
+/** Clamp to AutoDL integer `duration` seconds for the workflow. */
+export function normalizeAutodlH3Duration(value: string, model = ""): string {
+    const max = autodlH3DurationMax(model);
     const numeric = Math.round(Number(value));
     if (!Number.isFinite(numeric)) return String(H3_DURATION_DEFAULT);
-    return String(Math.min(H3_DURATION_MAX, Math.max(H3_DURATION_MIN, numeric)));
+    return String(Math.min(max, Math.max(H3_DURATION_MIN, numeric)));
 }
 
-export function autodlH3DurationOptions(): number[] {
-    return Array.from({ length: H3_DURATION_MAX - H3_DURATION_MIN + 1 }, (_, index) => H3_DURATION_MIN + index);
+/** Integer seconds for API body.duration (AutoDL ComfyUI). */
+export function autodlH3DurationSeconds(value: string, model = ""): number {
+    return Number(normalizeAutodlH3Duration(value, model));
+}
+
+export function autodlH3DurationOptions(model = ""): number[] {
+    const max = autodlH3DurationMax(model);
+    return Array.from({ length: max - H3_DURATION_MIN + 1 }, (_, index) => H3_DURATION_MIN + index);
 }
 
 export function autodlH3ResolutionLabel(value: string): string {

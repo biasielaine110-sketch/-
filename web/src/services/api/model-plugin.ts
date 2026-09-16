@@ -1,7 +1,7 @@
 import axios, { type AxiosRequestConfig } from "axios";
 
 import i18n from "@/i18n";
-import { buildApiUrl, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { buildApiUrl, modelOptionName, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
 
 type RequestOptions = { signal?: AbortSignal };
@@ -141,7 +141,7 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
             args.images || [],
             args.messages || [],
             args.params || {},
-            config.model,
+            modelOptionName(config.model),
             config.baseUrl,
             config.apiKey,
             config.systemPrompt || "",
@@ -156,7 +156,22 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
     } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") throw error;
         if (axios.isCancel(error)) throw error;
-        const message = error instanceof Error ? error.message : String(error);
+        let message = error instanceof Error ? error.message : String(error);
+        if (axios.isAxiosError(error)) {
+            const status = error.response?.status;
+            const bodyMessage =
+                typeof error.response?.data === "string"
+                    ? error.response.data.slice(0, 240)
+                    : error.response?.data && typeof error.response.data === "object"
+                      ? String((error.response.data as { msg?: string; message?: string }).msg || (error.response.data as { message?: string }).message || "")
+                      : "";
+            if (bodyMessage) message = bodyMessage;
+            if ((status === 401 || status === 403) && /autodl\.art/i.test(config.baseUrl || "")) {
+                message = i18n.t("apiErrors.autodlComfyAuthFailed");
+            } else if (status && !bodyMessage) {
+                message = `${message} (HTTP ${status})`;
+            }
+        }
         throw new Error(i18n.t("modelPlugin.executionFailed", { message }));
     }
 }
@@ -378,8 +393,8 @@ if (!workflowId) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.
 const token = String(apiKey || "").replace(/^Bearer\\s+/i, "").trim();
 const headers = { Authorization: token, "Content-Type": "application/json" };
 const body = { prompt };
-if (params.duration != null && params.duration !== "") body.duration = Number(params.duration);
-else if (params.seconds != null && params.seconds !== "") body.duration = Number(params.seconds);
+if (params.duration != null && params.duration !== "") body.duration = Math.round(Number(params.duration));
+else if (params.seconds != null && params.seconds !== "") body.duration = Math.round(Number(params.seconds));
 if (params.resolution) body.resolution = params.resolution;
 else if (params.size) body.resolution = params.size;
 images.slice(0, 9).forEach((item, index) => {
@@ -412,7 +427,7 @@ const urls = await poll(
     const data = state?.data || state || {};
     const status = String(data.status || "");
     if (/^failed|failure$/i.test(status)) throw new Error(state?.msg || data.message || ${JSON.stringify(i18n.t("modelPlugin.templates.autodlTaskFailed"))});
-    if (!/^success$/i.test(status)) return null;
+    if (!/^success|completed$/i.test(status)) return null;
     const list = (Array.isArray(data.results) ? data.results : [])
       .map((item) => {
         if (typeof item === "string") return item;
@@ -488,6 +503,64 @@ for (let i = 0; i < raw.length; i++) {
 }
 if (!chunks.length) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.geminiNoAudio"))});
 return { data: chunks.join("") };`,
+        },
+        {
+            label: i18n.t("modelPlugin.templates.autodlComfy"),
+            script: `// ${i18n.t("modelPlugin.templates.audioAutodlComfy")}
+// Base URL: https://autodl.art/api/v1
+// model = workflow_id（如 indextts2-v1）；Token 分组选 ComfyUI
+// indextts2-v1: prompt_text + prompt_simple（参考音色，需公网 URL）
+const workflowId = String(model || "").trim();
+if (!workflowId) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.autodlWorkflowRequired"))});
+const token = String(apiKey || "").replace(/^Bearer\\s+/i, "").trim();
+const headers = { Authorization: token, "Content-Type": "application/json" };
+const speaker = String(params.prompt_simple || params.audio || params.audio_url || params.voice || "").trim();
+if (!speaker) throw new Error(${JSON.stringify(i18n.t("apiErrors.autodlIndexTtsRefRequired"))});
+const body = {
+  prompt_text: prompt,
+  prompt_simple: speaker,
+  emo_control_method: "与音色参考音频相同",
+  emo_random: false,
+};
+if (params.emo_ref_audio) {
+  body.emo_ref_audio = params.emo_ref_audio;
+  body.emo_control_method = "使用情感参考音频";
+}
+const submit = await request({
+  method: "post",
+  url: \`\${baseUrl}/comfyui/comfyui_workflow/\${encodeURIComponent(workflowId)}\`,
+  headers,
+  data: body,
+});
+if (submit?.code && !/^success$/i.test(String(submit.code))) {
+  throw new Error(submit.msg || submit.message || JSON.stringify(submit));
+}
+const taskId = submit?.data?.task_id || submit?.task_id;
+if (!taskId) throw new Error(submit?.msg || ${JSON.stringify(i18n.t("modelPlugin.templates.autodlNoTaskId"))});
+const url = await poll(
+  () => request({
+    method: "get",
+    url: \`\${baseUrl}/comfyui/comfyui_workflow/result/\${encodeURIComponent(taskId)}\`,
+    headers: { Authorization: token },
+  }),
+  (state) => {
+    const data = state?.data || state || {};
+    const status = String(data.status || "");
+    if (/^failed|failure$/i.test(status)) throw new Error(state?.msg || data.message || ${JSON.stringify(i18n.t("modelPlugin.templates.autodlTaskFailed"))});
+    if (!/^success|completed$/i.test(status)) return null;
+    const list = (Array.isArray(data.results) ? data.results : [])
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (!item || typeof item !== "object") return "";
+        return item.url || item.audio_url || item.file_url || "";
+      })
+      .filter(Boolean);
+    if (!list.length) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.autodlNoResults"))});
+    return list[0];
+  },
+  { intervalMs: 2000, timeoutMs: 15 * 60 * 1000 },
+);
+return { url };`,
         },
         {
             label: i18n.t("modelPlugin.templates.gemini"),
