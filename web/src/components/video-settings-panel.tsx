@@ -4,10 +4,10 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import {
-    AUTODL_H3_RESOLUTION_OPTIONS,
     autodlH3DurationMax,
     autodlH3DurationOptions,
     autodlH3ResolutionLabel,
+    autodlH3ResolutionOptions,
     isAutodlH3ComfyVideoModel,
     normalizeAutodlH3Duration,
     normalizeAutodlH3Resolution,
@@ -49,7 +49,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const h3Comfy = isAutodlH3ComfyVideoModel(model, config.baseUrl);
 
     if (h3Comfy) {
-        const resolution = normalizeAutodlH3Resolution(config.vquality);
+        const resolutionChoices = autodlH3ResolutionOptions(model);
+        const resolution = normalizeAutodlH3Resolution(config.vquality, model);
         const durationMax = autodlH3DurationMax(model);
         const seconds = normalizeAutodlH3Duration(config.videoSeconds, model);
         const durationChoices = autodlH3DurationOptions(model);
@@ -62,7 +63,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     </div>
                     <SettingGroup title={t("settingsPanels.video.resolution")} color={theme.node.muted}>
                         <div className="grid grid-cols-3 gap-2">
-                            {AUTODL_H3_RESOLUTION_OPTIONS.map((value) => (
+                            {resolutionChoices.map((value) => (
                                 <OptionPill key={value} selected={resolution === value} theme={theme} onClick={() => onConfigChange("vquality", value)}>
                                     {value}
                                 </OptionPill>
@@ -158,7 +159,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
 export function videoSettingsSummary(config: AiConfig) {
     const model = config.model || config.videoModel || "";
     if (isAutodlH3ComfyVideoModel(model, config.baseUrl)) {
-        return `${autodlH3ResolutionLabel(config.vquality)} · ${normalizeAutodlH3Duration(config.videoSeconds, model)}s`;
+        return `${autodlH3ResolutionLabel(config.vquality, model)} · ${normalizeAutodlH3Duration(config.videoSeconds, model)}s`;
     }
     return `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
 }

@@ -88,7 +88,7 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
         : isSeedanceVideoModel(model)
           ? normalizeSeedanceSeconds(config.videoSeconds)
           : normalizeVideoSeconds(config.videoSeconds);
-    const resolution = h3Comfy ? normalizeAutodlH3Resolution(config.vquality) : normalizeVideoResolution(config.vquality);
+    const resolution = h3Comfy ? normalizeAutodlH3Resolution(config.vquality, model) : normalizeVideoResolution(config.vquality);
     // Seedance / Doubao scripts often bind `size` into the API `ratio` field by mistake.
     // For those models, pass the ratio enum in both `ratio` and `size`.
     const seedance = isSeedanceVideoModel(model);
@@ -134,7 +134,7 @@ async function createAutodlComfyVideoTask(config: AiConfig, model: string, promp
     const token = String(config.apiKey || "").replace(/^Bearer\s+/i, "").trim();
     const headers = { Authorization: token, "Content-Type": "application/json" };
     const duration = autodlH3DurationSeconds(config.videoSeconds, workflowId);
-    const resolution = normalizeAutodlH3Resolution(config.vquality);
+    const resolution = normalizeAutodlH3Resolution(config.vquality, workflowId);
     const refs = await Promise.all(references.slice(0, 9).map((image) => resolveAutodlComfyReferenceUrl(image, Math.min(9, references.length || 1))));
     // AutoDL body: duration must be an integer (seconds), see https://autodl.art/docs/comfyui_api/
     const body: Record<string, unknown> = { prompt, duration, resolution };

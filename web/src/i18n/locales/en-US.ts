@@ -57,7 +57,7 @@ export default {
         video: {
             title: "Video settings",
             h3ComfyTitle: "H3 ComfyUI video settings",
-            h3ComfyHint: "Aligned with AutoDL ComfyUI: resolution like 480p竖; duration is an integer in seconds (1–{{max}}, default 5). Connected images are sent as ref_image_0…",
+            h3ComfyHint: "Aligned with AutoDL ComfyUI: resolution like 480p竖 / 1080p横 / 1440p横 (pricing label 1088p maps to 1080p); duration is an integer in seconds (1–{{max}}, default 5). Connected images are sent as ref_image_0…",
             quality: "Quality",
             size: "Size",
             seconds: "Seconds",
