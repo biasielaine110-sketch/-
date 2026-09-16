@@ -56,6 +56,8 @@ export default {
         },
         video: {
             title: "Video settings",
+            h3ComfyTitle: "H3 ComfyUI video settings",
+            h3ComfyHint: "Aligned with AutoDL ComfyUI: resolution like 480p竖, duration 1–10s. Connected images are sent as ref_image_0…",
             quality: "Quality",
             size: "Size",
             seconds: "Seconds",
@@ -194,7 +196,7 @@ export default {
             videoOpenai: "Video with polling inside the script. Use params.ratio (e.g. 16:9); do not send pixel sizes like 1280x720 as ratio. Available: prompt, images, params{seconds,duration,resolution,ratio,size}",
             videoGemini: "Gemini (Veo) video: submit with predictLongRunning and poll the operation for the video URI.",
             availableVideoGemini: "Available: prompt, images(dataURL[]), params, model, baseUrl, apiKey",
-            videoAutodlComfy: "AutoDL ComfyUI video: submit workflow then poll results. model=workflow_id; Base URL=https://autodl.art/api/v1.",
+            videoAutodlComfy: "AutoDL ComfyUI video: submit workflow then poll results. model=workflow_id; Base URL=https://autodl.art/api/v1. Body uses prompt, duration, resolution (e.g. 480p竖), ref_image_0…",
             autodlWorkflowRequired: "Set the model name to the AutoDL workflow_id",
             autodlNoTaskId: "AutoDL did not return a task_id",
             autodlTaskFailed: "AutoDL ComfyUI task failed",

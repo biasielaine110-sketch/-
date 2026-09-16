@@ -154,7 +154,7 @@ type ConfigStore = {
     clearPromptContinue: () => void;
 };
 
-const VIDEO_KEYWORDS = ["video", "sora", "veo", "kling", "wan", "hailuo", "upscaler"];
+const VIDEO_KEYWORDS = ["video", "sora", "veo", "kling", "wan", "hailuo", "upscaler", "minimax", "h3", "lightx2v", "comfy"];
 const AUDIO_KEYWORDS = ["audio", "tts", "speech", "voice", "music", "sound", "suno"];
 const IMAGE_KEYWORDS = ["seedream", "gpt-image", "image", "dall-e", "dalle", "imagen", "flux", "sdxl", "stable-diffusion", "midjourney"];
 

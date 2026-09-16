@@ -56,6 +56,8 @@ export default {
         },
         video: {
             title: "视频设置",
+            h3ComfyTitle: "H3 ComfyUI 视频设置",
+            h3ComfyHint: "参数对齐 AutoDL ComfyUI：resolution 如 480p竖，duration 为 1–10 秒。参考图将作为 ref_image_0… 提交。",
             quality: "清晰度",
             size: "尺寸",
             seconds: "秒数",
@@ -194,7 +196,7 @@ export default {
             videoOpenai: "视频（脚本内部自行轮询）。请使用 params.ratio（如 16:9），不要把 1280x720 这类像素尺寸当作 ratio。可用：prompt、images、params{seconds,duration,resolution,ratio,size}",
             videoGemini: "Gemini(Veo) 视频：predictLongRunning 提交，轮询 operation 拿视频 URI。",
             availableVideoGemini: "可用：prompt、images(dataURL[])、params、model、baseUrl、apiKey",
-            videoAutodlComfy: "AutoDL ComfyUI 视频：提交工作流后轮询 results。模型名=workflow_id；Base URL=https://autodl.art/api/v1。",
+            videoAutodlComfy: "AutoDL ComfyUI 视频：提交工作流后轮询 results。模型名=workflow_id；Base URL=https://autodl.art/api/v1。body 使用 prompt、duration、resolution（如 480p竖）、ref_image_0…。",
             autodlWorkflowRequired: "请把模型名设为 AutoDL 的 workflow_id",
             autodlNoTaskId: "AutoDL 未返回 task_id",
             autodlTaskFailed: "AutoDL ComfyUI 任务失败",

@@ -382,11 +382,15 @@ if (params.duration != null && params.duration !== "") body.duration = Number(pa
 else if (params.seconds != null && params.seconds !== "") body.duration = Number(params.seconds);
 if (params.resolution) body.resolution = params.resolution;
 else if (params.size) body.resolution = params.size;
-const httpImage = images.find((item) => /^https?:\\/\\//i.test(String(item || "")));
-if (httpImage) {
-  body.image = httpImage;
-  body.image_url = httpImage;
-}
+images.slice(0, 9).forEach((item, index) => {
+  const url = String(item || "").trim();
+  if (!url) return;
+  body[\`ref_image_\${index}\`] = url;
+  if (index === 0 && /^https?:\\/\\//i.test(url)) {
+    body.image = url;
+    body.image_url = url;
+  }
+});
 const submit = await request({
   method: "post",
   url: \`\${baseUrl}/comfyui/comfyui_workflow/\${encodeURIComponent(workflowId)}\`,

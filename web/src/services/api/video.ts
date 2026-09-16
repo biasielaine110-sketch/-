@@ -2,6 +2,7 @@ import axios from "axios";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { isAutodlH3ComfyVideoModel, normalizeAutodlH3Duration, normalizeAutodlH3Resolution } from "@/lib/autodl-h3-comfy";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
@@ -72,8 +73,13 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
     const refs = await Promise.all(references.map((image) => imageToDataUrl(image)));
     const ratio = normalizeVideoRatio(config.size);
     const pixelSize = normalizeVideoSize(config.size);
-    const seconds = isSeedanceVideoModel(model) ? normalizeSeedanceSeconds(config.videoSeconds) : normalizeVideoSeconds(config.videoSeconds);
-    const resolution = normalizeVideoResolution(config.vquality);
+    const h3Comfy = isAutodlH3ComfyVideoModel(model, config.baseUrl);
+    const seconds = h3Comfy
+        ? normalizeAutodlH3Duration(config.videoSeconds)
+        : isSeedanceVideoModel(model)
+          ? normalizeSeedanceSeconds(config.videoSeconds)
+          : normalizeVideoSeconds(config.videoSeconds);
+    const resolution = h3Comfy ? normalizeAutodlH3Resolution(config.vquality) : normalizeVideoResolution(config.vquality);
     // Seedance / Doubao scripts often bind `size` into the API `ratio` field by mistake.
     // For those models, pass the ratio enum in both `ratio` and `size`.
     const seedance = isSeedanceVideoModel(model);

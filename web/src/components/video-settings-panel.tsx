@@ -3,6 +3,14 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
+import {
+    AUTODL_H3_RESOLUTION_OPTIONS,
+    autodlH3DurationOptions,
+    autodlH3ResolutionLabel,
+    isAutodlH3ComfyVideoModel,
+    normalizeAutodlH3Duration,
+    normalizeAutodlH3Resolution,
+} from "@/lib/autodl-h3-comfy";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { type AiConfig } from "@/stores/use-config-store";
 
@@ -21,6 +29,7 @@ const sizeOptions = [
 ];
 
 const secondOptions = [6, 10, 12, 16, 20];
+const h3DurationOptions = autodlH3DurationOptions();
 
 export const videoResolutionOptions = resolutionOptions.map((item) => ({ value: item.value, label: item.label }));
 export const videoSizeOptions = sizeOptions.map((item) => ({ value: item.value, get label() { return i18n.t(`settingsPanels.video.sizes.${item.labelKey}`); } }));
@@ -36,6 +45,43 @@ type VideoSettingsPanelProps = {
 
 export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
+    const model = config.model || config.videoModel || "";
+    const h3Comfy = isAutodlH3ComfyVideoModel(model, config.baseUrl);
+
+    if (h3Comfy) {
+        const resolution = normalizeAutodlH3Resolution(config.vquality);
+        const seconds = normalizeAutodlH3Duration(config.videoSeconds);
+        return (
+            <ImageSettingsTheme theme={theme}>
+                <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+                    {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.video.h3ComfyTitle")}</div> : null}
+                    <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                        {t("settingsPanels.video.h3ComfyHint")}
+                    </div>
+                    <SettingGroup title={t("settingsPanels.video.resolution")} color={theme.node.muted}>
+                        <div className="grid grid-cols-3 gap-2.5">
+                            {AUTODL_H3_RESOLUTION_OPTIONS.map((value) => (
+                                <OptionPill key={value} selected={resolution === value} theme={theme} onClick={() => onConfigChange("vquality", value)}>
+                                    {value}
+                                </OptionPill>
+                            ))}
+                        </div>
+                    </SettingGroup>
+                    <SettingGroup title={t("settingsPanels.video.duration")} color={theme.node.muted}>
+                        <div className="grid grid-cols-5 gap-2">
+                            {h3DurationOptions.map((value) => (
+                                <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
+                                    {value}s
+                                </OptionPill>
+                            ))}
+                        </div>
+                        <NumberInput value={seconds} min={1} max={10} theme={theme} onChange={(value) => onConfigChange("videoSeconds", normalizeAutodlH3Duration(value))} />
+                    </SettingGroup>
+                </div>
+            </ImageSettingsTheme>
+        );
+    }
+
     const seconds = config.videoSeconds || "6";
     const size = normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
@@ -101,7 +147,16 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     );
 }
 
+export function videoSettingsSummary(config: AiConfig) {
+    const model = config.model || config.videoModel || "";
+    if (isAutodlH3ComfyVideoModel(model, config.baseUrl)) {
+        return `${autodlH3ResolutionLabel(config.vquality)} · ${normalizeAutodlH3Duration(config.videoSeconds)}s`;
+    }
+    return `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
+}
+
 export function videoResolutionLabel(value: string) {
+    if (/[竖横]|\(1:1\)/i.test(value || "")) return autodlH3ResolutionLabel(value);
     return `${normalizeVideoResolutionValue(value)}p`;
 }
 
@@ -143,6 +198,7 @@ export function normalizeVideoSizeValue(value: string) {
 }
 
 export function normalizeVideoResolutionValue(value: string) {
+    if (/[竖横]|\(1:1\)/i.test(value || "")) return normalizeAutodlH3Resolution(value).replace(/p.*$/, "") || "768";
     if (value === "480p" || value === "low") return "480";
     if (value === "720p" || value === "auto" || value === "high" || value === "medium") return "720";
     return value.replace(/p$/i, "") || "720";
