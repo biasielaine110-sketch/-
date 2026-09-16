@@ -5002,6 +5002,28 @@ function AtelierCanvasPage() {
                             onChatImageModelChange={(nodeId, model) => handleConfigNodeChange(nodeId, { imageModel: model })}
                             onChatModesChange={(nodeId, options) => handleConfigNodeChange(nodeId, { chatTextEnabled: options.text, chatImageEnabled: options.image })}
                             onChatSkillsChange={(nodeId, skillIds) => handleConfigNodeChange(nodeId, { chatSkillIds: skillIds })}
+                            onDeleteChatMessage={(nodeId, messageId) => {
+                                const target = nodesRef.current.find((node) => node.id === nodeId);
+                                const deleted = target?.metadata?.messages?.find((message) => message.id === messageId);
+                                if (target?.metadata?.status === NODE_STATUS_LOADING && deleted?.role === "assistant") {
+                                    stopGenerationForNode(nodeId);
+                                }
+                                setNodes((prev) =>
+                                    prev.map((node) => {
+                                        if (node.id !== nodeId) return node;
+                                        const messages = (node.metadata?.messages || []).filter((message) => message.id !== messageId);
+                                        const clearLoading = node.metadata?.status === NODE_STATUS_LOADING && deleted?.role === "assistant";
+                                        return {
+                                            ...node,
+                                            metadata: {
+                                                ...node.metadata,
+                                                messages,
+                                                ...(clearLoading ? { status: NODE_STATUS_IDLE, errorDetails: undefined } : {}),
+                                            },
+                                        };
+                                    }),
+                                );
+                            }}
                             onInsertChatImage={(image) => void insertAssistantImage(image)}
                             onFontSizeChange={handleFontSizeChange}
                             onEditText={(node) => setTextEditNodeId(node.id)}

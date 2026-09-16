@@ -555,6 +555,7 @@ export default {
             viewMessageHint: "双击气泡可最大化阅读，可在此调整预览字号",
             doubleClickMaximize: "双击最大化查看",
             copyReply: "复制回复",
+            deleteMessage: "删除这条消息",
             skills: "Skills",
             skillsTitle: "工具 Skills",
             skillCanvas: "画布",

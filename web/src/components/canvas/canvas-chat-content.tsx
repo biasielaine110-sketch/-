@@ -31,6 +31,7 @@ type CanvasChatContentProps = {
     onImageModelChange?: (nodeId: string, model: string) => void;
     onModesChange?: (nodeId: string, options: ChatSendOptions) => void;
     onSkillsChange?: (nodeId: string, skillIds: string[]) => void;
+    onDeleteMessage?: (nodeId: string, messageId: string) => void;
     onInsertImage?: (image: CanvasAssistantImage) => void;
     onFontSizeChange?: (nodeId: string, fontSize: number) => void;
 };
@@ -46,6 +47,7 @@ export function CanvasChatContent({
     onImageModelChange,
     onModesChange,
     onSkillsChange,
+    onDeleteMessage,
     onInsertImage,
     onFontSizeChange,
 }: CanvasChatContentProps) {
@@ -305,6 +307,10 @@ export function CanvasChatContent({
                             fontSize={fontSize}
                             onInsertImage={onInsertImage}
                             onMaximize={() => setPreviewMessageId(message.id)}
+                            onDelete={() => {
+                                if (previewMessageId === message.id) setPreviewMessageId(null);
+                                onDeleteMessage?.(node.id, message.id);
+                            }}
                         />
                     ))
                 )}
@@ -535,12 +541,14 @@ function ChatBubble({
     fontSize,
     onInsertImage,
     onMaximize,
+    onDelete,
 }: {
     message: CanvasAssistantMessage;
     theme: CanvasTheme;
     fontSize: number;
     onInsertImage?: (image: CanvasAssistantImage) => void;
     onMaximize: () => void;
+    onDelete?: () => void;
 }) {
     const { t } = useTranslation();
     const { message: toast } = App.useApp();
@@ -551,6 +559,7 @@ function ChatBubble({
     const text = (message.text || "").trim();
     const bodyStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.55)}px` };
     const metaStyle = { fontSize: `${Math.max(10, Math.round(fontSize * 0.75))}px` };
+    const canDelete = Boolean(onDelete);
 
     const handleCopy = (event: ReactMouseEvent | ReactPointerEvent) => {
         event.stopPropagation();
@@ -560,6 +569,12 @@ function ChatBubble({
         setCopied(true);
         toast.success(t("common.copied"));
         window.setTimeout(() => setCopied(false), 1500);
+    };
+
+    const handleDelete = (event: ReactMouseEvent | ReactPointerEvent) => {
+        event.stopPropagation();
+        event.preventDefault();
+        onDelete?.();
     };
 
     const openPreview = (event: ReactMouseEvent) => {
@@ -583,7 +598,24 @@ function ChatBubble({
                 title={text ? t("canvas.chat.doubleClickMaximize") : undefined}
                 onDoubleClick={openPreview}
             >
-                <div className="mb-1 font-semibold uppercase opacity-50" style={metaStyle}>{isUser ? t("canvas.chat.you") : isError ? t("common.error") : t("canvas.chat.assistant")}</div>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                    <div className="font-semibold uppercase opacity-50" style={metaStyle}>{isUser ? t("canvas.chat.you") : isError ? t("common.error") : t("canvas.chat.assistant")}</div>
+                    {canDelete ? (
+                        <button
+                            type="button"
+                            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md opacity-55 transition hover:opacity-100"
+                            style={{ color: theme.node.text, background: `${theme.node.fill}99` }}
+                            title={t("canvas.chat.deleteMessage")}
+                            aria-label={t("canvas.chat.deleteMessage")}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={handleDelete}
+                            onDoubleClick={(event) => event.stopPropagation()}
+                        >
+                            <Trash2 className="size-3" />
+                        </button>
+                    ) : null}
+                </div>
                 {text ? <div>{message.text}</div> : message.role === "assistant" && !images.length ? "…" : null}
                 {images.length ? (
                     <div

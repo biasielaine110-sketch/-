@@ -44,7 +44,7 @@ export type ChatSkillCanvasContext = {
 const chatText = (key: string, options?: Record<string, unknown>) => i18n.t(`canvas.chat.${key}`, options);
 
 /** Default skill ids enabled on new chat nodes (and when metadata.chatSkillIds is unset). */
-export const DEFAULT_CHAT_SKILL_IDS = ["canvas", "utils"] as const;
+export const DEFAULT_CHAT_SKILL_IDS = [] as const;
 
 export function resolveChatSkillIds(skillIds: string[] | undefined | null): string[] {
     return skillIds ?? [...DEFAULT_CHAT_SKILL_IDS];

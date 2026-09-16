@@ -63,6 +63,7 @@ type CanvasNodeProps = {
     onChatImageModelChange?: (nodeId: string, model: string) => void;
     onChatModesChange?: (nodeId: string, options: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
     onChatSkillsChange?: (nodeId: string, skillIds: string[]) => void;
+    onDeleteChatMessage?: (nodeId: string, messageId: string) => void;
     onInsertChatImage?: (image: import("@/types/canvas").CanvasAssistantImage) => void;
     onFontSizeChange?: (nodeId: string, fontSize: number) => void;
     onEditText?: (node: CanvasNodeData) => void;
@@ -93,6 +94,7 @@ type NodeContentRendererProps = {
     onChatImageModelChange?: (nodeId: string, model: string) => void;
     onChatModesChange?: (nodeId: string, options: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
     onChatSkillsChange?: (nodeId: string, skillIds: string[]) => void;
+    onDeleteChatMessage?: (nodeId: string, messageId: string) => void;
     onInsertChatImage?: (image: import("@/types/canvas").CanvasAssistantImage) => void;
     onFontSizeChange?: (nodeId: string, fontSize: number) => void;
     onEditText?: (node: CanvasNodeData) => void;
@@ -148,6 +150,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onChatImageModelChange,
     onChatModesChange,
     onChatSkillsChange,
+    onDeleteChatMessage,
     onInsertChatImage,
     onFontSizeChange,
     onEditText,
@@ -458,6 +461,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onChatImageModelChange={onChatImageModelChange}
                         onChatModesChange={onChatModesChange}
                         onChatSkillsChange={onChatSkillsChange}
+                        onDeleteChatMessage={onDeleteChatMessage}
                         onInsertChatImage={onInsertChatImage}
                         onFontSizeChange={onFontSizeChange}
                         onEditText={onEditText}
@@ -606,7 +610,7 @@ function AnnotateNodeContent({ node, theme, onAnnotate }: NodeContentRendererPro
     );
 }
 
-function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onChatSkillsChange, onInsertChatImage, onFontSizeChange, onCancelGeneration }: NodeContentRendererProps) {
+function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onChatSkillsChange, onDeleteChatMessage, onInsertChatImage, onFontSizeChange, onCancelGeneration }: NodeContentRendererProps) {
     // Exclude this chat node itself: its resource text is the latest reply and must not fill the composer.
     const upstreamReferences = mentionReferences.filter((reference) => reference.nodeId !== node.id);
     const connectedTexts = upstreamReferences.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim()).map((reference) => reference.text!.trim());
@@ -622,6 +626,7 @@ function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatMod
             onImageModelChange={(nodeId, model) => onChatImageModelChange?.(nodeId, model)}
             onModesChange={(nodeId, options) => onChatModesChange?.(nodeId, options)}
             onSkillsChange={(nodeId, skillIds) => onChatSkillsChange?.(nodeId, skillIds)}
+            onDeleteMessage={onDeleteChatMessage}
             onInsertImage={onInsertChatImage}
             onFontSizeChange={onFontSizeChange}
         />
@@ -932,7 +937,7 @@ function VideoNodeContent({ node, theme, onDeleteBatchImage }: NodeContentRender
             <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-no-zoom />
             <button
                 type="button"
-                className="absolute bottom-2.5 left-2.5 z-30 grid size-8 place-items-center rounded-full border shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                className="absolute right-2.5 top-2.5 z-30 grid size-8 place-items-center rounded-full border shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
                 style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
                 title={t("common.delete")}
                 aria-label={t("common.delete")}
@@ -1113,7 +1118,7 @@ function ImageContent({
             {primaryContent && primaryImage?.status !== "error" ? (
                 <button
                     type="button"
-                    className="absolute bottom-2.5 left-2.5 z-30 grid size-8 place-items-center rounded-full border shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                    className={`absolute z-30 grid size-8 place-items-center rounded-full border shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02] ${isVideo ? "right-2.5 top-2.5" : "bottom-2.5 left-2.5"}`}
                     style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
                     title={t("common.delete")}
                     aria-label={t("common.delete")}
@@ -1140,7 +1145,7 @@ function ImageContent({
             {isBatchRoot ? (
                 <button
                     type="button"
-                    className="absolute right-2.5 top-2.5 z-30 flex h-8 items-center justify-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
+                    className={`absolute top-2.5 z-30 flex h-8 items-center justify-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02] ${isVideo && primaryContent && primaryImage?.status !== "error" ? "right-12" : "right-2.5"}`}
                     style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
                     aria-label={batchExpanded ? t("canvas.node.batchExpanded") : t("canvas.node.batchCollapsed")}
                     onClick={(event) => {

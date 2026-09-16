@@ -555,6 +555,7 @@ export default {
             viewMessageHint: "Double-click a bubble to maximize. Adjust preview font size here.",
             doubleClickMaximize: "Double-click to maximize",
             copyReply: "Copy reply",
+            deleteMessage: "Delete this message",
             skills: "Skills",
             skillsTitle: "Tool skills",
             skillCanvas: "Canvas",
