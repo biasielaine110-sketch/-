@@ -41,8 +41,10 @@ type CanvasNodeHoverToolbarProps = {
     onRetry: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
     onScale: (node: CanvasNodeData) => void;
+    onResetSize: (node: CanvasNodeData) => void;
     onDelete: (node: CanvasNodeData) => void;
     onOpenVideoTools?: (node: CanvasNodeData) => void;
+    onOpenAudioTools?: (node: CanvasNodeData) => void;
 };
 
 type ToolbarTool = {
@@ -83,8 +85,10 @@ export function CanvasNodeHoverToolbar({
     onRetry,
     onToggleFreeResize,
     onScale,
+    onResetSize,
     onDelete,
     onOpenVideoTools,
+    onOpenAudioTools,
 }: CanvasNodeHoverToolbarProps) {
     const imageQuickTools = useConfigStore((state) => state.config.imageQuickTools);
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -129,7 +133,7 @@ export function CanvasNodeHoverToolbar({
         }
         copyText(prompt, t("common.promptCopied"));
     };
-    const imageTools = buildImageToolbarTools(node, { onUpload, onToggleFreeResize, onScale, onMaskEdit, onAnnotate, onCrop, onSplit, onUpscale, onSuperResolve, onAngle, onPanorama, onViewImage, onCopyPrompt: copyImagePrompt, onReversePrompt });
+    const imageTools = buildImageToolbarTools(node, { onUpload, onToggleFreeResize, onScale, onResetSize, onMaskEdit, onAnnotate, onCrop, onSplit, onUpscale, onSuperResolve, onAngle, onPanorama, onViewImage, onCopyPrompt: copyImagePrompt, onReversePrompt });
 
     function openImageToolSettings() {
         onKeep(activeNode.id);
@@ -161,6 +165,7 @@ export function CanvasNodeHoverToolbar({
         ...(isVideo ? [{ id: "uploadVideo", title: t(hasVideo ? "canvas.nodeToolbar.replaceVideo" : "canvas.nodeToolbar.uploadVideo"), label: t(hasVideo ? "canvas.nodeToolbar.replaceVideo" : "canvas.nodeToolbar.uploadVideo"), icon: <Video className="size-[10px]" />, onClick: () => onUpload(node) }] : []),
         ...(hasVideo && onOpenVideoTools ? [{ id: "videoTools", title: t("canvas.videoTools.openTitle"), label: t("canvas.videoTools.open"), icon: <Scissors className="size-[10px]" />, onClick: () => onOpenVideoTools(node) }] : []),
         ...(isAudio ? [{ id: "uploadAudio", title: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), label: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), icon: <Music2 className="size-[10px]" />, onClick: () => onUpload(node) }] : []),
+        ...(hasAudio && onOpenAudioTools ? [{ id: "audioTools", title: t("canvas.audioTools.openTitle"), label: t("canvas.audioTools.open"), icon: <Scissors className="size-[10px]" />, onClick: () => onOpenAudioTools(node) }] : []),
         ...(hasImage && isImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
     // Keep deletion available even when an older saved quick-tool configuration hid it.

@@ -81,6 +81,9 @@ export function CanvasTextPromptPicker({ onSelect, onOpenPreferences, size = "de
                 open={open}
                 trigger={["click"]}
                 placement="bottomRight"
+                // Keep the library under the trigger (into the text node). Auto-flip
+                // occasionally puts it above the node on a transformed canvas.
+                autoAdjustOverflow={false}
                 getPopupContainer={() => document.body}
                 menu={{ items }}
                 onOpenChange={setOpen}

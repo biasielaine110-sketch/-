@@ -39,6 +39,7 @@ import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/compon
 import { CanvasNodeMjUpscaleDialog } from "@/components/canvas/canvas-node-mj-upscale-dialog";
 import { CanvasNodeScaleDialog } from "@/components/canvas/canvas-node-scale-dialog";
 import { CanvasNodeVideoToolsDialog, type VideoToolsFrameResult, type VideoToolsTrimResult, type VideoToolsUpscaleResult } from "@/components/canvas/canvas-node-video-tools-dialog";
+import { CanvasNodeAudioToolsDialog, type AudioToolsTrimResult } from "@/components/canvas/canvas-node-audio-tools-dialog";
 import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
@@ -48,6 +49,7 @@ import { CanvasNode } from "@/components/canvas/canvas-node";
 import { CanvasDraftSaveDialog } from "@/components/canvas/canvas-draft-save-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import { CanvasTextClipboardMenu, blurActiveCanvasTextInput, isCanvasTextInteractionTarget } from "@/components/canvas/canvas-text-clipboard-menu";
+import { isImeComposing } from "@/lib/keyboard-event";
 import {
     getCanvasDraftMeta,
     overwriteCanvasDraft,
@@ -203,6 +205,43 @@ function collectSuccessfulImageHistory(node: CanvasNodeData | undefined): Canvas
     ];
 }
 
+/** Resolve original media pixel size from primary image / metadata / cached DOM image. */
+function resolveNodeMediaNaturalSize(node: CanvasNodeData): { width: number; height: number } | null {
+    const primary = node.metadata?.images?.find((image) => image.id === node.metadata?.primaryImageId) || node.metadata?.images?.[0];
+    const content = primary?.content || node.metadata?.content || node.metadata?.thumbnailContent || "";
+    let width = Number(primary?.naturalWidth || node.metadata?.naturalWidth || 0);
+    let height = Number(primary?.naturalHeight || node.metadata?.naturalHeight || 0);
+
+    if ((!width || !height) && content) {
+        try {
+            const probe = new Image();
+            probe.src = content;
+            if (probe.complete && probe.naturalWidth > 0 && probe.naturalHeight > 0) {
+                width = probe.naturalWidth;
+                height = probe.naturalHeight;
+            }
+        } catch {
+            // Ignore probe failures; fall through.
+        }
+    }
+
+    // Last resort: keep current frame aspect so free-resize / corner-scale can still snap back to a fit box.
+    if ((!width || !height) && node.width > 0 && node.height > 0) {
+        width = node.width;
+        height = node.height;
+    }
+
+    if (!(width > 0 && height > 0)) return null;
+    return { width, height };
+}
+
+function defaultFitSizeForNode(node: CanvasNodeData, natural: { width: number; height: number }) {
+    if (node.type === CanvasNodeType.Video) {
+        return fitNodeSize(natural.width, natural.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+    }
+    return sizeFromDisplayScalePercent(natural.width, natural.height, 100);
+}
+
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
 
@@ -312,6 +351,7 @@ function AtelierCanvasPage() {
     const [mjUpscaleNodeId, setMjUpscaleNodeId] = useState<string | null>(null);
     const [scaleNodeId, setScaleNodeId] = useState<string | null>(null);
     const [videoToolsNodeId, setVideoToolsNodeId] = useState<string | null>(null);
+    const [audioToolsNodeId, setAudioToolsNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [panoramaNodeId, setPanoramaNodeId] = useState<string | null>(null);
@@ -329,6 +369,8 @@ function AtelierCanvasPage() {
     const nodesRef = useRef(nodes);
     const connectionsRef = useRef(connections);
     const selectedNodeIdsRef = useRef(selectedNodeIds);
+    const hoveredNodeIdRef = useRef(hoveredNodeId);
+    const toolbarNodeIdRef = useRef(toolbarNodeId);
     const viewportRef = useRef(viewport);
     const focusAnimRef = useRef<number | null>(null);
     const generateNodeRef = useRef<((nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => Promise<void>) | null>(null);
@@ -614,11 +656,13 @@ function AtelierCanvasPage() {
         nodesRef.current = nodes;
         connectionsRef.current = connections;
         selectedNodeIdsRef.current = selectedNodeIds;
+        hoveredNodeIdRef.current = hoveredNodeId;
+        toolbarNodeIdRef.current = toolbarNodeId;
         viewportRef.current = viewport;
         connectingParamsRef.current = connectingParams;
         connectionTargetNodeIdRef.current = connectionTargetNodeId;
         pendingConnectionCreateRef.current = pendingConnectionCreate;
-    }, [nodes, connections, selectedNodeIds, viewport, connectingParams, connectionTargetNodeId, pendingConnectionCreate]);
+    }, [nodes, connections, selectedNodeIds, hoveredNodeId, toolbarNodeId, viewport, connectingParams, connectionTargetNodeId, pendingConnectionCreate]);
 
     useLayoutEffect(() => {
         selectionBoxRef.current = selectionBox;
@@ -886,6 +930,7 @@ function AtelierCanvasPage() {
     const mjUpscaleNode = mjUpscaleNodeId ? nodeById.get(mjUpscaleNodeId) || null : null;
     const scaleNode = scaleNodeId ? nodeById.get(scaleNodeId) || null : null;
     const videoToolsNode = videoToolsNodeId ? nodeById.get(videoToolsNodeId) || null : null;
+    const audioToolsNode = audioToolsNodeId ? nodeById.get(audioToolsNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
     const panoramaNode = panoramaNodeId ? nodeById.get(panoramaNodeId) || null : null;
@@ -2038,15 +2083,88 @@ function AtelierCanvasPage() {
         if (createTextNodeFromClipboard(text)) message.success(t("canvas.projectPage.clipboardTextAdded"));
     }, [createImageFileNode, createTextNodeFromClipboard, getCanvasCenter, message, t]);
 
+    const resetSelectedNodesToOriginalSize = useCallback((explicitIds?: Iterable<string>) => {
+        const selectedIds = new Set(explicitIds || selectedNodeIdsRef.current);
+        if (!selectedIds.size) {
+            const fallbackId = toolbarNodeIdRef.current || hoveredNodeIdRef.current;
+            if (fallbackId) selectedIds.add(fallbackId);
+        }
+        if (!selectedIds.size) {
+            message.warning(t("canvas.shortcut.selectNodeToResetSize"));
+            return;
+        }
+
+        const eligible = nodesRef.current.filter((node) => {
+            if (!selectedIds.has(node.id)) return false;
+            if (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Annotate) return false;
+            return Boolean(resolveNodeMediaNaturalSize(node));
+        });
+
+        if (!eligible.length) {
+            message.warning(t("canvas.shortcut.resetSizeNeedMedia"));
+            return;
+        }
+
+        const eligibleIds = new Set(eligible.map((node) => node.id));
+        setNodes((prev) =>
+            prev.map((node) => {
+                if (!eligibleIds.has(node.id)) return node;
+                const natural = resolveNodeMediaNaturalSize(node);
+                if (!natural) return node;
+                const size = defaultFitSizeForNode(node, natural);
+                const nextWidth = Math.max(1, Math.round(size.width));
+                const nextHeight = Math.max(1, Math.round(size.height));
+                const centerX = node.position.x + node.width / 2;
+                const centerY = node.position.y + node.height / 2;
+                return {
+                    ...node,
+                    width: nextWidth,
+                    height: nextHeight,
+                    position: { x: centerX - nextWidth / 2, y: centerY - nextHeight / 2 },
+                    metadata: {
+                        ...node.metadata,
+                        freeResize: false,
+                        naturalWidth: node.metadata?.naturalWidth || natural.width,
+                        naturalHeight: node.metadata?.naturalHeight || natural.height,
+                    },
+                };
+            }),
+        );
+        message.success(t("canvas.shortcut.resetSizeDone", { count: eligible.length }));
+    }, [message, t]);
+
+    // Capture-phase G: runs before prompt inputs can stopPropagation, and uses physical KeyG (IME-safe).
+    useEffect(() => {
+        const handleResetSizeShortcut = (event: KeyboardEvent) => {
+            if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+            if (event.code !== "KeyG" && event.key.toLowerCase() !== "g") return;
+            if (isImeComposing(event)) return;
+
+            const target = event.target;
+            if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
+            if (target instanceof HTMLElement && target.isContentEditable) return;
+            if (target instanceof Element && target.closest(".ant-modal")) return;
+
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            blurActiveCanvasTextInput();
+            resetSelectedNodesToOriginalSize();
+        };
+
+        window.addEventListener("keydown", handleResetSizeShortcut, true);
+        return () => window.removeEventListener("keydown", handleResetSizeShortcut, true);
+    }, [resetSelectedNodesToOriginalSize]);
+
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
             // Let native copy/paste/select work inside text fields and edit dialogs.
+            // Do not treat data-canvas-no-zoom as a shortcut blocker (videos/prompt chrome use it only to disable wheel zoom).
             if (
                 event.target instanceof HTMLInputElement ||
                 event.target instanceof HTMLTextAreaElement ||
                 event.target instanceof HTMLSelectElement ||
-                target?.closest("[contenteditable],[data-canvas-text-input],[data-canvas-shortcuts-ignore],[data-canvas-no-zoom],.ant-modal,.ant-input,.ant-input-textarea")
+                target?.closest("[contenteditable],[data-canvas-text-input],[data-canvas-shortcuts-ignore],.ant-modal,.ant-input,.ant-input-textarea")
             ) {
                 return;
             }
@@ -2231,7 +2349,14 @@ function AtelierCanvasPage() {
     const handleNodeResizeStart = useCallback(() => {
         setIsNodeResizing(true);
     }, []);
-    const handleNodeResizeEnd = useCallback(() => setIsNodeResizing(false), []);
+    const handleNodeResizeEnd = useCallback(() => {
+        setIsNodeResizing(false);
+        // Corner-resize often leaves focus inside the prompt panel; blur so G/F shortcuts work right after.
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && active.closest("[data-canvas-shortcuts-ignore],[contenteditable],[data-canvas-text-input]")) {
+            active.blur();
+        }
+    }, []);
 
     const toggleNodeFreeResize = useCallback((nodeId: string) => {
         setNodes((prev) =>
@@ -2248,28 +2373,32 @@ function AtelierCanvasPage() {
 
     const scaleImageNodeDisplay = useCallback(
         (node: CanvasNodeData, percent: number) => {
-            if (!node.metadata?.content) return;
-            const naturalWidth = node.metadata.naturalWidth || node.width;
-            const naturalHeight = node.metadata.naturalHeight || node.height;
-            const size = sizeFromDisplayScalePercent(naturalWidth, naturalHeight, percent);
-            const childId = nanoid();
-            const child: CanvasNodeData = {
-                id: childId,
-                type: CanvasNodeType.Image,
-                title: t("canvas.projectPage.scaleCopyTitle", { percent }),
-                position: { x: node.position.x + node.width + 96, y: node.position.y },
-                width: size.width,
-                height: size.height,
-                metadata: {
-                    ...node.metadata,
-                    freeResize: false,
-                    images: undefined,
-                    primaryImageId: undefined,
-                },
-            };
-            setNodes((prev) => [...prev, child]);
-            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
-            setSelectedNodeIds(new Set([childId]));
+            const natural = resolveNodeMediaNaturalSize(node);
+            if (!natural) {
+                message.warning(t("canvas.shortcut.resetSizeNeedMedia"));
+                return;
+            }
+            const size = sizeFromDisplayScalePercent(natural.width, natural.height, percent);
+            const centerX = node.position.x + node.width / 2;
+            const centerY = node.position.y + node.height / 2;
+            setNodes((prev) =>
+                prev.map((item) =>
+                    item.id === node.id
+                        ? {
+                              ...item,
+                              width: size.width,
+                              height: size.height,
+                              position: { x: centerX - size.width / 2, y: centerY - size.height / 2 },
+                              metadata: {
+                                  ...item.metadata,
+                                  freeResize: false,
+                                  naturalWidth: item.metadata?.naturalWidth || natural.width,
+                                  naturalHeight: item.metadata?.naturalHeight || natural.height,
+                              },
+                          }
+                        : item,
+                ),
+            );
             setScaleNodeId(null);
             message.success(t("canvas.projectPage.scaleApplied", { percent }));
         },
@@ -2524,6 +2653,14 @@ function AtelierCanvasPage() {
         setVideoToolsNodeId(node.id);
     }, [message, t]);
 
+    const openAudioTools = useCallback((node: CanvasNodeData) => {
+        if (!node.metadata?.content) {
+            message.warning(t("canvas.node.emptyAudio"));
+            return;
+        }
+        setAudioToolsNodeId(node.id);
+    }, [message, t]);
+
     const createAdjacentVideoNode = useCallback(async (source: CanvasNodeData, videoFile: Awaited<ReturnType<typeof storeGeneratedVideo>>, title: string) => {
         const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
         const width = Math.min(Math.max(spec.width, source.width), 640);
@@ -2558,6 +2695,71 @@ function AtelierCanvasPage() {
         },
         [createAdjacentVideoNode, message, t, videoToolsNode],
     );
+
+    const handleAudioTrim = useCallback(
+        async (result: AudioToolsTrimResult) => {
+            const source = audioToolsNode;
+            if (!source?.metadata?.content) return;
+            const format = result.blob.type.includes("wav") ? "wav" : "mp3";
+            const stored = await storeGeneratedAudio(result.blob, format);
+            const previous = {
+                content: source.metadata.content,
+                storageKey: source.metadata.storageKey,
+                mimeType: source.metadata.mimeType,
+                bytes: source.metadata.bytes,
+                durationMs: source.metadata.durationMs,
+            };
+            setNodes((prev) =>
+                prev.map((node) => {
+                    if (node.id !== source.id) return node;
+                    const history = [...(node.metadata?.audioHistory || []), previous].slice(-8);
+                    return {
+                        ...node,
+                        metadata: {
+                            ...node.metadata,
+                            ...audioMetadata(stored),
+                            audioHistory: history,
+                            errorDetails: undefined,
+                        },
+                    };
+                }),
+            );
+            message.success(t("canvas.audioTools.trimSuccess"));
+        },
+        [audioToolsNode, message, t],
+    );
+
+    const handleAudioRestore = useCallback(() => {
+        const source = audioToolsNode;
+        if (!source) return;
+        const history = source.metadata?.audioHistory || [];
+        const previous = history[history.length - 1];
+        if (!previous?.content) {
+            message.warning(t("canvas.audioTools.restoreEmpty"));
+            return;
+        }
+        setNodes((prev) =>
+            prev.map((node) => {
+                if (node.id !== source.id) return node;
+                const nextHistory = history.slice(0, -1);
+                return {
+                    ...node,
+                    metadata: {
+                        ...node.metadata,
+                        content: previous.content,
+                        storageKey: previous.storageKey,
+                        mimeType: previous.mimeType,
+                        bytes: previous.bytes,
+                        durationMs: previous.durationMs,
+                        audioHistory: nextHistory.length ? nextHistory : undefined,
+                        status: NODE_STATUS_SUCCESS,
+                        errorDetails: undefined,
+                    },
+                };
+            }),
+        );
+        message.success(t("canvas.audioTools.restoreSuccess"));
+    }, [audioToolsNode, message, t]);
 
     const handleVideoFrame = useCallback(
         async (result: VideoToolsFrameResult) => {
@@ -4755,6 +4957,7 @@ function AtelierCanvasPage() {
             onUpload: (node) => handleUploadRequest(node.id),
             onToggleFreeResize: (node) => toggleNodeFreeResize(node.id),
             onScale: (node) => setScaleNodeId(node.id),
+            onResetSize: (node) => resetSelectedNodesToOriginalSize([node.id]),
             onMaskEdit: (node) => setMaskEditNodeId(node.id),
             onAnnotate: (node) => {
                 if (!node.metadata?.content) {
@@ -4780,7 +4983,7 @@ function AtelierCanvasPage() {
             },
             onReversePrompt: createImageReversePromptNodes,
         }),
-        [copyText, createImageReversePromptNodes, handleNodeViewImage, handleUploadRequest, message, openImageUpscale, t, toggleNodeFreeResize],
+        [copyText, createImageReversePromptNodes, handleNodeViewImage, handleUploadRequest, message, openImageUpscale, resetSelectedNodesToOriginalSize, t, toggleNodeFreeResize],
     );
 
     const renderNodePanel = useCallback(
@@ -5102,8 +5305,10 @@ function AtelierCanvasPage() {
                     onRetry={(node) => void handleRetryNode(node)}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
                     onScale={(node) => setScaleNodeId(node.id)}
+                    onResetSize={(node) => resetSelectedNodesToOriginalSize([node.id])}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                     onOpenVideoTools={openVideoTools}
+                    onOpenAudioTools={openAudioTools}
                 />
 
                 <CanvasToolbar
@@ -5147,6 +5352,7 @@ function AtelierCanvasPage() {
                         onDownload={downloadNodeImage}
                         onSaveAsset={(node) => void saveNodeAsset(node)}
                         onOpenVideoTools={openVideoTools}
+                        onOpenAudioTools={openAudioTools}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
@@ -5239,6 +5445,17 @@ function AtelierCanvasPage() {
                     />
                 ) : null}
 
+                {audioToolsNode?.metadata?.content ? (
+                    <CanvasNodeAudioToolsDialog
+                        open={Boolean(audioToolsNode)}
+                        audioUrl={audioToolsNode.metadata.content}
+                        canRestore={Boolean(audioToolsNode.metadata.audioHistory?.length)}
+                        onClose={() => setAudioToolsNodeId(null)}
+                        onTrim={handleAudioTrim}
+                        onRestore={handleAudioRestore}
+                    />
+                ) : null}
+
                 {mjUpscaleNode ? (
                     <CanvasNodeMjUpscaleDialog
                         open={Boolean(mjUpscaleNode)}
@@ -5258,8 +5475,8 @@ function AtelierCanvasPage() {
                         open={Boolean(scaleNode)}
                         nodeWidth={scaleNode.width}
                         nodeHeight={scaleNode.height}
-                        naturalWidth={scaleNode.metadata?.naturalWidth}
-                        naturalHeight={scaleNode.metadata?.naturalHeight}
+                        naturalWidth={resolveNodeMediaNaturalSize(scaleNode)?.width || scaleNode.metadata?.naturalWidth}
+                        naturalHeight={resolveNodeMediaNaturalSize(scaleNode)?.height || scaleNode.metadata?.naturalHeight}
                         onClose={() => setScaleNodeId(null)}
                         onConfirm={(percent) => scaleImageNodeDisplay(scaleNode, percent)}
                     />

@@ -35,6 +35,7 @@ export function CanvasNodeContextMenu({
     onDownload,
     onSaveAsset,
     onOpenVideoTools,
+    onOpenAudioTools,
 }: {
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
@@ -46,6 +47,7 @@ export function CanvasNodeContextMenu({
     onDownload?: (node: CanvasNodeData) => void;
     onSaveAsset?: (node: CanvasNodeData) => void;
     onOpenVideoTools?: (node: CanvasNodeData) => void;
+    onOpenAudioTools?: (node: CanvasNodeData) => void;
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -58,6 +60,7 @@ export function CanvasNodeContextMenu({
     const suppressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const hasImage = Boolean(node && node.type === CanvasNodeType.Image && node.metadata?.content);
     const hasVideo = Boolean(node && node.type === CanvasNodeType.Video && node.metadata?.content);
+    const hasAudio = Boolean(node && node.type === CanvasNodeType.Audio && node.metadata?.content);
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -88,6 +91,19 @@ export function CanvasNodeContextMenu({
                               icon: <Scissors className="size-4" />,
                               onClick: () => {
                                   onOpenVideoTools(node);
+                                  onClose();
+                              },
+                          },
+                      ]
+                    : []),
+                ...(hasAudio && onOpenAudioTools
+                    ? [
+                          {
+                              id: "audioTools",
+                              label: t("canvas.audioTools.open"),
+                              icon: <Scissors className="size-4" />,
+                              onClick: () => {
+                                  onOpenAudioTools(node);
                                   onClose();
                               },
                           },
@@ -159,7 +175,7 @@ export function CanvasNodeContextMenu({
                 onClick: () => runAndClose(onDelete),
             },
         ];
-    }, [hasImage, hasVideo, imageHandlers, menu.type, node, onClose, onDelete, onDownload, onDuplicate, onInfo, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
+    }, [hasAudio, hasImage, hasVideo, imageHandlers, menu.type, node, onClose, onDelete, onDownload, onDuplicate, onInfo, onOpenAudioTools, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
 
     const menuOrder = useMemo(() => mergeOrderedIds(imageContextMenuOrder || [], tools.map((tool) => tool.id)), [imageContextMenuOrder, tools]);
     const orderedTools = useMemo(() => sortByOrder(tools, menuOrder), [menuOrder, tools]);

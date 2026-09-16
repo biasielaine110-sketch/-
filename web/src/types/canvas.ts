@@ -56,6 +56,15 @@ export type CanvasNodeImage = {
     midjourneyIndex?: number;
 };
 
+/** Snapshot of an audio node's media fields so trim can be undone. */
+export type CanvasAudioSnapshot = {
+    content: string;
+    storageKey?: string;
+    mimeType?: string;
+    bytes?: number;
+    durationMs?: number;
+};
+
 export type CanvasAnnotationKind = "rect" | "ellipse" | "arrow" | "text";
 
 export type CanvasAnnotationBase = {
@@ -143,6 +152,8 @@ export type CanvasNodeMetadata = {
     mimeType?: string;
     bytes?: number;
     durationMs?: number;
+    /** Previous audio versions after in-place trim; last entry is the most recent pre-trim snapshot. */
+    audioHistory?: CanvasAudioSnapshot[];
     groupId?: string;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
     messages?: CanvasAssistantMessage[];
