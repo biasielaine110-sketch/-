@@ -4,9 +4,8 @@
  *
  * Request body (workflow-dependent; H3 video example):
  *   { prompt, duration: <int seconds>, resolution: "480p竖", ref_image_0?… }
- * Example: duration: 1, resolution: "480p竖"
- * lightx2v_v5: duration 1–10 (default 5)
- * *_15s workflows: duration 1–15 (default 5)
+ * duration: 1–15 (default 5)
+ * resolution: 480p / 768p / 1080p / 1088p / 1440p × 竖|横|(1:1)
  */
 
 export const AUTODL_H3_RESOLUTION_OPTIONS = [
@@ -19,12 +18,20 @@ export const AUTODL_H3_RESOLUTION_OPTIONS = [
     "1080p竖",
     "1080p横",
     "1080p(1:1)",
+    "1088p竖",
+    "1088p横",
+    "1088p(1:1)",
+    "1440p竖",
+    "1440p横",
+    "1440p(1:1)",
 ] as const;
 
 export type AutodlH3Resolution = (typeof AUTODL_H3_RESOLUTION_OPTIONS)[number];
+type AutodlH3Tier = "480" | "768" | "1080" | "1088" | "1440";
 
 const DEFAULT_H3_RESOLUTION: AutodlH3Resolution = "768p竖";
 const H3_DURATION_MIN = 1;
+const H3_DURATION_MAX = 15;
 const H3_DURATION_DEFAULT = 5;
 
 /** Detect AutoDL H3 / ComfyUI video workflow ids (model name = workflow_id). */
@@ -40,16 +47,9 @@ export function isAutodlH3ComfyVideoModel(model: string, baseUrl = ""): boolean 
     return false;
 }
 
-/** Max duration in seconds for the given AutoDL H3 workflow. */
-export function autodlH3DurationMax(model = ""): number {
-    const name = String(model || "")
-        .split("::")
-        .pop()
-        ?.trim()
-        .toLowerCase() || "";
-    // e.g. minimax_h3_image_audio_to_video_v2_15s
-    if (/15s|_15(?!\d)|to_video.*15/i.test(name)) return 15;
-    return 10;
+/** Max duration in seconds for AutoDL H3 workflows. */
+export function autodlH3DurationMax(_model = ""): number {
+    return H3_DURATION_MAX;
 }
 
 export function normalizeAutodlH3Resolution(value: string): AutodlH3Resolution {
@@ -61,13 +61,17 @@ export function normalizeAutodlH3Resolution(value: string): AutodlH3Resolution {
     const isLandscape = /横|landscape|16\s*:\s*9|21\s*:\s*9/i.test(raw);
     const isPortrait = /竖|portrait|9\s*:\s*16|3\s*:\s*4/i.test(raw);
 
-    let tier: "480" | "768" | "1080" = "768";
-    if (/1080/.test(lower)) tier = "1080";
+    let tier: AutodlH3Tier = "768";
+    if (/1440|2k|qhd/i.test(lower)) tier = "1440";
+    else if (/1088/.test(lower)) tier = "1088";
+    else if (/1080|full\s*hd|fhd/i.test(lower)) tier = "1080";
     else if (/480|low/.test(lower)) tier = "480";
     else if (/720|768|medium|high|auto/.test(lower) || /^\d+$/.test(lower)) {
         const numeric = Number(lower.replace(/p$/i, ""));
         if (numeric && numeric <= 480) tier = "480";
-        else if (numeric && numeric >= 1000) tier = "1080";
+        else if (numeric >= 1400) tier = "1440";
+        else if (numeric >= 1088) tier = "1088";
+        else if (numeric >= 1000) tier = "1080";
         else tier = "768";
     }
 

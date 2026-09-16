@@ -72,7 +72,7 @@ function VideoSettingsPortal({
     config: AiConfig;
     onConfigChange: (key: keyof AiConfig, value: string) => void;
 }) {
-    const width = 356;
+    const width = 380;
     const gap = 8;
     const margin = 12;
     const alignRight = placement?.endsWith("Right");

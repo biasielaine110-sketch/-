@@ -61,7 +61,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         {t("settingsPanels.video.h3ComfyHint", { max: durationMax })}
                     </div>
                     <SettingGroup title={t("settingsPanels.video.resolution")} color={theme.node.muted}>
-                        <div className="grid grid-cols-3 gap-2.5">
+                        <div className="grid grid-cols-3 gap-2">
                             {AUTODL_H3_RESOLUTION_OPTIONS.map((value) => (
                                 <OptionPill key={value} selected={resolution === value} theme={theme} onClick={() => onConfigChange("vquality", value)}>
                                     {value}
@@ -70,7 +70,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         </div>
                     </SettingGroup>
                     <SettingGroup title={`${t("settingsPanels.video.duration")} (duration)`} color={theme.node.muted}>
-                        <div className={`grid gap-2 ${durationMax > 10 ? "grid-cols-5" : "grid-cols-5"}`}>
+                        <div className="grid grid-cols-5 gap-2">
                             {durationChoices.map((value) => (
                                 <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                     {value}s
@@ -214,7 +214,7 @@ export function normalizeVideoResolutionValue(value: string) {
 
 function OptionPill({ selected, disabled = false, theme, onClick, children }: { selected: boolean; disabled?: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {
     return (
-        <button type="button" disabled={disabled} className="h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-35" style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()} onClick={onClick}>
+        <button type="button" disabled={disabled} className="h-9 cursor-pointer rounded-full border px-1.5 text-[12px] transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-35" style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()} onClick={onClick}>
             {children}
         </button>
     );
