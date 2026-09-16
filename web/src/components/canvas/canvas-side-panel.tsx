@@ -9,7 +9,7 @@ import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
-import { uploadMediaFile } from "@/services/file-storage";
+import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { useAssetStore, type Asset, type AssetKind } from "@/stores/use-asset-store";
 import { useGenerationHistoryStore, type GenerationHistoryRecord } from "@/stores/canvas/use-generation-history-store";
@@ -286,10 +286,18 @@ const ASSET_GROUPS: { kind: AssetKind; icon: typeof Square }[] = [
     { kind: "text", icon: FileText },
 ];
 
-function buildInsertPayload(asset: Asset): InsertAssetPayload {
+async function buildInsertPayload(asset: Asset): Promise<InsertAssetPayload> {
     if (asset.kind === "text") return { kind: "text", content: asset.data.content, title: asset.title };
-    if (asset.kind === "video") return { kind: "video", url: asset.data.url, storageKey: asset.data.storageKey, title: asset.title, width: asset.data.width, height: asset.data.height };
-    return { kind: "image", dataUrl: asset.data.dataUrl, storageKey: asset.data.storageKey, title: asset.title };
+    if (asset.kind === "video") {
+        const url =
+            (asset.data.url && !asset.data.url.startsWith("blob:") ? asset.data.url : "") ||
+            (asset.data.storageKey ? await resolveMediaUrl(asset.data.storageKey, asset.data.url) : "");
+        return { kind: "video", url, storageKey: asset.data.storageKey, title: asset.title, width: asset.data.width, height: asset.data.height };
+    }
+    const dataUrl =
+        (asset.data.dataUrl && !asset.data.dataUrl.startsWith("blob:") ? asset.data.dataUrl : "") ||
+        (asset.data.storageKey ? await resolveImageUrl(asset.data.storageKey, asset.data.dataUrl) : asset.data.dataUrl);
+    return { kind: "image", dataUrl, storageKey: asset.data.storageKey, title: asset.title };
 }
 
 const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onInsert: (payload: InsertAssetPayload) => void; theme: CanvasTheme }) {
@@ -391,7 +399,15 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
                                     {isCollapsed ? null : (
                                         <div className="grid grid-cols-2 gap-2 px-1 pb-2 pt-1">
                                             {group.items.map((asset) => (
-                                                <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert(buildInsertPayload(asset))} onRemove={() => (removeAsset(asset.id), message.success(t("canvas.sidePanel.assetRemoved")))} />
+                                                <AssetCard
+                                                    key={asset.id}
+                                                    asset={asset}
+                                                    theme={theme}
+                                                    onInsert={() => {
+                                                        void buildInsertPayload(asset).then((payload) => onInsert(payload));
+                                                    }}
+                                                    onRemove={() => (removeAsset(asset.id), message.success(t("canvas.sidePanel.assetRemoved")))}
+                                                />
                                             ))}
                                         </div>
                                     )}
@@ -436,12 +452,58 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
 }
 
 function AssetCover({ asset }: { asset: Asset }) {
+    const [src, setSrc] = useState(() => {
+        if (asset.kind === "video") return asset.coverUrl || asset.data.url || "";
+        if (asset.kind === "image") return asset.coverUrl || asset.data.dataUrl || "";
+        return "";
+    });
+
+    useEffect(() => {
+        let cancelled = false;
+        const run = async () => {
+            if (asset.kind === "text") return;
+            if (asset.kind === "video") {
+                if (asset.coverUrl && !asset.coverUrl.startsWith("blob:")) {
+                    setSrc(asset.coverUrl);
+                    return;
+                }
+                if (asset.data.url && !asset.data.url.startsWith("blob:")) {
+                    setSrc(asset.data.url);
+                    return;
+                }
+                if (asset.data.storageKey) {
+                    const url = await resolveMediaUrl(asset.data.storageKey, asset.data.url);
+                    if (!cancelled && url) setSrc(url);
+                }
+                return;
+            }
+            if (asset.coverUrl && !asset.coverUrl.startsWith("blob:")) {
+                setSrc(asset.coverUrl);
+                return;
+            }
+            if (asset.data.dataUrl && !asset.data.dataUrl.startsWith("blob:") && !asset.data.storageKey) {
+                setSrc(asset.data.dataUrl);
+                return;
+            }
+            if (asset.data.storageKey) {
+                const url = await resolveImageUrl(asset.data.storageKey, asset.data.dataUrl);
+                if (!cancelled && url) setSrc(url);
+            }
+        };
+        void run();
+        return () => {
+            cancelled = true;
+        };
+    }, [asset]);
+
     if (asset.kind === "text") return <div className="size-full overflow-hidden whitespace-pre-wrap break-words p-2.5 text-[11px] leading-snug opacity-80">{asset.data.content}</div>;
     if (asset.kind === "video") {
-        if (asset.coverUrl) return <img src={asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
-        return <video src={`${asset.data.url}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+        if (src && !src.includes("#") && asset.coverUrl) return <img src={src} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+        if (src) return <video src={`${src}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+        return <div className="size-full animate-pulse bg-black/10 dark:bg-white/10" />;
     }
-    return <img src={asset.coverUrl || asset.data.dataUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+    if (src) return <img src={src} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+    return <div className="size-full animate-pulse bg-black/10 dark:bg-white/10" />;
 }
 
 // ---------------------------------------------------------------------------

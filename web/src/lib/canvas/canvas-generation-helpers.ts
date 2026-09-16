@@ -42,29 +42,48 @@ export async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
     return references.every(Boolean) ? (references as ReferenceImage[]) : null;
 }
 
-export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
+export type HydrateCanvasMediaOptions = {
+    /** `fast` (default): primary + thumbs only — keeps refresh snappy. `full`: every history version. */
+    mode?: "fast" | "full";
+};
+
+function isDeadBlobUrl(url?: string) {
+    return Boolean(url?.startsWith("blob:"));
+}
+
+export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: HydrateCanvasMediaOptions) {
+    const mode = options?.mode || "fast";
     return Promise.all(
         nodes.map(async (node) => {
             const content = node.metadata?.content;
             if (node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) {
+                const list = node.metadata?.images || [];
+                const primaryId = node.metadata?.primaryImageId || list[0]?.id;
                 const images = await Promise.all(
-                    (node.metadata?.images || []).map(async (image) => {
+                    list.map(async (image) => {
                         if (!image.content && !image.storageKey) return image;
+                        const isPrimary = image.id === primaryId;
+                        // Fast path: only materialize the playable primary; keep storageKey for later.
+                        if (mode === "fast" && !isPrimary) {
+                            return {
+                                ...image,
+                                content: isDeadBlobUrl(image.content) ? "" : image.content,
+                            };
+                        }
                         const nextContent = image.storageKey
                             ? await resolveMediaUrl(image.storageKey, image.content)
-                            : image.content?.startsWith("blob:")
+                            : isDeadBlobUrl(image.content)
                               ? ""
                               : image.content;
                         return { ...image, content: nextContent };
                     }),
                 );
+                const primary = images.find((image) => image.id === primaryId && image.content) || images.find((image) => image.content);
                 const nextContent = node.metadata?.storageKey
                     ? await resolveMediaUrl(node.metadata.storageKey, content)
-                    : content?.startsWith("blob:")
-                      ? images.find((image) => image.id === (node.metadata?.primaryImageId || images[0]?.id))?.content || images[0]?.content || ""
+                    : isDeadBlobUrl(content)
+                      ? primary?.content || ""
                       : content;
-                // Prefer a playable primary version when top-level content is still empty.
-                const primary = images.find((image) => image.id === (node.metadata?.primaryImageId || images[0]?.id) && image.content) || images.find((image) => image.content);
                 return {
                     ...node,
                     metadata: {
@@ -76,22 +95,56 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
                 };
             }
             if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) || !content) return node;
+            const list = node.metadata?.images || [];
+            const primaryId = node.metadata?.primaryImageId || list[0]?.id;
             const images = await Promise.all(
-                (node.metadata?.images || []).map(async (image) => {
+                list.map(async (image) => {
                     if (!image.content && !image.storageKey) return image;
-                    const nextContent = image.storageKey ? await resolveImageUrl(image.storageKey, image.content) : image.content;
-                    const thumbnailContent = image.thumbnailStorageKey ? await resolveImageUrl(image.thumbnailStorageKey, image.thumbnailContent || "") : image.thumbnailContent;
+                    const isPrimary = image.id === primaryId;
+                    const thumbnailContent = image.thumbnailStorageKey
+                        ? await resolveImageUrl(image.thumbnailStorageKey, image.thumbnailContent || "")
+                        : isDeadBlobUrl(image.thumbnailContent)
+                          ? ""
+                          : image.thumbnailContent;
+                    // Fast path: non-primary versions only need a thumb for the filmstrip.
+                    if (mode === "fast" && !isPrimary) {
+                        return {
+                            ...image,
+                            content: isDeadBlobUrl(image.content) ? "" : image.content,
+                            thumbnailContent,
+                        };
+                    }
+                    const nextContent = image.storageKey ? await resolveImageUrl(image.storageKey, image.content) : isDeadBlobUrl(image.content) ? "" : image.content;
                     return { ...image, content: nextContent, thumbnailContent };
                 }),
             );
             if (node.metadata?.storageKey) {
-                const thumbnailContent = node.metadata.thumbnailStorageKey ? await resolveImageUrl(node.metadata.thumbnailStorageKey, node.metadata.thumbnailContent || "") : node.metadata.thumbnailContent;
-                return { ...node, metadata: { ...node.metadata, content: await resolveImageUrl(node.metadata.storageKey, content), thumbnailContent, images } };
+                const thumbnailContent = node.metadata.thumbnailStorageKey
+                    ? await resolveImageUrl(node.metadata.thumbnailStorageKey, node.metadata.thumbnailContent || "")
+                    : isDeadBlobUrl(node.metadata.thumbnailContent)
+                      ? ""
+                      : node.metadata.thumbnailContent;
+                // Prefer thumbnail for canvas chrome when available; still resolve full primary for crisp display.
+                const fullContent = await resolveImageUrl(node.metadata.storageKey, content);
+                return { ...node, metadata: { ...node.metadata, content: fullContent, thumbnailContent, images } };
             }
             if (!content.startsWith("data:image/")) return { ...node, metadata: { ...node.metadata, images } };
             return { ...node, metadata: { ...node.metadata, ...imageMetadata(await uploadImage(content)), images } };
         }),
     );
+}
+
+/** Fill remaining history versions after first paint (video/audio/image batch). */
+export async function hydrateCanvasMediaDeferred(nodes: CanvasNodeData[], signal?: AbortSignal) {
+    const needsWork = nodes.some((node) => {
+        const list = node.metadata?.images || [];
+        if (list.length <= 1) return false;
+        const primaryId = node.metadata?.primaryImageId || list[0]?.id;
+        return list.some((image) => image.id !== primaryId && image.storageKey && (!image.content || isDeadBlobUrl(image.content)));
+    });
+    if (!needsWork) return nodes;
+    if (signal?.aborted) return nodes;
+    return hydrateCanvasImages(nodes, { mode: "full" });
 }
 
 function yieldToMain() {

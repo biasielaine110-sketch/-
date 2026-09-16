@@ -85,6 +85,7 @@ import {
     getInputSummary,
     hydrateAssistantImages,
     hydrateCanvasImages,
+    hydrateCanvasMediaDeferred,
     backfillCanvasImageThumbnails,
     imageExtension,
     isAudioFile,
@@ -431,17 +432,17 @@ function AtelierCanvasPage() {
 
         const thumbAbort = new AbortController();
         const restore = async () => {
-            const restoredNodes = (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes))).map((node) =>
+            // Fast hydrate: primary media only — do not block first paint on every history blob.
+            const restoredNodes = (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes), { mode: "fast" })).map((node) =>
                 node.type === CanvasNodeType.Chat && node.height === 520
                     ? { ...node, height: 1040 }
                     : node.type === CanvasNodeType.Text && node.height === 240
                       ? { ...node, height: 480 }
                       : node,
             );
-            const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
             setNodes(restoredNodes);
             setConnections(project.connections);
-            setChatSessions(restoredSessions);
+            setChatSessions(project.chatSessions || []);
             setActiveChatId(project.activeChatId || null);
             setBackgroundMode(project.backgroundMode);
             setShowImageInfo(project.showImageInfo || false);
@@ -454,13 +455,43 @@ function AtelierCanvasPage() {
             lastHistoryRef.current = {
                 nodes: restoredNodes,
                 connections: project.connections,
-                chatSessions: restoredSessions,
+                chatSessions: project.chatSessions || [],
                 activeChatId: project.activeChatId || null,
                 backgroundMode: project.backgroundMode,
                 showImageInfo: project.showImageInfo || false,
             };
             setHistoryState({ canUndo: false, canRedo: false });
             setProjectLoaded(true);
+
+            // Background: chat image refs + remaining video/image history versions.
+            void (async () => {
+                if (thumbAbort.signal.aborted) return;
+                const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
+                if (thumbAbort.signal.aborted) return;
+                setChatSessions(restoredSessions);
+                if (lastHistoryRef.current) {
+                    lastHistoryRef.current = { ...lastHistoryRef.current, chatSessions: restoredSessions };
+                }
+
+                const fullNodes = await hydrateCanvasMediaDeferred(restoredNodes, thumbAbort.signal);
+                if (thumbAbort.signal.aborted) return;
+                setNodes((prev) => {
+                    const byId = new Map(fullNodes.map((node) => [node.id, node]));
+                    return prev.map((node) => {
+                        const next = byId.get(node.id);
+                        if (!next?.metadata?.images?.length) return node;
+                        return {
+                            ...node,
+                            metadata: {
+                                ...node.metadata,
+                                content: next.metadata?.content || node.metadata?.content,
+                                storageKey: next.metadata?.storageKey || node.metadata?.storageKey,
+                                images: next.metadata?.images,
+                            },
+                        };
+                    });
+                });
+            })();
 
             // Legacy projects: generate missing thumbnails in the background without blocking the canvas.
             void backfillCanvasImageThumbnails(
