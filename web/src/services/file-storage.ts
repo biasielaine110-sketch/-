@@ -49,7 +49,15 @@ function usableMediaFallback(fallback = "") {
 export async function getMediaBlob(storageKey: string) {
     const local = await readLocalMediaBlob(storageKey);
     if (local) return local;
-    return store.getItem<Blob>(storageKey);
+    const stored = await store.getItem<Blob>(storageKey);
+    if (stored) return stored;
+    const cached = objectUrls.get(storageKey);
+    if (!cached) return null;
+    try {
+        return await (await fetch(cached)).blob();
+    } catch {
+        return null;
+    }
 }
 
 export async function setMediaBlob(storageKey: string, blob: Blob) {

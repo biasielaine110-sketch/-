@@ -1,5 +1,14 @@
 import i18n from "@/i18n";
-import type { CanvasConnection, CanvasNodeData } from "@/types/canvas";
+import {
+    findPackByNamespacedId,
+    mapBuiltinArgs,
+    namespacedToolName,
+    parseNamespacedToolName,
+    renderSkillTemplate,
+    type LocalSkillPack,
+} from "@/lib/chat-skill-pack";
+import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
+import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
 
 export type ChatSkillTool = {
     type: "function";
@@ -13,23 +22,38 @@ export type ChatSkillTool = {
 
 export type ChatSkillDefinition = {
     id: string;
-    /** i18n key under canvas.chat.skills.* */
-    nameKey: string;
-    descriptionKey: string;
+    /** i18n key under canvas.chat.skills.* — builtin only */
+    nameKey?: string;
+    descriptionKey?: string;
+    name?: string;
+    description?: string;
+    source: "builtin" | "local";
+    systemHint?: string;
     tools: ChatSkillTool[];
+    removable?: boolean;
 };
 
 export type ChatSkillCanvasContext = {
     chatNodeId: string;
     nodes: CanvasNodeData[];
     connections: CanvasConnection[];
+    updateNodeMetadata?: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
+    selectNode?: (nodeId: string) => void;
 };
 
 const chatText = (key: string, options?: Record<string, unknown>) => i18n.t(`canvas.chat.${key}`, options);
 
-export const CHAT_SKILLS: ChatSkillDefinition[] = [
+/** Default skill ids enabled on new chat nodes (and when metadata.chatSkillIds is unset). */
+export const DEFAULT_CHAT_SKILL_IDS = ["canvas", "utils"] as const;
+
+export function resolveChatSkillIds(skillIds: string[] | undefined | null): string[] {
+    return skillIds ?? [...DEFAULT_CHAT_SKILL_IDS];
+}
+
+const BUILTIN_CHAT_SKILLS: ChatSkillDefinition[] = [
     {
         id: "canvas",
+        source: "builtin",
         nameKey: "skillCanvas",
         descriptionKey: "skillCanvasDesc",
         tools: [
@@ -91,10 +115,33 @@ export const CHAT_SKILLS: ChatSkillDefinition[] = [
                     },
                 },
             },
+            {
+                type: "function",
+                function: {
+                    name: "update_node_prompt",
+                    description:
+                        "Write text into a canvas node's prompt/input box (video, image, audio, config composer) or text-node body. Use when the user asks to put a prompt into a node. Prefer connected video/image nodes from get_chat_connections when the target is ambiguous.",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            node_id: { type: "string", description: "Target canvas node id" },
+                            prompt: { type: "string", description: "Full prompt/text to write into the node" },
+                            mode: {
+                                type: "string",
+                                description: "replace (default) or append to existing text",
+                                enum: ["replace", "append"],
+                            },
+                        },
+                        required: ["node_id", "prompt"],
+                        additionalProperties: false,
+                    },
+                },
+            },
         ],
     },
     {
         id: "utils",
+        source: "builtin",
         nameKey: "skillUtils",
         descriptionKey: "skillUtilsDesc",
         tools: [
@@ -114,21 +161,64 @@ export const CHAT_SKILLS: ChatSkillDefinition[] = [
     },
 ];
 
-export function listChatSkills() {
-    return CHAT_SKILLS;
+/** @deprecated use listChatSkills(); kept for callers expecting a constant array of builtins */
+export const CHAT_SKILLS = BUILTIN_CHAT_SKILLS;
+
+function localPackToDefinition(pack: LocalSkillPack): ChatSkillDefinition {
+    return {
+        id: pack.id,
+        source: "local",
+        name: pack.name,
+        description: pack.description,
+        systemHint: pack.systemHint,
+        removable: true,
+        tools: pack.tools.map((tool) => ({
+            type: "function" as const,
+            function: {
+                name: namespacedToolName(pack.id, tool.name),
+                description: `[${pack.name}] ${tool.description}`,
+                parameters: tool.parameters || { type: "object", properties: {}, additionalProperties: false },
+            },
+        })),
+    };
+}
+
+export function listChatSkills(): ChatSkillDefinition[] {
+    const packs = useChatSkillPacksStore.getState().packs;
+    return [...BUILTIN_CHAT_SKILLS, ...packs.map(localPackToDefinition)];
 }
 
 export function resolveChatSkillTools(skillIds: string[] | undefined): ChatSkillTool[] {
-    if (!skillIds?.length) return [];
-    const selected = new Set(skillIds);
-    return CHAT_SKILLS.filter((skill) => selected.has(skill.id)).flatMap((skill) => skill.tools);
+    const selected = new Set(resolveChatSkillIds(skillIds));
+    return listChatSkills()
+        .filter((skill) => selected.has(skill.id))
+        .flatMap((skill) => skill.tools);
 }
 
 export function chatSkillsSystemHint(skillIds: string[] | undefined) {
-    const tools = resolveChatSkillTools(skillIds);
+    const selected = new Set(resolveChatSkillIds(skillIds));
+    const skills = listChatSkills().filter((skill) => selected.has(skill.id));
+    const tools = skills.flatMap((skill) => skill.tools);
     if (!tools.length) return "";
     const names = tools.map((tool) => tool.function.name).join(", ");
-    return chatText("skillsSystemHint", { tools: names });
+    const packHints = skills
+        .filter((skill) => skill.source === "local" && skill.systemHint)
+        .map((skill) => `- ${skill.name || skill.id}: ${skill.systemHint}`)
+        .join("\n");
+    const base = chatText("skillsSystemHint", { tools: names });
+    return packHints ? `${base}\n\n${chatText("skillsLocalPackHints")}\n${packHints}` : base;
+}
+
+export function getChatSkillDisplayName(skill: ChatSkillDefinition) {
+    if (skill.name) return skill.name;
+    if (skill.nameKey) return chatText(skill.nameKey);
+    return skill.id;
+}
+
+export function getChatSkillDisplayDescription(skill: ChatSkillDefinition) {
+    if (skill.description) return skill.description;
+    if (skill.descriptionKey) return chatText(skill.descriptionKey);
+    return "";
 }
 
 export async function executeChatSkillTool(
@@ -137,27 +227,71 @@ export async function executeChatSkillTool(
     context: ChatSkillCanvasContext,
 ): Promise<string> {
     try {
-        switch (name) {
-            case "list_canvas_nodes":
-                return jsonResult(listCanvasNodes(context, args));
-            case "read_node":
-                return jsonResult(readNode(context, String(args.node_id || "")));
-            case "search_canvas":
-                return jsonResult(searchCanvas(context, String(args.query || ""), Number(args.limit)));
-            case "get_chat_connections":
-                return jsonResult(getChatConnections(context));
-            case "get_current_time":
-                return jsonResult({
-                    iso: new Date().toISOString(),
-                    local: new Date().toLocaleString(),
-                    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                });
-            default:
-                return jsonResult({ error: chatText("skillsUnknownTool", { name }) });
-        }
+        const builtinResult = await executeBuiltinTool(name, args, context);
+        if (builtinResult !== null) return builtinResult;
+
+        const localResult = await executeLocalPackTool(name, args, context);
+        if (localResult !== null) return localResult;
+
+        return jsonResult({ error: chatText("skillsUnknownTool", { name }) });
     } catch (error) {
         return jsonResult({ error: error instanceof Error ? error.message : String(error) });
     }
+}
+
+async function executeBuiltinTool(name: string, args: Record<string, unknown>, context: ChatSkillCanvasContext): Promise<string | null> {
+    switch (name) {
+        case "list_canvas_nodes":
+            return jsonResult(listCanvasNodes(context, args));
+        case "read_node":
+            return jsonResult(readNode(context, String(args.node_id || "")));
+        case "search_canvas":
+            return jsonResult(searchCanvas(context, String(args.query || ""), Number(args.limit)));
+        case "get_chat_connections":
+            return jsonResult(getChatConnections(context));
+        case "update_node_prompt":
+            return jsonResult(updateNodePrompt(context, String(args.node_id || ""), String(args.prompt ?? ""), String(args.mode || "replace")));
+        case "get_current_time":
+            return jsonResult({
+                iso: new Date().toISOString(),
+                local: new Date().toLocaleString(),
+                timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            });
+        default:
+            return null;
+    }
+}
+
+async function executeLocalPackTool(name: string, args: Record<string, unknown>, context: ChatSkillCanvasContext): Promise<string | null> {
+    const parsed = parseNamespacedToolName(name);
+    if (!parsed) return null;
+    const pack = findPackByNamespacedId(useChatSkillPacksStore.getState().packs, parsed.packId);
+    if (!pack) return jsonResult({ error: chatText("skillsPackNotFound", { id: parsed.packId }) });
+    const tool = pack.tools.find((item) => sanitizeToolMatch(item.name) === parsed.toolName);
+    if (!tool) return jsonResult({ error: chatText("skillsUnknownTool", { name }) });
+
+    const action = tool.action;
+    if (action.type === "template") {
+        return jsonResult({
+            ok: true,
+            packId: pack.id,
+            tool: tool.name,
+            text: renderSkillTemplate(action.template, args),
+        });
+    }
+    if (action.type === "static") {
+        return jsonResult({ ok: true, packId: pack.id, tool: tool.name, result: action.result });
+    }
+    if (action.type === "return_args") {
+        return jsonResult({ ok: true, packId: pack.id, tool: tool.name, args });
+    }
+    if (action.type === "builtin") {
+        const mapped = mapBuiltinArgs(args, action.argMap);
+        const result = await executeBuiltinTool(action.builtin, mapped, context);
+        if (result === null) return jsonResult({ error: chatText("skillsUnknownTool", { name: action.builtin }) });
+        return result;
+    }
+    return jsonResult({ error: chatText("skillsUnknownTool", { name }) });
 }
 
 function jsonResult(value: unknown) {
@@ -211,6 +345,52 @@ function getChatConnections(context: ChatSkillCanvasContext) {
     };
 }
 
+function updateNodePrompt(context: ChatSkillCanvasContext, nodeId: string, prompt: string, modeRaw: string) {
+    if (!context.updateNodeMetadata) {
+        return { error: chatText("skillsWriteUnavailable") };
+    }
+    const node = context.nodes.find((item) => item.id === nodeId);
+    if (!node) return { error: chatText("skillsNodeNotFound", { id: nodeId }) };
+    if (node.type === CanvasNodeType.Chat || node.type === CanvasNodeType.Group) {
+        return { error: chatText("skillsWriteUnsupportedType", { type: node.type }) };
+    }
+
+    const mode = modeRaw.trim().toLowerCase() === "append" ? "append" : "replace";
+    const existing =
+        node.type === CanvasNodeType.Text
+            ? node.metadata?.content || node.metadata?.prompt || node.metadata?.composerContent || ""
+            : node.metadata?.composerContent || node.metadata?.prompt || node.metadata?.content || "";
+    const nextText = mode === "append" ? `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}${prompt}` : prompt;
+    const stamp = Date.now();
+
+    if (node.type === CanvasNodeType.Text) {
+        context.updateNodeMetadata(nodeId, {
+            content: nextText,
+            prompt: nextText,
+            composerContent: nextText,
+            promptSyncAt: stamp,
+        });
+    } else {
+        context.updateNodeMetadata(nodeId, {
+            prompt: nextText,
+            composerContent: nextText,
+            promptSyncAt: stamp,
+        });
+    }
+
+    context.selectNode?.(nodeId);
+
+    return {
+        ok: true,
+        node_id: nodeId,
+        type: node.type,
+        title: node.title,
+        mode,
+        promptLength: nextText.length,
+        promptPreview: nextText.slice(0, 240),
+    };
+}
+
 function summarizeNode(node: CanvasNodeData | undefined, includeContent: boolean) {
     if (!node) return null;
     const text = (node.metadata?.content || node.metadata?.prompt || node.metadata?.composerContent || "").trim();
@@ -226,6 +406,7 @@ function summarizeNode(node: CanvasNodeData | undefined, includeContent: boolean
                   contentPreview: text.slice(0, 4000),
                   contentLength: text.length,
                   prompt: (node.metadata?.prompt || "").slice(0, 2000),
+                  composerContent: (node.metadata?.composerContent || "").slice(0, 2000),
               }
             : {
                   contentPreview: text ? text.slice(0, 160) : "",
@@ -237,4 +418,8 @@ function clampLimit(value: unknown, fallback: number) {
     const numeric = Math.round(Number(value));
     if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
     return Math.min(100, numeric);
+}
+
+function sanitizeToolMatch(value: string) {
+    return value.replace(/[^a-zA-Z0-9_]/g, "_");
 }

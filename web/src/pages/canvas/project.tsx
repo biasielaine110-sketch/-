@@ -5,7 +5,7 @@ import { Group, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { isMidjourneyModel, requestEdit, requestGeneration, requestImageQuestion, requestMidjourneyUpscale, type AiTextMessage } from "@/services/api/image";
-import { chatSkillsSystemHint, executeChatSkillTool, resolveChatSkillTools } from "@/lib/chat-skills";
+import { chatSkillsSystemHint, executeChatSkillTool, resolveChatSkillIds, resolveChatSkillTools } from "@/lib/chat-skills";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
 import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -160,7 +160,7 @@ const NODE_STATUS_ERROR = "error" as const;
 /** Soft cap so same-panel re-generations do not grow without bound. */
 const MAX_IMAGE_NODE_HISTORY = 24;
 
-/** Remap edges for copied nodes, keeping links to uncopied neighbors (A→B becomes A'→B). */
+/** Remap edges for copied nodes, keeping links to uncopied neighbors (AâB becomes A'âB). */
 function cloneConnectionsForCopiedNodes(connections: CanvasConnection[], idMap: Map<string, string>, stamp = Date.now()): CanvasConnection[] {
     if (!idMap.size) return [];
     const seen = new Set<string>();
@@ -432,7 +432,7 @@ function AtelierCanvasPage() {
 
         const thumbAbort = new AbortController();
         const restore = async () => {
-            // Fast hydrate: primary media only —do not block first paint on every history blob.
+            // Fast hydrate: primary media only âdo not block first paint on every history blob.
             const restoredNodes = (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes), { mode: "fast" })).map((node) =>
                 node.type === CanvasNodeType.Chat && (node.height === 520 || node.height === 1040 || node.width === 420)
                     ? { ...node, width: 840, height: 1387 }
@@ -705,7 +705,7 @@ function AtelierCanvasPage() {
                 return additions.length ? [...prev, ...additions] : prev;
             });
 
-            // Annotate —Image: load the first linked image into the annotate node.
+            // Annotate âImage: load the first linked image into the annotate node.
             for (const { fromNodeId, toNodeId } of pairs) {
                 const fromNode = nodesSnapshot.find((node) => node.id === fromNodeId);
                 const toNode = nodesSnapshot.find((node) => node.id === toNodeId);
@@ -1523,7 +1523,7 @@ function AtelierCanvasPage() {
             if (pendingConnectionCreateRef.current) cancelPendingConnectionCreate();
             if (event.button !== 0) return;
 
-            // Sticky X linking stays active until X/Esc —blank-canvas clicks do not cancel it.
+            // Sticky X linking stays active until X/Esc âblank-canvas clicks do not cancel it.
             if (connectingParamsRef.current?.sticky) {
                 const anchorId = connectingParamsRef.current.nodeId;
                 setSelectedNodeIds(new Set([anchorId]));
@@ -1614,7 +1614,7 @@ function AtelierCanvasPage() {
 
     const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
         event.stopPropagation();
-        // While sticky-linking, clicks only create edges —do not start a drag on the clicked peer.
+        // While sticky-linking, clicks only create edges âdo not start a drag on the clicked peer.
         if (connectingParamsRef.current?.sticky) {
             pendingSelectionRef.current = null;
             return;
@@ -1788,7 +1788,7 @@ function AtelierCanvasPage() {
                 });
                 setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
 
-                // Preview drag with transform offset only —commit positions once on mouseup.
+                // Preview drag with transform offset only âcommit positions once on mouseup.
                 if (rafRef.current) cancelAnimationFrame(rafRef.current);
                 rafRef.current = requestAnimationFrame(() => {
                     const ids = dragRef.current.initialSelectedNodes.map((item) => item.id);
@@ -2375,6 +2375,21 @@ function AtelierCanvasPage() {
 
     const downloadNodeImage = useCallback(
         async (node: CanvasNodeData) => {
+            if (node.type === CanvasNodeType.Text) {
+                const content = (node.metadata?.content || node.metadata?.prompt || "").trim();
+                if (!content) return message.error(t("canvas.projectPage.noTextToSave"));
+                const rawName = (node.title || t("canvas.projectPage.canvasText")).trim() || "document";
+                const safeName = rawName.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 48) || "document";
+                const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+                const result = await saveBlobAs(blob, `${safeName}.md`, { projectId });
+                if (result.method === "draft") {
+                    message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
+                } else {
+                    message.success(t("canvas.nodeToolbar.exportDocumentDone", { name: result.fileName }));
+                    if (draftMeta && !draftMeta.hasDirectory) message.warning(t("canvas.draft.rebindForFolderSave"));
+                }
+                return;
+            }
             if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
             const extension = node.type === CanvasNodeType.Video ? "mp4" : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content);
             const result = await saveBlobAs(node.metadata.content, `canvas-${node.type}-${node.id}.${extension}`, { projectId });
@@ -3304,7 +3319,7 @@ function AtelierCanvasPage() {
                     // Image nodes always write back into themselves so the same panel can re-run
                     // without chaining a new node off the previous result.
                     const writeImageToSelf = isImageNode;
-                    // Only upstream connected images count as references —never this node's own result
+                    // Only upstream connected images count as references ânever this node's own result
                     // or nodes previously generated from this panel.
                     const selfStorageKey = sourceNode?.metadata?.storageKey;
                     const selfContent = sourceNode?.metadata?.content;
@@ -4456,7 +4471,7 @@ function AtelierCanvasPage() {
                 );
 
                 const videoNote = uniqueVideos.length
-                    ? `\n\n${t("canvas.chat.linkedVideoNote", { count: uniqueVideos.length, titles: uniqueVideos.map((item) => item.title).join("、") })}`
+                    ? `\n\n${t("canvas.chat.linkedVideoNote", { count: uniqueVideos.length, titles: uniqueVideos.map((item) => item.title).join("ã") })}`
                     : "";
                 const promptText = `${userText}${videoNote}`;
                 const userContent: AiTextMessage["content"] = referenceImages.length
@@ -4468,7 +4483,7 @@ function AtelierCanvasPage() {
                     ...historyMessages,
                     { role: "user", content: userContent },
                 ];
-                const skillIds = sourceNode.metadata?.chatSkillIds || [];
+                const skillIds = resolveChatSkillIds(sourceNode.metadata?.chatSkillIds);
                 const skillTools = resolveChatSkillTools(skillIds);
                 const skillsHint = chatSkillsSystemHint(skillIds);
                 const messagesWithSkills: AiTextMessage[] = skillsHint
@@ -4488,6 +4503,17 @@ function AtelierCanvasPage() {
                                           chatNodeId: nodeId,
                                           nodes: nodesRef.current,
                                           connections: connectionsRef.current,
+                                          updateNodeMetadata: (targetId, patch) => {
+                                              setNodes((prev) => {
+                                                  const next = prev.map((node) => (node.id === targetId ? applyNodeConfigPatch(node, patch) : node));
+                                                  nodesRef.current = next;
+                                                  return next;
+                                              });
+                                          },
+                                          selectNode: (targetId) => {
+                                              setSelectedNodeIds(new Set([targetId]));
+                                              setDialogNodeId(targetId);
+                                          },
                                       }),
                                   onToolStart: (name) => updateAssistantMessage({ text: t("canvas.chat.skillsUsing", { name }) }),
                               }
@@ -4970,6 +4996,7 @@ function AtelierCanvasPage() {
                             onCancelGeneration={stopGenerationForNode}
                             onGenerateImage={generateImageFromTextNode}
                             onCreateChat={createChatFromTextNode}
+                            onExportDocument={downloadNodeImage}
                             onSendChat={sendChatMessage}
                             onChatModelChange={(nodeId, model) => handleConfigNodeChange(nodeId, { model })}
                             onChatImageModelChange={(nodeId, model) => handleConfigNodeChange(nodeId, { imageModel: model })}

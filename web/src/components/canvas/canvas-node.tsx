@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Clapperboard, Copy, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Clapperboard, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
 
 import { CanvasDisplayImage } from "@/lib/canvas/canvas-display-image";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -57,6 +57,7 @@ type CanvasNodeProps = {
     onCancelGeneration?: (nodeId: string) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onCreateChat?: (node: CanvasNodeData) => void;
+    onExportDocument?: (node: CanvasNodeData) => void;
     onSendChat?: (nodeId: string, text: string, options?: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
     onChatModelChange?: (nodeId: string, model: string) => void;
     onChatImageModelChange?: (nodeId: string, model: string) => void;
@@ -86,6 +87,7 @@ type NodeContentRendererProps = {
     onCancelGeneration?: (nodeId: string) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onCreateChat?: (node: CanvasNodeData) => void;
+    onExportDocument?: (node: CanvasNodeData) => void;
     onSendChat?: (nodeId: string, text: string, options?: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
     onChatModelChange?: (nodeId: string, model: string) => void;
     onChatImageModelChange?: (nodeId: string, model: string) => void;
@@ -140,6 +142,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onCancelGeneration,
     onGenerateImage,
     onCreateChat,
+    onExportDocument,
     onSendChat,
     onChatModelChange,
     onChatImageModelChange,
@@ -449,6 +452,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onCancelGeneration={onCancelGeneration}
                         onGenerateImage={onGenerateImage}
                         onCreateChat={onCreateChat}
+                        onExportDocument={onExportDocument}
                         onSendChat={onSendChat}
                         onChatModelChange={onChatModelChange}
                         onChatImageModelChange={onChatImageModelChange}
@@ -716,7 +720,7 @@ function MissingPluginContent({ theme, type }: Pick<NodeContentRendererProps, "t
     );
 }
 
-function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing, onGenerateImage, onCreateChat, onEditText, onFontSizeChange }: NodeContentRendererProps) {
+function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing, onGenerateImage, onCreateChat, onExportDocument, onEditText, onFontSizeChange }: NodeContentRendererProps) {
     const { t } = useTranslation();
     const fontSize = Math.max(10, Math.min(48, node.metadata?.fontSize || DEFAULT_CANVAS_FONT_SIZE));
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
@@ -781,6 +785,23 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
                     onSelect={(prompt) => onContentChange(node.id, prompt.content)}
                 />
+                <button
+                    type="button"
+                    className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100 disabled:opacity-35"
+                    style={actionButtonStyle}
+                    disabled={!((node.metadata?.content || node.metadata?.prompt || "").trim())}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onExportDocument?.(node);
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    title={t("canvas.nodeToolbar.exportDocumentTitle")}
+                    aria-label={t("canvas.nodeToolbar.exportDocument")}
+                >
+                    <Download className="size-3.5 shrink-0" />
+                    {t("canvas.nodeToolbar.exportDocument")}
+                </button>
                 <button
                     type="button"
                     className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"

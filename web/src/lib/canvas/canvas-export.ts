@@ -4,25 +4,37 @@ import i18n from "@/i18n";
 import { createZip } from "@/lib/zip";
 import { getMediaBlob } from "@/services/file-storage";
 import { getImageBlob } from "@/services/image-storage";
+import { getLocalMediaLibraryMeta, requestLocalMediaLibraryAccess } from "@/services/local-media-library";
 import type { CanvasExportAsset, CanvasExportFile } from "@/types/canvas-export";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
 export async function buildCanvasProjectsZip(projects: CanvasProject[]) {
+    // Draft/export is always user-triggered — re-acquire local media library permission so blobs
+    // migrated out of IndexedDB can still be packed into the zip for another computer.
+    if (await getLocalMediaLibraryMeta()) {
+        try {
+            await requestLocalMediaLibraryAccess();
+        } catch {
+            // Continue; recovery below may still find in-memory object URLs / data URLs.
+        }
+    }
+
     const zipFiles: { name: string; data: BlobPart }[] = [];
     const exportedProjects = await Promise.all(
         projects.map(async (project) => {
             const files: CanvasExportAsset[] = [];
+            const contentByKey = collectContentUrlsByStorageKey(project);
             await Promise.all(
                 collectStorageKeys(project).map(async (storageKey) => {
-                    const blob = storageKey.startsWith("image:") ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
+                    const blob = await resolveExportBlob(storageKey, contentByKey.get(storageKey));
                     if (!blob) return;
                     const path = `projects/${project.id}/files/${safeFileName(storageKey)}.${fileExtension(blob.type, storageKey)}`;
                     files.push({ storageKey, path, mimeType: blob.type || "application/octet-stream", bytes: blob.size });
                     zipFiles.push({ name: path, data: blob });
                 }),
             );
-            return { project, files };
+            return { project: scrubProjectBlobUrls(project), files };
         }),
     );
 
@@ -51,7 +63,7 @@ export async function exportCanvasNodes(nodes: CanvasNodeData[], fileName = i18n
             const title = node.title || node.type;
             const storageKey = node.metadata?.storageKey || "";
             if (storageKey) {
-                const blob = storageKey.startsWith("image:") ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
+                const blob = await resolveExportBlob(storageKey, node.metadata?.content);
                 if (blob) return void zipFiles.push({ name: uniqueName(title, fileExtension(blob.type, storageKey)), data: blob });
             }
             if (node.type === CanvasNodeType.Text) return void zipFiles.push({ name: uniqueName(title, "txt"), data: node.metadata?.content || node.metadata?.prompt || "" });
@@ -68,11 +80,48 @@ export async function exportCanvasNodes(nodes: CanvasNodeData[], fileName = i18n
     saveAs(zip, `${safeFileName(fileName)}.zip`);
 }
 
+async function resolveExportBlob(storageKey: string, contentUrl?: string) {
+    const fromStore = storageKey.startsWith("image:") ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
+    if (fromStore) return fromStore;
+    const url = String(contentUrl || "").trim();
+    if (!url) return null;
+    if (url.startsWith("blob:") || url.startsWith("data:") || url.startsWith("http:") || url.startsWith("https:")) {
+        try {
+            return await (await fetch(url)).blob();
+        } catch {
+            return null;
+        }
+    }
+    return null;
+}
+
 function collectStorageKeys(value: unknown, keys = new Set<string>()) {
     if (!value || typeof value !== "object") return [...keys];
-    if ("storageKey" in value && typeof value.storageKey === "string" && value.storageKey.includes(":")) keys.add(value.storageKey);
-    Object.values(value).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectStorageKeys(child, keys)) : collectStorageKeys(item, keys)));
+    const record = value as Record<string, unknown>;
+    for (const field of ["storageKey", "thumbnailStorageKey"] as const) {
+        const key = record[field];
+        if (typeof key === "string" && key.includes(":")) keys.add(key);
+    }
+    Object.values(record).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectStorageKeys(child, keys)) : collectStorageKeys(item, keys)));
     return [...keys];
+}
+
+function collectContentUrlsByStorageKey(value: unknown, map = new Map<string, string>()) {
+    if (!value || typeof value !== "object") return map;
+    const record = value as Record<string, unknown>;
+    const storageKey = typeof record.storageKey === "string" ? record.storageKey : "";
+    const thumbnailStorageKey = typeof record.thumbnailStorageKey === "string" ? record.thumbnailStorageKey : "";
+    const content = typeof record.content === "string" ? record.content : typeof record.dataUrl === "string" ? record.dataUrl : "";
+    const thumbnailContent = typeof record.thumbnailContent === "string" ? record.thumbnailContent : "";
+    if (storageKey.includes(":") && content && !map.has(storageKey)) map.set(storageKey, content);
+    if (thumbnailStorageKey.includes(":") && thumbnailContent && !map.has(thumbnailStorageKey)) map.set(thumbnailStorageKey, thumbnailContent);
+    Object.values(record).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectContentUrlsByStorageKey(child, map)) : collectContentUrlsByStorageKey(item, map)));
+    return map;
+}
+
+/** Drop machine-local blob: URLs so the other computer doesn't try to open dead addresses. */
+function scrubProjectBlobUrls(project: CanvasProject): CanvasProject {
+    return JSON.parse(JSON.stringify(project, (_key, value) => (typeof value === "string" && value.startsWith("blob:") ? "" : value))) as CanvasProject;
 }
 
 function safeFileName(value: string) {

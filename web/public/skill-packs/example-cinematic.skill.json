@@ -1,0 +1,46 @@
+{
+  "id": "cinematic_prompt",
+  "name": "电影感提示词",
+  "description": "把题材整理成结构化视频提示词，并可写入画布节点",
+  "version": "1.0.0",
+  "systemHint": "当用户需要电影感/镜头感视频提示词时，优先调用 cinematic_prompt__build_cinematic_prompt；若用户要求写入节点，再调用 cinematic_prompt__write_prompt_to_node（可先用画布工具定位 node_id）。",
+  "tools": [
+    {
+      "name": "build_cinematic_prompt",
+      "description": "根据题材、情绪、镜头生成一段英文视频提示词",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "subject": { "type": "string", "description": "主体与动作" },
+          "mood": { "type": "string", "description": "情绪氛围" },
+          "shot": { "type": "string", "description": "镜头类型，如 wide shot / close-up" },
+          "style": { "type": "string", "description": "视觉风格" }
+        },
+        "required": ["subject"],
+        "additionalProperties": false
+      },
+      "action": {
+        "type": "template",
+        "template": "{{shot|cinematic wide shot}} of {{subject}}, mood: {{mood|dramatic}}, style: {{style|photorealistic film still}}, shallow depth of field, natural lighting, high detail"
+      }
+    },
+    {
+      "name": "write_prompt_to_node",
+      "description": "把提示词写入指定画布节点的输入框（调用内置 update_node_prompt）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "node_id": { "type": "string", "description": "目标节点 id" },
+          "prompt": { "type": "string", "description": "要写入的完整提示词" },
+          "mode": { "type": "string", "enum": ["replace", "append"], "description": "替换或追加" }
+        },
+        "required": ["node_id", "prompt"],
+        "additionalProperties": false
+      },
+      "action": {
+        "type": "builtin",
+        "builtin": "update_node_prompt"
+      }
+    }
+  ]
+}

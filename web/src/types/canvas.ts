@@ -103,6 +103,8 @@ export type CanvasNodeMetadata = {
     content?: string;
     composerContent?: string;
     prompt?: string;
+    /** Bumped when chat skills (or similar) write prompt text so the prompt panel can sync. */
+    promptSyncAt?: number;
     status?: CanvasNodeStatus;
     errorDetails?: string;
     fontSize?: number;

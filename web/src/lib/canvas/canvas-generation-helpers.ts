@@ -94,7 +94,9 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                     },
                 };
             }
-            if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) || !content) return node;
+            if (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) return node;
+            // storageKey alone is enough after draft import (content may be scrubbed empty / dead blob).
+            if (!content && !node.metadata?.storageKey && !(node.metadata?.images || []).some((image) => image.storageKey || image.content)) return node;
             const list = node.metadata?.images || [];
             const primaryId = node.metadata?.primaryImageId || list[0]?.id;
             const images = await Promise.all(
@@ -128,7 +130,7 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                 const fullContent = await resolveImageUrl(node.metadata.storageKey, content);
                 return { ...node, metadata: { ...node.metadata, content: fullContent, thumbnailContent, images } };
             }
-            if (!content.startsWith("data:image/")) return { ...node, metadata: { ...node.metadata, images } };
+            if (!content || !content.startsWith("data:image/")) return { ...node, metadata: { ...node.metadata, content: isDeadBlobUrl(content) ? "" : content, images } };
             return { ...node, metadata: { ...node.metadata, ...imageMetadata(await uploadImage(content)), images } };
         }),
     );

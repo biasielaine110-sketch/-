@@ -114,11 +114,11 @@ export async function ensureImageThumbnail(options: {
 }
 
 export async function resolveImageUrl(storageKey?: string, fallback = "") {
-    if (!storageKey) return fallback;
+    if (!storageKey) return usableImageFallback(fallback);
     const cached = objectUrls.get(storageKey);
     if (cached) return cached;
     const blob = await getImageBlob(storageKey);
-    if (!blob) return fallback;
+    if (!blob) return usableImageFallback(fallback);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     return url;
@@ -127,7 +127,16 @@ export async function resolveImageUrl(storageKey?: string, fallback = "") {
 export async function getImageBlob(storageKey: string) {
     const local = await readLocalMediaBlob(storageKey);
     if (local) return local;
-    return store.getItem<Blob>(storageKey);
+    const stored = await store.getItem<Blob>(storageKey);
+    if (stored) return stored;
+    // Same-session object URLs still hold bytes even if IndexedDB was cleared after migrating to a local library.
+    const cached = objectUrls.get(storageKey);
+    if (!cached) return null;
+    try {
+        return await (await fetch(cached)).blob();
+    } catch {
+        return null;
+    }
 }
 
 export async function setImageBlob(storageKey: string, blob: Blob) {
@@ -203,6 +212,13 @@ async function persistImageBlob(storageKey: string, blob: Blob) {
         }
     }
     await store.setItem(storageKey, blob);
+}
+
+/** Blob object URLs die after refresh/import; never treat them as a usable fallback. */
+function usableImageFallback(fallback = "") {
+    const value = String(fallback || "").trim();
+    if (!value || value.startsWith("blob:")) return "";
+    return value;
 }
 
 function blobToDataUrl(blob: Blob) {

@@ -10,9 +10,13 @@ import { setImageBlob } from "@/services/image-storage";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
 import { CanvasProjectCard } from "@/components/canvas/canvas-project-card";
 import type { CanvasExportFile } from "@/types/canvas-export";
-import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
+
+function scrubImportedProject(project: CanvasProject): CanvasProject {
+    return JSON.parse(JSON.stringify(project, (_key, value) => (typeof value === "string" && value.startsWith("blob:") ? "" : value))) as CanvasProject;
+}
 
 export default function CanvasPage() {
     const { message } = App.useApp();
@@ -47,7 +51,7 @@ export default function CanvasPage() {
                     }),
                 ),
             );
-            data.projects.forEach((item) => importProject(item.project));
+            data.projects.forEach((item) => importProject(scrubImportedProject(item.project)));
             message.success(t("canvas.imported", { count: data.projects.length }));
         } catch {
             message.error(t("canvas.importFailed"));

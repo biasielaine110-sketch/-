@@ -45,12 +45,12 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const running = isRunning || localRunning;
     const promptPlaceholder = t(`canvas.promptPanel.${mode === "text" && hasTextContent ? "editText" : mode}`);
 
-    // Restore prompts only when switching nodes; preserve the current input after generation on the same node.
+    // Restore prompts when switching nodes, or when chat skills / external writers bump promptSyncAt.
     useEffect(() => {
         setPrompt(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
         setLocalRunning(false);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [node.id]);
+    }, [node.id, node.metadata?.promptSyncAt]);
 
     // Hand off to parent-controlled running, or drop optimistic state if generation never started.
     useEffect(() => {
