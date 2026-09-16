@@ -7,7 +7,7 @@ import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/l
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { getApiTransport, proxyApiUrl } from "@/lib/api-proxy";
+import { resolveApiTransport, proxyApiUrl } from "@/lib/api-proxy";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 
@@ -480,7 +480,7 @@ async function resolveAutodlComfyReferenceUrl(image: ReferenceImage, referenceCo
 
 /** Fail fast with a clear 413 hint before hitting the site proxy body cap. */
 function assertProxyBodyFits(body: Record<string, unknown>) {
-    if (getApiTransport() !== "proxy") return;
+    if (resolveApiTransport() !== "proxy") return;
     let encoded = "";
     try {
         encoded = JSON.stringify(body);
@@ -491,7 +491,7 @@ function assertProxyBodyFits(body: Record<string, unknown>) {
     if (encoded.length > 3_800_000) {
         throw new Error(apiText("payloadTooLarge"));
     }
-    const inlineBytes = Object.values(body).reduce((sum, value) => {
+    const inlineBytes = Object.values(body).reduce<number>((sum, value) => {
         if (typeof value !== "string" || !value.startsWith("data:")) return sum;
         return sum + getDataUrlByteSize(value);
     }, 0);
