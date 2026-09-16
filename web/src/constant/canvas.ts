@@ -3,6 +3,9 @@ import { CanvasNodeType } from "@/types/canvas";
 import type { CanvasNodeMetadata } from "@/types/canvas";
 import { getNodeSpec as getRegistryNodeSpec } from "@/lib/canvas/node-registry";
 
+/** Default font size for text / chat nodes on the canvas. */
+export const DEFAULT_CANVAS_FONT_SIZE = 16;
+
 type CanvasNodeSpec = {
     width: number;
     height: number;
@@ -18,7 +21,7 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Audio]: { width: 340, height: 120, get title() { return i18n.t("canvas.nodeTypes.audio"); } },
     [CanvasNodeType.Group]: { width: 760, height: 480, get title() { return i18n.t("canvas.nodeTypes.group"); } },
     [CanvasNodeType.Director]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.director"); } },
-    [CanvasNodeType.Chat]: { width: 420, height: 1040, get title() { return i18n.t("canvas.nodeTypes.chat"); } },
+    [CanvasNodeType.Chat]: { width: 840, height: 1387, get title() { return i18n.t("canvas.nodeTypes.chat"); } },
     [CanvasNodeType.Annotate]: { width: 420, height: 320, get title() { return i18n.t("canvas.nodeTypes.annotate"); } },
     [CanvasNodeType.Merge]: { width: 480, height: 420, get title() { return i18n.t("canvas.nodeTypes.merge"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
@@ -30,7 +33,7 @@ export const NODE_SPECS = {
     },
     [CanvasNodeType.Text]: {
         width: 340, height: 480, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Text].title; },
-        metadata: { content: "", status: "idle", fontSize: 14 },
+        metadata: { content: "", status: "idle", fontSize: DEFAULT_CANVAS_FONT_SIZE },
     },
     [CanvasNodeType.Config]: {
         width: 340, height: 240, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Config].title; },
@@ -53,8 +56,8 @@ export const NODE_SPECS = {
         metadata: { status: "idle" },
     },
     [CanvasNodeType.Chat]: {
-        width: 420, height: 1040, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Chat].title; },
-        metadata: { status: "idle", messages: [], fontSize: 14 },
+        width: 840, height: 1387, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Chat].title; },
+        metadata: { status: "idle", messages: [], fontSize: DEFAULT_CANVAS_FONT_SIZE },
     },
     [CanvasNodeType.Annotate]: {
         width: 420, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Annotate].title; },

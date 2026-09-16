@@ -20,7 +20,7 @@ import { cropDataUrl, mergeDataUrls, splitDataUrl, upscaleDataUrl } from "@/lib/
 import { loadVideoBlob } from "@/lib/canvas/canvas-video-tools";
 import { fitNodeSize, nodeSizeFromRatio, sizeFromDisplayScalePercent } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Modal } from "antd";
-import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
+import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -432,10 +432,10 @@ function AtelierCanvasPage() {
 
         const thumbAbort = new AbortController();
         const restore = async () => {
-            // Fast hydrate: primary media only — do not block first paint on every history blob.
+            // Fast hydrate: primary media only —do not block first paint on every history blob.
             const restoredNodes = (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes), { mode: "fast" })).map((node) =>
-                node.type === CanvasNodeType.Chat && node.height === 520
-                    ? { ...node, height: 1040 }
+                node.type === CanvasNodeType.Chat && (node.height === 520 || node.height === 1040 || node.width === 420)
+                    ? { ...node, width: 840, height: 1387 }
                     : node.type === CanvasNodeType.Text && node.height === 240
                       ? { ...node, height: 480 }
                       : node,
@@ -705,7 +705,7 @@ function AtelierCanvasPage() {
                 return additions.length ? [...prev, ...additions] : prev;
             });
 
-            // Annotate ↔ Image: load the first linked image into the annotate node.
+            // Annotate —Image: load the first linked image into the annotate node.
             for (const { fromNodeId, toNodeId } of pairs) {
                 const fromNode = nodesSnapshot.find((node) => node.id === fromNodeId);
                 const toNode = nodesSnapshot.find((node) => node.id === toNodeId);
@@ -1523,7 +1523,7 @@ function AtelierCanvasPage() {
             if (pendingConnectionCreateRef.current) cancelPendingConnectionCreate();
             if (event.button !== 0) return;
 
-            // Sticky X linking stays active until X/Esc — blank-canvas clicks do not cancel it.
+            // Sticky X linking stays active until X/Esc —blank-canvas clicks do not cancel it.
             if (connectingParamsRef.current?.sticky) {
                 const anchorId = connectingParamsRef.current.nodeId;
                 setSelectedNodeIds(new Set([anchorId]));
@@ -1614,7 +1614,7 @@ function AtelierCanvasPage() {
 
     const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
         event.stopPropagation();
-        // While sticky-linking, clicks only create edges — do not start a drag on the clicked peer.
+        // While sticky-linking, clicks only create edges —do not start a drag on the clicked peer.
         if (connectingParamsRef.current?.sticky) {
             pendingSelectionRef.current = null;
             return;
@@ -1788,7 +1788,7 @@ function AtelierCanvasPage() {
                 });
                 setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
 
-                // Preview drag with transform offset only — commit positions once on mouseup.
+                // Preview drag with transform offset only —commit positions once on mouseup.
                 if (rafRef.current) cancelAnimationFrame(rafRef.current);
                 rafRef.current = requestAnimationFrame(() => {
                     const ids = dragRef.current.initialSelectedNodes.map((item) => item.id);
@@ -1954,7 +1954,7 @@ function AtelierCanvasPage() {
                 const content = await readDocumentAsText(file);
                 const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Text];
                 const node = {
-                    ...createCanvasNode(CanvasNodeType.Text, position, { content, status: NODE_STATUS_SUCCESS, fontSize: 14 }),
+                    ...createCanvasNode(CanvasNodeType.Text, position, { content, status: NODE_STATUS_SUCCESS, fontSize: DEFAULT_CANVAS_FONT_SIZE }),
                     title: file.name.replace(/\.[^.]+$/, "").slice(0, 48) || file.name,
                     position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
                 };
@@ -2448,7 +2448,7 @@ function AtelierCanvasPage() {
                 ...createCanvasNode(
                     CanvasNodeType.Text,
                     { x: node.position.x + node.width + gap + textSpec.width / 2, y: centerY },
-                    { content: t("canvas.projectPage.reversePreset"), prompt: t("canvas.projectPage.reversePreset"), status: NODE_STATUS_SUCCESS, fontSize: 14 },
+                    { content: t("canvas.projectPage.reversePreset"), prompt: t("canvas.projectPage.reversePreset"), status: NODE_STATUS_SUCCESS, fontSize: DEFAULT_CANVAS_FONT_SIZE },
                 ),
                 title: t("canvas.projectPage.reverseTitle"),
             };
@@ -2835,7 +2835,7 @@ function AtelierCanvasPage() {
             const textNode = createCanvasNode(CanvasNodeType.Text, {
                 x: node.position.x + node.width + 96 + getNodeSpec(CanvasNodeType.Text).width / 2,
                 y: node.position.y + getNodeSpec(CanvasNodeType.Text).height / 2,
-            }, { content: text, status: "idle", fontSize: 14 });
+            }, { content: text, status: "idle", fontSize: DEFAULT_CANVAS_FONT_SIZE });
             setNodes((prev) => [...prev, textNode]);
             setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: textNode.id }]);
             setSelectedNodeIds(new Set([textNode.id]));
@@ -3173,7 +3173,7 @@ function AtelierCanvasPage() {
                     const pos = screenToCanvas(event.clientX, event.clientY);
                     const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Text];
                     const node = {
-                        ...createCanvasNode(CanvasNodeType.Text, pos, { content: plainText, status: NODE_STATUS_SUCCESS, fontSize: 14 }),
+                        ...createCanvasNode(CanvasNodeType.Text, pos, { content: plainText, status: NODE_STATUS_SUCCESS, fontSize: DEFAULT_CANVAS_FONT_SIZE }),
                         title: plainText.slice(0, 32) || t("canvas.projectPage.clipboardText"),
                         position: { x: pos.x - spec.width / 2, y: pos.y - spec.height / 2 },
                     };
@@ -3304,7 +3304,7 @@ function AtelierCanvasPage() {
                     // Image nodes always write back into themselves so the same panel can re-run
                     // without chaining a new node off the previous result.
                     const writeImageToSelf = isImageNode;
-                    // Only upstream connected images count as references — never this node's own result
+                    // Only upstream connected images count as references —never this node's own result
                     // or nodes previously generated from this panel.
                     const selfStorageKey = sourceNode?.metadata?.storageKey;
                     const selfContent = sourceNode?.metadata?.content;
@@ -3407,7 +3407,7 @@ function AtelierCanvasPage() {
                                             title: prompt.slice(0, 32) || "Prompt",
                                             width: parentConfig.width,
                                             height: parentConfig.height,
-                                            metadata: { ...node.metadata, content: prompt, prompt, status: NODE_STATUS_SUCCESS, fontSize: 14, errorDetails: undefined },
+                                            metadata: { ...node.metadata, content: prompt, prompt, status: NODE_STATUS_SUCCESS, fontSize: DEFAULT_CANVAS_FONT_SIZE, errorDetails: undefined },
                                         }
                                 : node,
                         ),
@@ -3847,7 +3847,7 @@ function AtelierCanvasPage() {
                         },
                         width: textConfig.width,
                         height: textConfig.height,
-                        metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, fontSize: 14, model: generationConfig.model, reasoningEffort: generationConfig.reasoningEffort },
+                        metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, fontSize: DEFAULT_CANVAS_FONT_SIZE, model: generationConfig.model, reasoningEffort: generationConfig.reasoningEffort },
                     }));
                     setNodes((prev) => [...prev.map((node) => (node.id === nodeId && isConfigNode ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined } } : node)), ...childNodes]);
                     setConnections((prev) => [...prev, ...childIds.map((childId) => ({ id: nanoid(), fromNodeId: nodeId, toNodeId: childId }))]);
@@ -5025,8 +5025,8 @@ function AtelierCanvasPage() {
                     onKeep={keepNodeToolbar}
                     onLeave={hideNodeToolbar}
                     onInfo={(node) => setInfoNodeId(node.id)}
-                    onDecreaseFont={(node) => handleFontSizeChange(node.id, Math.max(10, (node.metadata?.fontSize || 14) - 2))}
-                    onIncreaseFont={(node) => handleFontSizeChange(node.id, Math.min(48, (node.metadata?.fontSize || 14) + 2))}
+                    onDecreaseFont={(node) => handleFontSizeChange(node.id, Math.max(10, (node.metadata?.fontSize || DEFAULT_CANVAS_FONT_SIZE) - 2))}
+                    onIncreaseFont={(node) => handleFontSizeChange(node.id, Math.min(48, (node.metadata?.fontSize || DEFAULT_CANVAS_FONT_SIZE) + 2))}
                     onToggleDialog={(node) => setDialogNodeId((current) => (current === node.id ? null : node.id))}
                     onGenerateImage={generateImageFromTextNode}
                     onCreateChat={createChatFromTextNode}
@@ -5140,7 +5140,7 @@ function AtelierCanvasPage() {
                 <CanvasTextEditDialog
                     open={Boolean(textEditNode)}
                     value={textEditNode?.metadata?.content || ""}
-                    fontSize={textEditNode?.metadata?.fontSize || 14}
+                    fontSize={textEditNode?.metadata?.fontSize || DEFAULT_CANVAS_FONT_SIZE}
                     onFontSizeChange={(fontSize) => {
                         if (!textEditNode) return;
                         handleFontSizeChange(textEditNode.id, fontSize);

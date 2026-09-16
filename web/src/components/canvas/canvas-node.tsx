@@ -14,6 +14,8 @@ import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type Positio
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useTranslation } from "react-i18next";
 
+import { DEFAULT_CANVAS_FONT_SIZE } from "@/constant/canvas";
+
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
 
@@ -716,7 +718,7 @@ function MissingPluginContent({ theme, type }: Pick<NodeContentRendererProps, "t
 
 function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, onContentChange, onStopEditing, onGenerateImage, onCreateChat, onEditText, onFontSizeChange }: NodeContentRendererProps) {
     const { t } = useTranslation();
-    const fontSize = Math.max(10, Math.min(48, node.metadata?.fontSize || 14));
+    const fontSize = Math.max(10, Math.min(48, node.metadata?.fontSize || DEFAULT_CANVAS_FONT_SIZE));
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
     const actionButtonStyle = { background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text };
 

@@ -11,6 +11,7 @@ import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { resolveChatSendOptions, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { listChatSkills } from "@/lib/chat-skills";
+import { DEFAULT_CANVAS_FONT_SIZE } from "@/constant/canvas";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasAssistantImage, CanvasAssistantMessage, CanvasNodeData } from "@/types/canvas";
 
@@ -78,7 +79,7 @@ export function CanvasChatContent({
     const textModel = resolveModelForCapability(globalConfig, node.metadata?.model, "text");
     const imageModel = resolveModelForCapability(globalConfig, node.metadata?.imageModel, "image");
     const canSend = Boolean(draft.trim() || contextText || linkedMedia.length) && !loading && (textEnabled || imageEnabled);
-    const fontSize = Math.max(MIN_CHAT_FONT_SIZE, Math.min(MAX_CHAT_FONT_SIZE, node.metadata?.fontSize || 14));
+    const fontSize = Math.max(MIN_CHAT_FONT_SIZE, Math.min(MAX_CHAT_FONT_SIZE, node.metadata?.fontSize || DEFAULT_CANVAS_FONT_SIZE));
     const bodyTextStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.55)}px` } as const;
     const metaTextStyle = { fontSize: `${Math.max(10, Math.round(fontSize * 0.75))}px` } as const;
     const previewMessage = previewMessageId ? messages.find((message) => message.id === previewMessageId) || null : null;
@@ -389,7 +390,7 @@ export function CanvasChatContent({
                             references={mentionReferences}
                             onChange={setDraft}
                             onSubmit={submit}
-                            className="thin-scrollbar max-h-24 min-h-[44px] w-full cursor-text overflow-y-auto px-1 py-1 outline-none"
+                            className="thin-scrollbar max-h-[288px] min-h-[132px] w-full cursor-text overflow-y-auto px-1 py-1 outline-none"
                             style={{ ...bodyTextStyle, color: theme.node.text, background: "transparent" }}
                             placeholder={placeholder}
                         />

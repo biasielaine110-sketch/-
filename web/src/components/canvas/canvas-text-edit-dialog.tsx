@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 
 import { useTextFindReplace } from "./canvas-text-find-replace";
 import { CanvasTextPromptPicker } from "./canvas-text-prompt-picker";
+import { DEFAULT_CANVAS_FONT_SIZE } from "@/constant/canvas";
 
 const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 48;
@@ -28,15 +29,15 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
     const { t } = useTranslation();
     const textAreaRef = useRef<TextAreaRef>(null);
     const [draft, setDraft] = useState(value);
-    const [localFontSize, setLocalFontSize] = useState(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || 14)));
+    const [localFontSize, setLocalFontSize] = useState(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE)));
     const resolvedFontSize = onFontSizeChange
-        ? Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || 14))
+        ? Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE))
         : localFontSize;
 
     useEffect(() => {
         if (open) {
             setDraft(value);
-            setLocalFontSize(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || 14)));
+            setLocalFontSize(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE)));
         }
     }, [open, value, fontSize]);
 
