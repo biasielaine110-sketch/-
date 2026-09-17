@@ -61,8 +61,13 @@ function workflowId(model: string): string {
 
 /** Detect AutoDL H3 / ComfyUI video workflow ids (model name = workflow_id). */
 export function isAutodlH3ComfyVideoModel(model: string, baseUrl = ""): boolean {
+    // Metaso MiniMax-H3 uses OpenAI /videos — never treat it as AutoDL ComfyUI.
+    if (/metaso\.cn/i.test(baseUrl)) return false;
     const name = workflowId(model);
     if (!name) return false;
+    // Bare "minimax-h3" / "minimax_h3" is Metaso's product id; AutoDL workflows always have a suffix
+    // (z0903, lightx2v, zm_u24, image_audio, …).
+    if (/^minimax[_-]?h3$/i.test(name)) return false;
     if (/minimax[_-]?h3|h3comfyui|h3[_-]?comfy|lightx2v|h3_image_audio|image_audio_to_video|z09\d{2}|(?:^|[_-])zm(?:[_-]|$)/i.test(name)) return true;
     if (/autodl\.art/i.test(baseUrl) && /(^|[_-])h3([_-]|$)|minimax|comfyui/i.test(name)) return true;
     return false;
@@ -74,6 +79,7 @@ export function isAutodlH3ComfyVideoModel(model: string, baseUrl = ""): boolean 
  * Scripts that already send ref_audio_* are honored (e.g. z0903 dedicated template).
  */
 export function shouldUseAutodlComfyVideoBuiltin(model: string, baseUrl = "", script = ""): boolean {
+    if (/metaso\.cn/i.test(baseUrl)) return false;
     if (script && /ref_audio/i.test(script) && /comfyui/i.test(script)) return false;
     if (isAutodlH3ComfyVideoModel(model, baseUrl)) return true;
     if (!/autodl\.art/i.test(baseUrl)) return false;

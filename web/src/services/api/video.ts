@@ -61,6 +61,11 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     const selectedModel = (config.model || config.videoModel).trim();
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
     const script = resolveModelScript(config, selectedModel);
+    // Metaso MiniMax-H3 must use OpenAI /videos before any AutoDL ComfyUI heuristic.
+    if (isMetasoH3Video(requestConfig, selectedModel)) {
+        assertVideoConfig(requestConfig, requestConfig.model);
+        return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
+    }
     // Built-in AutoDL ComfyUI path owns resolution/ref_audio mapping. Never let a stale
     // channel script omit ref_audio_0 and surface "模型调用脚本执行失败".
     if (shouldUseAutodlComfyVideoBuiltin(selectedModel, requestConfig.baseUrl, script)) {
@@ -450,9 +455,11 @@ async function createMetasoH3VideoTask(config: AiConfig, model: string, prompt: 
 function isMetasoH3Video(config: AiConfig, model: string) {
     const base = config.baseUrl.trim().toLowerCase();
     const name = modelOptionName(model).toLowerCase();
-    // AutoDL ComfyUI workflow ids often contain "minimax_h3" but are not Metaso /videos.
-    if (isAutodlH3ComfyVideoModel(model, config.baseUrl) || /autodl\.art/i.test(base)) return false;
+    // Metaso OpenAI root always uses /videos for H3 (model may be MiniMax-H3 or sora-2).
     if (/metaso\.cn/i.test(base)) return true;
+    if (/autodl\.art/i.test(base)) return false;
+    // AutoDL ComfyUI workflow ids often contain "minimax_h3_*" but are not Metaso /videos.
+    if (isAutodlH3ComfyVideoModel(model, config.baseUrl)) return false;
     return /minimax[-_]?h3|^h3$|minimax\/h3/i.test(name);
 }
 
