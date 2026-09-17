@@ -4,8 +4,9 @@ import i18n from "@/i18n";
 import { isSeedAudioModel, isSunoAudioModel } from "@/lib/audio-generation";
 import { isAutodlComfyAudioModel } from "@/lib/autodl-comfy-audio";
 import { isAutodlH3ComfyVideoModel } from "@/lib/autodl-h3-comfy";
+import { isNativeComfyUiBaseUrl, parseComfyApiWorkflow, probeNativeComfyUi } from "@/lib/comfyui-native";
 import { proxyApiUrl } from "@/lib/api-proxy";
-import { buildApiUrl, modelOptionName, resolveModelRequestConfig, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
 export type ModelHealthStatus = "idle" | "checking" | "ok" | "fail";
 
@@ -174,8 +175,14 @@ export async function ensureModelsHealth(
 export async function probeModelHealth(config: AiConfig, encodedModel: string, capability: ModelCapability, signal?: AbortSignal) {
     const request = resolveModelRequestConfig(config, encodedModel);
     if (!request.baseUrl.trim()) return { ok: false, message: apiText("baseUrlRequired") };
-    if (!request.apiKey.trim()) return { ok: false, message: apiText("apiKeyRequired") };
     if (!request.model.trim()) return { ok: false, message: apiText("requestFailed") };
+    const script = resolveModelScript(config, encodedModel);
+    const nativeComfy = isNativeComfyUiBaseUrl(request.baseUrl) || Boolean(parseComfyApiWorkflow(script));
+    if (!nativeComfy && !request.apiKey.trim()) return { ok: false, message: apiText("apiKeyRequired") };
+
+    if (nativeComfy && (capability === "image" || capability === "video")) {
+        return probeNativeComfyUi(request.baseUrl, request.apiKey, signal);
+    }
 
     if (capability === "text") return probeText(request, signal);
     if (capability === "image") return probeImage(request, signal);

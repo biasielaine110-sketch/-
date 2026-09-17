@@ -329,6 +329,17 @@ return await poll(
   { intervalMs: 2000, timeoutMs: 15 * 60 * 1000 },
 );`,
         },
+        {
+            label: i18n.t("modelPlugin.templates.nativeComfyUi"),
+            // Paste-ready API workflow skeleton — replace with File → Export Workflow (API).
+            script: `{
+  "3": {
+    "inputs": { "text": "a cat", "clip": ["4", 1] },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Positive Prompt" }
+  }
+}`,
+        },
     ],
     video: [
         {
@@ -543,6 +554,16 @@ const urls = await poll(
   { intervalMs: 2000, timeoutMs: 20 * 60 * 1000 },
 );
 return { url: urls[0] };`,
+        },
+        {
+            label: i18n.t("modelPlugin.templates.nativeComfyUi"),
+            script: `{
+  "3": {
+    "inputs": { "text": "a cinematic shot", "clip": ["4", 1] },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Positive Prompt" }
+  }
+}`,
         },
     ],
     audio: [

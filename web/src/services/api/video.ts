@@ -16,6 +16,7 @@ import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { resolveApiTransport, proxyApiUrl } from "@/lib/api-proxy";
+import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio } from "@/types/media";
@@ -70,6 +71,10 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     // channel script omit ref_audio_0 and surface "模型调用脚本执行失败".
     if (shouldUseAutodlComfyVideoBuiltin(selectedModel, requestConfig.baseUrl, script)) {
         return createAutodlComfyVideoTask(requestConfig, selectedModel, prompt, references, options);
+    }
+    // Native ComfyUI cloud/server: model script = Export Workflow (API) JSON.
+    if (shouldUseNativeComfyUi(requestConfig.baseUrl, selectedModel, script) || parseComfyApiWorkflow(script)) {
+        return createNativeComfyUiVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     }
     if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
     assertVideoConfig(requestConfig, requestConfig.model);
@@ -132,6 +137,54 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
     const id = nanoid();
     pluginVideoResults.set(id, result);
     return { id, provider: "plugin", model };
+}
+
+/**
+ * Native ComfyUI (/prompt) on a rented or proxied server.
+ * Put Export Workflow (API) JSON into the model's script field.
+ */
+async function createNativeComfyUiVideoTask(
+    config: AiConfig,
+    model: string,
+    script: string,
+    prompt: string,
+    references: ReferenceImage[],
+    options?: RequestOptions,
+): Promise<VideoGenerationTask> {
+    if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    const workflow = parseComfyApiWorkflow(script);
+    if (!workflow) throw new Error(apiText("comfyWorkflowRequired"));
+    const refs = await Promise.all(
+        references.slice(0, 8).map(async (image) => {
+            if (image.dataUrl?.startsWith("data:")) return image.dataUrl;
+            if (image.dataUrl) return image.dataUrl;
+            return "";
+        }),
+    );
+    try {
+        const result = await runNativeComfyUiJob({
+            baseUrl: config.baseUrl,
+            apiKey: config.apiKey,
+            workflow,
+            prompt,
+            referenceDataUrls: refs.filter(Boolean),
+            signal: options?.signal,
+        });
+        const video = result.videos[0];
+        if (!video?.blob) {
+            if (result.images[0]?.dataUrl) {
+                // Some workflows return image strips; surface a clear error for video capability.
+                throw new Error(apiText("comfyNoVideo"));
+            }
+            throw new Error(apiText("comfyNoVideo"));
+        }
+        const id = nanoid();
+        pluginVideoResults.set(id, { blob: video.blob, mimeType: video.mimeType });
+        return { id, provider: "plugin", model };
+    } catch (error) {
+        if (error instanceof Error && (error.message.includes("comfy") || error.message.includes("ComfyUI"))) throw error;
+        throw new Error(error instanceof Error ? error.message : apiText("requestFailed"));
+    }
 }
 
 /**

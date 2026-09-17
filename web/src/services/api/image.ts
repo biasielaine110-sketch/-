@@ -3,6 +3,7 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
+import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
@@ -1143,6 +1144,23 @@ function withSystemPrompt(config: AiConfig, prompt: string) {
     return systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
 }
 
+async function requestNativeComfyUiImages(config: AiConfig, prompt: string, referenceDataUrls: string[], options?: RequestOptions) {
+    const script = resolveModelScript(config, config.model || config.imageModel);
+    const workflow = parseComfyApiWorkflow(script);
+    if (!workflow) throw new Error(apiText("comfyWorkflowRequired"));
+    if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    const result = await runNativeComfyUiJob({
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        workflow,
+        prompt,
+        referenceDataUrls,
+        signal: options?.signal,
+    });
+    if (result.images.length) return result.images;
+    throw new Error(apiText("comfyNoImage"));
+}
+
 /** Midjourney (Seedance / APIMart): Imagine only — Upscale is manual. See seedance.nz/docs/#mj-overview */
 async function requestMidjourneyGeneration(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
     const size = closestAspectRatioLabel(
@@ -1728,6 +1746,13 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const requestConfig = resolveImageRequestConfig(config);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
+    if (shouldUseNativeComfyUi(requestConfig.baseUrl, requestConfig.model, script) || parseComfyApiWorkflow(script)) {
+        try {
+            return await requestNativeComfyUiImages(requestConfig, withSystemPrompt(requestConfig, prompt), [], options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
     if (script) {
         const quality = normalizeQuality(config.quality);
         const requestSize = isGptImageModel(requestConfig.model) ? resolveGptImageRequestSize(requestConfig.model, quality, config.size) : resolveRequestSize(quality, config.size);
@@ -1803,6 +1828,14 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     const script = resolveModelScript(config, config.model || config.imageModel);
+    if (shouldUseNativeComfyUi(requestConfig.baseUrl, requestConfig.model, script) || parseComfyApiWorkflow(script)) {
+        const refs = await Promise.all(references.map((image) => prepareReferenceDataUrl(image, Math.max(1, references.length))));
+        try {
+            return await requestNativeComfyUiImages(requestConfig, withSystemPrompt(requestConfig, requestPrompt), refs, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
     if (script) {
         const quality = normalizeQuality(config.quality);
         const requestSize = isGptImageModel(requestConfig.model) ? resolveGptImageRequestSize(requestConfig.model, quality, config.size) : resolveRequestSize(quality, config.size);

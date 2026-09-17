@@ -6,6 +6,7 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import { defaultTextPrompts, normalizeTextPrompts, type TextPromptEntry } from "@/constant/text-prompt-library";
 import { normalizeSunoVersionValue } from "@/lib/audio-generation";
+import { isNativeComfyUiBaseUrl, parseComfyApiWorkflow } from "@/lib/comfyui-native";
 
 export type { TextPromptEntry };
 
@@ -284,7 +285,11 @@ export function resolveModelScript(config: AiConfig, value: string) {
 
 function isAiConfigReady(config: AiConfig, model: string) {
     const channel = resolveModelChannel(config, model);
-    return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
+    if (!model.trim() || !channel.baseUrl.trim()) return false;
+    // Native ComfyUI often has no auth token (or key embedded in RunningHub proxy URL).
+    const script = channel.models.find((item) => item.name === modelOptionName(model))?.script || "";
+    if (isNativeComfyUiBaseUrl(channel.baseUrl) || parseComfyApiWorkflow(script)) return true;
+    return Boolean(channel.apiKey.trim());
 }
 
 export const useConfigStore = create<ConfigStore>()(
