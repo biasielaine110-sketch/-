@@ -145,6 +145,9 @@ async function createAutodlComfyVideoTask(config: AiConfig, model: string, promp
     if (/openspeech\.bytedance\.com/i.test(config.baseUrl)) {
         throw new Error(apiText("autodlComfyWrongBaseUrl"));
     }
+    if (!/autodl\.art/i.test(config.baseUrl)) {
+        throw new Error(apiText("autodlComfyWrongBaseUrl"));
+    }
     const workflowId = modelOptionName(model).trim();
     if (!workflowId) throw new Error(apiText("autodlWorkflowRequired"));
     const token = String(config.apiKey || "").replace(/^Bearer\s+/i, "").trim();

@@ -61,8 +61,8 @@ function workflowId(model: string): string {
 
 /** Detect AutoDL H3 / ComfyUI video workflow ids (model name = workflow_id). */
 export function isAutodlH3ComfyVideoModel(model: string, baseUrl = ""): boolean {
-    // Metaso MiniMax-H3 uses OpenAI /videos — never treat it as AutoDL ComfyUI.
-    if (/metaso\.cn/i.test(baseUrl)) return false;
+    // OpenAI /videos relays (Metaso, manxue, …) must never be treated as AutoDL ComfyUI.
+    if (baseUrl && !/autodl\.art/i.test(baseUrl)) return false;
     const name = workflowId(model);
     if (!name) return false;
     // Bare "minimax-h3" / "minimax_h3" is Metaso's product id; AutoDL workflows always have a suffix
@@ -77,12 +77,13 @@ export function isAutodlH3ComfyVideoModel(model: string, baseUrl = ""): boolean 
  * Prefer the built-in ComfyUI submit path over a channel-saved plugin script.
  * Saved AutoDL templates often omit ref_audio_*; those scripts must not win.
  * Scripts that already send ref_audio_* are honored (e.g. z0903 dedicated template).
+ *
+ * ComfyUI workflow routes exist only on AutoDL — never on Metaso / manxue / New API relays.
  */
 export function shouldUseAutodlComfyVideoBuiltin(model: string, baseUrl = "", script = ""): boolean {
-    if (/metaso\.cn/i.test(baseUrl)) return false;
+    if (!/autodl\.art/i.test(baseUrl)) return false;
     if (script && /ref_audio/i.test(script) && /comfyui/i.test(script)) return false;
     if (isAutodlH3ComfyVideoModel(model, baseUrl)) return true;
-    if (!/autodl\.art/i.test(baseUrl)) return false;
     if (/comfyui_workflow|comfyui\/comfyui/i.test(script)) return true;
     return /minimax|h3|comfy|lightx2v|z09|zm_/i.test(workflowId(model));
 }
