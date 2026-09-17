@@ -2133,28 +2133,6 @@ function AtelierCanvasPage() {
         message.success(t("canvas.shortcut.resetSizeDone", { count: eligible.length }));
     }, [message, t]);
 
-    // Capture-phase G: runs before prompt inputs can stopPropagation, and uses physical KeyG (IME-safe).
-    useEffect(() => {
-        const handleResetSizeShortcut = (event: KeyboardEvent) => {
-            if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-            if (event.code !== "KeyG" && event.key.toLowerCase() !== "g") return;
-            if (isImeComposing(event)) return;
-
-            const target = event.target;
-            if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
-            if (target instanceof HTMLElement && target.isContentEditable) return;
-            if (target instanceof Element && target.closest(".ant-modal")) return;
-
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            blurActiveCanvasTextInput();
-            resetSelectedNodesToOriginalSize();
-        };
-
-        window.addEventListener("keydown", handleResetSizeShortcut, true);
-        return () => window.removeEventListener("keydown", handleResetSizeShortcut, true);
-    }, [resetSelectedNodesToOriginalSize]);
-
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
@@ -2372,29 +2350,37 @@ function AtelierCanvasPage() {
     }, []);
 
     const scaleImageNodeDisplay = useCallback(
-        async (node: CanvasNodeData, percent: number) => {
+        async (node: CanvasNodeData, percent: number, options?: { silent?: boolean }) => {
             if (!node.metadata?.content) {
-                message.warning(t("canvas.shortcut.resetSizeNeedMedia"));
-                return;
+                if (!options?.silent) message.warning(t("canvas.shortcut.scaleNeedMedia"));
+                return false;
             }
             if (percent >= 100) {
-                message.info(t("canvas.editors.scaleAlreadyFull"));
-                setScaleNodeId(null);
-                return;
-            }
-            try {
-                const resized = await resizeDataUrlByPercent(node.metadata.content, percent);
-                if (!resized.changed) {
+                if (!options?.silent) {
                     message.info(t("canvas.editors.scaleAlreadyFull"));
                     setScaleNodeId(null);
-                    return;
+                }
+                return false;
+            }
+            try {
+                const sourceDataUrl = await imageToDataUrl({
+                    url: node.metadata.content,
+                    storageKey: node.metadata.storageKey,
+                });
+                const resized = await resizeDataUrlByPercent(sourceDataUrl, percent);
+                if (!resized.changed) {
+                    if (!options?.silent) {
+                        message.info(t("canvas.editors.scaleAlreadyFull"));
+                        setScaleNodeId(null);
+                    }
+                    return false;
                 }
                 const uploaded = await uploadImage(resized.dataUrl);
                 const size = fitNodeSize(uploaded.width, uploaded.height);
                 const centerX = node.position.x + node.width / 2;
                 const centerY = node.position.y + node.height / 2;
-                setNodes((prev) =>
-                    prev.map((item) => {
+                setNodes((prev) => {
+                    const next = prev.map((item) => {
                         if (item.id !== node.id) return item;
                         const primaryId = item.metadata?.primaryImageId;
                         const images = item.metadata?.images?.map((image) =>
@@ -2428,16 +2414,91 @@ function AtelierCanvasPage() {
                                 errorDetails: undefined,
                             },
                         };
-                    }),
-                );
-                setScaleNodeId(null);
-                message.success(t("canvas.projectPage.scaleApplied", { percent, width: uploaded.width, height: uploaded.height }));
+                    });
+                    nodesRef.current = next;
+                    return next;
+                });
+                if (!options?.silent) {
+                    setScaleNodeId(null);
+                    message.success(t("canvas.projectPage.scaleApplied", { percent, width: uploaded.width, height: uploaded.height }));
+                }
+                return true;
             } catch (error) {
+                if (options?.silent) throw error;
                 message.error(error instanceof Error ? error.message : t("canvas.editors.scaleFailed"));
+                return false;
             }
         },
         [message, t],
     );
+
+    /** G: one-shot 99% pixel downscale and overwrite selected image/annotate nodes. */
+    const downscaleSelectedImagesTo99 = useCallback(async () => {
+        const selectedIds = new Set(selectedNodeIdsRef.current);
+        if (!selectedIds.size) {
+            const fallbackId = toolbarNodeIdRef.current || hoveredNodeIdRef.current;
+            if (fallbackId) selectedIds.add(fallbackId);
+        }
+        if (!selectedIds.size) {
+            message.warning(t("canvas.shortcut.selectNodeToResetSize"));
+            return;
+        }
+
+        const eligible = nodesRef.current.filter(
+            (node) =>
+                selectedIds.has(node.id) &&
+                (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Annotate) &&
+                Boolean(node.metadata?.content),
+        );
+        if (!eligible.length) {
+            message.warning(t("canvas.shortcut.scaleNeedMedia"));
+            return;
+        }
+
+        let successCount = 0;
+        let lastError: unknown;
+        for (const node of eligible) {
+            const latest = nodesRef.current.find((item) => item.id === node.id) || node;
+            try {
+                const ok = await scaleImageNodeDisplay(latest, 99, { silent: true });
+                if (ok) successCount += 1;
+            } catch (error) {
+                lastError = error;
+            }
+        }
+
+        if (successCount) {
+            message.success(t("canvas.shortcut.resetSizeDone", { count: successCount }));
+            return;
+        }
+        if (lastError) {
+            message.error(lastError instanceof Error ? lastError.message : t("canvas.editors.scaleFailed"));
+            return;
+        }
+        message.info(t("canvas.editors.scaleAlreadyFull"));
+    }, [message, scaleImageNodeDisplay, t]);
+
+    // Capture-phase G: 99% pixel downscale overwrite (IME-safe KeyG).
+    useEffect(() => {
+        const handleDownscaleShortcut = (event: KeyboardEvent) => {
+            if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+            if (event.code !== "KeyG" && event.key.toLowerCase() !== "g") return;
+            if (isImeComposing(event)) return;
+
+            const target = event.target;
+            if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
+            if (target instanceof HTMLElement && target.isContentEditable) return;
+            if (target instanceof Element && target.closest(".ant-modal")) return;
+
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            blurActiveCanvasTextInput();
+            void downscaleSelectedImagesTo99();
+        };
+
+        window.addEventListener("keydown", handleDownscaleShortcut, true);
+        return () => window.removeEventListener("keydown", handleDownscaleShortcut, true);
+    }, [downscaleSelectedImagesTo99]);
 
     const handleNodeContentChange = useCallback((nodeId: string, content: string) => {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, content } } : node)));
