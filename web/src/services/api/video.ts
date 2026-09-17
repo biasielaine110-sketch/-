@@ -156,9 +156,12 @@ async function createNativeComfyUiVideoTask(
     if (!workflow) throw new Error(apiText("comfyWorkflowRequired"));
     const refs = await Promise.all(
         references.slice(0, 8).map(async (image) => {
-            if (image.dataUrl?.startsWith("data:")) return image.dataUrl;
-            if (image.dataUrl) return image.dataUrl;
-            return "";
+            try {
+                const dataUrl = await imageToDataUrl(image);
+                return dataUrl?.startsWith("data:") || /^https?:\/\//i.test(dataUrl || "") ? dataUrl : "";
+            } catch {
+                return "";
+            }
         }),
     );
     try {
@@ -668,11 +671,12 @@ function normalizeRelayH3Size(size: string, quality: string) {
 }
 
 async function resolveMetasoH3ImageUrl(config: AiConfig, image: ReferenceImage, options?: RequestOptions) {
-    if (image.url && isPublicHttpUrl(image.url) && !image.url.startsWith("data:")) return image.url.trim();
-    if (image.dataUrl && isPublicHttpUrl(image.dataUrl) && !image.dataUrl.startsWith("data:")) return image.dataUrl.trim();
+    if (image.url && isPublicHttpUrl(image.url) && !image.url.startsWith("data:") && !/^blob:/i.test(image.url)) return image.url.trim();
+    if (image.dataUrl && isPublicHttpUrl(image.dataUrl) && !image.dataUrl.startsWith("data:") && !/^blob:/i.test(image.dataUrl)) return image.dataUrl.trim();
     const dataUrl = await imageToDataUrl(image);
-    if (dataUrl && isPublicHttpUrl(dataUrl) && !dataUrl.startsWith("data:")) return dataUrl.trim();
-    if (dataUrl?.startsWith("data:image/")) {
+    if (!dataUrl) throw new Error(apiText("metasoH3ImageUnreadable"));
+    if (isPublicHttpUrl(dataUrl) && !dataUrl.startsWith("data:")) return dataUrl.trim();
+    if (dataUrl.startsWith("data:image/")) {
         try {
             const blob = await (await fetch(dataUrl)).blob();
             const uploaded = await uploadProviderMediaFile(config, blob, "reference.png", options);
@@ -691,10 +695,10 @@ function isPublicHttpUrl(value: string) {
 
 /** Prefer remote URLs; otherwise compress data URLs so /api/proxy stays under Vercel ~4.5MB. */
 async function resolveAutodlComfyReferenceUrl(image: ReferenceImage, referenceCount = 1) {
-    if (image.url && isPublicHttpUrl(image.url)) return image.url.trim();
-    if (image.dataUrl && isPublicHttpUrl(image.dataUrl)) return image.dataUrl.trim();
+    if (image.url && isPublicHttpUrl(image.url) && !/^blob:/i.test(image.url)) return image.url.trim();
+    if (image.dataUrl && isPublicHttpUrl(image.dataUrl) && !/^blob:/i.test(image.dataUrl)) return image.dataUrl.trim();
     const dataUrl = await imageToDataUrl(image);
-    if (!dataUrl) return "";
+    if (!dataUrl) throw new Error(apiText("metasoH3ImageUnreadable"));
     if (isPublicHttpUrl(dataUrl)) return dataUrl.trim();
     return compressReferenceDataUrl(dataUrl, referenceCount, { maxEdge: 1280, maxBytes: Math.min(650_000, Math.floor(2_200_000 / Math.max(1, referenceCount))) });
 }

@@ -147,9 +147,38 @@ export async function setImageBlob(storageKey: string, blob: Blob) {
 }
 
 export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string }) {
-    const url = image.dataUrl || (await resolveImageUrl(image.storageKey, image.url || ""));
-    if (!url || url.startsWith("data:")) return url;
-    return blobToDataUrl(await (await fetch(proxyRemoteMediaUrl(url))).blob());
+    const storageKey = String(image.storageKey || "").trim();
+    const dataUrl = String(image.dataUrl || "").trim();
+    const url = String(image.url || "").trim();
+
+    // Durable store first: canvas nodes often keep a dead blob: preview in `content` after refresh.
+    if (storageKey) {
+        try {
+            const fromStore = await resolveImageUrl(storageKey, "");
+            if (fromStore) {
+                if (fromStore.startsWith("data:")) return fromStore;
+                return blobToDataUrl(await (await fetch(proxyRemoteMediaUrl(fromStore))).blob());
+            }
+        } catch {
+            // Fall through to dataUrl / url.
+        }
+    }
+
+    if (dataUrl.startsWith("data:")) return dataUrl;
+    if (url.startsWith("data:")) return url;
+
+    const candidate = dataUrl || url;
+    if (!candidate) return "";
+    // Expired blob: previews must not block storageKey recovery above; if we still get here, fail soft.
+    if (/^blob:/i.test(candidate)) {
+        try {
+            return blobToDataUrl(await (await fetch(candidate)).blob());
+        } catch {
+            return "";
+        }
+    }
+
+    return blobToDataUrl(await (await fetch(proxyRemoteMediaUrl(candidate))).blob());
 }
 
 export async function deleteStoredImages(keys: Iterable<string>) {

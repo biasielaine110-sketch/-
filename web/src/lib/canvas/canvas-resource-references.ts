@@ -51,27 +51,28 @@ export async function resolveCanvasReferenceImages(references: CanvasResourceRef
 }
 
 export function getMentionResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
-    const configInputs = getConnectedConfigResourceNodes(nodeId, nodes, connections);
-    if (configInputs.length) return configInputs;
     const ownInputs = getContextResourceNodes(nodeId, nodes, connections);
     if (ownInputs.length) return ownInputs;
-    // Never treat the current node as its own @-reference; re-generate must not reuse the result image.
-    return [];
+    // Only fall back to a shared Config hub when nothing is wired directly to this node.
+    return getConnectedConfigResourceNodes(nodeId, nodes, connections);
 }
 
 export function getGenerationResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
-    const configInputs = getConnectedConfigResourceNodes(nodeId, nodes, connections);
+    const generating = nodes.find((node) => node.id === nodeId);
     const ownInputs = getContextResourceNodes(nodeId, nodes, connections);
-    // Merge both: config panel refs + resources wired directly into the generating node.
-    // Previously configInputs short-circuited and dropped audio linked only to the source node.
-    const merged: CanvasNodeData[] = [];
-    const seen = new Set<string>();
-    for (const node of [...configInputs, ...ownInputs]) {
-        if (!node || node.id === nodeId || seen.has(node.id)) continue;
-        seen.add(node.id);
-        merged.push(node);
+
+    // Config / Merge panels are hubs: every resource wired into them is intentional input.
+    if (generating?.type === CanvasNodeType.Config || generating?.type === CanvasNodeType.Merge) {
+        return ownInputs;
     }
-    return merged;
+
+    // Image / video / audio / chat: prefer only what the user wired into THIS node.
+    // Pulling sibling images from a shared Config hub made it look like "related images
+    // all got connected" when the user only linked one picture.
+    if (ownInputs.length) return ownInputs;
+
+    // Legacy layouts: generator → Config with resources only on the Config.
+    return getConnectedConfigResourceNodes(nodeId, nodes, connections);
 }
 
 function getContextResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {

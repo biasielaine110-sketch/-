@@ -148,7 +148,23 @@ export function buildNodeResponseMessages(context: NodeGenerationContext): AiTex
 
 export async function hydrateNodeGenerationContext(context: NodeGenerationContext) {
     const { imageToDataUrl } = await import("@/services/image-storage");
-    return { ...context, referenceImages: await Promise.all(context.referenceImages.map(async (image) => ({ ...image, dataUrl: await imageToDataUrl(image) }))) };
+    const referenceImages = (
+        await Promise.all(
+            context.referenceImages.map(async (image) => {
+                try {
+                    const dataUrl = await imageToDataUrl(image);
+                    if (!dataUrl?.startsWith("data:image/") && !/^https?:\/\//i.test(dataUrl || "")) return null;
+                    return { ...image, dataUrl };
+                } catch {
+                    return null;
+                }
+            }),
+        )
+    ).filter((image): image is NonNullable<typeof image> => Boolean(image));
+    if (context.referenceImages.length && !referenceImages.length) {
+        throw new Error(i18n.t("apiErrors.metasoH3ImageUnreadable"));
+    }
+    return { ...context, referenceImages, imageCount: referenceImages.length };
 }
 
 function readNodeTextInput(node: CanvasNodeData) {
@@ -164,13 +180,19 @@ function generationLabel(type: NodeGenerationInput["type"], index: number) {
 }
 
 function readReferenceImage(node: CanvasNodeData): ReferenceImage | null {
-    if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) || !node.metadata?.content) return null;
+    if (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) return null;
+    const content = String(node.metadata?.content || "").trim();
+    const storageKey = String(node.metadata?.storageKey || "").trim();
+    // Allow storageKey-only nodes (content may be a revoked blob: preview).
+    if (!content && !storageKey) return null;
+    if (/^blob:/i.test(content) && !storageKey) return null;
     return {
         id: node.id,
         name: `${node.title || node.id}.png`,
-        type: node.metadata.mimeType || "image/png",
-        dataUrl: node.metadata.content,
-        storageKey: node.metadata.storageKey,
+        type: node.metadata?.mimeType || "image/png",
+        dataUrl: /^blob:/i.test(content) ? "" : content,
+        url: /^https?:\/\//i.test(content) ? content : undefined,
+        storageKey: storageKey || undefined,
     };
 }
 
