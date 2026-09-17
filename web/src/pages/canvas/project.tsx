@@ -5391,7 +5391,16 @@ function AtelierCanvasPage() {
                         menu={contextMenu}
                         node={contextMenuNode}
                         imageHandlers={imageContextHandlers}
+                        elevated={Boolean(previewContent)}
                         onClose={() => setContextMenu(null)}
+                        onBeforeAction={
+                            previewContent
+                                ? () => {
+                                      setPreviewNodeId(null);
+                                      setPreviewImageId(null);
+                                  }
+                                : undefined
+                        }
                         onInfo={(node) => setInfoNodeId(node.id)}
                         onDownload={downloadNodeImage}
                         onSaveAsset={(node) => void saveNodeAsset(node)}
@@ -5571,9 +5580,16 @@ function AtelierCanvasPage() {
                               })()
                             : null
                     }
+                    onNodeContextMenu={(event) => {
+                        if (!previewNode) return;
+                        setSelectedNodeIds(new Set([previewNode.id]));
+                        setSelectedConnectionId(null);
+                        setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId: previewNode.id });
+                    }}
                     onClose={() => {
                         setPreviewNodeId(null);
                         setPreviewImageId(null);
+                        setContextMenu(null);
                     }}
                 />
 

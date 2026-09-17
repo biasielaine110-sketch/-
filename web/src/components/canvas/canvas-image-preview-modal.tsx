@@ -33,11 +33,13 @@ type CanvasImagePreviewModalProps = {
     projectId?: string | null;
     info?: CanvasImagePreviewInfo | null;
     onClose: () => void;
+    /** When set, right-click uses the canvas node edit menu instead of the local download-only menu. */
+    onNodeContextMenu?: (event: ReactMouseEvent) => void;
 };
 
 const PREVIEW_STAGE_ATTR = "data-canvas-image-preview-stage";
 
-export function CanvasImagePreviewModal({ open, src, title, fileName, projectId, info, onClose }: CanvasImagePreviewModalProps) {
+export function CanvasImagePreviewModal({ open, src, title, fileName, projectId, info, onClose, onNodeContextMenu }: CanvasImagePreviewModalProps) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -134,6 +136,11 @@ export function CanvasImagePreviewModal({ open, src, title, fileName, projectId,
     const handleContextMenu = (event: ReactMouseEvent) => {
         event.preventDefault();
         event.stopPropagation();
+        if (onNodeContextMenu) {
+            setMenu(null);
+            onNodeContextMenu(event);
+            return;
+        }
         setMenu({ x: event.clientX, y: event.clientY });
     };
 

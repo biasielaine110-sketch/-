@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Download, FolderPlus, GripVertical, Info, Plus, Scissors, Trash2, Unlink2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -28,7 +29,9 @@ export function CanvasNodeContextMenu({
     menu,
     node,
     imageHandlers,
+    elevated = false,
     onClose,
+    onBeforeAction,
     onDuplicate,
     onDelete,
     onInfo,
@@ -40,7 +43,11 @@ export function CanvasNodeContextMenu({
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
     imageHandlers?: ImageToolHandlers | null;
+    /** Raise above fullscreen image preview / Ant Modal layers. */
+    elevated?: boolean;
     onClose: () => void;
+    /** Runs before any menu action (e.g. close image preview so edit dialogs are visible). */
+    onBeforeAction?: () => void;
     onDuplicate: () => void;
     onDelete: () => void;
     onInfo?: (node: CanvasNodeData) => void;
@@ -115,6 +122,7 @@ export function CanvasNodeContextMenu({
 
         const quickSet = new Set(quickImageToolIds);
         const runAndClose = (action: () => void) => {
+            onBeforeAction?.();
             action();
             onClose();
         };
@@ -175,7 +183,7 @@ export function CanvasNodeContextMenu({
                 onClick: () => runAndClose(onDelete),
             },
         ];
-    }, [hasAudio, hasImage, hasVideo, imageHandlers, menu.type, node, onClose, onDelete, onDownload, onDuplicate, onInfo, onOpenAudioTools, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
+    }, [hasAudio, hasImage, hasVideo, imageHandlers, menu.type, node, onBeforeAction, onClose, onDelete, onDownload, onDuplicate, onInfo, onOpenAudioTools, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
 
     const menuOrder = useMemo(() => mergeOrderedIds(imageContextMenuOrder || [], tools.map((tool) => tool.id)), [imageContextMenuOrder, tools]);
     const orderedTools = useMemo(() => sortByOrder(tools, menuOrder), [menuOrder, tools]);
@@ -187,8 +195,8 @@ export function CanvasNodeContextMenu({
             if (target instanceof Element && target.closest("[data-canvas-node-context-menu],.ant-popover")) return;
             onClose();
         };
-        window.addEventListener("pointerdown", close);
-        return () => window.removeEventListener("pointerdown", close);
+        window.addEventListener("pointerdown", close, true);
+        return () => window.removeEventListener("pointerdown", close, true);
     }, [onClose]);
 
     useEffect(
@@ -222,10 +230,10 @@ export function CanvasNodeContextMenu({
         setDragOverId(null);
     };
 
-    return (
+    const menuNode = (
         <div
             data-canvas-node-context-menu
-            className="fixed z-[80] max-h-[min(70vh,520px)] min-w-52 overflow-y-auto rounded-xl border py-1 shadow-2xl thin-scrollbar"
+            className={`fixed max-h-[min(70vh,520px)] min-w-52 overflow-y-auto rounded-xl border py-1 shadow-2xl thin-scrollbar ${elevated ? "z-[5100]" : "z-[80]"}`}
             style={{ left: menu.x, top: menu.y, background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
@@ -291,6 +299,12 @@ export function CanvasNodeContextMenu({
             ))}
         </div>
     );
+
+    if (elevated && typeof document !== "undefined") {
+        return createPortal(menuNode, document.body);
+    }
+
+    return menuNode;
 }
 
 function MenuButton({ icon, label, onClick, danger = false, active = false }: { icon: ReactNode; label: string; onClick?: () => void; danger?: boolean; active?: boolean }) {
