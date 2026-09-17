@@ -361,6 +361,9 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     if (isMetasoH3Video(config, model)) {
         return createMetasoH3VideoTask(config, model, prompt, references, options);
     }
+    if (isRelayMiniMaxH3Video(config, model)) {
+        return createRelayMiniMaxH3VideoTask(config, model, prompt, references, options);
+    }
 
     const ratio = normalizeVideoRatio(config.size);
     const seedance = isSeedanceVideoModel(model);
@@ -416,7 +419,8 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
         if (size) body.append("size", size);
     }
     const files = await Promise.all(references.slice(0, 7).map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
-    files.forEach((file) => body.append("input_reference[]", file));
+    // OpenAI / New API expect repeated `input_reference`, not `input_reference[]`.
+    files.forEach((file) => body.append("input_reference", file));
     try {
         const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
         if (!created.id) throw new Error(apiText("noVideoTaskId"));
@@ -429,14 +433,17 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
 /**
  * Metaso MiniMax-H3 via OpenAI-compatible /v1/videos.
  * Docs: https://metaso.cn/minimax-h3/new-api-guide
- * Body must stay minimal: model, prompt, seconds, size, input_reference.image_url (single image required).
+ * Body must stay minimal: model=sora-2, prompt, seconds, size, input_reference.image_url (public HTTPS).
  */
 async function createMetasoH3VideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     if (!references.length) throw new Error(apiText("metasoH3ImageRequired"));
-    const modelName = modelOptionName(model) || "sora-2";
+    const modelName = resolveMetasoH3ModelName(model);
     const seconds = normalizeMetasoH3Seconds(config.videoSeconds);
     const size = normalizeMetasoH3Size(config.size, config.vquality);
     const imageUrl = await resolveMetasoH3ImageUrl(config, references[0], options);
+    if (!isPublicHttpUrl(imageUrl) || imageUrl.startsWith("data:")) {
+        throw new Error(apiText("metasoH3PublicImageRequired"));
+    }
     const payload = {
         model: modelName,
         prompt,
@@ -455,15 +462,62 @@ async function createMetasoH3VideoTask(config: AiConfig, model: string, prompt: 
     }
 }
 
-function isMetasoH3Video(config: AiConfig, model: string) {
-    const base = config.baseUrl.trim().toLowerCase();
+/**
+ * Non-Metaso MiniMax-H3 relays (manxue / CometAPI-style): multipart /v1/videos.
+ * Prefer HTTPS `images` URLs; otherwise upload files as repeated `input_reference`.
+ */
+async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    if (!references.length) throw new Error(apiText("relayH3ImageRequired"));
+    const modelName = modelOptionName(model).trim() || "minimax-h3";
+    const seconds = normalizeRelayH3Seconds(config.videoSeconds);
+    const size = normalizeRelayH3Size(config.size, config.vquality);
+    const body = new FormData();
+    body.append("model", modelName);
+    body.append("prompt", prompt);
+    body.append("seconds", seconds);
+    body.append("size", size);
+
+    let attached = 0;
+    for (const image of references.slice(0, 9)) {
+        const publicUrl = [image.url, image.dataUrl].map((value) => String(value || "").trim()).find((value) => isPublicHttpUrl(value) && !value.startsWith("data:"));
+        if (publicUrl) {
+            body.append("images", publicUrl);
+            attached += 1;
+            continue;
+        }
+        const dataUrl = await imageToDataUrl(image);
+        if (!dataUrl?.startsWith("data:image/")) continue;
+        body.append("input_reference", await dataUrlToFile({ ...image, dataUrl }));
+        attached += 1;
+    }
+    if (!attached) throw new Error(apiText("metasoH3ImageUnreadable"));
+
+    try {
+        const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
+        if (!created.id) throw new Error(apiText("noVideoTaskId"));
+        return { id: created.id, provider: "openai", model };
+    } catch (error) {
+        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    }
+}
+
+function isMetasoH3Video(config: AiConfig, _model: string) {
+    // Only Metaso's OpenAI root uses the sora-2 JSON shape. Other H3 relays differ.
+    return /metaso\.cn/i.test(config.baseUrl.trim());
+}
+
+function isRelayMiniMaxH3Video(config: AiConfig, model: string) {
+    if (/autodl\.art|metaso\.cn/i.test(config.baseUrl.trim())) return false;
     const name = modelOptionName(model).toLowerCase();
-    // Metaso OpenAI root always uses /videos for H3 (model may be MiniMax-H3 or sora-2).
-    if (/metaso\.cn/i.test(base)) return true;
-    if (/autodl\.art/i.test(base)) return false;
-    // AutoDL ComfyUI workflow ids often contain "minimax_h3_*" but are not Metaso /videos.
-    if (isAutodlH3ComfyVideoModel(model, config.baseUrl)) return false;
-    return /minimax[-_]?h3|^h3$|minimax\/h3/i.test(name);
+    return /minimax[-_]?h3|(?:^|[-_])h3(?:$|[-_])|1ren[-_]?minimax/i.test(name);
+}
+
+/** Metaso OpenAI examples always post model=sora-2 (mapped to MiniMax-H3 upstream). */
+function resolveMetasoH3ModelName(model: string) {
+    const name = modelOptionName(model).trim();
+    if (/^sora-2$/i.test(name)) return "sora-2";
+    if (/minimax|h3/i.test(name)) return "sora-2";
+    return name || "sora-2";
 }
 
 /** Metaso examples use 4 / 8 / 12 seconds. */
@@ -481,19 +535,42 @@ function normalizeMetasoH3Size(size: string, quality: string) {
     return high ? "1792x1024" : "1280x720";
 }
 
+/** CometAPI / manxue-style H3: seconds 5–15. */
+function normalizeRelayH3Seconds(value: string) {
+    const seconds = Math.floor(Number(value) || 5);
+    return String(Math.min(15, Math.max(5, seconds)));
+}
+
+/** CometAPI canonical H3 WxH table (768P / 2K). */
+function normalizeRelayH3Size(size: string, quality: string) {
+    const ratio = normalizeVideoRatio(size);
+    const high = /high|2k|1080|1440|2560|2912/i.test(quality || "") || /2560|1440|2912|1920/i.test(size || "");
+    const table: Record<string, { sd: string; hd: string }> = {
+        "21:9": { sd: "1536x672", hd: "2912x1280" },
+        "16:9": { sd: "1344x768", hd: "2560x1440" },
+        "4:3": { sd: "1024x768", hd: "1920x1440" },
+        "1:1": { sd: "768x768", hd: "1440x1440" },
+        "3:4": { sd: "768x1024", hd: "1440x1920" },
+        "9:16": { sd: "768x1344", hd: "1440x2560" },
+    };
+    const entry = table[ratio] || table["16:9"];
+    return high ? entry.hd : entry.sd;
+}
+
 async function resolveMetasoH3ImageUrl(config: AiConfig, image: ReferenceImage, options?: RequestOptions) {
-    if (image.url && isPublicHttpUrl(image.url)) return image.url.trim();
-    if (image.dataUrl && isPublicHttpUrl(image.dataUrl)) return image.dataUrl.trim();
+    if (image.url && isPublicHttpUrl(image.url) && !image.url.startsWith("data:")) return image.url.trim();
+    if (image.dataUrl && isPublicHttpUrl(image.dataUrl) && !image.dataUrl.startsWith("data:")) return image.dataUrl.trim();
     const dataUrl = await imageToDataUrl(image);
-    if (dataUrl && isPublicHttpUrl(dataUrl)) return dataUrl.trim();
-    // Prefer provider upload when available; otherwise send data URL (Metaso accepts it on some relays).
+    if (dataUrl && isPublicHttpUrl(dataUrl) && !dataUrl.startsWith("data:")) return dataUrl.trim();
     if (dataUrl?.startsWith("data:image/")) {
         try {
             const blob = await (await fetch(dataUrl)).blob();
-            return await uploadProviderMediaFile(config, blob, "reference.png", options);
+            const uploaded = await uploadProviderMediaFile(config, blob, "reference.png", options);
+            if (isPublicHttpUrl(uploaded) && !uploaded.startsWith("data:")) return uploaded;
         } catch {
-            return dataUrl;
+            // Metaso rejects data URLs; surface a clear requirement instead of a opaque 400.
         }
+        throw new Error(apiText("metasoH3PublicImageRequired"));
     }
     throw new Error(apiText("metasoH3ImageUnreadable"));
 }
@@ -756,6 +833,7 @@ function readNetworkMessage(message: string) {
 }
 
 function statusMessage(status: number | undefined, fallback: string) {
+    if (status === 400) return `${fallback}（400）`;
     if (status === 401 || status === 403) return apiText("authenticationFailed");
     if (status === 413) return apiText("payloadTooLarge");
     if (status === 429) return apiText("rateLimited");

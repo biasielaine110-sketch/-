@@ -276,6 +276,8 @@ export default {
         videoTaskCreateFailed: "视频任务创建失败",
         metasoH3ImageRequired: "秘塔 MiniMax-H3（OpenAI 协议）必须连接一张参考图。请把图片节点连到视频配置后再生成。",
         metasoH3ImageUnreadable: "已连接参考图，但无法读取图片内容。请重新上传图片或换一张后再试。",
+        metasoH3PublicImageRequired: "秘塔 H3 需要可公网访问的参考图 URL（不接受本地 data URL）。请使用已上传到公网的图片，或换支持图床上传的渠道。",
+        relayH3ImageRequired: "该 MiniMax-H3 渠道需要至少一张参考图。请把图片节点连到视频配置后再生成。",
         autodlWorkflowRequired: "请把模型名设为 AutoDL 的 workflow_id（例如 minimax_h3_lightx2v_no_pic）",
         autodlNoTaskId: "AutoDL 未返回 task_id",
         autodlTaskFailed: "AutoDL ComfyUI 任务失败",
