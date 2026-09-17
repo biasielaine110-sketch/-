@@ -270,7 +270,7 @@ function createReferenceChip(input: NodeGenerationInput, inputs: NodeGenerationI
         wrapper.title = input.text || input.title;
         const text = document.createElement("span");
         text.className = "block truncate";
-        text.textContent = input.type === "text" ? input.text || input.title : input.title;
+        text.textContent = input.title;
         wrapper.appendChild(text);
     }
     return wrapper;

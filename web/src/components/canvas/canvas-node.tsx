@@ -495,7 +495,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 onMouseDown={(event) => onConnectStart(event, data.id, "source")}
             />
 
-            {showPanel && !isGroup && renderPanel ? <div className="absolute left-1/2 top-full z-[70] w-[600px] -translate-x-1/2 pt-4">{renderPanel(data)}</div> : null}
+            {showPanel && !isGroup && renderPanel ? <div className="absolute left-1/2 top-full z-[70] w-[600px] max-w-none -translate-x-1/2 pt-4">{renderPanel(data)}</div> : null}
         </div>
     );
 });

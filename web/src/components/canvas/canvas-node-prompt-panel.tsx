@@ -84,10 +84,12 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const canSubmit = Boolean(prompt.trim() || connectedTextPrompt);
 
     const submit = () => {
-        const text = prompt.trim() || connectedTextPrompt;
-        if (!text || running) return;
+        // Pass only the user-typed prompt. Connected text is merged once in buildNodeGenerationContext.
+        // Passing connectedTextPrompt here used to duplicate it: once as `prompt`, again as upstreamText.
+        const userPrompt = prompt.trim();
+        if ((!userPrompt && !connectedTextPrompt) || running) return;
         setLocalRunning(true);
-        onGenerate(node.id, mode, text);
+        onGenerate(node.id, mode, userPrompt);
     };
 
     const handleStop = () => {
@@ -98,8 +100,8 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     return (
         <div
             data-canvas-no-zoom
-            className="rounded-2xl border p-3 shadow-2xl backdrop-blur"
-            style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+            className="min-w-0 overflow-hidden rounded-2xl border p-3 shadow-2xl backdrop-blur"
+            style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text, width: 600, maxWidth: 600 }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
@@ -127,7 +129,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                 onChange={updatePrompt}
                 onSubmit={submit}
                 onDoubleClick={textEdit.handleDoubleClick}
-                className="thin-scrollbar h-40 w-full cursor-text resize-none rounded-xl px-3 py-2 text-sm leading-5 outline-none"
+                className="thin-scrollbar h-40 min-w-0 w-full max-w-full cursor-text resize-none rounded-xl px-3 py-2 text-sm leading-5 outline-none"
                 style={{ background: "transparent", color: theme.node.text }}
                 placeholder={promptPlaceholder}
             />

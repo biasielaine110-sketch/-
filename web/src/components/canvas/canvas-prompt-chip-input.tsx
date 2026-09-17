@@ -144,9 +144,9 @@ export const CanvasPromptChipInput = forwardRef<CanvasPromptChipInputHandle, Pro
     const showPlaceholder = !value.trim();
 
     return (
-        <div className="relative w-full">
+        <div className="relative min-w-0 w-full max-w-full">
             {showPlaceholder && placeholder ? (
-                <div className="pointer-events-none absolute left-3 top-2 text-sm leading-5" style={{ color: theme.node.placeholder }}>
+                <div className="pointer-events-none absolute left-3 top-2 z-[1] text-sm leading-5" style={{ color: theme.node.placeholder }}>
                     {placeholder}
                 </div>
             ) : null}
@@ -158,8 +158,8 @@ export const CanvasPromptChipInput = forwardRef<CanvasPromptChipInputHandle, Pro
                 aria-multiline="true"
                 data-canvas-text-input
                 data-canvas-shortcuts-ignore
-                className={`${className || ""} select-text overflow-y-auto whitespace-pre-wrap break-words outline-none`}
-                style={{ ...style, cursor: "text" }}
+                className={`${className || ""} min-w-0 max-w-full select-text overflow-x-hidden overflow-y-auto whitespace-pre-wrap wrap-anywhere outline-none`}
+                style={{ ...style, cursor: "text", whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word" }}
                 onDoubleClick={onDoubleClick}
                 onCopy={(event) => event.stopPropagation()}
                 onCut={(event) => event.stopPropagation()}
@@ -317,7 +317,8 @@ function createReferenceChip(reference: CanvasResourceReference, theme: (typeof 
         wrapper.title = reference.text || reference.title;
         const text = document.createElement("span");
         text.className = "block truncate";
-        text.textContent = reference.kind === "text" ? reference.text || reference.title : reference.label;
+        // Always show the stable @ label in-editor; full text stays on title tooltip.
+        text.textContent = reference.label;
         wrapper.appendChild(text);
     }
     return wrapper;
