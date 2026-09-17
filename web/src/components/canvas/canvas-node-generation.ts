@@ -183,14 +183,13 @@ function readReferenceImage(node: CanvasNodeData): ReferenceImage | null {
     if (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) return null;
     const content = String(node.metadata?.content || "").trim();
     const storageKey = String(node.metadata?.storageKey || "").trim();
-    // Allow storageKey-only nodes (content may be a revoked blob: preview).
     if (!content && !storageKey) return null;
-    if (/^blob:/i.test(content) && !storageKey) return null;
     return {
         id: node.id,
         name: `${node.title || node.id}.png`,
         type: node.metadata?.mimeType || "image/png",
-        dataUrl: /^blob:/i.test(content) ? "" : content,
+        // Keep live blob:/data:/http content for same-session reads; imageToDataUrl recovers via storageKey when blob dies.
+        dataUrl: content || "",
         url: /^https?:\/\//i.test(content) ? content : undefined,
         storageKey: storageKey || undefined,
     };
