@@ -1026,6 +1026,7 @@ export default {
             videos: "{{count}} videos",
             generations: "{{count}} runs",
             reasoning: "Reasoning",
+            play: "Play",
         },
         contextMenu: {
             reorderHint: "Drag the handle to reorder buttons (saved to config for export/import)",

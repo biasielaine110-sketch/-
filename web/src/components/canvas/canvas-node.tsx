@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Clapperboard, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Clapperboard, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
 
 import { CanvasDisplayImage } from "@/lib/canvas/canvas-display-image";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -923,6 +923,71 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
+function CanvasNodeVideoPlayer({ src }: { src: string }) {
+    const { t } = useTranslation();
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const [playing, setPlaying] = useState(false);
+
+    useEffect(() => {
+        setPlaying(false);
+        const video = videoRef.current;
+        if (!video) return;
+        video.pause();
+        video.currentTime = 0;
+    }, [src]);
+
+    const stopShell = (event: React.SyntheticEvent) => {
+        event.stopPropagation();
+    };
+
+    const handlePlayClick = (event: React.MouseEvent) => {
+        event.stopPropagation();
+        event.preventDefault();
+        const video = videoRef.current;
+        if (!video) return;
+        void video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+    };
+
+    return (
+        <div
+            className="relative h-full w-full overflow-hidden"
+            onMouseDown={(event) => {
+                // 播放中与控件交互时不要拖动画布节点；未播放时点击画面只负责选中/拖动
+                if (playing) event.stopPropagation();
+            }}
+            onPointerDown={(event) => {
+                if (playing) event.stopPropagation();
+            }}
+        >
+            <video
+                ref={videoRef}
+                src={src}
+                className="h-full w-full rounded-[18px] bg-black object-contain"
+                playsInline
+                preload="metadata"
+                controls={playing}
+                data-canvas-no-zoom
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                onEnded={() => setPlaying(false)}
+            />
+            {!playing ? (
+                <button
+                    type="button"
+                    className="absolute left-1/2 top-1/2 z-20 grid size-14 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-white/25 bg-black/55 text-white shadow-[0_10px_28px_rgba(0,0,0,.35)] backdrop-blur-md transition hover:scale-[1.04] hover:bg-black/65"
+                    title={t("canvas.controls.play")}
+                    aria-label={t("canvas.controls.play")}
+                    onMouseDown={stopShell}
+                    onPointerDown={stopShell}
+                    onClick={handlePlayClick}
+                >
+                    <Play className="size-6 translate-x-[1px] fill-current" />
+                </button>
+            ) : null}
+        </div>
+    );
+}
+
 function VideoNodeContent({ node, theme, onDeleteBatchImage }: NodeContentRendererProps) {
     const { t } = useTranslation();
     if (!node.metadata?.content)
@@ -934,7 +999,7 @@ function VideoNodeContent({ node, theme, onDeleteBatchImage }: NodeContentRender
         );
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
-            <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-no-zoom />
+            <CanvasNodeVideoPlayer src={node.metadata.content} />
             <button
                 type="button"
                 className="absolute right-2.5 top-2.5 z-30 grid size-8 place-items-center rounded-full border shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
@@ -1052,7 +1117,7 @@ function ImageContent({
             <div className="relative h-full w-full overflow-hidden rounded-3xl">
                 {primaryContent ? (
                     isVideo ? (
-                        <video src={primaryContent} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-no-zoom />
+                        <CanvasNodeVideoPlayer src={primaryContent} />
                     ) : (
                         <>
                             <CanvasDisplayImage
