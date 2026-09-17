@@ -1295,7 +1295,7 @@ function ExpandedImageCard({
         >
             {image.content ? (
                 isVideo ? (
-                    <video src={image.content} className="pointer-events-none h-full w-full select-none object-contain" muted playsInline />
+                    <CanvasNodeVideoPlayer src={image.content} />
                 ) : (
                     <CanvasDisplayImage src={image.content} previewSrc={image.thumbnailContent} alt={node.title} maxEdge={512} className="pointer-events-none h-full w-full select-none object-contain" />
                 )
@@ -1303,7 +1303,7 @@ function ExpandedImageCard({
                 <ImageSlotStatus image={image} onCancel={onCancel} />
             )}
             {image.content ? (
-                <div className="absolute inset-x-2 top-2 flex items-center gap-1">
+                <div className="absolute inset-x-2 top-2 z-30 flex items-center gap-1">
                     <button
                         type="button"
                         className="grid size-8 shrink-0 place-items-center rounded-lg border shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
