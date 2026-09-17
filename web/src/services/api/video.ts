@@ -463,42 +463,105 @@ async function createMetasoH3VideoTask(config: AiConfig, model: string, prompt: 
 }
 
 /**
- * Non-Metaso MiniMax-H3 relays (manxue / CometAPI-style): multipart /v1/videos.
- * Prefer HTTPS `images` URLs; otherwise upload files as repeated `input_reference`.
+ * Non-Metaso MiniMax-H3 relays (manxue / New API / similar): JSON /v1/videos.
+ * manxueapi returns `new_api_error` — it expects OpenAI-compatible JSON, not multipart.
  */
 async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
-    if (!references.length) throw new Error(apiText("relayH3ImageRequired"));
     const modelName = modelOptionName(model).trim() || "minimax-h3";
-    const seconds = normalizeRelayH3Seconds(config.videoSeconds);
+    const secondsNum = Math.min(15, Math.max(4, Math.floor(Number(config.videoSeconds) || 5)));
+    const seconds = String(secondsNum);
+    const ratio = normalizeVideoRatio(config.size);
     const size = normalizeRelayH3Size(config.size, config.vquality);
-    const body = new FormData();
-    body.append("model", modelName);
-    body.append("prompt", prompt);
-    body.append("seconds", seconds);
-    body.append("size", size);
+    const metasoSize = normalizeMetasoH3Size(config.size, config.vquality);
+    const resolution = /high|2k|1080|1440|2560/i.test(config.vquality || "") ? "2K" : "768P";
 
-    let attached = 0;
+    const imageUrls: string[] = [];
     for (const image of references.slice(0, 9)) {
         const publicUrl = [image.url, image.dataUrl].map((value) => String(value || "").trim()).find((value) => isPublicHttpUrl(value) && !value.startsWith("data:"));
         if (publicUrl) {
-            body.append("images", publicUrl);
-            attached += 1;
+            imageUrls.push(publicUrl);
             continue;
         }
         const dataUrl = await imageToDataUrl(image);
         if (!dataUrl?.startsWith("data:image/")) continue;
-        body.append("input_reference", await dataUrlToFile({ ...image, dataUrl }));
-        attached += 1;
+        try {
+            const blob = await (await fetch(dataUrl)).blob();
+            const uploaded = await uploadProviderMediaFile(config, blob, "reference.png", options);
+            if (isPublicHttpUrl(uploaded) && !uploaded.startsWith("data:")) imageUrls.push(uploaded);
+        } catch {
+            // Keep going — text-to-video may still work without a reference URL.
+        }
     }
-    if (!attached) throw new Error(apiText("metasoH3ImageUnreadable"));
 
-    try {
-        const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
-        if (!created.id) throw new Error(apiText("noVideoTaskId"));
-        return { id: created.id, provider: "openai", model };
-    } catch (error) {
-        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    const attempts: Record<string, unknown>[] = [
+        // New API / Sora-compatible JSON (primary for manxueapi.com).
+        {
+            model: modelName,
+            prompt,
+            seconds,
+            size: metasoSize,
+            ...(imageUrls[0] ? { input_reference: { image_url: imageUrls[0] } } : {}),
+        },
+        // Same shape with CometAPI WxH sizes some H3 adapters expect.
+        {
+            model: modelName,
+            prompt,
+            seconds,
+            size,
+            ...(imageUrls[0] ? { input_reference: { image_url: imageUrls[0] } } : {}),
+        },
+        // MiniMax-native field names used by some New API model adapters.
+        {
+            model: modelName,
+            prompt,
+            duration: secondsNum,
+            resolution,
+            aspect_ratio: ratio,
+            ...(imageUrls[0] ? { first_frame_image: imageUrls[0] } : {}),
+        },
+    ];
+
+    let lastError: unknown;
+    for (const payload of attempts) {
+        try {
+            const created = unwrapVideoResponse(
+                (await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data,
+            );
+            if (!created.id) throw new Error(apiText("noVideoTaskId"));
+            return { id: created.id, provider: "openai", model };
+        } catch (error) {
+            lastError = error;
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+            // Only retry alternate shapes on 400 validation errors.
+            if (!axios.isAxiosError(error) || error.response?.status !== 400) break;
+        }
     }
+
+    // Last resort: multipart (CometAPI-style) when the relay rejects JSON shapes.
+    if (imageUrls.length || references.length) {
+        try {
+            const body = new FormData();
+            body.append("model", modelName);
+            body.append("prompt", prompt);
+            body.append("seconds", seconds);
+            body.append("size", size);
+            for (const url of imageUrls.slice(0, 9)) body.append("images", url);
+            if (!imageUrls.length) {
+                for (const image of references.slice(0, 9)) {
+                    const dataUrl = await imageToDataUrl(image);
+                    if (!dataUrl?.startsWith("data:image/")) continue;
+                    body.append("input_reference", await dataUrlToFile({ ...image, dataUrl }));
+                }
+            }
+            const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
+            if (!created.id) throw new Error(apiText("noVideoTaskId"));
+            return { id: created.id, provider: "openai", model };
+        } catch (error) {
+            lastError = error;
+        }
+    }
+
+    throw new Error(readAxiosError(lastError, apiText("videoTaskCreateFailed")));
 }
 
 function isMetasoH3Video(config: AiConfig, _model: string) {
@@ -533,12 +596,6 @@ function normalizeMetasoH3Size(size: string, quality: string) {
     const high = /high|2k|1080|1792|1024x1792|1792x1024/i.test(quality || "") || /1792|1024x1792|1792x1024/i.test(size || "");
     if (ratio === "9:16" || ratio === "3:4" || ratio === "2:3") return high ? "1024x1792" : "720x1280";
     return high ? "1792x1024" : "1280x720";
-}
-
-/** CometAPI / manxue-style H3: seconds 5–15. */
-function normalizeRelayH3Seconds(value: string) {
-    const seconds = Math.floor(Number(value) || 5);
-    return String(Math.min(15, Math.max(5, seconds)));
 }
 
 /** CometAPI canonical H3 WxH table (768P / 2K). */
