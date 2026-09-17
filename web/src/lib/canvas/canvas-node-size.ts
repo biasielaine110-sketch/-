@@ -1,4 +1,4 @@
-export const IMAGE_DISPLAY_SCALE_PERCENTS = [20, 40, 50, 70, 100] as const;
+export const IMAGE_DISPLAY_SCALE_PERCENTS = [20, 40, 50, 70, 99, 100] as const;
 
 export function fitNodeSize(width: number, height: number, maxWidth = 640, maxHeight = 640) {
     const w = Math.max(1, width);
