@@ -21,6 +21,8 @@ export type ChannelModel = {
     /** Per-model protocol; falls back to the channel default when omitted. */
     apiFormat?: ApiCallFormat;
     script?: string;
+    /** When false the model stays in the channel but is hidden from pickers. Defaults to true. */
+    enabled?: boolean;
 };
 
 export type ModelChannel = {
@@ -226,10 +228,14 @@ export function guessCapability(name: string): ModelCapability {
     return "text";
 }
 
+export function isChannelModelEnabled(model: Pick<ChannelModel, "enabled">) {
+    return model.enabled !== false;
+}
+
 export function findPreferredModelOption(channels: ModelChannel[], capability: ModelCapability, preferredNames: string[]) {
     for (const preferred of preferredNames) {
         for (const channel of channels) {
-            const model = channel.models.find((item) => item.name === preferred && item.capability === capability);
+            const model = channel.models.find((item) => item.name === preferred && item.capability === capability && isChannelModelEnabled(item));
             if (model) return encodeChannelModel(channel.id, model.name);
         }
     }
@@ -257,11 +263,11 @@ export function resolveModelForCapability(config: AiConfig, currentModel: string
     const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
     const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
     const selectable = selectableModelsByCapability(config, capability);
-    if (currentModel && (selectable.includes(currentModel) || modelMatchesCapability(config, currentModel, capability))) return currentModel;
-    if (defaultModel && (selectable.includes(defaultModel) || modelMatchesCapability(config, defaultModel, capability))) return defaultModel;
+    if (currentModel && selectable.includes(currentModel)) return currentModel;
+    if (defaultModel && selectable.includes(defaultModel)) return defaultModel;
     if (capability === "text") {
         const preferred = findPreferredModelOption(config.channels, "text", PREFERRED_TEXT_MODEL_NAMES);
-        if (preferred) return preferred;
+        if (preferred && selectable.includes(preferred)) return preferred;
     }
     return selectable[0] || fallbackModel;
 }
@@ -274,8 +280,11 @@ function resolvePersistedTextModel(config: Partial<AiConfig>, channels: ModelCha
 }
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
-    if (!capability) return config.models;
-    return config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)));
+    return config.channels.flatMap((channel) =>
+        channel.models
+            .filter((model) => isChannelModelEnabled(model) && (!capability || model.capability === capability))
+            .map((model) => encodeChannelModel(channel.id, model.name)),
+    );
 }
 
 /** The user script (if any) attached to a model; empty string means use the system default call. */
@@ -414,7 +423,11 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
         const apiFormat = typeof item === "string" || item.apiFormat == null ? undefined : normalizeApiFormat(item.apiFormat);
-        result.push(apiFormat ? { name, capability, apiFormat, script } : { name, capability, script });
+        const enabled = typeof item === "string" || item.enabled == null ? undefined : Boolean(item.enabled);
+        const entry: ChannelModel = { name, capability, script };
+        if (apiFormat) entry.apiFormat = apiFormat;
+        if (enabled === false) entry.enabled = false;
+        result.push(entry);
     }
     return result;
 }

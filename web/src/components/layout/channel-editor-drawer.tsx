@@ -1,10 +1,10 @@
-import { Button, Drawer, Input, Segmented, Select, Space } from "antd";
+import { Button, Drawer, Input, Segmented, Select, Space, Switch } from "antd";
 import { GripVertical, ListPlus, Trash2 } from "lucide-react";
 import { useEffect, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { HealthDot } from "@/components/model-picker";
-import { encodeChannelModel, defaultBaseUrlForApiFormat, defaultConfig, guessCapability, normalizeChannelModels, resolveChannelModelApiFormat, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { encodeChannelModel, defaultBaseUrlForApiFormat, defaultConfig, guessCapability, isChannelModelEnabled, normalizeChannelModels, resolveChannelModelApiFormat, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 import { getModelHealth, modelHealthKey, subscribeModelHealth } from "@/services/api/model-health";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
@@ -59,8 +59,11 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
 
     const setCapability = (name: string, capability: ModelCapability) => setModels(draft.models.map((model) => (model.name === name ? { ...model, capability } : model)));
     const setModelApiFormat = (name: string, apiFormat: ApiCallFormat) => setModels(draft.models.map((model) => (model.name === name ? { ...model, apiFormat } : model)));
+    const setModelEnabled = (name: string, enabled: boolean) =>
+        setModels(draft.models.map((model) => (model.name === name ? { ...model, enabled: enabled ? undefined : false } : model)));
     const setScript = (name: string, script: string) => setModels(draft.models.map((model) => (model.name === name ? { ...model, script: script || undefined } : model)));
     const removeModel = (name: string) => setModels(draft.models.filter((model) => model.name !== name));
+    const enabledCount = draft.models.filter((model) => isChannelModelEnabled(model)).length;
 
     const clearModelDrag = () => {
         setDraggingModelName(null);
@@ -138,7 +141,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
             <div className="mt-6 mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
                     <div className="text-sm font-semibold">{t("config.channelEditor.models")}</div>
-                    <div className="mt-0.5 text-xs text-stone-500">{t("config.channelEditor.modelDescription", { count: draft.models.length })}</div>
+                    <div className="mt-0.5 text-xs text-stone-500">{t("config.channelEditor.modelDescription", { count: draft.models.length, enabled: enabledCount })}</div>
                     <div className="mt-0.5 text-xs text-stone-500">{t("config.channelEditor.reorderHint")}</div>
                 </div>
                 <Button type="primary" icon={<ListPlus className="size-4" />} onClick={() => setSelectOpen(true)}>
@@ -148,14 +151,16 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
 
             <div className="space-y-2 rounded-lg border border-stone-200 p-2 dark:border-stone-800">
                 {draft.models.length ? (
-                    draft.models.map((model) => (
+                    draft.models.map((model) => {
+                        const enabled = isChannelModelEnabled(model);
+                        return (
                         <div
                             key={model.name}
                             onDragOver={(event) => handleModelDragOver(event, model.name)}
                             onDrop={(event) => handleModelDrop(event, model.name)}
                             className={`flex flex-wrap items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-stone-50 dark:hover:bg-stone-900/40 ${
                                 draggingModelName === model.name ? "opacity-50" : ""
-                            } ${dragOverModelName === model.name && draggingModelName !== model.name ? "bg-sky-50 ring-1 ring-sky-400 dark:bg-sky-950/40 dark:ring-sky-500" : ""}`}
+                            } ${!enabled ? "opacity-50" : ""} ${dragOverModelName === model.name && draggingModelName !== model.name ? "bg-sky-50 ring-1 ring-sky-400 dark:bg-sky-950/40 dark:ring-sky-500" : ""}`}
                         >
                             <span
                                 draggable
@@ -170,10 +175,18 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                             <span className="min-w-0 flex-1 truncate text-sm" title={model.name}>
                                 <span className="inline-flex max-w-full items-center gap-2">
                                     <ChannelModelHealth draft={draft} model={model} />
-                                    <span className="truncate">{model.name}</span>
+                                    <span className={`truncate ${enabled ? "" : "line-through text-stone-400"}`}>{model.name}</span>
                                 </span>
                             </span>
                             <div className="flex shrink-0 flex-wrap items-center gap-2">
+                                <Switch
+                                    size="small"
+                                    checked={enabled}
+                                    onChange={(checked) => setModelEnabled(model.name, checked)}
+                                    checkedChildren={t("config.channelEditor.enabled")}
+                                    unCheckedChildren={t("config.channelEditor.disabled")}
+                                    title={enabled ? t("config.channelEditor.disableTitle") : t("config.channelEditor.enableTitle")}
+                                />
                                 <Select
                                     size="small"
                                     className="w-[7.5rem]"
@@ -188,7 +201,8 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                                 <Button size="small" danger type="text" icon={<Trash2 className="size-3.5" />} onClick={() => removeModel(model.name)} />
                             </div>
                         </div>
-                    ))
+                        );
+                    })
                 ) : (
                     <div className="px-2 py-8 text-center text-sm text-stone-500">{t("config.channelEditor.empty")}</div>
                 )}
