@@ -279,7 +279,7 @@ export default {
         videoTaskCreateFailed: "Failed to create video task",
         metasoH3ImageRequired: "Metaso MiniMax-H3 (OpenAI protocol) requires one reference image. Connect an image node to the video config first.",
         metasoH3ImageUnreadable: "A reference image is connected but its bytes could not be read (often a stale local blob preview). Re-upload or drop the image, then generate again.",
-        metasoH3PublicImageRequired: "Metaso H3 needs a publicly reachable reference image URL (data URLs are rejected). Upload the image to a public host, or use a channel that supports image upload.",
+        metasoH3PublicImageRequired: "Metaso H3 needs a public image URL. Uploading the local image to a temporary host failed. Retry, or use an image that is already an https link.",
         relayH3ImageRequired: "This MiniMax-H3 channel requires at least one reference image. Connect an image node to the video config first.",
         autodlWorkflowRequired: "Set the model name to the AutoDL workflow_id (e.g. minimax_h3_lightx2v_no_pic)",
         autodlNoTaskId: "AutoDL did not return a task_id",

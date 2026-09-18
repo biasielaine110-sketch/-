@@ -614,6 +614,71 @@ function isImageEditsEndpointMissing(error: unknown, message: string) {
     return /404|not\s*found|接口地址不存在|unknown\s*url|invalid\s*url|method\s*not\s*allowed|405|does\s*not\s*exist/i.test(message);
 }
 
+function pushChatImageCandidate(urls: string[], value: unknown) {
+    if (typeof value !== "string") return;
+    const text = value.trim();
+    if (!text) return;
+    if (text.startsWith("data:image/")) {
+        urls.push(text.replace(/\s/g, ""));
+        return;
+    }
+    for (const match of text.matchAll(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=\s]+/gi)) {
+        urls.push(match[0].replace(/\s/g, ""));
+    }
+    for (const match of text.matchAll(/!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/gi)) {
+        urls.push(match[1]);
+    }
+    if (/^https?:\/\/\S+$/i.test(text)) urls.push(text);
+}
+
+function collectChatImageSources(payload: unknown) {
+    const urls: string[] = [];
+    const choices = (payload as { choices?: Array<{ message?: { content?: unknown } }> })?.choices || [];
+    for (const choice of choices) {
+        const content = choice.message?.content;
+        if (typeof content === "string") {
+            pushChatImageCandidate(urls, content);
+            continue;
+        }
+        if (!Array.isArray(content)) continue;
+        for (const part of content) {
+            if (!part || typeof part !== "object") continue;
+            const record = part as { text?: string; url?: string; image?: string; image_url?: { url?: string } };
+            pushChatImageCandidate(urls, record.image_url?.url);
+            pushChatImageCandidate(urls, record.url);
+            pushChatImageCandidate(urls, record.image);
+            pushChatImageCandidate(urls, record.text);
+        }
+    }
+    return [...new Set(urls)];
+}
+
+/** Some relays (including New API forks) expose gpt-image only on /chat/completions and 404 the Images API. */
+async function requestChatCompletionsImages(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    const text = withSystemPrompt(config, prompt);
+    const content: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = [{ type: "text", text }];
+    const refs = await Promise.all(references.map((image) => prepareReferenceDataUrl(image, Math.max(1, references.length || 1))));
+    for (const url of refs) content.push({ type: "image_url", image_url: { url } });
+    const response = await postImageJson<unknown>(
+        config,
+        "/chat/completions",
+        {
+            model: config.model,
+            messages: [{ role: "user", content: references.length ? content : text }],
+            stream: false,
+        },
+        options,
+    );
+    const sources = collectChatImageSources(response.data);
+    const images: GeneratedImageResult[] = [];
+    for (const source of sources) {
+        const dataUrl = source.startsWith("data:image/") ? source : await imageToDataUrl({ url: source });
+        if (dataUrl.startsWith("data:image/")) images.push({ id: nanoid(), dataUrl });
+    }
+    if (!images.length) throw new Error(apiText("requestFailed"));
+    return images;
+}
+
 /** Map "quality + ratio" to an explicit pixel dimension like "3840x2160". */
 function resolveSize(quality: string | undefined, ratio: string): string {
     const parsedRatio = parseImageRatio(ratio);
@@ -1838,6 +1903,14 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
                 throw new Error(normalizeImageApiErrorMessage(readAxiosError(fallbackError, message), requestConfig.model));
             }
         }
+        if (isImageEditsEndpointMissing(error, message)) {
+            try {
+                return await requestChatCompletionsImages(requestConfig, prompt, [], options);
+            } catch (fallbackError) {
+                const chatMessage = readAxiosError(fallbackError, message);
+                throw new Error(normalizeImageApiErrorMessage(chatMessage === apiText("requestFailed") ? message : chatMessage, requestConfig.model));
+            }
+        }
         throw new Error(normalizeImageApiErrorMessage(message, requestConfig.model));
     }
 }
@@ -1963,12 +2036,22 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
                 throw new Error(normalizeImageApiErrorMessage(readAxiosError(fallbackError, message), requestConfig.model));
             }
         }
-        // Relays without /images/edits (e.g. some New API hosts): retry img2img via /images/generations + image[].
+        // Relays without /images/edits (e.g. some New API hosts): retry img2img via /images/generations + image[],
+        // then /chat/completions when the Images API itself is not registered.
         if (!mask && references.length && isImageEditsEndpointMissing(error, message)) {
             try {
                 return await requestOpenAiCompatImageToImageViaGenerations(requestConfig, requestPrompt, references, n, options);
             } catch (fallbackError) {
-                throw new Error(normalizeImageApiErrorMessage(readAxiosError(fallbackError, message), requestConfig.model));
+                const fallbackMessage = readAxiosError(fallbackError, message);
+                if (isImageEditsEndpointMissing(fallbackError, fallbackMessage)) {
+                    try {
+                        return await requestChatCompletionsImages(requestConfig, requestPrompt, references, options);
+                    } catch (chatError) {
+                        const chatMessage = readAxiosError(chatError, fallbackMessage);
+                        throw new Error(normalizeImageApiErrorMessage(chatMessage === apiText("requestFailed") ? fallbackMessage : chatMessage, requestConfig.model));
+                    }
+                }
+                throw new Error(normalizeImageApiErrorMessage(fallbackMessage, requestConfig.model));
             }
         }
         throw new Error(normalizeImageApiErrorMessage(message, requestConfig.model));
