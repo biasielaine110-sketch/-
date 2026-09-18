@@ -595,6 +595,25 @@ async function requestVolcengineImageGeneration(config: AiConfig, prompt: string
     return resolveImageApiResponse(config, response.data, options);
 }
 
+/** Many OpenAI-compatible relays (New API style) expose img2img on /images/generations + `image`, not multipart /images/edits. */
+async function requestOpenAiCompatImageToImageViaGenerations(config: AiConfig, prompt: string, references: ReferenceImage[], count: number, options?: RequestOptions) {
+    const refs = await Promise.all(references.map((image) => prepareReferenceDataUrl(image, Math.max(1, references.length || 1))));
+    if (!refs.length) throw new Error(apiText("referenceImageReadFailed"));
+    const body: Record<string, unknown> = {
+        model: config.model,
+        prompt: withSystemPrompt(config, prompt),
+        ...resolveOpenAiImageParams(config, count),
+    };
+    body.image = refs.length === 1 ? refs[0] : refs;
+    const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
+    return resolveImageApiResponse(config, response.data, options);
+}
+
+function isImageEditsEndpointMissing(error: unknown, message: string) {
+    if (axios.isAxiosError(error) && (error.response?.status === 404 || error.response?.status === 405)) return true;
+    return /404|not\s*found|接口地址不存在|unknown\s*url|invalid\s*url|method\s*not\s*allowed|405|does\s*not\s*exist/i.test(message);
+}
+
 /** Map "quality + ratio" to an explicit pixel dimension like "3840x2160". */
 function resolveSize(quality: string | undefined, ratio: string): string {
     const parsedRatio = parseImageRatio(ratio);
@@ -1940,6 +1959,14 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         if (isGeminiNativeImageModel(requestConfig.model) && isImagenOnlyEndpointError(message) && !mask) {
             try {
                 return await requestGeminiImages({ ...requestConfig, apiFormat: "gemini" }, requestPrompt, references, n, options);
+            } catch (fallbackError) {
+                throw new Error(normalizeImageApiErrorMessage(readAxiosError(fallbackError, message), requestConfig.model));
+            }
+        }
+        // Relays without /images/edits (e.g. some New API hosts): retry img2img via /images/generations + image[].
+        if (!mask && references.length && isImageEditsEndpointMissing(error, message)) {
+            try {
+                return await requestOpenAiCompatImageToImageViaGenerations(requestConfig, requestPrompt, references, n, options);
             } catch (fallbackError) {
                 throw new Error(normalizeImageApiErrorMessage(readAxiosError(fallbackError, message), requestConfig.model));
             }

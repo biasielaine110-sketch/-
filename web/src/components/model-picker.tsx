@@ -9,6 +9,8 @@ import { cn } from "@/lib/utils";
 import { ensureModelHealth, ensureModelsHealth, getModelHealth, modelHealthKey, subscribeModelHealth, type ModelHealthStatus } from "@/services/api/model-health";
 import { modelOptionLabel, modelOptionName, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
+const MODEL_PICKER_POPUP_MIN_WIDTH = 420;
+
 type ModelPickerProps = {
     config: AiConfig;
     value?: string;
@@ -98,16 +100,17 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                     value={current}
                     placeholder={pickerPlaceholder}
                     className={cn("canvas-composer-model-picker h-8 w-full min-w-0 max-w-full [&_.ant-select-selector]:!rounded-full [&_.ant-select-selector]:!px-3")}
-                    popupMatchSelectWidth
+                    popupMatchSelectWidth={MODEL_PICKER_POPUP_MIN_WIDTH}
                     options={selectOptions}
                     optionLabelProp="title"
                     getPopupContainer={() => document.body}
                     classNames={{ popup: { root: "canvas-model-picker-dropdown" } }}
+                    styles={{ popup: { root: { minWidth: MODEL_PICKER_POPUP_MIN_WIDTH } } }}
                     popupRender={(menu) => (
                         <div
                             data-canvas-no-zoom
                             data-canvas-shortcuts-ignore
-                            className="w-full min-w-[16rem] max-w-[calc(100vw-24px)]"
+                            className="w-full"
                             onMouseDown={(event) => event.stopPropagation()}
                             onPointerDown={(event) => event.stopPropagation()}
                             onClick={(event) => event.stopPropagation()}
@@ -197,7 +200,7 @@ function ModelLabel({ config, model, capability }: { config: AiConfig; model: st
         <span className="flex w-full min-w-0 items-center gap-2">
             <HealthDot status={health.status} message={health.message} />
             <ModelIcon model={model} />
-            <span className="min-w-0 flex-1 truncate">{modelOptionLabel(config, model)}</span>
+            <span className="min-w-0 flex-1 whitespace-nowrap">{modelOptionLabel(config, model)}</span>
         </span>
     );
 }

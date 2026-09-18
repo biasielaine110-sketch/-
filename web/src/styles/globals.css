@@ -348,8 +348,10 @@
         padding-inline: 0;
     }
 
-    /* Model picker popup: stretch options to the select width (avoid left-narrow / right-empty layout). */
+    /* Popup stays wide enough for full model names even when the trigger is narrow. */
     .canvas-model-picker-dropdown.ant-select-dropdown {
+        min-width: 420px;
+        max-width: min(32rem, calc(100vw - 24px));
         padding-inline: 0;
     }
 
