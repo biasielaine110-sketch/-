@@ -1292,7 +1292,7 @@ export default {
         saved: "Settings saved",
         savedContinue: "Settings saved. Continue with your previous request.",
         channels: {
-            description: "Choose a protocol for each provider, fetch its models, assign capabilities, and optionally customize request scripts.",
+            description: "Choose a protocol for each provider, fetch its models, assign capabilities, and optionally customize request scripts. Disabled providers stay saved but hide from model pickers.",
             reorderHint: "Drag providers to reorder them; model pickers follow this order.",
             dragHandle: "Drag to reorder",
             add: "Add provider",
@@ -1305,6 +1305,10 @@ export default {
             defaultName: "Default provider",
             newName: "New provider",
             indexedName: "Provider {{index}}",
+            enabled: "On",
+            disabled: "Off",
+            enableTitle: "Enable this provider",
+            disableTitle: "Temporarily disable this provider (keeps it in the list)",
         },
         preferences: {
             interface: "Interface",

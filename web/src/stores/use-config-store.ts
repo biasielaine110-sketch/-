@@ -32,6 +32,8 @@ export type ModelChannel = {
     apiKey: string;
     apiFormat: ApiCallFormat;
     models: ChannelModel[];
+    /** When false the whole channel is hidden from model pickers. Defaults to true. */
+    enabled?: boolean;
 };
 
 export type ImageQuickToolsPreference = {
@@ -232,9 +234,14 @@ export function isChannelModelEnabled(model: Pick<ChannelModel, "enabled">) {
     return model.enabled !== false;
 }
 
+export function isChannelEnabled(channel: Pick<ModelChannel, "enabled">) {
+    return channel.enabled !== false;
+}
+
 export function findPreferredModelOption(channels: ModelChannel[], capability: ModelCapability, preferredNames: string[]) {
     for (const preferred of preferredNames) {
         for (const channel of channels) {
+            if (!isChannelEnabled(channel)) continue;
             const model = channel.models.find((item) => item.name === preferred && item.capability === capability && isChannelModelEnabled(item));
             if (model) return encodeChannelModel(channel.id, model.name);
         }
@@ -280,11 +287,12 @@ function resolvePersistedTextModel(config: Partial<AiConfig>, channels: ModelCha
 }
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
-    return config.channels.flatMap((channel) =>
-        channel.models
+    return config.channels.flatMap((channel) => {
+        if (!isChannelEnabled(channel)) return [];
+        return channel.models
             .filter((model) => isChannelModelEnabled(model) && (!capability || model.capability === capability))
-            .map((model) => encodeChannelModel(channel.id, model.name)),
-    );
+            .map((model) => encodeChannelModel(channel.id, model.name));
+    });
 }
 
 /** The user script (if any) attached to a model; empty string means use the system default call. */
@@ -434,7 +442,7 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
 
 export function createModelChannel(channel?: Partial<ModelChannel>): ModelChannel {
     const apiFormat = normalizeApiFormat(channel?.apiFormat);
-    return {
+    const next: ModelChannel = {
         id: channel?.id?.trim() || nanoid(),
         name: channel?.name?.trim() || i18n.t("config.channels.newName"),
         baseUrl: normalizeProviderBaseUrl(channel?.baseUrl?.trim() || defaultBaseUrlForApiFormat(apiFormat)),
@@ -442,6 +450,8 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
         apiFormat,
         models: normalizeChannelModels(channel?.models),
     };
+    if (channel?.enabled === false) next.enabled = false;
+    return next;
 }
 
 export function encodeChannelModel(channelId: string, model: string) {

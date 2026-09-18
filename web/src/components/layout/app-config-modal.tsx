@@ -1,4 +1,4 @@
-import { App, Button, Checkbox, Form, Input, Modal, Progress, Segmented, Select, Tabs } from "antd";
+import { App, Button, Checkbox, Form, Input, Modal, Progress, Segmented, Select, Switch, Tabs } from "antd";
 import { Download, FileUp, FolderOpen, GripVertical, HardDrive, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -28,6 +28,7 @@ import {
     channelProtocolSummary,
     createModelChannel,
     findPreferredModelOption,
+    isChannelEnabled,
     modelOptionsFromChannels,
     normalizeModelOptionValue,
     selectableModelsByCapability,
@@ -133,6 +134,14 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         updateChannels(config.channels.map((item) => (item.id === channel.id ? channel : item)));
     };
 
+    const setChannelEnabled = (id: string, enabled: boolean) => {
+        updateChannels(
+            config.channels.map((channel) =>
+                channel.id === id ? { ...channel, enabled: enabled ? undefined : false } : channel,
+            ),
+        );
+    };
+
     const reorderChannels = (fromId: string, toId: string) => {
         if (!fromId || !toId || fromId === toId) return;
         const fromIndex = config.channels.findIndex((channel) => channel.id === fromId);
@@ -223,13 +232,15 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                     </Button>
                                 </div>
                                 <div className="space-y-2">
-                                    {config.channels.map((channel) => (
+                                    {config.channels.map((channel) => {
+                                        const enabled = isChannelEnabled(channel);
+                                        return (
                                         <div
                                             key={channel.id}
                                             onDragOver={(event) => handleChannelDragOver(event, channel.id)}
                                             onDrop={(event) => handleChannelDrop(event, channel.id)}
                                             className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-3 transition-colors dark:border-stone-800 ${
-                                                draggingChannelId === channel.id ? "opacity-50" : ""
+                                                draggingChannelId === channel.id || !enabled ? "opacity-50" : ""
                                             } ${dragOverChannelId === channel.id && draggingChannelId !== channel.id ? "border-sky-400 bg-sky-50 dark:border-sky-500 dark:bg-sky-950/40" : "border-stone-200"}`}
                                         >
                                             <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -244,20 +255,29 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                                     <GripVertical className="size-4" />
                                                 </span>
                                                 <div className="min-w-0">
-                                                    <div className="truncate text-sm font-semibold">{channel.name || t("config.channels.unnamed")}</div>
+                                                    <div className={`truncate text-sm font-semibold ${enabled ? "" : "line-through text-stone-400"}`}>{channel.name || t("config.channels.unnamed")}</div>
                                                     <div className="mt-1 truncate text-xs text-stone-500">
                                                         {channelProtocolLabel(channel, t)} Â· {t("config.channels.modelCount", { count: channel.models.length })} Â· {channel.baseUrl || t("config.channels.missingUrl")}
                                                     </div>
                                                 </div>
                                             </div>
-                                            <div className="flex shrink-0 gap-2">
+                                            <div className="flex shrink-0 items-center gap-2">
+                                                <Switch
+                                                    size="small"
+                                                    checked={enabled}
+                                                    onChange={(checked) => setChannelEnabled(channel.id, checked)}
+                                                    checkedChildren={t("config.channels.enabled")}
+                                                    unCheckedChildren={t("config.channels.disabled")}
+                                                    title={enabled ? t("config.channels.disableTitle") : t("config.channels.enableTitle")}
+                                                />
                                                 <Button size="small" icon={<Pencil className="size-3.5" />} onClick={() => setEditingChannelId(channel.id)}>
                                                     {t("common.edit")}
                                                 </Button>
                                                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => deleteChannel(channel.id)} />
                                             </div>
                                         </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             </div>
                         ),
@@ -529,18 +549,18 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
                                     onChange={(event) => updatePrompt(prompt.id, { title: event.target.value })}
                                 />
                                 <Button size="small" disabled={index === 0} title={t("config.preferences.textPromptMoveTop")} onClick={() => movePrompt(index, 0)}>
-                                    â‡?                                </Button>
+                                    â‡ˆ                                </Button>
                                 <Button size="small" disabled={index === 0} title={t("config.preferences.textPromptMoveUp")} onClick={() => movePrompt(index, index - 1)}>
-                                    â†?                                </Button>
+                                    â†‘                                </Button>
                                 <Button size="small" disabled={index === prompts.length - 1} title={t("config.preferences.textPromptMoveDown")} onClick={() => movePrompt(index, index + 1)}>
-                                    â†?                                </Button>
+                                    â†“                                </Button>
                                 <Button
                                     size="small"
                                     disabled={index === prompts.length - 1}
                                     title={t("config.preferences.textPromptMoveBottom")}
                                     onClick={() => movePrompt(index, prompts.length - 1)}
                                 >
-                                    â‡?                                </Button>
+                                    â‡Š                                </Button>
                                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removePrompt(prompt.id)} />
                             </div>
                             <CanvasFindReplaceTextArea
