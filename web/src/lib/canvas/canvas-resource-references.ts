@@ -32,7 +32,14 @@ export async function resolveCanvasReferenceImages(references: CanvasResourceRef
         const node = nodesById.get(reference.nodeId);
         if (!node) throw new Error(i18n.t("agent.composer.mentions.resourceMissing", { title: reference.title }));
         const metadata = node.metadata;
-        const dataUrl = await imageToDataUrl({ storageKey: metadata?.storageKey, url: reference.previewUrl });
+        const dataUrl = await imageToDataUrl({
+            storageKey: metadata?.storageKey,
+            thumbnailStorageKey: metadata?.thumbnailStorageKey,
+            storageKeys: [metadata?.storageKey, metadata?.thumbnailStorageKey, ...(metadata?.images || []).flatMap((image) => [image.storageKey, image.thumbnailStorageKey])],
+            url: reference.previewUrl,
+            urls: [reference.previewUrl, metadata?.content, metadata?.thumbnailContent, ...(metadata?.images || []).flatMap((image) => [image.content, image.thumbnailContent])],
+            nodeId: node.id,
+        });
         if (!dataUrl.startsWith("data:image/")) throw new Error(i18n.t("agent.composer.mentions.imageReadFailed", { title: reference.title }));
         const meta = metadata?.naturalWidth && metadata.naturalHeight
             ? { width: metadata.naturalWidth, height: metadata.naturalHeight, mimeType: metadata.mimeType || dataUrl.match(/^data:([^;]+)/)?.[1] || "image/png" }

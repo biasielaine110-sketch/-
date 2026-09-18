@@ -152,7 +152,7 @@ export async function hydrateNodeGenerationContext(context: NodeGenerationContex
         await Promise.all(
             context.referenceImages.map(async (image) => {
                 try {
-                    const dataUrl = await imageToDataUrl(image);
+                    const dataUrl = await imageToDataUrl({ ...image, nodeId: image.id, urls: image.fallbackUrls, storageKeys: image.storageKeys });
                     if (!dataUrl?.startsWith("data:image/") && !/^https?:\/\//i.test(dataUrl || "")) return null;
                     return { ...image, dataUrl };
                 } catch {
@@ -184,22 +184,40 @@ function readReferenceImage(node: CanvasNodeData): ReferenceImage | null {
     const images = node.metadata?.images || [];
     const primaryId = node.metadata?.primaryImageId || images[0]?.id;
     const primary = images.find((image) => image.id === primaryId) || images[0];
-    // Prefer primary version fields — top-level content is often a stale blob: preview after refresh.
-    const content = String(primary?.content || node.metadata?.content || "").trim();
-    const storageKey = String(primary?.storageKey || node.metadata?.storageKey || "").trim();
-    const thumbnailContent = String(primary?.thumbnailContent || node.metadata?.thumbnailContent || "").trim();
-    const thumbnailStorageKey = String(primary?.thumbnailStorageKey || node.metadata?.thumbnailStorageKey || "").trim();
-    if (!content && !storageKey && !thumbnailContent && !thumbnailStorageKey) return null;
-    const preview = content || thumbnailContent;
+    const slots = [primary, node.metadata, ...images.filter((image) => image !== primary)].filter((slot): slot is NonNullable<typeof slot> => Boolean(slot));
+    const storageKeys: string[] = [];
+    const urls: string[] = [];
+    const pushKey = (value?: string) => {
+        const text = String(value || "").trim();
+        if (text && !storageKeys.includes(text)) storageKeys.push(text);
+    };
+    const pushUrl = (value?: string) => {
+        const text = String(value || "").trim();
+        if (!text) return;
+        if (/^(image|media):/i.test(text)) {
+            pushKey(text);
+            return;
+        }
+        if (!urls.includes(text)) urls.push(text);
+    };
+    for (const slot of slots) {
+        pushKey("storageKey" in slot ? slot.storageKey : undefined);
+        pushKey("thumbnailStorageKey" in slot ? slot.thumbnailStorageKey : undefined);
+        pushUrl("content" in slot ? slot.content : undefined);
+        pushUrl("thumbnailContent" in slot ? slot.thumbnailContent : undefined);
+    }
+    if (!storageKeys.length && !urls.length) return null;
+    const preview = urls.find((url) => url.startsWith("data:image/") || /^https?:\/\//i.test(url)) || urls[0] || "";
     return {
         id: node.id,
         name: `${node.title || node.id}.png`,
         type: primary?.mimeType || node.metadata?.mimeType || "image/png",
-        // Keep live blob:/data:/http content for same-session reads; imageToDataUrl recovers via storageKey when blob dies.
-        dataUrl: preview || "",
+        dataUrl: preview,
         url: /^https?:\/\//i.test(preview) ? preview : undefined,
-        storageKey: storageKey || undefined,
-        thumbnailStorageKey: thumbnailStorageKey || undefined,
+        storageKey: storageKeys[0],
+        thumbnailStorageKey: storageKeys.find((key) => key.includes(":thumb")) || storageKeys[1],
+        storageKeys,
+        fallbackUrls: urls,
     };
 }
 

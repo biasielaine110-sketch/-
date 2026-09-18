@@ -4,7 +4,7 @@ import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import { readImageMeta } from "@/lib/image-utils";
 import { proxyMediaUrl } from "@/lib/api-proxy";
-import { deleteLocalMediaBlob, isLocalMediaLibraryReady, readLocalMediaBlob, writeLocalMediaBlob } from "@/services/local-media-library";
+import { deleteLocalMediaBlob, getLocalMediaLibraryDirectory, isLocalMediaLibraryReady, readLocalMediaBlob, requestLocalMediaLibraryAccess, writeLocalMediaBlob } from "@/services/local-media-library";
 
 export type UploadedImage = {
     url: string;
@@ -148,27 +148,24 @@ export async function setImageBlob(storageKey: string, blob: Blob) {
     return url;
 }
 
-export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string; thumbnailStorageKey?: string }) {
-    const storageKeys = [image.storageKey, image.thumbnailStorageKey].map((value) => String(value || "").trim()).filter(Boolean);
-    const dataUrl = String(image.dataUrl || "").trim();
-    const url = String(image.url || "").trim();
+export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string; thumbnailStorageKey?: string; storageKeys?: string[]; urls?: string[]; fallbackUrls?: string[]; nodeId?: string }) {
+    // Generate is a click, so we can ask for the local folder if IndexedDB was migrated out.
+    await ensureLocalLibraryAccess();
+    const storageKeys = uniqueStrings([image.storageKey, image.thumbnailStorageKey, ...(image.storageKeys || [])]);
+    const urls = uniqueStrings([image.dataUrl, image.url, ...(image.urls || []), ...(image.fallbackUrls || [])]).filter((value) => !storageKeys.includes(value));
 
     const readCandidate = async (candidate: string) => {
         if (!candidate) return "";
-        if (candidate.startsWith("data:")) return candidate;
-        // Dead blob: previews throw; skip without treating as a hard failure.
-        if (/^blob:/i.test(candidate)) {
-            try {
-                const blob = await (await fetch(candidate)).blob();
-                if (!blob.size) return "";
-                return blobToDataUrl(blob);
-            } catch {
-                return "";
-            }
-        }
+        if (/^(image|media):/i.test(candidate)) return "";
+        if (candidate.startsWith("data:image/") && !candidate.startsWith("data:image/svg")) return candidate;
+        if (candidate.startsWith("data:")) return "";
+        if (!/^(blob:|https?:)/i.test(candidate)) return "";
+        // <img> can paint these even when fetch fails or the blob MIME is not image/*.
+        // That is the same path the maximize preview uses.
         try {
-            return blobToDataUrl(await (await fetch(proxyRemoteMediaUrl(candidate))).blob());
+            return await paintImageDataUrl(candidate);
         } catch {
+            if (/^https?:\/\//i.test(candidate)) return candidate;
             return "";
         }
     };
@@ -178,20 +175,19 @@ export async function imageToDataUrl(image: { url?: string; dataUrl?: string; st
         try {
             const fromStore = await resolveImageUrl(storageKey, "");
             const stored = await readCandidate(fromStore);
-            if (stored) return stored;
+            if (stored.startsWith("data:image/")) return stored;
         } catch {
             // try next key / fall through
         }
     }
 
-    for (const candidate of [dataUrl, url]) {
+    for (const candidate of urls) {
         const resolved = await readCandidate(candidate);
-        if (!resolved) continue;
-        // Heal empty IndexedDB entry while the live blob preview is still valid.
+        if (!resolved.startsWith("data:image/") && !/^https?:\/\//i.test(resolved)) continue;
         const healKey = storageKeys[0];
-        if (healKey && /^blob:/i.test(candidate)) {
+        if (healKey && resolved.startsWith("data:image/") && /^blob:/i.test(candidate)) {
             try {
-                const blob = await (await fetch(candidate)).blob();
+                const blob = await (await fetch(resolved)).blob();
                 if (blob.size > 0) await setImageBlob(healKey, blob);
             } catch {
                 // ignore heal failures
@@ -199,7 +195,78 @@ export async function imageToDataUrl(image: { url?: string; dataUrl?: string; st
         }
         return resolved;
     }
+
+    if (image.nodeId) return readDisplayedImageDataUrl(image.nodeId);
     return "";
+}
+
+/** Last resort: the canvas <img> may still hold a live blob the metadata no longer points at. */
+export async function readDisplayedImageDataUrl(nodeId: string) {
+    if (typeof document === "undefined" || !nodeId) return "";
+    const root = document.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`);
+    if (!root) return "";
+    const sources = Array.from(root.querySelectorAll("img"))
+        .map((img) => img.currentSrc || img.src)
+        .filter(Boolean);
+    for (const src of sources) {
+        if (src.startsWith("data:image/") && !src.startsWith("data:image/svg")) return src;
+        if (!/^blob:/i.test(src) && !/^https?:\/\//i.test(src)) continue;
+        try {
+            return await paintImageDataUrl(src);
+        } catch {
+            if (/^https?:\/\//i.test(src)) return src;
+        }
+    }
+    return "";
+}
+
+/** Decode whatever the browser can already paint, including blobs whose MIME type is not image/*. */
+function paintImageDataUrl(src: string) {
+    return new Promise<string>((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => {
+            try {
+                const width = image.naturalWidth || image.width;
+                const height = image.naturalHeight || image.height;
+                if (!width || !height) {
+                    reject(new Error("empty"));
+                    return;
+                }
+                const canvas = document.createElement("canvas");
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext("2d");
+                if (!ctx) {
+                    reject(new Error("canvas"));
+                    return;
+                }
+                ctx.drawImage(image, 0, 0);
+                resolve(canvas.toDataURL("image/png"));
+            } catch (error) {
+                reject(error);
+            }
+        };
+        image.onerror = () => reject(new Error("decode"));
+        image.src = src;
+    });
+}
+
+async function ensureLocalLibraryAccess() {
+    if (await isLocalMediaLibraryReady()) return;
+    if (!(await getLocalMediaLibraryDirectory())) return;
+    await requestLocalMediaLibraryAccess();
+}
+
+function uniqueStrings(values: Array<string | undefined>) {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const value of values) {
+        const text = String(value || "").trim();
+        if (!text || seen.has(text)) continue;
+        seen.add(text);
+        result.push(text);
+    }
+    return result;
 }
 
 export async function deleteStoredImages(keys: Iterable<string>) {
