@@ -8,6 +8,7 @@ import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
+import { uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
 import { imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
 
@@ -532,18 +533,33 @@ function isProviderUploadUnsupported(error: unknown) {
     return /providerImageUploadUnsupported|uploads\/images|参考图上传.*不支持|does not support image upload/i.test(message);
 }
 
+function isHfsyApiBaseUrl(baseUrl: string) {
+    return /hfsyapi\.cn/i.test(baseUrl.trim());
+}
+
+function isReferenceBase64Unsupported(message: string) {
+    return /参考图不支持\s*base64|does\s*not\s*support\s*base64|base64[^\n]{0,40}not\s*supported|invalid_request[^\n]{0,40}base64/i.test(message);
+}
+
 async function resolveReferenceImageUrls(config: AiConfig, references: ReferenceImage[], options?: RequestOptions) {
     const urls: string[] = [];
     for (const image of references.slice(0, 14)) {
-        if (image.url && isPublicHttpUrl(image.url)) {
+        if (image.url && isPublicHttpUrl(image.url) && !image.url.startsWith("data:")) {
             urls.push(image.url.trim());
             continue;
         }
-        if (image.dataUrl && isPublicHttpUrl(image.dataUrl)) {
+        if (image.dataUrl && isPublicHttpUrl(image.dataUrl) && !image.dataUrl.startsWith("data:")) {
             urls.push(image.dataUrl.trim());
             continue;
         }
-        urls.push(await uploadProviderReferenceImage(config, image, options));
+        try {
+            urls.push(await uploadProviderReferenceImage(config, image, options));
+        } catch (error) {
+            // Only hfsyapi: no /uploads/images — host a short-lived public URL instead of sending base64.
+            if (!isHfsyApiBaseUrl(config.baseUrl) || !isProviderUploadUnsupported(error)) throw error;
+            const dataUrl = await prepareReferenceDataUrl(image, Math.max(1, references.length));
+            urls.push(await uploadTemporaryPublicImageFromDataUrl(dataUrl, options?.signal));
+        }
     }
     if (!urls.length) throw new Error(apiText("referenceImageReadFailed"));
     return urls;
@@ -605,8 +621,24 @@ async function requestOpenAiCompatImageToImageViaGenerations(config: AiConfig, p
         ...resolveOpenAiImageParams(config, count),
     };
     body.image = refs.length === 1 ? refs[0] : refs;
-    const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
-    return resolveImageApiResponse(config, response.data, options);
+    try {
+        const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
+        return resolveImageApiResponse(config, response.data, options);
+    } catch (error) {
+        const message = readAxiosError(error, apiText("requestFailed"));
+        // Only hfsyapi rejects data-URL references — upload to a temp host and retry with image_urls.
+        if (!isHfsyApiBaseUrl(config.baseUrl) || !isReferenceBase64Unsupported(message)) throw error;
+        const imageUrls = await Promise.all(refs.map((dataUrl) => uploadTemporaryPublicImageFromDataUrl(dataUrl, options?.signal)));
+        const retryBody: Record<string, unknown> = {
+            model: config.model,
+            prompt: withSystemPrompt(config, prompt),
+            ...resolveOpenAiImageParams(config, count),
+            image_urls: imageUrls,
+            image: imageUrls.length === 1 ? imageUrls[0] : imageUrls,
+        };
+        const response = await postImageJson<ImageApiResponse>(config, "/images/generations", retryBody, options);
+        return resolveImageApiResponse(config, response.data, options);
+    }
 }
 
 function isImageEditsEndpointMissing(error: unknown, message: string) {
@@ -1670,7 +1702,20 @@ function toGeminiParts(content: ResponseMessageContent): GeminiPart[] {
 function toGeminiImagePart(url: string): GeminiPart {
     const match = url.match(/^data:([^;,]+);base64,(.+)$/);
     if (match) return { inlineData: { mimeType: match[1], data: match[2] } };
-    return { fileData: { fileUri: url, mimeType: "image/png" } };
+    return { fileData: { fileUri: url, mimeType: guessImageMimeType(url) } };
+}
+
+function guessImageMimeType(url: string) {
+    const path = url.split("?")[0].toLowerCase();
+    if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
+    if (path.endsWith(".webp")) return "image/webp";
+    if (path.endsWith(".gif")) return "image/gif";
+    return "image/png";
+}
+
+/** Official Google accepts inline base64; hfsyapi Gemini img2img only accepts public fileUri URLs. */
+function prefersGeminiPublicImageUrls(baseUrl: string) {
+    return isHfsyApiBaseUrl(baseUrl);
 }
 
 function geminiTextContent(content: ResponseMessageContent) {
@@ -1792,11 +1837,35 @@ async function requestGeminiImages(config: AiConfig, prompt: string, references:
 }
 
 async function requestGeminiImagesOnce(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
-    const parts: GeminiPart[] = [{ text: prompt }];
-    const count = Math.max(1, references.length);
-    for (const image of references) {
-        parts.push(toGeminiImagePart(await prepareReferenceDataUrl(image, count)));
+    const buildParts = async (usePublicUrls: boolean) => {
+        const parts: GeminiPart[] = [{ text: prompt }];
+        if (!references.length) return parts;
+        if (usePublicUrls) {
+            const urls = await resolveReferenceImageUrls(config, references, options);
+            for (const url of urls) parts.push(toGeminiImagePart(url));
+            return parts;
+        }
+        const count = Math.max(1, references.length);
+        for (const image of references) {
+            parts.push(toGeminiImagePart(await prepareReferenceDataUrl(image, count)));
+        }
+        return parts;
+    };
+
+    const preferPublic = Boolean(references.length) && prefersGeminiPublicImageUrls(config.baseUrl);
+    try {
+        return await postGeminiImageParts(config, prompt, await buildParts(preferPublic), options);
+    } catch (error) {
+        const message = readAxiosError(error, apiText("requestFailed"));
+        // Only retry public fileUri for hfsyapi when it rejects inline base64.
+        if (!references.length || !isHfsyApiBaseUrl(config.baseUrl) || !isReferenceBase64Unsupported(message) || preferPublic) {
+            throw error instanceof Error ? error : new Error(message);
+        }
+        return await postGeminiImageParts(config, prompt, await buildParts(true), options);
     }
+}
+
+async function postGeminiImageParts(config: AiConfig, prompt: string, parts: GeminiPart[], options?: RequestOptions) {
     const response = await axios.post<GeminiPayload>(
         geminiApiUrl(config, "generateContent"),
         {

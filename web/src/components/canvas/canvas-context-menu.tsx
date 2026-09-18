@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Download, FolderPlus, GripVertical, Info, Plus, Scissors, Trash2, Unlink2 } from "lucide-react";
+import { Download, FolderPlus, GripVertical, Info, Plus, Copy, Scissors, Trash2, Unlink2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -33,6 +33,7 @@ export function CanvasNodeContextMenu({
     onClose,
     onBeforeAction,
     onDuplicate,
+    onCopyImage,
     onDelete,
     onInfo,
     onDownload,
@@ -49,6 +50,8 @@ export function CanvasNodeContextMenu({
     /** Runs before any menu action (e.g. close image preview so edit dialogs are visible). */
     onBeforeAction?: () => void;
     onDuplicate: () => void;
+    /** Copy the image bitmap to the system clipboard (for pasting outside the canvas). */
+    onCopyImage?: () => void;
     onDelete: () => void;
     onInfo?: (node: CanvasNodeData) => void;
     onDownload?: (node: CanvasNodeData) => void;
@@ -169,9 +172,19 @@ export function CanvasNodeContextMenu({
                   ]
                 : []),
             ...imageTools,
+            ...(onCopyImage
+                ? [
+                      {
+                          id: "copy",
+                          label: t("common.copy"),
+                          icon: <Copy className="size-4" />,
+                          onClick: () => runAndClose(onCopyImage),
+                      },
+                  ]
+                : []),
             {
                 id: "duplicate",
-                label: t("canvas.controls.duplicate"),
+                label: t("canvas.controls.duplicateNode"),
                 icon: <Plus className="size-4" />,
                 onClick: () => runAndClose(onDuplicate),
             },
@@ -183,7 +196,7 @@ export function CanvasNodeContextMenu({
                 onClick: () => runAndClose(onDelete),
             },
         ];
-    }, [hasAudio, hasImage, hasVideo, imageHandlers, menu.type, node, onBeforeAction, onClose, onDelete, onDownload, onDuplicate, onInfo, onOpenAudioTools, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
+    }, [hasAudio, hasImage, hasVideo, imageHandlers, menu.type, node, onBeforeAction, onClose, onCopyImage, onDelete, onDownload, onDuplicate, onInfo, onOpenAudioTools, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
 
     const menuOrder = useMemo(() => mergeOrderedIds(imageContextMenuOrder || [], tools.map((tool) => tool.id)), [imageContextMenuOrder, tools]);
     const orderedTools = useMemo(() => sortByOrder(tools, menuOrder), [menuOrder, tools]);

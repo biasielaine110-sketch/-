@@ -15,7 +15,8 @@ import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/l
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { resolveApiTransport, proxyApiUrl, proxyMediaUrl } from "@/lib/api-proxy";
+import { resolveApiTransport, proxyApiUrl } from "@/lib/api-proxy";
+import { uploadTemporaryPublicImage } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
@@ -703,51 +704,6 @@ function publicImageFilename(blob: Blob) {
     if (blob.type.includes("png")) return "reference.png";
     if (blob.type.includes("webp")) return "reference.webp";
     return "reference.jpg";
-}
-
-/** Metaso fetches image_url itself, so a local data URL must become a short-lived public HTTPS URL. */
-async function uploadTemporaryPublicImage(blob: Blob, filename: string, signal?: AbortSignal) {
-    const attempts = [() => uploadLitterboxImage(blob, filename, signal), () => uploadCatboxImage(blob, filename, signal), () => uploadNullPointerImage(blob, filename, signal)];
-    let lastError: unknown;
-    for (const attempt of attempts) {
-        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        try {
-            const url = (await attempt()).trim();
-            if (isPublicHttpUrl(url) && !url.startsWith("data:")) return url;
-        } catch (error) {
-            lastError = error;
-            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
-        }
-    }
-    throw lastError instanceof Error ? lastError : new Error(apiText("metasoH3PublicImageRequired"));
-}
-
-async function uploadLitterboxImage(blob: Blob, filename: string, signal?: AbortSignal) {
-    const form = new FormData();
-    form.append("reqtype", "fileupload");
-    form.append("time", "24h");
-    form.append("fileToUpload", blob, filename);
-    return readPlainPublicUrl(await axios.post<string>(proxyMediaUrl("https://litterbox.catbox.moe/resources/internals/api.php"), form, { signal, responseType: "text" }));
-}
-
-async function uploadCatboxImage(blob: Blob, filename: string, signal?: AbortSignal) {
-    const form = new FormData();
-    form.append("reqtype", "fileupload");
-    form.append("fileToUpload", blob, filename);
-    return readPlainPublicUrl(await axios.post<string>(proxyMediaUrl("https://catbox.moe/user/api.php"), form, { signal, responseType: "text" }));
-}
-
-async function uploadNullPointerImage(blob: Blob, filename: string, signal?: AbortSignal) {
-    const form = new FormData();
-    form.append("file", blob, filename);
-    return readPlainPublicUrl(await axios.post<string>(proxyMediaUrl("https://0x0.st"), form, { signal, responseType: "text" }));
-}
-
-function readPlainPublicUrl(response: { data: unknown }) {
-    const text = String(response.data || "").trim();
-    const url = text.split(/\s+/)[0] || "";
-    if (!isPublicHttpUrl(url)) throw new Error(text.slice(0, 180) || apiText("metasoH3PublicImageRequired"));
-    return url;
 }
 
 /** Prefer remote URLs; otherwise compress data URLs so /api/proxy stays under Vercel ~4.5MB. */

@@ -242,6 +242,24 @@ function defaultFitSizeForNode(node: CanvasNodeData, natural: { width: number; h
     return sizeFromDisplayScalePercent(natural.width, natural.height, 100);
 }
 
+/** Browsers often only accept image/png in ClipboardItem — re-encode other formats. */
+async function ensureClipboardImageBlob(blob: Blob) {
+    if (blob.type === "image/png") return blob;
+    const bitmap = await createImageBitmap(blob);
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+        bitmap.close();
+        return new Blob([blob], { type: "image/png" });
+    }
+    context.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    return png || new Blob([blob], { type: "image/png" });
+}
+
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
 
@@ -1162,22 +1180,21 @@ function AtelierCanvasPage() {
         };
     }, []);
 
-    const copySelectedImageToClipboard = useCallback(async () => {
-        if (selectedNodeIdsRef.current.size !== 1) {
-            message.warning(t("canvas.shortcut.copyImageNeedSelect"));
-            return;
-        }
-        const nodeId = Array.from(selectedNodeIdsRef.current)[0];
+    const copyNodeImageToClipboard = useCallback(async (nodeId: string) => {
         const node = nodesRef.current.find((item) => item.id === nodeId);
         if (!node || node.type !== CanvasNodeType.Image || !node.metadata?.content) {
             message.warning(t("canvas.shortcut.copyImageNeedSelect"));
             return;
         }
         try {
-            const dataUrl = await imageToDataUrl({ url: node.metadata.content, storageKey: node.metadata.storageKey });
-            const blob = await (await fetch(dataUrl)).blob();
-            const type = blob.type || node.metadata.mimeType || "image/png";
-            await navigator.clipboard.write([new ClipboardItem({ [type]: blob })]);
+            const primary = node.metadata.images?.find((image) => image.id === (node.metadata?.primaryImageId || node.metadata?.images?.[0]?.id) && image.content) || null;
+            const dataUrl = await imageToDataUrl({
+                url: primary?.content || node.metadata.content,
+                storageKey: primary?.storageKey || node.metadata.storageKey,
+            });
+            const sourceBlob = await (await fetch(dataUrl)).blob();
+            const clipboardBlob = await ensureClipboardImageBlob(sourceBlob);
+            await navigator.clipboard.write([new ClipboardItem({ [clipboardBlob.type]: clipboardBlob })]);
             message.success(t("canvas.shortcut.copyImageDone"));
         } catch (error) {
             message.error(error instanceof Error ? error.message : t("canvas.shortcut.copyImageFailed"));
@@ -5470,6 +5487,11 @@ function AtelierCanvasPage() {
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
+                            setContextMenu(null);
+                        }}
+                        onCopyImage={() => {
+                            if (contextMenu.type !== "node") return;
+                            void copyNodeImageToClipboard(contextMenu.nodeId);
                             setContextMenu(null);
                         }}
                         onDelete={() => {
