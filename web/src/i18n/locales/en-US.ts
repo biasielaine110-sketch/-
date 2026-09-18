@@ -1076,6 +1076,7 @@ export default {
             createImage: "Create an image node",
             createAnnotate: "Create an annotate node",
             createVideo: "Create a video generation node",
+            createAudio: "Create an audio node",
             focusNode: "Maximize the selected node in view",
             selectNodeToFocus: "Select one node first, then press F to maximize",
             resetNodeSize: "Downscale selected image pixels to 99% and overwrite in place",

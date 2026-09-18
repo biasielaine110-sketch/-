@@ -98,7 +98,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                     value={current}
                     placeholder={pickerPlaceholder}
                     className={cn("canvas-composer-model-picker h-8 w-full min-w-0 max-w-full [&_.ant-select-selector]:!rounded-full [&_.ant-select-selector]:!px-3")}
-                    popupMatchSelectWidth={false}
+                    popupMatchSelectWidth
                     options={selectOptions}
                     optionLabelProp="title"
                     getPopupContainer={() => document.body}
@@ -107,7 +107,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                         <div
                             data-canvas-no-zoom
                             data-canvas-shortcuts-ignore
-                            className="w-80 max-w-[calc(100vw-24px)]"
+                            className="w-full min-w-[16rem] max-w-[calc(100vw-24px)]"
                             onMouseDown={(event) => event.stopPropagation()}
                             onPointerDown={(event) => event.stopPropagation()}
                             onClick={(event) => event.stopPropagation()}
@@ -194,10 +194,10 @@ function emptyModelLabel(config: AiConfig, capability?: ModelCapability) {
 function ModelLabel({ config, model, capability }: { config: AiConfig; model: string; capability: ModelCapability }) {
     const health = getModelHealth(modelHealthKey(config, model, capability));
     return (
-        <span className="flex min-w-0 items-center gap-2">
+        <span className="flex w-full min-w-0 items-center gap-2">
             <HealthDot status={health.status} message={health.message} />
             <ModelIcon model={model} />
-            <span className="truncate">{modelOptionLabel(config, model)}</span>
+            <span className="min-w-0 flex-1 truncate">{modelOptionLabel(config, model)}</span>
         </span>
     );
 }

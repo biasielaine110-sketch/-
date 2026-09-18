@@ -1075,6 +1075,7 @@ export default {
             createImage: "新建图片节点",
             createAnnotate: "新建图片标记节点",
             createVideo: "新建视频生成节点",
+            createAudio: "新建音频节点",
             focusNode: "最大化显示选中节点",
             selectNodeToFocus: "请先选中一个节点，再按 F 最大化显示",
             resetNodeSize: "将选中图片像素缩小到 99% 并直接覆盖原图",

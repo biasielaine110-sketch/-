@@ -2206,7 +2206,7 @@ function AtelierCanvasPage() {
                 return;
             }
 
-            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "r") {
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "e") {
                 event.preventDefault();
                 createNode(CanvasNodeType.Text);
                 return;
@@ -2218,15 +2218,15 @@ function AtelierCanvasPage() {
                 return;
             }
 
-            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "e") {
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "r") {
                 event.preventDefault();
-                createNode(CanvasNodeType.Annotate);
+                createNode(CanvasNodeType.Video);
                 return;
             }
 
             if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "t") {
                 event.preventDefault();
-                createNode(CanvasNodeType.Video);
+                createNode(CanvasNodeType.Audio);
                 return;
             }
 

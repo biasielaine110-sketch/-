@@ -348,6 +348,19 @@
         padding-inline: 0;
     }
 
+    /* Model picker popup: stretch options to the select width (avoid left-narrow / right-empty layout). */
+    .canvas-model-picker-dropdown.ant-select-dropdown {
+        padding-inline: 0;
+    }
+
+    .canvas-model-picker-dropdown .ant-select-item {
+        width: 100%;
+    }
+
+    .canvas-model-picker-dropdown .rc-virtual-list-holder-inner {
+        width: 100% !important;
+    }
+
     @container (min-width: 440px) {
         .canvas-composer-mode-button {
             padding-inline: 8px;

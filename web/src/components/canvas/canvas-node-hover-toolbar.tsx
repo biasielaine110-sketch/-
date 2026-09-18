@@ -203,7 +203,9 @@ export function CanvasNodeHoverToolbar({
     return (
         <>
             <div
-                className="absolute z-[70] flex h-[31px] -translate-x-1/2 -translate-y-full items-center overflow-visible rounded-[12px] border border-white/15 bg-neutral-700/55 text-[10px] text-white/90 shadow-[0_4px_14px_rgba(15,23,42,.18)] backdrop-blur-md"
+                className={`absolute z-[70] flex -translate-x-1/2 -translate-y-full items-center overflow-visible rounded-[12px] border border-white/15 bg-neutral-700/55 text-white/90 shadow-[0_4px_14px_rgba(15,23,42,.18)] backdrop-blur-md ${
+                    isChat ? "h-10 rounded-2xl text-base" : "h-[31px] text-[10px]"
+                }`}
                 style={{ left, top }}
                 onMouseEnter={() => onKeep(node.id)}
                 onMouseLeave={() => {
@@ -213,7 +215,7 @@ export function CanvasNodeHoverToolbar({
                 onPointerDown={(event) => event.stopPropagation()}
             >
                 {toolbarTools.map((tool) => (
-                    <ToolbarAction key={tool.id} {...tool} showLabel={isImage ? showImageToolLabels : true} />
+                    <ToolbarAction key={tool.id} {...tool} showLabel={isImage ? showImageToolLabels : true} large={isChat} />
                 ))}
                 {hasImage && isImage ? <ToolbarAction id="more" title={t("canvas.imageTools.configure")} label={t("canvas.imageTools.more")} icon={<Ellipsis className="size-[10px]" />} active={imageToolSettingsOpen} onClick={openImageToolSettings} showLabel={showImageToolLabels} /> : null}
             </div>
@@ -304,12 +306,12 @@ export function CanvasNodeInfoModal({ node, open, onClose }: { node: CanvasNodeD
     );
 }
 
-function ToolbarAction({ title, label, icon, onClick, showLabel, active = false, danger = false }: ToolbarTool & { showLabel: boolean }) {
+function ToolbarAction({ title, label, icon, onClick, showLabel, active = false, danger = false, large = false }: ToolbarTool & { showLabel: boolean; large?: boolean }) {
     const hasText = showLabel && Boolean(label);
     return (
-        <Tooltip title={title} placement="top" mouseEnterDelay={0.2} color="rgba(64,64,64,.92)" styles={{ root: { color: "#f5f5f5", boxShadow: "0 4px 12px rgba(15,23,42,.2)", fontSize: 14, fontWeight: 500 } }}>
-            <button type="button" className={`group relative flex h-[31px] items-center whitespace-nowrap px-[3px] ${danger ? "text-[#f87171]" : ""}`} onClick={onClick} aria-label={title}>
-                <span className={`flex h-[23px] items-center ${hasText ? "gap-1.5 px-2" : "justify-center px-1.5"} rounded-md transition group-hover:bg-white/15 ${active ? "bg-white/20" : ""}`}>
+        <Tooltip title={title} placement="top" mouseEnterDelay={0.2} color="rgba(64,64,64,.92)" styles={{ root: { color: "#f5f5f5", boxShadow: "0 4px 12px rgba(15,23,42,.2)", fontSize: large ? 16 : 14, fontWeight: 500 } }}>
+            <button type="button" className={`group relative flex items-center whitespace-nowrap px-[3px] ${large ? "h-10" : "h-[31px]"} ${danger ? "text-[#f87171]" : ""}`} onClick={onClick} aria-label={title}>
+                <span className={`flex items-center ${large ? "h-8" : "h-[23px]"} ${hasText ? (large ? "gap-2 px-2.5" : "gap-1.5 px-2") : large ? "justify-center px-2" : "justify-center px-1.5"} rounded-md transition group-hover:bg-white/15 ${active ? "bg-white/20" : ""}`}>
                     {icon}
                     {hasText ? <span>{label}</span> : null}
                 </span>
