@@ -340,6 +340,25 @@
         display: none;
     }
 
+    /* Chat window: closed model box matches the 20px UI, dropdown list stays default. */
+    .canvas-chat-shell .canvas-composer-model-picker.ant-select {
+        height: 44px !important;
+        font-size: 20px !important;
+    }
+
+    .canvas-chat-shell .canvas-composer-model-picker .ant-select-selector {
+        height: 44px !important;
+        min-height: 44px !important;
+        font-size: 20px !important;
+    }
+
+    .canvas-chat-shell .canvas-composer-model-picker .ant-select-selection-item,
+    .canvas-chat-shell .canvas-composer-model-picker .ant-select-selection-placeholder,
+    .canvas-chat-shell .canvas-model-picker-text {
+        font-size: 20px !important;
+        line-height: 1.2 !important;
+    }
+
     .canvas-composer-tools .canvas-composer-model-picker {
         width: 32px;
         min-width: 32px;

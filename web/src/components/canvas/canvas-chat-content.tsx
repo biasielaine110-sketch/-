@@ -11,7 +11,7 @@ import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { resolveChatSendOptions, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { getChatSkillDisplayDescription, getChatSkillDisplayName, listChatSkills, resolveChatSkillIds } from "@/lib/chat-skills";
-import { DEFAULT_CANVAS_FONT_SIZE } from "@/constant/canvas";
+import { DEFAULT_CANVAS_FONT_SIZE, DEFAULT_CHAT_FONT_SIZE } from "@/constant/canvas";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasAssistantImage, CanvasAssistantMessage, CanvasNodeData } from "@/types/canvas";
@@ -87,9 +87,13 @@ export function CanvasChatContent({
     const textModel = resolveModelForCapability(globalConfig, node.metadata?.model, "text");
     const imageModel = resolveModelForCapability(globalConfig, node.metadata?.imageModel, "image");
     const canSend = Boolean(draft.trim() || contextText || linkedMedia.length) && !loading && (textEnabled || imageEnabled);
-    const fontSize = Math.max(MIN_CHAT_FONT_SIZE, Math.min(MAX_CHAT_FONT_SIZE, node.metadata?.fontSize || DEFAULT_CANVAS_FONT_SIZE));
+    const storedFont = node.metadata?.fontSize;
+    const fontSize = Math.max(
+        MIN_CHAT_FONT_SIZE,
+        Math.min(MAX_CHAT_FONT_SIZE, !storedFont || storedFont === DEFAULT_CANVAS_FONT_SIZE ? DEFAULT_CHAT_FONT_SIZE : storedFont),
+    );
     const bodyTextStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.55)}px` } as const;
-    const metaTextStyle = { fontSize: `${Math.max(10, Math.round(fontSize * 0.75))}px` } as const;
+    const metaTextStyle = { fontSize: "20px" } as const;
     const previewMessage = previewMessageId ? messages.find((message) => message.id === previewMessageId) || null : null;
     const previewText = (previewMessage?.text || "").trim();
     const previewTitle = previewMessage
@@ -213,10 +217,10 @@ export function CanvasChatContent({
     const headerRows = (textEnabled ? 1 : 0) + (imageEnabled ? 1 : 0);
 
     return (
-        <div className={`flex h-full w-full cursor-move flex-col overflow-hidden text-base ${headerRows > 1 ? "pt-[5.25rem]" : "pt-11"}`} style={{ color: theme.node.text }}>
+        <div className={`canvas-chat-shell flex h-full w-full cursor-move flex-col overflow-hidden text-[20px] ${headerRows > 1 ? "pt-32" : "pt-16"}`} style={{ color: theme.node.text }}>
             <div className="absolute inset-x-2 top-2 z-20 flex flex-col gap-1.5">
                 <div className="flex items-center gap-2">
-                    <div className="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-base font-medium opacity-80" style={{ background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke }}>
+                    <div className="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[20px] font-medium opacity-80" style={{ background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke }}>
                         <MessageSquareText className="size-4" />
                         {t("canvas.chat.title")}
                     </div>
@@ -269,7 +273,7 @@ export function CanvasChatContent({
                         ) : null}
                         {linkedMedia.length ? (
                             <div>
-                                <div className="mb-1.5 text-sm font-semibold uppercase opacity-50">{t("canvas.chat.linkedMediaLabel")}</div>
+                                <div className="mb-1.5 text-[20px] font-semibold uppercase opacity-50">{t("canvas.chat.linkedMediaLabel")}</div>
                                 <div className="flex flex-wrap gap-1.5">
                                     {linkedMedia.map((reference) => (
                                         <div key={reference.id} className="relative h-14 w-14 overflow-hidden rounded-lg border" style={{ borderColor: theme.node.stroke }} title={reference.title}>
@@ -319,9 +323,9 @@ export function CanvasChatContent({
             <div className="shrink-0 cursor-auto border-t p-2" style={{ borderColor: theme.node.stroke }} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
                 {activeReferences.length ? (
                     <div className="mb-1.5 flex flex-wrap items-center gap-1">
-                        <span className="text-sm opacity-50">{t("canvas.chat.mentionHint")}</span>
+                        <span className="text-[20px] opacity-50">{t("canvas.chat.mentionHint")}</span>
                         {activeReferences.slice(0, 6).map((reference) => (
-                            <span key={reference.id} className="inline-flex max-w-36 items-center gap-1 rounded-md border px-2 py-1 text-sm" style={{ borderColor: theme.node.stroke, background: theme.node.panel }} title={reference.title}>
+                            <span key={reference.id} className="inline-flex max-w-36 items-center gap-1 rounded-md border px-2 py-1 text-[20px]" style={{ borderColor: theme.node.stroke, background: theme.node.panel }} title={reference.title}>
                                 {reference.kind === "image" && reference.previewUrl ? <img src={reference.previewUrl} alt="" className="size-5 rounded object-cover" /> : null}
                                 {reference.kind === "video" ? <Video className="size-4 opacity-70" /> : null}
                                 <span className="truncate">{reference.label}</span>
@@ -344,16 +348,16 @@ export function CanvasChatContent({
                             />
                             {skillsOpen ? (
                                 <div
-                                    className="absolute bottom-full left-0 z-30 mb-1 w-72 rounded-xl border p-2.5 shadow-lg text-base"
+                                    className="absolute bottom-full left-0 z-30 mb-1 w-72 rounded-xl border p-2.5 shadow-lg text-[20px]"
                                     style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
                                     onMouseDown={(event) => event.stopPropagation()}
                                     onPointerDown={(event) => event.stopPropagation()}
                                 >
                                     <div className="mb-2 flex items-center justify-between gap-2">
-                                        <div className="text-sm font-semibold uppercase opacity-55">{t("canvas.chat.skillsTitle")}</div>
+                                        <div className="text-[20px] font-semibold uppercase opacity-55">{t("canvas.chat.skillsTitle")}</div>
                                         <button
                                             type="button"
-                                            className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-sm opacity-80 transition hover:opacity-100"
+                                            className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[20px] opacity-80 transition hover:opacity-100"
                                             style={{ borderColor: theme.node.stroke }}
                                             onClick={() => skillPackInputRef.current?.click()}
                                             title={t("canvas.chat.skillsImportHint")}
@@ -369,7 +373,7 @@ export function CanvasChatContent({
                                             onChange={(event) => void importSkillPack(event.target.files?.[0] || null)}
                                         />
                                     </div>
-                                    <div className="mb-2 text-sm leading-snug opacity-50">{t("canvas.chat.skillsImportHint")}</div>
+                                    <div className="mb-2 text-[20px] leading-snug opacity-50">{t("canvas.chat.skillsImportHint")}</div>
                                     <div className="max-h-64 space-y-1 overflow-y-auto">
                                         {skills.map((skill) => {
                                             const active = enabledSkillIds.includes(skill.id);
@@ -386,17 +390,17 @@ export function CanvasChatContent({
                                                 >
                                                     <button type="button" className="flex min-w-0 flex-1 items-start gap-2 text-left" onClick={() => toggleSkill(skill.id)} title={skillDesc}>
                                                         <span
-                                                            className="mt-0.5 grid size-5 shrink-0 place-items-center rounded border text-sm"
+                                                            className="mt-0.5 grid size-5 shrink-0 place-items-center rounded border text-[20px]"
                                                             style={{ borderColor: active ? theme.toolbar.activeBg : theme.node.stroke, background: active ? theme.toolbar.activeBg : "transparent", color: active ? "#fff" : theme.node.text }}
                                                         >
                                                             {active ? <Check className="size-3" /> : null}
                                                         </span>
                                                         <span className="min-w-0">
-                                                            <span className="block text-base font-medium">
+                                                            <span className="block text-[20px] font-medium">
                                                                 {skillName}
-                                                                {skill.source === "local" ? <span className="ml-1 text-sm font-normal opacity-50">{t("canvas.chat.skillsLocalBadge")}</span> : null}
+                                                                {skill.source === "local" ? <span className="ml-1 text-[20px] font-normal opacity-50">{t("canvas.chat.skillsLocalBadge")}</span> : null}
                                                             </span>
-                                                            <span className="block text-sm opacity-60">{skillDesc}</span>
+                                                            <span className="block text-[20px] opacity-60">{skillDesc}</span>
                                                         </span>
                                                     </button>
                                                     {skill.removable ? (
@@ -432,7 +436,7 @@ export function CanvasChatContent({
                             >
                                 <Minus className="size-3.5" />
                             </button>
-                            <span className="min-w-8 text-center text-sm font-medium tabular-nums opacity-70" style={{ color: theme.node.text }}>
+                            <span className="min-w-8 text-center text-[20px] font-medium tabular-nums opacity-70" style={{ color: theme.node.text }}>
                                 {fontSize}
                             </span>
                             <button
@@ -480,7 +484,7 @@ export function CanvasChatContent({
                         {loading ? (
                             <>
                                 <Square className="size-3.5 fill-current" />
-                                <span className="text-base font-medium">{t("canvas.chat.stop")}</span>
+                                <span className="text-[20px] font-medium">{t("canvas.chat.stop")}</span>
                             </>
                         ) : textEnabled && imageEnabled ? (
                             <SendHorizontal className="size-5" />
@@ -520,7 +524,7 @@ function ModeToggle({ active, label, icon, theme, onClick }: { active: boolean; 
     return (
         <button
             type="button"
-            className="inline-flex h-9 items-center gap-1.5 rounded-full border px-3 text-base font-medium transition"
+            className="inline-flex h-11 items-center gap-1.5 rounded-full border px-3 text-[20px] font-medium transition"
             style={{
                 background: active ? theme.toolbar.activeBg : `${theme.toolbar.panel}aa`,
                 color: active ? theme.toolbar.activeText : theme.node.text,
@@ -558,7 +562,7 @@ function ChatBubble({
     const images = message.images || [];
     const text = (message.text || "").trim();
     const bodyStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.55)}px` };
-    const metaStyle = { fontSize: `${Math.max(10, Math.round(fontSize * 0.75))}px` };
+    const metaStyle = { fontSize: "20px" };
     const canDelete = Boolean(onDelete);
 
     const handleCopy = (event: ReactMouseEvent | ReactPointerEvent) => {

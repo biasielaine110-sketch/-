@@ -4,8 +4,10 @@ import type { CanvasNodeMetadata } from "@/types/canvas";
 import { getNodeSpec as getRegistryNodeSpec } from "@/lib/canvas/node-registry";
 import { DEFAULT_CHAT_SKILL_IDS } from "@/lib/chat-skills";
 
-/** Default font size for text / chat nodes on the canvas. */
+/** Default font size for text nodes on the canvas. */
 export const DEFAULT_CANVAS_FONT_SIZE = 16;
+/** Default font size for the chat node UI and message body. */
+export const DEFAULT_CHAT_FONT_SIZE = 20;
 
 type CanvasNodeSpec = {
     width: number;
@@ -58,7 +60,7 @@ export const NODE_SPECS = {
     },
     [CanvasNodeType.Chat]: {
         width: 840, height: 1387, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Chat].title; },
-        metadata: { status: "idle", messages: [], fontSize: DEFAULT_CANVAS_FONT_SIZE, chatSkillIds: [...DEFAULT_CHAT_SKILL_IDS] },
+        metadata: { status: "idle", messages: [], fontSize: DEFAULT_CHAT_FONT_SIZE, chatSkillIds: [...DEFAULT_CHAT_SKILL_IDS] },
     },
     [CanvasNodeType.Annotate]: {
         width: 420, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Annotate].title; },
