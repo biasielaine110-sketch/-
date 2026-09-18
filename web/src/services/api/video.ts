@@ -489,18 +489,68 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
 
 /**
  * Metaso MiniMax-H3 via OpenAI-compatible /v1/videos.
- * Docs: https://metaso.cn/minimax-h3/new-api-guide
- * Body must stay minimal: model=sora-2, prompt, seconds, size, input_reference.image_url (public HTTPS).
+ * Spec shape: https://metaso.cn/minimax-h3/new-api-guide
+ * Note: that guide's `sora-2` is a New API *channel mapping alias*.
+ * Calling https://metaso.cn/api/openai directly requires the real model id (e.g. MiniMax-H3).
  */
 async function createMetasoH3VideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     if (!references.length) throw new Error(apiText("metasoH3ImageRequired"));
-    const modelName = resolveMetasoH3ModelName(model);
+    const modelName = resolveMetasoDirectModelName(model);
     const seconds = normalizeMetasoH3Seconds(config.videoSeconds);
     const size = normalizeMetasoH3Size(config.size, config.vquality);
-    const imageUrl = await resolveMetasoH3ImageUrl(config, references[0], options);
-    if (!isPublicHttpUrl(imageUrl) || imageUrl.startsWith("data:")) {
-        throw new Error(apiText("metasoH3PublicImageRequired"));
+    const trimmedPrompt = prompt.trim();
+    if (!trimmedPrompt) throw new Error(apiText("videoTaskCreateFailed"));
+
+    const { publicUrl, dataUrl, file } = await resolveMetasoH3ImageSources(references[0], size, options);
+    const attempts: Array<() => Promise<VideoGenerationTask>> = [];
+
+    // 1) JSON + public HTTPS (docs shape).
+    if (publicUrl) {
+        attempts.push(() => postMetasoH3VideoJson(config, model, modelName, trimmedPrompt, seconds, size, publicUrl, options));
     }
+    // 2) Multipart file (OpenAI-native local reference; Metaso has no /files/upload).
+    if (file) {
+        attempts.push(async () => {
+            const body = new FormData();
+            body.append("model", modelName);
+            body.append("prompt", trimmedPrompt);
+            body.append("seconds", String(seconds));
+            body.append("size", size);
+            body.append("input_reference", file);
+            const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
+            if (!created.id) throw new Error(apiText("noVideoTaskId"));
+            return { id: created.id, provider: "openai", model };
+        });
+    }
+    // 3) JSON + data URL (OpenAI image_url allows base64).
+    if (dataUrl) {
+        attempts.push(() => postMetasoH3VideoJson(config, model, modelName, trimmedPrompt, seconds, size, dataUrl, options));
+    }
+    if (!attempts.length) throw new Error(apiText("metasoH3PublicImageRequired"));
+
+    let lastError: unknown;
+    for (const attempt of attempts) {
+        try {
+            return await attempt();
+        } catch (error) {
+            lastError = error;
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+            if (!axios.isAxiosError(error) || error.response?.status !== 400) break;
+        }
+    }
+    throw new Error(readAxiosError(lastError, apiText("videoTaskCreateFailed")));
+}
+
+async function postMetasoH3VideoJson(
+    config: AiConfig,
+    model: string,
+    modelName: string,
+    prompt: string,
+    seconds: number,
+    size: string,
+    imageUrl: string,
+    options?: RequestOptions,
+): Promise<VideoGenerationTask> {
     const payload = {
         model: modelName,
         prompt,
@@ -508,15 +558,88 @@ async function createMetasoH3VideoTask(config: AiConfig, model: string, prompt: 
         size,
         input_reference: { image_url: imageUrl },
     };
-    try {
-        const created = unwrapVideoResponse(
-            (await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data,
-        );
-        if (!created.id) throw new Error(apiText("noVideoTaskId"));
-        return { id: created.id, provider: "openai", model };
-    } catch (error) {
-        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+    if (imageUrl.startsWith("data:")) assertProxyBodyFits(payload);
+    const created = unwrapVideoResponse(
+        (await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data,
+    );
+    if (!created.id) throw new Error(apiText("noVideoTaskId"));
+    return { id: created.id, provider: "openai", model };
+}
+
+/**
+ * Prefer a public HTTPS URL (docs examples). Keep a sized file/data URL as fallbacks
+ * when temp hosts fail or Metaso cannot fetch the hosted file.
+ */
+async function resolveMetasoH3ImageSources(image: ReferenceImage, size: string, options?: RequestOptions) {
+    const existing = [image.url, image.dataUrl].map((value) => String(value || "").trim()).find((value) => isPublicHttpUrl(value) && !value.startsWith("data:") && !/^blob:/i.test(value));
+    const rawDataUrl = await imageToDataUrl(image);
+    if (!rawDataUrl?.startsWith("data:image/")) {
+        if (existing) return { publicUrl: existing, dataUrl: "", file: null as File | null };
+        throw new Error(apiText("metasoH3ImageUnreadable"));
     }
+
+    const sizedDataUrl = await resizeImageDataUrlToExactSize(rawDataUrl, size);
+    const blob = await (await fetch(sizedDataUrl)).blob();
+    const file = new File([blob], publicImageFilename(blob), { type: blob.type || "image/jpeg" });
+    let publicUrl = "";
+    try {
+        const hosted = await uploadTemporaryPublicImage(blob, publicImageFilename(blob), options?.signal);
+        if (isPublicHttpUrl(hosted) && !hosted.startsWith("data:")) publicUrl = hosted;
+    } catch {
+        // Temp hosts may be blocked; multipart / data URL still work.
+    }
+
+    const dataUrl = sizedDataUrl.startsWith("data:image/") && sizedDataUrl.length < 3_500_000 ? sizedDataUrl : "";
+    if (!publicUrl && !dataUrl && !file.size) {
+        if (existing) return { publicUrl: existing, dataUrl: "", file: null };
+        throw new Error(apiText("metasoH3PublicImageRequired"));
+    }
+    return { publicUrl, dataUrl, file };
+}
+
+/** Direct Metaso OpenAI root expects MiniMax-H3; `sora-2` is only a New API mapping alias. */
+function resolveMetasoDirectModelName(model: string) {
+    const name = modelOptionName(model).trim();
+    if (!name || /^sora-2$/i.test(name)) return "MiniMax-H3";
+    return name;
+}
+
+/** Cover-crop / scale so pixel WxH equals Metaso `size`. */
+async function resizeImageDataUrlToExactSize(dataUrl: string, size: string) {
+    const match = /^(\d+)\s*[xX×]\s*(\d+)$/.exec(size.trim());
+    if (!match) return dataUrl;
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (!width || !height) return dataUrl;
+
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const element = new Image();
+        element.onload = () => resolve(element);
+        element.onerror = () => reject(new Error(apiText("metasoH3ImageUnreadable")));
+        element.src = dataUrl;
+    });
+
+    if (image.naturalWidth === width && image.naturalHeight === height) {
+        // Re-encode as JPEG for a stable content-type when hosting.
+        if (/^data:image\/jpeg/i.test(dataUrl)) return dataUrl;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return dataUrl;
+
+    const scale = Math.max(width / image.naturalWidth, height / image.naturalHeight);
+    const drawWidth = image.naturalWidth * scale;
+    const drawHeight = image.naturalHeight * scale;
+    const dx = (width - drawWidth) / 2;
+    const dy = (height - drawHeight) / 2;
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(image, dx, dy, drawWidth, drawHeight);
+
+    return canvas.toDataURL("image/jpeg", 0.92);
 }
 
 /**
@@ -632,14 +755,6 @@ function isRelayMiniMaxH3Video(config: AiConfig, model: string) {
     return /minimax[-_]?h3|(?:^|[-_])h3(?:$|[-_])|1ren[-_]?minimax/i.test(name);
 }
 
-/** Metaso OpenAI examples always post model=sora-2 (mapped to MiniMax-H3 upstream). */
-function resolveMetasoH3ModelName(model: string) {
-    const name = modelOptionName(model).trim();
-    if (/^sora-2$/i.test(name)) return "sora-2";
-    if (/minimax|h3/i.test(name)) return "sora-2";
-    return name || "sora-2";
-}
-
 /** Metaso examples use 4 / 8 / 12 seconds. */
 function normalizeMetasoH3Seconds(value: string) {
     const seconds = Math.floor(Number(value) || 4);
@@ -669,31 +784,6 @@ function normalizeRelayH3Size(size: string, quality: string) {
     };
     const entry = table[ratio] || table["16:9"];
     return high ? entry.hd : entry.sd;
-}
-
-async function resolveMetasoH3ImageUrl(config: AiConfig, image: ReferenceImage, options?: RequestOptions) {
-    if (image.url && isPublicHttpUrl(image.url) && !image.url.startsWith("data:") && !/^blob:/i.test(image.url)) return image.url.trim();
-    if (image.dataUrl && isPublicHttpUrl(image.dataUrl) && !image.dataUrl.startsWith("data:") && !/^blob:/i.test(image.dataUrl)) return image.dataUrl.trim();
-    const dataUrl = await imageToDataUrl(image);
-    if (!dataUrl) throw new Error(apiText("metasoH3ImageUnreadable"));
-    if (isPublicHttpUrl(dataUrl) && !dataUrl.startsWith("data:")) return dataUrl.trim();
-    if (dataUrl.startsWith("data:image/")) {
-        const compressed = await compressReferenceDataUrl(dataUrl, 1, { maxEdge: 1280, maxBytes: 1_500_000 });
-        const blob = await (await fetch(compressed)).blob();
-        const filename = publicImageFilename(blob);
-        try {
-            const uploaded = await uploadProviderMediaFile(config, blob, filename, options);
-            if (isPublicHttpUrl(uploaded) && !uploaded.startsWith("data:")) return uploaded;
-        } catch {
-            // Metaso's OpenAI root has no /files/upload. Fall through to a temporary public host.
-        }
-        try {
-            return await uploadTemporaryPublicImage(blob, filename, options?.signal);
-        } catch {
-            throw new Error(apiText("metasoH3PublicImageRequired"));
-        }
-    }
-    throw new Error(apiText("metasoH3ImageUnreadable"));
 }
 
 function isPublicHttpUrl(value: string) {

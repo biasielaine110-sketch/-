@@ -19,6 +19,21 @@ function readPlainPublicUrl(response: { data: unknown }, fallbackMessage: string
     return url;
 }
 
+async function uploadTmpFilesImage(blob: Blob, filename: string, signal?: AbortSignal) {
+    const form = new FormData();
+    form.append("file", blob, filename);
+    const response = await axios.post<{ data?: { url?: string }; url?: string; status?: string }>(proxyMediaUrl("https://tmpfiles.org/api/v1/upload"), form, { signal });
+    const raw = String(response.data?.data?.url || response.data?.url || "").trim();
+    if (!raw) throw new Error("temporary image host rejected the upload");
+    // tmpfiles share links need /dl/ for a direct file URL that Metaso can fetch.
+    const match = raw.match(/tmpfiles\.org\/(?:dl\/)?(\d+)\/(.+)$/i);
+    if (match) return `https://tmpfiles.org/dl/${match[1]}/${match[2]}`;
+    // Newer tmpfiles short links: https://tmpfiles.org/<id>/name — convert to /dl/ when numeric id is present.
+    const short = raw.match(/tmpfiles\.org\/([A-Za-z0-9]+)\/(.+)$/i);
+    if (short && /^\d+$/.test(short[1])) return `https://tmpfiles.org/dl/${short[1]}/${short[2]}`;
+    return raw.replace(/^http:\/\//i, "https://");
+}
+
 async function uploadLitterboxImage(blob: Blob, filename: string, signal?: AbortSignal) {
     const form = new FormData();
     form.append("reqtype", "fileupload");
@@ -49,7 +64,7 @@ async function uploadNullPointerImage(blob: Blob, filename: string, signal?: Abo
 /** Upload a local image blob to a short-lived public host (needed when providers reject data URLs). */
 export async function uploadTemporaryPublicImage(blob: Blob, filename = "reference.png", signal?: AbortSignal) {
     const name = filename || publicImageFilename(blob);
-    const attempts = [() => uploadLitterboxImage(blob, name, signal), () => uploadCatboxImage(blob, name, signal), () => uploadNullPointerImage(blob, name, signal)];
+    const attempts = [() => uploadLitterboxImage(blob, name, signal), () => uploadCatboxImage(blob, name, signal), () => uploadTmpFilesImage(blob, name, signal), () => uploadNullPointerImage(blob, name, signal)];
     let lastError: unknown;
     for (const attempt of attempts) {
         if (signal?.aborted) throw new DOMException("Aborted", "AbortError");

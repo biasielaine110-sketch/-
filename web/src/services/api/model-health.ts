@@ -379,17 +379,37 @@ async function probeVideo(config: ReturnType<typeof resolveModelRequestConfig>, 
     if (isAutodlH3ComfyVideoModel(config.model, config.baseUrl) || /autodl\.art/i.test(config.baseUrl)) {
         return probeAutodlComfyVideo(config, signal);
     }
+
+    // Prefer a non-billable /models probe so empty-prompt POSTs don't spam 400 in the console.
     try {
-        const response = await axios.post(
-            proxyApiUrl(buildApiUrl(config.baseUrl, "/videos")),
-            { model: config.model, prompt: "" },
-            {
-                headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
-                signal,
-                timeout: HEALTH_TIMEOUT_MS,
-                validateStatus: () => true,
-            },
-        );
+        const modelsResponse = await axios.get(proxyApiUrl(buildApiUrl(config.baseUrl, "/models")), {
+            headers: { Authorization: `Bearer ${config.apiKey}` },
+            signal,
+            timeout: HEALTH_TIMEOUT_MS,
+            validateStatus: () => true,
+        });
+        if (modelsResponse.status >= 200 && modelsResponse.status < 300) return { ok: true as const };
+        if (isAuthFailure(modelsResponse.status, readMessage(modelsResponse.data))) {
+            return { ok: false as const, message: readMessage(modelsResponse.data) || `HTTP ${modelsResponse.status}` };
+        }
+    } catch {
+        // Fall through to empty-prompt POST probe.
+    }
+
+    const isMetaso = /metaso\.cn/i.test(config.baseUrl);
+    // Metaso's OpenAI root accepts MiniMax-H3 (channel model). `sora-2` is only a New API mapping alias.
+    // Empty prompt stays a non-billable validation probe (Metaso returns invalid_value, not model_not_found).
+    const body = isMetaso
+        ? { model: /^sora-2$/i.test(config.model) ? "MiniMax-H3" : config.model || "MiniMax-H3", prompt: "" }
+        : { model: config.model, prompt: "" };
+
+    try {
+        const response = await axios.post(proxyApiUrl(buildApiUrl(config.baseUrl, "/videos")), body, {
+            headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+            signal,
+            timeout: HEALTH_TIMEOUT_MS,
+            validateStatus: () => true,
+        });
         return interpretNonTextProbe(response.status, response.data);
     } catch (error) {
         return failFromError(error);
