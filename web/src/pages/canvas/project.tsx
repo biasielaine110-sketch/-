@@ -5591,7 +5591,9 @@ function AtelierCanvasPage() {
                         naturalHeight={resolveNodeMediaNaturalSize(scaleNode)?.height || scaleNode.metadata?.naturalHeight}
                         bytes={scaleNode.metadata?.bytes}
                         onClose={() => setScaleNodeId(null)}
-                        onConfirm={(percent) => scaleImageNodeDisplay(scaleNode, percent)}
+                        onConfirm={(percent) => {
+                            void scaleImageNodeDisplay(scaleNode, percent);
+                        }}
                     />
                 ) : null}
 
