@@ -44,7 +44,9 @@ function aiHeaders(config: AiConfig) {
     };
 }
 
-export async function requestAudioGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<Blob> {
+export type GeneratedAudioPayload = Blob | { remoteUrl: string; mimeType?: string };
+
+export async function requestAudioGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<GeneratedAudioPayload> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.audioModel);
     const model = requestConfig.model.trim();
     const format = normalizeAudioFormatValue(config.audioFormat);
@@ -491,7 +493,7 @@ function readSeedanceAudioUrl(payload: Record<string, unknown>): string {
     return "";
 }
 
-async function requestSunoMusic(config: AiConfig, prompt: string, options?: RequestOptions): Promise<Blob> {
+async function requestSunoMusic(config: AiConfig, prompt: string, options?: RequestOptions): Promise<GeneratedAudioPayload> {
     const custom = normalizeSunoFlagValue(config.sunoCustom) === "true";
     const instrumental = normalizeSunoFlagValue(config.sunoInstrumental) === "true";
     const version = normalizeSunoVersionValue(config.sunoVersion || "");
@@ -550,6 +552,7 @@ async function requestSunoMusic(config: AiConfig, prompt: string, options?: Requ
     if (!taskId) throw new Error(readApiErrorMessage(submitPayload) || apiText("audioGenerationFailed"));
 
     const started = Date.now();
+    let terminalMisses = 0;
     while (Date.now() - started < SUNO_MAX_WAIT_MS) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         await sleep(SUNO_POLL_INTERVAL_MS, options?.signal);
@@ -559,10 +562,12 @@ async function requestSunoMusic(config: AiConfig, prompt: string, options?: Requ
             poll = await axios.get(aiApiUrl(config, `/music/tasks/${encodeURIComponent(taskId)}`), {
                 headers: aiHeaders(config),
                 signal: options?.signal,
+                timeout: 25_000,
                 transformResponse: [(data) => data],
             });
         } catch (error) {
-            throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+            continue;
         }
 
         const pollPayload = coerceJsonPayload(poll.data) as {
@@ -571,26 +576,33 @@ async function requestSunoMusic(config: AiConfig, prompt: string, options?: Requ
             message?: string;
             data?: SunoTaskPayload;
         } | null;
-        if (!pollPayload) throw new Error(apiText("audioGenerationFailed"));
+        // One bad poll (proxy timeout / empty body) must not abandon a task the backend already accepted.
+        if (!pollPayload) continue;
 
         if (isSunoApiFailureCode(pollPayload.code)) {
             throw new Error(readApiErrorMessage(pollPayload) || apiText("audioGenerationFailed"));
         }
 
-        const payload = pollPayload.data;
-        const status = String(payload?.status || "").toLowerCase();
-        if (["failed", "error", "cancelled", "canceled"].includes(status)) {
+        const payload = unwrapSunoTask(pollPayload);
+        const status = normalizeSunoStatus(payload?.status);
+        if (["failed", "failure", "error", "cancelled", "canceled"].includes(status)) {
             throw new Error(readSunoErrorMessage(payload) || readApiErrorMessage(pollPayload) || apiText("audioGenerationFailed"));
         }
 
         const audioUrl = readSunoAudioUrl(payload);
-        const finished = ["completed", "complete", "success"].includes(status) || Boolean(payload?.result?.music?.some((track) => track.audio_url || track.audioUrl || track.url));
-        if (!finished) continue;
-        if (!audioUrl) throw new Error(apiText("audioGenerationFailed"));
+        const progress = Number(payload?.progress);
+        const finished = ["completed", "complete", "success", "succeeded", "done", "finished"].includes(status) || (Number.isFinite(progress) && progress >= 100 && Boolean(audioUrl));
+        if (finished && !audioUrl) {
+            terminalMisses += 1;
+            if (terminalMisses >= 6) throw new Error(apiText("audioGenerationFailed"));
+            continue;
+        }
+        if (!finished || !audioUrl) continue;
 
-        const response = await axios.get<Blob>(proxyApiUrl(audioUrl), { responseType: "blob", signal: options?.signal });
         const mime = audioMimeType(outputFormat);
-        return response.data.type.startsWith("audio/") ? response.data : new Blob([response.data], { type: mime });
+        const blob = await downloadSunoAudio(audioUrl, mime, options?.signal);
+        if (blob) return blob;
+        return { remoteUrl: audioUrl, mimeType: mime };
     }
 
     throw new Error(apiText("audioGenerationFailed"));
@@ -638,14 +650,76 @@ function isSunoApiFailureCode(code: number | string | undefined) {
     return normalized !== "200" && normalized !== "0" && normalized !== "ok" && normalized !== "success";
 }
 
-type SunoTrack = { audio_url?: string; audioUrl?: string; url?: string; status?: string };
+type SunoTrack = Record<string, unknown> & { audio_url?: string; audioUrl?: string; url?: string; status?: string };
 type SunoTaskPayload = {
     status?: string;
+    progress?: number | string;
     error?: string | { message?: string };
     message?: string;
-    result?: { music?: SunoTrack[] };
+    result?: { music?: SunoTrack[]; clips?: SunoTrack[]; songs?: SunoTrack[] };
     music?: SunoTrack[];
+    clips?: SunoTrack[];
+    songs?: SunoTrack[];
+    data?: SunoTrack[] | SunoTaskPayload;
+    response?: { sunoData?: SunoTrack[]; data?: SunoTrack[] };
 };
+
+function normalizeSunoStatus(value: unknown) {
+    return String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[\s_-]+/g, "");
+}
+
+function unwrapSunoTask(payload: { data?: SunoTaskPayload } | null | undefined): SunoTaskPayload | undefined {
+    const data = payload?.data;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+    const nested = data.data;
+    if (nested && typeof nested === "object" && !Array.isArray(nested) && (nested.status || nested.result || nested.response || nested.music)) {
+        return { ...data, ...nested };
+    }
+    return data;
+}
+
+function collectSunoTracks(payload: SunoTaskPayload | undefined) {
+    if (!payload) return [] as SunoTrack[];
+    const buckets = [
+        payload.result?.music,
+        payload.result?.clips,
+        payload.result?.songs,
+        payload.music,
+        payload.clips,
+        payload.songs,
+        payload.response?.sunoData,
+        payload.response?.data,
+        Array.isArray(payload.data) ? payload.data : undefined,
+    ];
+    return buckets.flatMap((list) => (Array.isArray(list) ? list : []));
+}
+
+function readTrackAudioUrl(track: SunoTrack) {
+    const keys = ["audio_url", "audioUrl", "source_audio_url", "sourceAudioUrl", "download_url", "downloadUrl", "file_url", "url", "stream_audio_url", "streamAudioUrl"];
+    for (const key of keys) {
+        const value = track[key];
+        if (typeof value === "string" && /^https?:\/\//i.test(value) && !/\.(png|jpe?g|webp|gif)(\?|$)/i.test(value)) return value;
+    }
+    return "";
+}
+
+async function downloadSunoAudio(url: string, mime: string, signal?: AbortSignal) {
+    const attempts = [() => axios.get<Blob>(proxyApiUrl(url), { responseType: "blob", signal, timeout: 90_000 }), () => axios.get<Blob>(url, { responseType: "blob", signal, timeout: 90_000 })];
+    for (const attempt of attempts) {
+        try {
+            const response = await attempt();
+            const blob = response.data;
+            if (!blob || blob.size < 64 || blob.type.includes("json") || blob.type.includes("html")) continue;
+            return blob.type.startsWith("audio/") ? blob : new Blob([blob], { type: mime });
+        } catch (error) {
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+        }
+    }
+    return null;
+}
 
 function readSunoErrorMessage(payload: SunoTaskPayload | undefined) {
     const error = payload?.error;
@@ -659,6 +733,8 @@ function readSunoTaskId(payload: { data?: Array<{ task_id?: string; id?: string 
     if (!payload) return "";
     if (typeof payload.task_id === "string" && payload.task_id) return payload.task_id;
     if (typeof payload.id === "string" && payload.id) return payload.id;
+    const record = payload as { taskId?: string };
+    if (typeof record.taskId === "string" && record.taskId) return record.taskId;
     const data = payload.data;
     if (Array.isArray(data)) return data[0]?.task_id || data[0]?.id || "";
     if (data && typeof data === "object") return data.task_id || data.id || "";
@@ -666,13 +742,13 @@ function readSunoTaskId(payload: { data?: Array<{ task_id?: string; id?: string 
 }
 
 function readSunoAudioUrl(payload: SunoTaskPayload | undefined) {
-    const tracks = payload?.result?.music || payload?.music || [];
+    const tracks = collectSunoTracks(payload);
     const ready = tracks.find((track) => {
-        const status = String(track.status || "").toLowerCase();
-        return Boolean(track.audio_url || track.audioUrl || track.url) && (!status || ["complete", "completed", "success"].includes(status));
+        const status = normalizeSunoStatus(track.status);
+        return Boolean(readTrackAudioUrl(track)) && (!status || ["complete", "completed", "success", "succeeded", "done", "finished"].includes(status));
     });
-    const track = ready || tracks.find((item) => item.audio_url || item.audioUrl || item.url);
-    return track?.audio_url || track?.audioUrl || track?.url || "";
+    const track = ready || tracks.find((item) => readTrackAudioUrl(item));
+    return track ? readTrackAudioUrl(track) : "";
 }
 
 function sleep(ms: number, signal?: AbortSignal) {
@@ -832,8 +908,15 @@ async function audioPluginBlob(result: unknown, format: string): Promise<Blob> {
     return blob.type.startsWith("audio/") ? blob : new Blob([blob], { type: audioMimeType(format) });
 }
 
-export async function storeGeneratedAudio(blob: Blob, format = "mp3"): Promise<UploadedFile> {
-    const audio = blob.type.startsWith("audio/") ? blob : new Blob([blob], { type: audioMimeType(format) });
+export async function storeGeneratedAudio(input: GeneratedAudioPayload, format = "mp3"): Promise<UploadedFile> {
+    if (!(input instanceof Blob)) {
+        try {
+            return await uploadMediaFile(input.remoteUrl, "audio");
+        } catch {
+            return { url: input.remoteUrl, storageKey: "", bytes: 0, mimeType: input.mimeType || audioMimeType(format) };
+        }
+    }
+    const audio = input.type.startsWith("audio/") ? input : new Blob([input], { type: audioMimeType(format) });
     return uploadMediaFile(audio, "audio");
 }
 
