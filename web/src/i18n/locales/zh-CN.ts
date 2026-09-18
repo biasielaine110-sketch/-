@@ -53,6 +53,7 @@ export default {
             transparentHint: "开启后生成无背景的透明图像（仅部分模型可用）",
             count: "生成张数",
             images: "{{count}} 张",
+            mjVersion: "版本",
         },
         video: {
             title: "视频设置",

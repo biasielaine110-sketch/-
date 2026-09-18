@@ -317,6 +317,7 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         sunoStyle: node?.metadata?.sunoStyle || config.sunoStyle || defaultConfig.sunoStyle,
         sunoVocalGender: node?.metadata?.sunoVocalGender || config.sunoVocalGender || defaultConfig.sunoVocalGender,
         count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
+        mjVersion: node?.metadata?.mjVersion || config.mjVersion || defaultConfig.mjVersion,
     };
 }
 

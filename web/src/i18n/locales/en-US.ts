@@ -53,6 +53,7 @@ export default {
             transparentHint: "Generate an image without a background when supported by the model",
             count: "Image count",
             images: "{{count}} images",
+            mjVersion: "Version",
         },
         video: {
             title: "Video settings",

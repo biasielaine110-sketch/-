@@ -4,7 +4,8 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import type { AiConfig } from "@/stores/use-config-store";
+import { isMidjourneyModel } from "@/services/api/image";
+import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
 const qualityOptions = [
     { value: "auto", labelKey: "auto" },
@@ -30,12 +31,26 @@ const aspectOptions = [
     { value: "auto", label: "auto", width: 0, height: 0, icon: "auto" },
 ];
 
+const midjourneyVersionOptions = [
+    { value: "8.2", label: "v8.2" },
+    { value: "8.1", label: "v8.1" },
+    { value: "7", label: "v7" },
+    { value: "6.1", label: "v6.1" },
+    { value: "5.2", label: "v5.2" },
+    { value: "5.1", label: "v5.1" },
+    { value: "niji7", label: "Niji 7" },
+    { value: "niji6", label: "Niji 6" },
+];
 export const imageQualityOptions = qualityOptions.map((item) => ({ value: item.value, get label() { return i18n.t(`settingsPanels.common.${item.labelKey}`); } }));
 export const imageAspectOptions = aspectOptions.map((item) => ({ value: item.size || item.value, label: item.label }));
 
+export function midjourneyVersionLabel(value: string) {
+    return midjourneyVersionOptions.find((item) => item.value === value)?.label || value || "v6.1";
+}
+
 type ImageSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "quality" | "size" | "count" | "background", value: string) => void;
+    onConfigChange: (key: "quality" | "size" | "count" | "background" | "mjVersion", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
@@ -50,6 +65,8 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const count = Math.max(1, Math.min(maxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
     const activeSize = config.size || "auto";
     const transparentBackground = config.background === "transparent";
+    const midjourney = isMidjourneyModel(modelOptionName(config.model || config.imageModel || ""));
+    const mjVersion = midjourneyVersionOptions.some((item) => item.value === config.mjVersion) ? config.mjVersion : "6.1";
     const selectedAspect = aspectOptions.find((item) => (item.size || item.value) === activeSize || item.value === activeSize);
     const dimensions = readSizeDimensions(activeSize, selectedAspect || aspectOptions[0]);
     const selectAspect = (value: string) => {
@@ -75,6 +92,18 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 }}
             >
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.image.title")}</div> : null}
+                {midjourney ? (
+                    <div className="space-y-2.5">
+                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.mjVersion")}</SettingTitle>
+                        <div className="grid grid-cols-4 gap-2.5">
+                            {midjourneyVersionOptions.map((item) => (
+                                <OptionPill key={item.value} selected={mjVersion === item.value} theme={theme} onClick={() => onConfigChange("mjVersion", item.value)}>
+                                    {item.label}
+                                </OptionPill>
+                            ))}
+                        </div>
+                    </div>
+                ) : null}
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.quality")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">

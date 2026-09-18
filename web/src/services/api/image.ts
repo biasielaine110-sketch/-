@@ -1294,7 +1294,7 @@ async function requestMidjourneyGeneration(config: AiConfig, prompt: string, ref
         prompt: withSystemPrompt(config, prompt),
         size,
         speed,
-        version: "6.1",
+        ...resolveMidjourneyVersionBody(config.mjVersion),
     };
     if (references.length) {
         const urls: string[] = [];
@@ -1390,6 +1390,15 @@ export async function requestMidjourneyUpscale(config: AiConfig, parentTaskId: s
     } catch (error) {
         throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), mjConfig.model));
     }
+}
+
+/** Seedance normalizes main versions to v8.2/v8.1/v7/v6.1/v5.2/v5.1; Niji is niji + version 7/6. */
+function resolveMidjourneyVersionBody(value: string) {
+    const normalized = String(value || "6.1").trim().toLowerCase().replace(/^v/, "");
+    if (normalized === "niji7" || normalized === "niji-7") return { version: "7", niji: true };
+    if (normalized === "niji6" || normalized === "niji-6") return { version: "6", niji: true };
+    const allowed = ["8.2", "8.1", "7", "6.1", "5.2", "5.1"];
+    return { version: allowed.includes(normalized) ? normalized : "6.1" };
 }
 
 function resolveMidjourneySpeed(quality: string) {

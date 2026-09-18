@@ -125,6 +125,7 @@ export type CanvasNodeMetadata = {
     quality?: string;
     background?: string;
     count?: number;
+    mjVersion?: string;
     textCount?: number;
     seconds?: string;
     vquality?: string;

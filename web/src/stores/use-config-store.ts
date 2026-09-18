@@ -75,6 +75,8 @@ export type AiConfig = {
     size: string;
     background: string;
     count: string;
+    /** Midjourney Imagine version: 8.2 / 8.1 / 7 / 6.1 / 5.2 / 5.1 / niji7 / niji6. */
+    mjVersion: string;
     canvasImageCount: string;
     textPrompts: TextPromptEntry[];
     /** Image node quick-toolbar visibility + order (also used by image context menu). */
@@ -140,6 +142,7 @@ export const defaultConfig: AiConfig = {
     size: "2048x1152",
     background: "",
     count: "1",
+    mjVersion: "6.1",
     canvasImageCount: "1",
     textPrompts: defaultTextPrompts.map((item) => ({ ...item })),
     imageQuickTools: { ids: [], showLabels: false },
@@ -393,6 +396,7 @@ export const useConfigStore = create<ConfigStore>()(
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
                         canvasImageCount: config.canvasImageCount || "1",
+                        mjVersion: config.mjVersion || defaultConfig.mjVersion,
                         quality: config.quality || "medium",
                         size: config.size || "2048x1152",
                         textPrompts: normalizeTextPrompts(config.textPrompts),
