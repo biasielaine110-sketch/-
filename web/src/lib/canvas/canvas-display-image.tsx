@@ -4,6 +4,9 @@ const MAX_CACHE = 96;
 const cache = new Map<string, string>();
 const inflight = new Map<string, Promise<string>>();
 
+/** Hard cap for on-canvas image decode / display (CSS px before DPR). */
+export const CANVAS_DISPLAY_MAX_EDGE = 768;
+
 function cacheKey(src: string, maxEdge: number) {
     return `${src}\0${maxEdge}`;
 }
@@ -20,10 +23,17 @@ function touch(key: string, url: string) {
     }
 }
 
+function clampDisplayEdge(maxEdge?: number) {
+    const raw = Number(maxEdge);
+    if (!Number.isFinite(raw) || raw <= 0) return CANVAS_DISPLAY_MAX_EDGE;
+    return Math.min(Math.round(raw), CANVAS_DISPLAY_MAX_EDGE);
+}
+
 /** Downscale large sources so canvas nodes don't keep multi‑MB bitmaps in GPU memory. */
-export async function getCanvasDisplaySrc(src: string, maxEdge = 1024): Promise<string> {
+export async function getCanvasDisplaySrc(src: string, maxEdge = CANVAS_DISPLAY_MAX_EDGE): Promise<string> {
     if (!src || src.startsWith("data:image/svg")) return src;
-    const key = cacheKey(src, maxEdge);
+    const edge = clampDisplayEdge(maxEdge);
+    const key = cacheKey(src, edge);
     const cached = cache.get(key);
     if (cached) {
         touch(key, cached);
@@ -40,11 +50,11 @@ export async function getCanvasDisplaySrc(src: string, maxEdge = 1024): Promise<
             await image.decode();
             const width = image.naturalWidth || 0;
             const height = image.naturalHeight || 0;
-            if (!width || !height || Math.max(width, height) <= maxEdge) {
+            if (!width || !height || Math.max(width, height) <= edge) {
                 touch(key, src);
                 return src;
             }
-            const scale = maxEdge / Math.max(width, height);
+            const scale = edge / Math.max(width, height);
             const targetW = Math.max(1, Math.round(width * scale));
             const targetH = Math.max(1, Math.round(height * scale));
             const canvas = document.createElement("canvas");
@@ -82,14 +92,15 @@ type CanvasDisplayImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> 
     src?: string;
     /** Persisted/on-disk thumbnail — preferred for canvas display when present. */
     previewSrc?: string;
-    /** Longest edge for the on-canvas preview (CSS pixels × DPR handled inside). */
+    /** Longest edge for the on-canvas preview (CSS pixels × DPR handled inside). Clamped to CANVAS_DISPLAY_MAX_EDGE. */
     maxEdge?: number;
 };
 
 /** Lazy, async-decoded image that prefers a stored thumbnail, else downscales the full source. */
 export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, alt = "", ...rest }: CanvasDisplayImageProps) {
     const dpr = typeof window !== "undefined" ? Math.min(window.devicePixelRatio || 1, 2) : 1;
-    const edge = Math.round((maxEdge ?? 1024) * dpr);
+    const edge = Math.round(clampDisplayEdge(maxEdge) * dpr);
+    // Prefer thumb exclusively for canvas chrome — never decode the full asset when a thumb exists.
     const preferred = previewSrc || src;
     const [displaySrc, setDisplaySrc] = useState(preferred);
 
@@ -97,7 +108,6 @@ export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, a
         let cancelled = false;
         setDisplaySrc(preferred);
         if (!preferred) return;
-        // Stored thumbnails are already sized for the canvas — skip another encode pass.
         if (previewSrc) {
             setDisplaySrc(previewSrc);
             return;

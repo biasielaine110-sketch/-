@@ -31,6 +31,8 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
         startedOnBackground: false,
     });
     const scaleRef = useRef(viewport.k);
+    const viewportLiveRef = useRef(viewport);
+    const onViewportChangeRef = useRef(onViewportChange);
     const frameRef = useRef<number | null>(null);
     const nextViewportRef = useRef<ViewportTransform | null>(null);
     const [isSpacePressed, setIsSpacePressed] = useState(false);
@@ -39,7 +41,28 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
 
     useEffect(() => {
         scaleRef.current = viewport.k;
-    }, [viewport.k]);
+        viewportLiveRef.current = viewport;
+    }, [viewport]);
+
+    useEffect(() => {
+        onViewportChangeRef.current = onViewportChange;
+    }, [onViewportChange]);
+
+    const flushViewport = () => {
+        frameRef.current = null;
+        const next = nextViewportRef.current;
+        if (!next) return;
+        nextViewportRef.current = null;
+        onViewportChangeRef.current(next);
+    };
+
+    const scheduleViewport = (next: ViewportTransform) => {
+        nextViewportRef.current = next;
+        viewportLiveRef.current = next;
+        scaleRef.current = next.k;
+        if (frameRef.current) return;
+        frameRef.current = requestAnimationFrame(flushViewport);
+    };
 
     useEffect(
         () => () => {
@@ -89,18 +112,19 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
         const target = event.target instanceof Element ? event.target : null;
         if (target?.closest("[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown,.ant-picker-dropdown")) return;
 
+        const current = nextViewportRef.current || viewportLiveRef.current;
         const delta = -event.deltaY;
         const factor = Math.pow(1.1, delta / 100);
-        const newScale = Math.min(Math.max(viewport.k * factor, 0.05), 5);
+        const newScale = Math.min(Math.max(current.k * factor, 0.05), 5);
         const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) return;
 
         const mouseX = event.clientX - rect.left;
         const mouseY = event.clientY - rect.top;
-        const worldX = (mouseX - viewport.x) / viewport.k;
-        const worldY = (mouseY - viewport.y) / viewport.k;
+        const worldX = (mouseX - current.x) / current.k;
+        const worldY = (mouseY - current.y) / current.k;
 
-        onViewportChange({
+        scheduleViewport({
             x: mouseX - worldX * newScale,
             y: mouseY - worldY * newScale,
             k: newScale,
@@ -164,10 +188,14 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
                 y: panState.current.initialY + dy,
                 k: scaleRef.current,
             };
+            viewportLiveRef.current = nextViewportRef.current;
             if (frameRef.current) return;
             frameRef.current = requestAnimationFrame(() => {
                 frameRef.current = null;
-                if (nextViewportRef.current) onViewportChange(nextViewportRef.current);
+                const next = nextViewportRef.current;
+                if (!next) return;
+                nextViewportRef.current = null;
+                onViewportChangeRef.current(next);
             });
         };
 
@@ -191,7 +219,7 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
             window.removeEventListener("pointercancel", handlePointerUp);
             document.body.style.cursor = "";
         };
-    }, [onCanvasDeselect, onViewportChange]);
+    }, [onCanvasDeselect]);
 
     useEffect(() => {
         const container = containerRef.current;

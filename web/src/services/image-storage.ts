@@ -17,7 +17,7 @@ export type UploadedImage = {
     mimeType: string;
 };
 
-const THUMB_MAX_EDGE = 1024;
+const THUMB_MAX_EDGE = 768;
 
 const store = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
 const objectUrls = new Map<string, string>();
@@ -43,7 +43,9 @@ export async function uploadImage(input: string | Blob): Promise<UploadedImage> 
 }
 
 async function createAndStoreThumbnail(sourceUrl: string, fullStorageKey: string, width: number, height: number) {
-    if (!width || !height || Math.max(width, height) <= THUMB_MAX_EDGE) return null;
+    if (!width || !height) return null;
+    // Always persist a canvas-sized thumb when the source is larger than the display cap.
+    if (Math.max(width, height) <= THUMB_MAX_EDGE) return null;
     try {
         const image = new Image();
         image.decoding = "async";

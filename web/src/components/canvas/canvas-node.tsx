@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react";
 import { ChevronRight, Clapperboard, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
 
-import { CanvasDisplayImage } from "@/lib/canvas/canvas-display-image";
+import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas-display-image";
+import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
@@ -558,7 +559,9 @@ function AnnotateNodeContent({ node, theme, onAnnotate }: NodeContentRendererPro
     }
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
-            <CanvasDisplayImage src={content} previewSrc={node.metadata?.thumbnailContent} alt={node.title} maxEdge={Math.max(node.width, node.height, 512)} className="pointer-events-none block h-full w-full select-none object-contain" />
+            <CanvasLazyMedia>
+                <CanvasDisplayImage src={content} previewSrc={node.metadata?.thumbnailContent} alt={node.title} maxEdge={CANVAS_DISPLAY_MAX_EDGE} className="pointer-events-none block h-full w-full select-none object-contain" />
+            </CanvasLazyMedia>
             {annotations.length ? (
                 <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
                     {annotations.map((item) => {
@@ -923,18 +926,26 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
-function CanvasNodeVideoPlayer({ src }: { src: string }) {
+function CanvasNodeVideoPlayer({ src, posterSrc }: { src: string; posterSrc?: string }) {
     const { t } = useTranslation();
     const videoRef = useRef<HTMLVideoElement>(null);
+    const [activated, setActivated] = useState(false);
     const [playing, setPlaying] = useState(false);
 
     useEffect(() => {
+        setActivated(false);
         setPlaying(false);
+    }, [src]);
+
+    useEffect(() => {
+        if (!activated) return;
         const video = videoRef.current;
         if (!video) return;
-        video.pause();
-        video.currentTime = 0;
-    }, [src]);
+        void video
+            .play()
+            .then(() => setPlaying(true))
+            .catch(() => setPlaying(false));
+    }, [activated]);
 
     const stopShell = (event: React.SyntheticEvent) => {
         event.stopPropagation();
@@ -943,9 +954,16 @@ function CanvasNodeVideoPlayer({ src }: { src: string }) {
     const handlePlayClick = (event: React.MouseEvent) => {
         event.stopPropagation();
         event.preventDefault();
+        if (!activated) {
+            setActivated(true);
+            return;
+        }
         const video = videoRef.current;
         if (!video) return;
-        void video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+        void video
+            .play()
+            .then(() => setPlaying(true))
+            .catch(() => setPlaying(false));
     };
 
     return (
@@ -959,18 +977,25 @@ function CanvasNodeVideoPlayer({ src }: { src: string }) {
                 if (playing) event.stopPropagation();
             }}
         >
-            <video
-                ref={videoRef}
-                src={src}
-                className="h-full w-full rounded-[18px] bg-black object-contain"
-                playsInline
-                preload="metadata"
-                controls={playing}
-                data-canvas-no-zoom
-                onPlay={() => setPlaying(true)}
-                onPause={() => setPlaying(false)}
-                onEnded={() => setPlaying(false)}
-            />
+            {activated ? (
+                <video
+                    ref={videoRef}
+                    src={src}
+                    poster={posterSrc || undefined}
+                    className="h-full w-full rounded-[18px] bg-black object-contain"
+                    playsInline
+                    preload="metadata"
+                    controls={playing}
+                    data-canvas-no-zoom
+                    onPlay={() => setPlaying(true)}
+                    onPause={() => setPlaying(false)}
+                    onEnded={() => setPlaying(false)}
+                />
+            ) : posterSrc ? (
+                <img src={posterSrc} alt="" draggable={false} className="pointer-events-none h-full w-full rounded-[18px] bg-black object-contain" />
+            ) : (
+                <div className="h-full w-full rounded-[18px] bg-black" aria-hidden />
+            )}
             {!playing ? (
                 <button
                     type="button"
@@ -999,7 +1024,9 @@ function VideoNodeContent({ node, theme, onDeleteBatchImage }: NodeContentRender
         );
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
-            <CanvasNodeVideoPlayer src={node.metadata.content} />
+            <CanvasLazyMedia>
+                <CanvasNodeVideoPlayer src={node.metadata.content} posterSrc={node.metadata?.thumbnailContent} />
+            </CanvasLazyMedia>
             <button
                 type="button"
                 className="absolute right-2.5 top-2.5 z-30 grid size-8 place-items-center rounded-full border shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
@@ -1117,17 +1144,21 @@ function ImageContent({
             <div className="relative h-full w-full overflow-hidden rounded-3xl">
                 {primaryContent ? (
                     isVideo ? (
-                        <CanvasNodeVideoPlayer src={primaryContent} />
+                        <CanvasLazyMedia>
+                            <CanvasNodeVideoPlayer src={primaryContent} posterSrc={primaryThumb} />
+                        </CanvasLazyMedia>
                     ) : (
                         <>
-                            <CanvasDisplayImage
-                                src={primaryContent}
-                                previewSrc={primaryThumb}
-                                alt={node.title}
-                                maxEdge={Math.max(node.width, node.height, 512)}
-                                onDragStart={(event) => event.preventDefault()}
-                                className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
-                            />
+                            <CanvasLazyMedia>
+                                <CanvasDisplayImage
+                                    src={primaryContent}
+                                    previewSrc={primaryThumb}
+                                    alt={node.title}
+                                    maxEdge={CANVAS_DISPLAY_MAX_EDGE}
+                                    onDragStart={(event) => event.preventDefault()}
+                                    className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
+                                />
+                            </CanvasLazyMedia>
                             {(node.metadata?.annotations?.length || 0) > 0 ? (
                                 <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
                                     {node.metadata!.annotations!.map((item) => {
@@ -1295,9 +1326,13 @@ function ExpandedImageCard({
         >
             {image.content ? (
                 isVideo ? (
-                    <CanvasNodeVideoPlayer src={image.content} />
+                    <CanvasLazyMedia className="h-full w-full">
+                        <CanvasNodeVideoPlayer src={image.content} posterSrc={image.thumbnailContent} />
+                    </CanvasLazyMedia>
                 ) : (
-                    <CanvasDisplayImage src={image.content} previewSrc={image.thumbnailContent} alt={node.title} maxEdge={512} className="pointer-events-none h-full w-full select-none object-contain" />
+                    <CanvasLazyMedia className="h-full w-full">
+                        <CanvasDisplayImage src={image.content} previewSrc={image.thumbnailContent} alt={node.title} maxEdge={CANVAS_DISPLAY_MAX_EDGE} className="pointer-events-none h-full w-full select-none object-contain" />
+                    </CanvasLazyMedia>
                 )
             ) : (
                 <ImageSlotStatus image={image} onCancel={onCancel} />

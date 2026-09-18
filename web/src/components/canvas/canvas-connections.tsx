@@ -1,4 +1,4 @@
-import type { MouseEvent as ReactMouseEvent } from "react";
+import { memo, type MouseEvent as ReactMouseEvent } from "react";
 import { Unlink2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -6,16 +6,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasConnection, CanvasNodeData, ConnectionHandle, Position } from "@/types/canvas";
 
-export function ConnectionPath({
-    connection,
-    from,
-    to,
-    active,
-    selected,
-    onSelect,
-    onContextMenu,
-    onDelete,
-}: {
+type ConnectionPathProps = {
     connection: CanvasConnection;
     from: CanvasNodeData;
     to: CanvasNodeData;
@@ -24,7 +15,24 @@ export function ConnectionPath({
     onSelect: () => void;
     onContextMenu?: (event: ReactMouseEvent<SVGPathElement>) => void;
     onDelete: () => void;
-}) {
+};
+
+function connectionGeometryEqual(a: CanvasNodeData, b: CanvasNodeData) {
+    return a.id === b.id && a.position.x === b.position.x && a.position.y === b.position.y && a.width === b.width && a.height === b.height;
+}
+
+/** Ignore unstable parent lambdas — handlers only close over connection id + setState. */
+function connectionPathPropsEqual(prev: ConnectionPathProps, next: ConnectionPathProps) {
+    return (
+        prev.connection.id === next.connection.id &&
+        prev.active === next.active &&
+        prev.selected === next.selected &&
+        connectionGeometryEqual(prev.from, next.from) &&
+        connectionGeometryEqual(prev.to, next.to)
+    );
+}
+
+export const ConnectionPath = memo(function ConnectionPath({ connection, from, to, active, selected, onSelect, onContextMenu, onDelete }: ConnectionPathProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
     const startX = from.position.x + from.width;
@@ -90,7 +98,7 @@ export function ConnectionPath({
             ) : null}
         </g>
     );
-}
+}, connectionPathPropsEqual);
 
 export function ActiveConnectionPath({ node, handle, mouseWorld, target }: { node?: CanvasNodeData; handle: ConnectionHandle; mouseWorld: Position; target?: CanvasNodeData }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
