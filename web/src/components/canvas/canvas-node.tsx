@@ -1095,6 +1095,8 @@ function ImageContent({
     const primaryImage = images.find((image) => image.id === primaryImageId);
     const primaryContent = primaryImage?.content || node.metadata?.content;
     const primaryThumb = primaryImage?.thumbnailContent || node.metadata?.thumbnailContent;
+    // After refresh, full blob may fail to hydrate while thumb still resolves — prefer any visible source.
+    const displaySrc = primaryContent || primaryThumb || "";
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const isGenerating = node.metadata?.status === "loading" || images.some((image) => image.status === "loading");
     const canCancel = Boolean(onCancelGeneration) && isGenerating;
@@ -1142,16 +1144,16 @@ function ImageContent({
                       ))
                 : null}
             <div className="relative h-full w-full overflow-hidden rounded-3xl">
-                {primaryContent ? (
+                {displaySrc ? (
                     isVideo ? (
                         <CanvasLazyMedia>
-                            <CanvasNodeVideoPlayer src={primaryContent} posterSrc={primaryThumb} />
+                            <CanvasNodeVideoPlayer src={displaySrc} posterSrc={primaryThumb} />
                         </CanvasLazyMedia>
                     ) : (
                         <>
                             <CanvasLazyMedia>
                                 <CanvasDisplayImage
-                                    src={primaryContent}
+                                    src={displaySrc}
                                     previewSrc={primaryThumb}
                                     alt={node.title}
                                     maxEdge={CANVAS_DISPLAY_MAX_EDGE}
@@ -1191,10 +1193,25 @@ function ImageContent({
                         </>
                     )
                 ) : (
-                    <ImageSlotStatus image={primaryImage} onCancel={canCancel ? () => onCancelGeneration?.(node.id) : undefined} />
+                    <ImageSlotStatus
+                        image={
+                            primaryImage || {
+                                id: "__missing__",
+                                status: node.metadata?.status === "loading" ? "loading" : "error",
+                                content: "",
+                                storageKey: "",
+                                naturalWidth: 0,
+                                naturalHeight: 0,
+                                bytes: 0,
+                                mimeType: "",
+                                errorDetails: node.metadata?.errorDetails,
+                            }
+                        }
+                        onCancel={canCancel ? () => onCancelGeneration?.(node.id) : undefined}
+                    />
                 )}
             </div>
-            {canCancel && primaryContent ? (
+            {canCancel && displaySrc ? (
                 <button
                     type="button"
                     className="absolute bottom-2.5 left-1/2 z-40 flex h-9 -translate-x-1/2 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02]"
@@ -1211,7 +1228,7 @@ function ImageContent({
                 </button>
             ) : null}
             {primaryImage?.status === "error" ? <BatchImageFailureActions placement="left" onRetry={() => onRetryBatchImage?.(primaryImage.id)} onDelete={() => onDeleteBatchImage?.(primaryImage.id)} /> : null}
-            {primaryContent && primaryImage?.status !== "error" ? (
+            {displaySrc && primaryImage?.status !== "error" ? (
                 <button
                     type="button"
                     className={`absolute z-30 grid size-8 place-items-center rounded-full border shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02] ${isVideo ? "right-2.5 top-2.5" : "bottom-2.5 left-2.5"}`}
@@ -1241,7 +1258,7 @@ function ImageContent({
             {isBatchRoot ? (
                 <button
                     type="button"
-                    className={`absolute top-2.5 z-30 flex h-8 items-center justify-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02] ${isVideo && primaryContent && primaryImage?.status !== "error" ? "right-12" : "right-2.5"}`}
+                    className={`absolute top-2.5 z-30 flex h-8 items-center justify-center gap-1.5 rounded-full border px-3 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md transition hover:scale-[1.02] ${isVideo && displaySrc && primaryImage?.status !== "error" ? "right-12" : "right-2.5"}`}
                     style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
                     aria-label={batchExpanded ? t("canvas.node.batchExpanded") : t("canvas.node.batchCollapsed")}
                     onClick={(event) => {
@@ -1319,25 +1336,25 @@ function ExpandedImageCard({
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onDoubleClick={(event) => {
-                if (!image.content || (event.target instanceof Element && event.target.closest("button"))) return;
+                if (!(image.content || image.thumbnailContent) || (event.target instanceof Element && event.target.closest("button"))) return;
                 event.stopPropagation();
                 onView();
             }}
         >
-            {image.content ? (
+            {image.content || image.thumbnailContent ? (
                 isVideo ? (
                     <CanvasLazyMedia className="h-full w-full">
-                        <CanvasNodeVideoPlayer src={image.content} posterSrc={image.thumbnailContent} />
+                        <CanvasNodeVideoPlayer src={image.content || image.thumbnailContent || ""} posterSrc={image.thumbnailContent} />
                     </CanvasLazyMedia>
                 ) : (
                     <CanvasLazyMedia className="h-full w-full">
-                        <CanvasDisplayImage src={image.content} previewSrc={image.thumbnailContent} alt={node.title} maxEdge={CANVAS_DISPLAY_MAX_EDGE} className="pointer-events-none h-full w-full select-none object-contain" />
+                        <CanvasDisplayImage src={image.content || image.thumbnailContent || ""} previewSrc={image.thumbnailContent} alt={node.title} maxEdge={CANVAS_DISPLAY_MAX_EDGE} className="pointer-events-none h-full w-full select-none object-contain" />
                     </CanvasLazyMedia>
                 )
             ) : (
                 <ImageSlotStatus image={image} onCancel={onCancel} />
             )}
-            {image.content ? (
+            {image.content || image.thumbnailContent ? (
                 <div className="absolute inset-x-2 top-2 z-30 flex items-center gap-1">
                     <button
                         type="button"
@@ -1417,16 +1434,20 @@ function BatchImageFailureActions({ placement, onRetry, onDelete }: { placement:
 function ImageSlotStatus({ image, onCancel }: { image?: CanvasNodeImage; onCancel?: () => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
-    const failed = image?.status === "error";
+    const isLoading = image?.status === "loading";
+    const failed = image?.status === "error" || (!isLoading && !image?.content && !image?.thumbnailContent);
+    const message = failed
+        ? image?.errorDetails || (image?.status === "error" ? t("canvas.node.failed") : t("canvas.generation.mediaMissing"))
+        : t("canvas.node.generating");
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center" style={{ background: theme.node.fill, color: failed ? theme.node.text : theme.node.activeStroke }}>
             {failed ? (
-                <span className="text-xs leading-5">{image.errorDetails || t("canvas.node.failed")}</span>
+                <span className="text-xs leading-5">{message}</span>
             ) : (
                 <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
             )}
-            {!failed ? <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span> : null}
-            {!failed && onCancel ? (
+            {!failed ? <span className="text-[10px] tracking-[0.2em]">{message}</span> : null}
+            {isLoading && onCancel ? (
                 <button
                     type="button"
                     className="pointer-events-auto inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"

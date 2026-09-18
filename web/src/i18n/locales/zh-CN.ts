@@ -1042,6 +1042,7 @@ export default {
         },
         generation: {
             interrupted: "页面刷新后生成已中断，请重新生成。",
+            mediaMissing: "图片缓存已失效，无法显示。请重新授权本地媒体库，或重新生成。",
             front: "正面视角",
             rotateRight: "向右旋转 {{angle}} 度",
             rotateLeft: "向左旋转 {{angle}} 度",

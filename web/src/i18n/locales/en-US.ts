@@ -1043,6 +1043,7 @@ export default {
         },
         generation: {
             interrupted: "Generation was interrupted by a page refresh. Generate again.",
+            mediaMissing: "Image cache is missing. Re-authorize the local media library, or generate again.",
             front: "front view",
             rotateRight: "rotated {{angle}} degrees right",
             rotateLeft: "rotated {{angle}} degrees left",

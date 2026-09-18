@@ -51,6 +51,18 @@ function isDeadBlobUrl(url?: string) {
     return Boolean(url?.startsWith("blob:"));
 }
 
+/** After refresh, dead blob: URLs + missing IndexedDB leave empty content — mark as error instead of fake "generating". */
+function markMissingMedia<T extends { status?: CanvasNodeImage["status"]; content?: string; thumbnailContent?: string; storageKey?: string; thumbnailStorageKey?: string; errorDetails?: string }>(image: T): T {
+    const visible = Boolean(image.content || image.thumbnailContent);
+    if (visible || image.status === "loading" || image.status === "error") return image;
+    if (!image.storageKey && !image.thumbnailStorageKey && image.status !== "success") return image;
+    return {
+        ...image,
+        status: "error" as const,
+        errorDetails: image.errorDetails || i18n.t("canvas.generation.mediaMissing"),
+    };
+}
+
 export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: HydrateCanvasMediaOptions) {
     const mode = options?.mode || "fast";
     return Promise.all(
@@ -101,7 +113,7 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
             const primaryId = node.metadata?.primaryImageId || list[0]?.id;
             const images = await Promise.all(
                 list.map(async (image) => {
-                    if (!image.content && !image.storageKey) return image;
+                    if (!image.content && !image.storageKey && !image.thumbnailStorageKey) return image;
                     const isPrimary = image.id === primaryId;
                     const thumbnailContent = image.thumbnailStorageKey
                         ? await resolveImageUrl(image.thumbnailStorageKey, image.thumbnailContent || "")
@@ -110,14 +122,11 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                           : image.thumbnailContent;
                     // Fast path: non-primary versions only need a thumb for the filmstrip.
                     if (mode === "fast" && !isPrimary) {
-                        return {
-                            ...image,
-                            content: isDeadBlobUrl(image.content) ? "" : image.content,
-                            thumbnailContent,
-                        };
+                        const content = isDeadBlobUrl(image.content) ? "" : image.content;
+                        return markMissingMedia({ ...image, content, thumbnailContent });
                     }
                     const nextContent = image.storageKey ? await resolveImageUrl(image.storageKey, image.content) : isDeadBlobUrl(image.content) ? "" : image.content;
-                    return { ...image, content: nextContent, thumbnailContent };
+                    return markMissingMedia({ ...image, content: nextContent, thumbnailContent });
                 }),
             );
             if (node.metadata?.storageKey) {
@@ -128,9 +137,45 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                       : node.metadata.thumbnailContent;
                 // Prefer thumbnail for canvas chrome when available; still resolve full primary for crisp display.
                 const fullContent = await resolveImageUrl(node.metadata.storageKey, content);
-                return { ...node, metadata: { ...node.metadata, content: fullContent, thumbnailContent, images } };
+                const nextMeta = markMissingMedia({
+                    status: node.metadata.status || "success",
+                    content: fullContent,
+                    storageKey: node.metadata.storageKey,
+                    thumbnailContent,
+                    thumbnailStorageKey: node.metadata.thumbnailStorageKey,
+                    errorDetails: node.metadata.errorDetails,
+                });
+                return {
+                    ...node,
+                    metadata: {
+                        ...node.metadata,
+                        content: nextMeta.content,
+                        thumbnailContent: nextMeta.thumbnailContent,
+                        status: nextMeta.status,
+                        errorDetails: nextMeta.errorDetails,
+                        images,
+                    },
+                };
             }
-            if (!content || !content.startsWith("data:image/")) return { ...node, metadata: { ...node.metadata, content: isDeadBlobUrl(content) ? "" : content, images } };
+            if (!content || !content.startsWith("data:image/")) {
+                const cleared = isDeadBlobUrl(content) ? "" : content;
+                const primary = images.find((image) => image.id === primaryId) || images[0];
+                const visible = cleared || primary?.content || primary?.thumbnailContent || "";
+                const nextStatus =
+                    !visible && (node.metadata?.status === "success" || primary?.storageKey || node.metadata?.storageKey)
+                        ? ("error" as const)
+                        : node.metadata?.status;
+                return {
+                    ...node,
+                    metadata: {
+                        ...node.metadata,
+                        content: cleared || primary?.content || "",
+                        status: nextStatus,
+                        errorDetails: nextStatus === "error" ? node.metadata?.errorDetails || i18n.t("canvas.generation.mediaMissing") : node.metadata?.errorDetails,
+                        images,
+                    },
+                };
+            }
             return { ...node, metadata: { ...node.metadata, ...imageMetadata(await uploadImage(content)), images } };
         }),
     );
@@ -276,19 +321,25 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
 }
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
-    return nodes.map((node) =>
-        node.metadata?.status === "loading"
-            ? {
-                  ...node,
-                  metadata: {
-                      ...node.metadata,
-                      status: "error" as const,
-                      errorDetails: i18n.t("canvas.generation.interrupted"),
-                      images: node.metadata.images?.map((image) => (image.status === "loading" ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : image)),
-                  },
-              }
-            : node,
-    );
+    return nodes.map((node) => {
+        const images = node.metadata?.images;
+        const hasLoadingSlot = images?.some((image) => image.status === "loading");
+        const nodeLoading = node.metadata?.status === "loading";
+        if (!nodeLoading && !hasLoadingSlot) return node;
+        return {
+            ...node,
+            metadata: {
+                ...node.metadata,
+                status: nodeLoading ? ("error" as const) : node.metadata?.status,
+                errorDetails: nodeLoading ? i18n.t("canvas.generation.interrupted") : node.metadata?.errorDetails,
+                images: images?.map((image) =>
+                    image.status === "loading"
+                        ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") }
+                        : image,
+                ),
+            },
+        };
+    });
 }
 
 export function isGenerationCanceled(error: unknown) {
