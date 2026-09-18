@@ -148,14 +148,24 @@ export async function setImageBlob(storageKey: string, blob: Blob) {
     return url;
 }
 
-export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string }) {
-    const storageKey = String(image.storageKey || "").trim();
+export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string; thumbnailStorageKey?: string }) {
+    const storageKeys = [image.storageKey, image.thumbnailStorageKey].map((value) => String(value || "").trim()).filter(Boolean);
     const dataUrl = String(image.dataUrl || "").trim();
     const url = String(image.url || "").trim();
 
     const readCandidate = async (candidate: string) => {
         if (!candidate) return "";
         if (candidate.startsWith("data:")) return candidate;
+        // Dead blob: previews throw; skip without treating as a hard failure.
+        if (/^blob:/i.test(candidate)) {
+            try {
+                const blob = await (await fetch(candidate)).blob();
+                if (!blob.size) return "";
+                return blobToDataUrl(blob);
+            } catch {
+                return "";
+            }
+        }
         try {
             return blobToDataUrl(await (await fetch(proxyRemoteMediaUrl(candidate))).blob());
         } catch {
@@ -164,13 +174,13 @@ export async function imageToDataUrl(image: { url?: string; dataUrl?: string; st
     };
 
     // Prefer durable store, but keep same-session blob:/http previews as fallback when store misses.
-    if (storageKey) {
+    for (const storageKey of storageKeys) {
         try {
             const fromStore = await resolveImageUrl(storageKey, "");
             const stored = await readCandidate(fromStore);
             if (stored) return stored;
         } catch {
-            // fall through
+            // try next key / fall through
         }
     }
 
@@ -178,10 +188,11 @@ export async function imageToDataUrl(image: { url?: string; dataUrl?: string; st
         const resolved = await readCandidate(candidate);
         if (!resolved) continue;
         // Heal empty IndexedDB entry while the live blob preview is still valid.
-        if (storageKey && /^blob:/i.test(candidate)) {
+        const healKey = storageKeys[0];
+        if (healKey && /^blob:/i.test(candidate)) {
             try {
                 const blob = await (await fetch(candidate)).blob();
-                if (blob.size > 0) await setImageBlob(storageKey, blob);
+                if (blob.size > 0) await setImageBlob(healKey, blob);
             } catch {
                 // ignore heal failures
             }

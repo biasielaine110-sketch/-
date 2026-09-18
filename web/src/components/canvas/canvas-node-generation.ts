@@ -181,17 +181,25 @@ function generationLabel(type: NodeGenerationInput["type"], index: number) {
 
 function readReferenceImage(node: CanvasNodeData): ReferenceImage | null {
     if (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate) return null;
-    const content = String(node.metadata?.content || "").trim();
-    const storageKey = String(node.metadata?.storageKey || "").trim();
-    if (!content && !storageKey) return null;
+    const images = node.metadata?.images || [];
+    const primaryId = node.metadata?.primaryImageId || images[0]?.id;
+    const primary = images.find((image) => image.id === primaryId) || images[0];
+    // Prefer primary version fields — top-level content is often a stale blob: preview after refresh.
+    const content = String(primary?.content || node.metadata?.content || "").trim();
+    const storageKey = String(primary?.storageKey || node.metadata?.storageKey || "").trim();
+    const thumbnailContent = String(primary?.thumbnailContent || node.metadata?.thumbnailContent || "").trim();
+    const thumbnailStorageKey = String(primary?.thumbnailStorageKey || node.metadata?.thumbnailStorageKey || "").trim();
+    if (!content && !storageKey && !thumbnailContent && !thumbnailStorageKey) return null;
+    const preview = content || thumbnailContent;
     return {
         id: node.id,
         name: `${node.title || node.id}.png`,
-        type: node.metadata?.mimeType || "image/png",
+        type: primary?.mimeType || node.metadata?.mimeType || "image/png",
         // Keep live blob:/data:/http content for same-session reads; imageToDataUrl recovers via storageKey when blob dies.
-        dataUrl: content || "",
-        url: /^https?:\/\//i.test(content) ? content : undefined,
+        dataUrl: preview || "",
+        url: /^https?:\/\//i.test(preview) ? preview : undefined,
         storageKey: storageKey || undefined,
+        thumbnailStorageKey: thumbnailStorageKey || undefined,
     };
 }
 
