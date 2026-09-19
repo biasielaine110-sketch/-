@@ -23,23 +23,58 @@ const store = localforage.createInstance({ name: "infinite-canvas", storeName: "
 const objectUrls = new Map<string, string>();
 
 export async function uploadImage(input: string | Blob): Promise<UploadedImage> {
-    const blob = typeof input === "string" ? await (await fetch(proxyRemoteMediaUrl(input))).blob() : input;
+    const blob = typeof input === "string" ? await fetchImageBlob(input) : input;
     const storageKey = `image:${nanoid()}`;
-    await persistImageBlob(storageKey, blob);
     const url = URL.createObjectURL(blob);
-    objectUrls.set(storageKey, url);
-    const meta = await readImageMeta(url);
-    const thumb = await createAndStoreThumbnail(url, storageKey, meta.width, meta.height);
-    return {
-        url,
-        storageKey,
-        thumbnailUrl: thumb?.url,
-        thumbnailStorageKey: thumb?.storageKey,
-        width: meta.width,
-        height: meta.height,
-        bytes: blob.size,
-        mimeType: blob.type || meta.mimeType,
-    };
+    try {
+        const meta = await readStrictImageMeta(url);
+        await persistImageBlob(storageKey, blob);
+        objectUrls.set(storageKey, url);
+        const thumb = await createAndStoreThumbnail(url, storageKey, meta.width, meta.height);
+        return {
+            url,
+            storageKey,
+            thumbnailUrl: thumb?.url,
+            thumbnailStorageKey: thumb?.storageKey,
+            width: meta.width,
+            height: meta.height,
+            bytes: blob.size,
+            mimeType: blob.type || meta.mimeType,
+        };
+    } catch (error) {
+        URL.revokeObjectURL(url);
+        throw error;
+    }
+}
+
+async function fetchImageBlob(url: string) {
+    const response = await fetch(proxyRemoteMediaUrl(url));
+    if (!response.ok) throw new Error(i18n.t("common.imageReadFailed"));
+    const blob = await response.blob();
+    if (!blob.size) throw new Error(i18n.t("common.imageReadFailed"));
+    return blob;
+}
+
+function readStrictImageMeta(url: string) {
+    return new Promise<{ width: number; height: number; mimeType: string }>((resolve, reject) => {
+        const image = new Image();
+        const timer = window.setTimeout(() => reject(new Error(i18n.t("common.imageReadFailed"))), 8000);
+        image.onload = () => {
+            window.clearTimeout(timer);
+            const width = image.naturalWidth || image.width;
+            const height = image.naturalHeight || image.height;
+            if (!width || !height) {
+                reject(new Error(i18n.t("common.imageReadFailed")));
+                return;
+            }
+            resolve({ width, height, mimeType: url.match(/^data:([^;]+)/)?.[1] || "image/png" });
+        };
+        image.onerror = () => {
+            window.clearTimeout(timer);
+            reject(new Error(i18n.t("common.imageReadFailed")));
+        };
+        image.src = url;
+    });
 }
 
 async function createAndStoreThumbnail(sourceUrl: string, fullStorageKey: string, width: number, height: number) {

@@ -4,7 +4,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { Group, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { isMidjourneyModel, requestEdit, requestGeneration, requestImageQuestion, requestMidjourneyUpscale, type AiTextMessage } from "@/services/api/image";
+import { isMidjourneyModel, requestEdit, requestGeneration, requestImageQuestion, requestMidjourneyUpscale, type AiTextMessage, type GeneratedImageResult } from "@/services/api/image";
 import { chatSkillsSystemHint, executeChatSkillTool, resolveChatSkillIds, resolveChatSkillTools } from "@/lib/chat-skills";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
@@ -259,6 +259,19 @@ async function ensureClipboardImageBlob(blob: Blob) {
     bitmap.close();
     const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
     return png || new Blob([blob], { type: "image/png" });
+}
+
+async function uploadGeneratedImage(image: Pick<GeneratedImageResult, "dataUrl" | "fallbackUrls">) {
+    const candidates = [...new Set([image.dataUrl, ...(image.fallbackUrls || [])].filter(Boolean))];
+    let lastError: unknown;
+    for (const candidate of candidates) {
+        try {
+            return await uploadImage(candidate);
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError instanceof Error ? lastError : new Error("Image could not be loaded");
 }
 
 export default function CanvasPage() {
@@ -3092,7 +3105,7 @@ function AtelierCanvasPage() {
             const controller = startGenerationRequest(childId, node.id, childId);
             try {
                 const image = await requestEdit(generationConfig, prompt, [source], { id: `${node.id}-mask`, name: "mask.png", type: "image/png", dataUrl: payload.maskDataUrl }, { signal: controller.signal }).then((items) => items[0]);
-                const uploaded = await uploadImage(image.dataUrl);
+                const uploaded = await uploadGeneratedImage(image);
                 const size = fitNodeSize(uploaded.width, uploaded.height, node.width, node.height);
                 setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, width: size.width, height: size.height, metadata: { ...item.metadata, ...imageMetadata(uploaded), prompt, ...generationMetadata } } : item)));
             } catch (error) {
@@ -3242,7 +3255,7 @@ function AtelierCanvasPage() {
             try {
                 const image = await requestMidjourneyUpscale(generationConfig, taskId, index, { signal: controller.signal }).then((items) => items[0]);
                 if (!image?.dataUrl) throw new Error(t("canvas.projectPage.generationFailed"));
-                const uploaded = await uploadImage(image.dataUrl);
+                const uploaded = await uploadGeneratedImage(image);
                 const size = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                 setNodes((prev) =>
                     prev.map((item) =>
@@ -3321,7 +3334,7 @@ function AtelierCanvasPage() {
                     undefined,
                     { signal: controller.signal },
                 ).then((items) => items[0]);
-                const uploaded = await uploadImage(image.dataUrl);
+                const uploaded = await uploadGeneratedImage(image);
                 const size = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                 setNodes((prev) => prev.map((item) => (item.id === childId ? { ...item, width: size.width, height: size.height, metadata: { ...item.metadata, ...imageMetadata(uploaded), prompt, ...generationMetadata } } : item)));
             } catch (error) {
@@ -3585,7 +3598,7 @@ function AtelierCanvasPage() {
                     const image = refs.length
                         ? await requestEdit({ ...generationConfig, count: "1" }, fullPrompt, refs, undefined, { signal: controller.signal }).then((items) => items[0])
                         : await requestGeneration({ ...generationConfig, count: "1" }, fullPrompt, { signal: controller.signal }).then((items) => items[0]);
-                    const uploaded = await uploadImage(image.dataUrl);
+                    const uploaded = await uploadGeneratedImage(image);
                     setNodes((prev) =>
                         prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
                     );
@@ -3756,9 +3769,9 @@ function AtelierCanvasPage() {
                     const newImageIdSet = new Set(imageIds);
                     const applyGeneratedSlot = async (
                         imageId: string,
-                        image: { dataUrl: string; midjourneyTaskId?: string; midjourneyIndex?: number },
+                        image: GeneratedImageResult,
                     ) => {
-                        const uploaded = await uploadImage(image.dataUrl);
+                        const uploaded = await uploadGeneratedImage(image);
                         const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                         const item = canvasNodeImageFromUpload(imageId, uploaded, {
                             midjourneyTaskId: image.midjourneyTaskId,
@@ -4466,7 +4479,7 @@ function AtelierCanvasPage() {
                 const image = useReferenceImages
                     ? await requestEdit(generationConfig, prompt, retryImages, undefined, { signal: controller.signal }).then((items) => items[0])
                     : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
-                const uploadedImage = await uploadImage(image.dataUrl);
+                const uploadedImage = await uploadGeneratedImage(image);
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                 const retryImage = canvasNodeImageFromUpload(imageId || node.metadata?.primaryImageId || nanoid(), uploadedImage);
                 const generationMetadata = savedImageMetadata?.generationType
@@ -4901,7 +4914,7 @@ function AtelierCanvasPage() {
                 const results = referenceImages.length
                     ? await requestEdit({ ...imageConfig!, count: "1" }, imageContext.prompt || userText, referenceImages, undefined, { signal: controller.signal })
                     : await requestGeneration({ ...imageConfig!, count: "1" }, imageContext.prompt || userText, { signal: controller.signal });
-                const uploadedImages = await Promise.all(results.map(async (item) => uploadImage(item.dataUrl)));
+                const uploadedImages = await Promise.all(results.map(async (item) => uploadGeneratedImage(item)));
                 const chatImages = uploadedImages.map((uploaded, index) => ({
                     id: `${assistantId}-${index}`,
                     dataUrl: uploaded.url,
@@ -4994,7 +5007,7 @@ function AtelierCanvasPage() {
 
     const insertAssistantImage = useCallback(
         async (image: CanvasAssistantImage) => {
-            const storedImage = image.storageKey ? { url: image.dataUrl, storageKey: image.storageKey, width: 1, height: 1, bytes: 0, mimeType: "image/png" } : await uploadImage(image.dataUrl);
+            const storedImage = image.storageKey ? { url: image.dataUrl, storageKey: image.storageKey, width: 1, height: 1, bytes: 0, mimeType: "image/png" } : await uploadGeneratedImage(image);
             const meta = storedImage.width === 1 && storedImage.height === 1 ? await readImageMeta(storedImage.url) : storedImage;
             const config = fitNodeSize(meta.width, meta.height);
             const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);

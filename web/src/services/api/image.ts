@@ -269,6 +269,7 @@ export function isMidjourneyModel(model: string) {
 export type GeneratedImageResult = {
     id: string;
     dataUrl: string;
+    fallbackUrls?: string[];
     midjourneyTaskId?: string;
     midjourneyIndex?: number;
 };
@@ -1460,12 +1461,16 @@ async function pollHfsyMjTask(config: AiConfig, taskId: string, options?: Reques
 }
 
 function hfsyMjImages(taskId: string, done: { urls: string[]; grid: string }, count: number): GeneratedImageResult[] {
-    const grid = done.grid && /^https?:\/\//i.test(done.grid) ? done.grid : done.urls.length === 1 ? done.urls[0] : "";
-    if (grid) return [{ id: nanoid(), dataUrl: grid, midjourneyTaskId: taskId }];
+    const candidates = [...new Set([done.grid, ...done.urls].filter((url): url is string => /^https?:\/\//i.test(String(url || ""))))];
+    const grid = candidates[0] || "";
+    if (grid) {
+        return [{ id: nanoid(), dataUrl: grid, fallbackUrls: candidates.slice(1), midjourneyTaskId: taskId }];
+    }
     const limit = Math.max(1, Math.min(4, count));
     return done.urls.slice(0, limit).map((dataUrl, index) => ({
         id: nanoid(),
         dataUrl,
+        fallbackUrls: done.urls.filter((url) => url !== dataUrl),
         midjourneyTaskId: taskId,
         midjourneyIndex: index + 1,
     }));
