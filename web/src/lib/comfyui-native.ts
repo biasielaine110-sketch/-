@@ -73,7 +73,7 @@ export function parseComfyApiWorkflow(script: string | undefined | null): ComfyW
 }
 
 export function shouldUseNativeComfyUi(baseUrl: string, model: string, script?: string): boolean {
-    if (/autodl\.art/i.test(baseUrl)) return false;
+    if (/autodl\.art/i.test(baseUrl) || /runninghub\.(cn|ai)/i.test(baseUrl)) return false;
     if (parseComfyApiWorkflow(script)) return true;
     const name = String(model || "")
         .split("::")
@@ -235,6 +235,59 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     });
 }
 
+function readSubmitRecord(value: unknown): Record<string, unknown> | null {
+    if (typeof value === "string") {
+        try {
+            return readSubmitRecord(JSON.parse(value));
+        } catch {
+            return null;
+        }
+    }
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function readComfySubmit(data: unknown) {
+    const root = readSubmitRecord(data);
+    const nested = readSubmitRecord(root?.data);
+    const records = [root, nested].filter((item): item is Record<string, unknown> => Boolean(item));
+    let promptId = "";
+    let taskId = "";
+    let message = "";
+    for (const record of records) {
+        if (!promptId) {
+            const id = record.prompt_id || record.promptId;
+            if (typeof id === "string" || typeof id === "number") promptId = String(id);
+        }
+        if (!taskId) {
+            const id = record.taskId || record.task_id;
+            if (typeof id === "string" && id) taskId = id;
+        }
+        if (!message) {
+            const text = [record.errorMessage, record.failedReason, record.msg, record.message, record.errorCode].find(
+                (item) => typeof item === "string" && item.trim() && !/^success$/i.test(item.trim()),
+            );
+            if (typeof text === "string") message = text.trim();
+        }
+    }
+    return { promptId, taskId, message };
+}
+
+async function finishRunningHubTask(baseUrl: string, apiKey: string, taskId: string, signal?: AbortSignal): Promise<NativeComfyUiResult> {
+    const { pollRunningHubQuery, runningHubApiKey, runningHubOrigin } = await import("@/lib/runninghub-workflow");
+    const origin = runningHubOrigin(baseUrl);
+    const token = runningHubApiKey(baseUrl, apiKey);
+    if (!origin || !token) throw new Error("ComfyUI did not return prompt_id");
+    const task = await pollRunningHubQuery({ origin, apiKey: token, taskId, signal });
+    const images = task.images.map((url) => ({ id: nanoid(), dataUrl: url }));
+    const videos: NativeComfyUiResult["videos"] = [];
+    for (const url of task.videos) {
+        const response = await axios.get<Blob>(proxyApiUrl(url), { responseType: "blob", signal });
+        videos.push({ blob: response.data, mimeType: response.data.type || "video/mp4", url });
+    }
+    if (!images.length && !videos.length) throw new Error("ComfyUI finished but returned no images/videos");
+    return { images, videos };
+}
+
 function sleep(ms: number, signal?: AbortSignal) {
     return new Promise<void>((resolve, reject) => {
         if (signal?.aborted) {
@@ -291,10 +344,15 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         headers: authHeaders(apiKey, "application/json"),
         signal,
     });
-    const promptId = String(submit.data?.prompt_id || submit.data?.promptId || "");
+    const submitted = readComfySubmit(submit.data);
+    if (!submitted.promptId && submitted.taskId && /runninghub\.(cn|ai)/i.test(baseUrl)) {
+        return finishRunningHubTask(baseUrl, apiKey, submitted.taskId, signal);
+    }
+    const promptId = submitted.promptId;
     if (!promptId) {
         const err = submit.data?.error || submit.data?.node_errors;
-        throw new Error(typeof err === "string" ? err : err ? JSON.stringify(err) : "ComfyUI did not return prompt_id");
+        const errText = typeof err === "string" ? err : err && typeof err === "object" && Object.keys(err).length ? JSON.stringify(err) : "";
+        throw new Error(errText || submitted.message || "ComfyUI did not return prompt_id");
     }
 
     const deadline = performance.now() + HISTORY_TIMEOUT_MS;

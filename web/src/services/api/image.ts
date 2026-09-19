@@ -1,9 +1,10 @@
 import axios from "axios";
 
 import i18n from "@/i18n";
-import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
+import { pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
@@ -919,6 +920,8 @@ function resolveImageDataUrl(item: Record<string, unknown>) {
     if (typeof item.dataUrl === "string" && item.dataUrl) {
         return item.dataUrl;
     }
+    if (typeof item.fileUrl === "string" && item.fileUrl) return item.fileUrl;
+    if (typeof item.file_url === "string" && item.file_url) return item.file_url;
     return null;
 }
 
@@ -1118,7 +1121,39 @@ async function pollAsyncImageTask(config: AiConfig, taskId: string, options?: Re
     return parseImagePayload(await pollAsyncImageTaskPayload(config, taskId, options));
 }
 
+async function resolveRunningHubImageTask(config: AiConfig, payload: ImageApiResponse, options?: RequestOptions) {
+    const hub = readRunningHubTask(payload);
+    if (!hub) return null;
+    if (hub.errorMessage || /fail|cancel|error/i.test(hub.status)) {
+        throw new Error(hub.errorMessage || apiText("runningHubTaskFailed"));
+    }
+    const done = /^(success|succeeded|completed)$/i.test(hub.status);
+    const images = done ? hub.images : [];
+    if (done) {
+        if (!images.length) throw new Error(apiText("runningHubNoImage"));
+        return {
+            id: hub.taskId,
+            status: hub.status,
+            url: images[0],
+            images: images.map((url) => ({ url })),
+            results: images.map((url) => ({ url })),
+        } satisfies ImageApiResponse;
+    }
+    const origin = runningHubOrigin(config.baseUrl) || "https://www.runninghub.cn";
+    const finalTask = await pollRunningHubQuery({ origin, apiKey: config.apiKey, taskId: hub.taskId, signal: options?.signal });
+    if (!finalTask.images.length) throw new Error(apiText("runningHubNoImage"));
+    return {
+        id: finalTask.taskId,
+        status: finalTask.status,
+        url: finalTask.images[0],
+        images: finalTask.images.map((url) => ({ url })),
+        results: finalTask.images.map((url) => ({ url })),
+    } satisfies ImageApiResponse;
+}
+
 async function resolveImageTaskPayload(config: AiConfig, payload: ImageApiResponse, options?: RequestOptions) {
+    const runningHub = await resolveRunningHubImageTask(config, payload, options);
+    if (runningHub) return runningHub;
     const normalized = normalizeImageApiPayload(payload);
     if (isAsyncImageTask(normalized)) {
         const status = String(normalized.status || "").trim().toLowerCase();
@@ -1258,6 +1293,33 @@ async function resolveInlineOrRemoteReferenceUrl(image: ReferenceImage, referenc
 function withSystemPrompt(config: AiConfig, prompt: string) {
     const systemPrompt = config.systemPrompt.trim();
     return systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
+}
+
+function runningHubWorkflowId(config: AiConfig, encodedModel: string, request: { baseUrl: string; model: string }, script: string) {
+    const channel = resolveModelChannel(config, encodedModel);
+    return pickRunningHubWorkflowId({
+        baseUrl: request.baseUrl || channel.baseUrl,
+        model: request.model,
+        script,
+        channelName: channel.name,
+        siblingModels: channel.models,
+    });
+}
+
+async function requestRunningHubImages(config: AiConfig, prompt: string, referenceDataUrls: string[], script: string, options?: RequestOptions) {
+    if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    const result = await runRunningHubWorkflow({
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        model: config.model || config.imageModel,
+        script,
+        prompt,
+        size: config.size,
+        referenceDataUrls,
+        signal: options?.signal,
+    });
+    if (result.images.length) return result.images.map((dataUrl) => ({ id: nanoid(), dataUrl }));
+    throw new Error(apiText("runningHubNoImage"));
 }
 
 async function requestNativeComfyUiImages(config: AiConfig, prompt: string, referenceDataUrls: string[], options?: RequestOptions) {
@@ -1908,6 +1970,15 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const requestConfig = resolveImageRequestConfig(config);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
+    if (runningHubOrigin(requestConfig.baseUrl)) {
+        const workflowId = runningHubWorkflowId(config, config.model || config.imageModel, requestConfig, script);
+        if (!workflowId) throw new Error(apiText("runningHubWorkflowFetchFailed", { model: requestConfig.model || "空" }));
+        try {
+            return await requestRunningHubImages({ ...requestConfig, model: workflowId }, withSystemPrompt(requestConfig, prompt), [], script, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
     if (shouldUseNativeComfyUi(requestConfig.baseUrl, requestConfig.model, script) || parseComfyApiWorkflow(script)) {
         try {
             return await requestNativeComfyUiImages(requestConfig, withSystemPrompt(requestConfig, prompt), [], options);
@@ -1998,6 +2069,16 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     const script = resolveModelScript(config, config.model || config.imageModel);
+    if (runningHubOrigin(requestConfig.baseUrl)) {
+        const workflowId = runningHubWorkflowId(config, config.model || config.imageModel, requestConfig, script);
+        if (!workflowId) throw new Error(apiText("runningHubWorkflowFetchFailed", { model: requestConfig.model || "空" }));
+        const refs = await Promise.all(references.map((image) => prepareReferenceDataUrl(image, Math.max(1, references.length))));
+        try {
+            return await requestRunningHubImages({ ...requestConfig, model: workflowId }, withSystemPrompt(requestConfig, requestPrompt), refs, script, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
     if (shouldUseNativeComfyUi(requestConfig.baseUrl, requestConfig.model, script) || parseComfyApiWorkflow(script)) {
         const refs = await Promise.all(references.map((image) => prepareReferenceDataUrl(image, Math.max(1, references.length))));
         try {

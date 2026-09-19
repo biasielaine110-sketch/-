@@ -104,7 +104,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     return (
         <Drawer
             open={open}
-            width={720}
+            size={720}
             title={t("config.channelEditor.title")}
             onClose={onClose}
             styles={{ body: { paddingTop: 16 } }}

@@ -5,6 +5,7 @@ import { isSeedAudioModel, isSunoAudioModel } from "@/lib/audio-generation";
 import { isAutodlComfyAudioModel } from "@/lib/autodl-comfy-audio";
 import { isAutodlH3ComfyVideoModel } from "@/lib/autodl-h3-comfy";
 import { isNativeComfyUiBaseUrl, parseComfyApiWorkflow, probeNativeComfyUi } from "@/lib/comfyui-native";
+import { probeRunningHubWorkflow, shouldUseRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import { buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
@@ -177,7 +178,10 @@ export async function probeModelHealth(config: AiConfig, encodedModel: string, c
     if (!request.baseUrl.trim()) return { ok: false, message: apiText("baseUrlRequired") };
     if (!request.model.trim()) return { ok: false, message: apiText("requestFailed") };
     const script = resolveModelScript(config, encodedModel);
-    const nativeComfy = isNativeComfyUiBaseUrl(request.baseUrl) || Boolean(parseComfyApiWorkflow(script));
+    if (shouldUseRunningHubWorkflow(request.baseUrl, request.model, script) && (capability === "image" || capability === "video")) {
+        return probeRunningHubWorkflow(request.baseUrl, request.apiKey, request.model, script, signal);
+    }
+    const nativeComfy = !/runninghub\.(cn|ai)/i.test(request.baseUrl) && (isNativeComfyUiBaseUrl(request.baseUrl) || Boolean(parseComfyApiWorkflow(script)));
     if (!nativeComfy && !request.apiKey.trim()) return { ok: false, message: apiText("apiKeyRequired") };
 
     if (nativeComfy && (capability === "image" || capability === "video")) {

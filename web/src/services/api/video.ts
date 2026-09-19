@@ -14,10 +14,11 @@ import {
 import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/lib/image-utils";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
-import { boolConfig, buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { resolveApiTransport, proxyApiUrl } from "@/lib/api-proxy";
 import { uploadTemporaryPublicImage } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
+import { pickRunningHubWorkflowId, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio } from "@/types/media";
@@ -72,6 +73,18 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     // channel script omit ref_audio_0 and surface "模型调用脚本执行失败".
     if (shouldUseAutodlComfyVideoBuiltin(selectedModel, requestConfig.baseUrl, script)) {
         return createAutodlComfyVideoTask(requestConfig, selectedModel, prompt, references, options);
+    }
+    if (runningHubOrigin(requestConfig.baseUrl)) {
+        const channel = resolveModelChannel(config, selectedModel);
+        const workflowId = pickRunningHubWorkflowId({
+            baseUrl: requestConfig.baseUrl || channel.baseUrl,
+            model: requestConfig.model || modelOptionName(selectedModel),
+            script,
+            channelName: channel.name,
+            siblingModels: channel.models,
+        });
+        if (!workflowId) throw new Error(apiText("runningHubWorkflowFetchFailed", { model: requestConfig.model || modelOptionName(selectedModel) || "空" }));
+        return createRunningHubVideoTask(requestConfig, workflowId, script, prompt, references, options);
     }
     // Native ComfyUI cloud/server: model script = Export Workflow (API) JSON.
     if (shouldUseNativeComfyUi(requestConfig.baseUrl, selectedModel, script) || parseComfyApiWorkflow(script)) {
@@ -137,6 +150,47 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
     );
     const id = nanoid();
     pluginVideoResults.set(id, result);
+    return { id, provider: "plugin", model };
+}
+
+/**
+ * RunningHub official workflow API. Model name = workflowId. Do not paste workflow JSON.
+ */
+async function createRunningHubVideoTask(
+    config: AiConfig,
+    model: string,
+    script: string,
+    prompt: string,
+    references: ReferenceImage[],
+    options?: RequestOptions,
+): Promise<VideoGenerationTask> {
+    if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    const refs = await Promise.all(
+        references.slice(0, 8).map(async (image) => {
+            try {
+                const dataUrl = await imageToDataUrl(image);
+                return dataUrl?.startsWith("data:") || /^https?:\/\//i.test(dataUrl || "") ? dataUrl : "";
+            } catch {
+                return "";
+            }
+        }),
+    );
+    const result = await runRunningHubWorkflow({
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        model,
+        script,
+        prompt,
+        size: config.size,
+        seconds: config.videoSeconds,
+        media: "video",
+        referenceDataUrls: refs.filter(Boolean),
+        signal: options?.signal,
+    });
+    const videoUrl = result.videos[0];
+    if (!videoUrl) throw new Error(apiText("runningHubNoVideo"));
+    const id = nanoid();
+    pluginVideoResults.set(id, { url: videoUrl, mimeType: "video/mp4" });
     return { id, provider: "plugin", model };
 }
 
