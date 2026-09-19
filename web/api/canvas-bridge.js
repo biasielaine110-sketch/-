@@ -456,6 +456,7 @@ async function handleCanvasApi(req, res, pathname) {
         return;
     }
     if (req.method === "POST" && pathname.endsWith("/state")) {
+        if (!requireAuth(req, res)) return;
         const body = await readBody(req);
         if (!body || typeof body !== "object" || !body.projectId) {
             sendJson(req, res, 400, { ok: false, error: "missing project" });
@@ -470,6 +471,7 @@ async function handleCanvasApi(req, res, pathname) {
         return;
     }
     if (req.method === "GET" && pathname.endsWith("/commands")) {
+        if (!requireAuth(req, res)) return;
         const commands = await takePendingCommands();
         sendJson(req, res, 200, { commands });
         return;
@@ -542,6 +544,7 @@ async function handleCanvasApi(req, res, pathname) {
         return;
     }
     if (req.method === "POST" && pathname.endsWith("/result")) {
+        if (!requireAuth(req, res)) return;
         const body = await readBody(req);
         const done = body?.id ? await finishCommand(body.id, { ok: body.ok !== false, ...body }) : false;
         sendJson(req, res, done ? 200 : 404, { ok: Boolean(done) });

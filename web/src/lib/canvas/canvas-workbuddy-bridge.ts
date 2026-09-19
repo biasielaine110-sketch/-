@@ -64,7 +64,23 @@ function summarizeNode(node: CanvasNodeData) {
 }
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1"]);
+const BRIDGE_TOKEN_STORAGE_KEY = "infinite-atelier:canvas-bridge-token";
 let bridgeBase: string | null = null;
+
+function bridgeToken() {
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get("bridgeToken") || params.get("workbuddyToken") || params.get("canvasBridgeToken") || "";
+    if (fromUrl) {
+        window.localStorage.setItem(BRIDGE_TOKEN_STORAGE_KEY, fromUrl);
+        return fromUrl;
+    }
+    return window.localStorage.getItem(BRIDGE_TOKEN_STORAGE_KEY) || "";
+}
+
+function bridgeHeaders(headers?: HeadersInit) {
+    const token = bridgeToken();
+    return { ...(headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+}
 
 function bridgeBases() {
     const here = window.location.origin.replace(/\/$/, "");
@@ -76,7 +92,7 @@ async function bridgeFetch(path: string, init?: RequestInit) {
     const bases = bridgeBase ? [bridgeBase, ...bridgeBases().filter((item) => item !== bridgeBase)] : bridgeBases();
     for (const base of bases) {
         try {
-            const response = await fetch(`${base}${path}`, init);
+            const response = await fetch(`${base}${path}`, { ...init, headers: bridgeHeaders(init?.headers) });
             if (!(response.headers.get("content-type") || "").includes("application/json")) continue;
             bridgeBase = base;
             return response;
