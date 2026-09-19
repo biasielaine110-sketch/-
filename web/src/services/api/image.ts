@@ -1339,8 +1339,191 @@ async function requestNativeComfyUiImages(config: AiConfig, prompt: string, refe
     throw new Error(apiText("comfyNoImage"));
 }
 
+/** hfsyapi mj_imagine: POST {origin}/mj/submit/imagine, then GET /mj/task/{id}/fetch. Not /v1/midjourney/generations. */
+function hfsyApiOrigin(baseUrl: string) {
+    try {
+        return new URL(baseUrl.trim()).origin;
+    } catch {
+        return baseUrl.trim().replace(/\/+$/, "").replace(/\/v1(?:beta)?$/i, "");
+    }
+}
+
+function isHfsyMjImagineModel(config: Pick<AiConfig, "baseUrl" | "model">) {
+    return isHfsyApiBaseUrl(config.baseUrl) && /^mj_imagine$/i.test(config.model.trim());
+}
+
+function hfsyMjUrl(config: AiConfig, path: string) {
+    return proxyApiUrl(`${hfsyApiOrigin(config.baseUrl)}${path}`);
+}
+
+function appendMjFlag(prompt: string, flag: string, value?: string) {
+    const escaped = flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`${escaped}(?:\\s+\\S+)?`, "i").test(prompt)) return prompt;
+    return `${prompt} ${value ? `${flag} ${value}` : flag}`.trim();
+}
+
+function hfsyMjPrompt(config: AiConfig, prompt: string) {
+    let text = withSystemPrompt(config, prompt).trim();
+    const rawSize = config.size.trim();
+    if (rawSize && rawSize.toLowerCase() !== "auto") {
+        const dimensions = parseImageDimensions(rawSize);
+        const ratio = closestAspectRatioLabel(dimensions ? `${dimensions.width}:${dimensions.height}` : rawSize.replace(/[xX×]/g, ":"), APIMART_DEFAULT_RATIOS);
+        text = appendMjFlag(text, "--ar", ratio);
+    }
+    const version = resolveMidjourneyVersionBody(config.mjVersion);
+    text = version.niji ? appendMjFlag(text, "--niji", version.version) : appendMjFlag(text, "--v", version.version);
+    if (!/--(?:turbo|relax|fast)\b/i.test(text)) {
+        const speed = resolveMidjourneySpeed(config.quality);
+        text = `${text} ${speed === "turbo" ? "--turbo" : speed === "relax" ? "--relax" : "--fast"}`.trim();
+    }
+    return text;
+}
+
+type HfsyMjSubmit = { code?: number; result?: string | number; taskId?: string; id?: string; description?: string; message?: string };
+
+function readHfsyMjTaskId(payload: HfsyMjSubmit | null | undefined) {
+    const id = payload?.result ?? payload?.taskId ?? payload?.id;
+    return id == null ? "" : String(id).trim();
+}
+
+function unwrapHfsyMjTask(payload: unknown) {
+    if (!payload || typeof payload !== "object") return {} as Record<string, unknown>;
+    const record = payload as Record<string, unknown>;
+    const data = record.data;
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+        const nested = data as Record<string, unknown>;
+        if ("status" in nested || "imageUrl" in nested || "imageUrls" in nested || "image_url" in nested || "failReason" in nested) {
+            return { ...record, ...nested };
+        }
+    }
+    return record;
+}
+
+function readHfsyMjUrls(task: Record<string, unknown>) {
+    const urls: string[] = [];
+    const push = (value: unknown) => {
+        if (typeof value === "string" && /^https?:\/\//i.test(value.trim())) urls.push(value.trim());
+    };
+    const lists: unknown[] = [task.imageUrls, task.image_urls];
+    const data = task.data;
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+        const nested = data as Record<string, unknown>;
+        lists.push(nested.imageUrls, nested.image_urls);
+        push(nested.image_url);
+        push(nested.imageUrl);
+        push(nested.result_url);
+        push(nested.url);
+    }
+    for (const list of lists) {
+        if (!Array.isArray(list)) continue;
+        for (const item of list) {
+            if (typeof item === "string") push(item);
+            else if (item && typeof item === "object") push((item as { url?: unknown }).url);
+        }
+    }
+    push(task.imageUrl);
+    push(task.result_url);
+    push(task.image_url);
+    push(task.url);
+    return [...new Set(urls)];
+}
+
+async function postHfsyMj<T>(config: AiConfig, path: string, data: unknown, options?: RequestOptions) {
+    return axios.post<T>(hfsyMjUrl(config, path), data, {
+        headers: aiHeaders(config, "application/json"),
+        signal: options?.signal,
+        timeout: IMAGE_REQUEST_TIMEOUT_MS,
+    });
+}
+
+async function pollHfsyMjTask(config: AiConfig, taskId: string, options?: RequestOptions) {
+    const deadline = performance.now() + IMAGE_TASK_POLL_TIMEOUT_MS;
+    const url = hfsyMjUrl(config, `/mj/task/${encodeURIComponent(taskId)}/fetch`);
+    while (performance.now() < deadline) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const response = await axios.get<unknown>(url, { headers: aiHeaders(config), signal: options?.signal, timeout: IMAGE_REQUEST_TIMEOUT_MS });
+        const task = unwrapHfsyMjTask(response.data);
+        const status = String(task.status || task.state || "").trim().toLowerCase();
+        if (["failure", "failed", "error", "cancel", "cancelled", "canceled"].includes(status)) {
+            const reason = task.failReason || task.description || task.error;
+            throw new Error(typeof reason === "string" && reason.trim() ? reason : apiText("imageTaskFailed"));
+        }
+        const urls = readHfsyMjUrls(task);
+        const progress = String(task.progress || "");
+        if (urls.length && (status === "success" || status === "completed" || progress === "100%")) {
+            const grid = typeof task.imageUrl === "string" ? task.imageUrl : typeof task.result_url === "string" ? task.result_url : "";
+            return { urls, grid };
+        }
+        await sleep(IMAGE_TASK_POLL_INTERVAL_MS, options?.signal);
+    }
+    throw new Error(apiText("imageTaskPollTimeout"));
+}
+
+function hfsyMjImages(taskId: string, done: { urls: string[]; grid: string }, count: number): GeneratedImageResult[] {
+    const grid = done.grid && /^https?:\/\//i.test(done.grid) ? done.grid : done.urls.length === 1 ? done.urls[0] : "";
+    if (grid) return [{ id: nanoid(), dataUrl: grid, midjourneyTaskId: taskId }];
+    const limit = Math.max(1, Math.min(4, count));
+    return done.urls.slice(0, limit).map((dataUrl, index) => ({
+        id: nanoid(),
+        dataUrl,
+        midjourneyTaskId: taskId,
+        midjourneyIndex: index + 1,
+    }));
+}
+
+async function requestHfsyMjImagine(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    const body: Record<string, unknown> = {
+        botType: "MID_JOURNEY",
+        prompt: hfsyMjPrompt(config, prompt),
+    };
+    if (references.length) {
+        const images: string[] = [];
+        for (const image of references.slice(0, 7)) {
+            images.push(await prepareReferenceDataUrl(image, references.length));
+        }
+        body.base64Array = images;
+    }
+    const response = await postHfsyMj<HfsyMjSubmit>(config, "/mj/submit/imagine", body, options);
+    const taskId = readHfsyMjTaskId(response.data);
+    if (!taskId) throw new Error(response.data?.description || response.data?.message || apiText("imageTaskFailed"));
+    const done = await pollHfsyMjTask(config, taskId, options);
+    if (!done.urls.length && !done.grid) throw new Error(apiText("imageTaskFailed"));
+    const count = Math.max(1, Math.min(4, Math.floor(Math.abs(Number(config.count)) || 1)));
+    return hfsyMjImages(taskId, done, count);
+}
+
+function hfsyUpscaleCustomId(task: Record<string, unknown>, index: number) {
+    const buttons = Array.isArray(task.buttons) ? task.buttons : [];
+    for (const button of buttons) {
+        if (!button || typeof button !== "object") continue;
+        const item = button as { customId?: unknown; label?: unknown };
+        const customId = typeof item.customId === "string" ? item.customId : "";
+        const label = String(item.label || "").trim().toUpperCase();
+        if (label === `U${index}` || customId.includes(`upsample::${index}::`)) return customId;
+    }
+    return "";
+}
+
+async function requestHfsyMjUpscale(config: AiConfig, parentTaskId: string, index: number, options?: RequestOptions) {
+    const fetched = await axios.get<unknown>(hfsyMjUrl(config, `/mj/task/${encodeURIComponent(parentTaskId)}/fetch`), {
+        headers: aiHeaders(config),
+        signal: options?.signal,
+        timeout: IMAGE_REQUEST_TIMEOUT_MS,
+    });
+    const customId = hfsyUpscaleCustomId(unwrapHfsyMjTask(fetched.data), index);
+    if (!customId) throw new Error(apiText("imageTaskFailed"));
+    const response = await postHfsyMj<HfsyMjSubmit>(config, "/mj/submit/action", { taskId: parentTaskId, customId }, options);
+    const taskId = readHfsyMjTaskId(response.data);
+    if (!taskId) throw new Error(response.data?.description || response.data?.message || apiText("imageTaskFailed"));
+    const done = await pollHfsyMjTask(config, taskId, options);
+    const url = done.urls[0] || done.grid;
+    if (!url) throw new Error(apiText("imageTaskFailed"));
+    return [{ id: nanoid(), dataUrl: url }];
+}
+
 /** Midjourney (Seedance / APIMart): Imagine only — Upscale is manual. See seedance.nz/docs/#mj-overview */
 async function requestMidjourneyGeneration(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    if (isHfsyMjImagineModel(config)) return requestHfsyMjImagine(config, prompt, references, options);
     const size = closestAspectRatioLabel(
         (() => {
             const value = config.size.trim();
@@ -1434,8 +1617,15 @@ function parseMidjourneyImagineImages(payload: ImageApiResponse, parentTaskId: s
 /** Manual Midjourney Upscale (U1–U4). Billing uses the upscale path SKU. */
 export async function requestMidjourneyUpscale(config: AiConfig, parentTaskId: string, index: number, options?: RequestOptions) {
     const requestConfig = resolveImageRequestConfig(config);
-    const mjConfig = { ...requestConfig, model: requestConfig.model || "midjourney" };
     const safeIndex = Math.max(1, Math.min(4, Math.floor(index) || 1));
+    if (isHfsyMjImagineModel(requestConfig) || (isHfsyApiBaseUrl(requestConfig.baseUrl) && isMidjourneyModel(requestConfig.model))) {
+        try {
+            return await requestHfsyMjUpscale(requestConfig, parentTaskId, safeIndex, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+    const mjConfig = { ...requestConfig, model: requestConfig.model || "midjourney" };
     try {
         const response = await postImageJson<ImageApiResponse>(
             mjConfig,
@@ -1456,11 +1646,11 @@ export async function requestMidjourneyUpscale(config: AiConfig, parentTaskId: s
 
 /** Seedance normalizes main versions to v8.2/v8.1/v7/v6.1/v5.2/v5.1; Niji is niji + version 7/6. */
 function resolveMidjourneyVersionBody(value: string) {
-    const normalized = String(value || "6.1").trim().toLowerCase().replace(/^v/, "");
+    const normalized = String(value || "8.1").trim().toLowerCase().replace(/^v/, "");
     if (normalized === "niji7" || normalized === "niji-7") return { version: "7", niji: true };
     if (normalized === "niji6" || normalized === "niji-6") return { version: "6", niji: true };
     const allowed = ["8.2", "8.1", "7", "6.1", "5.2", "5.1"];
-    return { version: allowed.includes(normalized) ? normalized : "6.1" };
+    return { version: allowed.includes(normalized) ? normalized : "8.1" };
 }
 
 function resolveMidjourneySpeed(quality: string) {

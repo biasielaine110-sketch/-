@@ -144,7 +144,7 @@ export const defaultConfig: AiConfig = {
     size: "2048x1152",
     background: "",
     count: "1",
-    mjVersion: "6.1",
+    mjVersion: "8.1",
     canvasImageCount: "1",
     textPrompts: defaultTextPrompts.map((item) => ({ ...item })),
     imageQuickTools: { ids: [], showLabels: false },
@@ -335,7 +335,7 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
-            version: 5,
+            version: 6,
             partialize: (state) => ({ config: state.config }),
             migrate: (persisted, version) => {
                 const state = (persisted || {}) as Partial<ConfigStore> & { config?: Partial<AiConfig> };
@@ -359,6 +359,10 @@ export const useConfigStore = create<ConfigStore>()(
                         nodeCreateMenuOrder: Array.isArray(state.config.nodeCreateMenuOrder) ? state.config.nodeCreateMenuOrder : readLegacyStringArray("canvas-node-create-menu-order-v1"),
                         imageContextMenuOrder: Array.isArray(state.config.imageContextMenuOrder) ? state.config.imageContextMenuOrder : readLegacyStringArray("canvas-image-context-menu-order-v1"),
                     };
+                }
+                // v6: Midjourney default version moved from 6.1 to 8.1. Keep any other explicit choice.
+                if (version < 6 && state.config && (!state.config.mjVersion || state.config.mjVersion === "6.1")) {
+                    state.config = { ...state.config, mjVersion: "8.1" };
                 }
                 return state as ConfigStore;
             },

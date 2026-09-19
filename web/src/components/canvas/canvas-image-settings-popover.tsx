@@ -33,7 +33,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     const activeSize = config.size || "auto";
     const midjourney = isMidjourneyModel(modelOptionName(config.model || config.imageModel || ""));
     const summary = midjourney
-        ? `${midjourneyVersionLabel(config.mjVersion || "6.1")} · ${imageSizeLabel(activeSize)} · ${t("canvas.controls.images", { count })}`
+        ? `${midjourneyVersionLabel(config.mjVersion || "8.1")} · ${imageSizeLabel(activeSize)} · ${t("canvas.controls.images", { count })}`
         : `${imageQualityLabel(quality)} · ${imageSizeLabel(activeSize)} · ${t("canvas.controls.images", { count })}`;
     const updateOpen = (nextOpen: boolean) => {
         setOpen(nextOpen);

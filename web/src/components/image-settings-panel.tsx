@@ -45,7 +45,7 @@ export const imageQualityOptions = qualityOptions.map((item) => ({ value: item.v
 export const imageAspectOptions = aspectOptions.map((item) => ({ value: item.size || item.value, label: item.label }));
 
 export function midjourneyVersionLabel(value: string) {
-    return midjourneyVersionOptions.find((item) => item.value === value)?.label || value || "v6.1";
+    return midjourneyVersionOptions.find((item) => item.value === value)?.label || value || "v8.1";
 }
 
 type ImageSettingsPanelProps = {
@@ -66,7 +66,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const activeSize = config.size || "auto";
     const transparentBackground = config.background === "transparent";
     const midjourney = isMidjourneyModel(modelOptionName(config.model || config.imageModel || ""));
-    const mjVersion = midjourneyVersionOptions.some((item) => item.value === config.mjVersion) ? config.mjVersion : "6.1";
+    const mjVersion = midjourneyVersionOptions.some((item) => item.value === config.mjVersion) ? config.mjVersion : "8.1";
     const selectedAspect = aspectOptions.find((item) => (item.size || item.value) === activeSize || item.value === activeSize);
     const dimensions = readSizeDimensions(activeSize, selectedAspect || aspectOptions[0]);
     const selectAspect = (value: string) => {

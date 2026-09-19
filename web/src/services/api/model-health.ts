@@ -258,8 +258,32 @@ async function probeImage(config: ReturnType<typeof resolveModelRequestConfig>, 
     }
 
     // Empty prompt should fail validation after auth/model routing — avoids billing a real image.
+    const isHfsyMj = /hfsyapi\.cn/i.test(config.baseUrl) && /^mj_imagine$/i.test(config.model);
     const isMidjourney = /midjourney|\bmj[-_]?/i.test(config.model);
     const isSeedance = /seedance\.nz/i.test(config.baseUrl);
+    if (isHfsyMj) {
+        let origin = config.baseUrl.trim().replace(/\/+$/, "");
+        try {
+            origin = new URL(config.baseUrl).origin;
+        } catch {
+            origin = origin.replace(/\/v1(?:beta)?$/i, "");
+        }
+        try {
+            const response = await axios.post(
+                proxyApiUrl(`${origin}/mj/submit/imagine`),
+                { botType: "MID_JOURNEY", prompt: "" },
+                {
+                    headers: { Authorization: `Bearer ${config.apiKey}`, "Content-Type": "application/json" },
+                    signal,
+                    timeout: HEALTH_TIMEOUT_MS,
+                    validateStatus: () => true,
+                },
+            );
+            return interpretNonTextProbe(response.status, response.data);
+        } catch (error) {
+            return failFromError(error);
+        }
+    }
     const path = isMidjourney ? "/midjourney/generations" : isSeedance ? "/image/generations" : "/images/generations";
     const body = isMidjourney
         ? { prompt: "" }
