@@ -7,6 +7,10 @@
     "api/proxy.js": {
       "maxDuration": 300,
       "memory": 1024
+    },
+    "api/canvas-bridge/[...path].js": {
+      "maxDuration": 300,
+      "memory": 1024
     }
   },
   "rewrites": [

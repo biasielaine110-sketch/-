@@ -46,13 +46,13 @@ function summarizeNode(node: CanvasNodeData) {
     };
 }
 
-const LOCAL_BRIDGE = "http://127.0.0.1:3000";
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1"]);
 let bridgeBase: string | null = null;
 
 function bridgeBases() {
     const here = window.location.origin.replace(/\/$/, "");
-    if (here === LOCAL_BRIDGE || here === "http://localhost:3000") return [here];
-    return [here, LOCAL_BRIDGE];
+    if (LOCAL_HOSTS.has(window.location.hostname)) return [here];
+    return [here];
 }
 
 async function bridgeFetch(path: string, init?: RequestInit) {
