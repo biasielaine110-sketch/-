@@ -1044,6 +1044,32 @@ function AtelierCanvasPage() {
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, effectiveConfig.textModel, getCreateNodePosition],
     );
 
+    const createBridgeTextNode = useCallback(
+        (content: string, position?: Position) => {
+            const nodeId = createNode(CanvasNodeType.Text, position);
+            const patch = { content, prompt: content, composerContent: content, promptSyncAt: Date.now() };
+            setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node)));
+            nodesRef.current = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node));
+            return nodeId;
+        },
+        [createNode],
+    );
+
+    const createBridgeImageNode = useCallback(
+        async (imageUrl: string, prompt?: string, position?: Position) => {
+            const uploaded = await uploadImage(imageUrl);
+            const nodeId = createNode(CanvasNodeType.Image, position);
+            const patch = {
+                ...imageMetadata(uploaded),
+                ...(prompt ? { prompt, composerContent: prompt, promptSyncAt: Date.now() } : {}),
+            };
+            setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node)));
+            nodesRef.current = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node));
+            return nodeId;
+        },
+        [createNode],
+    );
+
     const createMergeNode = useCallback(
         (position?: Position, sourceImageIds?: string[]) => {
             const mergeId = createNode(CanvasNodeType.Merge, position);
@@ -4263,6 +4289,8 @@ function AtelierCanvasPage() {
         return startCanvasWorkbuddyBridge({
             projectId,
             getNodes: () => nodesRef.current,
+            createTextNode: createBridgeTextNode,
+            createImageNode: createBridgeImageNode,
             setPrompt: (nodeId, prompt) => {
                 handleConfigNodeChange(nodeId, { prompt, composerContent: prompt, promptSyncAt: Date.now() });
                 nodesRef.current = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt, composerContent: prompt } } : node));
@@ -4273,7 +4301,7 @@ function AtelierCanvasPage() {
             },
             generate: (nodeId, mode, prompt) => generateNodeRef.current?.(nodeId, mode, prompt) || Promise.resolve(),
         });
-    }, [handleConfigNodeChange, projectId, projectLoaded]);
+    }, [createBridgeImageNode, createBridgeTextNode, handleConfigNodeChange, projectId, projectLoaded]);
 
     const handleRetryNode = useCallback(
         async (node: CanvasNodeData, imageId?: string) => {

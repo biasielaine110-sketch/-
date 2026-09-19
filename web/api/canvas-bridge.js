@@ -6,6 +6,7 @@
 
 const GENERATE_TIMEOUT_MS = 12 * 60 * 1000;
 const COMMAND_TIMEOUT_MS = 20_000;
+const ACCESS_TOKEN = process.env.CANVAS_BRIDGE_TOKEN || "";
 
 const state = {
     snapshot: null,
@@ -16,8 +17,54 @@ const state = {
 const TOOLS = [
     {
         name: "list_canvas_nodes",
-        description: "列出当前打开的无限画布项目里的节点，包含提示词、尺寸、生成状态。调用其它工具前先用它确认 nodeId。",
-        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        description: "列出当前打开的无限画布项目里的节点，包含提示词、尺寸、位置、生成状态。调用其它工具前先用它确认 nodeId。",
+        inputSchema: {
+            type: "object",
+            properties: { projectId: { type: "string", description: "可选。指定后只操作该项目，避免误连其它打开的画布。" } },
+            additionalProperties: false,
+        },
+    },
+    {
+        name: "create_text_node",
+        description: "在当前打开的画布中创建文本节点。适合把 WorkBuddy 的说明、提示词、计划或批注放到画布上。",
+        inputSchema: {
+            type: "object",
+            properties: {
+                projectId: { type: "string", description: "可选。目标画布项目 id。" },
+                content: { type: "string", description: "文本内容" },
+                x: { type: "number", description: "可选。画布坐标 x，不填则放在当前视口中心附近。" },
+                y: { type: "number", description: "可选。画布坐标 y，不填则放在当前视口中心附近。" },
+            },
+            required: ["content"],
+        },
+    },
+    {
+        name: "create_image_node",
+        description: "在当前打开的画布中创建图片节点。imageUrl 必须是浏览器可访问且可解码的图片 URL。",
+        inputSchema: {
+            type: "object",
+            properties: {
+                projectId: { type: "string", description: "可选。目标画布项目 id。" },
+                imageUrl: { type: "string", description: "图片 URL" },
+                prompt: { type: "string", description: "可选。写入节点的提示词或来源说明。" },
+                x: { type: "number", description: "可选。画布坐标 x。" },
+                y: { type: "number", description: "可选。画布坐标 y。" },
+            },
+            required: ["imageUrl"],
+        },
+    },
+    {
+        name: "export_image_data",
+        description: "按 storageKey 从当前打开的画布浏览器中导出图片 data URL。通常由 /api/canvas-bridge/image 使用。",
+        inputSchema: {
+            type: "object",
+            properties: {
+                projectId: { type: "string", description: "可选。目标画布项目 id。" },
+                storageKey: { type: "string", description: "图片 storageKey，例如 image:xxx" },
+                nodeId: { type: "string", description: "可选。存储缺失时从画布节点显示图兜底读取。" },
+            },
+            required: ["storageKey"],
+        },
     },
     {
         name: "set_canvas_prompt",
@@ -71,6 +118,42 @@ function sendJson(req, res, status, body) {
     res.end(JSON.stringify(body));
 }
 
+function authorized(req) {
+    if (!ACCESS_TOKEN) return true;
+    const auth = String(req.headers?.authorization || "");
+    if (auth === `Bearer ${ACCESS_TOKEN}`) return true;
+    const url = new URL(req.url || "/", "http://localhost");
+    return url.searchParams.get("token") === ACCESS_TOKEN;
+}
+
+function requireAuth(req, res) {
+    if (authorized(req)) return true;
+    sendJson(req, res, 401, { ok: false, error: "unauthorized" });
+    return false;
+}
+
+function dataUrlToBuffer(dataUrl) {
+    const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+    if (!match) return null;
+    const mimeType = match[1] || "application/octet-stream";
+    const body = match[3] || "";
+    const buffer = match[2] ? Buffer.from(body, "base64") : Buffer.from(decodeURIComponent(body), "utf8");
+    return { mimeType, buffer };
+}
+
+function safeFilename(value, fallback) {
+    const text = String(value || fallback || "image").replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "");
+    return text || fallback || "image";
+}
+
+function extensionForMime(mimeType) {
+    if (mimeType === "image/jpeg") return "jpg";
+    if (mimeType === "image/webp") return "webp";
+    if (mimeType === "image/gif") return "gif";
+    if (mimeType === "image/svg+xml") return "svg";
+    return "png";
+}
+
 function readBody(req) {
     return new Promise((resolve) => {
         const chunks = [];
@@ -103,8 +186,14 @@ function publicNodes() {
         model: node.model || "",
         canvasName: node.canvasName || node.model || "",
         hasImage: Boolean(node.hasImage),
+        imageUrl: node.imageUrl || "",
+        thumbnailUrl: node.thumbnailUrl || "",
+        storageKey: node.storageKey || "",
+        thumbnailStorageKey: node.thumbnailStorageKey || "",
+        images: Array.isArray(node.images) ? node.images : [],
         width: node.width || 0,
         height: node.height || 0,
+        position: node.position || null,
         error: node.error || "",
     }));
 }
@@ -140,6 +229,10 @@ async function callTool(name, args) {
     if (!state.snapshot) {
         return { ok: false, error: "还没有画布连上来。请先在浏览器打开要操作的项目。" };
     }
+    const requestedProjectId = args?.projectId ? String(args.projectId) : "";
+    if (requestedProjectId && requestedProjectId !== state.snapshot.projectId) {
+        return { ok: false, error: `当前连上的画布是 ${state.snapshot.projectId}，不是 ${requestedProjectId}` };
+    }
     if (name === "list_canvas_nodes") {
         return {
             ok: true,
@@ -169,6 +262,7 @@ async function handleMcp(req, res) {
         res.end();
         return;
     }
+    if (!requireAuth(req, res)) return;
     if (req.method === "GET") {
         sendJson(req, res, 200, {
             name: "infinite-atelier",
@@ -257,6 +351,59 @@ async function handleCanvasApi(req, res, pathname) {
         const pending = state.commands.filter((item) => item.status === "pending");
         for (const item of pending) item.status = "dispatched";
         sendJson(req, res, 200, { commands: pending.map((item) => ({ id: item.id, name: item.name, args: item.args })) });
+        return;
+    }
+    if (req.method === "POST" && pathname.endsWith("/commands")) {
+        if (!requireAuth(req, res)) return;
+        const body = await readBody(req);
+        const name = body?.name || body?.tool;
+        const args = body?.args || body?.arguments || {};
+        if (!name) {
+            sendJson(req, res, 400, { ok: false, error: "missing command name" });
+            return;
+        }
+        const result = await callTool(String(name), args);
+        sendJson(req, res, result?.ok === false ? 400 : 200, result);
+        return;
+    }
+    if (req.method === "GET" && pathname.endsWith("/image")) {
+        if (!requireAuth(req, res)) return;
+        const url = new URL(req.url || "/", "http://localhost");
+        const storageKey = url.searchParams.get("storageKey") || "";
+        const projectId = url.searchParams.get("projectId") || "";
+        const nodeId = url.searchParams.get("nodeId") || "";
+        if (!storageKey) {
+            sendJson(req, res, 400, { ok: false, error: "missing storageKey" });
+            return;
+        }
+        const result = await callTool("export_image_data", { projectId, storageKey, nodeId });
+        if (!result?.ok || !result.dataUrl) {
+            sendJson(req, res, 404, { ok: false, error: result?.error || "image not found" });
+            return;
+        }
+        const decoded = dataUrlToBuffer(result.dataUrl);
+        if (!decoded || !decoded.buffer.length) {
+            sendJson(req, res, 500, { ok: false, error: "invalid image data" });
+            return;
+        }
+        const ext = extensionForMime(decoded.mimeType);
+        const filename = `${safeFilename(nodeId || storageKey, "canvas-image")}.${ext}`;
+        cors(res, req);
+        res.statusCode = 200;
+        res.setHeader("Content-Type", decoded.mimeType);
+        res.setHeader("Content-Length", String(decoded.buffer.length));
+        res.setHeader("Content-Disposition", `inline; filename="${filename}"`);
+        res.end(decoded.buffer);
+        return;
+    }
+    if (req.method === "GET" && pathname.endsWith("/state")) {
+        sendJson(req, res, 200, {
+            ok: true,
+            connected: Boolean(state.snapshot),
+            projectId: state.snapshot?.projectId || "",
+            updatedAt: state.snapshot?.updatedAt || 0,
+            nodes: publicNodes(),
+        });
         return;
     }
     if (req.method === "POST" && pathname.endsWith("/result")) {

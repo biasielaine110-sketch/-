@@ -1,5 +1,6 @@
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
 import { channelModelEntry, modelCanvasName, modelOptionName, useConfigStore } from "@/stores/use-config-store";
+import { imageToDataUrl } from "@/services/image-storage";
 
 type BridgeCommand = { id: string; name: string; args: Record<string, unknown> };
 
@@ -30,6 +31,7 @@ export function canvasSizeForTier(tier: string, aspect: string) {
 function summarizeNode(node: CanvasNodeData) {
     const metadata = node.metadata || {};
     const prompt = metadata.composerContent || metadata.prompt || (node.type === CanvasNodeType.Text ? metadata.content : "") || "";
+    const imageUrl = node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video ? metadata.content || "" : "";
     return {
         id: node.id,
         type: node.type,
@@ -39,9 +41,24 @@ function summarizeNode(node: CanvasNodeData) {
         status: metadata.status || "idle",
         model: metadata.model || "",
         canvasName: metadata.model ? modelCanvasName(channelModelEntry(useConfigStore.getState().config, metadata.model), modelOptionName(metadata.model)) : "",
-        hasImage: Boolean(metadata.content && !String(metadata.content).startsWith("data:text")),
-        width: metadata.naturalWidth || 0,
-        height: metadata.naturalHeight || 0,
+        hasImage: Boolean(imageUrl),
+        imageUrl,
+        thumbnailUrl: metadata.thumbnailContent || "",
+        storageKey: metadata.storageKey || "",
+        thumbnailStorageKey: metadata.thumbnailStorageKey || "",
+        images: (metadata.images || []).map((image) => ({
+            id: image.id,
+            status: image.status,
+            imageUrl: image.content || "",
+            thumbnailUrl: image.thumbnailContent || "",
+            storageKey: image.storageKey || "",
+            thumbnailStorageKey: image.thumbnailStorageKey || "",
+            width: image.naturalWidth || 0,
+            height: image.naturalHeight || 0,
+        })),
+        width: metadata.naturalWidth || node.width || 0,
+        height: metadata.naturalHeight || node.height || 0,
+        position: node.position,
         error: metadata.errorDetails || "",
     };
 }
@@ -78,6 +95,8 @@ async function postJson(path: string, body: unknown) {
 export function startCanvasWorkbuddyBridge(options: {
     projectId: string;
     getNodes: () => CanvasNodeData[];
+    createTextNode: (content: string, position?: { x: number; y: number }) => string;
+    createImageNode: (imageUrl: string, prompt?: string, position?: { x: number; y: number }) => Promise<string>;
     setPrompt: (nodeId: string, prompt: string) => void;
     setSize: (nodeId: string, size: string) => void;
     generate: (nodeId: string, mode: CanvasGenerationMode, prompt: string) => Promise<void>;
@@ -122,6 +141,36 @@ async function waitForNode(getNodes: () => CanvasNodeData[], nodeId: string) {
 }
 
 async function runCommand(command: BridgeCommand, nodes: CanvasNodeData[], options: Parameters<typeof startCanvasWorkbuddyBridge>[0]) {
+    const position = typeof command.args.x === "number" && typeof command.args.y === "number" ? { x: command.args.x, y: command.args.y } : undefined;
+    if (command.name === "create_text_node") {
+        const content = String(command.args.content || "");
+        if (!content.trim()) return { ok: false, error: "文本内容不能为空" };
+        const nodeId = options.createTextNode(content, position);
+        return { ok: true, nodeId, type: CanvasNodeType.Text };
+    }
+    if (command.name === "create_image_node") {
+        const imageUrl = String(command.args.imageUrl || "");
+        if (!imageUrl.trim()) return { ok: false, error: "imageUrl 不能为空" };
+        const prompt = String(command.args.prompt || "");
+        const nodeId = await options.createImageNode(imageUrl, prompt, position);
+        return { ok: true, nodeId, type: CanvasNodeType.Image, imageUrl };
+    }
+    if (command.name === "export_image_data") {
+        const storageKey = String(command.args.storageKey || "");
+        const nodeId = String(command.args.nodeId || "");
+        if (!storageKey.trim()) return { ok: false, error: "storageKey 不能为空" };
+        const node = nodes.find((item) => item.id === nodeId || item.metadata?.storageKey === storageKey || item.metadata?.thumbnailStorageKey === storageKey);
+        const dataUrl = await imageToDataUrl({
+            storageKey,
+            nodeId: node?.id || nodeId,
+            url: node?.metadata?.content,
+            thumbnailStorageKey: node?.metadata?.thumbnailStorageKey,
+            storageKeys: node?.metadata?.images?.flatMap((image) => [image.storageKey, image.thumbnailStorageKey]) || [],
+            urls: node?.metadata?.images?.flatMap((image) => [image.content, image.thumbnailContent]) || [],
+        });
+        if (!dataUrl) return { ok: false, error: `找不到图片 ${storageKey}` };
+        return { ok: true, storageKey, nodeId: node?.id || nodeId, dataUrl };
+    }
     const nodeId = String(command.args.nodeId || "");
     const node = nodes.find((item) => item.id === nodeId);
     if (!node) return { ok: false, error: `找不到节点 ${nodeId}` };
@@ -153,6 +202,20 @@ async function runCommand(command: BridgeCommand, nodes: CanvasNodeData[], optio
             ok: true,
             status,
             hasImage,
+            imageUrl: done?.metadata?.content || "",
+            thumbnailUrl: done?.metadata?.thumbnailContent || "",
+            storageKey: done?.metadata?.storageKey || "",
+            thumbnailStorageKey: done?.metadata?.thumbnailStorageKey || "",
+            images: (done?.metadata?.images || []).map((image) => ({
+                id: image.id,
+                status: image.status,
+                imageUrl: image.content || "",
+                thumbnailUrl: image.thumbnailContent || "",
+                storageKey: image.storageKey || "",
+                thumbnailStorageKey: image.thumbnailStorageKey || "",
+                width: image.naturalWidth || 0,
+                height: image.naturalHeight || 0,
+            })),
             width: done?.metadata?.naturalWidth || 0,
             height: done?.metadata?.naturalHeight || 0,
             error: "",

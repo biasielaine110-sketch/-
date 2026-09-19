@@ -23,6 +23,10 @@
     "api/canvas-bridge/result.js": {
       "maxDuration": 300,
       "memory": 1024
+    },
+    "api/canvas-bridge/image.js": {
+      "maxDuration": 300,
+      "memory": 1024
     }
   },
   "rewrites": [
