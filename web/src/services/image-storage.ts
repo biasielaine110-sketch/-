@@ -148,7 +148,7 @@ export async function setImageBlob(storageKey: string, blob: Blob) {
     return url;
 }
 
-export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string; thumbnailStorageKey?: string; storageKeys?: string[]; urls?: string[]; fallbackUrls?: string[]; nodeId?: string }) {
+export async function imageToDataUrl(image: { url?: string; dataUrl?: string; storageKey?: string; thumbnailStorageKey?: string; storageKeys?: Array<string | undefined>; urls?: Array<string | undefined>; fallbackUrls?: Array<string | undefined>; nodeId?: string }) {
     // Generate is a click, so we can ask for the local folder if IndexedDB was migrated out.
     await ensureLocalLibraryAccess();
     const storageKeys = uniqueStrings([image.storageKey, image.thumbnailStorageKey, ...(image.storageKeys || [])]);
