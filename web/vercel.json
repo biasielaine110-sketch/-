@@ -11,6 +11,18 @@
     "api/canvas-bridge/[...path].js": {
       "maxDuration": 300,
       "memory": 1024
+    },
+    "api/canvas-bridge/state.js": {
+      "maxDuration": 300,
+      "memory": 1024
+    },
+    "api/canvas-bridge/commands.js": {
+      "maxDuration": 300,
+      "memory": 1024
+    },
+    "api/canvas-bridge/result.js": {
+      "maxDuration": 300,
+      "memory": 1024
     }
   },
   "rewrites": [
