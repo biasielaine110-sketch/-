@@ -1,17 +1,24 @@
 /**
- * Local bridge so WorkBuddy can drive the open canvas over MCP.
- * The browser page posts its snapshot and polls commands. One Node process
- * (the Vite dev server) must serve both /mcp and /api/canvas-bridge.
+ * Bridge so WorkBuddy can drive the open canvas over MCP or HTTP.
+ * The browser page posts its snapshot, polls commands, executes them, and posts results.
+ * Local dev uses process memory. Serverless deployments should configure Vercel KV / Upstash
+ * Redis REST env vars so state is shared across function instances.
  */
 
 const GENERATE_TIMEOUT_MS = 12 * 60 * 1000;
 const COMMAND_TIMEOUT_MS = 20_000;
+const SERVERLESS_MAX_WAIT_MS = 280_000;
 const ACCESS_TOKEN = process.env.CANVAS_BRIDGE_TOKEN || "";
+const REDIS_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "").replace(/\/+$/, "");
+const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "";
+const STORE_PREFIX = process.env.CANVAS_BRIDGE_STORE_PREFIX || "canvas-bridge";
+const USE_REDIS = Boolean(REDIS_URL && REDIS_TOKEN);
 
 const state = {
     snapshot: null,
     commands: [],
     waiters: new Map(),
+    results: new Map(),
 };
 
 const TOOLS = [
@@ -132,6 +139,48 @@ function requireAuth(req, res) {
     return false;
 }
 
+function key(name) {
+    return `${STORE_PREFIX}:${name}`;
+}
+
+function commandKey(id) {
+    return key(`command:${id}`);
+}
+
+function resultKey(id) {
+    return key(`result:${id}`);
+}
+
+async function redis(command) {
+    const response = await fetch(REDIS_URL, {
+        method: "POST",
+        headers: {
+            Authorization: `Bearer ${REDIS_TOKEN}`,
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(command),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || data?.error) {
+        throw new Error(data?.error || `Redis REST request failed: ${response.status}`);
+    }
+    return data?.result;
+}
+
+function parseJson(value, fallback = null) {
+    if (!value) return fallback;
+    if (typeof value === "object") return value;
+    try {
+        return JSON.parse(String(value));
+    } catch {
+        return fallback;
+    }
+}
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function dataUrlToBuffer(dataUrl) {
     const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
     if (!match) return null;
@@ -174,8 +223,8 @@ function readBody(req) {
     });
 }
 
-function publicNodes() {
-    const nodes = state.snapshot?.nodes || [];
+function publicNodes(snapshot = state.snapshot) {
+    const nodes = snapshot?.nodes || [];
     return nodes.map((node) => ({
         id: node.id,
         type: node.type,
@@ -198,53 +247,124 @@ function publicNodes() {
     }));
 }
 
-function enqueue(name, args) {
-    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const command = { id, name, args, status: "pending", createdAt: Date.now() };
-    state.commands.push(command);
-    state.commands = state.commands.filter((item) => Date.now() - item.createdAt < 30 * 60 * 1000);
-    const timeout = name === "generate_canvas_node" ? GENERATE_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
-    return new Promise((resolve) => {
-        const timer = setTimeout(() => {
-            command.status = "timeout";
-            state.waiters.delete(id);
-            resolve({ ok: false, error: "画布没有响应。请用浏览器打开这个项目页，并保持页面不要关掉。" });
-        }, timeout);
-        state.waiters.set(id, { resolve, timer });
-    });
+async function setSnapshot(snapshot) {
+    state.snapshot = snapshot;
+    if (USE_REDIS) {
+        await redis(["SET", key("snapshot"), JSON.stringify(snapshot), "EX", 120]);
+    }
 }
 
-function finishCommand(id, result) {
+async function getSnapshot() {
+    if (!USE_REDIS) return state.snapshot;
+    return parseJson(await redis(["GET", key("snapshot")]), null);
+}
+
+function createCommand(name, args) {
+    return {
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        name,
+        args: args || {},
+        status: "pending",
+        createdAt: Date.now(),
+    };
+}
+
+async function enqueue(name, args) {
+    const command = createCommand(name, args);
+    if (USE_REDIS) {
+        await redis(["SET", commandKey(command.id), JSON.stringify(command), "EX", 1800]);
+        await redis(["RPUSH", key("commands"), command.id]);
+        return command.id;
+    }
+    state.commands.push(command);
+    state.commands = state.commands.filter((item) => Date.now() - item.createdAt < 30 * 60 * 1000);
+    return command.id;
+}
+
+async function takePendingCommands() {
+    if (USE_REDIS) {
+        const ids = (await redis(["LRANGE", key("commands"), 0, 49])) || [];
+        if (!ids.length) return [];
+        await redis(["LTRIM", key("commands"), ids.length, -1]);
+        const values = ids.length === 1 ? [await redis(["GET", commandKey(ids[0])])] : await redis(["MGET", ...ids.map(commandKey)]);
+        return (values || []).map((value) => parseJson(value, null)).filter(Boolean).map((item) => ({ id: item.id, name: item.name, args: item.args }));
+    }
+    const pending = state.commands.filter((item) => item.status === "pending");
+    for (const item of pending) item.status = "dispatched";
+    return pending.map((item) => ({ id: item.id, name: item.name, args: item.args }));
+}
+
+async function finishCommand(id, result) {
+    if (USE_REDIS) {
+        await redis(["SET", resultKey(id), JSON.stringify({ ok: result?.ok !== false, ...result }), "EX", 1800]);
+        const raw = await redis(["GET", commandKey(id)]);
+        const command = parseJson(raw, null);
+        if (command) {
+            command.status = "done";
+            await redis(["SET", commandKey(id), JSON.stringify(command), "EX", 1800]);
+        }
+        return true;
+    }
     const command = state.commands.find((item) => item.id === id);
     if (command) command.status = "done";
+    state.results.set(id, { ok: result?.ok !== false, ...result });
     const waiter = state.waiters.get(id);
-    if (!waiter) return false;
+    if (!waiter) return Boolean(command);
     clearTimeout(waiter.timer);
     state.waiters.delete(id);
     waiter.resolve(result);
     return true;
 }
 
-async function callTool(name, args) {
-    if (!state.snapshot) {
+async function getResult(id) {
+    if (USE_REDIS) return parseJson(await redis(["GET", resultKey(id)]), null);
+    return state.results.get(id) || null;
+}
+
+async function waitForResult(id, timeout) {
+    if (!USE_REDIS) {
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                state.waiters.delete(id);
+                resolve({ ok: false, commandId: id, error: "画布没有响应。请用浏览器打开这个项目页，并保持页面不要关掉。" });
+            }, timeout);
+            state.waiters.set(id, { resolve, timer });
+        });
+    }
+    const started = Date.now();
+    const maxWait = Math.min(timeout, SERVERLESS_MAX_WAIT_MS);
+    while (Date.now() - started < maxWait) {
+        const result = await getResult(id);
+        if (result) return { commandId: id, ...result };
+        await delay(500);
+    }
+    return { ok: false, commandId: id, error: "画布没有及时回传结果。可稍后用 /api/canvas-bridge/result?id=... 查询。" };
+}
+
+async function callTool(name, args, options = {}) {
+    const snapshot = await getSnapshot();
+    if (!snapshot) {
         return { ok: false, error: "还没有画布连上来。请先在浏览器打开要操作的项目。" };
     }
     const requestedProjectId = args?.projectId ? String(args.projectId) : "";
-    if (requestedProjectId && requestedProjectId !== state.snapshot.projectId) {
-        return { ok: false, error: `当前连上的画布是 ${state.snapshot.projectId}，不是 ${requestedProjectId}` };
+    if (requestedProjectId && requestedProjectId !== snapshot.projectId) {
+        return { ok: false, error: `当前连上的画布是 ${snapshot.projectId}，不是 ${requestedProjectId}` };
     }
     if (name === "list_canvas_nodes") {
         return {
             ok: true,
-            projectId: state.snapshot.projectId,
-            updatedAt: state.snapshot.updatedAt,
-            nodes: publicNodes(),
+            projectId: snapshot.projectId,
+            updatedAt: snapshot.updatedAt,
+            nodes: publicNodes(snapshot),
         };
     }
     if (!TOOLS.some((tool) => tool.name === name)) {
         return { ok: false, error: `未知工具 ${name}` };
     }
-    return enqueue(name, args || {});
+    const id = await enqueue(name, args || {});
+    if (options.wait === false) return { ok: true, commandId: id, queued: true };
+    const timeout = name === "generate_canvas_node" ? GENERATE_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
+    return waitForResult(id, timeout);
 }
 
 function rpcResult(id, result) {
@@ -264,12 +384,14 @@ async function handleMcp(req, res) {
     }
     if (!requireAuth(req, res)) return;
     if (req.method === "GET") {
+        const snapshot = await getSnapshot();
         sendJson(req, res, 200, {
             name: "infinite-atelier",
-            connected: Boolean(state.snapshot),
-            projectId: state.snapshot?.projectId || "",
-            updatedAt: state.snapshot?.updatedAt || 0,
+            connected: Boolean(snapshot),
+            projectId: snapshot?.projectId || "",
+            updatedAt: snapshot?.updatedAt || 0,
             tools: TOOLS.map((tool) => tool.name),
+            store: USE_REDIS ? "redis" : "memory",
         });
         return;
     }
@@ -310,7 +432,7 @@ async function handleMcp(req, res) {
         const name = params?.name;
         const args = params?.arguments || params?.args || {};
         try {
-            const data = await callTool(name, args);
+            const data = await callTool(name, args, { wait: params?.wait !== false });
             sendJson(req, res, 200, rpcResult(id, {
                 content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
                 isError: data?.ok === false,
@@ -339,18 +461,17 @@ async function handleCanvasApi(req, res, pathname) {
             sendJson(req, res, 400, { ok: false, error: "missing project" });
             return;
         }
-        state.snapshot = {
+        await setSnapshot({
             projectId: String(body.projectId),
             updatedAt: Date.now(),
             nodes: Array.isArray(body.nodes) ? body.nodes : [],
-        };
-        sendJson(req, res, 200, { ok: true });
+        });
+        sendJson(req, res, 200, { ok: true, store: USE_REDIS ? "redis" : "memory" });
         return;
     }
     if (req.method === "GET" && pathname.endsWith("/commands")) {
-        const pending = state.commands.filter((item) => item.status === "pending");
-        for (const item of pending) item.status = "dispatched";
-        sendJson(req, res, 200, { commands: pending.map((item) => ({ id: item.id, name: item.name, args: item.args })) });
+        const commands = await takePendingCommands();
+        sendJson(req, res, 200, { commands });
         return;
     }
     if (req.method === "POST" && pathname.endsWith("/commands")) {
@@ -362,7 +483,7 @@ async function handleCanvasApi(req, res, pathname) {
             sendJson(req, res, 400, { ok: false, error: "missing command name" });
             return;
         }
-        const result = await callTool(String(name), args);
+        const result = await callTool(String(name), args, { wait: body?.wait !== false });
         sendJson(req, res, result?.ok === false ? 400 : 200, result);
         return;
     }
@@ -378,7 +499,7 @@ async function handleCanvasApi(req, res, pathname) {
         }
         const result = await callTool("export_image_data", { projectId, storageKey, nodeId });
         if (!result?.ok || !result.dataUrl) {
-            sendJson(req, res, 404, { ok: false, error: result?.error || "image not found" });
+            sendJson(req, res, 404, { ok: false, commandId: result?.commandId, error: result?.error || "image not found" });
             return;
         }
         const decoded = dataUrlToBuffer(result.dataUrl);
@@ -397,18 +518,32 @@ async function handleCanvasApi(req, res, pathname) {
         return;
     }
     if (req.method === "GET" && pathname.endsWith("/state")) {
+        const snapshot = await getSnapshot();
         sendJson(req, res, 200, {
             ok: true,
-            connected: Boolean(state.snapshot),
-            projectId: state.snapshot?.projectId || "",
-            updatedAt: state.snapshot?.updatedAt || 0,
-            nodes: publicNodes(),
+            connected: Boolean(snapshot),
+            projectId: snapshot?.projectId || "",
+            updatedAt: snapshot?.updatedAt || 0,
+            nodes: publicNodes(snapshot),
+            store: USE_REDIS ? "redis" : "memory",
         });
+        return;
+    }
+    if (req.method === "GET" && pathname.endsWith("/result")) {
+        if (!requireAuth(req, res)) return;
+        const url = new URL(req.url || "/", "http://localhost");
+        const id = url.searchParams.get("id") || "";
+        if (!id) {
+            sendJson(req, res, 400, { ok: false, error: "missing id" });
+            return;
+        }
+        const result = await getResult(id);
+        sendJson(req, res, result ? 200 : 404, result || { ok: false, commandId: id, error: "result not found" });
         return;
     }
     if (req.method === "POST" && pathname.endsWith("/result")) {
         const body = await readBody(req);
-        const done = body && finishCommand(body.id, { ok: body.ok !== false, ...body });
+        const done = body?.id ? await finishCommand(body.id, { ok: body.ok !== false, ...body }) : false;
         sendJson(req, res, done ? 200 : 404, { ok: Boolean(done) });
         return;
     }
