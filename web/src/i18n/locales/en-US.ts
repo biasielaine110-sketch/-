@@ -1380,6 +1380,8 @@ export default {
             disableTitle: "Temporarily disable this model (keeps it in the list)",
             scriptReady: "Script set",
             script: "Request script",
+            canvasName: "Canvas name",
+            canvasNameHint: "Only changes the name shown on the canvas. Requests still use the model name above.",
             empty: "Select models to fetch or manually add models.",
             capabilities: {
                 image: "Image",

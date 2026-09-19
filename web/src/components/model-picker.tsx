@@ -200,7 +200,7 @@ function ModelLabel({ config, model, capability }: { config: AiConfig; model: st
         <span className="flex w-full min-w-0 items-center gap-2">
             <HealthDot status={health.status} message={health.message} />
             <ModelIcon model={model} />
-            <span className="min-w-0 flex-1 whitespace-nowrap">{modelOptionLabel(config, model)}</span>
+            <span className="min-w-0 flex-1 whitespace-nowrap" title={modelOptionName(model)}>{modelOptionLabel(config, model)}</span>
         </span>
     );
 }

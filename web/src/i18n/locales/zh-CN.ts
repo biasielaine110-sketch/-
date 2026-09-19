@@ -1379,6 +1379,8 @@ export default {
             disableTitle: "暂时关闭该模型（不删除）",
             scriptReady: "脚本已设",
             script: "调用脚本",
+            canvasName: "画布名称",
+            canvasNameHint: "只改变画布上显示的名字，调用仍使用上面的模型名。",
             empty: "点击「选择模型」拉取或手动增加模型。",
             capabilities: {
                 image: "生图",

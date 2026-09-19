@@ -62,6 +62,14 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const setModelEnabled = (name: string, enabled: boolean) =>
         setModels(draft.models.map((model) => (model.name === name ? { ...model, enabled: enabled ? undefined : false } : model)));
     const setScript = (name: string, script: string) => setModels(draft.models.map((model) => (model.name === name ? { ...model, script: script || undefined } : model)));
+    const setCanvasName = (name: string, canvasName: string) =>
+        setModels(
+            draft.models.map((model) => {
+                if (model.name !== name) return model;
+                const trimmed = canvasName.trim();
+                return { ...model, canvasName: trimmed && trimmed !== model.name ? trimmed : undefined };
+            }),
+        );
     const removeModel = (name: string) => setModels(draft.models.filter((model) => model.name !== name));
     const enabledCount = draft.models.filter((model) => isChannelModelEnabled(model)).length;
 
@@ -172,12 +180,22 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                             >
                                 <GripVertical className="size-4" />
                             </span>
-                            <span className="min-w-0 flex-1 truncate text-sm" title={model.name}>
-                                <span className="inline-flex max-w-full items-center gap-2">
+                            <div className="min-w-0 flex-1">
+                                <span className="inline-flex max-w-full items-center gap-2 text-sm" title={model.name}>
                                     <ChannelModelHealth draft={draft} model={model} />
                                     <span className={`truncate ${enabled ? "" : "line-through text-stone-400"}`}>{model.name}</span>
                                 </span>
-                            </span>
+                                <Input
+                                    size="small"
+                                    className="mt-1 max-w-xs"
+                                    placeholder={model.name}
+                                    value={model.canvasName || ""}
+                                    title={t("config.channelEditor.canvasNameHint")}
+                                    aria-label={t("config.channelEditor.canvasName")}
+                                    prefix={<span className="text-[11px] text-stone-400">{t("config.channelEditor.canvasName")}</span>}
+                                    onChange={(event) => setCanvasName(model.name, event.target.value)}
+                                />
+                            </div>
                             <div className="flex shrink-0 flex-wrap items-center gap-2">
                                 <Switch
                                     size="small"

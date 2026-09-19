@@ -17,6 +17,8 @@ export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 
 export type ChannelModel = {
     name: string;
+    /** Name shown on the canvas. Empty means the external model name. Never sent as the API model. */
+    canvasName?: string;
     capability: ModelCapability;
     /** Per-model protocol; falls back to the channel default when omitted. */
     apiFormat?: ApiCallFormat;
@@ -434,9 +436,11 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         seen.add(name);
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
+        const canvasName = typeof item === "string" ? undefined : item.canvasName?.trim() || undefined;
         const apiFormat = typeof item === "string" || item.apiFormat == null ? undefined : normalizeApiFormat(item.apiFormat);
         const enabled = typeof item === "string" || item.enabled == null ? undefined : Boolean(item.enabled);
         const entry: ChannelModel = { name, capability, script };
+        if (canvasName && canvasName !== name) entry.canvasName = canvasName;
         if (apiFormat) entry.apiFormat = apiFormat;
         if (enabled === false) entry.enabled = false;
         result.push(entry);
@@ -476,11 +480,23 @@ export function modelOptionName(value: string) {
     return decodeChannelModel(value)?.model || value;
 }
 
+export function channelModelEntry(config: AiConfig, value: string) {
+    const decoded = decodeChannelModel(value);
+    if (decoded) return config.channels.find((item) => item.id === decoded.channelId)?.models.find((item) => item.name === decoded.model);
+    return config.channels.flatMap((channel) => channel.models).find((item) => item.name === value);
+}
+
+export function modelCanvasName(entry: Pick<ChannelModel, "name" | "canvasName"> | undefined, fallback: string) {
+    return entry?.canvasName?.trim() || fallback;
+}
+
 export function modelOptionLabel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
-    if (!decoded) return value;
+    const raw = decoded?.model || value;
+    const shown = modelCanvasName(channelModelEntry(config, value), raw);
+    if (!decoded) return shown;
     const channel = config.channels.find((item) => item.id === decoded.channelId);
-    return channel ? `${decoded.model}（${channel.name}）` : decoded.model;
+    return channel ? `${shown}（${channel.name}）` : shown;
 }
 
 export function modelOptionsFromChannels(channels: ModelChannel[]) {

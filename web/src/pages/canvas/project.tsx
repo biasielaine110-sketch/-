@@ -8,7 +8,7 @@ import { isMidjourneyModel, requestEdit, requestGeneration, requestImageQuestion
 import { chatSkillsSystemHint, executeChatSkillTool, resolveChatSkillIds, resolveChatSkillTools } from "@/lib/chat-skills";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
-import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelOptionLabel, resolveModelForCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
@@ -63,6 +63,7 @@ import {
     supportsFileSystemAccess,
     type CanvasDraftMeta,
 } from "@/lib/canvas/canvas-draft";
+import { startCanvasWorkbuddyBridge } from "@/lib/canvas/canvas-workbuddy-bridge";
 import { CanvasNodePromptPanel, type CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { CanvasToolbar } from "@/components/canvas/canvas-toolbar";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
@@ -4244,6 +4245,23 @@ function AtelierCanvasPage() {
         generateNodeRef.current = handleGenerateNode;
     }, [handleGenerateNode]);
 
+    useEffect(() => {
+        if (!projectLoaded || !projectId) return;
+        return startCanvasWorkbuddyBridge({
+            projectId,
+            getNodes: () => nodesRef.current,
+            setPrompt: (nodeId, prompt) => {
+                handleConfigNodeChange(nodeId, { prompt, composerContent: prompt, promptSyncAt: Date.now() });
+                nodesRef.current = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt, composerContent: prompt } } : node));
+            },
+            setSize: (nodeId, size) => {
+                handleConfigNodeChange(nodeId, { size });
+                nodesRef.current = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, size } } : node));
+            },
+            generate: (nodeId, mode, prompt) => generateNodeRef.current?.(nodeId, mode, prompt) || Promise.resolve(),
+        });
+    }, [handleConfigNodeChange, projectId, projectLoaded]);
+
     const handleRetryNode = useCallback(
         async (node: CanvasNodeData, imageId?: string) => {
             const sourceNode = findRetrySourceNode(node.id, nodesRef.current, connectionsRef.current) || node;
@@ -5658,7 +5676,7 @@ function AtelierCanvasPage() {
                                       displayHeight: previewNode.height,
                                       mimeType: batchImage?.mimeType || previewNode.metadata?.mimeType,
                                       bytes: batchImage?.bytes || previewNode.metadata?.bytes,
-                                      model: previewNode.metadata?.model || previewNode.metadata?.imageModel,
+                                      model: modelOptionLabel(config, previewNode.metadata?.model || previewNode.metadata?.imageModel || "") || previewNode.metadata?.model || previewNode.metadata?.imageModel,
                                       prompt: previewNode.metadata?.prompt,
                                       status: batchImage?.status || previewNode.metadata?.status,
                                   };
