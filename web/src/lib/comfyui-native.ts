@@ -39,13 +39,15 @@ export function isNativeComfyUiBaseUrl(baseUrl: string): boolean {
         const url = new URL(raw.includes("://") ? raw : `http://${raw}`);
         const host = url.hostname.toLowerCase();
         const path = url.pathname.toLowerCase();
+        // Port in URL, or Compshare / similar pods that put 8188 in the subdomain.
         if (/:(8188|8189)\b/.test(raw) || url.port === "8188" || url.port === "8189") return true;
+        if (/^8188[-.]|^8189[-.]/i.test(host) || /\.pod\.compshare\.cn$/i.test(host)) return true;
         if (/runninghub\.cn/i.test(host) && /\/proxy(-plus)?(\/|$)/i.test(path)) return true;
-        if (/seetacloud\.com|cloud\.ai\.cpolar|ngrok|trycloudflare/i.test(host)) return true;
+        if (/seetacloud\.com|cloud\.ai\.cpolar|ngrok|trycloudflare|compshare\.cn/i.test(host)) return true;
         if (/comfyui/i.test(host) || /\/comfyui\/?$/i.test(path)) return true;
         return false;
     } catch {
-        return /:(8188|8189)\b|runninghub\.cn\/proxy|comfyui/i.test(raw);
+        return /:(8188|8189)\b|^8188[-.]|pod\.compshare|runninghub\.cn\/proxy|comfyui/i.test(raw);
     }
 }
 
@@ -114,53 +116,120 @@ function cloneWorkflow(workflow: ComfyWorkflow): ComfyWorkflow {
     return JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
 }
 
+const PROMPT_FIELDS = ["text", "prompt", "string", "value", "caption", "positive", "positive_prompt", "text_g", "text_l", "clip_l", "t5xxl"];
+
+function isNegativeComfyNode(node: ComfyNode, field = "") {
+    return /negative|负面|\bneg\b/i.test(`${field} ${node._meta?.title || ""} ${node.class_type || ""}`);
+}
+
+function comfyPromptScore(node: ComfyNode) {
+    if (isNegativeComfyNode(node)) return -1;
+    const title = String(node._meta?.title || "");
+    const type = String(node.class_type || "");
+    if (/positive|正面|提示词|\bprompt\b/i.test(title)) return 40;
+    if (/CLIPTextEncode|TextEncode/i.test(type)) return 30;
+    if (/Prompt|CRText|PrimitiveString|StringConstant|Wildcard/i.test(type)) return 20;
+    if (PROMPT_FIELDS.some((field) => typeof node.inputs?.[field] === "string" && !isNegativeComfyNode(node, field))) return 10;
+    return 0;
+}
+
+function linkedComfyNode(workflow: ComfyWorkflow, value: unknown): ComfyNode | null {
+    if (!Array.isArray(value) || value[0] == null) return null;
+    return workflow[String(value[0])] || null;
+}
+
+/** Write prompt into a node, following [nodeId, slot] links to Primitive/String sources. */
+function writeComfyPromptFields(
+    workflow: ComfyWorkflow,
+    node: ComfyNode,
+    value: string,
+    depth = 0,
+    forceText = false,
+): boolean {
+    if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
+    if (depth > 3) return false;
+    for (const field of PROMPT_FIELDS) {
+        if (!(field in node.inputs) || isNegativeComfyNode(node, field)) continue;
+        const current = node.inputs[field];
+        if (typeof current === "string") {
+            node.inputs[field] = value;
+            return true;
+        }
+        const source = linkedComfyNode(workflow, current);
+        if (source && writeComfyPromptFields(workflow, source, value, depth + 1, false)) return true;
+    }
+    // Only force `text` on an already-selected prompt node (not blind fallback).
+    if (forceText && depth === 0) {
+        node.inputs.text = value;
+        return true;
+    }
+    return false;
+}
+
 /** Inject user prompt into CLIP / text-encode positive nodes. */
 export function applyComfyPrompt(workflow: ComfyWorkflow, prompt: string): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
-    const textNodes = Object.entries(next).filter(([, node]) => {
-        const type = String(node?.class_type || "");
-        return /CLIPTextEncode|TextEncode|Prompt|StringConstant|PrimitiveString/i.test(type);
-    });
+    const scored = Object.values(next)
+        .map((node) => ({ node, score: comfyPromptScore(node) }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score);
+    const best = scored[0]?.score || 0;
+    // Prefer every title-marked positive node; otherwise only the top match.
+    const chosen = best >= 40 ? scored.filter((item) => item.score === best) : scored.slice(0, 1);
 
-    const positive = textNodes.filter(([, node]) => /positive|正面|pos\b/i.test(String(node?._meta?.title || "")));
-    const negative = textNodes.filter(([, node]) => /negative|负面|neg\b/i.test(String(node?._meta?.title || "")));
-    const targets = positive.length ? positive : textNodes.filter(([id, node]) => !negative.some(([negId]) => negId === id));
-
-    const applyText = (node: ComfyNode, value: string) => {
-        if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
-        if ("text" in node.inputs) node.inputs.text = value;
-        else if ("string" in node.inputs) node.inputs.string = value;
-        else if ("value" in node.inputs && typeof node.inputs.value === "string") node.inputs.value = value;
-        else node.inputs.text = value;
-    };
-
-    if (targets.length) {
-        applyText(targets[0][1], prompt);
+    if (chosen.length) {
+        for (const item of chosen) writeComfyPromptFields(next, item.node, prompt, 0, true);
         return next;
     }
 
-    // Fallback: first node that already has a string text field.
+    // Fallback: first node that already has a string prompt-like field (or linked Primitive).
     for (const [, node] of Object.entries(next)) {
-        if (node?.inputs && typeof node.inputs.text === "string") {
-            node.inputs.text = prompt;
-            break;
-        }
+        if (!node?.inputs || isNegativeComfyNode(node)) continue;
+        if (writeComfyPromptFields(next, node, prompt, 0, false)) return next;
     }
     return next;
+}
+
+function isComfyImageLoader(node: ComfyNode) {
+    const type = String(node?.class_type || "");
+    const title = String(node?._meta?.title || "");
+    // Skip URL/path/base64/video loaders — those need different input fields.
+    if (/FromUrl|FromPath|FromBase64|LoadVideo|VHS_LoadVideo|LoadAudio/i.test(type)) return false;
+    if (/LoadImage|ImageLoader|LoadImageMask|EasyLoadImage|LoadImageOutput/i.test(type)) return true;
+    // Title-marked start/ref frames that already expose a filename `image` string.
+    if (/参考|首帧|start.?image|ref.?image|load.?image/i.test(title) && typeof node.inputs?.image === "string") return true;
+    return typeof node.inputs?.image === "string" && /image/i.test(type);
 }
 
 /** Map uploaded filenames onto LoadImage nodes in order. */
 export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
     if (!filenames.length) return workflow;
     const next = cloneWorkflow(workflow);
-    const loaders = Object.values(next).filter((node) => /LoadImage/i.test(String(node?.class_type || "")));
+    // Stable order by node id so multi-ref mapping is predictable across runs.
+    const loaders = Object.entries(next)
+        .filter(([, node]) => isComfyImageLoader(node))
+        .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+        .map(([, node]) => node);
     loaders.forEach((node, index) => {
         const name = filenames[index] || filenames[filenames.length - 1];
         if (!name) return;
         if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
-        node.inputs.image = name;
+        if ("image" in node.inputs || !("url" in node.inputs)) node.inputs.image = name;
+        else node.inputs.url = name;
     });
     return next;
+}
+
+async function referenceToUploadFile(dataUrlOrHttp: string, fileName: string, signal?: AbortSignal): Promise<File> {
+    if (dataUrlOrHttp.startsWith("data:")) {
+        return dataUrlToFile({ id: fileName, name: fileName, dataUrl: dataUrlOrHttp, type: "image/png" });
+    }
+    if (/^https?:\/\//i.test(dataUrlOrHttp)) {
+        const response = await axios.get(proxyApiUrl(dataUrlOrHttp), { responseType: "blob", signal });
+        const blob = response.data as Blob;
+        return new File([blob], fileName, { type: blob.type || "image/png" });
+    }
+    throw new Error("Unsupported ComfyUI reference image");
 }
 
 export async function uploadComfyImage(
@@ -170,7 +239,7 @@ export async function uploadComfyImage(
     fileName: string,
     options?: RequestOptions,
 ): Promise<string> {
-    const file = dataUrlToFile({ id: fileName, name: fileName, dataUrl, type: "image/png" });
+    const file = await referenceToUploadFile(dataUrl, fileName, options?.signal);
     const body = new FormData();
     body.append("image", file);
     body.append("overwrite", "true");
@@ -217,8 +286,15 @@ async function fetchComfyView(
     file: { filename: string; subfolder: string; type: string },
     options?: RequestOptions,
 ): Promise<Blob> {
-    const response = await axios.get(comfyUiUrl(baseUrl, "/view"), {
-        params: { filename: file.filename, subfolder: file.subfolder, type: file.type },
+    // Bake query into the ComfyUI URL BEFORE proxy wrapping. Axios `params` on an
+    // already-proxied URL (`/api/proxy?target=.../view`) would attach to the outer
+    // proxy URL and leave upstream `/view` without filename → 404.
+    const query = new URLSearchParams({
+        filename: file.filename,
+        subfolder: file.subfolder || "",
+        type: file.type || "output",
+    });
+    const response = await axios.get(comfyUiUrl(baseUrl, `/view?${query.toString()}`), {
         headers: authHeaders(apiKey),
         responseType: "blob",
         signal: options?.signal,
