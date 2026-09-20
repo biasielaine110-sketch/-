@@ -219,6 +219,7 @@ async function createNativeComfyUiVideoTask(
             }
         }),
     );
+    const audioSources = await resolveNativeComfyAudioSources(options?.referenceAudios || [], options?.signal);
     try {
         const result = await runNativeComfyUiJob({
             baseUrl: config.baseUrl,
@@ -226,6 +227,7 @@ async function createNativeComfyUiVideoTask(
             workflow,
             prompt,
             referenceDataUrls: refs.filter(Boolean),
+            referenceAudioSources: audioSources,
             signal: options?.signal,
         });
         const video = result.videos[0];
@@ -243,6 +245,50 @@ async function createNativeComfyUiVideoTask(
         if (error instanceof Error && (error.message.includes("comfy") || error.message.includes("ComfyUI"))) throw error;
         throw new Error(error instanceof Error ? error.message : apiText("requestFailed"));
     }
+}
+
+/** Resolve canvas audio (blob:/storageKey/http) into uploadable sources for native ComfyUI. */
+async function resolveNativeComfyAudioSources(audios: ReferenceAudio[], signal?: AbortSignal): Promise<string[]> {
+    const { getMediaBlob } = await import("@/services/file-storage");
+    const out: string[] = [];
+    for (const audio of audios.slice(0, 3)) {
+        const url = String(audio.url || "").trim();
+        const storageKey = String(audio.storageKey || "").trim();
+        if (/^https?:\/\//i.test(url) && !/^blob:/i.test(url)) {
+            out.push(url);
+            continue;
+        }
+        if (url.startsWith("data:")) {
+            out.push(url);
+            continue;
+        }
+        if (storageKey.includes(":")) {
+            try {
+                const blob = await getMediaBlob(storageKey);
+                if (blob) {
+                    out.push(await blobToDataUrl(blob.type.startsWith("audio/") ? blob : new Blob([blob], { type: audio.type || "audio/mpeg" })));
+                    continue;
+                }
+            } catch {
+                // fall through
+            }
+        }
+        if (/^blob:/i.test(url)) {
+            try {
+                const response = await fetch(url, { signal });
+                const blob = await response.blob();
+                out.push(await blobToDataUrl(blob.type.startsWith("audio/") ? blob : new Blob([blob], { type: audio.type || "audio/mpeg" })));
+                continue;
+            } catch {
+                // fall through
+            }
+        }
+        if (url && !url.includes(":")) {
+            // Unknown local path — skip rather than send a bad value.
+            continue;
+        }
+    }
+    return out;
 }
 
 /**

@@ -127,6 +127,7 @@ function comfyPromptScore(node: ComfyNode) {
     const title = String(node._meta?.title || "");
     const type = String(node.class_type || "");
     if (/positive|正面|提示词|\bprompt\b/i.test(title)) return 40;
+    if (/CR\s*PromptText/i.test(type)) return 35;
     if (/CLIPTextEncode|TextEncode/i.test(type)) return 30;
     if (/Prompt|CRText|PrimitiveString|StringConstant|Wildcard/i.test(type)) return 20;
     if (PROMPT_FIELDS.some((field) => typeof node.inputs?.[field] === "string" && !isNegativeComfyNode(node, field))) return 10;
@@ -148,16 +149,27 @@ function writeComfyPromptFields(
 ): boolean {
     if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
     if (depth > 3) return false;
-    for (const field of PROMPT_FIELDS) {
+    let wrote = false;
+    const type = String(node.class_type || "");
+    // CR PromptText keeps the long screenplay in `prompt` and a short stub in `text`.
+    const fields =
+        /CR\s*PromptText|PromptText/i.test(type) || ("prompt" in node.inputs && "text" in node.inputs)
+            ? ["prompt", ...PROMPT_FIELDS.filter((field) => field !== "prompt")]
+            : PROMPT_FIELDS;
+
+    for (const field of fields) {
         if (!(field in node.inputs) || isNegativeComfyNode(node, field)) continue;
         const current = node.inputs[field];
         if (typeof current === "string") {
             node.inputs[field] = value;
-            return true;
+            wrote = true;
+            // Keep writing sibling string fields on the same node (CR PromptText has both).
+            continue;
         }
         const source = linkedComfyNode(workflow, current);
-        if (source && writeComfyPromptFields(workflow, source, value, depth + 1, false)) return true;
+        if (source && writeComfyPromptFields(workflow, source, value, depth + 1, false)) wrote = true;
     }
+    if (wrote) return true;
     // Only force `text` on an already-selected prompt node (not blind fallback).
     if (forceText && depth === 0) {
         node.inputs.text = value;
@@ -220,27 +232,145 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
     return next;
 }
 
-async function referenceToUploadFile(dataUrlOrHttp: string, fileName: string, signal?: AbortSignal): Promise<File> {
+const AUDIO_FILENAME_FIELDS = ["audio", "audio_path", "audio_file", "path", "file", "filename"];
+
+function isComfyAudioLoader(node: ComfyNode) {
+    const type = String(node?.class_type || "");
+    const title = String(node?._meta?.title || "");
+    if (/FromUrl|FromPath|FromBase64|LoadVideo|LoadImage/i.test(type)) return false;
+    if (/LoadAudio|AudioLoader|VHS_LoadAudio|LoadAudioUpload|AudioLoad/i.test(type)) return true;
+    if (/参考音频|音频|ref.?audio|load.?audio|audio.?ref/i.test(title)) {
+        return AUDIO_FILENAME_FIELDS.some((field) => typeof node.inputs?.[field] === "string");
+    }
+    return false;
+}
+
+function writeComfyAudioFilename(node: ComfyNode, filename: string) {
+    if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
+    for (const field of AUDIO_FILENAME_FIELDS) {
+        if (field in node.inputs && typeof node.inputs[field] === "string") {
+            node.inputs[field] = filename;
+            return;
+        }
+    }
+    node.inputs.audio = filename;
+}
+
+/** Map uploaded filenames onto LoadAudio nodes in order. */
+export function applyComfyLoadAudios(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
+    if (!filenames.length) return workflow;
+    const next = cloneWorkflow(workflow);
+    const loaders = Object.entries(next)
+        .filter(([, node]) => isComfyAudioLoader(node))
+        .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+        .map(([, node]) => node);
+    loaders.forEach((node, index) => {
+        const name = filenames[index] || filenames[filenames.length - 1];
+        if (!name) return;
+        writeComfyAudioFilename(node, name);
+    });
+    // MiniMax H3 graphs often have no LoadAudio — wire drive_audio / ref_audios instead.
+    return applyComfyMiniMaxDriveAudio(next, filenames);
+}
+
+function isMiniMaxH3ConditioningNode(node: ComfyNode) {
+    return /MiniMaxH3AudioConditioning/i.test(String(node?.class_type || ""));
+}
+
+function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
+    let index = 1;
+    while (workflow[`${prefix}${index}`]) index += 1;
+    return `${prefix}${index}`;
+}
+
+/**
+ * Compshare MiniMax H3: inject canvas audio by adding LoadAudio nodes and linking
+ * `drive_audio` / `ref_audios.ref_audio_*` on MiniMaxH3AudioConditioningT8.
+ * When audio is provided, switch `audio_mode` away from `native` so the source is used.
+ */
+export function applyComfyMiniMaxDriveAudio(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
+    if (!filenames.length) return workflow;
+    const next = cloneWorkflow(workflow);
+    const targets = Object.values(next).filter(isMiniMaxH3ConditioningNode);
+    if (!targets.length) return next;
+
+    const existingLoaders = Object.entries(next)
+        .filter(([, node]) => isComfyAudioLoader(node))
+        .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+
+    const loaderIds: string[] = [];
+    filenames.forEach((filename, index) => {
+        if (!filename) return;
+        let loaderId = existingLoaders[index]?.[0];
+        if (loaderId) {
+            writeComfyAudioFilename(next[loaderId], filename);
+        } else {
+            loaderId = nextComfyNodeId(next, "ia_audio_");
+            next[loaderId] = {
+                class_type: "LoadAudio",
+                inputs: { audio: filename },
+                _meta: { title: `Canvas Audio ${index + 1}` },
+            };
+        }
+        loaderIds.push(loaderId);
+    });
+
+    if (!loaderIds.length) return next;
+    const primary = loaderIds[0];
+
+    for (const node of targets) {
+        if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
+        node.inputs.drive_audio = [primary, 0];
+        node.inputs.final_audio = [primary, 0];
+        loaderIds.forEach((id, index) => {
+            node.inputs![`ref_audios.ref_audio_${index}`] = [id, 0];
+        });
+        // `native` ignores drive_audio and synthesizes sound — force lock when canvas audio exists.
+        const mode = String(node.inputs.audio_mode || "");
+        if (!mode || /^native$/i.test(mode)) {
+            node.inputs.audio_mode = "lock_source";
+        }
+        node.inputs.add_source_as_reference = true;
+        if (!node.inputs.prompt_primary_audio_ordinal || node.inputs.prompt_primary_audio_ordinal === 0) {
+            node.inputs.prompt_primary_audio_ordinal = 1;
+        }
+    }
+    return next;
+}
+
+async function referenceToUploadFile(
+    dataUrlOrHttp: string,
+    fileName: string,
+    signal?: AbortSignal,
+    fallbackType = "image/png",
+): Promise<File> {
     if (dataUrlOrHttp.startsWith("data:")) {
-        return dataUrlToFile({ id: fileName, name: fileName, dataUrl: dataUrlOrHttp, type: "image/png" });
+        return dataUrlToFile({ id: fileName, name: fileName, dataUrl: dataUrlOrHttp, type: fallbackType });
     }
     if (/^https?:\/\//i.test(dataUrlOrHttp)) {
         const response = await axios.get(proxyApiUrl(dataUrlOrHttp), { responseType: "blob", signal });
         const blob = response.data as Blob;
-        return new File([blob], fileName, { type: blob.type || "image/png" });
+        return new File([blob], fileName, { type: blob.type || fallbackType });
     }
-    throw new Error("Unsupported ComfyUI reference image");
+    if (/^blob:/i.test(dataUrlOrHttp)) {
+        const response = await fetch(dataUrlOrHttp, { signal });
+        const blob = await response.blob();
+        return new File([blob], fileName, { type: blob.type || fallbackType });
+    }
+    throw new Error("Unsupported ComfyUI reference media");
 }
 
-export async function uploadComfyImage(
+async function uploadComfyInputFile(
     baseUrl: string,
     apiKey: string,
-    dataUrl: string,
+    source: string,
     fileName: string,
+    fallbackType: string,
     options?: RequestOptions,
 ): Promise<string> {
-    const file = await referenceToUploadFile(dataUrl, fileName, options?.signal);
+    const file = await referenceToUploadFile(source, fileName, options?.signal, fallbackType);
     const body = new FormData();
+    // ComfyUI stores uploads under input/ via this endpoint for images and audio alike.
     body.append("image", file);
     body.append("overwrite", "true");
     const response = await axios.post(comfyUiUrl(baseUrl, "/upload/image"), body, {
@@ -250,6 +380,27 @@ export async function uploadComfyImage(
     const name = response.data?.name || response.data?.filename || file.name;
     if (!name) throw new Error("ComfyUI upload did not return a filename");
     return String(name);
+}
+
+export async function uploadComfyImage(
+    baseUrl: string,
+    apiKey: string,
+    dataUrl: string,
+    fileName: string,
+    options?: RequestOptions,
+): Promise<string> {
+    return uploadComfyInputFile(baseUrl, apiKey, dataUrl, fileName, "image/png", options);
+}
+
+export async function uploadComfyAudio(
+    baseUrl: string,
+    apiKey: string,
+    source: string,
+    fileName: string,
+    options?: RequestOptions,
+): Promise<string> {
+    const ext = /\.(mp3|wav|flac|ogg|m4a|aac)$/i.test(fileName) ? "" : ".mp3";
+    return uploadComfyInputFile(baseUrl, apiKey, source, `${fileName}${ext}`, "audio/mpeg", options);
 }
 
 type HistoryOutputs = Record<
@@ -388,11 +539,13 @@ export type RunNativeComfyUiArgs = {
     workflow: ComfyWorkflow;
     prompt: string;
     referenceDataUrls?: string[];
+    /** data:/http(s):/blob: audio sources to upload into LoadAudio nodes. */
+    referenceAudioSources?: string[];
     signal?: AbortSignal;
 };
 
 /**
- * Upload references, inject prompt/images, queue prompt, poll history, download outputs.
+ * Upload references, inject prompt/images/audio, queue prompt, poll history, download outputs.
  */
 export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<NativeComfyUiResult> {
     const { baseUrl, apiKey, prompt, signal } = args;
@@ -407,6 +560,16 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             names.push(uploaded);
         }
         workflow = applyComfyLoadImages(workflow, names);
+    }
+
+    const audioRefs = (args.referenceAudioSources || []).filter(Boolean).slice(0, 3);
+    if (audioRefs.length) {
+        const names: string[] = [];
+        for (let i = 0; i < audioRefs.length; i += 1) {
+            const uploaded = await uploadComfyAudio(baseUrl, apiKey, audioRefs[i], `ref-audio-${i + 1}.mp3`, { signal });
+            names.push(uploaded);
+        }
+        workflow = applyComfyLoadAudios(workflow, names);
     }
 
     const clientId = nanoid(12);
