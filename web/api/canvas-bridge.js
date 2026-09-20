@@ -9,8 +9,17 @@ const GENERATE_TIMEOUT_MS = 12 * 60 * 1000;
 const COMMAND_TIMEOUT_MS = 20_000;
 const SERVERLESS_MAX_WAIT_MS = 280_000;
 const ACCESS_TOKEN = process.env.CANVAS_BRIDGE_TOKEN || "";
-const REDIS_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "").replace(/\/+$/, "");
-const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "";
+const REDIS_URL = (
+    process.env.KV_REST_API_URL ||
+    process.env.UPSTASH_REDIS_REST_URL ||
+    process.env.UPSTASH_REDIS_REST_KV_REST_API_URL ||
+    ""
+).replace(/\/+$/, "");
+const REDIS_TOKEN =
+    process.env.KV_REST_API_TOKEN ||
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    process.env.UPSTASH_REDIS_REST_KV_REST_API_TOKEN ||
+    "";
 const STORE_PREFIX = process.env.CANVAS_BRIDGE_STORE_PREFIX || "canvas-bridge";
 const USE_REDIS = Boolean(REDIS_URL && REDIS_TOKEN);
 
