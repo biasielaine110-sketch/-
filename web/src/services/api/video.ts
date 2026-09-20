@@ -228,6 +228,9 @@ async function createNativeComfyUiVideoTask(
             prompt,
             referenceDataUrls: refs.filter(Boolean),
             referenceAudioSources: audioSources,
+            size: config.size,
+            seconds: config.videoSeconds,
+            vquality: config.vquality,
             signal: options?.signal,
         });
         const video = result.videos[0];

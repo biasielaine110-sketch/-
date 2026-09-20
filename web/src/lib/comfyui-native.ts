@@ -338,6 +338,179 @@ export function applyComfyMiniMaxDriveAudio(workflow: ComfyWorkflow, filenames: 
     return next;
 }
 
+const RESOLUTION_SELECTOR_ASPECTS: Array<{ ratio: string; label: string; value: number }> = [
+    { ratio: "1:1", label: "1:1 (Square)", value: 1 },
+    { ratio: "2:3", label: "2:3 (Portrait Photo)", value: 2 / 3 },
+    { ratio: "3:2", label: "3:2 (Photo)", value: 3 / 2 },
+    { ratio: "3:4", label: "3:4 (Portrait Standard)", value: 3 / 4 },
+    { ratio: "4:3", label: "4:3 (Standard)", value: 4 / 3 },
+    { ratio: "9:16", label: "9:16 (Portrait Widescreen)", value: 9 / 16 },
+    { ratio: "16:9", label: "16:9 (Widescreen)", value: 16 / 9 },
+    { ratio: "21:9", label: "21:9 (Ultrawide)", value: 21 / 9 },
+];
+
+function parseCanvasAspectRatio(size?: string): string {
+    const raw = String(size || "").trim();
+    if (!raw || /^auto|adaptive$/i.test(raw)) return "16:9";
+    const named = raw.match(/^(\d+)\s*:\s*(\d+)/);
+    if (named) return nearestAspectRatio(Number(named[1]) / Number(named[2]));
+    const pixels = raw.match(/^(\d+)\s*[x×]\s*(\d+)$/i);
+    if (pixels) return nearestAspectRatio(Number(pixels[1]) / Number(pixels[2]));
+    return "16:9";
+}
+
+function nearestAspectRatio(ratio: number) {
+    let best = RESOLUTION_SELECTOR_ASPECTS[6];
+    let bestDiff = Infinity;
+    for (const item of RESOLUTION_SELECTOR_ASPECTS) {
+        const diff = Math.abs(ratio - item.value);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            best = item;
+        }
+    }
+    return best.ratio;
+}
+
+function resolutionSelectorAspectLabel(ratio: string) {
+    return RESOLUTION_SELECTOR_ASPECTS.find((item) => item.ratio === ratio)?.label || "16:9 (Widescreen)";
+}
+
+/** Map canvas quality to a long-side pixel target for video. */
+function longSideFromQuality(vquality?: string) {
+    const raw = String(vquality || "").trim().toLowerCase();
+    if (!raw || raw === "auto" || raw === "medium") return 1280;
+    if (/4k|2160|3840/.test(raw)) return 3840;
+    if (/2k|1440|2560|high/.test(raw)) return 2560;
+    if (/1080|hd/.test(raw)) return 1920;
+    if (/720|sd/.test(raw)) return 1280;
+    if (/480|low/.test(raw)) return 854;
+    const numeric = Number(raw.replace(/p$/i, ""));
+    if (Number.isFinite(numeric) && numeric > 0) {
+        if (numeric >= 3000) return 3840;
+        if (numeric >= 2000) return 2560;
+        if (numeric >= 1080) return 1920;
+        if (numeric >= 720) return 1280;
+        return 854;
+    }
+    return 1280;
+}
+
+function pixelsFromSizeAndQuality(size?: string, vquality?: string) {
+    const ratioLabel = parseCanvasAspectRatio(size);
+    const aspect = RESOLUTION_SELECTOR_ASPECTS.find((item) => item.ratio === ratioLabel) || RESOLUTION_SELECTOR_ASPECTS[6];
+    const longSide = longSideFromQuality(vquality);
+    const snap = (value: number) => Math.max(64, Math.round(value / 32) * 32);
+    if (aspect.value >= 1) {
+        return { width: longSide, height: snap(longSide / aspect.value), ratio: ratioLabel };
+    }
+    return { width: snap(longSide * aspect.value), height: longSide, ratio: ratioLabel };
+}
+
+function megapixelsFromPixels(width: number, height: number) {
+    return Math.max(0.1, Math.min(16, Math.round(((width * height) / 1_000_000) * 100) / 100));
+}
+
+function parseCanvasSeconds(seconds?: string | number) {
+    const value = typeof seconds === "number" ? seconds : Number(String(seconds || "").trim());
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return Math.max(1, Math.min(30, value));
+}
+
+/** MiniMax H3 frame length from seconds @24fps, snapped to 17n+5. */
+function h3LengthFromSeconds(seconds: number) {
+    const frames = Math.max(5, Math.round(seconds * 24));
+    return frames + ((5 - (frames % 17)) % 17);
+}
+
+function writeComfyNumberInput(node: ComfyNode, field: string, nextValue: number) {
+    if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
+    const current = node.inputs[field];
+    if (typeof current === "number") {
+        node.inputs[field] = nextValue;
+        return true;
+    }
+    if (typeof current === "string" && /^-?\d+(\.\d+)?$/.test(current.trim())) {
+        node.inputs[field] = String(nextValue);
+        return true;
+    }
+    return false;
+}
+
+function writeLinkedComfyNumber(workflow: ComfyWorkflow, value: unknown, nextValue: number): boolean {
+    if (!Array.isArray(value) || value[0] == null) return false;
+    const source = workflow[String(value[0])];
+    if (!source?.inputs) return false;
+    for (const key of ["value", "int", "number", "Number", "float"]) {
+        if (writeComfyNumberInput(source, key, nextValue)) return true;
+    }
+    return false;
+}
+
+/**
+ * Inject canvas aspect / megapixels / duration into native ComfyUI graphs
+ * (ResolutionSelector + duration PrimitiveFloat + MiniMax H3 width/height/length).
+ */
+export function applyComfyVideoSettings(
+    workflow: ComfyWorkflow,
+    settings: { size?: string; seconds?: string | number; vquality?: string },
+): ComfyWorkflow {
+    const next = cloneWorkflow(workflow);
+    const pixels = pixelsFromSizeAndQuality(settings.size, settings.vquality);
+    const megapixels = megapixelsFromPixels(pixels.width, pixels.height);
+    const aspectLabel = resolutionSelectorAspectLabel(pixels.ratio);
+    const seconds = parseCanvasSeconds(settings.seconds);
+
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        const title = String(node._meta?.title || "");
+        if (!node.inputs || typeof node.inputs !== "object") continue;
+
+        if (/ResolutionSelector/i.test(type) || /分辨率/i.test(title)) {
+            if ("aspect_ratio" in node.inputs) node.inputs.aspect_ratio = aspectLabel;
+            if ("megapixels" in node.inputs) writeComfyNumberInput(node, "megapixels", megapixels);
+        }
+
+        if (seconds != null && (/duration|时长|seconds/i.test(title) || (/Primitive(Float|Int|Number)/i.test(type) && /duration|时长/i.test(title)))) {
+            writeComfyNumberInput(node, "value", seconds);
+        }
+    }
+
+    // MiniMax H3 conditioning often exposes width/height/length (scalar or linked).
+    for (const node of Object.values(next)) {
+        if (!isMiniMaxH3ConditioningNode(node) || !node.inputs) continue;
+        if (!writeComfyNumberInput(node, "width", pixels.width)) writeLinkedComfyNumber(next, node.inputs.width, pixels.width);
+        if (!writeComfyNumberInput(node, "height", pixels.height)) writeLinkedComfyNumber(next, node.inputs.height, pixels.height);
+        if (seconds != null) {
+            const length = h3LengthFromSeconds(seconds);
+            if (!writeComfyNumberInput(node, "length", length)) {
+                // Prefer writing the upstream duration float (seconds) when length is math-derived.
+                const lengthLink = node.inputs.length;
+                if (Array.isArray(lengthLink) && lengthLink[0] != null) {
+                    const mathNode = next[String(lengthLink[0])];
+                    const durationLink = mathNode?.inputs?.["values.a"] ?? mathNode?.inputs?.a;
+                    if (!writeLinkedComfyNumber(next, durationLink, seconds)) {
+                        writeLinkedComfyNumber(next, lengthLink, length);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: any standalone duration float/int titled for video length.
+    if (seconds != null) {
+        for (const node of Object.values(next)) {
+            const type = String(node.class_type || "");
+            const title = String(node._meta?.title || "");
+            if (!/Primitive(Float|Int)|float|int/i.test(type)) continue;
+            if (!/duration|时长|seconds|秒/i.test(title)) continue;
+            writeComfyNumberInput(node, "value", seconds);
+        }
+    }
+
+    return next;
+}
+
 async function referenceToUploadFile(
     dataUrlOrHttp: string,
     fileName: string,
@@ -541,17 +714,28 @@ export type RunNativeComfyUiArgs = {
     referenceDataUrls?: string[];
     /** data:/http(s):/blob: audio sources to upload into LoadAudio nodes. */
     referenceAudioSources?: string[];
+    /** Canvas video size / ratio (e.g. 16:9, 1280x720). */
+    size?: string;
+    /** Canvas duration in seconds. */
+    seconds?: string | number;
+    /** Canvas quality tier (e.g. 720, 1080, 2k). */
+    vquality?: string;
     signal?: AbortSignal;
 };
 
 /**
- * Upload references, inject prompt/images/audio, queue prompt, poll history, download outputs.
+ * Upload references, inject prompt/images/audio/size/duration, queue prompt, poll history, download outputs.
  */
 export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<NativeComfyUiResult> {
     const { baseUrl, apiKey, prompt, signal } = args;
     if (!normalizeComfyUiRoot(baseUrl)) throw new Error("ComfyUI Base URL is required");
 
     let workflow = applyComfyPrompt(args.workflow, prompt);
+    workflow = applyComfyVideoSettings(workflow, {
+        size: args.size,
+        seconds: args.seconds,
+        vquality: args.vquality,
+    });
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     if (refs.length) {
         const names: string[] = [];
