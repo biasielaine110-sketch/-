@@ -11,6 +11,7 @@ import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploa
 import { defaultConfig, modelOptionLabel, resolveModelForCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
+import { subscribeLocalMediaLibraryAccess } from "@/services/local-media-library";
 import { nanoid } from "nanoid";
 import { captureVideoFrameDataUrl, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
@@ -78,6 +79,7 @@ import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, getGroupMemberNodes, normalizeConnection, resolveConnectionPairs, canConnectNodes, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
+    applyHydratedMedia,
     audioExtension,
     buildAngleLabel,
     buildAnglePrompt,
@@ -100,6 +102,7 @@ import { isDocumentFile, readDocumentAsText } from "@/lib/canvas/document-text";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType } from "@/lib/canvas/node-registry";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
 import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
+import { CanvasMediaLibraryNotice } from "@/components/canvas/canvas-media-library-notice";
 import { CanvasTopBar } from "@/components/canvas/canvas-top-bar";
 import { ConnectionCreateMenu, NodeCreateMenu, type PendingConnectionCreate } from "@/components/canvas/canvas-create-menus";
 import {
@@ -399,6 +402,7 @@ function AtelierCanvasPage() {
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
 
     const nodesRef = useRef(nodes);
+    const chatSessionsRef = useRef(chatSessions);
     const connectionsRef = useRef(connections);
     const selectedNodeIdsRef = useRef(selectedNodeIds);
     const hoveredNodeIdRef = useRef(hoveredNodeId);
@@ -686,6 +690,7 @@ function AtelierCanvasPage() {
 
     useLayoutEffect(() => {
         nodesRef.current = nodes;
+        chatSessionsRef.current = chatSessions;
         connectionsRef.current = connections;
         selectedNodeIdsRef.current = selectedNodeIds;
         hoveredNodeIdRef.current = hoveredNodeId;
@@ -694,11 +699,33 @@ function AtelierCanvasPage() {
         connectingParamsRef.current = connectingParams;
         connectionTargetNodeIdRef.current = connectionTargetNodeId;
         pendingConnectionCreateRef.current = pendingConnectionCreate;
-    }, [nodes, connections, selectedNodeIds, hoveredNodeId, toolbarNodeId, viewport, connectingParams, connectionTargetNodeId, pendingConnectionCreate]);
+    }, [nodes, chatSessions, connections, selectedNodeIds, hoveredNodeId, toolbarNodeId, viewport, connectingParams, connectionTargetNodeId, pendingConnectionCreate]);
 
     useLayoutEffect(() => {
         selectionBoxRef.current = selectionBox;
     }, [selectionBox]);
+
+    /**
+     * Re-resolve media that was unreadable while the bound local folder had no permission.
+     * Runs on every successful (re-)authorization so the canvas recovers without a page reload —
+     * media fields only, so the viewport, undo history, and in-progress edits are left untouched.
+     */
+    const rehydrateLocalMedia = useCallback(async () => {
+        const currentNodes = nodesRef.current;
+        if (currentNodes.length) {
+            const restored = await hydrateCanvasImages(currentNodes, { mode: "fast" });
+            setNodes((prev) => applyHydratedMedia(prev, restored));
+        }
+        const sessions = chatSessionsRef.current;
+        if (!sessions.length) return;
+        const restoredSessions = await hydrateAssistantImages(sessions);
+        setChatSessions(restoredSessions);
+        if (lastHistoryRef.current) {
+            lastHistoryRef.current = { ...lastHistoryRef.current, chatSessions: restoredSessions };
+        }
+    }, []);
+
+    useEffect(() => subscribeLocalMediaLibraryAccess(() => void rehydrateLocalMedia()), [rehydrateLocalMedia]);
 
     useEffect(() => {
         const el = containerRef.current;
@@ -5295,6 +5322,8 @@ function AtelierCanvasPage() {
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                 />
+
+                <CanvasMediaLibraryNotice />
 
                 <AtelierCanvas
                     containerRef={containerRef}

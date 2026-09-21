@@ -161,6 +161,22 @@ export async function resolveImageUrl(storageKey?: string, fallback = "") {
     return url;
 }
 
+/**
+ * Drop the cached object URL for a key and rebuild it from the stored blob.
+ * `objectUrls` can hold a URL that was revoked elsewhere (or died with a previous decode),
+ * and `resolveImageUrl` would keep handing that dead URL back — this forces a fresh one.
+ * Returns "" when the blob itself is gone.
+ */
+export async function refreshImageUrl(storageKey?: string) {
+    if (!storageKey) return "";
+    const cached = objectUrls.get(storageKey);
+    if (cached) {
+        URL.revokeObjectURL(cached);
+        objectUrls.delete(storageKey);
+    }
+    return resolveImageUrl(storageKey, "");
+}
+
 export async function getImageBlob(storageKey: string) {
     const local = await readLocalMediaBlob(storageKey);
     if (local) return local;
@@ -355,15 +371,23 @@ export async function removeIndexedDbImages(keys: Iterable<string>) {
     );
 }
 
+/**
+ * Persist a blob to the bound local folder *and* IndexedDB.
+ *
+ * The local folder is the primary copy, but its `readwrite` permission lapses when the browser
+ * restarts — and removing the IndexedDB copy at that point left the blob unreadable in both
+ * places, which surfaced as images silently disappearing from the canvas. Keeping the IndexedDB
+ * copy as a fallback costs browser space; "Clean IndexedDB" in settings stays the explicit way to
+ * reclaim it, and only ever deletes keys that are already present in the local folder.
+ */
 async function persistImageBlob(storageKey: string, blob: Blob) {
-    if (await isLocalMediaLibraryReady()) {
-        const wrote = await writeLocalMediaBlob(storageKey, blob);
-        if (wrote) {
-            await store.removeItem(storageKey);
-            return;
-        }
+    const wroteLocal = (await isLocalMediaLibraryReady()) && (await writeLocalMediaBlob(storageKey, blob));
+    try {
+        await store.setItem(storageKey, blob);
+    } catch (error) {
+        // IndexedDB quota exhausted — the local folder still holds a durable copy, so keep going.
+        if (!wroteLocal) throw error;
     }
-    await store.setItem(storageKey, blob);
 }
 
 /** Blob object URLs die after refresh/import; never treat them as a usable fallback. */

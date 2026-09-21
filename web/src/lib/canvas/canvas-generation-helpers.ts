@@ -2,6 +2,7 @@ import { defaultConfig, resolveModelForCapability, type AiConfig } from "@/store
 import i18n from "@/i18n";
 import { ensureImageThumbnail, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
+import { isLocalMediaLibraryPermissionLost } from "@/services/local-media-library";
 import { imageMetadata, referenceUrl } from "@/lib/canvas/canvas-node-factory";
 import type { NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
@@ -51,20 +52,42 @@ function isDeadBlobUrl(url?: string) {
     return Boolean(url?.startsWith("blob:"));
 }
 
+/** Errors that only mean "the blob was not readable right now" — cleared once the media resolves again. */
+function isRecoverableMediaError(details?: string) {
+    if (!details) return true;
+    return details === i18n.t("canvas.generation.mediaMissing") || details === i18n.t("canvas.generation.mediaPermissionRequired");
+}
+
+/** A lapsed local-folder permission is not data loss — the bytes are still on disk, so say so. */
+function recoverableMediaDetail(permissionLost: boolean) {
+    return i18n.t(permissionLost ? "canvas.generation.mediaPermissionRequired" : "canvas.generation.mediaMissing");
+}
+
 /** After refresh, dead blob: URLs + missing IndexedDB leave empty content — mark as error instead of fake "generating". */
-function markMissingMedia<T extends { status?: CanvasNodeImage["status"]; content?: string; thumbnailContent?: string; storageKey?: string; thumbnailStorageKey?: string; errorDetails?: string }>(image: T): T {
+function markMissingMedia<T extends { status?: CanvasNodeImage["status"]; content?: string; thumbnailContent?: string; storageKey?: string; thumbnailStorageKey?: string; errorDetails?: string }>(image: T, detail: string): T {
     const visible = Boolean(image.content || image.thumbnailContent);
-    if (visible || image.status === "loading" || image.status === "error") return image;
+    if (visible) {
+        // Media is readable again (e.g. the local folder was re-authorized) — drop the stale error so
+        // the node repaints instead of keeping the "missing media" overlay forever.
+        if (image.status === "error" && isRecoverableMediaError(image.errorDetails)) {
+            return { ...image, status: "success" as const, errorDetails: undefined };
+        }
+        return image;
+    }
+    if (image.status === "loading" || image.status === "error") return image;
     if (!image.storageKey && !image.thumbnailStorageKey && image.status !== "success") return image;
     return {
         ...image,
         status: "error" as const,
-        errorDetails: image.errorDetails || i18n.t("canvas.generation.mediaMissing"),
+        errorDetails: image.errorDetails || detail,
     };
 }
 
 export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: HydrateCanvasMediaOptions) {
     const mode = options?.mode || "fast";
+    // Unreadable media has two very different causes: the local folder lost its write permission
+    // (recoverable — the bytes are still on disk) or the blob is genuinely gone. Tell them apart.
+    const missingDetail = recoverableMediaDetail(await isLocalMediaLibraryPermissionLost());
     return Promise.all(
         nodes.map(async (node) => {
             const content = node.metadata?.content;
@@ -123,10 +146,10 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                     // Fast path: non-primary versions only need a thumb for the filmstrip.
                     if (mode === "fast" && !isPrimary) {
                         const content = isDeadBlobUrl(image.content) ? "" : image.content;
-                        return markMissingMedia({ ...image, content, thumbnailContent });
+                        return markMissingMedia({ ...image, content, thumbnailContent }, missingDetail);
                     }
                     const nextContent = image.storageKey ? await resolveImageUrl(image.storageKey, image.content) : isDeadBlobUrl(image.content) ? "" : image.content;
-                    return markMissingMedia({ ...image, content: nextContent, thumbnailContent });
+                    return markMissingMedia({ ...image, content: nextContent, thumbnailContent }, missingDetail);
                 }),
             );
             if (node.metadata?.storageKey) {
@@ -137,14 +160,17 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                       : node.metadata.thumbnailContent;
                 // Prefer thumbnail for canvas chrome when available; still resolve full primary for crisp display.
                 const fullContent = await resolveImageUrl(node.metadata.storageKey, content);
-                const nextMeta = markMissingMedia({
-                    status: node.metadata.status || "success",
-                    content: fullContent,
-                    storageKey: node.metadata.storageKey,
-                    thumbnailContent,
-                    thumbnailStorageKey: node.metadata.thumbnailStorageKey,
-                    errorDetails: node.metadata.errorDetails,
-                });
+                const nextMeta = markMissingMedia(
+                    {
+                        status: node.metadata.status || "success",
+                        content: fullContent,
+                        storageKey: node.metadata.storageKey,
+                        thumbnailContent,
+                        thumbnailStorageKey: node.metadata.thumbnailStorageKey,
+                        errorDetails: node.metadata.errorDetails,
+                    },
+                    missingDetail,
+                );
                 return {
                     ...node,
                     metadata: {
@@ -161,17 +187,20 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                 const cleared = isDeadBlobUrl(content) ? "" : content;
                 const primary = images.find((image) => image.id === primaryId) || images[0];
                 const visible = cleared || primary?.content || primary?.thumbnailContent || "";
-                const nextStatus =
-                    !visible && (node.metadata?.status === "success" || primary?.storageKey || node.metadata?.storageKey)
-                        ? ("error" as const)
-                        : node.metadata?.status;
+                // Re-authorized local folder: the media resolves again, so drop the stale missing-media error.
+                const recovered = Boolean(visible) && node.metadata?.status === "error" && isRecoverableMediaError(node.metadata?.errorDetails);
+                const nextStatus = recovered
+                    ? ("success" as const)
+                    : !visible && (node.metadata?.status === "success" || primary?.storageKey || node.metadata?.storageKey)
+                      ? ("error" as const)
+                      : node.metadata?.status;
                 return {
                     ...node,
                     metadata: {
                         ...node.metadata,
                         content: cleared || primary?.content || "",
                         status: nextStatus,
-                        errorDetails: nextStatus === "error" ? node.metadata?.errorDetails || i18n.t("canvas.generation.mediaMissing") : node.metadata?.errorDetails,
+                        errorDetails: nextStatus === "error" ? node.metadata?.errorDetails || missingDetail : recovered ? undefined : node.metadata?.errorDetails,
                         images,
                     },
                 };
@@ -192,6 +221,50 @@ export async function hydrateCanvasMediaDeferred(nodes: CanvasNodeData[], signal
     if (!needsWork) return nodes;
     if (signal?.aborted) return nodes;
     return hydrateCanvasImages(nodes, { mode: "full" });
+}
+
+/**
+ * Merge re-hydrated media onto the live nodes, touching media fields only.
+ *
+ * Used when the local folder is re-authorized mid-session: the canvas must repaint the media that
+ * failed while permission was missing, without resetting the viewport, undo history, or anything
+ * the user changed in the meantime.
+ */
+export function applyHydratedMedia(nodes: CanvasNodeData[], hydrated: CanvasNodeData[]) {
+    const byId = new Map(hydrated.map((node) => [node.id, node]));
+    return nodes.map((node) => {
+        const nextMeta = byId.get(node.id)?.metadata;
+        if (!nextMeta) return node;
+        const images = nextMeta.images;
+        const mergedImages =
+            images?.length && node.metadata?.images?.length
+                ? node.metadata.images.map((image) => {
+                      const match = images.find((item) => item.id === image.id);
+                      if (!match) return image;
+                      return {
+                          ...image,
+                          content: match.content || image.content,
+                          thumbnailContent: match.thumbnailContent || image.thumbnailContent,
+                          status: match.status || image.status,
+                          errorDetails: match.errorDetails,
+                      };
+                  })
+                : node.metadata?.images;
+        return {
+            ...node,
+            metadata: {
+                ...node.metadata,
+                content: nextMeta.content || node.metadata?.content || "",
+                thumbnailContent: nextMeta.thumbnailContent || node.metadata?.thumbnailContent,
+                // Only adopt keys the live node is missing — never clobber a media the user swapped out.
+                storageKey: node.metadata?.storageKey || nextMeta.storageKey,
+                thumbnailStorageKey: node.metadata?.thumbnailStorageKey || nextMeta.thumbnailStorageKey,
+                status: nextMeta.status || node.metadata?.status,
+                errorDetails: nextMeta.errorDetails,
+                ...(mergedImages ? { images: mergedImages } : {}),
+            },
+        };
+    });
 }
 
 function yieldToMain() {

@@ -114,15 +114,18 @@ export async function removeIndexedDbMedia(keys: Iterable<string>) {
     );
 }
 
+/**
+ * Mirror the blob into the bound local folder *and* IndexedDB (see image-storage.persistImageBlob).
+ * Dropping the IndexedDB copy while the folder permission can lapse is what made media disappear.
+ */
 async function persistMediaBlob(storageKey: string, blob: Blob) {
-    if (await isLocalMediaLibraryReady()) {
-        const wrote = await writeLocalMediaBlob(storageKey, blob);
-        if (wrote) {
-            await store.removeItem(storageKey);
-            return;
-        }
+    const wroteLocal = (await isLocalMediaLibraryReady()) && (await writeLocalMediaBlob(storageKey, blob));
+    try {
+        await store.setItem(storageKey, blob);
+    } catch (error) {
+        // IndexedDB quota exhausted — the local folder still holds a durable copy, so keep going.
+        if (!wroteLocal) throw error;
     }
-    await store.setItem(storageKey, blob);
 }
 
 function readVideoMeta(url: string) {

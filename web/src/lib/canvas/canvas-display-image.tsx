@@ -1,4 +1,6 @@
-import { useEffect, useState, type ImgHTMLAttributes } from "react";
+import { useEffect, useRef, useState, type ImgHTMLAttributes } from "react";
+
+import { refreshImageUrl } from "@/services/image-storage";
 
 const MAX_CACHE = 96;
 const cache = new Map<string, string>();
@@ -102,53 +104,87 @@ type CanvasDisplayImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> 
     previewSrc?: string;
     /** Longest edge for the on-canvas preview (CSS pixels × DPR handled inside). Clamped to CANVAS_DISPLAY_MAX_EDGE. */
     maxEdge?: number;
+    /** Storage key behind `src` — lets a dead URL be rebuilt from the stored blob. */
+    storageKey?: string;
+    /** Storage key behind `previewSrc`. */
+    previewStorageKey?: string;
 };
 
-/** Lazy, async-decoded image that prefers a stored thumbnail, else downscales the full source. */
-export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, alt = "", ...rest }: CanvasDisplayImageProps) {
+/** Candidate URLs in preference order (cheap thumbnail first), de-duplicated. */
+function buildCandidates(previewSrc?: string, src?: string) {
+    const seen = new Set<string>();
+    const candidates: string[] = [];
+    for (const value of [previewSrc, src]) {
+        const url = String(value || "").trim();
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        candidates.push(url);
+    }
+    return candidates;
+}
+
+/**
+ * Lazy, async-decoded image for canvas chrome.
+ *
+ * Tries every available source in turn (thumbnail → full asset). When they all fail it
+ * rebuilds fresh object URLs from the storage keys, because a `blob:` URL can be dead while
+ * the underlying bytes are still stored. Only when nothing can be revived does it render nothing,
+ * so a broken source never leaves the node stuck blank forever.
+ */
+export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, alt = "", storageKey, previewStorageKey, ...rest }: CanvasDisplayImageProps) {
     const dpr = typeof window !== "undefined" ? Math.min(window.devicePixelRatio || 1, 2) : 1;
     const edge = Math.round(clampDisplayEdge(maxEdge) * dpr);
-    // A stored thumbnail can be a revoked or persisted-from-a-previous-session blob: URL.
-    // Remember which one failed so we can fall back to the full source instead of rendering blank.
-    const [failedPreview, setFailedPreview] = useState<string | null>(null);
-    const usePreview = Boolean(previewSrc) && previewSrc !== failedPreview;
-    // Prefer thumb exclusively for canvas chrome — never decode the full asset when a usable thumb exists.
-    const preferred = usePreview ? (previewSrc as string) : src;
-    const [displaySrc, setDisplaySrc] = useState(preferred);
+
+    const candidates = buildCandidates(previewSrc, src);
+    const candidatesKey = candidates.join("\n");
+    // URLs revived from storage after every candidate died.
+    const [revived, setRevived] = useState<string[]>([]);
+    const [attempt, setAttempt] = useState(0);
+    const [displaySrc, setDisplaySrc] = useState("");
+    const failedRef = useRef(new Set<string>());
+
+    const chain = [...candidates, ...revived];
+    const current = chain[attempt] || "";
+
+    useEffect(() => {
+        failedRef.current = new Set();
+        setRevived([]);
+        setAttempt(0);
+    }, [candidatesKey]);
 
     useEffect(() => {
         let cancelled = false;
-        setDisplaySrc(preferred);
-        if (!preferred) return;
-        if (usePreview) {
-            setDisplaySrc(previewSrc as string);
+        if (!current) {
+            setDisplaySrc("");
             return;
         }
-        void getCanvasDisplaySrc(src, edge).then((next) => {
-            if (!cancelled) setDisplaySrc(next);
+        setDisplaySrc(current);
+        void getCanvasDisplaySrc(current, edge).then((next) => {
+            if (!cancelled) setDisplaySrc(next || current);
         });
         return () => {
             cancelled = true;
         };
-    }, [src, previewSrc, preferred, edge, usePreview]);
+    }, [current, edge]);
 
-    if (!src && !previewSrc) return null;
-    // Effects run after render: while the fallback state has just flipped, displaySrc may still
-    // hold the failed thumbnail — render the full source instead of retrying the dead URL.
-    const resolvedSrc = !usePreview && displaySrc === previewSrc ? src : displaySrc;
-    return (
-        <img
-            alt={alt}
-            loading="lazy"
-            decoding="async"
-            draggable={false}
-            className={className}
-            {...rest}
-            src={resolvedSrc || preferred}
-            onError={() => {
-                // Thumbnail is unusable (revoked / missing blob) — retry with the full-size source.
-                if (usePreview && previewSrc) setFailedPreview(previewSrc);
-            }}
-        />
-    );
+    const advance = async () => {
+        // The same URL can error more than once before state settles — never skip a candidate.
+        if (failedRef.current.has(current)) return;
+        failedRef.current.add(current);
+        if (attempt + 1 < chain.length) {
+            setAttempt(attempt + 1);
+            return;
+        }
+        if (!revived.length) {
+            const rebuilt = (await Promise.all([refreshImageUrl(previewStorageKey), refreshImageUrl(storageKey)])).filter((url): url is string => Boolean(url) && !chain.includes(url));
+            if (rebuilt.length) {
+                setRevived(rebuilt);
+                return;
+            }
+        }
+        setDisplaySrc("");
+    };
+
+    if (!chain.length || !displaySrc) return null;
+    return <img alt={alt} loading="lazy" decoding="async" draggable={false} className={className} {...rest} src={displaySrc} onError={() => void advance()} />;
 }

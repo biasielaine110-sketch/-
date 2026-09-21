@@ -560,7 +560,15 @@ function AnnotateNodeContent({ node, theme, onAnnotate }: NodeContentRendererPro
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
             <CanvasLazyMedia>
-                <CanvasDisplayImage src={content} previewSrc={node.metadata?.thumbnailContent} alt={node.title} maxEdge={CANVAS_DISPLAY_MAX_EDGE} className="pointer-events-none block h-full w-full select-none object-contain" />
+                <CanvasDisplayImage
+                    src={content}
+                    previewSrc={node.metadata?.thumbnailContent}
+                    storageKey={node.metadata?.storageKey}
+                    previewStorageKey={node.metadata?.thumbnailStorageKey}
+                    alt={node.title}
+                    maxEdge={CANVAS_DISPLAY_MAX_EDGE}
+                    className="pointer-events-none block h-full w-full select-none object-contain"
+                />
             </CanvasLazyMedia>
             {annotations.length ? (
                 <svg className="pointer-events-none absolute inset-0 h-full w-full" viewBox="0 0 1 1" preserveAspectRatio="none">
@@ -1155,6 +1163,8 @@ function ImageContent({
                                 <CanvasDisplayImage
                                     src={displaySrc}
                                     previewSrc={primaryThumb}
+                                    storageKey={primaryImage?.storageKey || node.metadata?.storageKey}
+                                    previewStorageKey={primaryImage?.thumbnailStorageKey || node.metadata?.thumbnailStorageKey}
                                     alt={node.title}
                                     maxEdge={CANVAS_DISPLAY_MAX_EDGE}
                                     onDragStart={(event) => event.preventDefault()}
@@ -1348,7 +1358,15 @@ function ExpandedImageCard({
                     </CanvasLazyMedia>
                 ) : (
                     <CanvasLazyMedia className="h-full w-full">
-                        <CanvasDisplayImage src={image.content || image.thumbnailContent || ""} previewSrc={image.thumbnailContent} alt={node.title} maxEdge={CANVAS_DISPLAY_MAX_EDGE} className="pointer-events-none h-full w-full select-none object-contain" />
+                        <CanvasDisplayImage
+                            src={image.content || image.thumbnailContent || ""}
+                            previewSrc={image.thumbnailContent}
+                            storageKey={image.storageKey}
+                            previewStorageKey={image.thumbnailStorageKey}
+                            alt={node.title}
+                            maxEdge={CANVAS_DISPLAY_MAX_EDGE}
+                            className="pointer-events-none h-full w-full select-none object-contain"
+                        />
                     </CanvasLazyMedia>
                 )
             ) : (

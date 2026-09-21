@@ -28,11 +28,67 @@ export type LocalMediaMigrateResult = {
     errors: string[];
 };
 
+export type LocalMediaLibraryPermissionState = "unsupported" | "unbound" | "granted" | "prompt" | "denied";
+
 const META_KEY = "library";
 const libraryStore = localforage.createInstance({ name: "infinite-canvas", storeName: "media_library" });
 
+let accessEpoch = 0;
+const accessListeners = new Set<() => void>();
+
 export function supportsLocalMediaLibrary() {
     return supportsDirectoryPicker();
+}
+
+/**
+ * Bumped every time the bound folder becomes readable again.
+ * The canvas subscribes to this so media that failed while permission was missing can re-hydrate
+ * without the user reloading the page.
+ */
+export function getLocalMediaLibraryAccessEpoch() {
+    return accessEpoch;
+}
+
+export function subscribeLocalMediaLibraryAccess(listener: () => void) {
+    accessListeners.add(listener);
+    return () => {
+        accessListeners.delete(listener);
+    };
+}
+
+function notifyLocalMediaLibraryAccess() {
+    accessEpoch += 1;
+    accessListeners.forEach((listener) => {
+        try {
+            listener();
+        } catch {
+            // A throwing subscriber must not break the grant flow.
+        }
+    });
+}
+
+/**
+ * Silent permission probe — never prompts.
+ * `readwrite` permission on a persisted directory handle lapses when the browser restarts, so a
+ * bound folder can be unreadable while every other part of the app still looks healthy.
+ */
+export async function getLocalMediaLibraryPermissionState(): Promise<LocalMediaLibraryPermissionState> {
+    if (!supportsLocalMediaLibrary()) return "unsupported";
+    const directory = await getLocalMediaLibraryDirectory();
+    if (!directory) return "unbound";
+    try {
+        const state = await directory.queryPermission({ mode: "readwrite" });
+        if (state === "granted") return "granted";
+        return state === "denied" ? "denied" : "prompt";
+    } catch {
+        return "denied";
+    }
+}
+
+/** True when a folder is bound but its `readwrite` permission has lapsed (typical after a restart). */
+export async function isLocalMediaLibraryPermissionLost() {
+    const state = await getLocalMediaLibraryPermissionState();
+    return state === "prompt" || state === "denied";
 }
 
 export async function getLocalMediaLibraryMeta(): Promise<LocalMediaLibraryMeta | null> {
@@ -71,6 +127,7 @@ export async function bindLocalMediaLibraryDirectory(directory?: FileSystemDirec
         directoryHandle: handle,
     };
     await libraryStore.setItem(META_KEY, meta);
+    notifyLocalMediaLibraryAccess();
     return {
         folderName: meta.folderName,
         boundAt: meta.boundAt,
@@ -89,7 +146,9 @@ export async function isLocalMediaLibraryReady() {
 export async function requestLocalMediaLibraryAccess() {
     const directory = await getLocalMediaLibraryDirectory();
     if (!directory) return false;
-    return requestLibraryPermission(directory);
+    const allowed = await requestLibraryPermission(directory);
+    if (allowed) notifyLocalMediaLibraryAccess();
+    return allowed;
 }
 
 export async function writeLocalMediaBlob(storageKey: string, blob: Blob) {
