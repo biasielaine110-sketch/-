@@ -314,9 +314,51 @@ function resolveVolcengineImageSize(quality: string | undefined, size: string) {
     return best.size;
 }
 
+/**
+ * hfsyapi seedream `size` accepts only the ~1K pixel sizes from its docs `sizeTable`.
+ * "1K" in the parameter description is the resolution tier, NOT a literal value —
+ * sending "1K" makes the provider fall back to its 1:1 default and ignores the user's ratio.
+ */
+const HFSY_SEEDREAM_SIZES = [
+    { ratio: 16 / 9, size: "1280x720" },
+    { ratio: 4 / 3, size: "1024x768" },
+    { ratio: 4 / 5, size: "1024x832" },
+    { ratio: 9 / 16, size: "720x1280" },
+    { ratio: 1, size: "1024x1024" },
+    { ratio: 2, size: "1024x512" },
+    { ratio: 1.85, size: "1024x554" },
+    { ratio: 2.4, size: "1024x427" },
+    { ratio: 21 / 9, size: "1344x576" },
+];
+
+function resolveHfsySeedreamSize(size: string) {
+    const value = (size || "").trim();
+    if (!value || value.toLowerCase() === "auto") return "1024x1024";
+    const target = readSizeAspectRatio(value);
+    let best = HFSY_SEEDREAM_SIZES[0];
+    let bestDelta = Number.POSITIVE_INFINITY;
+    for (const item of HFSY_SEEDREAM_SIZES) {
+        const delta = Math.abs(item.ratio - target);
+        if (delta < bestDelta) {
+            best = item;
+            bestDelta = delta;
+        }
+    }
+    return best.size;
+}
+
 function resolveVolcengineImageParams(config: AiConfig, count: number) {
-    const size = resolveVolcengineImageSize(normalizeQuality(config.quality), config.size);
     const n = Math.max(1, Math.min(count, 15));
+    // hfsyapi seedream takes a ~1K pixel size (not Volcengine's 2K/3K tiers) and knows nothing
+    // about Volcengine's sequential_image_generation params.
+    if (usesHfsySeedreamImageApi(config)) {
+        return {
+            size: resolveHfsySeedreamSize(config.size),
+            response_format: IMAGE_RESPONSE_FORMAT,
+            ...(n > 1 ? { n: Math.min(n, 10) } : {}),
+        } as Record<string, unknown>;
+    }
+    const size = resolveVolcengineImageSize(normalizeQuality(config.quality), config.size);
     return {
         size,
         response_format: IMAGE_RESPONSE_FORMAT,
@@ -565,6 +607,45 @@ async function resolveReferenceImageUrls(config: AiConfig, references: Reference
     }
     if (!urls.length) throw new Error(apiText("referenceImageReadFailed"));
     return urls;
+}
+
+/** hfsyapi is a New API fork: seedream there takes `reference_images` (public URLs), not the Volcengine `image` field. */
+function usesHfsySeedreamImageApi(config: AiConfig) {
+    return isSeedreamModel(config.model) && isHfsyApiBaseUrl(config.baseUrl);
+}
+
+/**
+ * hfsyapi seedream (docs: https://www.hfsyapi.cn/docs):
+ *   POST /v1/images/generations
+ *   { model, prompt, reference_images: [url], n, size: "<WxH>", response_format }
+ * `size` must be one of the docs' ~1K `sizeTable` pixel sizes (the "1K" in the parameter
+ * description is a resolution tier, not a literal value). Reference images MUST be public URLs —
+ * sending base64 in `image` gets the reference silently dropped (random output).
+ */
+async function requestHfsySeedreamImage(config: AiConfig, prompt: string, references: ReferenceImage[], count: number, options?: RequestOptions) {
+    const n = Math.max(1, Math.min(count, 10));
+    const body: Record<string, unknown> = {
+        model: config.model,
+        prompt: withSystemPrompt(config, prompt),
+        size: resolveHfsySeedreamSize(config.size),
+        response_format: IMAGE_RESPONSE_FORMAT,
+    };
+    if (n > 1) body.n = n;
+    if (references.length) {
+        // The docs cap reference images at 10 per request.
+        const refs = references.slice(0, 10);
+        const dataUrls = await Promise.all(refs.map((image) => prepareReferenceDataUrl(image, refs.length)));
+        // Public URLs are what the docs ask for; if no host is reachable, fall back to the data URLs
+        // themselves rather than dropping the reference and silently generating a random image.
+        try {
+            body.reference_images = await resolveReferenceImageUrls(config, refs, options);
+        } catch (error) {
+            if (options?.signal?.aborted) throw error;
+            body.reference_images = dataUrls;
+        }
+    }
+    const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
+    return resolveImageApiResponse(config, response.data, options);
 }
 
 async function requestGeminiRelayImageToImage(config: AiConfig, prompt: string, references: ReferenceImage[], count: number, options?: RequestOptions) {
@@ -2397,6 +2478,17 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
             if (!isProviderUploadUnsupported(error)) {
                 throw new Error(normalizeImageApiErrorMessage(message, requestConfig.model));
             }
+        }
+    }
+
+    // hfsyapi seedream: img2img params are `reference_images` (public URLs) + size:"1K".
+    // The generic Volcengine branch below would send base64 in `image`, which hfsyapi drops,
+    // producing a random image that ignores the linked reference.
+    if (usesHfsySeedreamImageApi(requestConfig) && !mask) {
+        try {
+            return await requestHfsySeedreamImage(requestConfig, requestPrompt, references, n, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
     }
 

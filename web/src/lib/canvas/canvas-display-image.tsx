@@ -3,6 +3,8 @@ import { useEffect, useState, type ImgHTMLAttributes } from "react";
 const MAX_CACHE = 96;
 const cache = new Map<string, string>();
 const inflight = new Map<string, Promise<string>>();
+/** Blob URLs this module created — the only ones we are allowed to revoke. */
+const ownedUrls = new Set<string>();
 
 /** Hard cap for on-canvas image decode / display (CSS px before DPR). */
 export const CANVAS_DISPLAY_MAX_EDGE = 768;
@@ -19,7 +21,12 @@ function touch(key: string, url: string) {
         if (!oldest) break;
         const oldUrl = cache.get(oldest);
         cache.delete(oldest);
-        if (oldUrl?.startsWith("blob:")) URL.revokeObjectURL(oldUrl);
+        // Never revoke a caller-owned blob: URL — image-storage hands us its own object URLs,
+        // and revoking one here blanks the node everywhere until it is re-resolved.
+        if (oldUrl && ownedUrls.has(oldUrl)) {
+            URL.revokeObjectURL(oldUrl);
+            ownedUrls.delete(oldUrl);
+        }
     }
 }
 
@@ -74,6 +81,7 @@ export async function getCanvasDisplaySrc(src: string, maxEdge = CANVAS_DISPLAY_
                 return src;
             }
             const url = URL.createObjectURL(blob);
+            ownedUrls.add(url);
             touch(key, url);
             return url;
         } catch {
@@ -100,16 +108,20 @@ type CanvasDisplayImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> 
 export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, alt = "", ...rest }: CanvasDisplayImageProps) {
     const dpr = typeof window !== "undefined" ? Math.min(window.devicePixelRatio || 1, 2) : 1;
     const edge = Math.round(clampDisplayEdge(maxEdge) * dpr);
-    // Prefer thumb exclusively for canvas chrome — never decode the full asset when a thumb exists.
-    const preferred = previewSrc || src;
+    // A stored thumbnail can be a revoked or persisted-from-a-previous-session blob: URL.
+    // Remember which one failed so we can fall back to the full source instead of rendering blank.
+    const [failedPreview, setFailedPreview] = useState<string | null>(null);
+    const usePreview = Boolean(previewSrc) && previewSrc !== failedPreview;
+    // Prefer thumb exclusively for canvas chrome — never decode the full asset when a usable thumb exists.
+    const preferred = usePreview ? (previewSrc as string) : src;
     const [displaySrc, setDisplaySrc] = useState(preferred);
 
     useEffect(() => {
         let cancelled = false;
         setDisplaySrc(preferred);
         if (!preferred) return;
-        if (previewSrc) {
-            setDisplaySrc(previewSrc);
+        if (usePreview) {
+            setDisplaySrc(previewSrc as string);
             return;
         }
         void getCanvasDisplaySrc(src, edge).then((next) => {
@@ -118,8 +130,25 @@ export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, a
         return () => {
             cancelled = true;
         };
-    }, [src, previewSrc, preferred, edge]);
+    }, [src, previewSrc, preferred, edge, usePreview]);
 
     if (!src && !previewSrc) return null;
-    return <img src={displaySrc || preferred} alt={alt} loading="lazy" decoding="async" draggable={false} className={className} {...rest} />;
+    // Effects run after render: while the fallback state has just flipped, displaySrc may still
+    // hold the failed thumbnail — render the full source instead of retrying the dead URL.
+    const resolvedSrc = !usePreview && displaySrc === previewSrc ? src : displaySrc;
+    return (
+        <img
+            alt={alt}
+            loading="lazy"
+            decoding="async"
+            draggable={false}
+            className={className}
+            {...rest}
+            src={resolvedSrc || preferred}
+            onError={() => {
+                // Thumbnail is unusable (revoked / missing blob) — retry with the full-size source.
+                if (usePreview && previewSrc) setFailedPreview(previewSrc);
+            }}
+        />
+    );
 }

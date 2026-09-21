@@ -4723,7 +4723,7 @@ function AtelierCanvasPage() {
 
     const sendChatMessage = useCallback(
         async (nodeId: string, text: string, options: ChatSendOptions = { text: true, image: false }) => {
-            const { text: runText, image: runImage } = options;
+            const { text: runText, image: runImage, linkedMedia = [] } = options;
             if (!runText && !runImage) return;
 
             const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
@@ -4733,7 +4733,10 @@ function AtelierCanvasPage() {
             const linkedContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, ""));
             const linkedText = linkedContext.prompt.trim() || (sourceNode.metadata?.content || "").trim();
             const typedText = text.trim();
-            const hasLinkedMedia = (linkedContext.imageCount || 0) > 0 || (linkedContext.videoCount || 0) > 0;
+            // Media pinned in the composer (the "linked images" chips) that may not be wired as a connection
+            // or spelled out in the prompt — these must still reach image generation, e.g. Seedream reference images.
+            const composerLinkedImages = linkedMedia.length ? await resolveCanvasReferenceImages(linkedMedia, nodesRef.current) : [];
+            const hasLinkedMedia = (linkedContext.imageCount || 0) > 0 || (linkedContext.videoCount || 0) > 0 || composerLinkedImages.length > 0;
             const userText = typedText || linkedText || (hasLinkedMedia ? t("canvas.chat.defaultMediaPrompt") : "");
             if (!userText) return;
 
@@ -4934,7 +4937,7 @@ function AtelierCanvasPage() {
                 ).filter((item): item is ReferenceImage => Boolean(item));
                 const referenceImages = Array.from(
                     new Map(
-                        [...(resolvedMentions.length ? resolvedMentions : imageContext.referenceImages), ...videoFrames]
+                        [...composerLinkedImages, ...(resolvedMentions.length ? resolvedMentions : imageContext.referenceImages), ...videoFrames]
                             .filter((image) => Boolean(image?.dataUrl))
                             .map((image) => [image.id || image.dataUrl, image]),
                     ).values(),

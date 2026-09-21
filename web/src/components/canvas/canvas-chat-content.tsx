@@ -199,7 +199,7 @@ export function CanvasChatContent({
         const text = draft.trim() || contextText;
         if ((!text && !linkedMedia.length) || loading || (!textEnabled && !imageEnabled)) return;
         setDraft("");
-        onSend(node.id, text, sendOptions);
+        onSend(node.id, text, { ...sendOptions, linkedMedia });
     };
 
     const toggleText = () => {
