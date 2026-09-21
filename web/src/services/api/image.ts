@@ -1832,7 +1832,9 @@ async function readFetchError(response: Response, fallback: string) {
         try {
             message = responseErrorMessage(JSON.parse(text)) || readStatusError(response.status, fallback, requestUrl);
         } catch {
-            message = text.slice(0, 300) || readStatusError(response.status, fallback, requestUrl);
+            // Reverse proxies and CDN edges often return an HTML error page instead of JSON.
+            if (/<[a-z][\s\S]*>/i.test(text)) message = apiText("htmlError", { preview: `${text.slice(0, 80)}...` });
+            else message = text.slice(0, 300) || readStatusError(response.status, fallback, requestUrl);
         }
     }
     if (response.status === 404 && requestUrl && !message.includes(requestUrl)) return `${message}\n${requestUrl}`;
@@ -2020,13 +2022,26 @@ function toGeminiToolOptions(tools: ResponseFunctionTool[], toolChoice: ToolChoi
 }
 
 async function requestGeminiStreamingResponse(config: AiConfig, body: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
-    const response = await fetch(`${geminiApiUrl(config, "streamGenerateContent")}?alt=sse`, {
-        method: "POST",
-        headers: geminiHeaders(config),
-        body: JSON.stringify(body),
-        signal: options?.signal,
-    });
-    if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
+    let response: Response;
+    try {
+        response = await fetch(`${geminiApiUrl(config, "streamGenerateContent")}?alt=sse`, {
+            method: "POST",
+            headers: geminiHeaders(config),
+            body: JSON.stringify(body),
+            signal: options?.signal,
+        });
+    } catch (error) {
+        // A closed proxy connection has no Response to inspect. Retry once without SSE;
+        // the non-streaming endpoint is more tolerant of CDN/proxy connection limits.
+        if (isAbortError(error)) throw error;
+        return requestGeminiNonStreamingResponse(config, body, options);
+    }
+
+    if (!response.ok) {
+        const message = await readFetchError(response, apiText("requestFailed"));
+        if (shouldFallbackGeminiStream(response, message)) return requestGeminiNonStreamingResponse(config, body, options);
+        throw new Error(message);
+    }
     if (!response.body) {
         const payload = (await response.json()) as GeminiPayload;
         return parseGeminiToolResponse(payload);
@@ -2035,15 +2050,50 @@ async function requestGeminiStreamingResponse(config: AiConfig, body: Record<str
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const state: GeminiStreamState = { buffer: "", text: "", toolCalls: [] };
-    for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        consumeGeminiStreamText(state, decoder.decode(value, { stream: true }), onDelta);
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            consumeGeminiStreamText(state, decoder.decode(value, { stream: true }), onDelta);
+            if (state.error) throw new Error(state.error);
+        }
+        consumeGeminiStreamText(state, decoder.decode(), onDelta, true);
         if (state.error) throw new Error(state.error);
+        return { content: state.text, toolCalls: state.toolCalls };
+    } catch (error) {
+        // If the edge closes an otherwise valid SSE response before any payload arrives,
+        // retry through the simpler JSON endpoint. Do not replay after partial output.
+        if (!state.text && !state.toolCalls.length && shouldFallbackGeminiStreamError(error)) {
+            return requestGeminiNonStreamingResponse(config, body, options);
+        }
+        throw error;
     }
-    consumeGeminiStreamText(state, decoder.decode(), onDelta, true);
-    if (state.error) throw new Error(state.error);
-    return { content: state.text, toolCalls: state.toolCalls };
+}
+
+async function requestGeminiNonStreamingResponse(config: AiConfig, body: Record<string, unknown>, options?: RequestOptions): Promise<ToolResponseResult> {
+    const response = await fetch(geminiApiUrl(config, "generateContent"), {
+        method: "POST",
+        headers: geminiHeaders(config),
+        body: JSON.stringify(body),
+        signal: options?.signal,
+    });
+    if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
+    return parseGeminiToolResponse((await response.json()) as GeminiPayload);
+}
+
+function shouldFallbackGeminiStream(response: Response, message: string) {
+    const contentType = response.headers.get("content-type") || "";
+    return response.status === 522 || response.status === 525 || /html/i.test(contentType) || /connection (closed|reset)|socket|network|proxy error|timed out/i.test(message);
+}
+
+function shouldFallbackGeminiStreamError(error: unknown) {
+    if (isAbortError(error)) return false;
+    const message = error instanceof Error ? error.message : String(error || "");
+    return !message || /connection (closed|reset)|socket|network|proxy error|timed out|terminated|failed to fetch/i.test(message);
+}
+
+function isAbortError(error: unknown) {
+    return error instanceof DOMException ? error.name === "AbortError" : error instanceof Error && error.name === "AbortError";
 }
 
 function consumeGeminiStreamText(state: GeminiStreamState, text: string, onDelta?: (text: string) => void, flush = false) {
