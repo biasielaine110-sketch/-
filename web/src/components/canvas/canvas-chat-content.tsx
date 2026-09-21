@@ -19,6 +19,7 @@ import type { CanvasAssistantImage, CanvasAssistantMessage, CanvasNodeData } fro
 const MIN_CHAT_FONT_SIZE = 10;
 const MAX_CHAT_FONT_SIZE = 48;
 const CHAT_FONT_SIZE_STEP = 2;
+const CHAT_SCROLL_POSITION_KEY = "infinite-atelier:canvas-chat-scroll-position";
 
 type CanvasChatContentProps = {
     node: CanvasNodeData;
@@ -64,6 +65,8 @@ export function CanvasChatContent({
     const [previewMessageId, setPreviewMessageId] = useState<string | null>(null);
     const listRef = useRef<HTMLDivElement>(null);
     const syncedConnectedRef = useRef("");
+    const restoredScrollNodeRef = useRef<string | null>(null);
+    const shouldFollowTailRef = useRef(true);
     const messages = (node.metadata?.messages || []) as CanvasAssistantMessage[];
     const loading = node.metadata?.status === "loading";
     const sendOptions = resolveChatSendOptions(node.metadata);
@@ -129,8 +132,55 @@ export function CanvasChatContent({
 
     useEffect(() => {
         const list = listRef.current;
+        if (!list || restoredScrollNodeRef.current === node.id) return;
+        restoredScrollNodeRef.current = node.id;
+
+        let savedTop = 0;
+        try {
+            const stored = window.localStorage.getItem(CHAT_SCROLL_POSITION_KEY);
+            const positions = stored ? (JSON.parse(stored) as Record<string, number>) : {};
+            savedTop = Number.isFinite(positions[node.id]) ? Math.max(0, positions[node.id]) : 0;
+        } catch {
+            savedTop = 0;
+        }
+
+        const restore = () => {
+            list.scrollTop = Math.min(savedTop, Math.max(0, list.scrollHeight - list.clientHeight));
+            shouldFollowTailRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+        };
+        restore();
+        const frame = window.requestAnimationFrame(restore);
+        return () => window.cancelAnimationFrame(frame);
+    }, [node.id]);
+
+    useEffect(() => {
+        const list = listRef.current;
         if (!list) return;
-        list.scrollTop = list.scrollHeight;
+        const save = () => {
+            shouldFollowTailRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+            try {
+                const stored = window.localStorage.getItem(CHAT_SCROLL_POSITION_KEY);
+                const positions = stored ? (JSON.parse(stored) as Record<string, number>) : {};
+                positions[node.id] = list.scrollTop;
+                window.localStorage.setItem(CHAT_SCROLL_POSITION_KEY, JSON.stringify(positions));
+            } catch {
+                // Ignore storage failures; scrolling should remain fully functional in private mode.
+            }
+        };
+        list.addEventListener("scroll", save, { passive: true });
+        return () => {
+            save();
+            list.removeEventListener("scroll", save);
+        };
+    }, [node.id]);
+
+    useEffect(() => {
+        const list = listRef.current;
+        if (!list || !shouldFollowTailRef.current) return;
+        const frame = window.requestAnimationFrame(() => {
+            list.scrollTop = list.scrollHeight;
+        });
+        return () => window.cancelAnimationFrame(frame);
     }, [messages, loading, contextText]);
 
     // Canvas container preventDefaults wheel (for zoom). Stop it on the list target
