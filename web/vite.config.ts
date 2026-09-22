@@ -1,3 +1,4 @@
+import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import type { IncomingMessage } from "node:http";
 import { dirname, resolve } from "node:path";
@@ -9,6 +10,26 @@ import { outboundFetch } from "./api/outbound-fetch.js";
 import { handleCanvasBridge } from "./api/canvas-bridge.js";
 
 const webDir = dirname(fileURLToPath(import.meta.url));
+
+/** undici/Node wrap the real failure (DNS, refused, reset, abort) in `cause` — surface it. */
+function describeError(error: unknown): string {
+    const base = error instanceof Error ? error.message : String(error);
+    const cause = error instanceof Error && error.cause instanceof Error ? error.cause.message : "";
+    return cause && !base.includes(cause) ? `${base} (${cause})` : base;
+}
+
+// Transient stream/network errors must not take down the whole dev server (an unhandled
+// Readable 'error' event crashes Node). Only swallow these known-benign categories; real
+// bugs still propagate through the outer catch / crash normally.
+const BENIGN_STREAM_ERROR = /timeout|abort|ECONNRESET|EPIPE|premature close|fetch failed|UND_ERR/i;
+process.on("uncaughtException", (error) => {
+    if (BENIGN_STREAM_ERROR.test(`${error.message} ${error.name}`)) {
+        console.warn(`[api-proxy] ignored transient error: ${describeError(error)}`);
+        return;
+    }
+    console.error("[api-proxy] fatal uncaught exception:", error);
+    process.exit(1);
+});
 
 // Dev-server forward proxy for CORS-blocked API targets (relay/中转 API providers usually
 // do not send CORS headers). Frontend calls /api-proxy?target=<full api url>; this middleware
@@ -74,13 +95,28 @@ function apiProxyPlugin(): Plugin {
                         });
                         if (upstream.body) {
                             const stream = Readable.fromWeb(upstream.body as import("node:stream/web").ReadableStream);
-                            stream.pipe(res);
+                            // pipeline forwards/handles stream errors (unlike bare pipe(), whose
+                            // unhandled 'error' event kills the whole dev server process).
+                            try {
+                                await pipeline(stream, res);
+                            } catch (streamError) {
+                                console.warn(`[api-proxy] stream aborted: ${describeError(streamError)}`);
+                                res.destroy();
+                            }
                         } else {
                             res.end();
                         }
                     } catch (error) {
+                        // undici's bare "fetch failed" hides the real reason (DNS / refused / reset)
+                        // in `cause` — surface it so a 502 here is diagnosable.
+                        const detail = describeError(error);
+                        console.warn(`[api-proxy] outbound failed: ${detail}`);
+                        if (res.headersSent) {
+                            res.destroy();
+                            return;
+                        }
                         res.statusCode = 502;
-                        res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}`);
+                        res.end(`proxy error: ${detail}`);
                     }
                 })();
             });

@@ -10,7 +10,7 @@ import { nanoid } from "nanoid";
 import { compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
-import { imageToDataUrl } from "@/services/image-storage";
+import { fetchRemoteImageBlob, imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
@@ -154,6 +154,25 @@ function isApimartBaseUrl(baseUrl: string) {
     return /apimart\.ai/i.test(baseUrl.trim());
 }
 
+/**
+ * Seedance.nz sells text-to-image and image-edit as separate model ids (zhenzhen-image-g2-t2i vs
+ * -i2i, wan-2.7-global-t2i vs -i2i; zhenzhen-image-gk-v15 is t2i-only with a separate -edit model).
+ * A t2i model silently ignores the `images` param — the user pays for a generation that never
+ * looks at their reference. Detect these so requestEdit can fail fast with the i2i sibling name.
+ */
+function isTextToImageOnlySeedanceModel(model: string) {
+    const value = model.trim();
+    if (/(?:^|[-_])t2i(?:$|[-_])/i.test(value)) return true;
+    return /^zhenzhen-image-gk-v15$/i.test(value);
+}
+
+function suggestImageToImageModelName(model: string) {
+    const value = model.trim();
+    if (/(?:^|[-_])t2i(?:$|[-_])/i.test(value)) return value.replace(/-t2i/i, "-i2i");
+    if (/^zhenzhen-image-gk-v15$/i.test(value)) return `${value}-edit`;
+    return value;
+}
+
 function isSeedanceNzBaseUrl(baseUrl: string) {
     return /seedance\.nz/i.test(baseUrl.trim());
 }
@@ -224,6 +243,11 @@ function isImagenOnlyEndpointError(message: string) {
 function normalizeImageApiErrorMessage(message: string, model?: string) {
     if (isImagenOnlyEndpointError(message)) {
         return apiText("imagenOnlyModel", { model: model || "?" });
+    }
+    // The provider fetched one of our reference image URLs and got an HTML error page / non-image
+    // bytes back — the reference link is dead or hotlink-protected from the provider's network.
+    if (/remote\s+image\s+returned\s+(an?\s+)?unexpected\s+content\s+type|unexpected\s+content\s+type:\s*text\/html/i.test(message)) {
+        return apiText("referenceUrlUnreachable");
     }
     if (/generateContent/i.test(message) && /\/v1\/images\/generations/i.test(message)) {
         return apiText("geminiImageUseOpenAi", { model: model || "?" });
@@ -585,25 +609,52 @@ function isReferenceBase64Unsupported(message: string) {
     return /参考图不支持\s*base64|does\s*not\s*support\s*base64|base64[^\n]{0,40}not\s*supported|invalid_request[^\n]{0,40}base64/i.test(message);
 }
 
+/**
+ * Upstream states it only accepts public image URLs for references — base64 and/or multipart
+ * uploads are rejected. Used to trigger the temporary-public-host retry on any relay.
+ */
+function isReferenceUrlRequired(message: string) {
+    return (
+        isReferenceBase64Unsupported(message) ||
+        /only\s+supports?\s+image\s+urls|only\s+support\s+image\s+urls|image\s+urls?\s+are\s+(only\s+)?supported|multipart\s+(file\s+)?uploads?\s+(are\s+)?not\s+supported|does\s+not\s+(accept|support)\s+(base64|multipart)/i.test(message)
+    );
+}
+
+/**
+ * A reference URL the provider cannot fetch (dead host, HTML error page) surfaces upstream as
+ * "remote image returned unexpected content type: text/html" — e.g. previously generated images
+ * hosted on a flaky provider CDN. Verify the URL still serves image bytes before passing it;
+ * when it does not, re-host fresh local bytes (IndexedDB survives restarts) on a temporary
+ * public host instead.
+ */
+async function resolveFetchableReferenceUrl(config: AiConfig, image: ReferenceImage, referenceCount: number, options?: RequestOptions & { allowProviderUpload?: boolean }) {
+    const remoteUrl = [image.url, image.dataUrl].find((value) => value && isPublicHttpUrl(value) && !value.startsWith("data:"))?.trim();
+    if (remoteUrl && (await fetchRemoteImageBlob(remoteUrl))) return remoteUrl;
+    if (!remoteUrl && options?.allowProviderUpload && !isHfsyApiBaseUrl(config.baseUrl)) {
+        // hfsyapi has no /v1/uploads/images (confirmed 404) — skip straight to the public host.
+        try {
+            return await uploadProviderReferenceImage(config, image, options);
+        } catch (error) {
+            if (options.signal?.aborted || axios.isCancel(error)) throw error;
+            if (!isProviderUploadUnsupported(error)) throw error;
+        }
+    }
+    try {
+        const dataUrl = await prepareReferenceDataUrl(image, referenceCount);
+        return await uploadTemporaryPublicImageFromDataUrl(dataUrl, options?.signal);
+    } catch (error) {
+        if (options?.signal?.aborted) throw error;
+        // Last resort: the provider's network may still reach the original URL even when ours cannot.
+        if (remoteUrl) return remoteUrl;
+        throw error;
+    }
+}
+
 async function resolveReferenceImageUrls(config: AiConfig, references: ReferenceImage[], options?: RequestOptions) {
     const urls: string[] = [];
+    const referenceCount = Math.max(1, references.length);
     for (const image of references.slice(0, 14)) {
-        if (image.url && isPublicHttpUrl(image.url) && !image.url.startsWith("data:")) {
-            urls.push(image.url.trim());
-            continue;
-        }
-        if (image.dataUrl && isPublicHttpUrl(image.dataUrl) && !image.dataUrl.startsWith("data:")) {
-            urls.push(image.dataUrl.trim());
-            continue;
-        }
-        try {
-            urls.push(await uploadProviderReferenceImage(config, image, options));
-        } catch (error) {
-            // Only hfsyapi: no /uploads/images — host a short-lived public URL instead of sending base64.
-            if (!isHfsyApiBaseUrl(config.baseUrl) || !isProviderUploadUnsupported(error)) throw error;
-            const dataUrl = await prepareReferenceDataUrl(image, Math.max(1, references.length));
-            urls.push(await uploadTemporaryPublicImageFromDataUrl(dataUrl, options?.signal));
-        }
+        urls.push(await resolveFetchableReferenceUrl(config, image, referenceCount, { ...options, allowProviderUpload: true }));
     }
     if (!urls.length) throw new Error(apiText("referenceImageReadFailed"));
     return urls;
@@ -709,8 +760,10 @@ async function requestOpenAiCompatImageToImageViaGenerations(config: AiConfig, p
         return resolveImageApiResponse(config, response.data, options);
     } catch (error) {
         const message = readAxiosError(error, apiText("requestFailed"));
-        // Only hfsyapi rejects data-URL references — upload to a temp host and retry with image_urls.
-        if (!isHfsyApiBaseUrl(config.baseUrl) || !isReferenceBase64Unsupported(message)) throw error;
+        // Upstream explicitly demands public image URLs (rejects base64 data URLs and/or multipart).
+        // Upload references to a short-lived public host and retry with image_urls — regardless of
+        // which relay this is, the message itself is the trigger.
+        if (!isReferenceUrlRequired(message)) throw error;
         const imageUrls = await Promise.all(refs.map((dataUrl) => uploadTemporaryPublicImageFromDataUrl(dataUrl, options?.signal)));
         const retryBody: Record<string, unknown> = {
             model: config.model,
@@ -725,8 +778,23 @@ async function requestOpenAiCompatImageToImageViaGenerations(config: AiConfig, p
 }
 
 function isImageEditsEndpointMissing(error: unknown, message: string) {
-    if (axios.isAxiosError(error) && (error.response?.status === 404 || error.response?.status === 405)) return true;
-    return /404|not\s*found|接口地址不存在|unknown\s*url|invalid\s*url|method\s*not\s*allowed|405|does\s*not\s*exist/i.test(message);
+    if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        if (status === 404 || status === 405) return true;
+        // Some relays answer 400 when the endpoint exists but cannot serve this model/request.
+        if (status === 400 && isImageEditsModelRestricted(message)) return true;
+    }
+    return isImageEditsModelRestricted(message) || /404|not\s*found|接口地址不存在|unknown\s*url|invalid\s*url|method\s*not\s*allowed|405|does\s*not\s*exist/i.test(message);
+}
+
+/**
+ * Relays that reject multipart /images/edits for non-Grok models or demand public image URLs
+ * ("only supports Grok image models", "async image tasks only support image URLs; multipart file
+ * uploads are not supported"). The endpoint exists, but this request can never succeed on it —
+ * fall through to the URL/base64 generations paths instead of surfacing the raw error.
+ */
+function isImageEditsModelRestricted(message: string) {
+    return /only\s+supports?\s+grok|multipart\s+(file\s+)?uploads?\s+(are\s+)?not\s+supported|async\s+image\s+tasks\s+only\s+support|only\s+supports?\s+image\s+urls/i.test(message);
 }
 
 function pushChatImageCandidate(urls: string[], value: unknown) {
@@ -1365,11 +1433,22 @@ async function prepareReferenceDataUrl(image: ReferenceImage, referenceCount = 1
     return compressReferenceDataUrl(dataUrl, referenceCount, { preserveAlpha: options?.preserveAlpha });
 }
 
-/** Prefer public HTTP URLs; always compress local data: URLs before proxy/API upload. */
-async function resolveInlineOrRemoteReferenceUrl(image: ReferenceImage, referenceCount = 1, options?: { preserveAlpha?: boolean }) {
-    if (image.url && isPublicHttpUrl(image.url)) return image.url.trim();
-    if (image.dataUrl && isPublicHttpUrl(image.dataUrl)) return image.dataUrl.trim();
-    return prepareReferenceDataUrl(image, referenceCount, options);
+/**
+ * Prefer a verified public HTTP URL; re-host local data: URLs on a temporary public host when
+ * the provider only fetches public links. Falls back to the original behaviors (raw remote URL
+ * or inline base64) when no host is reachable, so nothing regresses when hosts are down.
+ */
+async function resolveInlineOrRemoteReferenceUrl(image: ReferenceImage, referenceCount = 1, options?: { signal?: AbortSignal }) {
+    const remoteUrl = [image.url, image.dataUrl].find((value) => value && isPublicHttpUrl(value) && !value.startsWith("data:"))?.trim();
+    if (remoteUrl && (await fetchRemoteImageBlob(remoteUrl))) return remoteUrl;
+    const dataUrl = await prepareReferenceDataUrl(image, referenceCount);
+    try {
+        return await uploadTemporaryPublicImageFromDataUrl(dataUrl, options?.signal);
+    } catch (error) {
+        if (options?.signal?.aborted) throw error;
+        if (remoteUrl) return remoteUrl;
+        return dataUrl;
+    }
 }
 
 function withSystemPrompt(config: AiConfig, prompt: string) {
@@ -1630,7 +1709,7 @@ async function requestMidjourneyGeneration(config: AiConfig, prompt: string, ref
     if (references.length) {
         const urls: string[] = [];
         for (const image of references.slice(0, 5)) {
-            urls.push(await resolveInlineOrRemoteReferenceUrl(image, references.length));
+            urls.push(await resolveInlineOrRemoteReferenceUrl(image, references.length, { signal: options?.signal }));
         }
         body.image_urls = urls;
     }
@@ -1760,20 +1839,53 @@ async function requestSeedanceNzImage(config: AiConfig, prompt: string, referenc
     if (references.length) {
         const urls: string[] = [];
         for (const image of references.slice(0, 10)) {
-            urls.push(await resolveInlineOrRemoteReferenceUrl(image, references.length));
+            urls.push(await resolveInlineOrRemoteReferenceUrl(image, references.length, { signal: options?.signal }));
         }
         body.images = urls;
     }
-    const response = await postImageJson<ImageApiResponse>(config, "/image/generations", body, options);
-    return resolveImageApiResponse(config, response.data, options);
+    try {
+        const response = await postImageJson<ImageApiResponse>(config, "/image/generations", body, options);
+        return resolveImageApiResponse(config, response.data, options);
+    } catch (error) {
+        // The API validates `metadata.resolution` case-sensitively and lists the accepted values in
+        // the error ("resolution must be one of: 1K (invalid_parameter)"). Retry once with a value
+        // taken verbatim from that list before giving up — the accepted casing may change again.
+        if (options?.signal?.aborted) throw error;
+        const message = readAxiosError(error, apiText("requestFailed"));
+        const allowed = readSeedanceResolutionErrorValues(message);
+        const intended = String((body.metadata as Record<string, unknown> | undefined)?.resolution ?? "");
+        const retryValue = pickSeedanceResolutionRetryValue(intended, allowed || []);
+        if (!retryValue || retryValue === intended) throw error;
+        const retryBody: Record<string, unknown> = { ...body, metadata: { ...(body.metadata as Record<string, unknown>), resolution: retryValue } };
+        const retryResponse = await postImageJson<ImageApiResponse>(config, "/image/generations", retryBody, options);
+        return resolveImageApiResponse(config, retryResponse.data, options);
+    }
+}
+
+/** Parse the allowed resolution list out of "resolution must be one of: 1K (invalid_parameter)". */
+function readSeedanceResolutionErrorValues(message: string) {
+    const match = message.match(/resolution\s+must\s+be\s+(?:one\s+of|among)\s*:?\s*([^(]+)/i);
+    if (!match) return null;
+    const values = match[1]
+        .split(/[,/|]+/)
+        .map((value) => value.trim().replace(/^["']|["']$/g, ""))
+        .filter((value) => /^[124]k$/i.test(value));
+    return values.length ? values : null;
+}
+
+function pickSeedanceResolutionRetryValue(intended: string, allowed: string[]) {
+    if (!allowed.length) return "";
+    const target = intended.trim().toLowerCase();
+    return allowed.find((value) => value.toLowerCase() === target) || allowed[0];
 }
 
 function resolveSeedanceNzResolution(model: string, quality: string) {
     const normalized = normalizeQuality(quality);
-    if (/zhenzhen-image-g2/i.test(model)) return "1k";
-    if (normalized === "low" || normalized === "standard") return "1k";
-    if (normalized === "high" && /zhenzhen-image-g-v2-lowprice/i.test(model)) return "4k";
-    return "2k";
+    // The API's validation is case-sensitive: "1k" is rejected, "1K" is accepted.
+    if (/zhenzhen-image-g2/i.test(model)) return "1K";
+    if (normalized === "low" || normalized === "standard") return "1K";
+    if (normalized === "high" && /zhenzhen-image-g-v2-lowprice/i.test(model)) return "4K";
+    return "2K";
 }
 
 function aiApiUrl(config: AiConfig, path: string) {
@@ -2453,6 +2565,13 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
 
     if (isSeedanceNzBaseUrl(requestConfig.baseUrl)) {
         if (mask) throw new Error(apiText("geminiMaskUnsupported"));
+        // A -t2i model ignores reference images by design — fail fast with the i2i sibling name
+        // instead of silently returning a generation that never looked at the user's image.
+        if (references.length && isTextToImageOnlySeedanceModel(requestConfig.model)) {
+            throw new Error(
+                apiText("t2iModelIgnoresReferences", { model: requestConfig.model, suggestion: suggestImageToImageModelName(requestConfig.model) }),
+            );
+        }
         try {
             return await requestSeedanceNzImage(requestConfig, requestPrompt, references, options);
         } catch (error) {

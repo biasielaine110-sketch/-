@@ -47,12 +47,69 @@ export async function uploadImage(input: string | Blob): Promise<UploadedImage> 
     }
 }
 
+/** Decode a data: URL into a Blob locally — `fetch` cannot handle data URLs. */
+function dataUrlToBlob(url: string): Blob | null {
+    if (!/^data:image\//i.test(url)) return null;
+    try {
+        const [head, payload] = url.split(",");
+        if (!payload) return null;
+        const mime = head.match(/^data:([^;,]+)/i)?.[1] || "image/png";
+        if (/;base64$/i.test(head)) {
+            const binary = atob(payload);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+            return new Blob([bytes], { type: mime });
+        }
+        return new Blob([decodeURIComponent(payload)], { type: mime });
+    } catch {
+        return null;
+    }
+}
+
+/** Some flaky hosts answer 200 with an HTML error/challenge page instead of image bytes. */
+function isImageLikeContentType(contentType: string | null | undefined) {
+    if (!contentType) return true;
+    const value = contentType.toLowerCase().trim();
+    return value.startsWith("image/") || value === "application/octet-stream" || value === "binary/octet-stream";
+}
+
 async function fetchImageBlob(url: string) {
-    const response = await fetch(proxyRemoteMediaUrl(url));
-    if (!response.ok) throw new Error(i18n.t("common.imageReadFailed"));
-    const blob = await response.blob();
-    if (!blob.size) throw new Error(i18n.t("common.imageReadFailed"));
-    return blob;
+    // Data URLs must be decoded locally — routing them through `fetch` always fails.
+    const fromDataUrl = dataUrlToBlob(url);
+    if (fromDataUrl?.size) return fromDataUrl;
+    const target = proxyRemoteMediaUrl(url);
+    // Retries absorb transient proxy/CDN hiccups (e.g. intermittent 502s from flaky image hosts).
+    // Per-attempt timeout keeps dead hosts that hang (no RST, no response) from stalling for minutes.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+            const response = await fetch(target, { signal: AbortSignal.timeout(45_000) });
+            if (response.ok) {
+                const blob = await response.blob();
+                const contentType = blob.type || response.headers.get("content-type");
+                // An HTML "image" is an error page — reject it instead of storing junk.
+                if (blob.size && isImageLikeContentType(contentType)) return blob;
+            }
+        } catch {
+            // Fall through to the retry; the final throw keeps the user-facing message stable.
+        }
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+    }
+    throw new Error(i18n.t("common.imageReadFailed"));
+}
+
+/**
+ * Best-effort download of a remote image through the media proxy.
+ * Returns null when the URL is dead, times out, or serves non-image content —
+ * used to verify a reference URL is still fetchable before handing it to a provider.
+ */
+export async function fetchRemoteImageBlob(url: string): Promise<Blob | null> {
+    const target = String(url || "").trim();
+    if (!/^https?:\/\//i.test(target)) return null;
+    try {
+        return await fetchImageBlob(target);
+    } catch {
+        return null;
+    }
 }
 
 function readStrictImageMeta(url: string) {
