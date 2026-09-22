@@ -4,8 +4,27 @@ export type TextPromptEntry = {
     content: string;
 };
 
+/** id / title of the built-in prompt-optimizer entry used by the composer button. */
+export const H3_PROMPT_OPTIMIZER_ID = "h3-prompt-optimizer";
+export const H3_PROMPT_OPTIMIZER_TITLE = "H3-提示词优化";
+
+/** Standalone so the config-store migration and the composer button share one source. */
+export const h3PromptOptimizerEntry: TextPromptEntry = {
+    id: H3_PROMPT_OPTIMIZER_ID,
+    title: H3_PROMPT_OPTIMIZER_TITLE,
+    content:
+        "你是一名专业的 AI 生图/生视频提示词优化专家。请将用户输入的描述优化为一条高质量的提示词：严格保留用户的核心意图、主体与关键需求不变；补充主体外观与细节、环境场景与构图、光影氛围、镜头视角、艺术风格与质感等维度，使画面信息完整具体；语言精炼自然，可直接使用；不新增与画面无关的要求，不输出任何解释、前缀、引号或多余格式，只输出优化后的提示词本身。",
+};
+
+/** Resolve the H3 optimizer instruction: prefer the user's 词库 entry, fall back to the built-in. */
+export function resolveH3PromptOptimizerEntry(textPrompts: TextPromptEntry[]): TextPromptEntry {
+    const hit = (textPrompts || []).find((item) => item?.id === H3_PROMPT_OPTIMIZER_ID || item?.title?.trim() === H3_PROMPT_OPTIMIZER_TITLE);
+    return hit && hit.content.trim() ? hit : h3PromptOptimizerEntry;
+}
+
 /** Built-in prompts for text nodes; users can customize the full list in preferences. */
 export const defaultTextPrompts: TextPromptEntry[] = [
+    h3PromptOptimizerEntry,
     {
         id: "product-hero",
         title: "产品主图",

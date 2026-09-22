@@ -741,6 +741,58 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
     const fontSize = Math.max(10, Math.min(48, node.metadata?.fontSize || DEFAULT_CANVAS_FONT_SIZE));
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
     const actionButtonStyle = { background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text };
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+    const restoredScrollNodeRef = useRef<string | null>(null);
+    const SCROLL_KEY = "infinite-atelier:canvas-text-scroll-position";
+
+    // Restore the text node's scroll position once, on first mount. Nodes outside
+    // the visible viewport are culled by the canvas and remounted on return, and
+    // reopening the canvas remounts every node from scratch — so the position must
+    // live outside React state.
+    useEffect(() => {
+        if (restoredScrollNodeRef.current === node.id) return;
+        restoredScrollNodeRef.current = node.id;
+        const el = scrollRef.current || textareaRef.current;
+        if (!el) return;
+        let savedTop = 0;
+        try {
+            const stored = window.localStorage.getItem(SCROLL_KEY);
+            const positions = stored ? (JSON.parse(stored) as Record<string, number>) : {};
+            savedTop = Number.isFinite(positions[node.id]) ? Math.max(0, positions[node.id]) : 0;
+        } catch {
+            savedTop = 0;
+        }
+        const restore = () => {
+            el.scrollTop = Math.min(savedTop, Math.max(0, el.scrollHeight - el.clientHeight));
+        };
+        restore();
+        const frame = window.requestAnimationFrame(restore);
+        return () => window.cancelAnimationFrame(frame);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [node.id]);
+
+    // Save the scroll position as the user scrolls the active text surface. This
+    // effect rebinds whenever editing toggles, because the scrollable element swaps
+    // between the textarea (editing) and the read-only div.
+    useEffect(() => {
+        const el = isEditingContent ? textareaRef.current : scrollRef.current;
+        if (!el) return;
+        const save = () => {
+            try {
+                const stored = window.localStorage.getItem(SCROLL_KEY);
+                const positions = stored ? (JSON.parse(stored) as Record<string, number>) : {};
+                positions[node.id] = el.scrollTop;
+                window.localStorage.setItem(SCROLL_KEY, JSON.stringify(positions));
+            } catch {
+                // Ignore storage failures; scrolling should remain fully functional in private mode.
+            }
+        };
+        el.addEventListener("scroll", save, { passive: true });
+        return () => {
+            save();
+            el.removeEventListener("scroll", save);
+        };
+    }, [node.id, isEditingContent, textareaRef]);
 
     const adjustFontSize = (delta: number) => {
         if (!onFontSizeChange) return;
@@ -859,6 +911,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     value={node.metadata?.content || ""}
                     references={mentionReferences}
                     highlightLabels={false}
+                    data-canvas-no-zoom
                     data-canvas-text-input
                     onChange={(value) => onContentChange(node.id, value)}
                     onBlur={onStopEditing}
@@ -875,7 +928,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     }}
                 />
             ) : (
-                <div className="min-h-0 flex-1 overflow-y-auto" onWheel={(event) => event.stopPropagation()}>
+                <div ref={scrollRef} data-canvas-no-zoom className="min-h-0 flex-1 overflow-y-auto" onWheel={(event) => event.stopPropagation()}>
                     <div
                         data-canvas-selectable-text
                         className="block w-full cursor-text select-text whitespace-pre-wrap break-words bg-transparent pl-4 pr-4 pt-0 pb-4 font-mono"

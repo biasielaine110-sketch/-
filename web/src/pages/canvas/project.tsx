@@ -5213,6 +5213,7 @@ function AtelierCanvasPage() {
                     mentionReferences={mentionReferencesByNodeId.get(panelNode.id) || EMPTY_REFERENCES}
                     onPromptChange={handleNodePromptChange}
                     onConfigChange={handleConfigNodeChange}
+                    onContentChange={handleNodeContentChange}
                     onGenerate={handleGenerateNode}
                     onStop={stopGenerationForNode}
                     modeOverride={getNodeDefinition(panelNode.type)?.useBuiltinPanel?.mode}

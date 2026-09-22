@@ -4,7 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
-import { defaultTextPrompts, normalizeTextPrompts, type TextPromptEntry } from "@/constant/text-prompt-library";
+import { defaultTextPrompts, h3PromptOptimizerEntry, normalizeTextPrompts, type TextPromptEntry } from "@/constant/text-prompt-library";
 import { normalizeSunoVersionValue } from "@/lib/audio-generation";
 import { isNativeComfyUiBaseUrl, parseComfyApiWorkflow } from "@/lib/comfyui-native";
 
@@ -335,7 +335,7 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
-            version: 6,
+            version: 7,
             partialize: (state) => ({ config: state.config }),
             migrate: (persisted, version) => {
                 const state = (persisted || {}) as Partial<ConfigStore> & { config?: Partial<AiConfig> };
@@ -363,6 +363,10 @@ export const useConfigStore = create<ConfigStore>()(
                 // v6: Midjourney default version moved from 6.1 to 8.1. Keep any other explicit choice.
                 if (version < 6 && state.config && (!state.config.mjVersion || state.config.mjVersion === "6.1")) {
                     state.config = { ...state.config, mjVersion: "8.1" };
+                }
+                // v7: seed the H3 prompt-optimizer entry into an existing text-node prompt library.
+                if (version < 7 && state.config && Array.isArray(state.config.textPrompts) && !state.config.textPrompts.some((item) => item?.id === h3PromptOptimizerEntry.id || item?.title?.trim() === h3PromptOptimizerEntry.title)) {
+                    state.config = { ...state.config, textPrompts: [...state.config.textPrompts, { ...h3PromptOptimizerEntry }] };
                 }
                 return state as ConfigStore;
             },

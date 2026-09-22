@@ -1025,6 +1025,11 @@ export default {
             stop: "Cancel",
             references: "References",
             mentionHint: "Type @ to reference an image",
+            optimizePrompt: "H3 Prompt Optimizer",
+            optimizing: "Optimizing…",
+            optimizePromptTitle: "Rewrite the current input with the \"H3 Prompt Optimizer\" prompt from the library",
+            optimizeEmpty: "Enter some content before optimizing the prompt",
+            optimizeFailed: "Prompt optimization failed",
         },
         composer: {
             title: "Compose prompt",

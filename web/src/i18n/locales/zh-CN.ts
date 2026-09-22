@@ -1024,6 +1024,11 @@ export default {
             stop: "取消",
             references: "参考",
             mentionHint: "输入 @ 引用对应图片",
+            optimizePrompt: "H3-提示词优化",
+            optimizing: "优化中…",
+            optimizePromptTitle: "用词库「H3-提示词优化」的提示词改写当前输入内容",
+            optimizeEmpty: "请先输入内容，再进行提示词优化",
+            optimizeFailed: "提示词优化失败",
         },
         composer: {
             title: "组装提示词",

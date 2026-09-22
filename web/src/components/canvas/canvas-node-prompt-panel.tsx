@@ -1,12 +1,14 @@
-import { useEffect, useState } from "react";
-import { ArrowUp, LoaderCircle, Maximize2, Square } from "lucide-react";
-import { Button, Tooltip } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { ArrowUp, LoaderCircle, Maximize2, Square, WandSparkles } from "lucide-react";
+import { App, Button, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { resolveH3PromptOptimizerEntry } from "@/constant/text-prompt-library";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { requestImageQuestion, type AiTextMessage } from "@/services/api/image";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasPromptChipInput } from "./canvas-prompt-chip-input";
@@ -23,6 +25,7 @@ type CanvasNodePromptPanelProps = {
     isRunning: boolean;
     onPromptChange: (nodeId: string, prompt: string) => void;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeData["metadata"]>) => void;
+    onContentChange?: (nodeId: string, content: string) => void;
     onGenerate: (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => void;
     onStop: (nodeId: string) => void;
     mentionReferences?: CanvasResourceReference[];
@@ -30,10 +33,12 @@ type CanvasNodePromptPanelProps = {
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onGenerate, onStop, mentionReferences = [], onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
+    const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
+    const textPrompts = useConfigStore((state) => state.config.textPrompts || []);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mode = modeOverride ?? defaultMode(node.type);
     const config = buildNodeConfig(globalConfig, node, mode);
@@ -42,6 +47,8 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const [prompt, setPrompt] = useState(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
     const [localRunning, setLocalRunning] = useState(false);
+    const [optimizing, setOptimizing] = useState(false);
+    const optimizeControllerRef = useRef<AbortController | null>(null);
     const running = isRunning || localRunning;
     const promptPlaceholder = t(`canvas.promptPanel.${mode === "text" && hasTextContent ? "editText" : mode}`);
 
@@ -51,6 +58,14 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         setLocalRunning(false);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [node.id, node.metadata?.promptSyncAt]);
+
+    // Leaving the node (or unmounting) cancels an in-flight prompt optimization so its
+    // async continuation can never write stale text into another node's composer.
+    useEffect(() => {
+        optimizeControllerRef.current?.abort();
+        setOptimizing(false);
+    }, [node.id]);
+    useEffect(() => () => optimizeControllerRef.current?.abort(), []);
 
     // Hand off to parent-controlled running, or drop optimistic state if generation never started.
     useEffect(() => {
@@ -95,6 +110,55 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const handleStop = () => {
         setLocalRunning(false);
         onStop(node.id);
+    };
+
+    // Optimize the lower prompt input with the H3 prompt-optimizer instruction from the 词库,
+    // and stream the optimized text into the upper content editor (the text node body).
+    // Click the button again to cancel.
+    const optimizePrompt = async () => {
+        if (optimizeControllerRef.current) {
+            optimizeControllerRef.current.abort();
+            return;
+        }
+        const original = prompt;
+        if (!original.trim()) {
+            message.warning(t("canvas.promptPanel.optimizeEmpty"));
+            return;
+        }
+        const controller = new AbortController();
+        optimizeControllerRef.current = controller;
+        setOptimizing(true);
+        let streamed = "";
+        const writeContent = (text: string) => {
+            if (controller.signal.aborted) return;
+            onContentChange?.(node.id, text);
+        };
+        try {
+            const answer = await requestImageQuestion(
+                config,
+                [
+                    { role: "system", content: resolveH3PromptOptimizerEntry(textPrompts).content },
+                    { role: "user", content: original },
+                ] satisfies AiTextMessage[],
+                (text) => {
+                    if (controller.signal.aborted) return;
+                    streamed = text;
+                    writeContent(text);
+                },
+                { signal: controller.signal },
+            );
+            if (controller.signal.aborted) return;
+            writeContent((answer || streamed).trim() || original);
+        } catch (error) {
+            if (controller.signal.aborted) {
+                writeContent(original);
+                return;
+            }
+            message.error(`${t("canvas.promptPanel.optimizeFailed")}: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+            if (optimizeControllerRef.current === controller) optimizeControllerRef.current = null;
+            setOptimizing(false);
+        }
     };
 
     return (
@@ -165,6 +229,21 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         <>
                             <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="text" onMissingConfig={() => openConfigDialog(true)} className="max-w-[160px]" />
                             <CanvasTextSettingsPopover config={config} count={node.metadata?.textCount || 1} onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })} onCountChange={(textCount) => onConfigChange(node.id, { textCount })} />
+                            <Tooltip title={t("canvas.promptPanel.optimizePromptTitle")}>
+                                <Button
+                                    size="small"
+                                    type="text"
+                                    className="!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"
+                                    style={{ background: theme.node.fill, color: theme.node.text }}
+                                    icon={optimizing ? <LoaderCircle className="size-3.5 animate-spin" /> : <WandSparkles className="size-3.5" />}
+                                    onClick={optimizePrompt}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    aria-label={t("canvas.promptPanel.optimizePromptTitle")}
+                                >
+                                    <span className="truncate">{optimizing ? t("canvas.promptPanel.optimizing") : t("canvas.promptPanel.optimizePrompt")}</span>
+                                </Button>
+                            </Tooltip>
                         </>
                     )}
                 </div>
