@@ -7,7 +7,7 @@ import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } fr
 import { pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
-import { compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
+import { compressBodyImagesForProxy, compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
 import { fetchRemoteImageBlob, imageToDataUrl } from "@/services/image-storage";
@@ -2098,7 +2098,7 @@ async function requestStreamingResponse(config: AiConfig, body: Record<string, u
     const response = await fetch(aiApiUrl(config, "/responses"), {
         method: "POST",
         headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
-        body: JSON.stringify({ ...body, stream: true }),
+        body: JSON.stringify(await compressBodyImagesForProxy({ ...body, stream: true })),
         signal: options?.signal,
     });
     if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
@@ -2214,7 +2214,9 @@ function toGeminiToolOptions(tools: ResponseFunctionTool[], toolChoice: ToolChoi
     };
 }
 
-async function requestGeminiStreamingResponse(config: AiConfig, body: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
+async function requestGeminiStreamingResponse(config: AiConfig, rawBody: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
+    // Inline reference images can push the serialized body past the ~4.5MB proxy limit.
+    const body = await compressBodyImagesForProxy(rawBody);
     let response: Response;
     try {
         response = await fetch(`${geminiApiUrl(config, "streamGenerateContent")}?alt=sse`, {
@@ -2263,7 +2265,8 @@ async function requestGeminiStreamingResponse(config: AiConfig, body: Record<str
     }
 }
 
-async function requestGeminiNonStreamingResponse(config: AiConfig, body: Record<string, unknown>, options?: RequestOptions): Promise<ToolResponseResult> {
+async function requestGeminiNonStreamingResponse(config: AiConfig, rawBody: Record<string, unknown>, options?: RequestOptions): Promise<ToolResponseResult> {
+    const body = await compressBodyImagesForProxy(rawBody);
     const response = await fetch(geminiApiUrl(config, "generateContent"), {
         method: "POST",
         headers: geminiHeaders(config),
@@ -2917,11 +2920,13 @@ async function requestStreamingChatCompletions(config: AiConfig, messages: Respo
     const response = await fetch(aiApiUrl(config, "/chat/completions"), {
         method: "POST",
         headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
-        body: JSON.stringify({
-            model: config.model,
-            messages: toChatCompletionMessages(messages),
-            stream: true,
-        }),
+        body: JSON.stringify(
+            await compressBodyImagesForProxy({
+                model: config.model,
+                messages: toChatCompletionMessages(messages),
+                stream: true,
+            }),
+        ),
         signal: options?.signal,
     });
     if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));

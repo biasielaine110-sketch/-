@@ -169,6 +169,110 @@ export async function compressReferenceDataUrl(dataUrl: string, referenceCount =
     return compressDataUrlForApi(dataUrl, { maxEdge: 1536, ...options, maxBytes });
 }
 
+const BODY_IMAGE_TRIGGER_BYTES = 3_000_000;
+const BODY_IMAGE_PER_IMAGE_CAP = 650_000;
+const BODY_IMAGE_PER_IMAGE_TOTAL = 2_200_000;
+const BODY_IMAGE_COLLECT_THRESHOLD = 200_000;
+const BODY_IMAGE_COLLECT_THRESHOLD_SMALL = 64_000;
+
+type InlineImageFix = { mimeType: string; base64: string };
+
+/**
+ * Walk a JSON-able request body and shrink oversized inline base64 images so the
+ * serialized payload stays under proxy body limits (Vercel serverless ~4.5MB).
+ * Understands both OpenAI-style `data:image/...` URLs and Gemini `inlineData` /
+ * `inline_data` raw-base64 parts. Returns the body untouched when it is small
+ * enough or carries no compressible images.
+ */
+export async function compressBodyImagesForProxy<T>(body: T, options?: { totalBudgetBytes?: number; perImageMaxBytes?: number }): Promise<T> {
+    if (!body || typeof body !== "object") return body;
+
+    const totalBudget = options?.totalBudgetBytes ?? BODY_IMAGE_TRIGGER_BYTES;
+    const dataUrlFixes = new Map<string, string>();
+    const inlineCandidates = new Map<string, string>();
+
+    const visit = (value: unknown, threshold: number) => {
+        if (typeof value === "string") {
+            if (value.startsWith("data:image/") && getDataUrlByteSize(value) > threshold) dataUrlFixes.set(value, "");
+            return;
+        }
+        if (Array.isArray(value)) {
+            for (const item of value) visit(item, threshold);
+            return;
+        }
+        if (value && typeof value === "object") {
+            const record = value as Record<string, unknown>;
+            const inline = (record.inlineData || record.inline_data) as Record<string, unknown> | undefined;
+            if (inline && typeof inline.data === "string" && inline.data.length * 0.75 > threshold) {
+                const mimeType =
+                    typeof inline.mimeType === "string" ? inline.mimeType : typeof inline.mime_type === "string" ? inline.mime_type : "image/png";
+                inlineCandidates.set(inline.data, mimeType);
+            }
+            for (const item of Object.values(record)) visit(item, threshold);
+        }
+    };
+
+    let serializedSize = -1;
+    try {
+        serializedSize = JSON.stringify(body ?? "").length;
+    } catch {
+        return body; // non-serializable body — do not risk mangling it
+    }
+
+    visit(body, BODY_IMAGE_COLLECT_THRESHOLD);
+    if (serializedSize > totalBudget && !dataUrlFixes.size && !inlineCandidates.size) {
+        visit(body, BODY_IMAGE_COLLECT_THRESHOLD_SMALL);
+    }
+    if (!dataUrlFixes.size && !inlineCandidates.size) return body;
+    if (serializedSize <= totalBudget) return body;
+
+    const imageCount = dataUrlFixes.size + inlineCandidates.size;
+    const perImageMax = options?.perImageMaxBytes ?? Math.min(BODY_IMAGE_PER_IMAGE_CAP, Math.floor(BODY_IMAGE_PER_IMAGE_TOTAL / Math.max(1, imageCount)));
+
+    for (const [dataUrl] of dataUrlFixes) {
+        try {
+            const compressed = await compressDataUrlForApi(dataUrl, { maxEdge: 1536, maxBytes: perImageMax });
+            if (compressed !== dataUrl && getDataUrlByteSize(compressed) < getDataUrlByteSize(dataUrl)) dataUrlFixes.set(dataUrl, compressed);
+        } catch {
+            // keep original on compression failure
+        }
+    }
+
+    const inlineFixes = new Map<string, InlineImageFix>();
+    for (const [rawBase64, mimeType] of inlineCandidates) {
+        try {
+            const compressed = await compressDataUrlForApi(`data:${mimeType};base64,${rawBase64}`, { maxEdge: 1536, maxBytes: perImageMax });
+            const match = compressed.match(/^data:([^;,]+);base64,([\s\S]+)$/);
+            if (match && match[2].length < rawBase64.length) inlineFixes.set(rawBase64, { mimeType: match[1], base64: match[2] });
+        } catch {
+            // keep original on compression failure
+        }
+    }
+
+    if (!dataUrlFixes.size && !inlineFixes.size) return body;
+
+    const replace = (value: unknown): unknown => {
+        if (typeof value === "string") return dataUrlFixes.get(value) ?? value;
+        if (Array.isArray(value)) return value.map(replace);
+        if (value && typeof value === "object") {
+            const record = value as Record<string, unknown>;
+            const inlineKey = "inlineData" in record ? "inlineData" : "inline_data" in record ? "inline_data" : "";
+            const inline = inlineKey ? (record[inlineKey] as Record<string, unknown> | undefined) : undefined;
+            const rawBase64 = inline && typeof inline.data === "string" ? inline.data : "";
+            const fix = rawBase64 ? inlineFixes.get(rawBase64) : undefined;
+            if (inline && fix) {
+                const nextInline: Record<string, unknown> = { ...inline, data: fix.base64 };
+                if ("mime_type" in nextInline && !("mimeType" in nextInline)) nextInline.mime_type = fix.mimeType;
+                else nextInline.mimeType = fix.mimeType;
+                return { ...record, [inlineKey]: nextInline };
+            }
+            return Object.fromEntries(Object.entries(record).map(([entryKey, entryValue]) => [entryKey, replace(entryValue)]));
+        }
+        return value;
+    };
+    return replace(body) as T;
+}
+
 /** Grab a still frame from a video URL for multimodal chat / vision models. */
 export function captureVideoFrameDataUrl(url: string, seekRatio = 0.1): Promise<string | null> {
     if (!url) return Promise.resolve(null);
