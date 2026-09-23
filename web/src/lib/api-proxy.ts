@@ -8,6 +8,21 @@
 
 import { CONFIG_STORE_KEY, type ApiTransport } from "@/stores/use-config-store";
 
+/**
+ * Hosts that are known to send permissive CORS headers (Access-Control-Allow-Origin: *
+ * plus Authorization) AND that are frequently unreachable from the Vercel serverless
+ * edge (CN-only providers that rate-limit or block overseas IPs). For these we always
+ * POST directly from the browser, bypassing the /api/proxy hop that otherwise 502s.
+ */
+const DIRECT_CORS_HOSTS = [
+    "autodl.art",
+];
+
+function isDirectCorsHost(origin: string): boolean {
+    const host = origin.replace(/:\d+$/, "").toLowerCase();
+    return DIRECT_CORS_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
+}
+
 export function resolveApiTransport(): ApiTransport {
     try {
         if (typeof window === "undefined") return "proxy";
@@ -29,6 +44,8 @@ export function proxyApiUrl(directUrl: string): string {
         if (typeof window !== "undefined" && target.origin === window.location.origin) return normalized;
         if (target.protocol !== "http:" && target.protocol !== "https:") return normalized;
         if (resolveApiTransport() === "direct") return normalized;
+        // CORS-open CN hosts are unreachable from the serverless edge — go direct.
+        if (isDirectCorsHost(target.host)) return normalized;
         return buildProxyUrl(normalized);
     } catch {
         return normalized;
@@ -42,6 +59,8 @@ export function proxyMediaUrl(directUrl: string): string {
         const target = new URL(normalized);
         if (typeof window !== "undefined" && target.origin === window.location.origin) return normalized;
         if (target.protocol !== "http:" && target.protocol !== "https:") return normalized;
+        // CORS-open CN hosts are unreachable from the serverless edge — go direct.
+        if (isDirectCorsHost(target.host)) return normalized;
         return buildProxyUrl(normalized);
     } catch {
         return normalized;
