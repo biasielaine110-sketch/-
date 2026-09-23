@@ -806,9 +806,33 @@ function readTaskFromCreate(payload: unknown): RunningHubTaskView | null {
     };
 }
 
+/**
+ * Official task status endpoint (POST /task/openapi/status → data.taskStatus:
+ * QUEUED / RUNNING / SUCCESS / FAILED / CANCELED). The outputs endpoint alone keeps answering
+ * "still queued/running" (804/813) for failed or cancelled tasks, which previously dead-locked
+ * the poller into the full 20-minute timeout. Status errors never kill polling — they only
+ * surface when they reveal a terminal state.
+ */
+async function fetchTaskStatus(args: { origin: string; token: string; taskId: string; apiKey: string; signal?: AbortSignal }) {
+    const response = await axios.post(
+        proxyApiUrl(`${args.origin}/task/openapi/status`),
+        { apiKey: args.token, taskId: args.taskId },
+        { headers: bearer(args.apiKey), signal: args.signal, timeout: 30_000 },
+    );
+    const record = asRecord(response.data);
+    const code = typeof record?.code === "number" ? record.code : typeof record?.code === "string" && /^\d+$/.test(record.code) ? Number(record.code) : null;
+    if (code !== null && code !== 0 && code !== 200) return null;
+    const data = asRecord(record?.data);
+    return {
+        status: String(data?.taskStatus || data?.status || record?.taskStatus || "").trim(),
+        payload: response.data,
+    };
+}
+
 async function pollTaskOutputs(args: { origin: string; apiKey: string; taskId: string; signal?: AbortSignal }): Promise<RunningHubTaskView> {
     const deadline = performance.now() + POLL_TIMEOUT_MS;
     const token = args.apiKey.replace(/^Bearer\s+/i, "").trim();
+    let completedRounds = 0;
     while (performance.now() < deadline) {
         if (args.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const response = await axios.post(proxyApiUrl(`${args.origin}/task/openapi/outputs`), { apiKey: token, taskId: args.taskId }, {
@@ -819,6 +843,16 @@ async function pollTaskOutputs(args: { origin: string; apiKey: string; taskId: s
         const record = asRecord(response.data);
         const code = typeof record?.code === "number" ? record.code : typeof record?.code === "string" && /^\d+$/.test(record.code) ? Number(record.code) : null;
         if (code === 804 || code === 813) {
+            const statusInfo = await fetchTaskStatus({ origin: args.origin, token, taskId: args.taskId, apiKey: args.apiKey, signal: args.signal }).catch(() => null);
+            if (statusInfo && statusInfo.status && isFailedStatus(statusInfo.status)) {
+                throw new Error(readFailedReason(statusInfo.payload) || readMessage(statusInfo.payload) || apiText("runningHubTaskFailed"));
+            }
+            if (statusInfo && statusInfo.status && isDoneStatus(statusInfo.status)) {
+                // Task finished server-side but outputs has not surfaced the files yet —
+                // grace-limit the remaining wait instead of burning the full timeout.
+                completedRounds += 1;
+                if (completedRounds > 10) break;
+            }
             await sleep(POLL_INTERVAL_MS, args.signal);
             continue;
         }
@@ -843,7 +877,7 @@ async function pollTaskOutputs(args: { origin: string; apiKey: string; taskId: s
         }
         await sleep(POLL_INTERVAL_MS, args.signal);
     }
-    throw new Error(apiText("runningHubTimeout"));
+    throw new Error(`${apiText("runningHubTimeout")} (taskId: ${args.taskId})`);
 }
 
 export async function pollRunningHubQuery(args: { origin: string; apiKey: string; taskId: string; signal?: AbortSignal }): Promise<RunningHubTaskView> {
