@@ -234,6 +234,7 @@ function explainRunningHubError(error: unknown, workflowId: string): Error {
     const message = errorText(error);
     if (isMissingIdMessage(message)) return new Error(i18n.t("apiErrors.runningHubWorkflowNotExists", { id: workflowId }));
     if (/WORKFLOW_NOT_SAVED_OR_NOT_RUNNING/i.test(message)) return new Error(apiText("runningHubWorkflowNotRun"));
+    if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) return new Error(apiText("runningHubNoBalance"));
     if (isUnknownServerError(message)) return new Error(apiText("runningHubUnknownError"));
     if (error instanceof Error && error.message && !isUnknownServerError(error.message)) return error;
     return new Error(message || apiText("requestFailed"));
@@ -948,6 +949,11 @@ export async function runRunningHubWorkflow(args: {
         if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
         const message = errorText(error);
         if (isAuthMessage(message)) throw explainRunningHubError(error, workflowId);
+        // Balance/quota errors are terminal and platform-side — surface them directly instead of
+        // retrying or probing the webapp fallback (which would just fail the same way again).
+        if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) {
+            throw explainRunningHubError(error, workflowId);
+        }
         const canRetryPlain = Boolean(workflow) && overrides.length > 0 && (isUnknownServerError(message) || /APIKEY_INVALID_NODE_INFO|Node info error/i.test(message));
         if (canRetryPlain) {
             const fallback = keptOverrides.length && keptOverrides.length < overrides.length ? keptOverrides : [];

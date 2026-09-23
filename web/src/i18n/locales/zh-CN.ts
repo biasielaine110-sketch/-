@@ -301,6 +301,7 @@ export default {
         runningHubTaskFailed: "RunningHub 任务失败",
         runningHubNoImage: "RunningHub 任务完成但没有图片。若工作流输出的是视频，请在视频节点里生成。",
         runningHubNoVideo: "RunningHub 任务完成但没有视频。若工作流输出的是图片，请在生图节点里生成。",
+        runningHubNoBalance: "RunningHub 账户余额不足（NOT_ENOUGH_BALANCE），无法生成。请到 RunningHub 网站充值后再试。",
         runningHubTimeout: "RunningHub 任务超时，请稍后重试",
         runningHubUnknownError: "RunningHub 返回了 UNKNOWN_ERROR。请先在网站上打开这个工作流并成功运行一次；若刚改过节点，保存后再跑一遍。接口会先按网页上已保存的参数提交。",
         comfyNoImage: "ComfyUI 任务完成但未返回图片",
