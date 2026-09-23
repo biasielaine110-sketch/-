@@ -239,6 +239,78 @@ export async function upscaleDataUrl(dataUrl: string, params: ImageUpscaleParams
     return params.algorithm === "high" ? drawStepUpscale(image, width, height) : drawResize(image, image.width, image.height, width, height, params.algorithm);
 }
 
+export type ImageAdjustParams = {
+    /** Saturation percent. 100 = unchanged, 0 = grayscale, 200 = double. */
+    saturation: number;
+    /** Contrast percent. 100 = unchanged, 0 = flat, 200 = double. */
+    contrast: number;
+    /** Exposure percent. 100 = unchanged, <100 darker, >100 brighter. */
+    exposure: number;
+    /** Glow intensity 0..100. 0 = none, higher = stronger soft bloom on highlights. */
+    glow: number;
+};
+
+export const DEFAULT_IMAGE_ADJUST_PARAMS: ImageAdjustParams = { saturation: 100, contrast: 100, exposure: 100, glow: 0 };
+
+/** Apply saturation / contrast / exposure / glow and return a new PNG data URL. */
+export async function adjustDataUrl(dataUrl: string, params: ImageAdjustParams) {
+    const image = await loadImage(dataUrl);
+    const width = image.width;
+    const height = image.height;
+    if (!width || !height) return dataUrl;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return dataUrl;
+
+    const saturation = clampPercent(params.saturation);
+    const contrast = clampPercent(params.contrast);
+    const exposure = clampPercent(params.exposure);
+    const glow = Math.max(0, Math.min(100, Number(params.glow) || 0));
+
+    // 1) Base tone pass: saturation / contrast / exposure via the CSS filter stack
+    //    (exposure maps to brightness, which is the closest cheap approximation).
+    const filterParts: string[] = [];
+    if (saturation !== 100) filterParts.push(`saturate(${(saturation / 100).toFixed(3)})`);
+    if (contrast !== 100) filterParts.push(`contrast(${(contrast / 100).toFixed(3)})`);
+    if (exposure !== 100) filterParts.push(`brightness(${(exposure / 100).toFixed(3)})`);
+    context.filter = filterParts.length ? filterParts.join(" ") : "none";
+    context.drawImage(image, 0, 0, width, height);
+    context.filter = "none";
+
+    // 2) Glow pass: composite a blurred, brightened copy of the highlights on top
+    //    using the "screen" blend mode to create a soft bloom without crushing blacks.
+    if (glow > 0) {
+        const intensity = glow / 100;
+        const blurPx = Math.max(2, Math.round(Math.min(width, height) * 0.04 * (0.5 + intensity)));
+        const glowCanvas = document.createElement("canvas");
+        glowCanvas.width = width;
+        glowCanvas.height = height;
+        const glowCtx = glowCanvas.getContext("2d");
+        if (glowCtx) {
+            glowCtx.filter = `brightness(${(1 + intensity * 0.5).toFixed(3)}) blur(${blurPx}px)`;
+            glowCtx.drawImage(canvas, 0, 0, width, height);
+            glowCtx.filter = "none";
+            context.save();
+            context.globalAlpha = Math.min(1, intensity * 0.85);
+            context.globalCompositeOperation = "screen";
+            context.drawImage(glowCanvas, 0, 0, width, height);
+            context.restore();
+        }
+    }
+
+    const keepPng = /^data:image\/png/i.test(dataUrl) && canvasHasAlpha(context, width, height);
+    return keepPng ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", 0.92);
+}
+
+function clampPercent(value: number) {
+    const next = Number(value);
+    if (!Number.isFinite(next)) return 100;
+    return Math.max(0, Math.min(300, Math.round(next)));
+}
+
 /** Downscale image pixels by percent of natural size (100 = unchanged). Prefers JPEG to shrink file size. */
 export async function resizeDataUrlByPercent(dataUrl: string, percent: number) {
     const image = await loadImage(dataUrl);

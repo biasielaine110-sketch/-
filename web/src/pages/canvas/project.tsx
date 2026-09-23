@@ -17,7 +17,7 @@ import { captureVideoFrameDataUrl, getDataUrlByteSize, readImageMeta } from "@/l
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { cropDataUrl, mergeDataUrls, resizeDataUrlByPercent, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { cropDataUrl, mergeDataUrls, resizeDataUrlByPercent, splitDataUrl, upscaleDataUrl, adjustDataUrl, type ImageAdjustParams } from "@/lib/canvas/canvas-image-data";
 import { loadVideoBlob } from "@/lib/canvas/canvas-video-tools";
 import { fitNodeSize, nodeSizeFromRatio, sizeFromDisplayScalePercent } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Modal } from "antd";
@@ -39,6 +39,7 @@ import { CanvasMergeNodeContent } from "@/components/canvas/canvas-merge-node-co
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { CanvasNodeMjUpscaleDialog } from "@/components/canvas/canvas-node-mj-upscale-dialog";
 import { CanvasNodeScaleDialog } from "@/components/canvas/canvas-node-scale-dialog";
+import { CanvasNodeAdjustDialog } from "@/components/canvas/canvas-node-adjust-dialog";
 import { CanvasNodeVideoToolsDialog, type VideoToolsFrameResult, type VideoToolsTrimResult, type VideoToolsUpscaleResult } from "@/components/canvas/canvas-node-video-tools-dialog";
 import { CanvasNodeAudioToolsDialog, type AudioToolsTrimResult } from "@/components/canvas/canvas-node-audio-tools-dialog";
 import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
@@ -387,6 +388,7 @@ function AtelierCanvasPage() {
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
     const [mjUpscaleNodeId, setMjUpscaleNodeId] = useState<string | null>(null);
     const [scaleNodeId, setScaleNodeId] = useState<string | null>(null);
+    const [adjustNodeId, setAdjustNodeId] = useState<string | null>(null);
     const [videoToolsNodeId, setVideoToolsNodeId] = useState<string | null>(null);
     const [audioToolsNodeId, setAudioToolsNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
@@ -1007,6 +1009,7 @@ function AtelierCanvasPage() {
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
     const mjUpscaleNode = mjUpscaleNodeId ? nodeById.get(mjUpscaleNodeId) || null : null;
     const scaleNode = scaleNodeId ? nodeById.get(scaleNodeId) || null : null;
+    const adjustNode = adjustNodeId ? nodeById.get(adjustNodeId) || null : null;
     const videoToolsNode = videoToolsNodeId ? nodeById.get(videoToolsNodeId) || null : null;
     const audioToolsNode = audioToolsNodeId ? nodeById.get(audioToolsNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
@@ -1175,6 +1178,7 @@ function AtelierCanvasPage() {
             setTextEditNodeId((current) => (current && allIds.has(current) ? null : current));
             setAngleNodeId((current) => (current && allIds.has(current) ? null : current));
             setPanoramaNodeId((current) => (current && allIds.has(current) ? null : current));
+            setAdjustNodeId((current) => (current && allIds.has(current) ? null : current));
             setPreviewNodeId((current) => (current && allIds.has(current) ? null : current));
             setRunningNodeId((current) => (current && allIds.has(current) ? null : current));
             setExpandedImageNodeIds((current) => new Set([...current].filter((nodeId) => !allIds.has(nodeId))));
@@ -1219,6 +1223,7 @@ function AtelierCanvasPage() {
         setTextEditNodeId(null);
         setAngleNodeId(null);
         setPanoramaNodeId(null);
+        setAdjustNodeId(null);
         setPreviewNodeId(null);
         setRunningNodeId(null);
         deselectCanvas();
@@ -2429,6 +2434,7 @@ function AtelierCanvasPage() {
                 setMaskEditNodeId(null);
                 setAnnotateNodeId(null);
                 setPanoramaNodeId(null);
+                setAdjustNodeId(null);
                 setTextEditNodeId(null);
                 setPendingConnectionCreate(null);
             }
@@ -2894,6 +2900,31 @@ function AtelierCanvasPage() {
         setSelectedNodeIds(new Set([childId]));
         setDialogNodeId(childId);
         setCropNodeId(null);
+    }, []);
+
+    const adjustImageNode = useCallback(async (node: CanvasNodeData, params: ImageAdjustParams) => {
+        if (!node.metadata?.content) return;
+        const adjusted = await adjustDataUrl(node.metadata.content, params);
+        const image = await uploadImage(adjusted);
+        const size = fitNodeSize(image.width, image.height);
+        const childId = nanoid();
+        const child: CanvasNodeData = {
+            id: childId,
+            type: CanvasNodeType.Image,
+            title: "Adjusted Image",
+            position: { x: node.position.x + node.width + 96, y: node.position.y },
+            width: size.width,
+            height: size.height,
+            metadata: {
+                ...imageMetadata(image),
+                prompt: node.metadata?.prompt,
+            },
+        };
+        setNodes((prev) => [...prev, child]);
+        setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+        setSelectedNodeIds(new Set([childId]));
+        setDialogNodeId(childId);
+        setAdjustNodeId(null);
     }, []);
 
     const openVideoTools = useCallback((node: CanvasNodeData) => {
@@ -5255,6 +5286,7 @@ function AtelierCanvasPage() {
             onSuperResolve: (node) => setSuperResolveNodeId(node.id),
             onAngle: (node) => setAngleNodeId(node.id),
             onPanorama: (node) => setPanoramaNodeId(node.id),
+            onAdjust: (node) => setAdjustNodeId(node.id),
             onViewImage: handleNodeViewImage,
             onCopyPrompt: (node) => {
                 const prompt = node.metadata?.prompt?.trim();
@@ -5586,6 +5618,7 @@ function AtelierCanvasPage() {
                     onSuperResolve={(node) => setSuperResolveNodeId(node.id)}
                     onAngle={(node) => setAngleNodeId(node.id)}
                     onPanorama={(node) => setPanoramaNodeId(node.id)}
+                    onAdjust={(node) => setAdjustNodeId(node.id)}
                     onViewImage={handleNodeViewImage}
                     onReversePrompt={createImageReversePromptNodes}
                     onRetry={(node) => void handleRetryNode(node)}
@@ -5780,6 +5813,15 @@ function AtelierCanvasPage() {
                         onConfirm={(percent) => {
                             void scaleImageNodeDisplay(scaleNode, percent);
                         }}
+                    />
+                ) : null}
+
+                {adjustNode?.metadata?.content ? (
+                    <CanvasNodeAdjustDialog
+                        dataUrl={adjustNode.metadata.content}
+                        open={Boolean(adjustNode)}
+                        onClose={() => setAdjustNodeId(null)}
+                        onConfirm={(params) => void adjustImageNode(adjustNode!, params)}
                     />
                 ) : null}
 

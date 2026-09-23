@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
-import { Brush, Camera, Copy, FileText, Globe2, Grid2x2, Highlighter, Lock, LockOpen, Maximize2, Scaling, Scissors, Sparkles, Upload, ZoomIn, RotateCcw } from "lucide-react";
+import { Brush, Camera, Copy, FileText, Globe2, Grid2x2, Highlighter, Lock, LockOpen, Maximize2, Scaling, Scissors, SlidersHorizontal, Sparkles, Upload, ZoomIn, RotateCcw } from "lucide-react";
 
 import type { CanvasNodeData } from "@/types/canvas";
 import i18n from "@/i18n";
 
-export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "scale" | "resetSize" | "maskEdit" | "annotate" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "panorama" | "view";
+export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "scale" | "resetSize" | "maskEdit" | "annotate" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "panorama" | "adjust" | "view";
 export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | ImageNodeActionToolId;
 
 export type ImageToolHandlers = {
@@ -20,6 +20,7 @@ export type ImageToolHandlers = {
     onSuperResolve: (node: CanvasNodeData) => void;
     onAngle: (node: CanvasNodeData) => void;
     onPanorama: (node: CanvasNodeData) => void;
+    onAdjust: (node: CanvasNodeData) => void;
     onViewImage: (node: CanvasNodeData) => void;
     onCopyPrompt: (node: CanvasNodeData) => void;
     onReversePrompt: (node: CanvasNodeData) => void;
@@ -117,6 +118,14 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         title: () => i18n.t("canvas.imageTools.cropTitle"),
         icon: () => <Scissors className="size-[10px]" />,
         run: (node, handlers) => handlers.onCrop(node),
+    },
+    {
+        id: "adjust",
+        defaultVisible: true,
+        label: () => i18n.t("canvas.imageTools.adjust"),
+        title: () => i18n.t("canvas.imageTools.adjustTitle"),
+        icon: () => <SlidersHorizontal className="size-[10px]" />,
+        run: (node, handlers) => handlers.onAdjust(node),
     },
     {
         id: "split",
