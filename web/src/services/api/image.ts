@@ -449,6 +449,16 @@ function resolveApimartImageParams(config: AiConfig, count: number) {
         return params;
     }
 
+    // GPT-Image-2.5 (flare/sunburst): n 1-4, quality low/medium/high, 1k/2k/4k tiers.
+    if (isApimartGptImage25Model(model)) {
+        params.n = Math.max(1, Math.min(count, 4));
+        const quality = normalizeQuality(config.quality);
+        if (quality) params.quality = quality;
+        const resolution = resolveApimartResolution(model, config.quality);
+        if (resolution) params.resolution = resolution;
+        return params;
+    }
+
     params.n = Math.max(1, Math.min(count, resolveApimartMaxImages(model)));
 
     if (isGptImageFixedSizeModel(model) || /^gpt-image-1(?!.*2)/i.test(model)) {
@@ -698,6 +708,39 @@ async function requestHfsySeedreamImage(config: AiConfig, prompt: string, refere
             if (options?.signal?.aborted) throw error;
             body.reference_images = dataUrls;
         }
+    }
+    const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
+    return resolveImageApiResponse(config, response.data, options);
+}
+
+/** APIMart GPT-Image-2.5 (flare/sunburst, incl. relay suffixes like -official). */
+function isApimartGptImage25Model(model: string) {
+    return /^gpt-image-2\.5-(flare|sunburst)/i.test(model.trim());
+}
+
+/**
+ * APIMart GPT-Image-2.5 per docs.apimart.ai: editing is NOT multipart /images/edits (400) —
+ * it is the async JSON task on /images/generations with `image_urls` (public HTTP(S) URLs
+ * only, up to 16). Local refs upload via /v1/uploads/images (temporary public host as
+ * fallback). Submission returns data[0].task_id; the shared poller reads
+ * data.result.images[].url[] on /tasks/{id}.
+ */
+async function requestApimartGptImage(config: AiConfig, prompt: string, references: ReferenceImage[], count: number, options?: RequestOptions) {
+    const n = Math.max(1, Math.min(4, count));
+    const body: Record<string, unknown> = {
+        model: config.model,
+        prompt: withSystemPrompt(config, prompt),
+        ...resolveApimartImageParams(config, n),
+    };
+    if (references.length) {
+        const urls: string[] = [];
+        for (const image of references.slice(0, 16)) {
+            urls.push(await resolveFetchableReferenceUrl(config, image, Math.max(1, references.length), { ...options, allowProviderUpload: true }));
+        }
+        if (!urls.length) throw new Error(apiText("referenceImageReadFailed"));
+        body.image_urls = urls;
+        // Image-to-image: omit size so the service derives dimensions from the references.
+        delete body.size;
     }
     const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
     return resolveImageApiResponse(config, response.data, options);
@@ -2610,6 +2653,15 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     // ToAPIs / similar relays: Gemini flash-image refs must be public URLs on /images/generations.
     // New API (hfsyapi etc.) often lacks /v1/uploads/images — fall back to multipart /images/edits,
     // then to native Gemini generateContent when the OpenAI image route only accepts Imagen.
+    // APIMart GPT-Image-2.5 (flare/sunburst) rejects multipart /images/edits with 400 — refs go
+    // as public `image_urls` on the async JSON /images/generations task instead.
+    if (isApimartBaseUrl(requestConfig.baseUrl) && isApimartGptImage25Model(requestConfig.model) && !mask) {
+        try {
+            return await requestApimartGptImage(requestConfig, requestPrompt, references, n, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
     if (usesImageUrlReferences(requestConfig.model) && references.length && !mask) {
         try {
             return await requestGeminiRelayImageToImage(requestConfig, requestPrompt, references, n, options);

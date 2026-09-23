@@ -157,6 +157,11 @@ export function CanvasChatContent({
         const list = listRef.current;
         if (!list) return;
         const save = () => {
+            // Virtualized nodes are display:none'd when scrolled off-canvas; the browser then
+            // reports scrollTop 0 (firing a scroll event) which would overwrite the stored
+            // position with 0 — the "reset to the top after leaving the viewport / restart"
+            // bug. Persist only while the list is actually laid out and visible.
+            if (!list.isConnected || !list.offsetParent) return;
             shouldFollowTailRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
             try {
                 const stored = window.localStorage.getItem(CHAT_SCROLL_POSITION_KEY);
