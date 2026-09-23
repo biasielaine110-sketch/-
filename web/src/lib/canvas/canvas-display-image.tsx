@@ -87,8 +87,11 @@ export async function getCanvasDisplaySrc(src: string, maxEdge = CANVAS_DISPLAY_
             touch(key, url);
             return url;
         } catch {
-            touch(key, src);
-            return src;
+            // A dead blob:/revoked URL must not be cached or returned as-is — otherwise the
+            // <img> stays pinned to an undecodable src and the node renders transparent/blank.
+            // Return "" so CanvasDisplayImage's onError→refreshImageUrl chain takes over.
+            cache.delete(key);
+            return "";
         } finally {
             inflight.delete(key);
         }
@@ -142,8 +145,16 @@ export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, a
     const [attempt, setAttempt] = useState(0);
     const [displaySrc, setDisplaySrc] = useState("");
     const failedRef = useRef(new Set<string>());
+    // Latest candidate chain, kept in a ref so `advance` never reads a stale closure value
+    // when `onError` fires after several rapid re-renders (the "randomly blank" bug).
+    const chainRef = useRef<string[]>([]);
+    const attemptRef = useRef(0);
+    const revivedRef = useRef<string[]>([]);
 
     const chain = [...candidates, ...revived];
+    chainRef.current = chain;
+    attemptRef.current = attempt;
+    revivedRef.current = revived;
     const current = chain[attempt] || "";
 
     useEffect(() => {
@@ -160,23 +171,38 @@ export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, a
         }
         setDisplaySrc(current);
         void getCanvasDisplaySrc(current, edge).then((next) => {
-            if (!cancelled) setDisplaySrc(next || current);
+            if (cancelled) return;
+            if (next === "") {
+                // Decode failed for this candidate — advance to the next one (or rebuild
+                // from storage). We clear the src so the <img> doesn't stay pinned to a dead
+                // URL, and drive the recovery ourselves instead of relying on onError.
+                setDisplaySrc("");
+                void advance();
+                return;
+            }
+            setDisplaySrc(next || current);
         });
         return () => {
             cancelled = true;
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [current, edge]);
 
     const advance = async () => {
+        const chainNow = chainRef.current;
+        const attemptNow = attemptRef.current;
+        const revivedNow = revivedRef.current;
+        const currentNow = chainNow[attemptNow] || "";
+        if (!currentNow) return;
         // The same URL can error more than once before state settles — never skip a candidate.
-        if (failedRef.current.has(current)) return;
-        failedRef.current.add(current);
-        if (attempt + 1 < chain.length) {
-            setAttempt(attempt + 1);
+        if (failedRef.current.has(currentNow)) return;
+        failedRef.current.add(currentNow);
+        if (attemptNow + 1 < chainNow.length) {
+            setAttempt(attemptNow + 1);
             return;
         }
-        if (!revived.length) {
-            const rebuilt = (await Promise.all([refreshImageUrl(previewStorageKey), refreshImageUrl(storageKey)])).filter((url): url is string => Boolean(url) && !chain.includes(url));
+        if (!revivedNow.length) {
+            const rebuilt = (await Promise.all([refreshImageUrl(previewStorageKey), refreshImageUrl(storageKey)])).filter((url): url is string => Boolean(url) && !chainNow.includes(url));
             if (rebuilt.length) {
                 setRevived(rebuilt);
                 return;
