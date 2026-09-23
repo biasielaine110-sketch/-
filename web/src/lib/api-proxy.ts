@@ -23,30 +23,81 @@ export function resolveApiTransport(): ApiTransport {
 }
 
 export function proxyApiUrl(directUrl: string): string {
+    const normalized = normalizeProxyTarget(directUrl);
     try {
-        const target = new URL(directUrl);
-        if (typeof window !== "undefined" && target.origin === window.location.origin) return directUrl;
-        if (target.protocol !== "http:" && target.protocol !== "https:") return directUrl;
-        if (resolveApiTransport() === "direct") return directUrl;
-        return buildProxyUrl(directUrl);
+        const target = new URL(normalized);
+        if (typeof window !== "undefined" && target.origin === window.location.origin) return normalized;
+        if (target.protocol !== "http:" && target.protocol !== "https:") return normalized;
+        if (resolveApiTransport() === "direct") return normalized;
+        return buildProxyUrl(normalized);
     } catch {
-        return directUrl;
+        return normalized;
     }
 }
 
 /** Always proxy remote media — independent of API transport setting. */
 export function proxyMediaUrl(directUrl: string): string {
+    const normalized = normalizeProxyTarget(directUrl);
     try {
-        const target = new URL(directUrl);
-        if (typeof window !== "undefined" && target.origin === window.location.origin) return directUrl;
-        if (target.protocol !== "http:" && target.protocol !== "https:") return directUrl;
-        return buildProxyUrl(directUrl);
+        const target = new URL(normalized);
+        if (typeof window !== "undefined" && target.origin === window.location.origin) return normalized;
+        if (target.protocol !== "http:" && target.protocol !== "https:") return normalized;
+        return buildProxyUrl(normalized);
     } catch {
-        return directUrl;
+        return normalized;
     }
 }
 
 function buildProxyUrl(directUrl: string) {
+    const target = normalizeProxyTarget(directUrl);
     const path = import.meta.env.DEV ? "/api-proxy" : "/api/proxy";
-    return `${path}?target=${encodeURIComponent(directUrl)}`;
+    return `${path}?target=${encodeURIComponent(target)}`;
+}
+
+function normalizeProxyTarget(url: string): string {
+    const value = String(url || "").trim();
+    if (!value) return value;
+
+    const proxied = readProxyTarget(value);
+    const target = proxied || value;
+    return trimTrailingProxyUrl(target);
+}
+
+function readProxyTarget(url: string): string {
+    try {
+        const parsed = new URL(url, typeof window !== "undefined" ? window.location.origin : "http://localhost");
+        if (!isProxyPath(parsed.pathname)) return "";
+        return parsed.searchParams.get("target") || "";
+    } catch {
+        return "";
+    }
+}
+
+function isProxyPath(pathname: string) {
+    return pathname === "/api/proxy" || pathname === "/api-proxy";
+}
+
+function trimTrailingProxyUrl(url: string): string {
+    const firstProxy = findProxyUrlStart(url);
+    if (firstProxy === -1) return url;
+    return url.slice(0, firstProxy).trim();
+}
+
+function findProxyUrlStart(url: string) {
+    const markers = ["http://", "https://", "/api/proxy?target=", "/api-proxy?target="];
+    let best = -1;
+    for (const marker of markers) {
+        const index = url.indexOf(marker, 1);
+        if (index !== -1 && (best === -1 || index < best) && isProxyUrlFragment(url.slice(index))) best = index;
+    }
+    return best;
+}
+
+function isProxyUrlFragment(fragment: string) {
+    try {
+        const parsed = new URL(fragment, typeof window !== "undefined" ? window.location.origin : "http://localhost");
+        return isProxyPath(parsed.pathname) && parsed.searchParams.has("target");
+    } catch {
+        return false;
+    }
 }

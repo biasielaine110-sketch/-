@@ -370,6 +370,8 @@ function AtelierCanvasPage() {
     const [toolbarNodeId, setToolbarNodeId] = useState<string | null>(null);
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
     const [dialogNodeId, setDialogNodeId] = useState<string | null>(null);
+    /** Nodes whose generation panel the user dismissed by clicking empty canvas space while they were generating. */
+    const [dismissedGeneratingNodeIds, setDismissedGeneratingNodeIds] = useState<Set<string>>(new Set());
     const directorPanelNode = nodes.find((node) => node.id === dialogNodeId && node.type === CanvasNodeType.Director);
     const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
@@ -498,6 +500,23 @@ function AtelierCanvasPage() {
         },
         [generationEpoch, runningNodeId],
     );
+
+    // Once a dismissed node stops generating, drop it from the dismissal set so a future
+    // generation for the same node opens its panel again.
+    useEffect(() => {
+        setDismissedGeneratingNodeIds((prev) => {
+            if (!prev.size) return prev;
+            const stillGenerating = new Set<string>();
+            generationRequestsRef.current.forEach((request) => {
+                stillGenerating.add(request.runningNodeId);
+                stillGenerating.add(request.originNodeId);
+                stillGenerating.add(request.targetNodeId);
+            });
+            if (runningNodeId) stillGenerating.add(runningNodeId);
+            const filtered = new Set([...prev].filter((id) => stillGenerating.has(id)));
+            return filtered.size === prev.size ? prev : filtered;
+        });
+    }, [generationEpoch, runningNodeId]);
 
     useEffect(() => {
         if (!hydrated) return;
@@ -1180,6 +1199,14 @@ function AtelierCanvasPage() {
         setHoveredNodeId(null);
         setToolbarNodeId(null);
         setDialogNodeId(null);
+        // Keep pan-tool blank clicks consistent with the pointer path: also collapse panels still generating.
+        const generatingIds = new Set<string>();
+        generationRequestsRef.current.forEach((request) => {
+            generatingIds.add(request.runningNodeId);
+            generatingIds.add(request.originNodeId);
+            generatingIds.add(request.targetNodeId);
+        });
+        if (generatingIds.size) setDismissedGeneratingNodeIds((prev) => new Set([...prev, ...generatingIds]));
     }, [cancelPendingConnectionCreate]);
 
     const clearCanvas = useCallback(() => {
@@ -1649,6 +1676,15 @@ function AtelierCanvasPage() {
             setHoveredNodeId(null);
             setToolbarNodeId(null);
             setDialogNodeId(null);
+            // Clicking empty canvas space also collapses generation panels that are still running,
+            // so the prompt editor does not stay open during generation.
+            const generatingIds = new Set<string>();
+            generationRequestsRef.current.forEach((request) => {
+                generatingIds.add(request.runningNodeId);
+                generatingIds.add(request.originNodeId);
+                generatingIds.add(request.targetNodeId);
+            });
+            if (generatingIds.size) setDismissedGeneratingNodeIds((prev) => new Set([...prev, ...generatingIds]));
             if (pendingConnectionCreateRef.current) cancelPendingConnectionCreate();
             if (event.button !== 0) return;
 
@@ -1886,6 +1922,7 @@ function AtelierCanvasPage() {
                 setDialogNodeId((current) => (current === clickedNodeId ? current : null));
             } else if (clickedNode?.type !== CanvasNodeType.Group) {
                 setDialogNodeId(clickedNodeId);
+                setDismissedGeneratingNodeIds((prev) => (prev.has(clickedNodeId) ? new Set([...prev].filter((id) => id !== clickedNodeId)) : prev));
             }
         }
     }, []);
@@ -2148,6 +2185,16 @@ function AtelierCanvasPage() {
         [getCanvasCenter, t],
     );
 
+    const pasteClipboardImageFile = useCallback(
+        (file: File, position: Position = getCreateNodePosition()) => {
+            if (!file.type.startsWith("image/")) return false;
+            void createImageFileNode(file, position);
+            message.success(t("canvas.projectPage.clipboardImageAdded"));
+            return true;
+        },
+        [createImageFileNode, getCreateNodePosition, message, t],
+    );
+
     const pasteSystemClipboard = useCallback(async () => {
         if (!navigator.clipboard) return;
 
@@ -2158,14 +2205,13 @@ function AtelierCanvasPage() {
             if (!imageType) return;
             const blob = await imageItem.getType(imageType);
             const file = new File([blob], "clipboard-image.png", { type: imageType });
-            void createImageFileNode(file, getCanvasCenter());
-            message.success(t("canvas.projectPage.clipboardImageAdded"));
+            pasteClipboardImageFile(file);
             return;
         }
 
         const text = await navigator.clipboard.readText();
         if (createTextNodeFromClipboard(text)) message.success(t("canvas.projectPage.clipboardTextAdded"));
-    }, [createImageFileNode, createTextNodeFromClipboard, getCanvasCenter, message, t]);
+    }, [createTextNodeFromClipboard, message, pasteClipboardImageFile, t]);
 
     const resetSelectedNodesToOriginalSize = useCallback((explicitIds?: Iterable<string>) => {
         const selectedIds = new Set(explicitIds || selectedNodeIdsRef.current);
@@ -2391,6 +2437,32 @@ function AtelierCanvasPage() {
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
     }, [copySelectedNodes, createNode, deleteConnection, deleteNodes, duplicateSelectedMediaAsNode, focusNode, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, t, undoCanvas]);
+
+    useEffect(() => {
+        const handlePaste = (event: ClipboardEvent) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (
+                event.target instanceof HTMLInputElement ||
+                event.target instanceof HTMLTextAreaElement ||
+                event.target instanceof HTMLSelectElement ||
+                target?.closest("[contenteditable],[data-canvas-text-input],[data-canvas-shortcuts-ignore],.ant-modal,.ant-input,.ant-input-textarea")
+            ) {
+                return;
+            }
+
+            const items = Array.from(event.clipboardData?.items || []);
+            const imageItem = items.find((item) => item.kind === "file" && item.type.startsWith("image/"));
+            const imageFile = imageItem?.getAsFile();
+            if (!imageFile) return;
+
+            event.preventDefault();
+            const file = imageFile.name ? imageFile : new File([imageFile], "clipboard-image.png", { type: imageFile.type || "image/png" });
+            pasteClipboardImageFile(file);
+        };
+
+        window.addEventListener("paste", handlePaste);
+        return () => window.removeEventListener("paste", handlePaste);
+    }, [pasteClipboardImageFile]);
 
     const handleConnectStart = useCallback(
         (event: ReactMouseEvent, nodeId: string, handleType: "source" | "target") => {
@@ -5386,7 +5458,7 @@ function AtelierCanvasPage() {
                             isFocusRelated={activeNodeId === node.id}
                             isConnectionTarget={connectionTargetNodeId === node.id}
                             isConnecting={Boolean(connectingParams)}
-                            showPanel={!isNodeResizing && !selectionBox && !getNodeDefinition(node.type)?.hidePanel && (dialogNodeId === node.id || isNodeGenerating(node.id))}
+                            showPanel={!isNodeResizing && !selectionBox && !getNodeDefinition(node.type)?.hidePanel && (dialogNodeId === node.id || (isNodeGenerating(node.id) && !dismissedGeneratingNodeIds.has(node.id)))}
                             groupChildCount={groupChildCountById.get(node.id) || 0}
                             isGroupDropTarget={dropTargetGroupId === node.id}
                             batchExpanded={expandedImageNodeIds.has(node.id)}

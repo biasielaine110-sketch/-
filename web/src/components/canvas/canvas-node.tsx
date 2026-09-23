@@ -19,6 +19,7 @@ import { DEFAULT_CANVAS_FONT_SIZE } from "@/constant/canvas";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
+const CANVAS_NODE_SCROLL_POSITION_KEY = "infinite-atelier:canvas-node-scroll-position";
 
 type CanvasNodeProps = {
     data: CanvasNodeData;
@@ -182,6 +183,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
     const imageBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : "transparent";
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const nodeContentRef = useRef<HTMLDivElement>(null);
     const titleInputRef = useRef<HTMLInputElement>(null);
     const resizeRef = useRef({
         isResizing: false,
@@ -212,6 +214,55 @@ export const CanvasNode = React.memo(function CanvasNode({
         setIsEditingTitle(false);
         if (title !== data.title) onTitleChange(data.id, title);
     }, [data.id, data.title, onTitleChange, t, titleDraft]);
+
+    useEffect(() => {
+        const root = nodeContentRef.current;
+        if (!root) return;
+
+        const scrollables = Array.from(root.querySelectorAll<HTMLElement>("[data-canvas-scroll-position], [data-canvas-no-zoom]"));
+        if (!scrollables.length) return;
+
+        let saved: Record<string, { top: number; left: number }> = {};
+        try {
+            const stored = window.localStorage.getItem(CANVAS_NODE_SCROLL_POSITION_KEY);
+            saved = stored ? (JSON.parse(stored) as Record<string, { top: number; left: number }>) : {};
+        } catch {
+            saved = {};
+        }
+
+        const entries = scrollables.map((element, index) => {
+            const localKey = element.dataset.canvasScrollPosition || String(index);
+            const key = `${data.id}:${localKey}`;
+            const restore = () => {
+                const position = saved[key];
+                if (!position) return;
+                element.scrollTop = Math.min(Math.max(0, position.top), Math.max(0, element.scrollHeight - element.clientHeight));
+                element.scrollLeft = Math.min(Math.max(0, position.left), Math.max(0, element.scrollWidth - element.clientWidth));
+            };
+            const save = () => {
+                try {
+                    const stored = window.localStorage.getItem(CANVAS_NODE_SCROLL_POSITION_KEY);
+                    const positions = stored ? (JSON.parse(stored) as Record<string, { top: number; left: number }>) : {};
+                    positions[key] = { top: element.scrollTop, left: element.scrollLeft };
+                    window.localStorage.setItem(CANVAS_NODE_SCROLL_POSITION_KEY, JSON.stringify(positions));
+                } catch {
+                    // Ignore storage failures; scrolling should remain fully functional in private mode.
+                }
+            };
+            restore();
+            const frame = window.requestAnimationFrame(restore);
+            element.addEventListener("scroll", save, { passive: true });
+            return { element, save, frame };
+        });
+
+        return () => {
+            entries.forEach(({ element, save, frame }) => {
+                window.cancelAnimationFrame(frame);
+                save();
+                element.removeEventListener("scroll", save);
+            });
+        };
+    }, [data.id]);
 
     useEffect(() => {
         if (!isEditingTitle) return;
@@ -432,6 +483,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 }}
             >
                 <div
+                    ref={nodeContentRef}
                     className={`relative flex h-full w-full items-center justify-center rounded-[inherit] ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
                     style={
                         {

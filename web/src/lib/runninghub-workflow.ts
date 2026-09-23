@@ -267,6 +267,73 @@ async function fetchWorkflow(origin: string, apiKey: string, workflowId: string,
 
 type WebappNode = { nodeId: string; fieldName: string; fieldValue: string; fieldType?: string; nodeName?: string; description?: string };
 
+const QWEN_IMAGE_21_WORKFLOW_ID = "2101992508854202370";
+const QWEN_IMAGE_21_LOAD_IMAGE_ORDER = ["420", "432", "433", "436", "435", "434"];
+
+const RUNNINGHUB_RESOLUTION_SELECTOR_ASPECTS: Array<{ ratio: string; label: string; value: number }> = [
+    { ratio: "1:1", label: "1:1 (Square)", value: 1 },
+    { ratio: "2:3", label: "2:3 (Portrait Photo)", value: 2 / 3 },
+    { ratio: "3:2", label: "3:2 (Photo)", value: 3 / 2 },
+    { ratio: "3:4", label: "3:4 (Portrait Standard)", value: 3 / 4 },
+    { ratio: "4:3", label: "4:3 (Standard)", value: 4 / 3 },
+    { ratio: "9:16", label: "9:16 (Portrait Widescreen)", value: 9 / 16 },
+    { ratio: "16:9", label: "16:9 (Widescreen)", value: 16 / 9 },
+    { ratio: "21:9", label: "21:9 (Ultrawide)", value: 21 / 9 },
+];
+
+function isQwenImage21Workflow(workflowId?: string | null) {
+    return workflowId === QWEN_IMAGE_21_WORKFLOW_ID;
+}
+
+function resolutionSelectorAspectLabel(aspect: string) {
+    return RUNNINGHUB_RESOLUTION_SELECTOR_ASPECTS.find((item) => item.ratio === aspect)?.label || "16:9 (Widescreen)";
+}
+
+function closestResolutionSelectorAspect(width: number, height: number) {
+    const target = width / Math.max(1, height);
+    let best = RUNNINGHUB_RESOLUTION_SELECTOR_ASPECTS[6];
+    let bestDiff = Infinity;
+    for (const item of RUNNINGHUB_RESOLUTION_SELECTOR_ASPECTS) {
+        const diff = Math.abs(target - item.value);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            best = item;
+        }
+    }
+    return best.ratio;
+}
+
+function qwenImage21Megapixels(size: { width: number; height: number } | null | undefined, rawSize: string) {
+    const tier = canvasResolutionTier(rawSize);
+    if (tier === "4k") return 8.3;
+    if (tier === "2k") return 4.2;
+    if (size?.width && size.height) return Math.max(0.1, Math.min(16, Math.round(((size.width * size.height) / 1_000_000) * 10) / 10));
+    return 2.2;
+}
+
+function applyQwenImage21Settings(workflow: ComfyWorkflow, imageCount: number, size?: { width: number; height: number } | null, aspect = "", rawSize = "") {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    const hasReferenceImages = imageCount > 0;
+    const switchNode = next["419"];
+    // The RunningHub nodeInfo API can override scalar inputs, but cannot create a missing
+    // ComfyUI link. Only toggle into I2I when the saved workflow already exposes on_false.
+    if (switchNode?.inputs && (!hasReferenceImages || "on_false" in switchNode.inputs)) switchNode.inputs.switch = !hasReferenceImages;
+
+    const selector = next["424"];
+    if (selector?.inputs) {
+        const nextAspect = aspect || (size?.width && size.height ? closestResolutionSelectorAspect(size.width, size.height) : "9:16");
+        if ("aspect_ratio" in selector.inputs) selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(nextAspect);
+        if ("megapixels" in selector.inputs) selector.inputs.megapixels = qwenImage21Megapixels(size, rawSize);
+    }
+
+    const encoder = next["418"];
+    if (encoder?.inputs && "resolution" in encoder.inputs && size?.width && size.height) {
+        encoder.inputs.resolution = Math.max(size.width, size.height);
+    }
+
+    return next;
+}
+
 async function fetchWebappNodes(origin: string, apiKey: string, webappId: string, signal?: AbortSignal): Promise<WebappNode[]> {
     const token = apiKey.replace(/^Bearer\s+/i, "").trim();
     const response = await axios.get(proxyApiUrl(`${origin}/api/webapp/apiCallDemo`), {
@@ -348,13 +415,14 @@ function imageFieldName(node: ComfyNode) {
     return "";
 }
 
-function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "") {
+function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string) {
     let patched = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
     if (prompt.trim()) patched = writeRunningHubPrompt(patched, prompt);
     if (size) patched = writeRunningHubSize(patched, size.width, size.height, aspect);
     const tier = canvasResolutionTier(rawSize);
     if (tier) patched = writeRunningHubTier(patched, tier);
     if (seconds?.trim()) patched = writeRunningHubSeconds(patched, seconds.trim());
+    if (isQwenImage21Workflow(workflowId)) patched = applyQwenImage21Settings(patched, imageValues.length, size, aspect, rawSize);
     const list: Array<{ nodeId: string; fieldName: string; fieldValue: string }> = [];
     for (const [nodeId, node] of Object.entries(patched)) {
         const before = workflow[nodeId]?.inputs || {};
@@ -366,7 +434,9 @@ function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues:
             list.push({ nodeId, fieldName, fieldValue: String(value) });
         }
     }
-    const loaders = Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
+    const loaders = isQwenImage21Workflow(workflowId)
+        ? QWEN_IMAGE_21_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
+        : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
     imageValues.forEach((value, index) => {
         const entry = loaders[index];
         if (!entry || !value) return;
@@ -831,8 +901,8 @@ export async function runRunningHubWorkflow(args: {
     }
     const pixels = resolveCanvasPixels(args.size || "", args.media || "image");
     const aspect = canvasAspect(args.size || "");
-    const overrides = workflow ? buildNodeInfoList(workflow, args.prompt, uploaded, pixels, args.seconds, aspect, args.media === "video" ? "" : args.size || "") : [];
-    const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|resolution|megapixel/i.test(item.fieldName));
+    const overrides = workflow ? buildNodeInfoList(workflow, args.prompt, uploaded, pixels, args.seconds, aspect, args.media === "video" ? "" : args.size || "", workflowId) : [];
+    const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|resolution|megapixel|aspect_ratio|switch/i.test(item.fieldName));
     let task: RunningHubTaskView;
     try {
         if (workflow) {

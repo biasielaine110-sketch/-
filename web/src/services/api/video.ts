@@ -47,6 +47,41 @@ function aiHeaders(config: AiConfig, contentType?: string) {
     };
 }
 
+/** Vercel serverless functions reject request bodies over ~4.5MB with HTTP 413. */
+const PROXY_BODY_SAFE_BYTES = 3_400_000;
+
+function estimateBodyBytes(body: unknown): number {
+    if (typeof body === "string") return body.length;
+    if (body instanceof FormData) {
+        let total = 0;
+        body.forEach((value) => {
+            if (typeof value === "string") total += value.length;
+            else if (value instanceof Blob) total += value.size;
+        });
+        return total;
+    }
+    try {
+        return JSON.stringify(body ?? "").length;
+    } catch {
+        return 0;
+    }
+}
+
+/**
+ * Most CN relay sites (New API / hfsyapi / autodl) allow browser CORS, so when a
+ * body would exceed the site-proxy cap, POST the direct URL instead of dying 413.
+ */
+function aiUrlForBody(config: AiConfig, path: string, body: unknown) {
+    const bypass = resolveApiTransport() === "proxy" && estimateBodyBytes(body) > PROXY_BODY_SAFE_BYTES;
+    return { url: bypass ? buildApiUrl(config.baseUrl, path) : aiApiUrl(config, path), bypass };
+}
+
+/** Direct oversized uploads blocked by CORS surface as opaque network errors — explain the real cause. */
+function mapOversizeUploadError(error: unknown, bypassed: boolean): unknown {
+    if (bypassed && axios.isAxiosError(error) && !error.response) return new Error(apiText("payloadTooLarge"));
+    return error;
+}
+
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
     const task = await createVideoGenerationTask(config, prompt, references, options);
     for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -64,15 +99,18 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     const selectedModel = (config.model || config.videoModel).trim();
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
     const script = resolveModelScript(config, selectedModel);
+    // Pre-compress oversized local references before dispatch so no path sends a body
+    // that trips the Vercel ~4.5MB serverless cap (HTTP 413 "请求实体过大").
+    const safeReferences = await compressVideoReferences(references);
     // Metaso MiniMax-H3 must use OpenAI /videos before any AutoDL ComfyUI heuristic.
     if (isMetasoH3Video(requestConfig, selectedModel)) {
         assertVideoConfig(requestConfig, requestConfig.model);
-        return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
+        return createOpenAIVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
     }
     // Built-in AutoDL ComfyUI path owns resolution/ref_audio mapping. Never let a stale
     // channel script omit ref_audio_0 and surface "模型调用脚本执行失败".
     if (shouldUseAutodlComfyVideoBuiltin(selectedModel, requestConfig.baseUrl, script)) {
-        return createAutodlComfyVideoTask(requestConfig, selectedModel, prompt, references, options);
+        return createAutodlComfyVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
     }
     if (runningHubOrigin(requestConfig.baseUrl)) {
         const channel = resolveModelChannel(config, selectedModel);
@@ -84,15 +122,15 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
             siblingModels: channel.models,
         });
         if (!workflowId) throw new Error(apiText("runningHubWorkflowFetchFailed", { model: requestConfig.model || modelOptionName(selectedModel) || "空" }));
-        return createRunningHubVideoTask(requestConfig, workflowId, script, prompt, references, options);
+        return createRunningHubVideoTask(requestConfig, workflowId, script, prompt, safeReferences, options);
     }
     // Native ComfyUI cloud/server: model script = Export Workflow (API) JSON.
     if (shouldUseNativeComfyUi(requestConfig.baseUrl, selectedModel, script) || parseComfyApiWorkflow(script)) {
-        return createNativeComfyUiVideoTask(requestConfig, selectedModel, script, prompt, references, options);
+        return createNativeComfyUiVideoTask(requestConfig, selectedModel, script, prompt, safeReferences, options);
     }
-    if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, references, options);
+    if (script) return createPluginVideoTask(requestConfig, selectedModel, script, prompt, safeReferences, options);
     assertVideoConfig(requestConfig, requestConfig.model);
-    return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
+    return createOpenAIVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
 }
 
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -103,6 +141,43 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     const requestConfig = resolveModelRequestConfig(config, task.model);
     assertVideoConfig(requestConfig, requestConfig.model);
     return pollOpenAIVideoTask(requestConfig, task, options);
+}
+
+/**
+ * Pre-compress oversized local reference images before any video path sends them.
+ * Remote public URLs are left untouched (they don't occupy request-body bytes). Local
+ * data URLs / blob images larger than ~700KB are re-encoded to a bounded JPEG so the
+ * final request body stays well under the Vercel ~4.5MB serverless cap (413).
+ */
+async function compressVideoReferences(references: ReferenceImage[]): Promise<ReferenceImage[]> {
+    if (!references.length) return references;
+    const count = references.length;
+    const maxBytes = Math.min(650_000, Math.floor(2_200_000 / count));
+    const out: ReferenceImage[] = [];
+    for (const image of references) {
+        try {
+            // Keep existing remote URLs as-is — they are referenced by URL, not inlined.
+            const existingRemote = [image.url, image.dataUrl].map((v) => String(v || "").trim()).find((v) => isPublicHttpUrl(v) && !/^blob:/i.test(v));
+            if (existingRemote) {
+                out.push(image);
+                continue;
+            }
+            const dataUrl = await imageToDataUrl(image);
+            if (!dataUrl?.startsWith("data:image/")) {
+                out.push(image);
+                continue;
+            }
+            if (getDataUrlByteSize(dataUrl) <= 700_000) {
+                out.push(image);
+                continue;
+            }
+            const compressed = await compressReferenceDataUrl(dataUrl, count, { maxEdge: 1280, maxBytes });
+            out.push({ ...image, dataUrl: compressed });
+        } catch {
+            out.push(image);
+        }
+    }
+    return out;
 }
 
 async function createPluginVideoTask(config: AiConfig, model: string, script: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
@@ -339,12 +414,12 @@ async function createAutodlComfyVideoTask(config: AiConfig, model: string, promp
             body[`ref_audio_${index}`] = value;
         });
     }
-    assertProxyBodyFits(body);
+    const { url: submitUrl, bypass: submitBypass } = aiUrlForBody(config, `/comfyui/comfyui_workflow/${encodeURIComponent(workflowId)}`, body);
 
     try {
         const submit = (
             await axios.post<ApiEnvelope<{ task_id?: string; status?: string; message?: string }>>(
-                aiApiUrl(config, `/comfyui/comfyui_workflow/${encodeURIComponent(workflowId)}`),
+                submitUrl,
                 body,
                 { headers, signal: options?.signal },
             )
@@ -392,7 +467,7 @@ async function createAutodlComfyVideoTask(config: AiConfig, model: string, promp
         if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
             throw new Error(apiText("autodlComfyAuthFailed"));
         }
-        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+        throw new Error(readAxiosError(mapOversizeUploadError(error, submitBypass), apiText("videoTaskCreateFailed")));
     }
 }
 
@@ -430,21 +505,33 @@ export async function uploadProviderMediaFile(config: AiConfig, blob: Blob, file
     if (!requestConfig.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
     if (!requestConfig.apiKey.trim()) throw new Error(apiText("apiKeyRequired"));
 
+    let payload = blob;
+    // Shrink oversized image references so the upload fits the site-proxy body budget.
+    if (payload.type.startsWith("image/") && payload.size > 2_800_000) {
+        try {
+            const compressed = await compressReferenceDataUrl(await blobToDataUrl(payload));
+            if (compressed.startsWith("data:")) payload = await (await fetch(compressed)).blob();
+        } catch {
+            // Keep the original blob; the sized-URL fallback below still applies.
+        }
+    }
+
     const form = new FormData();
-    form.append("file", blob, filename);
+    form.append("file", payload, filename);
+    const { url: uploadUrl, bypass } = aiUrlForBody(requestConfig, "/files/upload", form);
     try {
         const response = await axios.post<{ url?: string; data?: { url?: string } | null; code?: number | string; msg?: string; message?: string }>(
-            aiApiUrl(requestConfig, "/files/upload"),
+            uploadUrl,
             form,
             { headers: { Authorization: `Bearer ${requestConfig.apiKey}` }, signal: options?.signal },
         );
-        const url = response.data?.url || (response.data?.data && typeof response.data.data === "object" ? response.data.data.url : "") || "";
-        if (!url || !/^https?:\/\//i.test(url)) {
+        const hosted = response.data?.url || (response.data?.data && typeof response.data.data === "object" ? response.data.data.url : "") || "";
+        if (!hosted || !/^https?:\/\//i.test(hosted)) {
             throw new Error(readApiErrorMessage(response.data) || apiText("providerImageUploadFailed"));
         }
-        return url;
+        return hosted;
     } catch (error) {
-        throw new Error(readAxiosError(error, apiText("providerImageUploadFailed")));
+        throw new Error(readAxiosError(mapOversizeUploadError(error, bypass), apiText("providerImageUploadFailed")));
     }
 }
 
@@ -578,15 +665,23 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
         const size = normalizeVideoSize(config.size);
         if (size) body.append("size", size);
     }
-    const files = await Promise.all(references.slice(0, 7).map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
+    const files = await Promise.all(
+        references.slice(0, 7).map(async (image) => {
+            const rawDataUrl = await imageToDataUrl(image);
+            // Keep the multipart body under the site-proxy cap for large photos.
+            const dataUrl = rawDataUrl.startsWith("data:image/") ? await compressReferenceDataUrl(rawDataUrl, Math.max(1, references.length)) : rawDataUrl;
+            return dataUrlToFile({ ...image, dataUrl });
+        }),
+    );
     // OpenAI / New API expect repeated `input_reference`, not `input_reference[]`.
     files.forEach((file) => body.append("input_reference", file));
+    const { url: postUrl, bypass } = aiUrlForBody(config, "/videos", body);
     try {
-        const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
+        const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(postUrl, body, { headers: aiHeaders(config), signal: options?.signal })).data);
         if (!created.id) throw new Error(apiText("noVideoTaskId"));
         return { id: created.id, provider: "openai", model };
     } catch (error) {
-        throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+        throw new Error(readAxiosError(mapOversizeUploadError(error, bypass), apiText("videoTaskCreateFailed")));
     }
 }
 
@@ -620,7 +715,12 @@ async function createMetasoH3VideoTask(config: AiConfig, model: string, prompt: 
             body.append("seconds", String(seconds));
             body.append("size", size);
             body.append("input_reference", file);
-            const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
+            const { url: postUrl, bypass } = aiUrlForBody(config, "/videos", body);
+            const created = unwrapVideoResponse(
+                (await axios.post<ApiVideoResponse>(postUrl, body, { headers: aiHeaders(config), signal: options?.signal }).catch((error: unknown) => {
+                    throw mapOversizeUploadError(error, bypass);
+                })).data,
+            );
             if (!created.id) throw new Error(apiText("noVideoTaskId"));
             return { id: created.id, provider: "openai", model };
         });
@@ -661,9 +761,12 @@ async function postMetasoH3VideoJson(
         size,
         input_reference: { image_url: imageUrl },
     };
-    if (imageUrl.startsWith("data:")) assertProxyBodyFits(payload);
+    // Inline base64 can exceed the site-proxy body cap — bypass to direct POST when it does.
+    const { url: postUrl, bypass } = aiUrlForBody(config, "/videos", payload);
     const created = unwrapVideoResponse(
-        (await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data,
+        (await axios.post<ApiVideoResponse>(postUrl, payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal }).catch((error: unknown) => {
+            throw mapOversizeUploadError(error, bypass);
+        })).data,
     );
     if (!created.id) throw new Error(apiText("noVideoTaskId"));
     return { id: created.id, provider: "openai", model };
@@ -806,14 +909,15 @@ async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, pr
 
     let lastError: unknown;
     for (const payload of attempts) {
+        const { url: postUrl, bypass } = aiUrlForBody(config, "/videos", payload);
         try {
             const created = unwrapVideoResponse(
-                (await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data,
+                (await axios.post<ApiVideoResponse>(postUrl, payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data,
             );
             if (!created.id) throw new Error(apiText("noVideoTaskId"));
             return { id: created.id, provider: "openai", model };
         } catch (error) {
-            lastError = error;
+            lastError = mapOversizeUploadError(error, bypass);
             if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
             // Only retry alternate shapes on 400 validation errors.
             if (!axios.isAxiosError(error) || error.response?.status !== 400) break;
@@ -822,25 +926,28 @@ async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, pr
 
     // Last resort: multipart (CometAPI-style) when the relay rejects JSON shapes.
     if (imageUrls.length || references.length) {
-        try {
-            const body = new FormData();
-            body.append("model", modelName);
-            body.append("prompt", prompt);
-            body.append("seconds", seconds);
-            body.append("size", size);
-            for (const url of imageUrls.slice(0, 9)) body.append("images", url);
-            if (!imageUrls.length) {
-                for (const image of references.slice(0, 9)) {
-                    const dataUrl = await imageToDataUrl(image);
-                    if (!dataUrl?.startsWith("data:image/")) continue;
-                    body.append("input_reference", await dataUrlToFile({ ...image, dataUrl }));
-                }
+        const body = new FormData();
+        body.append("model", modelName);
+        body.append("prompt", prompt);
+        body.append("seconds", seconds);
+        body.append("size", size);
+        for (const imageUrl of imageUrls.slice(0, 9)) body.append("images", imageUrl);
+        if (!imageUrls.length) {
+            for (const image of references.slice(0, 9)) {
+                const rawDataUrl = await imageToDataUrl(image);
+                if (!rawDataUrl?.startsWith("data:image/")) continue;
+                // Compressed so the multipart body fits the site-proxy cap.
+                const dataUrl = await compressReferenceDataUrl(rawDataUrl, Math.max(1, references.length));
+                body.append("input_reference", await dataUrlToFile({ ...image, dataUrl }));
             }
-            const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), body, { headers: aiHeaders(config), signal: options?.signal })).data);
+        }
+        const { url: postUrl, bypass } = aiUrlForBody(config, "/videos", body);
+        try {
+            const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(postUrl, body, { headers: aiHeaders(config), signal: options?.signal })).data);
             if (!created.id) throw new Error(apiText("noVideoTaskId"));
             return { id: created.id, provider: "openai", model };
         } catch (error) {
-            lastError = error;
+            lastError = mapOversizeUploadError(error, bypass);
         }
     }
 
@@ -939,28 +1046,6 @@ function blobToDataUrl(blob: Blob): Promise<string> {
         reader.onerror = () => reject(reader.error || new Error("Failed to read audio"));
         reader.readAsDataURL(blob);
     });
-}
-
-/** Fail fast with a clear 413 hint before hitting the site proxy body cap. */
-function assertProxyBodyFits(body: Record<string, unknown>) {
-    if (resolveApiTransport() !== "proxy") return;
-    let encoded = "";
-    try {
-        encoded = JSON.stringify(body);
-    } catch {
-        return;
-    }
-    // Vercel Hobby request body limit is ~4.5MB; leave headroom for headers/encoding.
-    if (encoded.length > 3_800_000) {
-        throw new Error(apiText("payloadTooLarge"));
-    }
-    const inlineBytes = Object.values(body).reduce<number>((sum, value) => {
-        if (typeof value !== "string" || !value.startsWith("data:")) return sum;
-        return sum + getDataUrlByteSize(value);
-    }, 0);
-    if (inlineBytes > 3_200_000) {
-        throw new Error(apiText("payloadTooLarge"));
-    }
 }
 
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {

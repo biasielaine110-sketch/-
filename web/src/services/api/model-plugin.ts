@@ -422,7 +422,7 @@ audios.slice(0, 3).forEach((item, index) => {
   const url = String(item || "").trim();
   if (url) body[\`ref_audio_\${index}\`] = url;
 });
-if (!body.ref_audio_0 && /z09\\d{2}|image[_-]?audio|audio[_-]?to[_-]?video|(?:^|[_-])zm(?:[_-]|$)/i.test(workflowId)) {
+if (!body.ref_audio_0 && /z09\\d*|image[_-]?audio|audio[_-]?to[_-]?video|(?:^|[_-])zm(?:[_-]|$)/i.test(workflowId)) {
   body.ref_audio_0 = "https://codewithgpu.ks3-cn-beijing.ksyuncs.com/comfyui_api/blank/blank.wav";
 }
 const submit = await request({

@@ -14,7 +14,7 @@ import {
     normalizeAutodlH3Resolution,
 } from "@/lib/autodl-h3-comfy";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import { type AiConfig } from "@/stores/use-config-store";
+import { resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 
 const resolutionOptions = [
     { value: "720", label: "720p" },
@@ -47,7 +47,7 @@ type VideoSettingsPanelProps = {
 export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
     const model = config.model || config.videoModel || "";
-    const h3Comfy = isAutodlH3ComfyVideoModel(model, config.baseUrl);
+    const h3Comfy = isAutodlH3ComfyVideoModel(model, resolveModelRequestConfig(config, model).baseUrl);
 
     if (h3Comfy) {
         const resolutionChoices = autodlH3ResolutionOptions(model);
@@ -159,7 +159,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
 
 export function videoSettingsSummary(config: AiConfig) {
     const model = config.model || config.videoModel || "";
-    if (isAutodlH3ComfyVideoModel(model, config.baseUrl)) {
+    if (isAutodlH3ComfyVideoModel(model, resolveModelRequestConfig(config, model).baseUrl)) {
         return `${autodlH3ResolutionLabel(config.vquality, model)} · ${normalizeAutodlH3Duration(config.videoSeconds, model)}s`;
     }
     return `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;

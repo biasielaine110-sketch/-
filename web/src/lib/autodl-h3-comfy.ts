@@ -68,7 +68,7 @@ export function isAutodlH3ComfyVideoModel(model: string, baseUrl = ""): boolean 
     // Bare "minimax-h3" / "minimax_h3" is Metaso's product id; AutoDL workflows always have a suffix
     // (z0903, lightx2v, zm_u24, image_audio, …).
     if (/^minimax[_-]?h3$/i.test(name)) return false;
-    if (/minimax[_-]?h3|h3comfyui|h3[_-]?comfy|lightx2v|h3_image_audio|image_audio_to_video|z09\d{2}|(?:^|[_-])zm(?:[_-]|$)/i.test(name)) return true;
+    if (/minimax[_-]?h3|h3comfyui|h3[_-]?comfy|lightx2v|h3_image_audio|image_audio_to_video|z09\d*|(?:^|[_-])zm(?:[_-]|$)/i.test(name)) return true;
     if (/autodl\.art/i.test(baseUrl) && /(^|[_-])h3([_-]|$)|minimax|comfyui/i.test(name)) return true;
     return false;
 }
@@ -90,7 +90,7 @@ export function shouldUseAutodlComfyVideoBuiltin(model: string, baseUrl = "", sc
 
 /** Workflows whose resolution enum embeds pixel sizes and uses 1088p (not 1080p). */
 export function isAutodlH3Z09Workflow(model = ""): boolean {
-    return /z09\d{2}/i.test(workflowId(model));
+    return /z09\d*/i.test(workflowId(model));
 }
 
 /** zm_* 升级画质类：仅 480/768（含 1:1）。 */
