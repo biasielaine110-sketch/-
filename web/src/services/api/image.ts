@@ -488,11 +488,16 @@ function resolveApimartMaxImages(model: string) {
 
 function resolveApimartResolution(model: string, quality: string) {
     const normalized = normalizeQuality(quality);
-    // Seedream: 1K / 1.5K / 2K only — 3K/4K → 400.
+    // Seedream on APIMart supports 2K / 3K / 4K only (1K is rejected); older seedream-4 is 1K/1.5K/2K.
     if (isSeedreamModel(model)) {
-        if (normalized === "low" || normalized === "standard") return "1K";
-        if (normalized === "medium" || normalized === "hd") return "1.5K";
-        return "2K";
+        if (/seedream-?4/i.test(model)) {
+            if (normalized === "low" || normalized === "standard") return "1K";
+            if (normalized === "medium" || normalized === "hd") return "1.5K";
+            return "2K";
+        }
+        if (normalized === "low" || normalized === "standard") return "2K";
+        if (normalized === "high" || normalized === "hd") return "4K";
+        return "3K";
     }
     // Qwen / Gemini family: uppercase K.
     if (/qwen/i.test(model) || isGeminiNativeImageModel(model) || isImagenModel(model)) {
@@ -722,13 +727,21 @@ function isApimartGptImage25Model(model: string) {
 }
 
 /**
- * APIMart Nano-Banana-2-Lite (incl. relay suffixes like -ext). Unlike the regular Nano-Banana
- * (Gemini 3 Pro Image), the -2-Lite tier maps to Gemini 3.1 Flash Lite Image and is served ONLY
- * via /v1/chat/completions (billed per token); it 400s on /images/edits and has no /images/generations
- * route. Its response is raw base64 in choices[0].message.content (no data: prefix).
+ * APIMart Nano-Banana-2-Lite (incl. relay suffixes like -ext). Maps to Gemini 3.1 Flash Lite Image,
+ * served via POST /v1/images/generations (async task) — NOT /chat/completions. Fixed at 1K.
  */
 function isApimartNanoBananaLiteModel(model: string) {
     return /nano-banana-2-lite/i.test(model.trim());
+}
+
+/**
+ * APIMart Nano-Banana-2 (non-lite, incl. -ext). Maps to gemini-3.1-flash-image-preview, served via
+ * the same async /images/generations task with image_urls (string array) + size aspect-ratio +
+ * top-level resolution (0.5K/1K/2K/4K). The model name has no "gemini" token, so the generic
+ * isGeminiNativeImageModel() predicate never matches it — handle the whole nano-banana family here.
+ */
+function isApimartNanoBananaModel(model: string) {
+    return /nano-banana/i.test(model.trim());
 }
 
 /**
@@ -973,42 +986,36 @@ async function requestChatCompletionsImages(config: AiConfig, prompt: string, re
 }
 
 /**
- * APIMart Nano-Banana-2-Lite: chat-only model. References go in messages as `image_url` (base64
- * data URL is accepted). The reply carries the image as raw base64 in choices[0].message.content
- * (no data: prefix) — normalise it into a data URL ourselves.
+ * APIMart Nano-Banana family (gemini-3.1-flash-image-preview / flash-lite-image and -ext aliases):
+ * async task on POST /v1/images/generations (NOT /chat/completions, NOT /images/edits). References
+ * go in `image_urls` as a string array (full URL or a complete `data:image/...;base64,` Data URI).
+ * Lite is fixed at 1K; non-lite supports 0.5K/1K/2K/4K. Submission returns { code:200,
+ * data:[{ status:"submitted", task_id }] }; the shared poller reads /tasks/{id}.
  */
-async function requestApimartNanoBananaLite(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
-    const text = withSystemPrompt(config, prompt);
-    const content: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = [{ type: "text", text }];
+async function requestApimartNanoBanana(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    const lite = isApimartNanoBananaLiteModel(config.model);
+    const body: Record<string, unknown> = {
+        model: config.model,
+        prompt: withSystemPrompt(config, prompt),
+        size: resolveApimartSize(config.model, config.size),
+        resolution: lite ? "1K" : resolveApimartResolution(config.model, config.quality),
+        n: 1,
+    };
+    if (!lite && !body.resolution) body.resolution = "1K";
     if (references.length) {
-        const refs = await Promise.all(references.map((image) => prepareReferenceDataUrl(image, Math.max(1, references.length))));
-        for (const url of refs) content.push({ type: "image_url", image_url: { url } });
-    }
-    const response = await postImageJson<unknown>(
-        config,
-        "/chat/completions",
-        { model: config.model, messages: [{ role: "user", content }], stream: false },
-        options,
-    );
-    const choices = (response.data as { choices?: Array<{ message?: { content?: unknown } }> })?.choices || [];
-    const images: GeneratedImageResult[] = [];
-    for (const choice of choices) {
-        const value = choice.message?.content;
-        if (typeof value !== "string") continue;
-        const raw = value.trim();
-        if (!raw) continue;
-        if (raw.startsWith("data:image/")) {
-            images.push({ id: nanoid(), dataUrl: raw.replace(/\s/g, "") });
-            continue;
+        // image_urls is a plain string array; base64 Data URIs are accepted (max 14).
+        const urls: string[] = [];
+        for (const image of references.slice(0, 14)) {
+            const dataUrl = await prepareReferenceDataUrl(image, Math.max(1, references.length));
+            urls.push(dataUrl);
         }
-        // Raw base64 output (no data: prefix) — sniff the image type and wrap it.
-        if (/^[a-z0-9+/=\s]+$/i.test(raw) && raw.length > 128) {
-            const mime = /^\/9j\//.test(raw) ? "image/jpeg" : /^iVBOR/.test(raw) ? "image/png" : "image/png";
-            images.push({ id: nanoid(), dataUrl: `data:${mime};base64,${raw.replace(/\s/g, "")}` });
-        }
+        if (!urls.length) throw new Error(apiText("referenceImageReadFailed"));
+        body.image_urls = urls;
+        // Image-to-image: let the service derive dimensions from the references.
+        delete body.size;
     }
-    if (!images.length) throw new Error(apiText("requestFailed"));
-    return images;
+    const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
+    return resolveImageApiResponse(config, response.data, options);
 }
 
 /** Map "quality + ratio" to an explicit pixel dimension like "3840x2160". */
@@ -2639,11 +2646,12 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
     }
-    // APIMart Nano-Banana-2-Lite is chat-only (maps to Gemini 3.1 Flash Lite Image); /images/generations
-    // and /images/edits both reject it. Route to /chat/completions directly.
-    if (isApimartBaseUrl(requestConfig.baseUrl) && isApimartNanoBananaLiteModel(requestConfig.model)) {
+    // APIMart Nano-Banana family (nano-banana-2 / -2-ext / -2-lite / -2-lite-ext): async task on
+    // /images/generations. Their names carry no "gemini" token, so the generic Gemini predicate
+    // never matches them — route the whole family here.
+    if (isApimartBaseUrl(requestConfig.baseUrl) && isApimartNanoBananaModel(requestConfig.model)) {
         try {
-            return await requestApimartNanoBananaLite(requestConfig, prompt, [], options);
+            return await requestApimartNanoBanana(requestConfig, prompt, [], options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
@@ -2761,11 +2769,22 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         }
     }
 
-    // APIMart Nano-Banana-2-Lite is chat-only; references go in messages as image_url (base64 is
-    // accepted) and the reply is raw base64 in content. Never touch /images/edits or /images/generations.
-    if (isApimartBaseUrl(requestConfig.baseUrl) && isApimartNanoBananaLiteModel(requestConfig.model) && !mask) {
+    // APIMart Nano-Banana family (nano-banana-2 / -2-ext / -2-lite / -2-lite-ext): async task on
+    // /images/generations with image_urls (string array). Never touch /images/edits or /chat/completions.
+    if (isApimartBaseUrl(requestConfig.baseUrl) && isApimartNanoBananaModel(requestConfig.model) && !mask) {
         try {
-            return await requestApimartNanoBananaLite(requestConfig, requestPrompt, references, options);
+            return await requestApimartNanoBanana(requestConfig, requestPrompt, references, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+
+    // APIMart Seedream uses the same async /images/generations task (size aspect-ratio + top-level
+    // resolution 2K/3K/4K + image_urls string array). The generic Volcengine branch below would send
+    // Volcengine's WxH pixel `size` + base64 `image`, which APIMart rejects.
+    if (isApimartBaseUrl(requestConfig.baseUrl) && isSeedreamModel(requestConfig.model) && !mask) {
+        try {
+            return await requestApimartGptImage(requestConfig, requestPrompt, references, n, options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
