@@ -67,6 +67,8 @@ export function CanvasChatContent({
     const syncedConnectedRef = useRef("");
     const restoredScrollNodeRef = useRef<string | null>(null);
     const shouldFollowTailRef = useRef(true);
+    const lastScrollTopRef = useRef(0);
+    const restoreFramesRef = useRef<number[]>([]);
     const messages = (node.metadata?.messages || []) as CanvasAssistantMessage[];
     const loading = node.metadata?.status === "loading";
     const sendOptions = resolveChatSendOptions(node.metadata);
@@ -144,29 +146,53 @@ export function CanvasChatContent({
             savedTop = 0;
         }
 
+        // Restore across several frames: message content (and any images) finishes layout
+        // asynchronously after remount, so a single rAF often clamps scrollTop before the real
+        // scrollHeight is known — which is why the position looked "reset to the top".
         const restore = () => {
-            list.scrollTop = Math.min(savedTop, Math.max(0, list.scrollHeight - list.clientHeight));
-            shouldFollowTailRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+            if (!list.isConnected) return;
+            const maxTop = Math.max(0, list.scrollHeight - list.clientHeight);
+            // Honour the saved position; only follow the tail on new messages when the user was
+            // already parked at the bottom (or there was no saved position yet).
+            const target = Math.min(savedTop, maxTop);
+            list.scrollTop = target;
+            shouldFollowTailRef.current = maxTop - target < 24;
+            lastScrollTopRef.current = list.scrollTop;
         };
         restore();
-        const frame = window.requestAnimationFrame(restore);
-        return () => window.cancelAnimationFrame(frame);
+        for (let frame = 1; frame <= 6; frame += 1) {
+            restoreFramesRef.current.push(window.requestAnimationFrame(restore));
+        }
+        const settle = window.setTimeout(restore, 300);
+        return () => {
+            restoreFramesRef.current.forEach((frame) => window.cancelAnimationFrame(frame));
+            restoreFramesRef.current = [];
+            window.clearTimeout(settle);
+        };
     }, [node.id]);
 
     useEffect(() => {
         const list = listRef.current;
         if (!list) return;
         const save = () => {
-            // Virtualized nodes are display:none'd when scrolled off-canvas; the browser then
-            // reports scrollTop 0 (firing a scroll event) which would overwrite the stored
-            // position with 0 — the "reset to the top after leaving the viewport / restart"
-            // bug. Persist only while the list is actually laid out and visible.
-            if (!list.isConnected || !list.offsetParent) return;
-            shouldFollowTailRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+            const top = list.scrollTop;
+            // Nodes are unmounted entirely when scrolled off-canvas (visibleNodes filter), and
+            // the browser fires a final scroll event with a clamped/zero scrollTop during that
+            // teardown. Persist only while the list is genuinely visible on screen — use the
+            // bounding rect, which is reliable regardless of whether hiding is done via
+            // display:none or a viewport cull that unmounts the node.
+            const rect = list.getBoundingClientRect();
+            const onScreen = list.isConnected && rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight && rect.right > 0 && rect.left < window.innerWidth;
+            if (!onScreen) return;
+            // Skip the teardown scroll event that resets scrollTop to 0 while content is scrollable.
+            const maxTop = list.scrollHeight - list.clientHeight;
+            if (top === 0 && maxTop > 0 && lastScrollTopRef.current > 0) return;
+            lastScrollTopRef.current = top;
+            shouldFollowTailRef.current = maxTop - top < 24;
             try {
                 const stored = window.localStorage.getItem(CHAT_SCROLL_POSITION_KEY);
                 const positions = stored ? (JSON.parse(stored) as Record<string, number>) : {};
-                positions[node.id] = list.scrollTop;
+                positions[node.id] = top;
                 window.localStorage.setItem(CHAT_SCROLL_POSITION_KEY, JSON.stringify(positions));
             } catch {
                 // Ignore storage failures; scrolling should remain fully functional in private mode.
@@ -174,7 +200,6 @@ export function CanvasChatContent({
         };
         list.addEventListener("scroll", save, { passive: true });
         return () => {
-            save();
             list.removeEventListener("scroll", save);
         };
     }, [node.id]);
