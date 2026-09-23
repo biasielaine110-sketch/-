@@ -16,6 +16,7 @@ import { CONFIG_STORE_KEY, type ApiTransport } from "@/stores/use-config-store";
  */
 const DIRECT_CORS_HOSTS = [
     "autodl.art",
+    "runninghub.cn",
 ];
 
 function isDirectCorsHost(origin: string): boolean {

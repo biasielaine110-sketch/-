@@ -2660,7 +2660,10 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     const files = await Promise.all(
         references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await prepareReferenceDataUrl(image, refCount) })),
     );
-    files.forEach((file) => formData.append("image", file));
+    // Multi-image edits follow OpenAI's official `image[]` convention — several strict
+    // relays (APIMart etc.) answer 400 on repeated bare "image" keys.
+    const imageField = files.length > 1 ? "image[]" : "image";
+    files.forEach((file) => formData.append(imageField, file));
     if (mask) {
         const maskDataUrl = await prepareReferenceDataUrl(mask, refCount, { preserveAlpha: true });
         formData.set("mask", dataUrlToFile({ ...mask, dataUrl: maskDataUrl }));
@@ -2682,6 +2685,17 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         // Relays without /images/edits (e.g. some New API hosts): retry img2img via /images/generations + image[],
         // then /chat/completions when the Images API itself is not registered.
         if (!mask && references.length && isImageEditsEndpointMissing(error, message)) {
+            // APIMart silently ignores the `image` field on /images/generations — the user pays
+            // for a reference-free generation. Its gpt-image models accept refs on the chat
+            // endpoint (image_url), so fall back there directly.
+            if (isApimartBaseUrl(requestConfig.baseUrl)) {
+                try {
+                    return await requestChatCompletionsImages(requestConfig, requestPrompt, references, options);
+                } catch (chatError) {
+                    const chatMessage = readAxiosError(chatError, message);
+                    throw new Error(normalizeImageApiErrorMessage(chatMessage === apiText("requestFailed") ? message : chatMessage, requestConfig.model));
+                }
+            }
             try {
                 return await requestOpenAiCompatImageToImageViaGenerations(requestConfig, requestPrompt, references, n, options);
             } catch (fallbackError) {
