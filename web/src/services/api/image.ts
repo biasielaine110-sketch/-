@@ -605,8 +605,12 @@ function isHfsyApiBaseUrl(baseUrl: string) {
     return /hfsyapi\.cn/i.test(baseUrl.trim());
 }
 
+function isToapisBaseUrl(baseUrl: string) {
+    return /toapis\.com/i.test(baseUrl.trim());
+}
+
 function isReferenceBase64Unsupported(message: string) {
-    return /参考图不支持\s*base64|does\s*not\s*support\s*base64|base64[^\n]{0,40}not\s*supported|invalid_request[^\n]{0,40}base64/i.test(message);
+    return /参考图不支持\s*base64|does\s*not\s*support\s*base64|base64[^\n]{0,40}not\s*supported|invalid_request[^\n]{0,40}base64|base64[^\n]{0,40}(not\s*allowed|is\s*not\s*allowed|不允许|不支持)/i.test(message);
 }
 
 /**
@@ -2125,14 +2129,14 @@ async function requestStreamingResponse(config: AiConfig, body: Record<string, u
     return { ...result, content: state.text || result.content };
 }
 
-function toGeminiBody(config: AiConfig, messages: ResponseInputMessage[], extra?: Record<string, unknown>) {
+async function toGeminiBody(config: AiConfig, messages: ResponseInputMessage[], extra?: Record<string, unknown>) {
     const systemText = [
         config.systemPrompt.trim(),
         ...messages.flatMap((message) => (!("type" in message) && message.role === "system" ? [geminiTextContent(message.content)] : [])),
     ]
         .filter(Boolean)
         .join("\n\n");
-    const contents = toGeminiContents(messages.filter((message) => ("type" in message ? true : message.role !== "system")));
+    const contents = await toGeminiContents(messages.filter((message) => ("type" in message ? true : message.role !== "system")), config.baseUrl);
     return {
         contents,
         ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
@@ -2140,29 +2144,50 @@ function toGeminiBody(config: AiConfig, messages: ResponseInputMessage[], extra?
     };
 }
 
-function toGeminiContents(messages: ResponseInputMessage[]): GeminiContent[] {
+async function toGeminiContents(messages: ResponseInputMessage[], baseUrl?: string): Promise<GeminiContent[]> {
     const callNameById = new Map<string, string>();
-    return messages.flatMap((message): GeminiContent[] => {
+    const usePublicUrls = baseUrl ? prefersGeminiPublicImageUrls(baseUrl) : false;
+    const contents: GeminiContent[] = [];
+    for (const message of messages) {
         if ("type" in message) {
             callNameById.set(message.call_id, message.name);
-            return [{ role: "model", parts: [{ functionCall: { id: message.call_id, name: message.name, args: jsonObject(message.arguments) }, ...(message.thoughtSignature ? { thoughtSignature: message.thoughtSignature } : {}) }] }];
+            contents.push({ role: "model", parts: [{ functionCall: { id: message.call_id, name: message.name, args: jsonObject(message.arguments) }, ...(message.thoughtSignature ? { thoughtSignature: message.thoughtSignature } : {}) }] });
+            continue;
         }
         if (message.role === "tool") {
             const name = callNameById.get(message.tool_call_id) || "tool_result";
-            return [{ role: "user", parts: [{ functionResponse: { id: message.tool_call_id, name, response: { result: jsonValue(message.content) } } }] }];
+            contents.push({ role: "user", parts: [{ functionResponse: { id: message.tool_call_id, name, response: { result: jsonValue(message.content) } } }] });
+            continue;
         }
-        return [{ role: message.role === "assistant" ? "model" : "user", parts: toGeminiParts(message.content) }];
-    });
+        contents.push({ role: message.role === "assistant" ? "model" : "user", parts: await toGeminiParts(message.content, usePublicUrls) });
+    }
+    return contents;
 }
 
-function toGeminiParts(content: ResponseMessageContent): GeminiPart[] {
+async function toGeminiParts(content: ResponseMessageContent, usePublicUrls: boolean): Promise<GeminiPart[]> {
     if (!Array.isArray(content)) return [{ text: String(content || "") }];
-    return content.map((item) => (item.type === "text" ? { text: item.text } : toGeminiImagePart(item.image_url.url)));
+    const parts: GeminiPart[] = [];
+    for (const item of content) {
+        if (item.type === "text") {
+            parts.push({ text: item.text });
+            continue;
+        }
+        parts.push(await toGeminiImagePart(item.image_url.url, usePublicUrls));
+    }
+    return parts;
 }
 
-function toGeminiImagePart(url: string): GeminiPart {
+async function toGeminiImagePart(url: string, usePublicUrls = false): Promise<GeminiPart> {
     const match = url.match(/^data:([^;,]+);base64,(.+)$/);
-    if (match) return { inlineData: { mimeType: match[1], data: match[2] } };
+    if (match) {
+        // Some CN relays (hfsyapi, toapis) reject base64 inline images outright — re-host the
+        // local bytes on a temporary public host so the model can fetch them as a fileUri.
+        if (usePublicUrls) {
+            const publicUrl = await uploadTemporaryPublicImageFromDataUrl(url);
+            if (publicUrl) return { fileData: { fileUri: publicUrl, mimeType: match[1] } };
+        }
+        return { inlineData: { mimeType: match[1], data: match[2] } };
+    }
     return { fileData: { fileUri: url, mimeType: guessImageMimeType(url) } };
 }
 
@@ -2174,9 +2199,9 @@ function guessImageMimeType(url: string) {
     return "image/png";
 }
 
-/** Official Google accepts inline base64; hfsyapi Gemini img2img only accepts public fileUri URLs. */
+/** Official Google accepts inline base64; hfsyapi / toapis Gemini only accept public fileUri URLs (reject base64 inline images). */
 function prefersGeminiPublicImageUrls(baseUrl: string) {
-    return isHfsyApiBaseUrl(baseUrl);
+    return isHfsyApiBaseUrl(baseUrl) || isToapisBaseUrl(baseUrl);
 }
 
 function geminiTextContent(content: ResponseMessageContent) {
@@ -2354,12 +2379,12 @@ async function requestGeminiImagesOnce(config: AiConfig, prompt: string, referen
         if (!references.length) return parts;
         if (usePublicUrls) {
             const urls = await resolveReferenceImageUrls(config, references, options);
-            for (const url of urls) parts.push(toGeminiImagePart(url));
+            for (const url of urls) parts.push(await toGeminiImagePart(url, true));
             return parts;
         }
         const count = Math.max(1, references.length);
         for (const image of references) {
-            parts.push(toGeminiImagePart(await prepareReferenceDataUrl(image, count)));
+            parts.push(await toGeminiImagePart(await prepareReferenceDataUrl(image, count)));
         }
         return parts;
     };
@@ -2369,8 +2394,8 @@ async function requestGeminiImagesOnce(config: AiConfig, prompt: string, referen
         return await postGeminiImageParts(config, prompt, await buildParts(preferPublic), options);
     } catch (error) {
         const message = readAxiosError(error, apiText("requestFailed"));
-        // Only retry public fileUri for hfsyapi when it rejects inline base64.
-        if (!references.length || !isHfsyApiBaseUrl(config.baseUrl) || !isReferenceBase64Unsupported(message) || preferPublic) {
+        // Retry public fileUri when a base64-averse relay (hfsyapi, toapis) rejects inline base64.
+        if (!references.length || !prefersGeminiPublicImageUrls(config.baseUrl) || !isReferenceBase64Unsupported(message) || preferPublic) {
             throw error instanceof Error ? error : new Error(message);
         }
         return await postGeminiImageParts(config, prompt, await buildParts(true), options);
@@ -2381,7 +2406,7 @@ async function postGeminiImageParts(config: AiConfig, prompt: string, parts: Gem
     const response = await axios.post<GeminiPayload>(
         geminiApiUrl(config, "generateContent"),
         {
-            ...toGeminiBody(config, [{ role: "user", content: prompt }], { generationConfig: { responseModalities: ["TEXT", "IMAGE"], ...resolveGeminiImageConfig(config) } }),
+            ...(await toGeminiBody(config, [{ role: "user", content: prompt }], { generationConfig: { responseModalities: ["TEXT", "IMAGE"], ...resolveGeminiImageConfig(config) } })),
             contents: [{ role: "user", parts }],
         },
         { headers: geminiHeaders(config), signal: options?.signal },
@@ -2796,7 +2821,7 @@ async function requestChatTurn(
     if (config.apiFormat === "gemini") {
         return requestGeminiStreamingResponse(
             config,
-            toGeminiBody(config, messages, toGeminiToolOptions(tools, toolChoice)),
+            await toGeminiBody(config, messages, toGeminiToolOptions(tools, toolChoice)),
             onDelta,
             options,
         );
