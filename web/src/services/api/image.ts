@@ -2886,9 +2886,10 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     const files = await Promise.all(
         references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await prepareReferenceDataUrl(image, refCount) })),
     );
-    // Multi-image edits follow OpenAI's official `image[]` convention — several strict
-    // relays (APIMart etc.) answer 400 on repeated bare "image" keys.
-    const imageField = files.length > 1 ? "image[]" : "image";
+    // APIMart (docs.apimart.ai) answers 400 on repeated bare "image" keys for multi-image
+    // edits and expects OpenAI's `image[]` convention instead. Other relays keep the original
+    // repeated "image" keys — do not change their behavior.
+    const imageField = isApimartBaseUrl(requestConfig.baseUrl) && files.length > 1 ? "image[]" : "image";
     files.forEach((file) => formData.append(imageField, file));
     if (mask) {
         const maskDataUrl = await prepareReferenceDataUrl(mask, refCount, { preserveAlpha: true });
