@@ -235,6 +235,7 @@ export default {
         invalidRequest: "Invalid request (400). Check the prompt and model settings.",
         badGateway: "Gateway error (502). The API service is temporarily unavailable.",
         serviceBusy: "Service unavailable (503). Try again later.",
+        originOverloaded: "The provider's origin server is overloaded or misconfigured (Cloudflare {{status}}). The request reached the provider fine but their server failed to process it — nothing is wrong with the app's settings. Retry later or check the provider's status page.",
         httpFailed: "Request failed (HTTP {{status}}). Check the Base URL and API key.",
         htmlError: "The service returned an HTML error page ({{preview}})",
         audioModelRequired: "Configure an audio model first",

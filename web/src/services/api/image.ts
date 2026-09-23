@@ -1454,7 +1454,7 @@ function readApiErrorMessage(value: unknown): string {
         } catch {
             // Detect HTML error pages.
             if (/<[a-z][\s\S]*>/i.test(value)) return apiText("htmlError", { preview: `${value.slice(0, 80)}...` });
-            return value;
+            return clarifyEdgeError(value);
         }
     }
     if (typeof value !== "object") return "";
@@ -1491,7 +1491,7 @@ function readAxiosError(error: unknown, fallback: string) {
         }
         const responseData = error.response?.data;
         // Prefer the API error from the response body.
-        const apiMsg = clarifyAuthError(readApiErrorMessage(responseData));
+        const apiMsg = clarifyAuthError(clarifyEdgeError(readApiErrorMessage(responseData)));
         const requestUrl = readRequestTargetUrl(typeof error.config?.url === "string" ? error.config.url : "");
         if (apiMsg) return requestUrl && error.response?.status === 404 ? `${apiMsg}\n${requestUrl}` : apiMsg;
         // Infer the error from the HTTP status when the response body has no usable message.
@@ -1517,6 +1517,15 @@ function readNetworkMessage(message: string) {
     return /failed to fetch|network error|load failed|net::err_/i.test(message) ? apiText("networkFailed") : null;
 }
 
+// Relays pass Cloudflare edge-error prose (520 "invalid or incomplete response", 521 "web server
+// is down", 522/524 timeouts) through their JSON error.message — replace it with a clear localized
+// cause so users don't mistake a provider-side outage for an app bug.
+function clarifyEdgeError(message: string) {
+    if (!/cloudflare/i.test(message)) return message;
+    const code = message.match(/\b52([0-4])\b/)?.[0] ?? (/origin web server returned an invalid|web server is down/i.test(message) ? "520" : "5xx");
+    return apiText("originOverloaded", { status: code });
+}
+
 function readStatusError(status: number | undefined, fallback: string, requestUrl = "") {
     if (status === 401 || status === 403) return apiText("authenticationFailed");
     if (status === 413) return apiText("payloadTooLarge");
@@ -1524,6 +1533,8 @@ function readStatusError(status: number | undefined, fallback: string, requestUr
     if (status === 404) return /\/models(\/|\?|$)/i.test(requestUrl) ? apiText("notFoundModels") : apiText("notFound");
     if (status === 502) return apiText("badGateway");
     if (status === 503) return apiText("serviceBusy");
+    // Cloudflare edge errors: the request reached the provider but their origin failed.
+    if (status && status >= 520 && status <= 524) return apiText("originOverloaded", { status });
     return status ? apiText("httpFailed", { status }) : fallback;
 }
 
@@ -2125,9 +2136,14 @@ async function readFetchError(response: Response, fallback: string) {
         try {
             message = responseErrorMessage(JSON.parse(text)) || readStatusError(response.status, fallback, requestUrl);
         } catch {
+            // Cloudflare edge-error pages carry a recognizable sentence — surface the localized cause.
+            if (/cloudflare/i.test(text)) {
+                const edge = clarifyEdgeError(text);
+                if (edge !== text) return clarifyAuthError(edge);
+            }
             // Reverse proxies and CDN edges often return an HTML error page instead of JSON.
             if (/<[a-z][\s\S]*>/i.test(text)) message = apiText("htmlError", { preview: `${text.slice(0, 80)}...` });
-            else message = text.slice(0, 300) || readStatusError(response.status, fallback, requestUrl);
+            else message = clarifyEdgeError(text.slice(0, 300)) || readStatusError(response.status, fallback, requestUrl);
         }
     }
     if (response.status === 404 && requestUrl && !message.includes(requestUrl)) return `${message}\n${requestUrl}`;

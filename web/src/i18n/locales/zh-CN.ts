@@ -235,6 +235,7 @@ export default {
         invalidRequest: "请求参数无效（400），请检查提示词与模型设置",
         badGateway: "网关错误（502），接口服务暂时不可用，请稍后重试",
         serviceBusy: "服务繁忙（503），请稍后重试",
+        originOverloaded: "服务商源站过载或故障（Cloudflare {{status}}）——请求已正常到达服务商，是对方服务器未能处理，与画布设置无关。请稍后重试，或到服务商后台/用户群确认服务状态",
         httpFailed: "请求失败（HTTP {{status}}），请检查 Base URL 和 API Key 是否正确",
         htmlError: "服务返回了 HTML 错误页面（{{preview}}）",
         audioModelRequired: "请先配置音频模型",
