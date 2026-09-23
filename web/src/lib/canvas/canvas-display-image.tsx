@@ -53,13 +53,34 @@ export async function getCanvasDisplaySrc(src: string, maxEdge = CANVAS_DISPLAY_
 
     const task = (async () => {
         try {
-            const image = new Image();
-            image.decoding = "async";
-            image.src = src;
-            await image.decode();
-            const width = image.naturalWidth || 0;
-            const height = image.naturalHeight || 0;
+            // Probe dimensions via createImageBitmap (a GPU bitmap, cheaper than <img>.decode)
+            // then downsample only when the source actually exceeds the display edge. This keeps
+            // large (4K+) images from being fully decoded into multi‑MB buffers — the main cause
+            // of jank on canvases with many big images.
+            let width = 0;
+            let height = 0;
+            let bitmap: ImageBitmap | null = null;
+            if (typeof createImageBitmap === "function") {
+                try {
+                    // createImageBitmap wants a Blob/ImageBitmapSource, not a URL string.
+                    const blob = await (await fetch(src)).blob();
+                    bitmap = await createImageBitmap(blob);
+                    width = bitmap.width || 0;
+                    height = bitmap.height || 0;
+                } catch {
+                    bitmap = null;
+                }
+            }
+            if (!width || !height) {
+                const image = new Image();
+                image.decoding = "async";
+                image.src = src;
+                await image.decode();
+                width = image.naturalWidth || 0;
+                height = image.naturalHeight || 0;
+            }
             if (!width || !height || Math.max(width, height) <= edge) {
+                if (bitmap) bitmap.close();
                 touch(key, src);
                 return src;
             }
@@ -71,12 +92,22 @@ export async function getCanvasDisplaySrc(src: string, maxEdge = CANVAS_DISPLAY_
             canvas.height = targetH;
             const ctx = canvas.getContext("2d");
             if (!ctx) {
+                if (bitmap) bitmap.close();
                 touch(key, src);
                 return src;
             }
             ctx.imageSmoothingEnabled = true;
             ctx.imageSmoothingQuality = "medium";
-            ctx.drawImage(image, 0, 0, targetW, targetH);
+            if (bitmap) {
+                ctx.drawImage(bitmap, 0, 0, targetW, targetH);
+                bitmap.close();
+            } else {
+                const image = new Image();
+                image.decoding = "async";
+                image.src = src;
+                await image.decode();
+                ctx.drawImage(image, 0, 0, targetW, targetH);
+            }
             const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
             if (!blob) {
                 touch(key, src);
