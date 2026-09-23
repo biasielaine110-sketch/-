@@ -124,6 +124,8 @@ const QUALITY_BASE: Record<string, number> = {
     low: 1024,
     medium: 2048,
     high: 2880,
+    xhigh: 3328,
+    max: 3840,
     standard: 1024,
     hd: 2048,
 };
@@ -616,7 +618,8 @@ function isHfsyApiBaseUrl(baseUrl: string) {
 }
 
 function isToapisBaseUrl(baseUrl: string) {
-    return /toapis\.com/i.test(baseUrl.trim());
+    // Domestic CN users use toapis.cn; the docs' international examples use toapis.com.
+    return /toapis\.(com|cn)/i.test(baseUrl.trim());
 }
 
 function isReferenceBase64Unsupported(message: string) {
@@ -744,6 +747,56 @@ async function requestApimartGptImage(config: AiConfig, prompt: string, referenc
     }
     const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
     return resolveImageApiResponse(config, response.data, options);
+}
+
+/** ToAPIs GPT-Image-2.5 (flare/sunburst, incl. -official suffixes). */
+function isToapisGptImage25Model(model: string) {
+    return /^gpt-image-2\.5-(flare|sunburst)/i.test(model.trim());
+}
+
+/**
+ * ToAPIs GPT-Image-2.5 per docs.toapis.com: unified async image task on POST /v1/images/generations.
+ * Reference images go in `image_urls` as an array of objects `[{ url }]` (public URLs only — base64
+ * is rejected with "base64 image is not allowed"). Local refs upload via /v1/uploads/images.
+ * size is an aspect-ratio token ("1:1", "16:9", …); resolution lives in metadata.resolution
+ * ("0.5K"/"1K"/"2K"/"4K"); quality supports low/medium/high/xhigh/max. Submission returns
+ * { id: task_id, status: "queued" }; the shared poller reads /v1/images/generations/{id}.
+ */
+async function requestToapisGptImage25(config: AiConfig, prompt: string, references: ReferenceImage[], count: number, options?: RequestOptions) {
+    const n = Math.max(1, Math.min(4, count));
+    const body: Record<string, unknown> = {
+        model: config.model,
+        prompt: withSystemPrompt(config, prompt),
+        n,
+        size: resolveToapisGptImage25Size(config.size),
+    };
+    const quality = normalizeQuality(config.quality);
+    if (quality) body.quality = quality;
+    const resolution = resolveToapisGptImage25Resolution(config.quality);
+    if (resolution) body.metadata = { resolution };
+    if (references.length) {
+        // image_urls is an array of { url } objects — base64 is rejected outright.
+        const urls: Array<{ url: string }> = [];
+        for (const image of references.slice(0, 16)) {
+            urls.push({ url: await resolveFetchableReferenceUrl(config, image, Math.max(1, references.length), { ...options, allowProviderUpload: true }) });
+        }
+        if (!urls.length) throw new Error(apiText("referenceImageReadFailed"));
+        body.image_urls = urls;
+    }
+    const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
+    return resolveImageApiResponse(config, response.data, options);
+}
+
+function resolveToapisGptImage25Size(size: string) {
+    return resolveApimartSize("gpt-image-2", size);
+}
+
+function resolveToapisGptImage25Resolution(quality: string) {
+    const normalized = normalizeQuality(quality);
+    if (!normalized) return undefined;
+    if (normalized === "low" || normalized === "standard") return "1K";
+    if (normalized === "high") return "4K";
+    return "2K";
 }
 
 async function requestGeminiRelayImageToImage(config: AiConfig, prompt: string, references: ReferenceImage[], count: number, options?: RequestOptions) {
@@ -2521,6 +2574,15 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
     }
+    // ToAPIs GPT-Image-2.5 text-to-image uses the same async /images/generations task with
+    // aspect-ratio size + metadata.resolution (base64 / pixel-size params are rejected).
+    if (isToapisBaseUrl(requestConfig.baseUrl) && isToapisGptImage25Model(requestConfig.model)) {
+        try {
+            return await requestToapisGptImage25(requestConfig, prompt, [], n, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
     // Midjourney relays (Seedance / APIMart): POST /v1/midjourney/generations
     if (isMidjourneyModel(requestConfig.model)) {
         try {
@@ -2658,6 +2720,15 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     if (isApimartBaseUrl(requestConfig.baseUrl) && isApimartGptImage25Model(requestConfig.model) && !mask) {
         try {
             return await requestApimartGptImage(requestConfig, requestPrompt, references, n, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+    // ToAPIs GPT-Image-2.5: same async /images/generations task, but `image_urls` is an array of
+    // { url } objects (not plain strings) and resolution lives in metadata — base64 is rejected.
+    if (isToapisBaseUrl(requestConfig.baseUrl) && isToapisGptImage25Model(requestConfig.model) && !mask) {
+        try {
+            return await requestToapisGptImage25(requestConfig, requestPrompt, references, n, options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
