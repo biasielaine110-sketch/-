@@ -269,6 +269,15 @@ async function fetchWorkflow(origin: string, apiKey: string, workflowId: string,
 type WebappNode = { nodeId: string; fieldName: string; fieldValue: string; fieldType?: string; nodeName?: string; description?: string };
 
 const QWEN_IMAGE_21_WORKFLOW_ID = "2101992508854202370";
+// Second Qwen Image 2.1 (文生图) workflow. Its nodes are numbered differently
+// (ResolutionSelector "13", TextEncodeQwenImage21 "471"), so node lookup must be
+// driven by class_type, not hard-coded node ids.
+const QWEN_IMAGE_21_V1_WORKFLOW_ID = "2102725625755820033";
+// Qwen Image 2.1 (图生图) workflow. Uses TextEncodeQwenImage21 with images.image_1..10
+// reference inputs plus a ComfySwitchNode (483) toggling I2I/T2I, and ships with several
+// pre-baked LoadImage references that must be cleared when the user links their own images.
+const QWEN_IMAGE_21_I2I_WORKFLOW_ID = "2102726433268387841";
+const QWEN_IMAGE_21_WORKFLOW_IDS = new Set([QWEN_IMAGE_21_WORKFLOW_ID, QWEN_IMAGE_21_V1_WORKFLOW_ID, QWEN_IMAGE_21_I2I_WORKFLOW_ID]);
 const QWEN_IMAGE_21_LOAD_IMAGE_ORDER = ["420", "432", "433", "436", "435", "434"];
 
 const RUNNINGHUB_RESOLUTION_SELECTOR_ASPECTS: Array<{ ratio: string; label: string; value: number }> = [
@@ -283,7 +292,11 @@ const RUNNINGHUB_RESOLUTION_SELECTOR_ASPECTS: Array<{ ratio: string; label: stri
 ];
 
 function isQwenImage21Workflow(workflowId?: string | null) {
-    return workflowId === QWEN_IMAGE_21_WORKFLOW_ID;
+    return Boolean(workflowId && QWEN_IMAGE_21_WORKFLOW_IDS.has(workflowId));
+}
+
+function isQwenImage21I2IWorkflow(workflowId?: string | null) {
+    return workflowId === QWEN_IMAGE_21_I2I_WORKFLOW_ID;
 }
 
 function resolutionSelectorAspectLabel(aspect: string) {
@@ -312,27 +325,71 @@ function qwenImage21Megapixels(size: { width: number; height: number } | null | 
     return 2.2;
 }
 
-function applyQwenImage21Settings(workflow: ComfyWorkflow, imageCount: number, size?: { width: number; height: number } | null, aspect = "", rawSize = "") {
+function applyQwenImage21Settings(workflow: ComfyWorkflow, imageValues: string[], size?: { width: number; height: number } | null, aspect = "", rawSize = "", workflowId?: string) {
     const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
-    const hasReferenceImages = imageCount > 0;
-    const switchNode = next["419"];
-    // The RunningHub nodeInfo API can override scalar inputs, but cannot create a missing
-    // ComfyUI link. Only toggle into I2I when the saved workflow already exposes on_false.
+    const hasReferenceImages = imageValues.length > 0;
+    // I2I/T2I switch. The RunningHub nodeInfo API can override scalar inputs, but cannot create
+    // a missing ComfyUI link. Only toggle into I2I when the saved workflow already exposes on_false.
+    // The switch node id differs across Qwen workflows, so fall back to a class_type scan.
+    const switchNode = next["419"] || findComfyNode(next, (node) => /switch/i.test(node.class_type || ""));
     if (switchNode?.inputs && (!hasReferenceImages || "on_false" in switchNode.inputs)) switchNode.inputs.switch = !hasReferenceImages;
 
-    const selector = next["424"];
+    // ResolutionSelector drives aspect_ratio (a display label like "16:9 (Widescreen)") and
+    // megapixels (a numeric tier). Its node id differs per workflow, so locate it by class_type.
+    const selector = next["424"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
     if (selector?.inputs) {
         const nextAspect = aspect || (size?.width && size.height ? closestResolutionSelectorAspect(size.width, size.height) : "9:16");
         if ("aspect_ratio" in selector.inputs) selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(nextAspect);
         if ("megapixels" in selector.inputs) selector.inputs.megapixels = qwenImage21Megapixels(size, rawSize);
     }
 
-    const encoder = next["418"];
+    // Qwen Image 2.1 encodes text at a fixed resolution matching the long side of the latent.
+    const encoder = next["418"] || findComfyNode(next, (node) => /TextEncodeQwenImage21/i.test(node.class_type || ""));
     if (encoder?.inputs && "resolution" in encoder.inputs && size?.width && size.height) {
         encoder.inputs.resolution = Math.max(size.width, size.height);
     }
 
+    // The 图生图 workflow ships with several pre-baked LoadImage references (image 1/2/3 hold real
+    // files). When the user links their own reference images, only the first N loaders should carry
+    // the uploaded files — every remaining loader must be cleared to "None" so the model does not
+    // pull the baked-in pictures and produce a garbled result.
+    if (isQwenImage21I2IWorkflow(workflowId)) {
+        const loaders = qwenImage21I2ILoadImageOrder(next);
+        loaders.forEach((entry, index) => {
+            const node = entry[1];
+            const filename = imageValues[index] || "";
+            if (node?.inputs && typeof node.inputs.image === "string" && node.inputs.image !== "None") {
+                node.inputs.image = filename || "None";
+            }
+        });
+    }
+
     return next;
+}
+
+/** The 图生图 workflow's reference images are ordered by the "Load Image N" title, not node id. */
+function qwenImage21I2ILoadImageOrder(workflow: ComfyWorkflow): Array<readonly [string, ComfyNode]> {
+    return Object.entries(workflow)
+        .filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")))
+        .sort(([idA, nodeA], [idB, nodeB]) => {
+            const numA = titleImageIndex(nodeA) ?? Number.MAX_SAFE_INTEGER;
+            const numB = titleImageIndex(nodeB) ?? Number.MAX_SAFE_INTEGER;
+            if (numA !== numB) return numA - numB;
+            return idA.localeCompare(idB, undefined, { numeric: true });
+        });
+}
+
+function titleImageIndex(node: ComfyNode | undefined): number | null {
+    const title = String(node?._meta?.title || "");
+    const match = title.match(/(\d+)\s*$/);
+    return match ? Number(match[1]) : null;
+}
+
+function findComfyNode(workflow: ComfyWorkflow, predicate: (node: ComfyNode) => boolean): ComfyNode | undefined {
+    for (const node of Object.values(workflow)) {
+        if (predicate(node)) return node;
+    }
+    return undefined;
 }
 
 async function fetchWebappNodes(origin: string, apiKey: string, webappId: string, signal?: AbortSignal): Promise<WebappNode[]> {
@@ -423,7 +480,7 @@ function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues:
     const tier = canvasResolutionTier(rawSize);
     if (tier) patched = writeRunningHubTier(patched, tier);
     if (seconds?.trim()) patched = writeRunningHubSeconds(patched, seconds.trim());
-    if (isQwenImage21Workflow(workflowId)) patched = applyQwenImage21Settings(patched, imageValues.length, size, aspect, rawSize);
+    if (isQwenImage21Workflow(workflowId)) patched = applyQwenImage21Settings(patched, imageValues, size, aspect, rawSize, workflowId);
     const list: Array<{ nodeId: string; fieldName: string; fieldValue: string }> = [];
     for (const [nodeId, node] of Object.entries(patched)) {
         const before = workflow[nodeId]?.inputs || {};
@@ -435,9 +492,14 @@ function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues:
             list.push({ nodeId, fieldName, fieldValue: String(value) });
         }
     }
-    const loaders = isQwenImage21Workflow(workflowId)
-        ? QWEN_IMAGE_21_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
-        : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
+    // The 图生图 workflow already wires uploaded references (and clears baked-in ones) inside
+    // applyQwenImage21Settings, so skip the generic mapping for it. Other Qwen workflows keep the
+    // hard-coded loader order; everything else uses the class_type scan.
+    const loaders = isQwenImage21I2IWorkflow(workflowId)
+        ? []
+        : isQwenImage21Workflow(workflowId)
+          ? QWEN_IMAGE_21_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
+          : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
     imageValues.forEach((value, index) => {
         const entry = loaders[index];
         if (!entry || !value) return;
