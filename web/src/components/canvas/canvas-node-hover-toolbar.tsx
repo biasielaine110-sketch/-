@@ -11,7 +11,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { useConfigStore } from "@/stores/use-config-store";
 import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
-import { buildImageToolbarTools, defaultImageQuickToolIds, normalizeImageQuickToolIds, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
+import { buildImageToolbarTools, defaultImageQuickToolIds, mergeMissingDefaultVisibleTools, normalizeImageQuickToolIds, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
 
 type CanvasNodeHoverToolbarProps = {
     node: CanvasNodeData | null;
@@ -96,7 +96,7 @@ export function CanvasNodeHoverToolbar({
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
-        return normalized.length ? normalized : defaultImageQuickToolIds;
+        return mergeMissingDefaultVisibleTools(normalized.length ? normalized : defaultImageQuickToolIds);
     }, [imageQuickTools?.ids]);
     const showImageToolLabels = Boolean(imageQuickTools?.showLabels);
     const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);

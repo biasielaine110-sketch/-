@@ -179,6 +179,18 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
 
 export const defaultImageQuickToolIds: ImageQuickToolId[] = [...defaultBaseToolIds, ...imageToolDefinitions.filter((tool) => tool.defaultVisible).map((tool) => tool.id)];
 
+/**
+ * Older saved toolbars predate tools added in later releases (e.g. "adjust"), so a
+ * user's persisted `imageQuickTools.ids` silently hides newly-shipped tools even when
+ * they are `defaultVisible: true`. Append any missing default-visible tool ids to the
+ * user's list so new tools show up without forcing a manual re-enable.
+ */
+export function mergeMissingDefaultVisibleTools(ids: ImageQuickToolId[]): ImageQuickToolId[] {
+    const present = new Set(ids);
+    const missing = imageToolDefinitions.filter((tool) => tool.defaultVisible && !present.has(tool.id)).map((tool) => tool.id);
+    return missing.length ? [...ids, ...missing] : ids;
+}
+
 export function buildImageToolbarTools(node: CanvasNodeData, handlers: ImageToolHandlers) {
     const hasMjTask =
         Boolean(node.metadata?.midjourneyTaskId) ||

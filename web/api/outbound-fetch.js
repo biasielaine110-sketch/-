@@ -12,6 +12,25 @@ function diag(msg) {
 const COMMON_LOCAL_PROXIES = ["http://127.0.0.1:7897", "http://127.0.0.1:7890", "http://127.0.0.1:10809"];
 const DIRECT_CONNECT_TIMEOUT_MS = 8_000;
 
+/**
+ * WorkBuddy (and some other hosts) inject a temporary loopback proxy on a high
+ * ephemeral port (e.g. http://127.0.0.1:55657) via HTTP(S)_PROXY. Routing outbound
+ * API calls through it is unstable for CN relay providers and drops long SSE streams,
+ * producing ERR_CONNECTION_CLOSED / ERR_HTTP2_PING_FAILED on the frontend. Treat any
+ * 127.0.0.1 proxy on a port > 10000 as untrusted and ignore it, so outbound requests
+ * fall through to direct connect (then to the user's real local proxy 7897).
+ */
+function isEphemeralLoopbackProxy(proxyUrl) {
+    try {
+        const u = new URL(proxyUrl);
+        if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") return false;
+        const port = Number(u.port);
+        return Number.isFinite(port) && port > 10000;
+    } catch {
+        return false;
+    }
+}
+
 /** @type {string | undefined} cached working local proxy; undefined = not yet discovered */
 let cachedProxyUrl;
 const directAgent = new Agent({ connect: { timeout: DIRECT_CONNECT_TIMEOUT_MS } });
@@ -19,7 +38,7 @@ const directAgent = new Agent({ connect: { timeout: DIRECT_CONNECT_TIMEOUT_MS } 
 const proxyAgents = new Map();
 
 function envProxyUrl() {
-    return (
+    const raw = (
         process.env.HTTPS_PROXY ||
         process.env.HTTP_PROXY ||
         process.env.ALL_PROXY ||
@@ -28,6 +47,10 @@ function envProxyUrl() {
         process.env.all_proxy ||
         ""
     ).trim();
+    // Ignore host-injected ephemeral loopback proxies (e.g. WorkBuddy's 127.0.0.1:55657):
+    // they are unstable for outbound API calls and drop long SSE streams.
+    if (raw && isEphemeralLoopbackProxy(raw)) return "";
+    return raw;
 }
 
 function isConnectFailure(error) {
