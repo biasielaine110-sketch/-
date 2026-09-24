@@ -36,6 +36,12 @@ export type ModelChannel = {
     models: ChannelModel[];
     /** When false the whole channel is hidden from model pickers. Defaults to true. */
     enabled?: boolean;
+    /**
+     * Additional API keys for the same provider. When a key hits a "balance exhausted"
+     * error the request automatically retries with the next key. `apiKey` is kept equal to
+     * `apiKeys[0]` for backward compatibility with every `config.apiKey` reader downstream.
+     */
+    apiKeys?: string[];
 };
 
 export type ImageQuickToolsPreference = {
@@ -47,6 +53,8 @@ export type AiConfig = {
     channelMode: "remote" | "local";
     baseUrl: string;
     apiKey: string;
+    /** Ordered backup keys for the active channel (auto-switch on balance exhaustion). */
+    apiKeys?: string[];
     apiFormat: ApiCallFormat;
     channels: ModelChannel[];
     model: string;
@@ -467,6 +475,8 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
         models: normalizeChannelModels(channel?.models),
     };
     if (channel?.enabled === false) next.enabled = false;
+    const extraKeys = Array.isArray(channel?.apiKeys) ? channel.apiKeys.map((key) => sanitizeApiKey(key)).filter(Boolean) : [];
+    if (extraKeys.length) next.apiKeys = Array.from(new Set(extraKeys));
     return next;
 }
 
@@ -539,6 +549,7 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
         model: modelName,
         baseUrl: normalizeProviderBaseUrl(channel.baseUrl),
         apiKey: sanitizeApiKey(channel.apiKey),
+        apiKeys: channelApiKeys(channel),
         apiFormat: resolveChannelModelApiFormat(channel, model),
     };
 }
@@ -594,6 +605,31 @@ function uniqueModelOptions(models: string[]) {
 
 export function sanitizeApiKey(apiKey: string) {
     return apiKey.trim().replace(/^Bearer\s+/i, "").replace(/^["']|["']$/g, "").trim();
+}
+
+/**
+ * Split a multi-line API-key string into a de-duplicated list of cleaned keys.
+ * A single input line of "key1, key2" is also treated as two keys. Keeps the first
+ * non-empty key as the primary (backward-compatible) `apiKey`.
+ */
+export function parseApiKeys(raw: string): string[] {
+    const keys: string[] = [];
+    const seen = new Set<string>();
+    for (const line of String(raw || "").split(/[\n\r,，]+/)) {
+        const key = sanitizeApiKey(line);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        keys.push(key);
+    }
+    return keys;
+}
+
+/** The full ordered key list for a channel (primary `apiKey` first, then any `apiKeys`). */
+export function channelApiKeys(channel: Pick<ModelChannel, "apiKey" | "apiKeys">): string[] {
+    const primary = sanitizeApiKey(channel.apiKey || "");
+    const extras = (channel.apiKeys || []).map((key) => sanitizeApiKey(key)).filter(Boolean);
+    const merged = [primary, ...extras].filter(Boolean);
+    return Array.from(new Set(merged));
 }
 
 export function normalizeProviderBaseUrl(baseUrl: string) {

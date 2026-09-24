@@ -4,7 +4,8 @@ import { useEffect, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { HealthDot } from "@/components/model-picker";
-import { encodeChannelModel, defaultBaseUrlForApiFormat, defaultConfig, guessCapability, isChannelModelEnabled, normalizeChannelModels, resolveChannelModelApiFormat, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { encodeChannelModel, defaultBaseUrlForApiFormat, defaultConfig, guessCapability, isChannelModelEnabled, normalizeChannelModels, parseApiKeys, resolveChannelModelApiFormat, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { runningHubOrigin } from "@/lib/runninghub-workflow";
 import { getModelHealth, modelHealthKey, subscribeModelHealth } from "@/services/api/model-health";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
@@ -27,7 +28,10 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
 
     useEffect(() => {
         if (open && channel) {
-            setDraft(channel);
+            // Rebuild the key field as a multi-line string (primary + backup keys) so the editor
+            // shows every stored key instead of only the primary.
+            const keys = [channel.apiKey, ...(channel.apiKeys || [])].map((key) => key.trim()).filter(Boolean);
+            setDraft({ ...channel, apiKey: keys.join("\n") });
             setDraggingModelName(null);
             setDragOverModelName(null);
         }
@@ -105,7 +109,17 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     };
 
     const save = () => {
-        onSave({ ...draft, name: draft.name.trim() || t("config.channels.unnamed"), models: normalizeChannelModels(draft.models) });
+        // Split the (possibly multi-line) key field into an ordered list. The first key is the
+        // backward-compatible `apiKey`; the rest are stored as `apiKeys` for auto-switch on
+        // balance exhaustion.
+        const keys = parseApiKeys(draft.apiKey);
+        onSave({
+            ...draft,
+            name: draft.name.trim() || t("config.channels.unnamed"),
+            apiKey: keys[0] || "",
+            ...(keys.length > 1 ? { apiKeys: keys.slice(1) } : { apiKeys: [] }),
+            models: normalizeChannelModels(draft.models),
+        });
         onClose();
     };
 
@@ -142,7 +156,17 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                 </label>
                 <label className="block md:col-span-2">
                     <span className="mb-1 block text-sm font-medium">API Key</span>
-                    <Input.Password value={draft.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder="sk-..." />
+                    <Input.TextArea
+                        value={draft.apiKey}
+                        onChange={(event) => patch({ apiKey: event.target.value })}
+                        placeholder="sk-..."
+                        autoSize={{ minRows: 1, maxRows: 6 }}
+                    />
+                    <span className="mt-1 block text-xs text-stone-500">
+                        {runningHubOrigin(draft.baseUrl)
+                            ? t("config.channelEditor.apiKeyMultiHint")
+                            : t("config.channelEditor.apiKeyHint")}
+                    </span>
                 </label>
             </div>
 

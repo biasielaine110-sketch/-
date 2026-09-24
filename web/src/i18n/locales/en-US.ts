@@ -1399,6 +1399,8 @@ export default {
             defaultProtocolHint: "New models inherit this protocol; each model can still use OpenAI or Gemini independently.",
             baseUrl: "API endpoint",
             baseUrlHint: "For OpenAI-compatible roots, /v1 is appended automatically. Ark Agent Plan: https://ark.cn-beijing.volces.com/api/plan/v3. Doubao speech: https://openspeech.bytedance.com. AutoDL hosted workflows: https://autodl.art/api/v1. Self-hosted/rented ComfyUI: http://PUBLIC_IP:8188 (do not append /v1; paste API workflow JSON into the model script).",
+            apiKeyHint: "Enter one API key per line; the first is the default and the rest are backups.",
+            apiKeyMultiHint: "RunningHub supports multiple keys: one per line. If the current key reports insufficient balance, generation automatically switches to the next key.",
             models: "Provider models",
             modelDescription: "{{count}} total, {{enabled}} enabled; disabled models stay saved but hide from model pickers.",
             reorderHint: "Drag the handle to reorder models; model pickers follow this order.",

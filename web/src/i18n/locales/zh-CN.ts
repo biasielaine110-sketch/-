@@ -1398,6 +1398,8 @@ export default {
             defaultProtocolHint: "新建模型默认使用该协议；每个模型仍可单独改为 OpenAI 或 Gemini。",
             baseUrl: "接口地址",
             baseUrlHint: "OpenAI 兼容填根域名（自动加 /v1）。方舟 Agent Plan：https://ark.cn-beijing.volces.com/api/plan/v3；豆包语音用 https://openspeech.bytedance.com；AutoDL 托管工作流用 https://autodl.art/api/v1；自建/租用 ComfyUI 填 http://公网IP:8188（不要加 /v1，脚本粘贴 API 工作流 JSON）。",
+            apiKeyHint: "每行填写一个 API Key；第一个为默认 Key，其余作为备用。",
+            apiKeyMultiHint: "RunningHub 支持多 Key：每行一个，生成时若当前 Key 提示余额不足，会自动切换到下一个 Key 重试。",
             models: "渠道模型",
             modelDescription: "共 {{count}} 个，启用 {{enabled}} 个；关闭后不会出现在模型选择列表中。",
             reorderHint: "拖动手柄可调整模型顺序；选择模型时会按此顺序显示。",

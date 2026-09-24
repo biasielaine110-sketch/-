@@ -253,6 +253,7 @@ async function createRunningHubVideoTask(
     const result = await runRunningHubWorkflow({
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
+        apiKeys: config.apiKeys,
         model,
         script,
         prompt,

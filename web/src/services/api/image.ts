@@ -1639,6 +1639,7 @@ async function requestRunningHubImages(config: AiConfig, prompt: string, referen
     const result = await runRunningHubWorkflow({
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
+        apiKeys: config.apiKeys,
         model: config.model || config.imageModel,
         script,
         prompt,

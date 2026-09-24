@@ -221,6 +221,10 @@ function isAuthMessage(message: string) {
     return /APIKEY_UNAUTHORIZED|APIKEY_UNSUPPORTED_FREE_USER|TOKEN_INVALID|APIKEY_USER_NOT_FOUND|CORPAPIKEY_INVALID/i.test(message);
 }
 
+function isBalanceMessage(message: string) {
+    return /NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message);
+}
+
 function isUnknownServerError(message: string) {
     return /UNKNOWN_ERROR|^Unknown error/i.test(message);
 }
@@ -974,6 +978,8 @@ export async function pollRunningHubQuery(args: { origin: string; apiKey: string
 export async function runRunningHubWorkflow(args: {
     baseUrl: string;
     apiKey: string;
+    /** Backup keys to try in order when the primary key hits a balance/quota error. */
+    apiKeys?: string[];
     model: string;
     script?: string;
     prompt: string;
@@ -985,29 +991,79 @@ export async function runRunningHubWorkflow(args: {
 }): Promise<RunningHubMedia> {
     const origin = runningHubOrigin(args.baseUrl);
     const workflowId = parseRunningHubWorkflowId(args.model, args.script, args.baseUrl);
-    const apiKey = runningHubApiKey(args.baseUrl, args.apiKey);
+    const primary = runningHubApiKey(args.baseUrl, args.apiKey);
     if (!origin || !workflowId) throw new Error(apiText("runningHubWorkflowFetchFailed"));
-    if (!apiKey || /^(none|-|n\/a)$/i.test(apiKey)) throw new Error(apiText("apiKeyRequired"));
 
-    const workflow = await fetchWorkflow(origin, apiKey, workflowId, args.signal).catch((error: unknown) => {
+    // Ordered key list: primary first, then any backups. The primary is dropped as a key that
+    // reports balance exhaustion, so the same account's key never blocks the fallback chain.
+    const keys = Array.from(
+        new Set(
+            [primary, ...(args.apiKeys || []).map((key) => runningHubApiKey(args.baseUrl, key))]
+                .map((key) => String(key || "").trim())
+                .filter((key) => key && !/^(none|-|n\/a)$/i.test(key)),
+        ),
+    );
+    if (!keys.length) throw new Error(apiText("apiKeyRequired"));
+
+    const isBalanceError = (error: unknown) => isBalanceMessage(errorText(error));
+
+    let lastError: unknown = null;
+    for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+        const apiKey = keys[keyIndex];
+        try {
+            return await runRunningHubWorkflowWithKey({ origin, workflowId, apiKey, args, isLastKey: keyIndex === keys.length - 1 });
+        } catch (error) {
+            // Cancellation must propagate immediately — never switch keys on a user abort.
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+            lastError = error;
+            // Only a balance/quota error justifies moving to the next key. Anything else
+            // (auth, bad workflow, unknown server error) is surfaced as-is.
+            if (!isBalanceError(error)) throw explainRunningHubError(error, workflowId);
+            // Fall through to the next key; when the last key also runs out, surface the balance error.
+        }
+    }
+    throw explainRunningHubError(lastError, workflowId);
+}
+
+/** One full fetch → upload → submit → poll cycle against a single API key. */
+async function runRunningHubWorkflowWithKey(args: {
+    origin: string;
+    workflowId: string;
+    apiKey: string;
+    isLastKey: boolean;
+    args: {
+        baseUrl: string;
+        model: string;
+        script?: string;
+        prompt: string;
+        size?: string;
+        seconds?: string;
+        media?: "image" | "video";
+        referenceDataUrls?: string[];
+        signal?: AbortSignal;
+    };
+}): Promise<RunningHubMedia> {
+    const { origin, workflowId, apiKey, isLastKey } = args;
+    const request = args.args;
+    const workflow = await fetchWorkflow(origin, apiKey, workflowId, request.signal).catch((error: unknown) => {
         if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
         const message = errorText(error);
         if (isAuthMessage(message)) throw explainRunningHubError(error, workflowId);
         return null;
     });
-    const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
+    const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     const uploaded: string[] = [];
     for (let index = 0; index < refs.length; index += 1) {
-        uploaded.push(await uploadImage(origin, apiKey, refs[index], `ref-${index + 1}.png`, args.signal));
+        uploaded.push(await uploadImage(origin, apiKey, refs[index], `ref-${index + 1}.png`, request.signal));
     }
-    const pixels = resolveCanvasPixels(args.size || "", args.media || "image");
-    const aspect = canvasAspect(args.size || "");
-    const overrides = workflow ? buildNodeInfoList(workflow, args.prompt, uploaded, pixels, args.seconds, aspect, args.media === "video" ? "" : args.size || "", workflowId) : [];
+    const pixels = resolveCanvasPixels(request.size || "", request.media || "image");
+    const aspect = canvasAspect(request.size || "");
+    const overrides = workflow ? buildNodeInfoList(workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId) : [];
     const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|resolution|megapixel|aspect_ratio|switch/i.test(item.fieldName));
     let task: RunningHubTaskView;
     try {
         if (workflow) {
-            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, args.signal);
+            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, request.signal);
         } else {
             throw new Error("WORKFLOW_NOT_EXISTS");
         }
@@ -1017,27 +1073,28 @@ export async function runRunningHubWorkflow(args: {
         if (isAuthMessage(message)) throw explainRunningHubError(error, workflowId);
         // Balance/quota errors are terminal and platform-side — surface them directly instead of
         // retrying or probing the webapp fallback (which would just fail the same way again).
-        if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) {
-            throw explainRunningHubError(error, workflowId);
+        // They are rethrown raw so the outer multi-key loop can switch to the next key.
+        if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message)) {
+            throw error;
         }
         const canRetryPlain = Boolean(workflow) && overrides.length > 0 && (isUnknownServerError(message) || /APIKEY_INVALID_NODE_INFO|Node info error/i.test(message));
         if (canRetryPlain) {
             const fallback = keptOverrides.length && keptOverrides.length < overrides.length ? keptOverrides : [];
-            task = await submitWorkflowTask(origin, apiKey, workflowId, fallback, args.signal).catch(async (retryError: unknown) => {
+            task = await submitWorkflowTask(origin, apiKey, workflowId, fallback, request.signal).catch(async (retryError: unknown) => {
                 if (!fallback.length) throw explainRunningHubError(retryError, workflowId);
-                return submitWorkflowTask(origin, apiKey, workflowId, [], args.signal).catch((plainError: unknown) => {
+                return submitWorkflowTask(origin, apiKey, workflowId, [], request.signal).catch((plainError: unknown) => {
                     throw explainRunningHubError(plainError, workflowId);
                 });
             });
         } else {
-            const nodes = await fetchWebappNodes(origin, apiKey, workflowId, args.signal).catch((webappError: unknown) => {
+            const nodes = await fetchWebappNodes(origin, apiKey, workflowId, request.signal).catch((webappError: unknown) => {
                 if (isAuthMessage(errorText(webappError))) throw webappError;
                 return [] as WebappNode[];
             });
             if (nodes.length) {
-                task = await submitWebappTask(origin, apiKey, workflowId, buildWebappNodeInfoList(nodes, args.prompt, uploaded, args.size, args.seconds, args.media), args.signal);
+                task = await submitWebappTask(origin, apiKey, workflowId, buildWebappNodeInfoList(nodes, request.prompt, uploaded, request.size, request.seconds, request.media), request.signal);
             } else if (!workflow) {
-                task = await submitWorkflowTask(origin, apiKey, workflowId, [], args.signal).catch((retryError: unknown) => {
+                task = await submitWorkflowTask(origin, apiKey, workflowId, [], request.signal).catch((retryError: unknown) => {
                     throw explainRunningHubError(retryError, workflowId);
                 });
             } else {
@@ -1045,9 +1102,27 @@ export async function runRunningHubWorkflow(args: {
             }
         }
     }
-    if (task.errorMessage || isFailedStatus(task.status)) throw explainRunningHubError(new Error(task.errorMessage || apiText("runningHubTaskFailed")), workflowId);
+    if (task.errorMessage || isFailedStatus(task.status)) {
+        // A failed task can also carry a balance error in its failure reason — let the outer loop switch keys.
+        const message = task.errorMessage || "";
+        if (isBalanceMessage(message)) {
+            const err = new Error(message);
+            if (isLastKey) throw explainRunningHubError(err, workflowId);
+            throw err;
+        }
+        throw explainRunningHubError(new Error(task.errorMessage || apiText("runningHubTaskFailed")), workflowId);
+    }
     if (!isDoneStatus(task.status)) {
-        task = await pollTaskOutputs({ origin, apiKey, taskId: task.taskId, signal: args.signal });
+        try {
+            task = await pollTaskOutputs({ origin, apiKey, taskId: task.taskId, signal: request.signal });
+        } catch (error) {
+            // Polling can surface a late balance failure; let the outer loop switch keys.
+            if (isBalanceMessage(errorText(error))) {
+                if (isLastKey) throw explainRunningHubError(error, workflowId);
+                throw error;
+            }
+            throw error;
+        }
     }
     return { images: task.images, videos: task.videos };
 }
