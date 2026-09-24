@@ -9,7 +9,7 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import { applyComfyPrompt, parseComfyApiWorkflow, type ComfyNode, type ComfyWorkflow } from "@/lib/comfyui-native";
-import { dataUrlToFile, readImageMeta } from "@/lib/image-utils";
+import { dataUrlToFile } from "@/lib/image-utils";
 
 type RequestOptions = { signal?: AbortSignal };
 
@@ -346,11 +346,9 @@ function applyQwenImage21Settings(workflow: ComfyWorkflow, imageValues: string[]
     // Qwen Image 2.1 encodes text at a fixed resolution matching the long side of the latent.
     const encoder = next["418"] || findComfyNode(next, (node) => /TextEncodeQwenImage21/i.test(node.class_type || ""));
     if (encoder?.inputs && "resolution" in encoder.inputs) {
-        if (isQwenImage21I2IWorkflow(workflowId)) {
-            // 图生图：resolution 设为 0 让输出尺寸/画幅完全跟随第一张参考图(image_1)，
-            // 而非被画布尺寸选择或工作流默认值(如 1280)强制 resize 成固定比例。
-            encoder.inputs.resolution = 0;
-        } else if (size?.width && size.height) {
+        // 图生图：resolution 跟随用户选择的画幅长边(而非 0 跟随参考图 image_1)，使输出
+        // 严格按所选画幅(9:16/16:9 等)resize，而非被参考图自身宽高比或工作流默认值决定。
+        if (size?.width && size.height) {
             encoder.inputs.resolution = Math.max(size.width, size.height);
         }
     }
@@ -396,17 +394,6 @@ function findComfyNode(workflow: ComfyWorkflow, predicate: (node: ComfyNode) => 
         if (predicate(node)) return node;
     }
     return undefined;
-}
-
-/** Read a reference image's intrinsic dimensions (falls back to null on failure). */
-async function referenceImageDimensions(dataUrl: string): Promise<{ width: number; height: number } | null> {
-    try {
-        const meta = await readImageMeta(dataUrl);
-        if (meta?.width && meta?.height) return { width: meta.width, height: meta.height };
-    } catch {
-        // fall through to null
-    }
-    return null;
 }
 
 async function fetchWebappNodes(origin: string, apiKey: string, webappId: string, signal?: AbortSignal): Promise<WebappNode[]> {
@@ -1014,12 +1001,7 @@ export async function runRunningHubWorkflow(args: {
         uploaded.push(await uploadImage(origin, apiKey, refs[index], `ref-${index + 1}.png`, args.signal));
     }
     const pixels = resolveCanvasPixels(args.size || "", args.media || "image");
-    let aspect = canvasAspect(args.size || "");
-    // 图生图：输出画幅应跟随用户链接的参考图自身宽高比，而非画布尺寸选择或默认 9:16。
-    if (refs.length && isQwenImage21I2IWorkflow(workflowId)) {
-        const refDims = await referenceImageDimensions(refs[0]);
-        if (refDims) aspect = closestResolutionSelectorAspect(refDims.width, refDims.height);
-    }
+    const aspect = canvasAspect(args.size || "");
     const overrides = workflow ? buildNodeInfoList(workflow, args.prompt, uploaded, pixels, args.seconds, aspect, args.media === "video" ? "" : args.size || "", workflowId) : [];
     const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|resolution|megapixel|aspect_ratio|switch/i.test(item.fieldName));
     let task: RunningHubTaskView;
