@@ -3,6 +3,8 @@ import { useEffect, useRef, useState, type ImgHTMLAttributes } from "react";
 import { refreshImageUrl } from "@/services/image-storage";
 
 const MAX_CACHE = 96;
+/** Evicted blob URLs are revoked after this grace period, not immediately. */
+const OWNED_URL_REVOKE_DELAY_MS = 30_000;
 const cache = new Map<string, string>();
 const inflight = new Map<string, Promise<string>>();
 /** Blob URLs this module created — the only ones we are allowed to revoke. */
@@ -13,6 +15,13 @@ export const CANVAS_DISPLAY_MAX_EDGE = 768;
 
 function cacheKey(src: string, maxEdge: number) {
     return `${src}\0${maxEdge}`;
+}
+
+function scheduleOwnedUrlRevoke(url: string) {
+    // A cache entry can be the live src of several mounted <img> elements at once (nodes
+    // sharing the same source). Revoking on eviction would blank them mid-frame; the grace
+    // period lets their recovery chain repaint from storage before the bytes go away.
+    window.setTimeout(() => URL.revokeObjectURL(url), OWNED_URL_REVOKE_DELAY_MS);
 }
 
 function touch(key: string, url: string) {
@@ -26,8 +35,8 @@ function touch(key: string, url: string) {
         // Never revoke a caller-owned blob: URL — image-storage hands us its own object URLs,
         // and revoking one here blanks the node everywhere until it is re-resolved.
         if (oldUrl && ownedUrls.has(oldUrl)) {
-            URL.revokeObjectURL(oldUrl);
             ownedUrls.delete(oldUrl);
+            scheduleOwnedUrlRevoke(oldUrl);
         }
     }
 }
@@ -181,15 +190,19 @@ export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, a
     const chainRef = useRef<string[]>([]);
     const attemptRef = useRef(0);
     const revivedRef = useRef<string[]>([]);
+    const reviveRetriesRef = useRef(0);
+    const candidatesKeyRef = useRef(candidatesKey);
 
     const chain = [...candidates, ...revived];
     chainRef.current = chain;
     attemptRef.current = attempt;
     revivedRef.current = revived;
+    candidatesKeyRef.current = candidatesKey;
     const current = chain[attempt] || "";
 
     useEffect(() => {
         failedRef.current = new Set();
+        reviveRetriesRef.current = 0;
         setRevived([]);
         setAttempt(0);
     }, [candidatesKey]);
@@ -219,10 +232,35 @@ export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, a
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [current, edge]);
 
+    const reviveFromStorage = async (chainNow: string[], forCandidatesKey: string) => {
+        const rebuilt = (await Promise.all([refreshImageUrl(previewStorageKey), refreshImageUrl(storageKey)])).filter((url): url is string => Boolean(url) && !chainNow.includes(url));
+        // The candidates changed while the storage reads were in flight (user swapped the
+        // media) — the rebuilt URLs belong to the old source, so drop them.
+        if (candidatesKeyRef.current !== forCandidatesKey) return;
+        if (rebuilt.length) {
+            reviveRetriesRef.current = 0;
+            setRevived(rebuilt);
+            // Jump to the first rebuilt URL. `attempt` still points at the failed candidate
+            // here; without this, `current` (= chain[attempt]) never changes, the load effect
+            // never re-runs, and the revived URLs are never displayed — the node stayed blank
+            // until the page was reloaded.
+            setAttempt(chainNow.length);
+            return;
+        }
+        // Storage reads can fail transiently (IndexedDB / local-folder hiccup). Retry the
+        // rebuild a few times before giving up, otherwise the node stays blank until reload.
+        if (reviveRetriesRef.current < 3) {
+            reviveRetriesRef.current += 1;
+            window.setTimeout(() => void reviveFromStorage(chainRef.current, forCandidatesKey), 900 * reviveRetriesRef.current);
+            return;
+        }
+        reviveRetriesRef.current = 0;
+        setDisplaySrc("");
+    };
+
     const advance = async () => {
         const chainNow = chainRef.current;
         const attemptNow = attemptRef.current;
-        const revivedNow = revivedRef.current;
         const currentNow = chainNow[attemptNow] || "";
         if (!currentNow) return;
         // The same URL can error more than once before state settles — never skip a candidate.
@@ -232,14 +270,7 @@ export function CanvasDisplayImage({ src = "", previewSrc, maxEdge, className, a
             setAttempt(attemptNow + 1);
             return;
         }
-        if (!revivedNow.length) {
-            const rebuilt = (await Promise.all([refreshImageUrl(previewStorageKey), refreshImageUrl(storageKey)])).filter((url): url is string => Boolean(url) && !chainNow.includes(url));
-            if (rebuilt.length) {
-                setRevived(rebuilt);
-                return;
-            }
-        }
-        setDisplaySrc("");
+        await reviveFromStorage(chainNow, candidatesKey);
     };
 
     if (!chain.length || !displaySrc) return null;

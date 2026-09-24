@@ -39,6 +39,20 @@ export async function resolveMediaUrl(storageKey?: string, fallback = "") {
     return url;
 }
 
+/**
+ * Drop the cached object URL for a key and rebuild it from the stored blob — the video
+ * counterpart of image-storage.refreshImageUrl. The old URL is deliberately NOT revoked:
+ * it can still be the live src of another mounted <video>, and revoking it would blank
+ * those elements too. Revoking an already-dead URL is a no-op, so skipping is always safe.
+ * Returns "" when the blob itself is gone.
+ */
+export async function refreshMediaUrl(storageKey?: string) {
+    if (!storageKey) return "";
+    const cached = objectUrls.get(storageKey);
+    if (cached) objectUrls.delete(storageKey);
+    return resolveMediaUrl(storageKey, "");
+}
+
 /** Blob object URLs die on refresh; never treat them as a usable fallback. */
 function usableMediaFallback(fallback = "") {
     const value = String(fallback || "").trim();

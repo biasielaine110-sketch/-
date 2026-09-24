@@ -222,15 +222,15 @@ export async function resolveImageUrl(storageKey?: string, fallback = "") {
  * Drop the cached object URL for a key and rebuild it from the stored blob.
  * `objectUrls` can hold a URL that was revoked elsewhere (or died with a previous decode),
  * and `resolveImageUrl` would keep handing that dead URL back — this forces a fresh one.
+ * The old URL is deliberately NOT revoked: it can still be the live src of another mounted
+ * <img> (nodes sharing the same image), and revoking it would blank those nodes too.
+ * Revoking an already-dead URL is a no-op, so skipping it is always safe.
  * Returns "" when the blob itself is gone.
  */
 export async function refreshImageUrl(storageKey?: string) {
     if (!storageKey) return "";
     const cached = objectUrls.get(storageKey);
-    if (cached) {
-        URL.revokeObjectURL(cached);
-        objectUrls.delete(storageKey);
-    }
+    if (cached) objectUrls.delete(storageKey);
     return resolveImageUrl(storageKey, "");
 }
 

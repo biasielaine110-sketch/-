@@ -7,6 +7,7 @@ import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { refreshMediaUrl } from "@/services/file-storage";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasChatContent } from "./canvas-chat-content";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
@@ -1039,16 +1040,33 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
-function CanvasNodeVideoPlayer({ src, posterSrc }: { src: string; posterSrc?: string }) {
+function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; posterSrc?: string; storageKey?: string }) {
     const { t } = useTranslation();
     const videoRef = useRef<HTMLVideoElement>(null);
     const [activated, setActivated] = useState(false);
     const [playing, setPlaying] = useState(false);
+    const [playableSrc, setPlayableSrc] = useState(src);
+    const retriesRef = useRef(0);
+
+    useEffect(() => {
+        setPlayableSrc(src);
+        retriesRef.current = 0;
+    }, [src, storageKey]);
+
+    // A dead blob: URL (revoked mid-session / failed hydration) leaves a plain <video> black
+    // forever. Rebuild a fresh object URL from the stored blob and retry a few times.
+    const handleVideoError = () => {
+        if (!storageKey || retriesRef.current >= 2) return;
+        retriesRef.current += 1;
+        void refreshMediaUrl(storageKey).then((next) => {
+            if (next && next !== playableSrc) setPlayableSrc(next);
+        });
+    };
 
     useEffect(() => {
         setActivated(false);
         setPlaying(false);
-    }, [src]);
+    }, [playableSrc]);
 
     useEffect(() => {
         if (!activated) return;
@@ -1093,13 +1111,14 @@ function CanvasNodeVideoPlayer({ src, posterSrc }: { src: string; posterSrc?: st
             {activated ? (
                 <video
                     ref={videoRef}
-                    src={src}
+                    src={playableSrc}
                     poster={posterSrc || undefined}
                     className="h-full w-full rounded-[18px] bg-black object-contain"
                     playsInline
                     preload="metadata"
                     controls={playing}
                     data-canvas-no-zoom
+                    onError={handleVideoError}
                     onPlay={() => setPlaying(true)}
                     onPause={() => setPlaying(false)}
                     onEnded={() => setPlaying(false)}
@@ -1138,7 +1157,7 @@ function VideoNodeContent({ node, theme, onDeleteBatchImage }: NodeContentRender
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
             <CanvasLazyMedia>
-                <CanvasNodeVideoPlayer src={node.metadata.content} posterSrc={node.metadata?.thumbnailContent} />
+                <CanvasNodeVideoPlayer src={node.metadata.content} posterSrc={node.metadata?.thumbnailContent} storageKey={node.metadata?.storageKey} />
             </CanvasLazyMedia>
             <button
                 type="button"
@@ -1260,7 +1279,7 @@ function ImageContent({
                 {displaySrc ? (
                     isVideo ? (
                         <CanvasLazyMedia>
-                            <CanvasNodeVideoPlayer src={displaySrc} posterSrc={primaryThumb} />
+                            <CanvasNodeVideoPlayer src={displaySrc} posterSrc={primaryThumb} storageKey={primaryImage?.storageKey || node.metadata?.storageKey} />
                         </CanvasLazyMedia>
                     ) : (
                         <>
@@ -1459,7 +1478,7 @@ function ExpandedImageCard({
             {image.content || image.thumbnailContent ? (
                 isVideo ? (
                     <CanvasLazyMedia className="h-full w-full">
-                        <CanvasNodeVideoPlayer src={image.content || image.thumbnailContent || ""} posterSrc={image.thumbnailContent} />
+                        <CanvasNodeVideoPlayer src={image.content || image.thumbnailContent || ""} posterSrc={image.thumbnailContent} storageKey={image.storageKey} />
                     </CanvasLazyMedia>
                 ) : (
                     <CanvasLazyMedia className="h-full w-full">
