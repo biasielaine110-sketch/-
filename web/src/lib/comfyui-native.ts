@@ -28,7 +28,9 @@ export type NativeComfyUiResult = {
 };
 
 const HISTORY_INTERVAL_MS = 2000;
-const HISTORY_TIMEOUT_MS = 20 * 60 * 1000;
+// H3 等 DiT 视频工作流在共享 GPU / 长队列下可能跑很久（排队 + 采样 + VAE 解码），
+// 60 分钟是实测安全上限；超时后任务仍在服务器跑，只是画布停止等待。
+const HISTORY_TIMEOUT_MS = 60 * 60 * 1000;
 
 /** True for typical rented / proxied ComfyUI endpoints (not AutoDL hosted workflow API). */
 export function isNativeComfyUiBaseUrl(baseUrl: string): boolean {
@@ -44,10 +46,11 @@ export function isNativeComfyUiBaseUrl(baseUrl: string): boolean {
         if (/^8188[-.]|^8189[-.]/i.test(host) || /\.pod\.compshare\.cn$/i.test(host)) return true;
         if (/runninghub\.cn/i.test(host) && /\/proxy(-plus)?(\/|$)/i.test(path)) return true;
         if (/seetacloud\.com|cloud\.ai\.cpolar|ngrok|trycloudflare|compshare\.cn/i.test(host)) return true;
+        if (/-(?:8188|8189)[-.]proxy\.runpod\.net$/i.test(host) || /[-.]8188[-.]proxy\.runpod\.net$/i.test(host)) return true;
         if (/comfyui/i.test(host) || /\/comfyui\/?$/i.test(path)) return true;
         return false;
     } catch {
-        return /:(8188|8189)\b|^8188[-.]|pod\.compshare|runninghub\.cn\/proxy|comfyui/i.test(raw);
+        return /:(8188|8189)\b|^8188[-.]|pod\.compshare|runninghub\.cn\/proxy|comfyui|[-.]8188[-.]proxy\.runpod\.net|-(?:8188|8189)[-.]proxy\.runpod\.net/i.test(raw);
     }
 }
 
@@ -83,7 +86,12 @@ export function shouldUseNativeComfyUi(baseUrl: string, model: string, script?: 
         ?.trim()
         .toLowerCase() || "";
     if (/^comfyui([_:-]|$)/i.test(name) || name === "comfy") return isNativeComfyUiBaseUrl(baseUrl) || Boolean(baseUrl.trim());
-    return isNativeComfyUiBaseUrl(baseUrl) && Boolean(parseComfyApiWorkflow(script));
+    // A recognized ComfyUI server must never fall through to the OpenAI-style call: that path
+    // sends `Authorization: Bearer ...`, the server answers 401 + WWW-Authenticate: Basic, and
+    // the browser pops a native login dialog on every generation request. Route to the native
+    // path instead so an empty script surfaces the clear "workflow required" error.
+    if (isNativeComfyUiBaseUrl(baseUrl)) return true;
+    return Boolean(parseComfyApiWorkflow(script));
 }
 
 /** Strip trailing slash and accidental /v1 so /prompt lands on the ComfyUI root. */
