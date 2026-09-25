@@ -30,7 +30,16 @@ export function resolveCanvasProjectIdFromLocation() {
  */
 export async function saveBlobAs(source: Blob | string, suggestedName: string, options?: SaveBlobOptions): Promise<SaveBlobResult> {
     const fileName = suggestedName.trim() || "download.bin";
-    const blob = await resolveBlobSource(source);
+    let blob = await resolveBlobSource(source);
+    // file-saver falls back to inferring the name from the URL when a Blob has an empty
+    // type; a blob: URL has no path, so downloads lose their extension (e.g. "canvas-video"
+    // instead of "canvas-video.mp4"). Restore the type from the suggested filename's extension
+    // so saveAs keeps the intended name even for proxy-fetched blobs.
+    if (!blob.type && /\.[a-z0-9]{1,5}$/i.test(fileName)) {
+        const ext = (fileName.match(/\.([a-z0-9]{1,5})$/i) || [])[1]?.toLowerCase() || "";
+        const mime = MIME_BY_EXT[ext];
+        if (mime) blob = new Blob([blob], { type: mime });
+    }
     const projectId = options?.projectId || resolveCanvasProjectIdFromLocation();
 
     if (projectId && supportsFileSystemAccess()) {
@@ -45,3 +54,17 @@ export async function saveBlobAs(source: Blob | string, suggestedName: string, o
     saveAs(blob, fileName);
     return { method: "download", fileName };
 }
+
+const MIME_BY_EXT: Record<string, string> = {
+    mp4: "video/mp4",
+    webm: "video/webm",
+    mov: "video/quicktime",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    json: "application/json",
+};
