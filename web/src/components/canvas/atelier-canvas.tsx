@@ -38,6 +38,9 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
     const [isSpacePressed, setIsSpacePressed] = useState(false);
     const [isControlPressed, setIsControlPressed] = useState(false);
     const [isPanning, setIsPanning] = useState(false);
+    // Pan offset applied locally during a drag so the parent (and every canvas node) is NOT
+    // re-rendered on each pointermove. The final viewport is committed once on pointerup.
+    const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
 
     useEffect(() => {
         scaleRef.current = viewport.k;
@@ -153,6 +156,7 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
                 hasMoved: false,
                 startedOnBackground: isBackgroundClick,
             };
+            setPanOffset({ x: 0, y: 0 });
             setIsPanning(true);
             document.body.style.cursor = "grabbing";
             return;
@@ -183,20 +187,15 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
                 panState.current.hasMoved = true;
             }
 
-            nextViewportRef.current = {
+            // Local-only offset: re-renders just this canvas shell (transform), not the
+            // parent project page nor any node/connection. Keeps panning GPU-composited
+            // and avoids the per-frame visibleNodes/visibleConnections re-filter.
+            setPanOffset({ x: dx, y: dy });
+            viewportLiveRef.current = {
                 x: panState.current.initialX + dx,
                 y: panState.current.initialY + dy,
                 k: scaleRef.current,
             };
-            viewportLiveRef.current = nextViewportRef.current;
-            if (frameRef.current) return;
-            frameRef.current = requestAnimationFrame(() => {
-                frameRef.current = null;
-                const next = nextViewportRef.current;
-                if (!next) return;
-                nextViewportRef.current = null;
-                onViewportChangeRef.current(next);
-            });
         };
 
         const handlePointerUp = () => {
@@ -205,9 +204,13 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
             if (!panState.current.hasMoved && panState.current.startedOnBackground) {
                 onCanvasDeselect?.();
             }
+            const finalViewport = viewportLiveRef.current;
             panState.current.isPanning = false;
+            setPanOffset({ x: 0, y: 0 });
             setIsPanning(false);
             document.body.style.cursor = "";
+            // Commit the final viewport exactly once; the parent then re-renders nodes once.
+            onViewportChangeRef.current(finalViewport);
         };
 
         window.addEventListener("pointermove", handlePointerMove);
@@ -252,11 +255,11 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
             onDragOver={(event) => event.preventDefault()}
             onDrop={onDrop}
         >
-            <CanvasGrid viewport={viewport} mode={backgroundMode} />
+            <CanvasGrid viewport={{ x: viewport.x + panOffset.x, y: viewport.y + panOffset.y, k: viewport.k }} mode={backgroundMode} />
             <div
                 className="absolute origin-top-left"
                 style={{
-                    transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.k})`,
+                    transform: `translate(${viewport.x + panOffset.x}px, ${viewport.y + panOffset.y}px) scale(${viewport.k})`,
                 }}
             >
                 {children}
