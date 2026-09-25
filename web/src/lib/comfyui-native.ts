@@ -465,6 +465,36 @@ function writeComfyNumberInput(node: ComfyNode, field: string, nextValue: number
     return false;
 }
 
+function writeComfyStringInput(node: ComfyNode, field: string, nextValue: string) {
+    if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
+    const current = node.inputs[field];
+    if (typeof current === "string") {
+        node.inputs[field] = nextValue;
+        return true;
+    }
+    return false;
+}
+
+/** Parse sampling steps (empty → null, invalid → null). Clamped to 1..10000 (BasicScheduler range). */
+function parseComfySteps(value?: string | number) {
+    const raw = typeof value === "number" ? value : Number(String(value ?? "").trim());
+    if (!Number.isFinite(raw) || raw <= 0) return null;
+    return Math.max(1, Math.min(10000, Math.round(raw)));
+}
+
+/** Normalize MiniMax H3 ref_image_size (only accepts "match" / "max"; otherwise null). */
+function normalizeH3RefImageSize(value?: string) {
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (raw === "match" || raw === "max") return raw;
+    return null;
+}
+
+/** Normalize a free-text ComfyUI combo value (trim; empty → null). */
+function normalizeComfyCombo(value?: string) {
+    const raw = String(value ?? "").trim();
+    return raw || null;
+}
+
 function writeLinkedComfyNumber(workflow: ComfyWorkflow, value: unknown, nextValue: number): boolean {
     if (!Array.isArray(value) || value[0] == null) return false;
     const source = workflow[String(value[0])];
@@ -481,13 +511,28 @@ function writeLinkedComfyNumber(workflow: ComfyWorkflow, value: unknown, nextVal
  */
 export function applyComfyVideoSettings(
     workflow: ComfyWorkflow,
-    settings: { size?: string; seconds?: string | number; vquality?: string },
+    settings: {
+        size?: string;
+        seconds?: string | number;
+        vquality?: string;
+        steps?: string | number;
+        refImageSize?: string;
+        samplerName?: string;
+        scheduler?: string;
+    },
 ): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
     const pixels = pixelsFromSizeAndQuality(settings.size, settings.vquality);
     const megapixels = megapixelsFromPixels(pixels.width, pixels.height);
     const aspectLabel = resolutionSelectorAspectLabel(pixels.ratio);
     const seconds = parseCanvasSeconds(settings.seconds);
+
+    // Sampling steps for scheduler nodes (BasicScheduler / KSampler / Scheduler steps).
+    const steps = parseComfySteps(settings.steps);
+    // MiniMax H3 reference image sizing (match / max) — only applied to H3 conditioning nodes.
+    const refImageSize = normalizeH3RefImageSize(settings.refImageSize);
+    const samplerName = normalizeComfyCombo(settings.samplerName);
+    const scheduler = normalizeComfyCombo(settings.scheduler);
 
     for (const node of Object.values(next)) {
         const type = String(node.class_type || "");
@@ -504,6 +549,33 @@ export function applyComfyVideoSettings(
         }
     }
 
+    // Sampling steps: BasicScheduler / KSampler expose an integer `steps` field.
+    if (steps != null) {
+        for (const node of Object.values(next)) {
+            const type = String(node.class_type || "");
+            if (!/BasicScheduler|KSampler|Scheduler/i.test(type) || !node.inputs) continue;
+            if ("steps" in node.inputs) writeComfyNumberInput(node, "steps", steps);
+        }
+    }
+
+    // Scheduler (BasicScheduler.scheduler) — string combo.
+    if (scheduler) {
+        for (const node of Object.values(next)) {
+            const type = String(node.class_type || "");
+            if (!/BasicScheduler|Scheduler/i.test(type) || !node.inputs) continue;
+            if ("scheduler" in node.inputs) writeComfyStringInput(node, "scheduler", scheduler);
+        }
+    }
+
+    // Sampler name (KSamplerSelect.sampler_name) — string combo.
+    if (samplerName) {
+        for (const node of Object.values(next)) {
+            const type = String(node.class_type || "");
+            if (!/KSamplerSelect|KSampler/i.test(type) || !node.inputs) continue;
+            if ("sampler_name" in node.inputs) writeComfyStringInput(node, "sampler_name", samplerName);
+        }
+    }
+
     // Text-to-image latent nodes (EmptySD3LatentImage / EmptyLatentImage / EmptySDXL...) expose
     // scalar width/height. Inject canvas dimensions so aspect-ratio switching works for these graphs.
     for (const node of Object.values(next)) {
@@ -514,11 +586,14 @@ export function applyComfyVideoSettings(
         }
     }
 
-    // MiniMax H3 conditioning often exposes width/height/length (scalar or linked).
+    // MiniMax H3 conditioning often exposes width/height/length (scalar or linked) and ref_image_size.
     for (const node of Object.values(next)) {
         if (!isMiniMaxH3ConditioningNode(node) || !node.inputs) continue;
         if (!writeComfyNumberInput(node, "width", pixels.width)) writeLinkedComfyNumber(next, node.inputs.width, pixels.width);
         if (!writeComfyNumberInput(node, "height", pixels.height)) writeLinkedComfyNumber(next, node.inputs.height, pixels.height);
+        if (refImageSize && "ref_image_size" in node.inputs) {
+            writeComfyStringInput(node, "ref_image_size", refImageSize);
+        }
         if (seconds != null) {
             const length = h3LengthFromSeconds(seconds);
             if (!writeComfyNumberInput(node, "length", length)) {
@@ -758,6 +833,14 @@ export type RunNativeComfyUiArgs = {
     seconds?: string | number;
     /** Canvas quality tier (e.g. 720, 1080, 2k). */
     vquality?: string;
+    /** ComfyUI sampling steps. */
+    steps?: string | number;
+    /** MiniMax H3 reference image sizing (match / max). */
+    refImageSize?: string;
+    /** ComfyUI sampler name (KSamplerSelect.sampler_name). */
+    samplerName?: string;
+    /** ComfyUI scheduler (BasicScheduler.scheduler). */
+    scheduler?: string;
     signal?: AbortSignal;
 };
 
@@ -773,6 +856,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         size: args.size,
         seconds: args.seconds,
         vquality: args.vquality,
+        steps: args.steps,
+        refImageSize: args.refImageSize,
+        samplerName: args.samplerName,
+        scheduler: args.scheduler,
     });
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     if (refs.length) {

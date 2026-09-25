@@ -307,6 +307,10 @@ async function createNativeComfyUiVideoTask(
             size: config.size,
             seconds: config.videoSeconds,
             vquality: config.vquality,
+            steps: config.videoSteps,
+            refImageSize: config.videoRefImageSize,
+            samplerName: config.videoSamplerName,
+            scheduler: config.videoScheduler,
             signal: options?.signal,
         });
         const video = result.videos[0];

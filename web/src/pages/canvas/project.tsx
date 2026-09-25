@@ -1308,7 +1308,7 @@ function AtelierCanvasPage() {
         }
         const nodeId = Array.from(selectedNodeIdsRef.current)[0];
         const node = nodesRef.current.find((item) => item.id === nodeId);
-        if (!node || (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Annotate) || !node.metadata?.content) {
+        if (!node || (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Annotate && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) {
             message.warning(t("canvas.shortcut.copyImageNeedSelect"));
             return;
         }
@@ -1322,15 +1322,18 @@ function AtelierCanvasPage() {
         const naturalWidth = primary?.naturalWidth || metadata.naturalWidth || node.width;
         const naturalHeight = primary?.naturalHeight || metadata.naturalHeight || node.height;
         const bytes = primary?.bytes || metadata.bytes || 0;
-        const mimeType = primary?.mimeType || metadata.mimeType || (node.type === CanvasNodeType.Video ? "video/mp4" : "image/png");
+        const isAudio = node.type === CanvasNodeType.Audio;
         const isVideo = node.type === CanvasNodeType.Video;
-        const size = isVideo
-            ? fitNodeSize(naturalWidth || node.width, naturalHeight || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT)
-            : fitNodeSize(naturalWidth || node.width, naturalHeight || node.height, Math.max(node.width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width), Math.max(node.height, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height));
-        const id = `${isVideo ? CanvasNodeType.Video : CanvasNodeType.Image}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const mimeType = primary?.mimeType || metadata.mimeType || (isVideo ? "video/mp4" : isAudio ? "audio/mpeg" : "image/png");
+        const size = isAudio
+            ? { width: node.width, height: node.height }
+            : isVideo
+              ? fitNodeSize(naturalWidth || node.width, naturalHeight || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT)
+              : fitNodeSize(naturalWidth || node.width, naturalHeight || node.height, Math.max(node.width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width), Math.max(node.height, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height));
+        const id = `${isVideo ? CanvasNodeType.Video : isAudio ? CanvasNodeType.Audio : CanvasNodeType.Image}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const copy: CanvasNodeData = {
             id,
-            type: isVideo ? CanvasNodeType.Video : CanvasNodeType.Image,
+            type: isVideo ? CanvasNodeType.Video : isAudio ? CanvasNodeType.Audio : CanvasNodeType.Image,
             title: node.title,
             position: { x: node.position.x + node.width + 48, y: node.position.y + node.height / 2 - size.height / 2 },
             ...size,
@@ -1344,7 +1347,7 @@ function AtelierCanvasPage() {
                 bytes,
                 mimeType,
                 status: NODE_STATUS_SUCCESS,
-                durationMs: isVideo ? metadata.durationMs : undefined,
+                durationMs: isVideo || isAudio ? metadata.durationMs : undefined,
             },
         };
         setNodes((prev) => [...prev, copy]);

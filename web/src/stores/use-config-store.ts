@@ -76,6 +76,14 @@ export type AiConfig = {
     vquality: string;
     videoGenerateAudio: string;
     videoWatermark: string;
+    /** ComfyUI video sampling steps (BasicScheduler.steps). */
+    videoSteps: string;
+    /** MiniMax H3 reference image sizing (match / max). */
+    videoRefImageSize: string;
+    /** ComfyUI sampler name (KSamplerSelect.sampler_name). */
+    videoSamplerName: string;
+    /** ComfyUI scheduler (BasicScheduler.scheduler). */
+    videoScheduler: string;
     systemPrompt: string;
     reasoningEffort: ReasoningEffort;
     /** direct = browser→API (no Vercel 60s cap); proxy = via /api/proxy for CORS. */
@@ -143,6 +151,10 @@ export const defaultConfig: AiConfig = {
     vquality: "720",
     videoGenerateAudio: "true",
     videoWatermark: "false",
+    videoSteps: "40",
+    videoRefImageSize: "max",
+    videoSamplerName: "dpmpp_2m",
+    videoScheduler: "karras",
     systemPrompt: "",
     reasoningEffort: "auto",
     // Default via same-origin proxy — most relay APIs block browser CORS.
@@ -413,6 +425,10 @@ export const useConfigStore = create<ConfigStore>()(
                         vquality: config.vquality || "720",
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
+                        videoSteps: config.videoSteps || defaultConfig.videoSteps,
+                        videoRefImageSize: config.videoRefImageSize || defaultConfig.videoRefImageSize,
+                        videoSamplerName: config.videoSamplerName || defaultConfig.videoSamplerName,
+                        videoScheduler: config.videoScheduler || defaultConfig.videoScheduler,
                         canvasImageCount: config.canvasImageCount || "1",
                         mjVersion: config.mjVersion || defaultConfig.mjVersion,
                         quality: config.quality || "medium",

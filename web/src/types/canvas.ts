@@ -131,6 +131,14 @@ export type CanvasNodeMetadata = {
     vquality?: string;
     generateAudio?: string;
     watermark?: string;
+    /** ComfyUI video sampling steps. */
+    steps?: string;
+    /** MiniMax H3 reference image sizing (match / max). */
+    refImageSize?: string;
+    /** ComfyUI sampler name. */
+    samplerName?: string;
+    /** ComfyUI scheduler. */
+    scheduler?: string;
     audioVoice?: string;
     audioFormat?: string;
     audioSpeed?: string;

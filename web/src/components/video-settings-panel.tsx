@@ -14,7 +14,8 @@ import {
     normalizeAutodlH3Resolution,
 } from "@/lib/autodl-h3-comfy";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import { resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 
 const resolutionOptions = [
     { value: "720", label: "720p" },
@@ -32,13 +33,21 @@ const sizeOptions = [
 
 const secondOptions = [6, 10, 12, 16, 20];
 
+const stepOptions = [20, 25, 30, 40, 50];
+
+// High-quality sampler names (subset of KSamplerSelect.sampler_name options).
+const samplerNameOptions = ["dpmpp_2m", "euler", "res_multistep", "dpmpp_2m_sde", "uni_pc", "ddim"];
+
+// Scheduler options (subset of BasicScheduler.scheduler options).
+const schedulerOptions = ["karras", "simple", "sgm_uniform", "normal"];
+
 export const videoResolutionOptions = resolutionOptions.map((item) => ({ value: item.value, label: item.label }));
 export const videoSizeOptions = sizeOptions.map((item) => ({ value: item.value, get label() { return i18n.t(`settingsPanels.video.sizes.${item.labelKey}`); } }));
 export const videoSecondOptions = secondOptions.map((value) => String(value));
 
 type VideoSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark", value: string) => void;
+    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoSteps" | "videoRefImageSize" | "videoSamplerName" | "videoScheduler", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
@@ -48,6 +57,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const { t } = useTranslation();
     const model = config.model || config.videoModel || "";
     const h3Comfy = isAutodlH3ComfyVideoModel(model, resolveModelRequestConfig(config, model).baseUrl);
+    const nativeComfy = shouldUseNativeComfyUi(resolveModelRequestConfig(config, model).baseUrl, model, resolveModelScript(config, model));
 
     if (h3Comfy) {
         const resolutionChoices = autodlH3ResolutionOptions(model);
@@ -96,6 +106,10 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const size = normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
     const resolution = normalizeVideoResolutionValue(config.vquality);
+    const steps = config.videoSteps || "40";
+    const refImageSize = (config.videoRefImageSize || "max") === "max" ? "max" : "match";
+    const samplerName = config.videoSamplerName || "dpmpp_2m";
+    const scheduler = config.videoScheduler || "karras";
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 720));
         onConfigChange("size", `${key === "width" ? next : dimensions.width}x${key === "height" ? next : dimensions.height}`);
@@ -152,6 +166,48 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <NumberInput value={seconds} min={1} max={20} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
                     </div>
                 </SettingGroup>
+                {nativeComfy && !h3Comfy ? (
+                    <>
+                        <SettingGroup title={t("settingsPanels.video.steps")} color={theme.node.muted}>
+                            <div className="grid grid-cols-4 gap-2.5">
+                                {stepOptions.map((value) => (
+                                    <OptionPill key={value} selected={steps === String(value)} theme={theme} onClick={() => onConfigChange("videoSteps", String(value))}>
+                                        {value}
+                                    </OptionPill>
+                                ))}
+                                <NumberInput value={steps} min={1} max={100} theme={theme} onChange={(value) => onConfigChange("videoSteps", value)} />
+                            </div>
+                        </SettingGroup>
+                        <SettingGroup title={t("settingsPanels.video.refImageSize")} color={theme.node.muted}>
+                            <div className="grid grid-cols-2 gap-2.5">
+                                <OptionPill selected={refImageSize === "max"} theme={theme} onClick={() => onConfigChange("videoRefImageSize", "max")}>
+                                    {t("settingsPanels.video.refImageMax")}
+                                </OptionPill>
+                                <OptionPill selected={refImageSize === "match"} theme={theme} onClick={() => onConfigChange("videoRefImageSize", "match")}>
+                                    {t("settingsPanels.video.refImageMatch")}
+                                </OptionPill>
+                            </div>
+                        </SettingGroup>
+                        <SettingGroup title={t("settingsPanels.video.samplerName")} color={theme.node.muted}>
+                            <div className="grid grid-cols-3 gap-2.5">
+                                {samplerNameOptions.map((value) => (
+                                    <OptionPill key={value} selected={samplerName === value} theme={theme} onClick={() => onConfigChange("videoSamplerName", value)}>
+                                        {value}
+                                    </OptionPill>
+                                ))}
+                            </div>
+                        </SettingGroup>
+                        <SettingGroup title={t("settingsPanels.video.scheduler")} color={theme.node.muted}>
+                            <div className="grid grid-cols-4 gap-2.5">
+                                {schedulerOptions.map((value) => (
+                                    <OptionPill key={value} selected={scheduler === value} theme={theme} onClick={() => onConfigChange("videoScheduler", value)}>
+                                        {value}
+                                    </OptionPill>
+                                ))}
+                            </div>
+                        </SettingGroup>
+                    </>
+                ) : null}
             </div>
         </ImageSettingsTheme>
     );
