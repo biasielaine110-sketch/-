@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Clapperboard, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Clapperboard, Copy, Download, Expand, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
 
 import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas-display-image";
 import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
@@ -8,6 +8,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { refreshMediaUrl } from "@/services/file-storage";
+import { saveBlobAs } from "@/lib/fs/save-blob";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasChatContent } from "./canvas-chat-content";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
@@ -1097,15 +1098,38 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; po
             .catch(() => setPlaying(false));
     };
 
+    const handleFullscreen = (event: React.MouseEvent) => {
+        event.stopPropagation();
+        event.preventDefault();
+        const video = videoRef.current;
+        if (!video) return;
+        if (document.fullscreenElement) {
+            void document.exitFullscreen().catch(() => {});
+            return;
+        }
+        const anyVideo = video as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+        if (typeof video.requestFullscreen === "function") {
+            void video.requestFullscreen().catch(() => {});
+        } else if (typeof anyVideo.webkitEnterFullscreen === "function") {
+            anyVideo.webkitEnterFullscreen();
+        }
+    };
+
+    const handleDownload = (event: React.MouseEvent) => {
+        event.stopPropagation();
+        event.preventDefault();
+        void saveBlobAs(playableSrc, "canvas-video.mp4");
+    };
+
     return (
         <div
             className="relative h-full w-full overflow-hidden"
             onMouseDown={(event) => {
-                // 播放中与控件交互时不要拖动画布节点；未播放时点击画面只负责选中/拖动
-                if (playing) event.stopPropagation();
+                // 激活后（含暂停态）都需要与原生控件交互，不拖动画布节点；未激活时点击只负责选中/拖动
+                if (activated) event.stopPropagation();
             }}
             onPointerDown={(event) => {
-                if (playing) event.stopPropagation();
+                if (activated) event.stopPropagation();
             }}
         >
             {activated ? (
@@ -1116,7 +1140,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; po
                     className="h-full w-full rounded-[18px] bg-black object-contain"
                     playsInline
                     preload="metadata"
-                    controls={playing}
+                    controls
                     data-canvas-no-zoom
                     onError={handleVideoError}
                     onPlay={() => setPlaying(true)}
@@ -1128,7 +1152,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; po
             ) : (
                 <div className="h-full w-full rounded-[18px] bg-black" aria-hidden />
             )}
-            {!playing ? (
+            {!activated ? (
                 <button
                     type="button"
                     className="absolute left-1/2 top-1/2 z-20 grid size-14 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-white/25 bg-black/55 text-white shadow-[0_10px_28px_rgba(0,0,0,.35)] backdrop-blur-md transition hover:scale-[1.04] hover:bg-black/65"
@@ -1140,6 +1164,33 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; po
                 >
                     <Play className="size-6 translate-x-[1px] fill-current" />
                 </button>
+            ) : null}
+            {activated ? (
+                <div
+                    className="absolute right-2 top-2 z-30 flex items-center gap-1.5"
+                    onMouseDown={stopShell}
+                    onPointerDown={stopShell}
+                    onClick={stopShell}
+                >
+                    <button
+                        type="button"
+                        className="grid size-8 place-items-center rounded-full border border-white/25 bg-black/55 text-white shadow-[0_6px_18px_rgba(0,0,0,.35)] backdrop-blur-md transition hover:scale-[1.05] hover:bg-black/65"
+                        title={t("common.download")}
+                        aria-label={t("common.download")}
+                        onClick={handleDownload}
+                    >
+                        <Download className="size-4" />
+                    </button>
+                    <button
+                        type="button"
+                        className="grid size-8 place-items-center rounded-full border border-white/25 bg-black/55 text-white shadow-[0_6px_18px_rgba(0,0,0,.35)] backdrop-blur-md transition hover:scale-[1.05] hover:bg-black/65"
+                        title={t("canvas.controls.fullscreen")}
+                        aria-label={t("canvas.controls.fullscreen")}
+                        onClick={handleFullscreen}
+                    >
+                        <Expand className="size-4" />
+                    </button>
+                </div>
             ) : null}
         </div>
     );

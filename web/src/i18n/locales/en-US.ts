@@ -1069,6 +1069,7 @@ export default {
             generations: "{{count}} runs",
             reasoning: "Reasoning",
             play: "Play",
+            fullscreen: "Fullscreen",
         },
         contextMenu: {
             reorderHint: "Drag the handle to reorder buttons (saved to config for export/import)",

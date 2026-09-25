@@ -1068,6 +1068,7 @@ export default {
             generations: "{{count}} 次",
             reasoning: "推理",
             play: "播放",
+            fullscreen: "全屏",
         },
         contextMenu: {
             reorderHint: "拖动手柄可调整按钮顺序（会写入配置，可导出/导入）",
