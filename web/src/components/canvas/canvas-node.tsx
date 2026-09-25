@@ -1125,11 +1125,16 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; po
         <div
             className="relative h-full w-full overflow-hidden"
             onMouseDown={(event) => {
-                // 激活后（含暂停态）都需要与原生控件交互，不拖动画布节点；未激活时点击只负责选中/拖动
-                if (activated) event.stopPropagation();
+                // 只在点击自定义叠加按钮（全屏/下载，已用 stopShell 单独处理）时阻止冒泡；
+                // 点住视频画面空白处要允许事件冒泡到节点容器，才能正常拖动节点。
+                if (event.target instanceof Element && event.target.closest("[data-video-action]")) {
+                    event.stopPropagation();
+                }
             }}
             onPointerDown={(event) => {
-                if (activated) event.stopPropagation();
+                if (event.target instanceof Element && event.target.closest("[data-video-action]")) {
+                    event.stopPropagation();
+                }
             }}
         >
             {activated ? (
@@ -1167,6 +1172,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; po
             ) : null}
             {activated ? (
                 <div
+                    data-video-action
                     className="absolute right-2 top-2 z-30 flex items-center gap-1.5"
                     onMouseDown={stopShell}
                     onPointerDown={stopShell}

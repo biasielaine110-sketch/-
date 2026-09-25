@@ -100,16 +100,34 @@ export function comfyUiUrl(baseUrl: string, path: string): string {
     return proxyApiUrl(`${root}${normalizedPath}`);
 }
 
+/** `user:pass` (Basic Auth) vs a Bearer/raw token. Returns the Basic credential, or null. */
+function parseBasicCredential(apiKey: string): { user: string; pass: string } | null {
+    const raw = String(apiKey || "").trim();
+    if (!raw || /^(none|-|n\/a)$/i.test(raw)) return null;
+    if (/^Bearer\s+/i.test(raw)) return null;
+    const colon = raw.indexOf(":");
+    if (colon <= 0 || colon === raw.length - 1) return null;
+    return { user: raw.slice(0, colon), pass: raw.slice(colon + 1) };
+}
+
 function authHeaders(apiKey: string, contentType?: string): Record<string, string> {
     const token = String(apiKey || "")
         .replace(/^Bearer\s+/i, "")
         .trim();
     const headers: Record<string, string> = {};
     if (contentType) headers["Content-Type"] = contentType;
-    if (token && !/^(none|-|n\/a)$/i.test(token)) {
+    const basic = parseBasicCredential(apiKey);
+    if (basic) {
+        headers.Authorization = `Basic ${btoa(`${basic.user}:${basic.pass}`)}`;
+    } else if (token && !/^(none|-|n\/a)$/i.test(token)) {
         headers.Authorization = `Bearer ${token}`;
     }
     return headers;
+}
+
+/** Whether a channel apiKey is a `user:pass` Basic-Auth credential (vs a Bearer token). */
+export function isBasicAuthCredential(apiKey: string): boolean {
+    return Boolean(parseBasicCredential(apiKey));
 }
 
 function cloneWorkflow(workflow: ComfyWorkflow): ComfyWorkflow {
@@ -274,7 +292,9 @@ export function applyComfyLoadAudios(workflow: ComfyWorkflow, filenames: string[
 }
 
 function isMiniMaxH3ConditioningNode(node: ComfyNode) {
-    return /MiniMaxH3AudioConditioning/i.test(String(node?.class_type || ""));
+    // MiniMax H3 exposes width/height/length on both the audio-conditioning and the
+    // reference-to-video conditioning nodes (MiniMaxH3ReferenceToVideo / MiniMaxH3AudioConditioning*).
+    return /MiniMaxH3(?:AudioConditioning|ReferenceToVideo|TextToVideo|VideoConditioning)/i.test(String(node?.class_type || ""));
 }
 
 function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
@@ -473,6 +493,16 @@ export function applyComfyVideoSettings(
 
         if (seconds != null && (/duration|时长|seconds/i.test(title) || (/Primitive(Float|Int|Number)/i.test(type) && /duration|时长/i.test(title)))) {
             writeComfyNumberInput(node, "value", seconds);
+        }
+    }
+
+    // Text-to-image latent nodes (EmptySD3LatentImage / EmptyLatentImage / EmptySDXL...) expose
+    // scalar width/height. Inject canvas dimensions so aspect-ratio switching works for these graphs.
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        if (!/Empty(?:SD3|SDXL|Latent|FLUX|SD)?LatentImage/i.test(type) || !node.inputs) continue;
+        if (writeComfyNumberInput(node, "width", pixels.width) || writeLinkedComfyNumber(next, node.inputs.width, pixels.width)) {
+            writeComfyNumberInput(node, "height", pixels.height) || writeLinkedComfyNumber(next, node.inputs.height, pixels.height);
         }
     }
 
@@ -761,7 +791,8 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         .replace(/^Bearer\s+/i, "")
         .trim();
     const body: Record<string, unknown> = { prompt: workflow, client_id: clientId };
-    if (token && !/^(none|-|n\/a)$/i.test(token)) body.token = token;
+    // Basic-Auth credentials authenticate via the Authorization header only — never as a body token.
+    if (token && !/^(none|-|n\/a)$/i.test(token) && !isBasicAuthCredential(apiKey)) body.token = token;
 
     const submit = await axios.post(comfyUiUrl(baseUrl, "/prompt"), body, {
         headers: authHeaders(apiKey, "application/json"),
