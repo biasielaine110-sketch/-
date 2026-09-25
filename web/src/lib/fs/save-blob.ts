@@ -37,8 +37,10 @@ export async function saveBlobAs(source: Blob | string, suggestedName: string, o
     // so saveAs keeps the intended name even for proxy-fetched blobs.
     if (!blob.type && /\.[a-z0-9]{1,5}$/i.test(fileName)) {
         const ext = (fileName.match(/\.([a-z0-9]{1,5})$/i) || [])[1]?.toLowerCase() || "";
-        const mime = MIME_BY_EXT[ext];
-        if (mime) blob = new Blob([blob], { type: mime });
+        // file-saver only keeps the suggested name when the Blob has a non-empty type;
+        // fall back to a generic binary type so the extension is never dropped.
+        const mime = MIME_BY_EXT[ext] || "application/octet-stream";
+        blob = new Blob([blob], { type: mime });
     }
     const projectId = options?.projectId || resolveCanvasProjectIdFromLocation();
 
@@ -59,8 +61,15 @@ const MIME_BY_EXT: Record<string, string> = {
     mp4: "video/mp4",
     webm: "video/webm",
     mov: "video/quicktime",
+    mkv: "video/x-matroska",
     mp3: "audio/mpeg",
     wav: "audio/wav",
+    ogg: "audio/ogg",
+    opus: "audio/opus",
+    aac: "audio/aac",
+    m4a: "audio/mp4",
+    flac: "audio/flac",
+    pcm: "audio/pcm",
     png: "image/png",
     jpg: "image/jpeg",
     jpeg: "image/jpeg",
