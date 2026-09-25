@@ -2009,7 +2009,11 @@ function AtelierCanvasPage() {
             const nextSelectionBox = { ...currentSelection, currentWorldX: world.x, currentWorldY: world.y };
             selectionBoxRef.current = nextSelectionBox;
             setSelectionBox(nextSelectionBox);
-            setSelectedNodeIds(nextSelected);
+            // Only update selection when the set actually changed; a marquee that slides over the
+            // same nodes would otherwise re-render every node on each pointermove.
+            const prevSelected = selectedNodeIdsRef.current;
+            const changed = nextSelected.size !== prevSelected.size || Array.from(nextSelected).some((id) => !prevSelected.has(id));
+            if (changed) setSelectedNodeIds(nextSelected);
         },
         [screenToCanvas],
     );
@@ -5304,6 +5308,54 @@ function AtelierCanvasPage() {
         [copyText, createImageReversePromptNodes, handleNodeViewImage, handleUploadRequest, message, openImageUpscale, resetSelectedNodesToOriginalSize, t, toggleNodeFreeResize],
     );
 
+    // Stable callback references for CanvasNode props. Inline arrow functions here would be
+    // recreated on every parent render and defeat CanvasNode's React.memo, re-rendering every
+    // node on every interaction (a major source of lag on dense canvases).
+    const handleChatModelChange = useCallback((nodeId: string, model: string) => handleConfigNodeChange(nodeId, { model }), [handleConfigNodeChange]);
+    const handleChatImageModelChange = useCallback((nodeId: string, model: string) => handleConfigNodeChange(nodeId, { imageModel: model }), [handleConfigNodeChange]);
+    const handleChatModesChange = useCallback(
+        (nodeId: string, options: { text: boolean; image: boolean }) => handleConfigNodeChange(nodeId, { chatTextEnabled: options.text, chatImageEnabled: options.image }),
+        [handleConfigNodeChange],
+    );
+    const handleChatSkillsChange = useCallback((nodeId: string, skillIds: string[]) => handleConfigNodeChange(nodeId, { chatSkillIds: skillIds }), [handleConfigNodeChange]);
+    const handleDeleteChatMessage = useCallback(
+        (nodeId: string, messageId: string) => {
+            const target = nodesRef.current.find((node) => node.id === nodeId);
+            const deleted = target?.metadata?.messages?.find((message) => message.id === messageId);
+            if (target?.metadata?.status === NODE_STATUS_LOADING && deleted?.role === "assistant") {
+                stopGenerationForNode(nodeId);
+            }
+            setNodes((prev) =>
+                prev.map((node) => {
+                    if (node.id !== nodeId) return node;
+                    const messages = (node.metadata?.messages || []).filter((message) => message.id !== messageId);
+                    const clearLoading = node.metadata?.status === NODE_STATUS_LOADING && deleted?.role === "assistant";
+                    return {
+                        ...node,
+                        metadata: {
+                            ...node.metadata,
+                            messages,
+                            ...(clearLoading ? { status: NODE_STATUS_IDLE, errorDetails: undefined } : {}),
+                        },
+                    };
+                }),
+            );
+        },
+        [stopGenerationForNode],
+    );
+    const handleInsertChatImage = useCallback((image: CanvasAssistantImage) => void insertAssistantImage(image), [insertAssistantImage]);
+    const handleEditText = useCallback((node: CanvasNodeData) => setTextEditNodeId(node.id), []);
+    const handleAnnotate = useCallback(
+        (node: CanvasNodeData) => {
+            if (!node.metadata?.content) {
+                handleUploadRequest(node.id);
+                return;
+            }
+            setAnnotateNodeId(node.id);
+        },
+        [handleUploadRequest],
+    );
+
     const renderNodePanel = useCallback(
         (panelNode: CanvasNodeData) =>
             panelNode.type === CanvasNodeType.Director ? null : panelNode.type === CanvasNodeType.Config ? (
@@ -5439,6 +5491,12 @@ function AtelierCanvasPage() {
                     tool={canvasTool}
                     backgroundMode={backgroundMode}
                     onViewportChange={(next) => {
+                        // A manual pan/zoom cancels any in-flight focus animation so the two
+                        // competing setViewport loops cannot make the viewport jump.
+                        if (focusAnimRef.current) {
+                            cancelAnimationFrame(focusAnimRef.current);
+                            focusAnimRef.current = null;
+                        }
                         setViewport(next);
                         setContextMenu(null);
                     }}
@@ -5522,43 +5580,16 @@ function AtelierCanvasPage() {
                             onCreateChat={createChatFromTextNode}
                             onExportDocument={downloadNodeImage}
                             onSendChat={sendChatMessage}
-                            onChatModelChange={(nodeId, model) => handleConfigNodeChange(nodeId, { model })}
-                            onChatImageModelChange={(nodeId, model) => handleConfigNodeChange(nodeId, { imageModel: model })}
-                            onChatModesChange={(nodeId, options) => handleConfigNodeChange(nodeId, { chatTextEnabled: options.text, chatImageEnabled: options.image })}
-                            onChatSkillsChange={(nodeId, skillIds) => handleConfigNodeChange(nodeId, { chatSkillIds: skillIds })}
-                            onDeleteChatMessage={(nodeId, messageId) => {
-                                const target = nodesRef.current.find((node) => node.id === nodeId);
-                                const deleted = target?.metadata?.messages?.find((message) => message.id === messageId);
-                                if (target?.metadata?.status === NODE_STATUS_LOADING && deleted?.role === "assistant") {
-                                    stopGenerationForNode(nodeId);
-                                }
-                                setNodes((prev) =>
-                                    prev.map((node) => {
-                                        if (node.id !== nodeId) return node;
-                                        const messages = (node.metadata?.messages || []).filter((message) => message.id !== messageId);
-                                        const clearLoading = node.metadata?.status === NODE_STATUS_LOADING && deleted?.role === "assistant";
-                                        return {
-                                            ...node,
-                                            metadata: {
-                                                ...node.metadata,
-                                                messages,
-                                                ...(clearLoading ? { status: NODE_STATUS_IDLE, errorDetails: undefined } : {}),
-                                            },
-                                        };
-                                    }),
-                                );
-                            }}
-                            onInsertChatImage={(image) => void insertAssistantImage(image)}
+                            onChatModelChange={handleChatModelChange}
+                            onChatImageModelChange={handleChatImageModelChange}
+                            onChatModesChange={handleChatModesChange}
+                            onChatSkillsChange={handleChatSkillsChange}
+                            onDeleteChatMessage={handleDeleteChatMessage}
+                            onInsertChatImage={handleInsertChatImage}
                             onFontSizeChange={handleFontSizeChange}
-                            onEditText={(node) => setTextEditNodeId(node.id)}
+                            onEditText={handleEditText}
                             onViewImage={handleNodeViewImage}
-                            onAnnotate={(node) => {
-                                if (!node.metadata?.content) {
-                                    handleUploadRequest(node.id);
-                                    return;
-                                }
-                                setAnnotateNodeId(node.id);
-                            }}
+                            onAnnotate={handleAnnotate}
                             onContextMenu={handleNodeContextMenu}
                         />
                     ))}

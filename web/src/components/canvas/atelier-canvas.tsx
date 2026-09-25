@@ -147,12 +147,16 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
             blurActiveCanvasTextInput(event.target);
             event.preventDefault();
             event.currentTarget.setPointerCapture(event.pointerId);
+            // Anchor pan to the live viewport (not the possibly-stale `viewport` prop), so a
+            // wheel-zoom that has been scheduled but not yet flushed to the parent cannot cause
+            // the canvas to jump back to an old position when the user starts panning right after.
+            const live = viewportLiveRef.current;
             panState.current = {
                 isPanning: true,
                 startX: event.clientX,
                 startY: event.clientY,
-                initialX: viewport.x,
-                initialY: viewport.y,
+                initialX: live.x,
+                initialY: live.y,
                 hasMoved: false,
                 startedOnBackground: isBackgroundClick,
             };
