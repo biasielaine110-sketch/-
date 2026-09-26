@@ -936,7 +936,16 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     const videos: NativeComfyUiResult["videos"] = [];
     for (const file of media.videos) {
         const blob = await fetchComfyView(baseUrl, apiKey, file, { signal });
-        const mimeType = blob.type || (/\.webm$/i.test(file.filename) ? "video/webm" : "video/mp4");
+        // ComfyUI /view often replies with a generic application/octet-stream content-type,
+        // so trust the filename extension over blob.type when deciding the real MIME.
+        const extMime = /\.webm$/i.test(file.filename)
+            ? "video/webm"
+            : /\.(mov|mkv)$/i.test(file.filename)
+              ? "video/quicktime"
+              : /\.mp4$/i.test(file.filename)
+                ? "video/mp4"
+                : "";
+        const mimeType = extMime || (blob.type && blob.type.startsWith("video/") ? blob.type : "video/mp4");
         videos.push({ blob, mimeType });
     }
 
