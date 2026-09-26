@@ -1044,19 +1044,43 @@ function AtelierCanvasPage() {
         return { nodeIds, connectionIds };
     }, [activeNodeId, connections]);
 
-    const configInputsById = useMemo(() => {
-        const map = new Map<string, NodeGenerationInput[]>();
-        nodes.forEach((node) => {
-            if (node.type !== CanvasNodeType.Config && node.type !== CanvasNodeType.Merge) return;
-            map.set(node.id, buildNodeGenerationInputs(node.id, nodes, connections));
-        });
-        return map;
-    }, [connections, nodes]);
-    const mentionReferencesByNodeId = useMemo(() => {
-        const map = new Map<string, ReturnType<typeof buildNodeMentionReferences>>();
-        nodes.forEach((node) => map.set(node.id, buildNodeMentionReferences(node, nodes, connections)));
-        return map;
-    }, [connections, nodes]);
+    // Lazy per-node generation inputs (only Config/Merge nodes need them). Eager building
+    // invalidates `renderNodePanel`/`renderNodeContentPanel` on every node/connection edit and
+    // forces all nodes to re-render; compute on demand instead.
+    const configInputsCacheRef = useRef<{ nodes: CanvasNodeData[]; connections: CanvasConnection[]; map: Map<string, NodeGenerationInput[]> } | null>(null);
+    const getConfigInputs = useCallback((nodeId: string) => {
+        const cache = configInputsCacheRef.current;
+        if (!cache || cache.nodes !== nodes || cache.connections !== connections) {
+            configInputsCacheRef.current = { nodes, connections, map: new Map() };
+        }
+        const current = configInputsCacheRef.current!;
+        const hit = current.map.get(nodeId);
+        if (hit) return hit;
+        const node = nodeById.get(nodeId);
+        if (!node || (node.type !== CanvasNodeType.Config && node.type !== CanvasNodeType.Merge)) return [];
+        const inputs = buildNodeGenerationInputs(nodeId, nodes, connections);
+        current.map.set(nodeId, inputs);
+        return inputs;
+    }, [connections, nodeById, nodes]);
+    // Lazy, per-node mention references. Building this eagerly for every node is O(N²) over
+    // connections and nodes, and the map's reference changing on any node/connection edit
+    // invalidates `renderNodePanel` and forces EVERY node to re-render. Compute on demand and
+    // cache per node, invalidating only when nodes/connections actually change.
+    const mentionCacheRef = useRef<{ nodes: CanvasNodeData[]; connections: CanvasConnection[]; map: Map<string, ReturnType<typeof buildNodeMentionReferences>> } | null>(null);
+    const getMentionReferences = useCallback((nodeId: string) => {
+        const cache = mentionCacheRef.current;
+        if (!cache || cache.nodes !== nodes || cache.connections !== connections) {
+            mentionCacheRef.current = { nodes, connections, map: new Map() };
+        }
+        const current = mentionCacheRef.current!;
+        const hit = current.map.get(nodeId);
+        if (hit) return hit;
+        const node = nodeById.get(nodeId);
+        if (!node) return EMPTY_REFERENCES;
+        const refs = buildNodeMentionReferences(node, nodes, connections);
+        current.map.set(nodeId, refs);
+        return refs;
+    }, [connections, nodeById, nodes]);
     const createNode = useCallback(
         (type: CanvasNodeTypeId, position?: Position) => {
             const targetPosition = position || getCreateNodePosition();
@@ -1452,6 +1476,30 @@ function AtelierCanvasPage() {
     );
 
     useEffect(() => () => void (focusAnimRef.current && cancelAnimationFrame(focusAnimRef.current)), []);
+
+    const cancelFocusAnimation = useCallback(() => {
+        if (focusAnimRef.current) {
+            cancelAnimationFrame(focusAnimRef.current);
+            focusAnimRef.current = null;
+        }
+    }, []);
+
+    const handleViewportChange = useCallback(
+        (next: ViewportTransform) => {
+            // A manual pan/zoom cancels any in-flight focus animation so the two competing
+            // setViewport loops cannot make the viewport jump.
+            cancelFocusAnimation();
+            setViewport(next);
+            setContextMenu(null);
+        },
+        [cancelFocusAnimation],
+    );
+
+    const handleUserInteract = useCallback(() => {
+        // Cancel focus animation the instant the user starts panning/zooming — before the
+        // viewport is committed — so a running focus tween cannot keep overwriting the pan anchor.
+        cancelFocusAnimation();
+    }, [cancelFocusAnimation]);
 
     const setZoomScale = useCallback(
         (scale: number) => {
@@ -5361,7 +5409,7 @@ function AtelierCanvasPage() {
             panelNode.type === CanvasNodeType.Director ? null : panelNode.type === CanvasNodeType.Config ? (
                 <CanvasConfigComposer
                     value={panelNode.metadata?.composerContent ?? panelNode.metadata?.prompt ?? ""}
-                    inputs={configInputsById.get(panelNode.id) || []}
+                    inputs={getConfigInputs(panelNode.id)}
                     onChange={(composerContent) => handleConfigNodeChange(panelNode.id, { composerContent })}
                     onClose={() => setDialogNodeId(null)}
                 />
@@ -5369,7 +5417,7 @@ function AtelierCanvasPage() {
                 <CanvasNodePromptPanel
                     node={panelNode}
                     isRunning={isNodeGenerating(panelNode.id)}
-                    mentionReferences={mentionReferencesByNodeId.get(panelNode.id) || EMPTY_REFERENCES}
+                    mentionReferences={getMentionReferences(panelNode.id)}
                     onPromptChange={handleNodePromptChange}
                     onConfigChange={handleConfigNodeChange}
                     onContentChange={handleNodeContentChange}
@@ -5382,7 +5430,7 @@ function AtelierCanvasPage() {
                     }}
                 />
             ),
-        [configInputsById, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, isNodeGenerating, mentionReferencesByNodeId, stopGenerationForNode],
+        [getConfigInputs, getMentionReferences, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, isNodeGenerating, stopGenerationForNode],
     );
 
     const handleDirectorExport = useCallback(
@@ -5415,7 +5463,7 @@ function AtelierCanvasPage() {
                 return (
                     <CanvasMergeNodeContent
                         node={contentNode}
-                        inputs={configInputsById.get(contentNode.id) || []}
+                        inputs={getConfigInputs(contentNode.id)}
                         isRunning={isNodeGenerating(contentNode.id)}
                         onConfigChange={handleConfigNodeChange}
                         onMerge={(nodeId) => void runMergeNode(nodeId)}
@@ -5443,7 +5491,7 @@ function AtelierCanvasPage() {
                 <CanvasConfigNodePanel
                     node={contentNode}
                     isRunning={isNodeGenerating(contentNode.id)}
-                    inputSummary={getInputSummary(configInputsById.get(contentNode.id) || [])}
+                    inputSummary={getInputSummary(getConfigInputs(contentNode.id))}
                     onConfigChange={handleConfigNodeChange}
                     onComposerToggle={() => setDialogNodeId((current) => (current === contentNode.id ? null : contentNode.id))}
                     onStop={stopGenerationForNode}
@@ -5454,7 +5502,7 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [configInputsById, handleConfigNodeChange, handleGenerateNode, isNodeGenerating, runMergeNode, stopGenerationForNode],
+        [getConfigInputs, handleConfigNodeChange, handleGenerateNode, isNodeGenerating, runMergeNode, stopGenerationForNode],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;
@@ -5490,16 +5538,8 @@ function AtelierCanvasPage() {
                     viewport={viewport}
                     tool={canvasTool}
                     backgroundMode={backgroundMode}
-                    onViewportChange={(next) => {
-                        // A manual pan/zoom cancels any in-flight focus animation so the two
-                        // competing setViewport loops cannot make the viewport jump.
-                        if (focusAnimRef.current) {
-                            cancelAnimationFrame(focusAnimRef.current);
-                            focusAnimRef.current = null;
-                        }
-                        setViewport(next);
-                        setContextMenu(null);
-                    }}
+                    onViewportChange={handleViewportChange}
+                    onUserInteract={handleUserInteract}
                     onCanvasMouseDown={handleCanvasMouseDown}
                     onCanvasDeselect={deselectCanvas}
                     onCanvasDoubleClick={(event) => {
@@ -5556,7 +5596,7 @@ function AtelierCanvasPage() {
                             isGroupDropTarget={dropTargetGroupId === node.id}
                             batchExpanded={expandedImageNodeIds.has(node.id)}
                             showImageInfo={showImageInfo}
-                            mentionReferences={mentionReferencesByNodeId.get(node.id) || EMPTY_REFERENCES}
+                            mentionReferences={getMentionReferences(node.id)}
                             renderPanel={renderNodePanel}
                             renderNodeContent={renderNodeContentPanel}
                             onMouseDown={handleNodeMouseDown}

@@ -16,10 +16,12 @@ type AtelierCanvasProps = {
     onCanvasDoubleClick?: (event: React.MouseEvent<HTMLDivElement>) => void;
     onContextMenu?: (event: React.MouseEvent) => void;
     onDrop?: (event: React.DragEvent<HTMLDivElement>) => void;
+    /** Fired the moment the user starts a manual pan/zoom, before the viewport is committed. */
+    onUserInteract?: () => void;
     children: React.ReactNode;
 };
 
-export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onCanvasDoubleClick, onContextMenu, onDrop, children }: AtelierCanvasProps) {
+export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onCanvasDoubleClick, onContextMenu, onDrop, onUserInteract, children }: AtelierCanvasProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const panState = useRef({
         isPanning: false,
@@ -33,6 +35,7 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
     const scaleRef = useRef(viewport.k);
     const viewportLiveRef = useRef(viewport);
     const onViewportChangeRef = useRef(onViewportChange);
+    const onUserInteractRef = useRef(onUserInteract);
     const frameRef = useRef<number | null>(null);
     const nextViewportRef = useRef<ViewportTransform | null>(null);
     const [isSpacePressed, setIsSpacePressed] = useState(false);
@@ -50,6 +53,10 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
     useEffect(() => {
         onViewportChangeRef.current = onViewportChange;
     }, [onViewportChange]);
+
+    useEffect(() => {
+        onUserInteractRef.current = onUserInteract;
+    }, [onUserInteract]);
 
     const flushViewport = () => {
         frameRef.current = null;
@@ -115,6 +122,7 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
         const target = event.target instanceof Element ? event.target : null;
         if (target?.closest("[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown,.ant-picker-dropdown")) return;
 
+        onUserInteractRef.current?.();
         const current = nextViewportRef.current || viewportLiveRef.current;
         const delta = -event.deltaY;
         const factor = Math.pow(1.1, delta / 100);
@@ -147,6 +155,7 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
             blurActiveCanvasTextInput(event.target);
             event.preventDefault();
             event.currentTarget.setPointerCapture(event.pointerId);
+            onUserInteractRef.current?.();
             // Anchor pan to the live viewport (not the possibly-stale `viewport` prop), so a
             // wheel-zoom that has been scheduled but not yet flushed to the parent cannot cause
             // the canvas to jump back to an old position when the user starts panning right after.
