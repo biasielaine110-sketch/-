@@ -956,6 +956,10 @@ function AtelierCanvasPage() {
         [screenToCanvas],
     );
 
+    // Nodes that recently left the viewport stay mounted for a short grace period. Without it,
+    // small back-and-forth pans/zooms repeatedly mount/unmount edge nodes, which re-decodes
+    // their images/videos every time — the main "many images feel laggy" culprit.
+    const visibleNodesGraceRef = useRef<Map<string, number>>(new Map());
     const visibleNodes = useMemo(() => {
         const padding = 280;
         const rect = containerRef.current?.getBoundingClientRect();
@@ -966,7 +970,26 @@ function AtelierCanvasPage() {
         const viewRight = viewLeft + width / viewport.k + padding * 2;
         const viewBottom = viewTop + height / viewport.k + padding * 2;
 
-        return nodes.filter((node) => node.position.x + node.width > viewLeft && node.position.x < viewRight && node.position.y + node.height > viewTop && node.position.y < viewBottom);
+        const GRACE_MS = 2000;
+        const now = Date.now();
+        const history = visibleNodesGraceRef.current;
+        const inView = new Set<string>();
+        const result = nodes.filter((node) => {
+            const inViewport = node.position.x + node.width > viewLeft && node.position.x < viewRight && node.position.y + node.height > viewTop && node.position.y < viewBottom;
+            if (inViewport) {
+                inView.add(node.id);
+                return true;
+            }
+            const lastSeen = history.get(node.id);
+            return Boolean(lastSeen && now - lastSeen < GRACE_MS);
+        });
+        const nextHistory = new Map<string, number>();
+        for (const id of inView) nextHistory.set(id, now);
+        for (const [id, ts] of history) {
+            if (!inView.has(id) && now - ts < GRACE_MS) nextHistory.set(id, ts);
+        }
+        visibleNodesGraceRef.current = nextHistory;
+        return result;
     }, [nodes, size.height, size.width, viewport.k, viewport.x, viewport.y]);
 
     const visibleConnections = useMemo(() => {

@@ -44,10 +44,17 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
     // Pan offset applied locally during a drag so the parent (and every canvas node) is NOT
     // re-rendered on each pointermove. The final viewport is committed once on pointerup.
     const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+    // Same idea for wheel zoom: mirror the pending viewport into local state so the shell's
+    // transform (and the grid) track the gesture instantly, while `children` keeps its element
+    // identity — React skips the whole node/connection subtree until the viewport is committed.
+    const [liveTransform, setLiveTransform] = useState<ViewportTransform | null>(null);
+    const zoomCommitTimerRef = useRef<number | null>(null);
 
     useEffect(() => {
         scaleRef.current = viewport.k;
         viewportLiveRef.current = viewport;
+        // The parent accepted our committed viewport — drop the local mirror.
+        setLiveTransform(null);
     }, [viewport]);
 
     useEffect(() => {
@@ -63,13 +70,35 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
         const next = nextViewportRef.current;
         if (!next) return;
         nextViewportRef.current = null;
-        onViewportChangeRef.current(next);
+        // Debounce the actual parent commit: a rapid wheel burst re-renders only this shell
+        // (children keep their element identity). The parent re-renders nodes exactly once
+        // after the gesture settles — the same contract the pan gesture already has.
+        if (zoomCommitTimerRef.current) window.clearTimeout(zoomCommitTimerRef.current);
+        zoomCommitTimerRef.current = window.setTimeout(() => {
+            zoomCommitTimerRef.current = null;
+            onViewportChangeRef.current(viewportLiveRef.current);
+        }, 160);
+    };
+
+    /** Synchronously commit any pending zoom viewport — must run before any world-coordinate
+     *  interaction (node click, drop, connection) so the parent never computes positions with
+     *  a stale viewport during the debounce window. */
+    const flushPendingViewport = () => {
+        if (zoomCommitTimerRef.current) {
+            window.clearTimeout(zoomCommitTimerRef.current);
+            zoomCommitTimerRef.current = null;
+        }
+        if (nextViewportRef.current || viewportLiveRef.current !== viewport) {
+            onViewportChangeRef.current(viewportLiveRef.current);
+        }
     };
 
     const scheduleViewport = (next: ViewportTransform) => {
         nextViewportRef.current = next;
         viewportLiveRef.current = next;
         scaleRef.current = next.k;
+        // Instant local mirror — this re-render only touches the shell + grid.
+        setLiveTransform(next);
         if (frameRef.current) return;
         frameRef.current = requestAnimationFrame(flushViewport);
     };
@@ -77,6 +106,7 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
     useEffect(
         () => () => {
             if (frameRef.current) cancelAnimationFrame(frameRef.current);
+            if (zoomCommitTimerRef.current) window.clearTimeout(zoomCommitTimerRef.current);
         },
         [],
     );
@@ -145,6 +175,9 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
     };
 
     const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+        // Any pointer interaction needs a world-accurate viewport: commit a pending (debounced)
+        // zoom synchronously before hit-testing / node creation runs with it.
+        flushPendingViewport();
         const target = event.target instanceof Element ? event.target : null;
         if (target?.closest("[data-canvas-no-zoom],.ant-select,.ant-select-dropdown,.ant-picker-dropdown,.ant-dropdown,.ant-modal,.ant-popover")) return;
         if (target?.closest("[data-connection-create-menu]")) return;
@@ -258,6 +291,17 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
     const activeTool = temporaryTool ? (tool === "select" ? "pan" : "select") : tool;
     const cursor = isPanning ? "grabbing" : activeTool === "pan" ? "grab" : undefined;
 
+    // What the shell actually shows: a pending (debounced) zoom transform wins, otherwise the
+    // committed viewport plus the live pan offset.
+    const displayTransform = liveTransform
+        ? { x: liveTransform.x + panOffset.x, y: liveTransform.y + panOffset.y, k: liveTransform.k }
+        : { x: viewport.x + panOffset.x, y: viewport.y + panOffset.y, k: viewport.k };
+    const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
+        // Drops create nodes at a world position — commit any pending zoom first.
+        flushPendingViewport();
+        onDrop?.(event);
+    };
+
     return (
         <div
             ref={containerRef}
@@ -268,13 +312,13 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
             onWheel={handleWheel}
             onContextMenu={onContextMenu}
             onDragOver={(event) => event.preventDefault()}
-            onDrop={onDrop}
+            onDrop={handleDrop}
         >
-            <CanvasGrid viewport={{ x: viewport.x + panOffset.x, y: viewport.y + panOffset.y, k: viewport.k }} mode={backgroundMode} />
+            <CanvasGrid viewport={displayTransform} mode={backgroundMode} />
             <div
                 className="absolute origin-top-left"
                 style={{
-                    transform: `translate(${viewport.x + panOffset.x}px, ${viewport.y + panOffset.y}px) scale(${viewport.k})`,
+                    transform: `translate(${displayTransform.x}px, ${displayTransform.y}px) scale(${displayTransform.k})`,
                 }}
             >
                 {children}
