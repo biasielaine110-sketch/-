@@ -396,6 +396,7 @@ export default {
         title: "Nww-无限画布",
         imported: "Imported {{count}} canvases",
         importFailed: "Import failed. Select a valid canvas package.",
+        importingLarge: "Importing a large canvas (~{{size}}MB), please wait…",
         opening: "Opening canvas...",
         loading: "Loading canvases...",
         exportSelected: "Export selected",

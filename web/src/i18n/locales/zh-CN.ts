@@ -396,6 +396,7 @@ export default {
         title: "Nww-无限画布",
         imported: "已导入 {{count}} 个画布",
         importFailed: "导入失败，请选择有效的画布压缩包",
+        importingLarge: "正在导入较大的画布（约 {{size}}MB），请稍候…",
         opening: "正在打开画布...",
         loading: "正在加载画布...",
         exportSelected: "导出选中",

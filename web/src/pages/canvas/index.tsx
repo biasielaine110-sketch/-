@@ -4,7 +4,7 @@ import { App, Button } from "antd";
 import { Download, FileUp, Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { readZip } from "@/lib/zip";
+import { readZipStreaming } from "@/lib/zip";
 import { setMediaBlob } from "@/services/file-storage";
 import { setImageBlob } from "@/services/image-storage";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
@@ -36,24 +36,49 @@ export default function CanvasPage() {
     const createAndEnter = () => enterProject(createProject(t("canvas.defaultTitle", { count: projects.length + 1 })));
     const importCanvas = async (file?: File) => {
         if (!file) return;
+        const warnLarge = file.size > 200 * 1024 * 1024;
+        if (warnLarge) {
+            const sizeMb = Math.round(file.size / 1024 / 1024);
+            message.loading({ content: t("canvas.importingLarge", { size: sizeMb }), key: "import", duration: 0 });
+        }
         try {
-            const zip = await readZip(file);
-            const projectFile = zip.get("projects.json");
-            if (!projectFile) throw new Error("missing projects.json");
-            const data = JSON.parse(await projectFile.text()) as CanvasExportFile;
-            await Promise.all(
-                data.projects.flatMap((project) =>
-                    project.files.map(async (item) => {
-                        const blob = zip.get(item.path);
-                        if (!blob) return;
-                        const typedBlob = blob.type ? blob : blob.slice(0, blob.size, item.mimeType);
+            // Pass 1: stream the archive and only extract the manifest (projects.json) that maps each
+            // media entry's path -> { storageKey, mimeType }. Media bytes are skipped without being
+            // retained, so even a multi-hundred-MB zip costs little memory here.
+            const mediaItemsByPath = new Map<string, { storageKey: string; mimeType: string }>();
+            let manifestText = "";
+            await readZipStreaming(file, (name, blob) => {
+                if (name === "projects.json") void blob.text().then((text) => (manifestText = text));
+                // Skip media entries during the manifest pass.
+            });
+            if (!manifestText) throw new Error("missing projects.json");
+            const data = JSON.parse(manifestText) as CanvasExportFile;
+            for (const project of data.projects) {
+                for (const item of project.files) mediaItemsByPath.set(item.path, { storageKey: item.storageKey, mimeType: item.mimeType });
+            }
+
+            // Pass 2: stream again, persisting each media blob to storage as it is decompressed, with
+            // bounded concurrency. Peak memory stays near a single media entry rather than the whole zip.
+            const mediaWrites: Array<Promise<void>> = [];
+            await readZipStreaming(file, async (name, blob) => {
+                if (name === "projects.json") return;
+                const item = mediaItemsByPath.get(name);
+                if (!item) return;
+                const typedBlob = blob.type ? blob : blob.slice(0, blob.size, item.mimeType);
+                mediaWrites.push(
+                    (async () => {
                         await (item.storageKey.startsWith("image:") ? setImageBlob(item.storageKey, typedBlob) : setMediaBlob(item.storageKey, typedBlob));
-                    }),
-                ),
-            );
+                    })().catch(() => undefined),
+                );
+                if (mediaWrites.length >= 8) await Promise.all(mediaWrites.splice(0, 8));
+            });
+            await Promise.all(mediaWrites);
+
             data.projects.forEach((item) => importProject(scrubImportedProject(item.project)));
+            message.destroy("import");
             message.success(t("canvas.imported", { count: data.projects.length }));
         } catch {
+            message.destroy("import");
             message.error(t("canvas.importFailed"));
         } finally {
             if (inputRef.current) inputRef.current.value = "";

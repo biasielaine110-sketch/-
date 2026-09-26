@@ -2,7 +2,7 @@ import { saveAs } from "file-saver";
 import localforage from "localforage";
 
 import i18n from "@/i18n";
-import { createZip, readZip } from "@/lib/zip";
+import { createZip, readZipStreaming } from "@/lib/zip";
 import { setImageBlob } from "@/services/image-storage";
 import { setMediaBlob } from "@/services/file-storage";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
@@ -41,24 +41,39 @@ export async function exportAppBackup() {
 
 // Restore projects, assets, media files, and configuration from a backup zip, replacing current data.
 export async function importAppBackup(file: File) {
-    const zip = await readZip(file);
-    const manifest = zip.get("backup.json");
-    if (!manifest) throw new Error(i18n.t("backup.invalidFile"));
+    // Pass 1: stream the archive to read only the manifest (backup.json). Media bytes are skipped
+    // without being retained, so even a multi-hundred-MB backup costs little memory here.
+    let manifestText = "";
+    await readZipStreaming(file, (name, blob) => {
+        if (name === "backup.json") void blob.text().then((text) => (manifestText = text));
+    });
+
     let data: AppBackupFile;
     try {
-        data = JSON.parse(await manifest.text()) as AppBackupFile;
+        data = JSON.parse(manifestText) as AppBackupFile;
     } catch {
         throw new Error(i18n.t("backup.invalidFile"));
     }
     if (data.app !== "infinite-canvas" || data.version !== 1 || !Array.isArray(data.projects) || !Array.isArray(data.assets) || !data.config) throw new Error(i18n.t("backup.invalidFile"));
-    await Promise.all(
-        data.files.map(async (item) => {
-            const blob = zip.get(item.path);
-            if (!blob) return;
-            const typedBlob = blob.type ? blob : blob.slice(0, blob.size, item.mimeType || "application/octet-stream");
-            await (item.storageKey.startsWith("image:") ? setImageBlob(item.storageKey, typedBlob) : setMediaBlob(item.storageKey, typedBlob));
-        }),
-    );
+
+    // Pass 2: stream again, persisting each media blob to storage as it is decompressed, with bounded
+    // concurrency. Peak memory stays near a single file rather than the whole archive.
+    const filesByPath = new Map(data.files.map((item) => [item.path, item] as const));
+    const writes: Array<Promise<void>> = [];
+    await readZipStreaming(file, async (name, blob) => {
+        if (name === "backup.json") return;
+        const item = filesByPath.get(name);
+        if (!item) return;
+        const typedBlob = blob.type ? blob : blob.slice(0, blob.size, item.mimeType || "application/octet-stream");
+        writes.push(
+            (async () => {
+                await (item.storageKey.startsWith("image:") ? setImageBlob(item.storageKey, typedBlob) : setMediaBlob(item.storageKey, typedBlob));
+            })().catch(() => undefined),
+        );
+        if (writes.length >= 8) await Promise.all(writes.splice(0, 8));
+    });
+    await Promise.all(writes);
+
     useConfigStore.setState({ config: data.config });
     useCanvasStore.getState().replaceProjects(data.projects);
     useAssetStore.getState().replaceAssets(data.assets);
