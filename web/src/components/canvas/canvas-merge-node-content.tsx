@@ -280,7 +280,7 @@ export function CanvasMergeNodeContent({ node, inputs, isRunning, onConfigChange
                                             onDragStart={(event) => handleDragStart(event, index, sourceId!)}
                                             onDragEnd={handleDragEnd}
                                         >
-                                            <img src={input.image.dataUrl} alt={input.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" />
+                                            <img src={input.image.dataUrl} alt={input.title} decoding="async" draggable={false} className="pointer-events-none h-full w-full select-none object-contain" />
                                         </div>
                                     ) : (
                                         <div className="flex h-full min-h-[48px] w-full flex-col items-center justify-center gap-0.5 text-[10px] opacity-45">

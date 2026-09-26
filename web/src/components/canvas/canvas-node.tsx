@@ -396,7 +396,17 @@ export const CanvasNode = React.memo(function CanvasNode({
                 width: data.width,
                 height: data.height,
                 transition: "box-shadow 200ms ease",
+                // NOTE: no `paint` in contain — the title chip / hover toolbar / resize handles
+                // overflow the node box and must stay visible while the node is on screen.
                 contain: "layout style",
+                // content-visibility lets the browser skip layout+paint for nodes that end up
+                // off-screen (e.g. retained by the viewport-culling grace window). Scoped to
+                // media nodes only: text/chat nodes restore inner scrollTop from localStorage
+                // on mount, and skipped content reports scrollHeight=0 which would clamp and
+                // destroy the saved scroll position. Paint/size containment only applies while
+                // skipped, so on-screen overflow UI is unaffected.
+                contentVisibility: data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Video || data.type === CanvasNodeType.Audio ? "auto" : undefined,
+                containIntrinsicSize: data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Video || data.type === CanvasNodeType.Audio ? `${data.width}px ${data.height}px` : undefined,
                 willChange: previewOffset ? "transform" : undefined,
             }}
             onMouseEnter={() => {
@@ -1046,18 +1056,48 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
-function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; posterSrc?: string; storageKey?: string }) {
+// Playback state of videos that CanvasLazyMedia unmounted (node panned off-screen). Restored
+// on remount so panning away and back resumes where the user left off instead of resetting to
+// the poster. Keyed by storageKey (falls back to src); soft-capped FIFO to bound memory.
+const videoPlaybackMemory = new Map<string, { time: number; resume: boolean; activated: boolean }>();
+const rememberVideoPlayback = (key: string, value: { time: number; resume: boolean; activated: boolean }) => {
+    if (videoPlaybackMemory.size > 300) {
+        const oldest = videoPlaybackMemory.keys().next().value;
+        if (oldest !== undefined) videoPlaybackMemory.delete(oldest);
+    }
+    videoPlaybackMemory.set(key, value);
+};
+
+function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKeyProp }: { src: string; posterSrc?: string; storageKey?: string; memoryKey?: string }) {
     const { t } = useTranslation();
     const videoRef = useRef<HTMLVideoElement>(null);
-    const [activated, setActivated] = useState(false);
+    // Prefer the caller's stable id (node/image id): src/storageKey can be filled in async
+    // after a drop, which would otherwise split one video's memory across two keys.
+    const memoryKey = memoryKeyProp || storageKey || src;
+    const [activated, setActivated] = useState(() => videoPlaybackMemory.get(memoryKey)?.activated ?? false);
     const [playing, setPlaying] = useState(false);
     const [playableSrc, setPlayableSrc] = useState(src);
     const retriesRef = useRef(0);
+    // Mount-time restore snapshot, consumed by the first activation effect run.
+    const restoredRef = useRef<{ time: number; resume: boolean } | null>(videoPlaybackMemory.get(memoryKey) ?? null);
+    const pendingSeekRef = useRef<number | null>(null);
+    // Play intent, kept across blob-URL refreshes so a refreshed URL respects play/pause state.
+    const wantPlayRef = useRef(false);
 
-    useEffect(() => {
+    // A real source switch (different video in this slot) resets the player — but a playableSrc
+    // swap for the SAME video (blob URL refreshed after a load error) must not, or it would
+    // kill the playback-restore every time a remounted video retries its URL.
+    const [prevSource, setPrevSource] = useState({ src, storageKey });
+    if (prevSource.src !== src || prevSource.storageKey !== storageKey) {
+        setPrevSource({ src, storageKey });
         setPlayableSrc(src);
         retriesRef.current = 0;
-    }, [src, storageKey]);
+        restoredRef.current = null;
+        pendingSeekRef.current = null;
+        wantPlayRef.current = false;
+        setActivated(false);
+        setPlaying(false);
+    }
 
     // A dead blob: URL (revoked mid-session / failed hydration) leaves a plain <video> black
     // forever. Rebuild a fresh object URL from the stored blob and retry a few times.
@@ -1070,19 +1110,31 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; po
     };
 
     useEffect(() => {
-        setActivated(false);
-        setPlaying(false);
-    }, [playableSrc]);
-
-    useEffect(() => {
         if (!activated) return;
         const video = videoRef.current;
         if (!video) return;
+        const restored = restoredRef.current;
+        if (restored) {
+            restoredRef.current = null;
+            if (restored.time > 0) pendingSeekRef.current = restored.time;
+            wantPlayRef.current = restored.resume;
+        }
+        // Restored-but-paused: show the frame at the saved position without autoplaying.
+        if (!wantPlayRef.current) return;
         void video
             .play()
             .then(() => setPlaying(true))
             .catch(() => setPlaying(false));
-    }, [activated]);
+        // playableSrc dep: after a blob-URL refresh, resume (or stay paused) per the same intent.
+    }, [activated, playableSrc]);
+
+    const remember = (resume?: boolean) => {
+        const video = videoRef.current;
+        if (!video) return;
+        // A restored seek that hasn't landed yet must not be overwritten with ~0 by a play event.
+        const time = pendingSeekRef.current ?? video.currentTime;
+        rememberVideoPlayback(memoryKey, { time, resume: resume ?? !video.paused, activated: true });
+    };
 
     const stopShell = (event: React.SyntheticEvent) => {
         event.stopPropagation();
@@ -1092,11 +1144,15 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; po
         event.stopPropagation();
         event.preventDefault();
         if (!activated) {
+            // Explicit user intent wins over any stale memory snapshot.
+            restoredRef.current = null;
+            wantPlayRef.current = true;
             setActivated(true);
             return;
         }
         const video = videoRef.current;
         if (!video) return;
+        wantPlayRef.current = true;
         void video
             .play()
             .then(() => setPlaying(true))
@@ -1152,13 +1208,34 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey }: { src: string; po
                     preload="metadata"
                     controls
                     data-canvas-no-zoom
+                    onLoadedMetadata={() => {
+                        const video = videoRef.current;
+                        if (video && pendingSeekRef.current != null) {
+                            const target = pendingSeekRef.current;
+                            pendingSeekRef.current = null;
+                            const duration = Number.isFinite(video.duration) ? video.duration : target;
+                            video.currentTime = Math.min(target, Math.max(0, duration - 0.05));
+                        }
+                    }}
+                    onTimeUpdate={() => remember()}
                     onError={handleVideoError}
-                    onPlay={() => setPlaying(true)}
-                    onPause={() => setPlaying(false)}
-                    onEnded={() => setPlaying(false)}
+                    onPlay={() => {
+                        wantPlayRef.current = true;
+                        setPlaying(true);
+                        remember(true);
+                    }}
+                    onPause={() => {
+                        wantPlayRef.current = false;
+                        setPlaying(false);
+                        remember(false);
+                    }}
+                    onEnded={() => {
+                        setPlaying(false);
+                        rememberVideoPlayback(memoryKey, { time: 0, resume: false, activated: true });
+                    }}
                 />
             ) : posterSrc ? (
-                <img src={posterSrc} alt="" draggable={false} className="pointer-events-none h-full w-full rounded-[18px] bg-black object-contain" />
+                <img src={posterSrc} alt="" decoding="async" draggable={false} className="pointer-events-none h-full w-full rounded-[18px] bg-black object-contain" />
             ) : (
                 <div className="h-full w-full rounded-[18px] bg-black" aria-hidden />
             )}
@@ -1219,7 +1296,7 @@ function VideoNodeContent({ node, theme, onDeleteBatchImage }: NodeContentRender
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
             <CanvasLazyMedia>
-                <CanvasNodeVideoPlayer src={node.metadata.content} posterSrc={node.metadata?.thumbnailContent} storageKey={node.metadata?.storageKey} />
+                <CanvasNodeVideoPlayer src={node.metadata.content} posterSrc={node.metadata?.thumbnailContent} storageKey={node.metadata?.storageKey} memoryKey={node.id} />
             </CanvasLazyMedia>
             <button
                 type="button"
@@ -1341,7 +1418,7 @@ function ImageContent({
                 {displaySrc ? (
                     isVideo ? (
                         <CanvasLazyMedia>
-                            <CanvasNodeVideoPlayer src={displaySrc} posterSrc={primaryThumb} storageKey={primaryImage?.storageKey || node.metadata?.storageKey} />
+                            <CanvasNodeVideoPlayer src={displaySrc} posterSrc={primaryThumb} storageKey={primaryImage?.storageKey || node.metadata?.storageKey} memoryKey={`${node.id}:${primaryImageId || "primary"}`} />
                         </CanvasLazyMedia>
                     ) : (
                         <>
@@ -1540,7 +1617,7 @@ function ExpandedImageCard({
             {image.content || image.thumbnailContent ? (
                 isVideo ? (
                     <CanvasLazyMedia className="h-full w-full">
-                        <CanvasNodeVideoPlayer src={image.content || image.thumbnailContent || ""} posterSrc={image.thumbnailContent} storageKey={image.storageKey} />
+                        <CanvasNodeVideoPlayer src={image.content || image.thumbnailContent || ""} posterSrc={image.thumbnailContent} storageKey={image.storageKey} memoryKey={`${node.id}:${image.id}`} />
                     </CanvasLazyMedia>
                 ) : (
                     <CanvasLazyMedia className="h-full w-full">

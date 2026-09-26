@@ -477,7 +477,7 @@ export function CanvasChatContent({
                                                 </span>
                                                 <span className="relative min-w-0 flex-1">
                                                     {reference.kind === "image" && reference.previewUrl ? (
-                                                        <img src={reference.previewUrl} alt={reference.title} className="pointer-events-none h-full w-full select-none object-cover" draggable={false} />
+                                                        <img src={reference.previewUrl} alt={reference.title} decoding="async" className="pointer-events-none h-full w-full select-none object-cover" draggable={false} />
                                                     ) : reference.kind === "video" && reference.previewUrl ? (
                                                         <video src={reference.previewUrl} muted playsInline preload="metadata" className="pointer-events-none h-full w-full object-cover" draggable={false} />
                                                     ) : (
@@ -851,7 +851,7 @@ function ChatBubble({
                     >
                         {images.map((image) => (
                             <div key={image.id} className="overflow-hidden rounded-xl border" style={{ borderColor: theme.node.stroke }}>
-                                <img src={image.dataUrl} alt={image.prompt || t("canvas.chat.generatedImage")} className="block max-h-56 w-full object-contain" draggable={false} />
+                                <img src={image.dataUrl} alt={image.prompt || t("canvas.chat.generatedImage")} decoding="async" className="block max-h-56 w-full object-contain" draggable={false} />
                                 {onInsertImage ? (
                                     <button
                                         type="button"
