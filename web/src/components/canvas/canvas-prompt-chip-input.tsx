@@ -157,6 +157,7 @@ export const CanvasPromptChipInput = forwardRef<CanvasPromptChipInputHandle, Pro
                 role="textbox"
                 aria-multiline="true"
                 data-canvas-text-input
+                data-canvas-no-zoom
                 data-canvas-shortcuts-ignore
                 className={`${className || ""} min-w-0 max-w-full select-text overflow-x-hidden overflow-y-auto whitespace-pre-wrap wrap-anywhere outline-none`}
                 style={{ ...style, cursor: "text", whiteSpace: "pre-wrap", overflowWrap: "anywhere", wordBreak: "break-word" }}

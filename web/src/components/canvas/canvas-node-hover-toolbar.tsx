@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { App, Modal, Segmented, Tooltip } from "antd";
-import { Clapperboard, Download, Ellipsis, FolderPlus, Highlighter, Image as ImageIcon, Info, MessageSquare, MessageSquareText, Minus, Music2, Plus, RefreshCw, Scissors, Settings2, Trash2, Type, Upload, Video } from "lucide-react";
+import { Clapperboard, Combine, Download, Ellipsis, FolderPlus, Highlighter, Image as ImageIcon, Info, MessageSquare, MessageSquareText, Minus, Music2, Plus, RefreshCw, Scissors, Settings2, Trash2, Type, Upload, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -46,6 +46,7 @@ type CanvasNodeHoverToolbarProps = {
     onDelete: (node: CanvasNodeData) => void;
     onOpenVideoTools?: (node: CanvasNodeData) => void;
     onOpenAudioTools?: (node: CanvasNodeData) => void;
+    onOpenAudioMerge?: () => void;
 };
 
 type ToolbarTool = {
@@ -91,6 +92,7 @@ export function CanvasNodeHoverToolbar({
     onDelete,
     onOpenVideoTools,
     onOpenAudioTools,
+    onOpenAudioMerge,
 }: CanvasNodeHoverToolbarProps) {
     const imageQuickTools = useConfigStore((state) => state.config.imageQuickTools);
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -168,6 +170,7 @@ export function CanvasNodeHoverToolbar({
         ...(hasVideo && onOpenVideoTools ? [{ id: "videoTools", title: t("canvas.videoTools.openTitle"), label: t("canvas.videoTools.open"), icon: <Scissors className="size-[10px]" />, onClick: () => onOpenVideoTools(node) }] : []),
         ...(isAudio ? [{ id: "uploadAudio", title: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), label: t(hasAudio ? "canvas.nodeToolbar.replaceAudio" : "canvas.nodeToolbar.uploadAudio"), icon: <Music2 className="size-[10px]" />, onClick: () => onUpload(node) }] : []),
         ...(hasAudio && onOpenAudioTools ? [{ id: "audioTools", title: t("canvas.audioTools.openTitle"), label: t("canvas.audioTools.open"), icon: <Scissors className="size-[10px]" />, onClick: () => onOpenAudioTools(node) }] : []),
+        ...(isAudio && onOpenAudioMerge ? [{ id: "audioMerge", title: t("canvas.audioMerge.openTitle"), label: t("canvas.audioMerge.open"), icon: <Combine className="size-[10px]" />, onClick: () => onOpenAudioMerge() }] : []),
         ...(hasImage && isImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
     // Keep deletion available even when an older saved quick-tool configuration hid it.

@@ -70,6 +70,7 @@ type CanvasNodeProps = {
     onDeleteChatMessage?: (nodeId: string, messageId: string) => void;
     onInsertChatImage?: (image: import("@/types/canvas").CanvasAssistantImage) => void;
     onFontSizeChange?: (nodeId: string, fontSize: number) => void;
+    onReorderLinkedMedia?: (nodeId: string, orderedNodeIds: string[]) => void;
     onEditText?: (node: CanvasNodeData) => void;
     onViewImage?: (node: CanvasNodeData, imageId?: string) => void;
     onAnnotate?: (node: CanvasNodeData) => void;
@@ -101,6 +102,7 @@ type NodeContentRendererProps = {
     onDeleteChatMessage?: (nodeId: string, messageId: string) => void;
     onInsertChatImage?: (image: import("@/types/canvas").CanvasAssistantImage) => void;
     onFontSizeChange?: (nodeId: string, fontSize: number) => void;
+    onReorderLinkedMedia?: (nodeId: string, orderedNodeIds: string[]) => void;
     onEditText?: (node: CanvasNodeData) => void;
     onToggleBatch?: () => void;
     onSetBatchPrimary?: (imageId: string) => void;
@@ -157,6 +159,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onDeleteChatMessage,
     onInsertChatImage,
     onFontSizeChange,
+    onReorderLinkedMedia,
     onEditText,
     onViewImage,
     onAnnotate,
@@ -519,6 +522,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onDeleteChatMessage={onDeleteChatMessage}
                         onInsertChatImage={onInsertChatImage}
                         onFontSizeChange={onFontSizeChange}
+                        onReorderLinkedMedia={onReorderLinkedMedia}
                         onEditText={onEditText}
                         onToggleBatch={() => onToggleBatch?.(data.id)}
                         onSetBatchPrimary={(imageId) => onSetBatchPrimary?.(data.id, imageId)}
@@ -675,7 +679,7 @@ function AnnotateNodeContent({ node, theme, onAnnotate }: NodeContentRendererPro
     );
 }
 
-function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onChatSkillsChange, onDeleteChatMessage, onInsertChatImage, onFontSizeChange, onCancelGeneration }: NodeContentRendererProps) {
+function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onChatSkillsChange, onDeleteChatMessage, onInsertChatImage, onFontSizeChange, onCancelGeneration, onReorderLinkedMedia }: NodeContentRendererProps) {
     // Exclude this chat node itself: its resource text is the latest reply and must not fill the composer.
     const upstreamReferences = mentionReferences.filter((reference) => reference.nodeId !== node.id);
     const connectedTexts = upstreamReferences.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim()).map((reference) => reference.text!.trim());
@@ -694,6 +698,7 @@ function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatMod
             onDeleteMessage={onDeleteChatMessage}
             onInsertImage={onInsertChatImage}
             onFontSizeChange={onFontSizeChange}
+            onReorderLinkedMedia={onReorderLinkedMedia}
         />
     );
 }

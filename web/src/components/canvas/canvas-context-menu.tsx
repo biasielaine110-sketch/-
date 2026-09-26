@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Download, FolderPlus, GripVertical, Info, Plus, Copy, Scissors, Trash2, Unlink2 } from "lucide-react";
+import { Combine, Download, FolderPlus, GripVertical, Info, Plus, Copy, Scissors, Trash2, Unlink2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -40,6 +40,7 @@ export function CanvasNodeContextMenu({
     onSaveAsset,
     onOpenVideoTools,
     onOpenAudioTools,
+    onOpenAudioMerge,
 }: {
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
@@ -58,6 +59,7 @@ export function CanvasNodeContextMenu({
     onSaveAsset?: (node: CanvasNodeData) => void;
     onOpenVideoTools?: (node: CanvasNodeData) => void;
     onOpenAudioTools?: (node: CanvasNodeData) => void;
+    onOpenAudioMerge?: () => void;
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -71,6 +73,7 @@ export function CanvasNodeContextMenu({
     const hasImage = Boolean(node && node.type === CanvasNodeType.Image && node.metadata?.content);
     const hasVideo = Boolean(node && node.type === CanvasNodeType.Video && node.metadata?.content);
     const hasAudio = Boolean(node && node.type === CanvasNodeType.Audio && node.metadata?.content);
+    const isAudio = Boolean(node && node.type === CanvasNodeType.Audio);
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -114,6 +117,19 @@ export function CanvasNodeContextMenu({
                               icon: <Scissors className="size-4" />,
                               onClick: () => {
                                   onOpenAudioTools(node);
+                                  onClose();
+                              },
+                          },
+                      ]
+                    : []),
+                ...(isAudio && onOpenAudioMerge
+                    ? [
+                          {
+                              id: "audioMerge",
+                              label: t("canvas.audioMerge.open"),
+                              icon: <Combine className="size-4" />,
+                              onClick: () => {
+                                  onOpenAudioMerge();
                                   onClose();
                               },
                           },
@@ -196,7 +212,7 @@ export function CanvasNodeContextMenu({
                 onClick: () => runAndClose(onDelete),
             },
         ];
-    }, [hasAudio, hasImage, hasVideo, imageHandlers, menu.type, node, onBeforeAction, onClose, onCopyImage, onDelete, onDownload, onDuplicate, onInfo, onOpenAudioTools, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
+    }, [hasAudio, hasImage, hasVideo, isAudio, imageHandlers, menu.type, node, onBeforeAction, onClose, onCopyImage, onDelete, onDownload, onDuplicate, onInfo, onOpenAudioTools, onOpenAudioMerge, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
 
     const menuOrder = useMemo(() => mergeOrderedIds(imageContextMenuOrder || [], tools.map((tool) => tool.id)), [imageContextMenuOrder, tools]);
     const orderedTools = useMemo(() => sortByOrder(tools, menuOrder), [menuOrder, tools]);

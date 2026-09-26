@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { ArrowUp, LoaderCircle, Maximize2, Square, WandSparkles } from "lucide-react";
+import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { ArrowUp, GripVertical, LoaderCircle, Maximize2, Square, WandSparkles } from "lucide-react";
 import { App, Button, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -29,11 +29,12 @@ type CanvasNodePromptPanelProps = {
     onGenerate: (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => void;
     onStop: (nodeId: string) => void;
     mentionReferences?: CanvasResourceReference[];
+    onReorderReferences?: (orderedNodeIds: string[]) => void;
     onImageSettingsOpenChange?: (open: boolean) => void;
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onReorderReferences, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
@@ -92,6 +93,53 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     });
 
     const activeReferences = mentionReferences.filter((reference) => reference.active && reference.nodeId !== node.id);
+
+    // HTML5 drag reordering of the reference chips, matching the channel-editor interaction:
+    // only the grip handle is draggable, so dragging can never trigger the browser's native
+    // image drag ("plus" cursor + zoomed snapshot). Dropping on another chip reorders the
+    // upstream connections, which renumbers 图片1/图片2 labels and the API reference order.
+    const [dragChipIndex, setDragChipIndex] = useState<number | null>(null);
+    const [dropChipIndex, setDropChipIndex] = useState<number | null>(null);
+    const dragChipIndexRef = useRef<number | null>(null);
+
+    const handleChipDragStart = (event: ReactDragEvent, index: number) => {
+        event.dataTransfer.effectAllowed = "move";
+        // Use a private MIME type (NOT text/plain) so the canvas's drop handler never mistakes
+        // this reorder drag for an external text drop (which would create a text node + dialog).
+        event.dataTransfer.setData("application/x-canvas-reference-reorder", String(index));
+        dragChipIndexRef.current = index;
+        setDragChipIndex(index);
+        setDropChipIndex(null);
+    };
+
+    const handleChipDragOver = (event: ReactDragEvent, index: number) => {
+        if (dragChipIndexRef.current === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+        if (dropChipIndex !== index) setDropChipIndex(index);
+    };
+
+    const handleChipDrop = (event: ReactDragEvent, targetIndex: number) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const rawFrom = dragChipIndexRef.current ?? Number(event.dataTransfer.getData("application/x-canvas-reference-reorder"));
+        dragChipIndexRef.current = null;
+        setDragChipIndex(null);
+        setDropChipIndex(null);
+        if (!onReorderReferences || !Number.isFinite(rawFrom) || rawFrom < 0 || rawFrom >= activeReferences.length || rawFrom === targetIndex) return;
+        const next = [...activeReferences];
+        const [moved] = next.splice(rawFrom, 1);
+        next.splice(targetIndex, 0, moved);
+        onReorderReferences(next.map((reference) => reference.nodeId));
+    };
+
+    const handleChipDragEnd = () => {
+        dragChipIndexRef.current = null;
+        setDragChipIndex(null);
+        setDropChipIndex(null);
+    };
+
     const connectedTextPrompt = activeReferences
         .filter((reference) => reference.kind === "text" && reference.text?.trim())
         .map((reference) => reference.text!.trim())
@@ -173,17 +221,34 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             {activeReferences.length ? (
                 <div className="mb-2 flex flex-wrap items-center gap-1.5">
                     <span className="text-[11px] opacity-55">{t("canvas.promptPanel.references")}</span>
-                    {activeReferences.map((reference) => (
-                        <span
-                            key={reference.id}
-                            className="inline-flex max-w-44 items-center gap-1.5 rounded-lg border px-1.5 py-1 text-xs"
-                            style={{ background: theme.toolbar.itemHover, borderColor: theme.node.stroke, color: theme.node.text }}
-                            title={reference.title}
-                        >
-                            {reference.kind === "image" && reference.previewUrl ? <img src={reference.previewUrl} alt="" className="size-6 rounded object-cover" /> : null}
-                            <span className="truncate font-medium">{reference.label}</span>
-                        </span>
-                    ))}
+                    {activeReferences.map((reference, index) => {
+                        const isDropTarget = dropChipIndex === index && dragChipIndex !== null && dragChipIndex !== index;
+                        return (
+                            <span
+                                key={reference.id}
+                                data-ref-chip={index}
+                                className={`inline-flex max-w-44 items-center gap-1 rounded-lg border px-1.5 py-1 text-xs ${isDropTarget ? "ring-2 ring-sky-500" : ""}`}
+                                style={{ background: theme.toolbar.itemHover, borderColor: isDropTarget ? "#0ea5e9" : theme.node.stroke, color: theme.node.text }}
+                                title={reference.title}
+                                onDragOver={onReorderReferences ? (event) => handleChipDragOver(event, index) : undefined}
+                                onDrop={onReorderReferences ? (event) => handleChipDrop(event, index) : undefined}
+                            >
+                                <span
+                                    data-ref-chip-handle={index}
+                                    draggable={Boolean(onReorderReferences)}
+                                    onDragStart={onReorderReferences ? (event) => handleChipDragStart(event, index) : undefined}
+                                    onDragEnd={onReorderReferences ? handleChipDragEnd : undefined}
+                                    className="cursor-grab touch-none opacity-45 active:cursor-grabbing"
+                                    title={t("canvas.promptPanel.reorderHint")}
+                                    aria-label={t("canvas.promptPanel.reorderHint")}
+                                >
+                                    <GripVertical className="size-3" />
+                                </span>
+                                {reference.kind === "image" && reference.previewUrl ? <img src={reference.previewUrl} alt="" draggable={false} className="size-6 rounded object-cover" /> : null}
+                                <span className="truncate font-medium">{reference.label}</span>
+                            </span>
+                        );
+                    })}
                     <span className="text-[11px] opacity-45">{t("canvas.promptPanel.mentionHint")}</span>
                 </div>
             ) : null}

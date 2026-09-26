@@ -120,7 +120,9 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
 
     const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
         const target = event.target instanceof Element ? event.target : null;
-        if (target?.closest("[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown,.ant-picker-dropdown")) return;
+        // Text inputs (contentEditable prompt boxes, chat composer, text nodes) scroll their own
+        // content on wheel — never let that gesture fall through to canvas zoom.
+        if (target?.closest("[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown,.ant-picker-dropdown,[contenteditable='true'],[data-canvas-text-input]")) return;
 
         onUserInteractRef.current?.();
         const current = nextViewportRef.current || viewportLiveRef.current;

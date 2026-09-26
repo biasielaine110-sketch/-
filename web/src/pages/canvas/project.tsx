@@ -42,6 +42,7 @@ import { CanvasNodeScaleDialog } from "@/components/canvas/canvas-node-scale-dia
 import { CanvasNodeAdjustDialog } from "@/components/canvas/canvas-node-adjust-dialog";
 import { CanvasNodeVideoToolsDialog, type VideoToolsFrameResult, type VideoToolsTrimResult, type VideoToolsUpscaleResult } from "@/components/canvas/canvas-node-video-tools-dialog";
 import { CanvasNodeAudioToolsDialog, type AudioToolsTrimResult } from "@/components/canvas/canvas-node-audio-tools-dialog";
+import { CanvasNodeAudioMergeDialog, type AudioMergeCandidate } from "@/components/canvas/canvas-node-audio-merge-dialog";
 import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
@@ -391,6 +392,9 @@ function AtelierCanvasPage() {
     const [adjustNodeId, setAdjustNodeId] = useState<string | null>(null);
     const [videoToolsNodeId, setVideoToolsNodeId] = useState<string | null>(null);
     const [audioToolsNodeId, setAudioToolsNodeId] = useState<string | null>(null);
+    const [audioMergeOpen, setAudioMergeOpen] = useState(false);
+    const [audioMergeSelected, setAudioMergeSelected] = useState<string[]>([]);
+    const [audioMergePicking, setAudioMergePicking] = useState(false);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [panoramaNodeId, setPanoramaNodeId] = useState<string | null>(null);
@@ -416,6 +420,8 @@ function AtelierCanvasPage() {
     const generateNodeRef = useRef<((nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => Promise<void>) | null>(null);
     const connectingParamsRef = useRef(connectingParams);
     const connectionTargetNodeIdRef = useRef(connectionTargetNodeId);
+    const audioMergePickingRef = useRef(false);
+    const audioMergeSelectedRef = useRef<string[]>([]);
     const selectionBoxRef = useRef(selectionBox);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
@@ -1218,6 +1224,26 @@ function AtelierCanvasPage() {
         setContextMenu((current) => (current?.type === "connection" && current.connectionId === connectionId ? null : current));
     }, []);
 
+    // Reorder the connections feeding a chat node so its "linked media" thumbnails, mention labels
+    // (图1/图2) and the API reference_images order all follow the user's drag order. Only the
+    // incoming image/video connections are reordered; every other connection keeps its position.
+    const handleReorderLinkedMedia = useCallback((nodeId: string, orderedNodeIds: string[]) => {
+        const order = new Map(orderedNodeIds.map((id, index) => [id, index]));
+        setConnections((prev) => {
+            const incoming = prev.filter((conn) => conn.toNodeId === nodeId && order.has(conn.fromNodeId));
+            if (incoming.length !== order.size) return prev;
+            incoming.sort((a, b) => (order.get(a.fromNodeId)! - order.get(b.fromNodeId)!));
+            const incomingIds = new Set(incoming.map((conn) => conn.id));
+            let pointer = 0;
+            const next = prev.map((conn) => {
+                if (conn.toNodeId !== nodeId || !incomingIds.has(conn.id)) return conn;
+                const replacement = incoming[pointer++];
+                return replacement;
+            });
+            return next;
+        });
+    }, []);
+
     const deselectCanvas = useCallback(() => {
         cancelPendingConnectionCreate();
         setSelectedNodeIds(new Set());
@@ -1794,9 +1820,30 @@ function AtelierCanvasPage() {
     // It only selects; body onMouseDown still starts dragging, so text selection inside editors does not drag the node.
     // Cache the capture result for the following bubbling drag handler to avoid applying shift-selection twice.
     const pendingSelectionRef = useRef<Set<string> | null>(null);
+
+    // Toggle an audio node into/out of the merge selection while "pick" mode is active.
+    const toggleAudioMergePick = useCallback((nodeId: string) => {
+        setAudioMergeSelected((prev) => {
+            const next = prev.includes(nodeId) ? prev.filter((id) => id !== nodeId) : [...prev, nodeId];
+            audioMergeSelectedRef.current = next;
+            return next;
+        });
+    }, []);
+
     const handleNodeSelectCapture = useCallback(
         (event: ReactMouseEvent, nodeId: string) => {
             if (event.button !== 0) return;
+            // Audio-merge "pick" mode: clicking an audio node toggles it in/out of the merge list,
+            // instead of performing normal canvas selection.
+            if (audioMergePickingRef.current) {
+                const clicked = nodesRef.current.find((node) => node.id === nodeId);
+                if (clicked?.type === CanvasNodeType.Audio) {
+                    event.preventDefault();
+                    toggleAudioMergePick(nodeId);
+                    pendingSelectionRef.current = null;
+                    return;
+                }
+            }
             // Keep Alt+drag from focusing the browser menu bar (Windows).
             if (event.altKey) event.preventDefault();
             blurActiveCanvasTextInput(event.target);
@@ -1830,11 +1877,20 @@ function AtelierCanvasPage() {
             const { nextSelected } = selectNodeByEvent(event, nodeId);
             pendingSelectionRef.current = nextSelected;
         },
-        [connectNodes, selectNodeByEvent, setConnecting],
+        [connectNodes, selectNodeByEvent, setConnecting, toggleAudioMergePick],
     );
 
     const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
         event.stopPropagation();
+        // Audio-merge "pick" mode: a click on an audio node only toggles it in the merge list and
+        // must never start a node drag.
+        if (audioMergePickingRef.current) {
+            const clicked = nodesRef.current.find((node) => node.id === nodeId);
+            if (clicked?.type === CanvasNodeType.Audio) {
+                pendingSelectionRef.current = null;
+                return;
+            }
+        }
         // While sticky-linking, clicks only create edges âdo not start a drag on the clicked peer.
         if (connectingParamsRef.current?.sticky) {
             pendingSelectionRef.current = null;
@@ -3097,6 +3153,64 @@ function AtelierCanvasPage() {
         );
         message.success(t("canvas.audioTools.restoreSuccess"));
     }, [audioToolsNode, message, t]);
+
+    const audioMergeCandidates = useMemo<AudioMergeCandidate[]>(
+        () =>
+            nodes
+                // Empty audio nodes are listed too (marked "empty") so users can still open the
+                // dialog and pick nodes; nodes without content are skipped at merge time.
+                .filter((node) => node.type === CanvasNodeType.Audio)
+                .map((node) => ({
+                    id: node.id,
+                    title: node.metadata?.content ? node.title || t("canvas.nodeTypes.audio") : `${node.title || t("canvas.nodeTypes.audio")}（空）`,
+                    url: node.metadata?.content || "",
+                    durationMs: node.metadata?.durationMs,
+                    empty: !node.metadata?.content,
+                })),
+        [nodes, t],
+    );
+
+    const openAudioMerge = useCallback(() => {
+        if (audioMergeCandidates.length < 2) {
+            message.warning(t("canvas.audioMerge.notEnough"));
+            return;
+        }
+        // Pre-select the currently selected audio nodes when possible; otherwise select all.
+        const preSelected = audioMergeCandidates
+            .filter((candidate) => selectedNodeIdsRef.current.has(candidate.id))
+            .map((candidate) => candidate.id);
+        const initial = preSelected.length >= 2 ? preSelected : audioMergeCandidates.map((candidate) => candidate.id);
+        setAudioMergeSelected(initial);
+        audioMergeSelectedRef.current = initial;
+        setAudioMergePicking(false);
+        audioMergePickingRef.current = false;
+        setAudioMergeOpen(true);
+    }, [audioMergeCandidates, message, t]);
+
+    const handleAudioMerge = useCallback(
+        async (blob: Blob) => {
+            const format = blob.type.includes("wav") ? "wav" : "mp3";
+            const stored = await storeGeneratedAudio(blob, format);
+            const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
+            const childId = nanoid();
+            const child: CanvasNodeData = {
+                id: childId,
+                type: CanvasNodeType.Audio,
+                title: t("canvas.audioMerge.resultTitle"),
+                position: { x: 0, y: 0 },
+                width: spec.width,
+                height: spec.height,
+                metadata: audioMetadata(stored),
+            };
+            setNodes((prev) => [...prev, child]);
+            setSelectedNodeIds(new Set([childId]));
+            setAudioMergeOpen(false);
+            setAudioMergePicking(false);
+            audioMergePickingRef.current = false;
+            message.success(t("canvas.audioMerge.success"));
+        },
+        [message, t],
+    );
 
     const handleVideoFrame = useCallback(
         async (result: VideoToolsFrameResult) => {
@@ -5418,6 +5532,7 @@ function AtelierCanvasPage() {
                     node={panelNode}
                     isRunning={isNodeGenerating(panelNode.id)}
                     mentionReferences={getMentionReferences(panelNode.id)}
+                    onReorderReferences={(orderedNodeIds) => handleReorderLinkedMedia(panelNode.id, orderedNodeIds)}
                     onPromptChange={handleNodePromptChange}
                     onConfigChange={handleConfigNodeChange}
                     onContentChange={handleNodeContentChange}
@@ -5430,7 +5545,7 @@ function AtelierCanvasPage() {
                     }}
                 />
             ),
-        [getConfigInputs, getMentionReferences, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, isNodeGenerating, stopGenerationForNode],
+        [getConfigInputs, getMentionReferences, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, handleReorderLinkedMedia, isNodeGenerating, stopGenerationForNode],
     );
 
     const handleDirectorExport = useCallback(
@@ -5627,6 +5742,7 @@ function AtelierCanvasPage() {
                             onDeleteChatMessage={handleDeleteChatMessage}
                             onInsertChatImage={handleInsertChatImage}
                             onFontSizeChange={handleFontSizeChange}
+                            onReorderLinkedMedia={handleReorderLinkedMedia}
                             onEditText={handleEditText}
                             onViewImage={handleNodeViewImage}
                             onAnnotate={handleAnnotate}
@@ -5702,6 +5818,7 @@ function AtelierCanvasPage() {
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
                     onOpenVideoTools={openVideoTools}
                     onOpenAudioTools={openAudioTools}
+                    onOpenAudioMerge={openAudioMerge}
                 />
 
                 <CanvasToolbar
@@ -5755,6 +5872,7 @@ function AtelierCanvasPage() {
                         onSaveAsset={(node) => void saveNodeAsset(node)}
                         onOpenVideoTools={openVideoTools}
                         onOpenAudioTools={openAudioTools}
+                        onOpenAudioMerge={openAudioMerge}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
@@ -5862,6 +5980,27 @@ function AtelierCanvasPage() {
                         onRestore={handleAudioRestore}
                     />
                 ) : null}
+
+                <CanvasNodeAudioMergeDialog
+                    open={audioMergeOpen}
+                    candidates={audioMergeCandidates}
+                    selected={audioMergeSelected}
+                    picking={audioMergePicking}
+                    onSelectedChange={(next) => {
+                        setAudioMergeSelected(next);
+                        audioMergeSelectedRef.current = next;
+                    }}
+                    onPickingChange={(next) => {
+                        setAudioMergePicking(next);
+                        audioMergePickingRef.current = next;
+                    }}
+                    onClose={() => {
+                        setAudioMergeOpen(false);
+                        setAudioMergePicking(false);
+                        audioMergePickingRef.current = false;
+                    }}
+                    onMerge={handleAudioMerge}
+                />
 
                 {mjUpscaleNode ? (
                     <CanvasNodeMjUpscaleDialog
