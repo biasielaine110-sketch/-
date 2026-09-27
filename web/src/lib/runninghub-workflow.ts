@@ -431,8 +431,68 @@ function qwenImage21DualLoadImageOrder(workflow: ComfyWorkflow): Array<readonly 
 }
 
 /**
+ * The saved "文生与编辑" graph ships its reference branch disconnected: the four LoadImage nodes
+ * (420/432/433/436) feed ImageScaleToMaxDimension (873..876), but those scalers plug into nothing
+ * and the TextEncodeQwenImage21 node (404) declares no `images.*` slots — so writing the uploaded
+ * filenames into the loaders alone leaves the graph in pure text-to-image and the references never
+ * reach the sampler.
+ *
+ * Re-attach each scaled reference to the encoder's growable `images.image_N` slot (slot order =
+ * 图1..图4, exactly the order the prompt addresses them by) so the visual reference actually
+ * conditions the result, and drop any slot the user did not fill so a baked demo picture can never
+ * leak in. Returns true when the wiring changed, i.e. the repaired graph must be submitted.
+ */
+function wireQwenImage21DualReferences(workflow: ComfyWorkflow, imageValues: string[]): boolean {
+    const encoder = workflow["404"] || findComfyNode(workflow, (node) => /TextEncodeQwenImage21/i.test(String(node.class_type || "")));
+    if (!encoder?.inputs) return false;
+
+    const ordered = qwenImage21DualLoadImageOrder(workflow).slice(0, 16);
+    const filled: number[] = [];
+    ordered.forEach((_entry, index) => {
+        const value = imageValues[index];
+        if (value && value !== "None") filled.push(index);
+    });
+    const trailing = filled.length ? filled[filled.length - 1] + 1 : ordered.length;
+
+    let changed = false;
+    for (const index of filled) {
+        const field = `images.image_${index + 1}`;
+        const source = qwenImage21ReferenceSource(workflow, ordered[index][0]);
+        const current = encoder.inputs[field];
+        if (Array.isArray(current) && String(current[0]) === source) continue;
+        encoder.inputs[field] = [source, 0];
+        changed = true;
+    }
+    for (let index = trailing; index < 16; index += 1) {
+        const field = `images.image_${index + 1}`;
+        if (field in encoder.inputs) {
+            delete encoder.inputs[field];
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
+/**
+ * The node that consumes a LoadImage output — the graph's per-figure ImageScaleToMaxDimension —
+ * so the encoder receives the normalized reference rather than the raw upload. Falls back to the
+ * loader itself on a variant that wires the references directly.
+ */
+function qwenImage21ReferenceSource(workflow: ComfyWorkflow, loadImageNodeId: string): string {
+    for (const [nodeId, node] of Object.entries(workflow)) {
+        if (!/ImageScale/i.test(String(node?.class_type || ""))) continue;
+        const feedsLoader = Object.values(node?.inputs || {}).some((value) => Array.isArray(value) && String(value[0]) === loadImageNodeId);
+        if (feedsLoader) return nodeId;
+    }
+    return loadImageNodeId;
+}
+
+/**
  * @param workflow patched graph (generic prompt/size/tier writers already ran)
  * @param pristine untouched API graph, used for baked defaults and for scrubbing synthetic inputs
+ * @returns the patched graph plus whether the reference wiring had to be repaired — when it did, the
+ * caller must submit the graph itself because nodeInfoList cannot create links.
  */
 function applyQwenImage21DualSettings(
     workflow: ComfyWorkflow,
@@ -442,7 +502,7 @@ function applyQwenImage21DualSettings(
     size?: { width: number; height: number } | null,
     aspect = "",
     rawSize = "",
-) {
+): { workflow: ComfyWorkflow; rewired: boolean } {
     const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
 
     // Prompt → "CR Prompt Text" (node 456), the head of the
@@ -508,7 +568,10 @@ function applyQwenImage21DualSettings(
         });
     }
 
-    return next;
+    // Writing the loaders is not enough on its own — the graph also has to consume them.
+    const rewired = wireQwenImage21DualReferences(next, imageValues);
+
+    return { workflow: next, rewired };
 }
 
 // MiniMax H3 高一致性-故事多分镜图 workflow (reference-to-video + 6 storyboard frames).
@@ -680,15 +743,35 @@ function imageFieldName(node: ComfyNode) {
     return "";
 }
 
-function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string, megapixels = "") {
+export type RunningHubNodeInfo = { nodeId: string; fieldName: string; fieldValue: string };
+
+export type RunningHubWorkflowPatch = {
+    /** Scalar overrides applied through the normal `nodeInfoList` body field. */
+    nodeInfoList: RunningHubNodeInfo[];
+    /**
+     * Present only when the graph had to be structurally repaired (a reference image needed a link
+     * that does not exist in the saved workflow). nodeInfoList cannot create links, so this graph
+     * must additionally be submitted through the `workflow` body field.
+     */
+    graph?: ComfyWorkflow;
+};
+
+// Exported for the workflow-diagnostics path and tests: the transformation is the risky part, so it
+// is exercised directly instead of only through a live task submission.
+export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string, megapixels = ""): RunningHubWorkflowPatch {
     let patched = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
     if (prompt.trim()) patched = writeRunningHubPrompt(patched, prompt);
     if (size) patched = writeRunningHubSize(patched, size.width, size.height, aspect);
     const tier = canvasResolutionTier(rawSize);
     if (tier) patched = writeRunningHubTier(patched, tier);
     if (seconds?.trim()) patched = writeRunningHubSeconds(patched, seconds.trim());
+    let structuralRepair = false;
     if (isQwenImage21Workflow(workflowId)) patched = applyQwenImage21Settings(patched, imageValues, size, aspect, rawSize, workflowId);
-    if (isQwenImage21DualWorkflow(workflowId)) patched = applyQwenImage21DualSettings(patched, workflow, prompt, imageValues, size, aspect, rawSize);
+    if (isQwenImage21DualWorkflow(workflowId)) {
+        const dual = applyQwenImage21DualSettings(patched, workflow, prompt, imageValues, size, aspect, rawSize);
+        patched = dual.workflow;
+        structuralRepair = dual.rewired;
+    }
     if (isMinimaxH3StoryWorkflow(workflowId)) {
         // Pristine (pre-tier) megapixels become the fallback so an unset precision keeps the
         // workflow's own default instead of the tier writer's 1k downgrade.
@@ -696,7 +779,7 @@ function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues:
         const fallbackMegapixels = typeof pristineSelector?.inputs?.megapixels === "number" ? pristineSelector.inputs.megapixels : undefined;
         patched = applyMinimaxH3StorySettings(patched, prompt, seconds, aspect, megapixels, fallbackMegapixels);
     }
-    const list: Array<{ nodeId: string; fieldName: string; fieldValue: string }> = [];
+    const list: RunningHubNodeInfo[] = [];
     for (const [nodeId, node] of Object.entries(patched)) {
         const before = workflow[nodeId]?.inputs || {};
         const after = node.inputs || {};
@@ -728,7 +811,7 @@ function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues:
         if (existing) existing.fieldValue = value;
         else list.push({ nodeId: entry[0], fieldName, fieldValue: value });
     });
-    return list;
+    return structuralRepair ? { nodeInfoList: list, graph: patched } : { nodeInfoList: list };
 }
 
 const CANVAS_IMAGE_SIZES: Record<string, { width: number; height: number }> = {
@@ -1012,10 +1095,15 @@ async function uploadImage(origin: string, apiKey: string, source: string, fileN
     return name;
 }
 
-async function submitWorkflowTask(origin: string, apiKey: string, workflowId: string, nodeInfoList: ReturnType<typeof buildNodeInfoList>, signal?: AbortSignal) {
+async function submitWorkflowTask(origin: string, apiKey: string, workflowId: string, nodeInfoList: RunningHubNodeInfo[], graph?: ComfyWorkflow, signal?: AbortSignal) {
     const token = apiKey.replace(/^Bearer\s+/i, "").trim();
     const body: Record<string, unknown> = { apiKey: token, workflowId, addMetadata: true };
     if (nodeInfoList.length) body.nodeInfoList = nodeInfoList;
+    // `workflow` runs the graph we send instead of the one saved under workflowId. It is the only way
+    // to add a link (nodeInfoList overrides scalar inputs only), which is what a reference image
+    // needs in order to reach the sampler. workflowId stays in the body, so a backend that ignores
+    // the field simply falls back to the previous behaviour rather than failing.
+    if (graph) body.workflow = JSON.stringify(graph);
     const response = await axios.post(proxyApiUrl(`${origin}/task/openapi/create`), body, {
         headers: bearer(apiKey),
         signal,
@@ -1280,12 +1368,16 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     const pixels = resolveCanvasPixels(request.size || "", request.media || "image");
     const aspect = canvasAspect(request.size || "");
-    const overrides = workflow ? buildNodeInfoList(workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "") : [];
+    const patch: RunningHubWorkflowPatch = workflow
+        ? buildWorkflowPatch(workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "")
+        : { nodeInfoList: [] };
+    const overrides = patch.nodeInfoList;
+    const repairedGraph = patch.graph;
     const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|resolution|megapixel|aspect_ratio|switch/i.test(item.fieldName));
     let task: RunningHubTaskView;
     try {
         if (workflow) {
-            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, request.signal);
+            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
         } else {
             throw new Error("WORKFLOW_NOT_EXISTS");
         }
@@ -1299,12 +1391,14 @@ async function runRunningHubWorkflowWithKey(args: {
         if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message)) {
             throw error;
         }
-        const canRetryPlain = Boolean(workflow) && overrides.length > 0 && (isUnknownServerError(message) || /APIKEY_INVALID_NODE_INFO|Node info error/i.test(message));
+        // A repaired-graph submission is always retried without it, so an unrecognized `workflow`
+        // field or a rejected link degrades to the previous nodeInfoList-only behaviour.
+        const canRetryPlain = Boolean(workflow) && (overrides.length > 0 || Boolean(repairedGraph)) && (Boolean(repairedGraph) || isUnknownServerError(message) || /APIKEY_INVALID_NODE_INFO|Node info error/i.test(message));
         if (canRetryPlain) {
             const fallback = keptOverrides.length && keptOverrides.length < overrides.length ? keptOverrides : [];
-            task = await submitWorkflowTask(origin, apiKey, workflowId, fallback, request.signal).catch(async (retryError: unknown) => {
+            task = await submitWorkflowTask(origin, apiKey, workflowId, fallback, undefined, request.signal).catch(async (retryError: unknown) => {
                 if (!fallback.length) throw explainRunningHubError(retryError, workflowId);
-                return submitWorkflowTask(origin, apiKey, workflowId, [], request.signal).catch((plainError: unknown) => {
+                return submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((plainError: unknown) => {
                     throw explainRunningHubError(plainError, workflowId);
                 });
             });
@@ -1316,7 +1410,7 @@ async function runRunningHubWorkflowWithKey(args: {
             if (nodes.length) {
                 task = await submitWebappTask(origin, apiKey, workflowId, buildWebappNodeInfoList(nodes, request.prompt, uploaded, request.size, request.seconds, request.media), request.signal);
             } else if (!workflow) {
-                task = await submitWorkflowTask(origin, apiKey, workflowId, [], request.signal).catch((retryError: unknown) => {
+                task = await submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((retryError: unknown) => {
                     throw explainRunningHubError(retryError, workflowId);
                 });
             } else {
