@@ -400,6 +400,73 @@ function findComfyNode(workflow: ComfyWorkflow, predicate: (node: ComfyNode) => 
     return undefined;
 }
 
+// MiniMax H3 高一致性-故事多分镜图 workflow (reference-to-video + 6 storyboard frames).
+// Its knobs do not match the generic field-name heuristics: duration is a PrimitiveFloat
+// titled "Float (Duration)" (field "value", not "duration"), the ResolutionSelector stores a
+// label enum ("16:9 (Widescreen)"), the storyboard extractor's frame indexes assume 6s@24fps,
+// and RandomNoise ships a fixed seed. Everything below is scoped to this workflow id only.
+const MINIMAX_H3_STORY_WORKFLOW_ID = "2103743201025814529";
+const MINIMAX_H3_STORY_LOAD_IMAGE_ORDER = ["154", "155", "156"]; // 角色1, 角色2, 场景1
+const MINIMAX_H3_STORYBOARD_FRAMES = 6;
+
+function isMinimaxH3StoryWorkflow(workflowId?: string | null) {
+    return workflowId === MINIMAX_H3_STORY_WORKFLOW_ID;
+}
+
+function randomComfySeed() {
+    return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+}
+
+function applyMinimaxH3StorySettings(workflow: ComfyWorkflow, prompt: string, seconds?: string, aspect = "") {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+
+    // Prompt → the multiline string titled 故事分镜图提示词 (node 283; node 151 links to it).
+    if (prompt.trim()) {
+        const promptNode =
+            next["283"] ||
+            findComfyNode(
+                next,
+                (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string" && /分镜|故事/.test(String(node._meta?.title || "")),
+            );
+        if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+    }
+
+    // Duration (seconds) → PrimitiveFloat "Float (Duration)" (node 143, field "value"). The
+    // generic seconds writer only probes fields named duration/seconds/video_length and misses it.
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const durationNode =
+            next["143"] ||
+            findComfyNode(next, (node) => /Primitive(Float|Int)/i.test(String(node.class_type || "")) && /duration|时长/i.test(String(node._meta?.title || "")));
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = duration;
+        // The storyboard extractor pulls 6 frames by absolute index ("12, 36, 60, 84, 108, 132"
+        // = evenly spaced over 6s*24fps). Recompute for the chosen duration so a shorter video
+        // never indexes past the rendered frame count.
+        const extractor = next["294"] || findComfyNode(next, (node) => /GetImagesFromBatchIndexed/i.test(String(node.class_type || "")));
+        if (extractor?.inputs && typeof extractor.inputs.indexes === "string") {
+            const base = Math.max(MINIMAX_H3_STORYBOARD_FRAMES * 2, Math.round(duration * 24));
+            const indexes = Array.from({ length: MINIMAX_H3_STORYBOARD_FRAMES }, (_, i) => Math.round(((i + 0.5) * base) / MINIMAX_H3_STORYBOARD_FRAMES));
+            extractor.inputs.indexes = indexes.join(", ");
+        }
+    }
+
+    // Aspect ratio → ResolutionSelector label enum (node 133). The generic writer only accepts a
+    // bare "16:9" value and cannot touch the "16:9 (Widescreen)" label format.
+    if (aspect) {
+        const selector = next["133"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+        if (selector?.inputs && typeof selector.inputs.aspect_ratio === "string") selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+    }
+
+    // The saved workflow bakes a fixed noise_seed — identical inputs would render identical
+    // videos on every run. Randomize per submission.
+    for (const node of Object.values(next)) {
+        if (/RandomNoise/i.test(String(node.class_type || "")) && typeof node.inputs?.noise_seed === "number") {
+            node.inputs.noise_seed = randomComfySeed();
+        }
+    }
+    return next;
+}
+
 async function fetchWebappNodes(origin: string, apiKey: string, webappId: string, signal?: AbortSignal): Promise<WebappNode[]> {
     const token = apiKey.replace(/^Bearer\s+/i, "").trim();
     const response = await axios.get(proxyApiUrl(`${origin}/api/webapp/apiCallDemo`), {
@@ -489,6 +556,7 @@ function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues:
     if (tier) patched = writeRunningHubTier(patched, tier);
     if (seconds?.trim()) patched = writeRunningHubSeconds(patched, seconds.trim());
     if (isQwenImage21Workflow(workflowId)) patched = applyQwenImage21Settings(patched, imageValues, size, aspect, rawSize, workflowId);
+    if (isMinimaxH3StoryWorkflow(workflowId)) patched = applyMinimaxH3StorySettings(patched, prompt, seconds, aspect);
     const list: Array<{ nodeId: string; fieldName: string; fieldValue: string }> = [];
     for (const [nodeId, node] of Object.entries(patched)) {
         const before = workflow[nodeId]?.inputs || {};
@@ -507,7 +575,9 @@ function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues:
         ? []
         : isQwenImage21Workflow(workflowId)
           ? QWEN_IMAGE_21_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
-          : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
+          : isMinimaxH3StoryWorkflow(workflowId)
+            ? MINIMAX_H3_STORY_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
+            : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
     imageValues.forEach((value, index) => {
         const entry = loaders[index];
         if (!entry || !value) return;
