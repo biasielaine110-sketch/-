@@ -400,6 +400,117 @@ function findComfyNode(workflow: ComfyWorkflow, predicate: (node: ComfyNode) => 
     return undefined;
 }
 
+// Qwen Image 2.1 文生与编辑加速工作流（双自动提示词）: a runninghub.cn/.ai text-to-image +
+// edit pair. The prompt itself already lands correctly in the "CR Prompt Text" node (the generic
+// writer gives it score 40 and writes its `prompt` field), but everything around resolution is
+// mismatched:
+//   - ResolutionSelector (406) drives EmptyLatentImage, so it alone decides the output size,
+//     yet its `aspect_ratio` is a label enum ("16:9 (Widescreen)") the generic writer cannot
+//     produce — the canvas aspect choice was silently ignored;
+//   - its `megapixels` is a number the tier writer force-maps 1k/2k/4k → 1/2/4, so every named
+//     aspect (always "1k") knocked the workflow's baked 2MP down to 1MP;
+//   - both KSamplers (442 / 902) bake a fixed seed, so identical inputs repeated identical images.
+// Everything below is scoped to these two workflow ids only.
+const QWEN_IMAGE_21_DUAL_WORKFLOW_IDS = new Set(["2104231628587798530", "2104232576453009410"]);
+// Reference loaders in graph order = 图1..图4 (kept as an explicit order so a re-numbered variant
+// still maps the user's images onto the same slots).
+const QWEN_IMAGE_21_DUAL_LOAD_IMAGE_ORDER = ["420", "432", "433", "436"];
+
+function isQwenImage21DualWorkflow(workflowId?: string | null) {
+    return Boolean(workflowId && QWEN_IMAGE_21_DUAL_WORKFLOW_IDS.has(workflowId));
+}
+
+function qwenImage21DualLoadImageOrder(workflow: ComfyWorkflow): Array<readonly [string, ComfyNode]> {
+    const named = QWEN_IMAGE_21_DUAL_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter(
+        (entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]) && /LoadImage/i.test(String(entry[1]?.class_type || "")),
+    );
+    if (named.length) return named;
+    return Object.entries(workflow)
+        .filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")))
+        .sort(([idA], [idB]) => idA.localeCompare(idB, undefined, { numeric: true }));
+}
+
+/**
+ * @param workflow patched graph (generic prompt/size/tier writers already ran)
+ * @param pristine untouched API graph, used for baked defaults and for scrubbing synthetic inputs
+ */
+function applyQwenImage21DualSettings(
+    workflow: ComfyWorkflow,
+    pristine: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    size?: { width: number; height: number } | null,
+    aspect = "",
+    rawSize = "",
+) {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+
+    // Prompt → "CR Prompt Text" (node 456), the head of the
+    // 456 → StringConcatenate(701/702) → Any Switch(710) → TextEncodeQwenImage21(404) chain.
+    // Write it explicitly so a variant whose titles drift cannot fall through to the forceText
+    // path, which would invent a `text` input the encoder does not declare.
+    if (prompt.trim()) {
+        const promptNode =
+            next["456"] ||
+            findComfyNode(next, (node) => /CR\s*Prompt\s*Text/i.test(String(node.class_type || "")) && typeof node.inputs?.prompt === "string");
+        if (promptNode?.inputs && typeof promptNode.inputs.prompt === "string") promptNode.inputs.prompt = prompt;
+    }
+
+    // Drop inputs that are not part of the node's declared API surface. RunningHub rejects
+    // overrides for unknown fields, and that rejection takes the whole nodeInfo batch with it —
+    // which would silently fall back to the workflow's baked demo prompt.
+    for (const [nodeId, node] of Object.entries(next)) {
+        if (!node?.inputs) continue;
+        const declared = pristine[nodeId]?.inputs || {};
+        for (const field of Object.keys(node.inputs)) {
+            if (!(field in declared)) delete node.inputs[field];
+        }
+    }
+
+    // Aspect ratio → ResolutionSelector label enum (node 406). This node feeds
+    // EmptyLatentImage, so it is the single lever for the rendered size.
+    const selector = next["406"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        const pristineSelector = pristine["406"] || findComfyNode(pristine, (node) => node.class_type === "ResolutionSelector" && "megapixels" in (node.inputs || {}));
+        const bakedMegapixels = typeof pristineSelector?.inputs?.megapixels === "number" ? pristineSelector.inputs.megapixels : NaN;
+
+        const nextAspect = aspect || (size?.width && size.height ? closestResolutionSelectorAspect(size.width, size.height) : "");
+        if (nextAspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(nextAspect);
+        }
+
+        // Precision stays ours: the workflow's baked value is a floor, so picking a shape (always a
+        // "1k" tier) can no longer silently degrade the output, while an explicit 2k/4k size may
+        // still raise it. With an "auto" size nothing is requested and the baked value stands.
+        if (typeof selector.inputs.megapixels === "number" || typeof selector.inputs.megapixels === "string") {
+            const tier = canvasResolutionTier(rawSize);
+            const tierMegapixels = tier === "4k" ? 4 : tier === "2k" ? 2 : 1;
+            const requested = Number.isFinite(bakedMegapixels) && bakedMegapixels > 0 ? Math.max(bakedMegapixels, tierMegapixels) : tierMegapixels;
+            if (requested > 0) selector.inputs.megapixels = requested;
+        }
+    }
+
+    // Fixed seeds → identical results for identical inputs. Randomize per submission.
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        if (/RandomNoise/i.test(type) && typeof node.inputs?.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
+        else if (/KSampler|SamplerCustom/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+    }
+
+    // Reference images → 图1..图4 loaders. The saved graph ships demo portraits; once the user
+    // links their own images only the first N slots carry them and every leftover is cleared, so
+    // baked-in characters never leak into the edit result.
+    if (imageValues.length) {
+        qwenImage21DualLoadImageOrder(next).forEach((entry, index) => {
+            const node = entry[1];
+            if (!node?.inputs || typeof node.inputs.image !== "string") return;
+            node.inputs.image = imageValues[index] || "None";
+        });
+    }
+
+    return next;
+}
+
 // MiniMax H3 高一致性-故事多分镜图 workflow (reference-to-video + 6 storyboard frames).
 // Its knobs do not match the generic field-name heuristics: duration is a PrimitiveFloat
 // titled "Float (Duration)" (field "value", not "duration"), the ResolutionSelector stores a
@@ -577,6 +688,7 @@ function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues:
     if (tier) patched = writeRunningHubTier(patched, tier);
     if (seconds?.trim()) patched = writeRunningHubSeconds(patched, seconds.trim());
     if (isQwenImage21Workflow(workflowId)) patched = applyQwenImage21Settings(patched, imageValues, size, aspect, rawSize, workflowId);
+    if (isQwenImage21DualWorkflow(workflowId)) patched = applyQwenImage21DualSettings(patched, workflow, prompt, imageValues, size, aspect, rawSize);
     if (isMinimaxH3StoryWorkflow(workflowId)) {
         // Pristine (pre-tier) megapixels become the fallback so an unset precision keeps the
         // workflow's own default instead of the tier writer's 1k downgrade.
@@ -596,15 +708,17 @@ function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues:
         }
     }
     // The 图生图 workflow already wires uploaded references (and clears baked-in ones) inside
-    // applyQwenImage21Settings, so skip the generic mapping for it. Other Qwen workflows keep the
-    // hard-coded loader order; everything else uses the class_type scan.
-    const loaders = isQwenImage21I2IWorkflow(workflowId)
-        ? []
-        : isQwenImage21Workflow(workflowId)
-          ? QWEN_IMAGE_21_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
-          : isMinimaxH3StoryWorkflow(workflowId)
-            ? MINIMAX_H3_STORY_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
-            : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
+    // applyQwenImage21Settings, so skip the generic mapping for it. The Qwen Image 2.1 dual
+    // (文生/编辑) pair does the same inside applyQwenImage21DualSettings. Other Qwen workflows keep
+    // the hard-coded loader order; everything else uses the class_type scan.
+    const loaders =
+        isQwenImage21I2IWorkflow(workflowId) || isQwenImage21DualWorkflow(workflowId)
+            ? []
+            : isQwenImage21Workflow(workflowId)
+              ? QWEN_IMAGE_21_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
+              : isMinimaxH3StoryWorkflow(workflowId)
+                ? MINIMAX_H3_STORY_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
+                : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
     imageValues.forEach((value, index) => {
         const entry = loaders[index];
         if (!entry || !value) return;
