@@ -73,6 +73,8 @@ export type AiConfig = {
     sunoStyle: string;
     sunoVocalGender: string;
     videoSeconds: string;
+    /** Megapixels for workflows exposing a ResolutionSelector (MiniMax H3 story); empty = workflow default. */
+    videoResolution: string;
     vquality: string;
     videoGenerateAudio: string;
     videoWatermark: string;
@@ -148,6 +150,7 @@ export const defaultConfig: AiConfig = {
     sunoStyle: "",
     sunoVocalGender: "",
     videoSeconds: "6",
+    videoResolution: "",
     vquality: "720",
     videoGenerateAudio: "true",
     videoWatermark: "false",
@@ -422,6 +425,7 @@ export const useConfigStore = create<ConfigStore>()(
                         reasoningEffort: config.reasoningEffort || "auto",
                         apiTransport: config.apiTransport === "direct" ? "direct" : "proxy",
                         videoSeconds: config.videoSeconds || "6",
+                        videoResolution: config.videoResolution || "",
                         vquality: config.vquality || "720",
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",

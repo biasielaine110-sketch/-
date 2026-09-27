@@ -35,9 +35,10 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     const midjourney = isMidjourneyModel(modelOptionName(config.model || config.imageModel || ""));
     const storyboardVideo = isMinimaxH3StoryWorkflowId(modelOptionName(config.model || config.imageModel || ""));
     const videoDuration = Math.max(1, Math.floor(Number(config.videoSeconds) || 6));
+    const videoResolution = config.videoResolution || "2";
     const summary = midjourney
         ? `${midjourneyVersionLabel(config.mjVersion || "8.1")} · ${imageSizeLabel(activeSize)} · ${t("canvas.controls.images", { count })}`
-        : `${imageQualityLabel(quality)} · ${imageSizeLabel(activeSize)} · ${t("canvas.controls.images", { count })}${storyboardVideo ? ` · ${videoDuration}s` : ""}`;
+        : `${imageQualityLabel(quality)} · ${imageSizeLabel(activeSize)} · ${t("canvas.controls.images", { count })}${storyboardVideo ? ` · ${videoDuration}s · ${videoResolution}MP` : ""}`;
     const updateOpen = (nextOpen: boolean) => {
         setOpen(nextOpen);
         onOpenChange?.(nextOpen);

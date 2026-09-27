@@ -422,7 +422,7 @@ function randomComfySeed() {
     return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
 }
 
-function applyMinimaxH3StorySettings(workflow: ComfyWorkflow, prompt: string, seconds?: string, aspect = "") {
+function applyMinimaxH3StorySettings(workflow: ComfyWorkflow, prompt: string, seconds?: string, aspect = "", megapixels = "", fallbackMegapixels?: number) {
     const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
 
     // Prompt → the multiline string titled 故事分镜图提示词 (node 283; node 151 links to it).
@@ -460,6 +460,22 @@ function applyMinimaxH3StorySettings(workflow: ComfyWorkflow, prompt: string, se
     if (aspect) {
         const selector = next["133"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
         if (selector?.inputs && typeof selector.inputs.aspect_ratio === "string") selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+    }
+
+    // Video/frame resolution (megapixels) → ResolutionSelector node 133. The generic tier writer
+    // force-maps 1k/2k/4k presets onto this field (and downgrades named aspects to 1), so always
+    // write it explicitly here: the user's precision choice wins, otherwise keep the workflow's
+    // baked default so the output quality never silently drifts with the aspect/size presets.
+    if (typeof megapixels === "string" && megapixels.trim()) {
+        const selector = next["133"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "megapixels" in (node.inputs || {}));
+        if (selector?.inputs && (typeof selector.inputs.megapixels === "number" || typeof selector.inputs.megapixels === "string")) {
+            const requested = Number(megapixels);
+            if (Number.isFinite(requested) && requested > 0) selector.inputs.megapixels = requested;
+            else if (typeof fallbackMegapixels === "number" && fallbackMegapixels > 0) selector.inputs.megapixels = fallbackMegapixels;
+        }
+    } else if (typeof fallbackMegapixels === "number" && fallbackMegapixels > 0) {
+        const selector = next["133"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "megapixels" in (node.inputs || {}));
+        if (selector?.inputs && (typeof selector.inputs.megapixels === "number" || typeof selector.inputs.megapixels === "string")) selector.inputs.megapixels = fallbackMegapixels;
     }
 
     // The saved workflow bakes a fixed noise_seed — identical inputs would render identical
@@ -553,7 +569,7 @@ function imageFieldName(node: ComfyNode) {
     return "";
 }
 
-function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string) {
+function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string, megapixels = "") {
     let patched = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
     if (prompt.trim()) patched = writeRunningHubPrompt(patched, prompt);
     if (size) patched = writeRunningHubSize(patched, size.width, size.height, aspect);
@@ -561,7 +577,13 @@ function buildNodeInfoList(workflow: ComfyWorkflow, prompt: string, imageValues:
     if (tier) patched = writeRunningHubTier(patched, tier);
     if (seconds?.trim()) patched = writeRunningHubSeconds(patched, seconds.trim());
     if (isQwenImage21Workflow(workflowId)) patched = applyQwenImage21Settings(patched, imageValues, size, aspect, rawSize, workflowId);
-    if (isMinimaxH3StoryWorkflow(workflowId)) patched = applyMinimaxH3StorySettings(patched, prompt, seconds, aspect);
+    if (isMinimaxH3StoryWorkflow(workflowId)) {
+        // Pristine (pre-tier) megapixels become the fallback so an unset precision keeps the
+        // workflow's own default instead of the tier writer's 1k downgrade.
+        const pristineSelector = workflow["133"] || findComfyNode(workflow, (node) => node.class_type === "ResolutionSelector" && "megapixels" in (node.inputs || {}));
+        const fallbackMegapixels = typeof pristineSelector?.inputs?.megapixels === "number" ? pristineSelector.inputs.megapixels : undefined;
+        patched = applyMinimaxH3StorySettings(patched, prompt, seconds, aspect, megapixels, fallbackMegapixels);
+    }
     const list: Array<{ nodeId: string; fieldName: string; fieldValue: string }> = [];
     for (const [nodeId, node] of Object.entries(patched)) {
         const before = workflow[nodeId]?.inputs || {};
@@ -1060,6 +1082,8 @@ export async function runRunningHubWorkflow(args: {
     prompt: string;
     size?: string;
     seconds?: string;
+    /** Megapixels override for workflows exposing a ResolutionSelector (MiniMax H3 story). */
+    resolution?: string;
     media?: "image" | "video";
     referenceDataUrls?: string[];
     signal?: AbortSignal;
@@ -1113,6 +1137,7 @@ async function runRunningHubWorkflowWithKey(args: {
         prompt: string;
         size?: string;
         seconds?: string;
+        resolution?: string;
         media?: "image" | "video";
         referenceDataUrls?: string[];
         signal?: AbortSignal;
@@ -1133,7 +1158,7 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     const pixels = resolveCanvasPixels(request.size || "", request.media || "image");
     const aspect = canvasAspect(request.size || "");
-    const overrides = workflow ? buildNodeInfoList(workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId) : [];
+    const overrides = workflow ? buildNodeInfoList(workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "") : [];
     const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|resolution|megapixel|aspect_ratio|switch/i.test(item.fieldName));
     let task: RunningHubTaskView;
     try {

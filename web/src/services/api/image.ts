@@ -1649,6 +1649,8 @@ async function requestRunningHubImages(config: AiConfig, prompt: string, referen
         // Storyboard workflow renders a video too; honor the duration setting for it. Scoped to
         // that workflow id so other image workflows never receive a seconds they don't expect.
         seconds: isMinimaxH3StoryWorkflowId(config.model || config.imageModel) ? config.videoSeconds : undefined,
+        // Same gate for the video resolution (ResolutionSelector megapixels).
+        resolution: isMinimaxH3StoryWorkflowId(config.model || config.imageModel) ? config.videoResolution : undefined,
         referenceDataUrls,
         signal: options?.signal,
     });

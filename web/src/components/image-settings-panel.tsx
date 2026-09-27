@@ -53,7 +53,7 @@ export function midjourneyVersionLabel(value: string) {
 
 type ImageSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "quality" | "size" | "count" | "background" | "mjVersion" | "videoSeconds", value: string) => void;
+    onConfigChange: (key: "quality" | "size" | "count" | "background" | "mjVersion" | "videoSeconds" | "videoResolution", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
@@ -62,6 +62,12 @@ type ImageSettingsPanelProps = {
 };
 
 const storyboardDurationOptions = [3, 6, 10, 15];
+// ResolutionSelector megapixels — 1/2/4 mirror the workflow's own valid set (2 = baked default).
+const storyboardResolutionOptions = [
+    { value: "1", label: "1MP ≈720p" },
+    { value: "2", label: "2MP ≈1080p" },
+    { value: "4", label: "4MP ≈1440p" },
+];
 
 export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10 }: ImageSettingsPanelProps) {
     const { t } = useTranslation();
@@ -133,6 +139,18 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                                 </OptionPill>
                             ))}
                             <DurationInput value={videoDuration} theme={theme} onChange={(value) => onConfigChange("videoSeconds", String(Math.max(1, Math.min(30, Math.floor(value || 6)))))} />
+                        </div>
+                    </div>
+                ) : null}
+                {storyboardVideo ? (
+                    <div className="space-y-2.5">
+                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.video.resolution")}</SettingTitle>
+                        <div className="grid grid-cols-3 gap-2.5">
+                            {storyboardResolutionOptions.map((item) => (
+                                <OptionPill key={item.value} selected={(config.videoResolution || "2") === item.value} theme={theme} onClick={() => onConfigChange("videoResolution", item.value)}>
+                                    {item.label}
+                                </OptionPill>
+                            ))}
                         </div>
                     </div>
                 ) : null}

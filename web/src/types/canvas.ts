@@ -128,6 +128,8 @@ export type CanvasNodeMetadata = {
     mjVersion?: string;
     textCount?: number;
     seconds?: string;
+    /** MiniMax H3 story video resolution (ResolutionSelector megapixels); empty = workflow default. */
+    videoResolution?: string;
     vquality?: string;
     generateAudio?: string;
     watermark?: string;
