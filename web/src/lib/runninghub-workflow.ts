@@ -1093,8 +1093,11 @@ export async function runRunningHubWorkflow(args: {
     const primary = runningHubApiKey(args.baseUrl, args.apiKey);
     if (!origin || !workflowId) throw new Error(apiText("runningHubWorkflowFetchFailed"));
 
-    // Ordered key list: primary first, then any backups. The primary is dropped as a key that
-    // reports balance exhaustion, so the same account's key never blocks the fallback chain.
+    // Key list: primary + backups, deduped. With multiple keys the order is shuffled per call
+    // (Fisher-Yates below) so every generation spreads load across accounts at random — applies
+    // to both runninghub.cn and runninghub.ai, which are the only origins that reach this
+    // function. The balance-exhaustion fallback then walks the shuffled order unchanged, so an
+    // exhausted key still falls through to the next one.
     const keys = Array.from(
         new Set(
             [primary, ...(args.apiKeys || []).map((key) => runningHubApiKey(args.baseUrl, key))]
@@ -1103,6 +1106,11 @@ export async function runRunningHubWorkflow(args: {
         ),
     );
     if (!keys.length) throw new Error(apiText("apiKeyRequired"));
+    // One fresh random order per generation call; a single-key list is untouched by this.
+    for (let i = keys.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [keys[i], keys[j]] = [keys[j], keys[i]];
+    }
 
     const isBalanceError = (error: unknown) => isBalanceMessage(errorText(error));
 
