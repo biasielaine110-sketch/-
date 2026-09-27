@@ -3101,6 +3101,48 @@ function AtelierCanvasPage() {
         return childId;
     }, []);
 
+    // Extra outputs one generation run produced (e.g. RunningHub storyboard workflows return every
+    // frame at once): upload each and drop standalone image nodes to the right of the anchor node,
+    // connected to it so the lineage stays visible. One failed upload skips only its own frame.
+    const spawnExtraImageNodes = useCallback(async (baseNodeId: string, dataUrls: string[], meta?: { prompt?: string; model?: string }) => {
+        if (!dataUrls.length) return;
+        const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+        let stackOffsetY = 0;
+        for (const dataUrl of dataUrls) {
+            try {
+                const uploaded = await uploadGeneratedImage({ dataUrl });
+                const imageSize = fitNodeSize(uploaded.width, uploaded.height, spec.width, spec.height);
+                const item = canvasNodeImageFromUpload(nanoid(), uploaded);
+                const anchor = nodesRef.current.find((node) => node.id === baseNodeId);
+                // Compute anchor fallbacks without re-narrowing `anchor` inside a ternary false branch
+                // (this TS version types the narrowed-undefined optional chain as `never`).
+                const anchorX = (anchor?.position.x ?? 0) + (anchor ? anchor.width + 96 : 0);
+                const anchorY = anchor?.position.y ?? 0;
+                const position = { x: anchorX, y: anchorY + stackOffsetY };
+                stackOffsetY += imageSize.height + 48;
+                const extra: CanvasNodeData = {
+                    id: item.id,
+                    type: CanvasNodeType.Image,
+                    title: (meta?.prompt || "").slice(0, 32) || "Storyboard",
+                    position,
+                    width: imageSize.width,
+                    height: imageSize.height,
+                    metadata: {
+                        ...(meta?.prompt ? { prompt: meta.prompt } : {}),
+                        ...(meta?.model ? { model: meta.model } : {}),
+                        ...imageMetadata(uploaded),
+                        images: [item],
+                        primaryImageId: item.id,
+                    },
+                };
+                setNodes((prev) => [...prev, extra]);
+                setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: baseNodeId, toNodeId: item.id }]);
+            } catch {
+                // Skip this frame only; keep placing the rest.
+            }
+        }
+    }, []);
+
     const handleVideoTrim = useCallback(
         async (result: VideoToolsTrimResult) => {
             const source = videoToolsNode;
@@ -3943,13 +3985,16 @@ function AtelierCanvasPage() {
                             ? [{ id: up.id, name: `${up.title || up.id}.png`, type: up.metadata.mimeType || "image/png", dataUrl: up.metadata.content, storageKey: up.metadata.storageKey }]
                             : [],
                     );
-                    const image = refs.length
-                        ? await requestEdit({ ...generationConfig, count: "1" }, fullPrompt, refs, undefined, { signal: controller.signal }).then((items) => items[0])
-                        : await requestGeneration({ ...generationConfig, count: "1" }, fullPrompt, { signal: controller.signal }).then((items) => items[0]);
-                    const uploaded = await uploadGeneratedImage(image);
+                    const items = refs.length
+                        ? await requestEdit({ ...generationConfig, count: "1" }, fullPrompt, refs, undefined, { signal: controller.signal })
+                        : await requestGeneration({ ...generationConfig, count: "1" }, fullPrompt, { signal: controller.signal });
+                    const uploaded = await uploadGeneratedImage(items[0]);
                     setNodes((prev) =>
                         prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
                     );
+                    if (items.length > 1) {
+                        void spawnExtraImageNodes(nodeId, items.slice(1).map((item) => item.dataUrl), { prompt: scene, model: generationConfig.model });
+                    }
                     setDialogNodeId(null);
                 } catch (error) {
                     if (!isGenerationCanceled(error)) {
@@ -4238,10 +4283,15 @@ function AtelierCanvasPage() {
                         await Promise.all(
                             imageIds.map(async (imageId) => {
                                 try {
-                                    const image = referenceImages.length
-                                        ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, undefined, { signal: controller.signal }).then((items) => items[0])
-                                        : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal }).then((items) => items[0]);
-                                    await applyGeneratedSlot(imageId, image);
+                                    const items = referenceImages.length
+                                        ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, undefined, { signal: controller.signal })
+                                        : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal });
+                                    await applyGeneratedSlot(imageId, items[0]);
+                                    // Storyboard-style workflows return every frame regardless of the count
+                                    // param; place the leftovers instead of silently dropping them.
+                                    if (items.length > 1) {
+                                        void spawnExtraImageNodes(rootId, items.slice(1).map((item) => item.dataUrl), { prompt: effectivePrompt, model: generationConfig.model });
+                                    }
                                 } catch (error) {
                                     if (isGenerationCanceled(error)) return;
                                     markSlotError(imageId, error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
@@ -4377,12 +4427,11 @@ function AtelierCanvasPage() {
                     setDialogNodeId(nodeId);
                     const controller = videoId === nodeId ? runController : startGenerationRequest(videoId, nodeId, nodeId, runController);
                     try {
-                        const video = await storeGeneratedVideo(
-                            await requestVideoGeneration(generationConfig, effectivePrompt, referenceImages, {
-                                signal: controller.signal,
-                                referenceAudios: generationContext.referenceAudios || [],
-                            }),
-                        );
+                        const videoResult = await requestVideoGeneration(generationConfig, effectivePrompt, referenceImages, {
+                            signal: controller.signal,
+                            referenceAudios: generationContext.referenceAudios || [],
+                        });
+                        const video = await storeGeneratedVideo(videoResult);
                         const videoSize = fitNodeSize(video.width || spec.width, video.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                         const meta = videoMetadata(video);
                         const version: CanvasNodeImage = {
@@ -4422,6 +4471,9 @@ function AtelierCanvasPage() {
                                     : node,
                             ),
                         );
+                        if (videoResult.extraImages?.length) {
+                            void spawnExtraImageNodes(videoId, videoResult.extraImages, { prompt: effectivePrompt, model: generationConfig.model });
+                        }
                     } catch (error) {
                         if (!isGenerationCanceled(error)) {
                             const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
@@ -4718,12 +4770,11 @@ function AtelierCanvasPage() {
                     return;
                 }
                 if (node.type === CanvasNodeType.Video) {
-                    const video = await storeGeneratedVideo(
-                        await requestVideoGeneration(generationConfig, prompt, retryImages, {
-                            signal: controller.signal,
-                            referenceAudios: context?.referenceAudios || [],
-                        }),
-                    );
+                    const videoResult = await requestVideoGeneration(generationConfig, prompt, retryImages, {
+                        signal: controller.signal,
+                        referenceAudios: context?.referenceAudios || [],
+                    });
+                    const video = await storeGeneratedVideo(videoResult);
                     const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                     const meta = videoMetadata(video);
                     const retryVideo: CanvasNodeImage = {
@@ -4771,6 +4822,9 @@ function AtelierCanvasPage() {
                             };
                         }),
                     );
+                    if (videoResult.extraImages?.length) {
+                        void spawnExtraImageNodes(node.id, videoResult.extraImages, { prompt, model: generationConfig.model });
+                    }
                     return;
                 }
                 if (node.type === CanvasNodeType.Audio) {
@@ -4826,9 +4880,10 @@ function AtelierCanvasPage() {
                     return;
                 }
 
-                const image = useReferenceImages
-                    ? await requestEdit(generationConfig, prompt, retryImages, undefined, { signal: controller.signal }).then((items) => items[0])
-                    : await requestGeneration(generationConfig, prompt, { signal: controller.signal }).then((items) => items[0]);
+                const retryItems = useReferenceImages
+                    ? await requestEdit(generationConfig, prompt, retryImages, undefined, { signal: controller.signal })
+                    : await requestGeneration(generationConfig, prompt, { signal: controller.signal });
+                const image = retryItems[0];
                 const uploadedImage = await uploadGeneratedImage(image);
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
                 const retryImage = canvasNodeImageFromUpload(imageId || node.metadata?.primaryImageId || nanoid(), uploadedImage);
@@ -4871,6 +4926,9 @@ function AtelierCanvasPage() {
                         };
                     }),
                 );
+                if (retryItems.length > 1) {
+                    void spawnExtraImageNodes(node.id, retryItems.slice(1).map((item) => item.dataUrl), { prompt, model: generationConfig.model });
+                }
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
                 const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");

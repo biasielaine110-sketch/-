@@ -29,7 +29,7 @@ type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: strin
 type RequestOptions = { signal?: AbortSignal; referenceAudios?: ReferenceAudio[] };
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
-export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
+export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string; extraImages?: string[] };
 export type VideoGenerationTask = { id: string; provider: "openai" | "plugin"; model: string };
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
@@ -266,7 +266,9 @@ async function createRunningHubVideoTask(
     const videoUrl = result.videos[0];
     if (!videoUrl) throw new Error(apiText("runningHubNoVideo"));
     const id = nanoid();
-    pluginVideoResults.set(id, { url: videoUrl, mimeType: "video/mp4" });
+    // Storyboard-style workflows emit extra images next to the video (e.g. per-scene frames).
+    // Carry them through so the canvas can place every output instead of dropping all but one.
+    pluginVideoResults.set(id, { url: videoUrl, mimeType: "video/mp4", ...(result.images.length ? { extraImages: result.images } : {}) });
     return { id, provider: "plugin", model };
 }
 
