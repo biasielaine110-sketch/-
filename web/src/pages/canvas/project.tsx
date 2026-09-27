@@ -48,7 +48,7 @@ import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeRespons
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { AtelierCanvas } from "@/components/canvas/atelier-canvas";
 import { Minimap } from "@/components/canvas/canvas-mini-map";
-import { CanvasNode } from "@/components/canvas/canvas-node";
+import { CanvasNode, getCanvasMediaToggle } from "@/components/canvas/canvas-node";
 import { CanvasDraftSaveDialog } from "@/components/canvas/canvas-draft-save-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import { CanvasTextClipboardMenu, blurActiveCanvasTextInput, isCanvasTextInteractionTarget } from "@/components/canvas/canvas-text-clipboard-menu";
@@ -2419,6 +2419,14 @@ function AtelierCanvasPage() {
             const key = event.key.toLowerCase();
             const isModifierShortcut = event.metaKey || event.ctrlKey;
 
+            // "." restores the selected node(s) to their original creation size (same path as the
+            // context-menu reset, but only acts when media actually got resized).
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === ".") {
+                event.preventDefault();
+                resetSelectedNodesToOriginalSize();
+                return;
+            }
+
             if (isModifierShortcut && (key === "c" || key === "v" || key === "x" || key === "a") && isCanvasTextInteractionTarget(event.target)) return;
             if (isModifierShortcut && key === "c" && window.getSelection()?.toString()) return;
 
@@ -2576,7 +2584,34 @@ function AtelierCanvasPage() {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [copySelectedNodes, createNode, deleteConnection, deleteNodes, duplicateSelectedMediaAsNode, focusNode, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, t, undoCanvas]);
+    }, [copySelectedNodes, createNode, deleteConnection, deleteNodes, duplicateSelectedMediaAsNode, focusNode, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, resetSelectedNodesToOriginalSize, selectedConnectionId, setConnecting, t, undoCanvas]);
+
+    // Space toggles the active media node (an activated video, or a single-selected audio). This
+    // runs in the capture phase so it can consume the event before the canvas pan listener (also
+    // on window, bubble phase) turns Space into a pan. No active media → the event falls through
+    // and Space pans as usual.
+    useEffect(() => {
+        const handleMediaSpace = (event: KeyboardEvent) => {
+            if (event.code !== "Space" || event.metaKey || event.ctrlKey || event.altKey) return;
+            const target = event.target instanceof Element ? event.target : null;
+            if (
+                event.target instanceof HTMLInputElement ||
+                event.target instanceof HTMLTextAreaElement ||
+                event.target instanceof HTMLSelectElement ||
+                target?.closest("[contenteditable],[data-canvas-text-input],[data-canvas-shortcuts-ignore],.ant-modal,.ant-input,.ant-input-textarea")
+            ) {
+                return;
+            }
+            const selectedId = selectedNodeIdsRef.current.size === 1 ? Array.from(selectedNodeIdsRef.current)[0] : null;
+            const activeMedia = selectedId ? getCanvasMediaToggle(selectedId) : null;
+            if (!activeMedia) return;
+            event.preventDefault();
+            event.stopPropagation();
+            activeMedia.toggle();
+        };
+        window.addEventListener("keydown", handleMediaSpace, true);
+        return () => window.removeEventListener("keydown", handleMediaSpace, true);
+    }, []);
 
     useEffect(() => {
         const handlePaste = (event: ClipboardEvent) => {

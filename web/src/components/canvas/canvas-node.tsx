@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Clapperboard, Copy, Download, Expand, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Clapperboard, Copy, Download, Expand, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
 
 import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas-display-image";
 import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
@@ -1081,6 +1081,19 @@ const rememberVideoPlayback = (key: string, value: { time: number }) => {
     videoPlaybackMemory.set(key, value);
 };
 
+// Registry of media nodes that can react to the global Space shortcut. Each entry maps a stable
+// node key to a toggle() that plays/pauses the node's media. Only an activated video (or a
+// single-selected audio) is toggleable; the canvas shortcut handler resolves the target by node id.
+export type CanvasMediaToggle = { kind: "video" | "audio"; toggle: () => void };
+const canvasMediaRegistry = new Map<string, CanvasMediaToggle>();
+export const registerCanvasMedia = (key: string, entry: CanvasMediaToggle) => {
+    canvasMediaRegistry.set(key, entry);
+    return () => {
+        if (canvasMediaRegistry.get(key) === entry) canvasMediaRegistry.delete(key);
+    };
+};
+export const getCanvasMediaToggle = (key: string) => canvasMediaRegistry.get(key);
+
 function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKeyProp }: { src: string; posterSrc?: string; storageKey?: string; memoryKey?: string }) {
     const { t } = useTranslation();
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -1192,6 +1205,31 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
         void saveBlobAs(playableSrc, "canvas-video.mp4");
     };
 
+    // Toggle play/pause. Only registered once the video is activated; Space switches playback
+    // while the native controls handle their own click-to-toggle via the play button.
+    const togglePlayback = () => {
+        const video = videoRef.current;
+        if (!video) return;
+        if (video.paused) {
+            wantPlayRef.current = true;
+            void video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+        } else {
+            wantPlayRef.current = false;
+            video.pause();
+            setPlaying(false);
+        }
+    };
+
+    // Register for the global Space shortcut only while activated. Keyed by memoryKey (the node
+    // id for node-level videos, `nodeId:imageId` for batch images), so the shortcut handler can
+    // resolve it against the selected node.
+    useEffect(() => {
+        if (!activated) return;
+        return registerCanvasMedia(memoryKey, { kind: "video", toggle: togglePlayback });
+        // togglePlayback closes over the videoRef + state setters, all stable across renders.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activated, memoryKey]);
+
     return (
         <div
             className="relative h-full w-full overflow-hidden"
@@ -1216,7 +1254,6 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
                     className="h-full w-full rounded-[18px] bg-black object-contain"
                     playsInline
                     preload="metadata"
-                    controls
                     data-canvas-no-zoom
                     onLoadedMetadata={() => {
                         const video = videoRef.current;
@@ -1260,6 +1297,23 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
                     onClick={handlePlayClick}
                 >
                     <Play className="size-6 translate-x-[1px] fill-current" />
+                </button>
+            ) : null}
+            {activated ? (
+                <button
+                    type="button"
+                    data-video-action
+                    className="absolute bottom-2 left-2 z-30 grid size-9 place-items-center rounded-full border border-white/25 bg-black/55 text-white shadow-[0_6px_18px_rgba(0,0,0,.35)] backdrop-blur-md transition hover:scale-[1.05] hover:bg-black/65"
+                    title={playing ? t("canvas.controls.pause") : t("canvas.controls.play")}
+                    aria-label={playing ? t("canvas.controls.pause") : t("canvas.controls.play")}
+                    onMouseDown={stopShell}
+                    onPointerDown={stopShell}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        togglePlayback();
+                    }}
+                >
+                    {playing ? <Pause className="size-4 fill-current" /> : <Play className="size-4 translate-x-[1px] fill-current" />}
                 </button>
             ) : null}
             {activated ? (
@@ -1327,6 +1381,23 @@ function VideoNodeContent({ node, theme, onDeleteBatchImage }: NodeContentRender
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
     const { t } = useTranslation();
+    const audioRef = useRef<HTMLAudioElement>(null);
+
+    // Register for the global Space shortcut keyed by node id. The shortcut handler resolves the
+    // single selected audio node and toggles it; the native controls still handle their own
+    // click-to-play as usual.
+    useEffect(() => {
+        return registerCanvasMedia(node.id, {
+            kind: "audio",
+            toggle: () => {
+                const audio = audioRef.current;
+                if (!audio) return;
+                if (audio.paused) void audio.play();
+                else audio.pause();
+            },
+        });
+    }, [node.id]);
+
     if (!node.metadata?.content)
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2" style={{ color: theme.node.placeholder }}>
@@ -1340,7 +1411,7 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
                 <Music2 className="size-4 shrink-0" />
                 <span className="truncate">{t("canvas.node.audio")}</span>
             </div>
-            <audio src={node.metadata.content} controls className="w-full" data-canvas-no-zoom />
+            <audio ref={audioRef} src={node.metadata.content} controls className="w-full" data-canvas-no-zoom />
         </div>
     );
 }

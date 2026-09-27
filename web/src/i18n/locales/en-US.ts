@@ -1099,6 +1099,7 @@ export default {
             generations: "{{count}} runs",
             reasoning: "Reasoning",
             play: "Play",
+            pause: "Pause",
             fullscreen: "Fullscreen",
         },
         contextMenu: {

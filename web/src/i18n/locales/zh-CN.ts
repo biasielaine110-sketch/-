@@ -1098,6 +1098,7 @@ export default {
             generations: "{{count}} 次",
             reasoning: "推理",
             play: "播放",
+            pause: "暂停",
             fullscreen: "全屏",
         },
         contextMenu: {
