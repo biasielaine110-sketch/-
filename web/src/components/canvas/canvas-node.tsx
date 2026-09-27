@@ -405,8 +405,20 @@ export const CanvasNode = React.memo(function CanvasNode({
                 // on mount, and skipped content reports scrollHeight=0 which would clamp and
                 // destroy the saved scroll position. Paint/size containment only applies while
                 // skipped, so on-screen overflow UI is unaffected.
-                contentVisibility: data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Video || data.type === CanvasNodeType.Audio ? "auto" : undefined,
-                containIntrinsicSize: data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Video || data.type === CanvasNodeType.Audio ? `${data.width}px ${data.height}px` : undefined,
+                // Interactive states must keep the subtree rendered even if the node box
+                // itself scrolls out: the prompt panel (showPanel/isSelected), the expanded
+                // batch strip and content/title editors all OVERFLOW the node box — skipping
+                // would make them vanish while still on screen.
+                contentVisibility:
+                    (data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Video || data.type === CanvasNodeType.Audio) &&
+                    !showPanel && !isSelected && !batchExpanded && !isEditingContent && !isEditingTitle
+                        ? "auto"
+                        : undefined,
+                containIntrinsicSize:
+                    (data.type === CanvasNodeType.Image || data.type === CanvasNodeType.Video || data.type === CanvasNodeType.Audio) &&
+                    !showPanel && !isSelected && !batchExpanded && !isEditingContent && !isEditingTitle
+                        ? `${data.width}px ${data.height}px`
+                        : undefined,
                 willChange: previewOffset ? "transform" : undefined,
             }}
             onMouseEnter={() => {
