@@ -413,6 +413,11 @@ function isMinimaxH3StoryWorkflow(workflowId?: string | null) {
     return workflowId === MINIMAX_H3_STORY_WORKFLOW_ID;
 }
 
+/** Public gate for callers outside this module (e.g. the image path deciding whether to send seconds). */
+export function isMinimaxH3StoryWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3StoryWorkflow(workflowId);
+}
+
 function randomComfySeed() {
     return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
 }

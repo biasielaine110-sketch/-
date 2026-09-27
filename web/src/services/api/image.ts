@@ -4,7 +4,7 @@ import i18n from "@/i18n";
 import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
-import { pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
+import { isMinimaxH3StoryWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { compressBodyImagesForProxy, compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
@@ -1646,6 +1646,9 @@ async function requestRunningHubImages(config: AiConfig, prompt: string, referen
         script,
         prompt,
         size: config.size,
+        // Storyboard workflow renders a video too; honor the duration setting for it. Scoped to
+        // that workflow id so other image workflows never receive a seconds they don't expect.
+        seconds: isMinimaxH3StoryWorkflowId(config.model || config.imageModel) ? config.videoSeconds : undefined,
         referenceDataUrls,
         signal: options?.signal,
     });

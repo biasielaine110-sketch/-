@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { type CanvasTheme } from "@/lib/canvas-theme";
+import { isMinimaxH3StoryWorkflowId } from "@/lib/runninghub-workflow";
 import { isMidjourneyModel } from "@/services/api/image";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
@@ -52,13 +53,15 @@ export function midjourneyVersionLabel(value: string) {
 
 type ImageSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "quality" | "size" | "count" | "background" | "mjVersion", value: string) => void;
+    onConfigChange: (key: "quality" | "size" | "count" | "background" | "mjVersion" | "videoSeconds", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
     maxCount?: number;
     quickCount?: number;
 };
+
+const storyboardDurationOptions = [3, 6, 10, 15];
 
 export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10 }: ImageSettingsPanelProps) {
     const { t } = useTranslation();
@@ -69,6 +72,10 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const transparentBackground = config.background === "transparent";
     const midjourney = isMidjourneyModel(modelOptionName(config.model || config.imageModel || ""));
     const mjVersion = midjourneyVersionOptions.some((item) => item.value === config.mjVersion) ? config.mjVersion : "8.1";
+    // MiniMax H3 story storyboard workflow renders a video next to the frames — surface its
+    // duration control here (the workflow receives it as the Float (Duration) node value).
+    const storyboardVideo = isMinimaxH3StoryWorkflowId(modelOptionName(config.model || config.imageModel || ""));
+    const videoDuration = Math.max(1, Math.floor(Number(config.videoSeconds) || 6));
     const selectedAspect = aspectOptions.find((item) => (item.size || item.value) === activeSize || item.value === activeSize);
     const dimensions = readSizeDimensions(activeSize, selectedAspect || aspectOptions[0]);
     const selectAspect = (value: string) => {
@@ -116,6 +123,19 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         ))}
                     </div>
                 </div>
+                {storyboardVideo ? (
+                    <div className="space-y-2.5">
+                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.video.duration")}</SettingTitle>
+                        <div className="grid grid-cols-5 gap-2.5">
+                            {storyboardDurationOptions.map((value) => (
+                                <OptionPill key={value} selected={videoDuration === value} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
+                                    {value}s
+                                </OptionPill>
+                            ))}
+                            <DurationInput value={videoDuration} theme={theme} onChange={(value) => onConfigChange("videoSeconds", String(Math.max(1, Math.min(30, Math.floor(value || 6)))))} />
+                        </div>
+                    </div>
+                ) : null}
                 <div className="space-y-2.5">
                     <div className="flex items-center justify-between gap-3">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.size")}</SettingTitle>
@@ -251,6 +271,23 @@ function CountInput({ value, max, theme, onChange }: { value: number; max: numbe
                 min={1}
                 max={max}
                 className="min-w-0 flex-1 bg-transparent px-3 text-center outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                style={{ color: theme.node.text, WebkitTextFillColor: theme.node.text }}
+                value={value || ""}
+                onChange={(event) => onChange(Number(event.target.value) || null)}
+                onMouseDown={(event) => event.stopPropagation()}
+            />
+        </label>
+    );
+}
+
+function DurationInput({ value, theme, onChange }: { value: number; theme: CanvasTheme; onChange: (value: number | null) => void }) {
+    return (
+        <label className="flex h-9 overflow-hidden rounded-full border text-sm" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
+            <input
+                type="number"
+                min={1}
+                max={30}
+                className="min-w-0 flex-1 bg-transparent px-2 text-center outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                 style={{ color: theme.node.text, WebkitTextFillColor: theme.node.text }}
                 value={value || ""}
                 onChange={(event) => onChange(Number(event.target.value) || null)}

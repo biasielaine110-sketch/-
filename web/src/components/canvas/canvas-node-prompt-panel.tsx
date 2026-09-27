@@ -275,7 +275,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                 config={config}
                                 placement="topLeft"
                                 buttonClassName="!h-10 !max-w-[150px] !shrink-0 !justify-start !rounded-full !px-3"
-                                onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
+                                onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : key === "videoSeconds" ? { seconds: value } : { [key]: value })}
                                 onMissingConfig={() => openConfigDialog(true)}
                                 onOpenChange={onImageSettingsOpenChange}
                             />
