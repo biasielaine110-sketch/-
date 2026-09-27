@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Combine, Download, FolderPlus, GripVertical, Info, Plus, Copy, Scissors, Trash2, Unlink2 } from "lucide-react";
+import { Combine, Download, FolderPlus, GripVertical, Info, Maximize2, Plus, Copy, Scissors, Trash2, Unlink2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -37,6 +37,7 @@ export function CanvasNodeContextMenu({
     onDelete,
     onInfo,
     onDownload,
+    onMaximizeVideo,
     onSaveAsset,
     onOpenVideoTools,
     onOpenAudioTools,
@@ -56,6 +57,8 @@ export function CanvasNodeContextMenu({
     onDelete: () => void;
     onInfo?: (node: CanvasNodeData) => void;
     onDownload?: (node: CanvasNodeData) => void;
+    /** Open the video in maximized (fullscreen) view. Video nodes only. */
+    onMaximizeVideo?: (node: CanvasNodeData) => void;
     onSaveAsset?: (node: CanvasNodeData) => void;
     onOpenVideoTools?: (node: CanvasNodeData) => void;
     onOpenAudioTools?: (node: CanvasNodeData) => void;
@@ -96,6 +99,33 @@ export function CanvasNodeContextMenu({
         if (!hasImage || !imageHandlers) {
             return [
                 { id: "duplicate", label: t("canvas.controls.duplicate"), icon: <Plus className="size-4" />, onClick: onDuplicate },
+                // Video-only actions: download the file and open it in maximized (fullscreen) view.
+                ...(hasVideo && onDownload
+                    ? [
+                          {
+                              id: "download",
+                              label: t("common.download"),
+                              icon: <Download className="size-4" />,
+                              onClick: () => {
+                                  onDownload(node);
+                                  onClose();
+                              },
+                          },
+                      ]
+                    : []),
+                ...(hasVideo && onMaximizeVideo
+                    ? [
+                          {
+                              id: "maximize",
+                              label: t("canvas.controls.maximize"),
+                              icon: <Maximize2 className="size-4" />,
+                              onClick: () => {
+                                  onMaximizeVideo(node);
+                                  onClose();
+                              },
+                          },
+                      ]
+                    : []),
                 ...(hasVideo && onOpenVideoTools
                     ? [
                           {
@@ -212,7 +242,7 @@ export function CanvasNodeContextMenu({
                 onClick: () => runAndClose(onDelete),
             },
         ];
-    }, [hasAudio, hasImage, hasVideo, isAudio, imageHandlers, menu.type, node, onBeforeAction, onClose, onCopyImage, onDelete, onDownload, onDuplicate, onInfo, onOpenAudioTools, onOpenAudioMerge, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
+    }, [hasAudio, hasImage, hasVideo, isAudio, imageHandlers, menu.type, node, onBeforeAction, onClose, onCopyImage, onDelete, onDownload, onDuplicate, onInfo, onMaximizeVideo, onOpenAudioTools, onOpenAudioMerge, onOpenVideoTools, onSaveAsset, quickImageToolIds, t]);
 
     const menuOrder = useMemo(() => mergeOrderedIds(imageContextMenuOrder || [], tools.map((tool) => tool.id)), [imageContextMenuOrder, tools]);
     const orderedTools = useMemo(() => sortByOrder(tools, menuOrder), [menuOrder, tools]);

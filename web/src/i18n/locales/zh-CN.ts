@@ -1099,7 +1099,7 @@ export default {
             reasoning: "推理",
             play: "播放",
             pause: "暂停",
-            fullscreen: "全屏",
+            maximize: "最大化显示",
         },
         contextMenu: {
             reorderHint: "拖动手柄可调整按钮顺序（会写入配置，可导出/导入）",

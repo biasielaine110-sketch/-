@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronRight, Clapperboard, Copy, Download, Expand, Grid2x2, Group, Highlighter, Image as ImageIcon, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Clapperboard, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
 
 import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas-display-image";
 import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
@@ -1081,10 +1081,13 @@ const rememberVideoPlayback = (key: string, value: { time: number }) => {
     videoPlaybackMemory.set(key, value);
 };
 
-// Registry of media nodes that can react to the global Space shortcut. Each entry maps a stable
-// node key to a toggle() that plays/pauses the node's media. Only an activated video (or a
-// single-selected audio) is toggleable; the canvas shortcut handler resolves the target by node id.
-export type CanvasMediaToggle = { kind: "video" | "audio"; toggle: () => void };
+// Registry of media nodes that can react to the global Space shortcut and to the node context
+// menu's media actions. Each entry maps a stable node key to a toggle() that plays/pauses the
+// node's media. `toggle` is only present for media that is actually playing-addressable (an
+// activated video / any audio node) — a video that is still showing its poster intentionally omits
+// it so Space keeps its usual canvas-pan behaviour. `maximize` is always present for videos so the
+// right-click "最大化显示" entry works before the player is activated.
+export type CanvasMediaToggle = { kind: "video" | "audio"; toggle?: () => void; maximize?: () => void };
 const canvasMediaRegistry = new Map<string, CanvasMediaToggle>();
 export const registerCanvasMedia = (key: string, entry: CanvasMediaToggle) => {
     canvasMediaRegistry.set(key, entry);
@@ -1109,6 +1112,9 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
     const pendingSeekRef = useRef<number | null>(null);
     // Play intent, kept across blob-URL refreshes so a refreshed URL respects play/pause state.
     const wantPlayRef = useRef(false);
+    // A "最大化显示" request made while the player is still on its poster: activation has to render
+    // the <video> first, so we remember the intent and honour it right after the element mounts.
+    const pendingFullscreenRef = useRef(false);
 
     // A real source switch (different video in this slot) resets the player — but a playableSrc
     // swap for the SAME video (blob URL refreshed after a load error) must not, or it would
@@ -1182,9 +1188,9 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
             .catch(() => setPlaying(false));
     };
 
-    const handleFullscreen = (event: React.MouseEvent) => {
-        event.stopPropagation();
-        event.preventDefault();
+    // Enter/leave fullscreen on the <video> element itself. Shared by the bottom-right button and
+    // the right-click menu so both paths behave identically.
+    const requestVideoFullscreen = () => {
         const video = videoRef.current;
         if (!video) return;
         if (document.fullscreenElement) {
@@ -1197,6 +1203,24 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
         } else if (typeof anyVideo.webkitEnterFullscreen === "function") {
             anyVideo.webkitEnterFullscreen();
         }
+    };
+
+    const handleFullscreen = (event: React.MouseEvent) => {
+        event.stopPropagation();
+        event.preventDefault();
+        requestVideoFullscreen();
+    };
+
+    // "最大化显示": while the player is still on its poster there is no <video> to fullscreen, so
+    // activate it first and replay the request once the element exists (effect below). Activation
+    // on its own never starts playback — playback stays tied to the play button / Space.
+    const maximizeVideo = () => {
+        if (videoRef.current) {
+            requestVideoFullscreen();
+            return;
+        }
+        pendingFullscreenRef.current = true;
+        setActivated(true);
     };
 
     const handleDownload = (event: React.MouseEvent) => {
@@ -1220,21 +1244,35 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
         }
     };
 
-    // Register for the global Space shortcut only while activated. Keyed by memoryKey (the node
-    // id for node-level videos, `nodeId:imageId` for batch images), so the shortcut handler can
-    // resolve it against the selected node.
+    // Register the entry exposed to the canvas: `toggle` powers the global Space shortcut (only
+    // once activated, so an un-started video leaves Space to the canvas pan) and `maximize` backs
+    // the right-click "最大化显示" entry for this node. Keyed by memoryKey (the node id for
+    // node-level videos, `nodeId:imageId` for batch images) so the handlers can resolve it by id.
     useEffect(() => {
-        if (!activated) return;
-        return registerCanvasMedia(memoryKey, { kind: "video", toggle: togglePlayback });
-        // togglePlayback closes over the videoRef + state setters, all stable across renders.
+        return registerCanvasMedia(memoryKey, {
+            kind: "video",
+            ...(activated ? { toggle: togglePlayback } : {}),
+            maximize: maximizeVideo,
+        });
+        // togglePlayback/maximizeVideo close over the videoRef + state setters, all stable across renders.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activated, memoryKey]);
+
+    // Honour a maximize requested while the player was still on its poster. A layout effect (not a
+    // passive one) so the fullscreen request stays inside the click's transient user-activation
+    // window; the <video> is committed by the time we run, so videoRef is already populated.
+    useLayoutEffect(() => {
+        if (!activated || !pendingFullscreenRef.current) return;
+        pendingFullscreenRef.current = false;
+        requestVideoFullscreen();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activated]);
 
     return (
         <div
             className="relative h-full w-full overflow-hidden"
             onMouseDown={(event) => {
-                // 只在点击自定义叠加按钮（全屏/下载，已用 stopShell 单独处理）时阻止冒泡；
+                // 只在点击自定义叠加按钮（下载/最大化显示，已用 stopShell 单独处理）时阻止冒泡；
                 // 点住视频画面空白处要允许事件冒泡到节点容器，才能正常拖动节点。
                 if (event.target instanceof Element && event.target.closest("[data-video-action]")) {
                     event.stopPropagation();
@@ -1319,7 +1357,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
             {activated ? (
                 <div
                     data-video-action
-                    className="absolute right-2 top-2 z-30 flex items-center gap-1.5"
+                    className="absolute bottom-2 right-2 z-30 flex items-center gap-1.5"
                     onMouseDown={stopShell}
                     onPointerDown={stopShell}
                     onClick={stopShell}
@@ -1336,11 +1374,11 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
                     <button
                         type="button"
                         className="grid size-8 place-items-center rounded-full border border-white/25 bg-black/55 text-white shadow-[0_6px_18px_rgba(0,0,0,.35)] backdrop-blur-md transition hover:scale-[1.05] hover:bg-black/65"
-                        title={t("canvas.controls.fullscreen")}
-                        aria-label={t("canvas.controls.fullscreen")}
+                        title={t("canvas.controls.maximize")}
+                        aria-label={t("canvas.controls.maximize")}
                         onClick={handleFullscreen}
                     >
-                        <Expand className="size-4" />
+                        <Maximize2 className="size-4" />
                     </button>
                 </div>
             ) : null}

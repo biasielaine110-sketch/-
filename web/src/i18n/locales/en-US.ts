@@ -1100,7 +1100,7 @@ export default {
             reasoning: "Reasoning",
             play: "Play",
             pause: "Pause",
-            fullscreen: "Fullscreen",
+            maximize: "Maximize",
         },
         contextMenu: {
             reorderHint: "Drag the handle to reorder buttons (saved to config for export/import)",

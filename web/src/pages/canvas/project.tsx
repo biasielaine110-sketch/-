@@ -2604,7 +2604,8 @@ function AtelierCanvasPage() {
             }
             const selectedId = selectedNodeIdsRef.current.size === 1 ? Array.from(selectedNodeIdsRef.current)[0] : null;
             const activeMedia = selectedId ? getCanvasMediaToggle(selectedId) : null;
-            if (!activeMedia) return;
+            // A video still showing its poster registers no `toggle`, so Space stays canvas-pan.
+            if (!activeMedia?.toggle) return;
             event.preventDefault();
             event.stopPropagation();
             activeMedia.toggle();
@@ -5606,6 +5607,12 @@ function AtelierCanvasPage() {
         setSelectedConnectionId(null);
         setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId });
     }, []);
+    // Right-click "最大化显示" on a video node. The player owns the <video> element, so we ask it
+    // through the media registry (keyed by node id). This also works before activation: the player
+    // renders the element first, then goes fullscreen.
+    const handleMaximizeVideo = useCallback((node: CanvasNodeData) => {
+        getCanvasMediaToggle(node.id)?.maximize?.();
+    }, []);
 
     const contextMenuNode = useMemo(() => {
         if (!contextMenu || contextMenu.type !== "node") return null;
@@ -6046,6 +6053,7 @@ function AtelierCanvasPage() {
                         }
                         onInfo={(node) => setInfoNodeId(node.id)}
                         onDownload={downloadNodeImage}
+                        onMaximizeVideo={handleMaximizeVideo}
                         onSaveAsset={(node) => void saveNodeAsset(node)}
                         onOpenVideoTools={openVideoTools}
                         onOpenAudioTools={openAudioTools}
