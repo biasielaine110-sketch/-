@@ -3113,6 +3113,7 @@ function AtelierCanvasPage() {
                 const uploaded = await uploadGeneratedImage({ dataUrl });
                 const imageSize = fitNodeSize(uploaded.width, uploaded.height, spec.width, spec.height);
                 const item = canvasNodeImageFromUpload(nanoid(), uploaded);
+                const nodeId = nanoid();
                 const anchor = nodesRef.current.find((node) => node.id === baseNodeId);
                 // Compute anchor fallbacks without re-narrowing `anchor` inside a ternary false branch
                 // (this TS version types the narrowed-undefined optional chain as `never`).
@@ -3121,7 +3122,7 @@ function AtelierCanvasPage() {
                 const position = { x: anchorX, y: anchorY + stackOffsetY };
                 stackOffsetY += imageSize.height + 48;
                 const extra: CanvasNodeData = {
-                    id: item.id,
+                    id: nodeId,
                     type: CanvasNodeType.Image,
                     title: (meta?.prompt || "").slice(0, 32) || "Storyboard",
                     position,
@@ -3136,9 +3137,60 @@ function AtelierCanvasPage() {
                     },
                 };
                 setNodes((prev) => [...prev, extra]);
-                setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: baseNodeId, toNodeId: item.id }]);
+                setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: baseNodeId, toNodeId: nodeId }]);
             } catch {
                 // Skip this frame only; keep placing the rest.
+            }
+        }
+    }, []);
+
+    // Videos a multi-output image workflow produced alongside the frames (e.g. RunningHub
+    // storyboard): store each and drop standalone video nodes below the anchor node, connected
+    // to it. One failed download skips only its own video.
+    const spawnExtraVideoNodes = useCallback(async (baseNodeId: string, videoUrls: string[], meta?: { prompt?: string; model?: string }) => {
+        if (!videoUrls.length) return;
+        const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
+        let stackOffsetY = 0;
+        for (const url of videoUrls) {
+            try {
+                const uploaded = await storeGeneratedVideo({ url, mimeType: "video/mp4" });
+                const videoSize = fitNodeSize(uploaded.width || spec.width, uploaded.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                const versionId = nanoid();
+                const version: CanvasNodeImage = {
+                    id: versionId,
+                    status: NODE_STATUS_SUCCESS,
+                    content: uploaded.url,
+                    storageKey: uploaded.storageKey || "",
+                    naturalWidth: uploaded.width || 0,
+                    naturalHeight: uploaded.height || 0,
+                    bytes: uploaded.bytes || 0,
+                    mimeType: uploaded.mimeType || "video/mp4",
+                };
+                const nodeId = nanoid();
+                const anchor = nodesRef.current.find((node) => node.id === baseNodeId);
+                const anchorX = anchor?.position.x ?? 0;
+                const anchorY = (anchor?.position.y ?? 0) + (anchor ? anchor.height + 96 : 0);
+                const position = { x: anchorX, y: anchorY + stackOffsetY };
+                stackOffsetY += videoSize.height + 48;
+                const extra: CanvasNodeData = {
+                    id: nodeId,
+                    type: CanvasNodeType.Video,
+                    title: (meta?.prompt || "").slice(0, 32) || "Video",
+                    position,
+                    width: videoSize.width,
+                    height: videoSize.height,
+                    metadata: {
+                        ...(meta?.prompt ? { prompt: meta.prompt } : {}),
+                        ...(meta?.model ? { model: meta.model } : {}),
+                        ...videoMetadata(uploaded),
+                        images: [version],
+                        primaryImageId: versionId,
+                    },
+                };
+                setNodes((prev) => [...prev, extra]);
+                setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: baseNodeId, toNodeId: nodeId }]);
+            } catch {
+                // Skip this video only; keep placing the rest.
             }
         }
     }, []);
@@ -3995,6 +4047,9 @@ function AtelierCanvasPage() {
                     if (items.length > 1) {
                         void spawnExtraImageNodes(nodeId, items.slice(1).map((item) => item.dataUrl), { prompt: scene, model: generationConfig.model });
                     }
+                    if (items[0]?.extraVideos?.length) {
+                        void spawnExtraVideoNodes(nodeId, items[0].extraVideos, { prompt: scene, model: generationConfig.model });
+                    }
                     setDialogNodeId(null);
                 } catch (error) {
                     if (!isGenerationCanceled(error)) {
@@ -4291,6 +4346,9 @@ function AtelierCanvasPage() {
                                     // param; place the leftovers instead of silently dropping them.
                                     if (items.length > 1) {
                                         void spawnExtraImageNodes(rootId, items.slice(1).map((item) => item.dataUrl), { prompt: effectivePrompt, model: generationConfig.model });
+                                    }
+                                    if (items[0]?.extraVideos?.length) {
+                                        void spawnExtraVideoNodes(rootId, items[0].extraVideos, { prompt: effectivePrompt, model: generationConfig.model });
                                     }
                                 } catch (error) {
                                     if (isGenerationCanceled(error)) return;
@@ -4928,6 +4986,9 @@ function AtelierCanvasPage() {
                 );
                 if (retryItems.length > 1) {
                     void spawnExtraImageNodes(node.id, retryItems.slice(1).map((item) => item.dataUrl), { prompt, model: generationConfig.model });
+                }
+                if (retryItems[0]?.extraVideos?.length) {
+                    void spawnExtraVideoNodes(node.id, retryItems[0].extraVideos, { prompt, model: generationConfig.model });
                 }
             } catch (error) {
                 if (isGenerationCanceled(error)) return;

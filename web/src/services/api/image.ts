@@ -298,6 +298,8 @@ export type GeneratedImageResult = {
     fallbackUrls?: string[];
     midjourneyTaskId?: string;
     midjourneyIndex?: number;
+    /** Videos a multi-output workflow produced alongside images (e.g. RunningHub storyboard). Attached to the first result only. */
+    extraVideos?: string[];
 };
 
 /** Agent Plan / Ark Seedream: OpenAI-shaped /images/generations with Volcengine-specific size rules. */
@@ -1647,7 +1649,15 @@ async function requestRunningHubImages(config: AiConfig, prompt: string, referen
         referenceDataUrls,
         signal: options?.signal,
     });
-    if (result.images.length) return result.images.map((dataUrl) => ({ id: nanoid(), dataUrl }));
+    if (result.images.length) {
+        // Storyboard-style workflows emit a video next to the frames. Carry it through on the
+        // first result so the canvas can place every output instead of dropping it.
+        return result.images.map((dataUrl, index) => ({
+            id: nanoid(),
+            dataUrl,
+            ...(index === 0 && result.videos.length ? { extraVideos: result.videos } : {}),
+        }));
+    }
     throw new Error(apiText("runningHubNoImage"));
 }
 
@@ -2601,7 +2611,7 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
     return images;
 }
 
-export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
+export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<GeneratedImageResult[]> {
     const requestConfig = resolveImageRequestConfig(config);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
@@ -2718,7 +2728,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     }
 }
 
-export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions) {
+export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions): Promise<GeneratedImageResult[]> {
     const requestConfig = resolveImageRequestConfig(config);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
