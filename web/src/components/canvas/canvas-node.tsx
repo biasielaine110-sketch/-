@@ -1068,11 +1068,12 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
-// Playback state of videos that CanvasLazyMedia unmounted (node panned off-screen). Restored
-// on remount so panning away and back resumes where the user left off instead of resetting to
-// the poster. Keyed by storageKey (falls back to src); soft-capped FIFO to bound memory.
-const videoPlaybackMemory = new Map<string, { time: number; resume: boolean; activated: boolean }>();
-const rememberVideoPlayback = (key: string, value: { time: number; resume: boolean; activated: boolean }) => {
+// Last playback position per video (CanvasLazyMedia unmounts off-screen players, which would
+// otherwise reset them to 0). The poster + play button always come back on remount — playback
+// only ever starts from an explicit click; the saved position is then used as the seek target.
+// Keyed by node/image id; soft-capped FIFO to bound memory.
+const videoPlaybackMemory = new Map<string, { time: number }>();
+const rememberVideoPlayback = (key: string, value: { time: number }) => {
     if (videoPlaybackMemory.size > 300) {
         const oldest = videoPlaybackMemory.keys().next().value;
         if (oldest !== undefined) videoPlaybackMemory.delete(oldest);
@@ -1086,19 +1087,19 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
     // Prefer the caller's stable id (node/image id): src/storageKey can be filled in async
     // after a drop, which would otherwise split one video's memory across two keys.
     const memoryKey = memoryKeyProp || storageKey || src;
-    const [activated, setActivated] = useState(() => videoPlaybackMemory.get(memoryKey)?.activated ?? false);
+    const [activated, setActivated] = useState(false);
     const [playing, setPlaying] = useState(false);
     const [playableSrc, setPlayableSrc] = useState(src);
     const retriesRef = useRef(0);
-    // Mount-time restore snapshot, consumed by the first activation effect run.
-    const restoredRef = useRef<{ time: number; resume: boolean } | null>(videoPlaybackMemory.get(memoryKey) ?? null);
+    // Saved position from a previous mount, consumed as the seek target on activation.
+    const restoredRef = useRef<{ time: number } | null>(videoPlaybackMemory.get(memoryKey) ?? null);
     const pendingSeekRef = useRef<number | null>(null);
     // Play intent, kept across blob-URL refreshes so a refreshed URL respects play/pause state.
     const wantPlayRef = useRef(false);
 
     // A real source switch (different video in this slot) resets the player — but a playableSrc
     // swap for the SAME video (blob URL refreshed after a load error) must not, or it would
-    // kill the playback-restore every time a remounted video retries its URL.
+    // reset the player every time a video retries its URL.
     const [prevSource, setPrevSource] = useState({ src, storageKey });
     if (prevSource.src !== src || prevSource.storageKey !== storageKey) {
         setPrevSource({ src, storageKey });
@@ -1129,9 +1130,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
         if (restored) {
             restoredRef.current = null;
             if (restored.time > 0) pendingSeekRef.current = restored.time;
-            wantPlayRef.current = restored.resume;
         }
-        // Restored-but-paused: show the frame at the saved position without autoplaying.
         if (!wantPlayRef.current) return;
         void video
             .play()
@@ -1140,12 +1139,12 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
         // playableSrc dep: after a blob-URL refresh, resume (or stay paused) per the same intent.
     }, [activated, playableSrc]);
 
-    const remember = (resume?: boolean) => {
+    const remember = () => {
         const video = videoRef.current;
         if (!video) return;
         // A restored seek that hasn't landed yet must not be overwritten with ~0 by a play event.
         const time = pendingSeekRef.current ?? video.currentTime;
-        rememberVideoPlayback(memoryKey, { time, resume: resume ?? !video.paused, activated: true });
+        rememberVideoPlayback(memoryKey, { time });
     };
 
     const stopShell = (event: React.SyntheticEvent) => {
@@ -1156,8 +1155,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
         event.stopPropagation();
         event.preventDefault();
         if (!activated) {
-            // Explicit user intent wins over any stale memory snapshot.
-            restoredRef.current = null;
+            // Explicit click starts playback; the saved position (if any) becomes the seek target.
             wantPlayRef.current = true;
             setActivated(true);
             return;
@@ -1234,16 +1232,16 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
                     onPlay={() => {
                         wantPlayRef.current = true;
                         setPlaying(true);
-                        remember(true);
+                        remember();
                     }}
                     onPause={() => {
                         wantPlayRef.current = false;
                         setPlaying(false);
-                        remember(false);
+                        remember();
                     }}
                     onEnded={() => {
                         setPlaying(false);
-                        rememberVideoPlayback(memoryKey, { time: 0, resume: false, activated: true });
+                        rememberVideoPlayback(memoryKey, { time: 0 });
                     }}
                 />
             ) : posterSrc ? (
