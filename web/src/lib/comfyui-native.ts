@@ -10,7 +10,7 @@ import axios from "axios";
 import { nanoid } from "nanoid";
 
 import { proxyApiUrl } from "@/lib/api-proxy";
-import { dataUrlToFile } from "@/lib/image-utils";
+import { compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
 
 export type ComfyNode = {
     class_type?: string;
@@ -280,16 +280,29 @@ function comfyReferenceSlotOrder(workflow: ComfyWorkflow): string[] {
  */
 export const COMFY_REFERENCE_SLOT_WORKFLOWS = ["U24-文武双修T8版MiniMaxH3双采参考生视频V2"] as const;
 
-function normalizeComfyWorkflowKey(value: string | undefined | null): string {
-    const parts = String(value || "").split("::");
-    return (parts[parts.length - 1] || "").trim().toLowerCase();
+/**
+ * Every comparable spelling of a workflow option value: the whole string plus each
+ * `::`-separated segment. Model options are stored as `<channelId>::<modelName>`
+ * (see use-config-store CHANNEL_MODEL_SEPARATOR), so this matches whether the caller
+ * passes the full value, the bare model name, or a prefixed variant.
+ */
+function comfyWorkflowKeys(value: string | undefined | null): string[] {
+    const raw = String(value || "").trim().toLowerCase();
+    if (!raw) return [];
+    const keys = new Set<string>([raw]);
+    for (const part of raw.split("::")) {
+        const segment = part.trim();
+        if (segment) keys.add(segment);
+    }
+    return [...keys];
 }
 
 /** True only for allow-listed workflows that must use reference-slot (link) order. */
 export function usesComfyReferenceSlotOrder(workflowId: string | undefined | null): boolean {
-    const key = normalizeComfyWorkflowKey(workflowId);
-    if (!key) return false;
-    return COMFY_REFERENCE_SLOT_WORKFLOWS.some((item) => normalizeComfyWorkflowKey(item) === key);
+    const keys = comfyWorkflowKeys(workflowId);
+    if (!keys.length) return false;
+    const allowed = new Set(COMFY_REFERENCE_SLOT_WORKFLOWS.flatMap((item) => comfyWorkflowKeys(item)));
+    return keys.some((key) => allowed.has(key));
 }
 
 /** Map uploaded filenames onto LoadImage nodes in order. */
@@ -703,6 +716,33 @@ async function referenceToUploadFile(
     throw new Error("Unsupported ComfyUI reference media");
 }
 
+/**
+ * Vercel serverless proxies cap request bodies at ~4.5MB, so a reference image over
+ * that budget fails the multipart upload with HTTP 413 before ComfyUI ever sees it.
+ * Unlike the JSON-body providers, the native path re-uploads reference bytes (including
+ * remote-URL refs), so any oversized image must be shrunk before it goes on the wire.
+ * Images already within budget are returned untouched.
+ */
+const COMFY_UPLOAD_BYTE_BUDGET = 2_400_000;
+const COMFY_UPLOAD_MAX_EDGE = 1536;
+
+async function shrinkOversizedUpload(file: File): Promise<File> {
+    if (!file.type.startsWith("image/") || file.size <= COMFY_UPLOAD_BYTE_BUDGET) return file;
+    try {
+        const dataUrl = await blobToDataUrl(file);
+        if (!dataUrl.startsWith("data:")) return file;
+        const compressed = await compressReferenceDataUrl(dataUrl, 1, {
+            maxEdge: COMFY_UPLOAD_MAX_EDGE,
+            maxBytes: COMFY_UPLOAD_BYTE_BUDGET,
+        });
+        if (!compressed.startsWith("data:") || compressed === dataUrl) return file;
+        const rebuilt = dataUrlToFile({ id: file.name, name: file.name, dataUrl: compressed, type: file.type });
+        return rebuilt.size > 0 && rebuilt.size < file.size ? rebuilt : file;
+    } catch {
+        return file;
+    }
+}
+
 async function uploadComfyInputFile(
     baseUrl: string,
     apiKey: string,
@@ -711,7 +751,8 @@ async function uploadComfyInputFile(
     fallbackType: string,
     options?: RequestOptions,
 ): Promise<string> {
-    const file = await referenceToUploadFile(source, fileName, options?.signal, fallbackType);
+    const upload = await referenceToUploadFile(source, fileName, options?.signal, fallbackType);
+    const file = await shrinkOversizedUpload(upload);
     const body = new FormData();
     // ComfyUI stores uploads under input/ via this endpoint for images and audio alike.
     body.append("image", file);
