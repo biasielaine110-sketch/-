@@ -303,6 +303,7 @@ async function createNativeComfyUiVideoTask(
             baseUrl: config.baseUrl,
             apiKey: config.apiKey,
             workflow,
+            workflowId: model,
             prompt,
             referenceDataUrls: refs.filter(Boolean),
             referenceAudioSources: audioSources,

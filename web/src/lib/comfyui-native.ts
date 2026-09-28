@@ -239,15 +239,72 @@ function isComfyImageLoader(node: ComfyNode) {
     return typeof node.inputs?.image === "string" && /image/i.test(type);
 }
 
+/**
+ * LoadImage node ids in MiniMax H3 reference-slot order.
+ *
+ * H3 conditioning nodes consume references through named slots `ref_images.ref_image_0…N`,
+ * and the slot order is defined by the *links* — never by node-id order. A real workflow
+ * can wire ref_image_0…3 to node ids 66/65/58/59, so sorting loaders by id would scramble
+ * every reference (subject 1 ↔ picture 3, …). Only trust the slot order when every slot
+ * points at a real image loader; otherwise return [] and let the caller fall back.
+ */
+function comfyReferenceSlotOrder(workflow: ComfyWorkflow): string[] {
+    const targets = Object.entries(workflow)
+        .filter(([, node]) => isMiniMaxH3ConditioningNode(node))
+        .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+    for (const [, node] of targets) {
+        const inputs = node?.inputs;
+        if (!inputs || typeof inputs !== "object") continue;
+        const slots: Array<{ index: number; id: string }> = [];
+        for (const key of Object.keys(inputs)) {
+            const match = /^ref_images\.ref_image_(\d+)$/.exec(key);
+            if (!match) continue;
+            const value = (inputs as Record<string, unknown>)[key];
+            if (!Array.isArray(value) || value[0] == null) continue;
+            slots.push({ index: Number(match[1]), id: String(value[0]) });
+        }
+        if (slots.length < 2) continue;
+        slots.sort((a, b) => a.index - b.index);
+        const ids = slots.map((slot) => slot.id);
+        if (ids.every((id) => workflow[id] && isComfyImageLoader(workflow[id]))) return ids;
+    }
+    return [];
+}
+
+/**
+ * Strict allow-list of workflows that map uploaded references by consumer slot order.
+ *
+ * Every workflow NOT listed here keeps the historical node-id order untouched. Add a
+ * workflow's model / option name only after verifying its `ref_images.ref_image_N` wiring —
+ * a wrong entry would scramble that workflow's references.
+ */
+export const COMFY_REFERENCE_SLOT_WORKFLOWS = ["U24-文武双修T8版MiniMaxH3双采参考生视频V2"] as const;
+
+function normalizeComfyWorkflowKey(value: string | undefined | null): string {
+    const parts = String(value || "").split("::");
+    return (parts[parts.length - 1] || "").trim().toLowerCase();
+}
+
+/** True only for allow-listed workflows that must use reference-slot (link) order. */
+export function usesComfyReferenceSlotOrder(workflowId: string | undefined | null): boolean {
+    const key = normalizeComfyWorkflowKey(workflowId);
+    if (!key) return false;
+    return COMFY_REFERENCE_SLOT_WORKFLOWS.some((item) => normalizeComfyWorkflowKey(item) === key);
+}
+
 /** Map uploaded filenames onto LoadImage nodes in order. */
-export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
+export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[], workflowId?: string): ComfyWorkflow {
     if (!filenames.length) return workflow;
     const next = cloneWorkflow(workflow);
-    // Stable order by node id so multi-ref mapping is predictable across runs.
-    const loaders = Object.entries(next)
-        .filter(([, node]) => isComfyImageLoader(node))
-        .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
-        .map(([, node]) => node);
+    // Strict allow-list: only the listed workflows map by consumer reference-slot links;
+    // every other workflow keeps the historical node-id order untouched.
+    const slotOrder = usesComfyReferenceSlotOrder(workflowId) ? comfyReferenceSlotOrder(next) : [];
+    const loaders = slotOrder.length
+        ? slotOrder.map((id) => next[id]).filter((node): node is ComfyNode => Boolean(node))
+        : Object.entries(next)
+              .filter(([, node]) => isComfyImageLoader(node))
+              .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+              .map(([, node]) => node);
     loaders.forEach((node, index) => {
         const name = filenames[index] || filenames[filenames.length - 1];
         if (!name) return;
@@ -823,6 +880,8 @@ export type RunNativeComfyUiArgs = {
     baseUrl: string;
     apiKey: string;
     workflow: ComfyWorkflow;
+    /** Model / workflow option name — gates the strict reference-slot allow-list. */
+    workflowId?: string;
     prompt: string;
     referenceDataUrls?: string[];
     /** data:/http(s):/blob: audio sources to upload into LoadAudio nodes. */
@@ -868,7 +927,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             const uploaded = await uploadComfyImage(baseUrl, apiKey, refs[i], `ref-${i + 1}.png`, { signal });
             names.push(uploaded);
         }
-        workflow = applyComfyLoadImages(workflow, names);
+        workflow = applyComfyLoadImages(workflow, names, args.workflowId);
     }
 
     const audioRefs = (args.referenceAudioSources || []).filter(Boolean).slice(0, 3);

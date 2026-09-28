@@ -1675,6 +1675,7 @@ async function requestNativeComfyUiImages(config: AiConfig, prompt: string, refe
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
         workflow,
+        workflowId: config.model || config.imageModel,
         prompt,
         referenceDataUrls,
         signal: options?.signal,
