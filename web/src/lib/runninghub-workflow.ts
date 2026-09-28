@@ -662,6 +662,79 @@ function applyMinimaxH3StorySettings(workflow: ComfyWorkflow, prompt: string, se
     return next;
 }
 
+// Qwen3VL + Next Scene 自动分镜 workflow (RunningHub 2104556548226895873).
+// One reference image + one instruction → Qwen3-VL writes six "Next Scene:" prompts → a
+// Qwen-Image-Edit batch renders all six storyboard frames in a single run (SaveImage "Batch"), so
+// one submission returns several images and the canvas places every frame.
+// Its knobs do not match the generic heuristics:
+//   - node 366 ("CR Prompt Text") is the instruction slot, and node 364 appends the fixed writing
+//     template. The generic prompt writer does reach 366, but it overwrites the whole directive —
+//     including the "六段…连续性…按下文模版" contract that makes the batch emit six frames. The scoped
+//     writer below keeps that contract and only swaps the subject;
+//   - the only reference-image loader is node 342;
+//   - the KSampler bakes a fixed seed (214), so every run rendered byte-identical frames.
+// Everything below is scoped to this workflow id only.
+const QWEN3VL_STORY_WORKFLOW_ID = "2104556548226895873";
+const QWEN3VL_STORY_LOAD_IMAGE_ORDER = ["342"];
+const QWEN3VL_STORY_PROMPT_NODE = "366";
+const QWEN3VL_STORY_SEED_NODE = "218";
+
+/** Wrap a subject back into the workflow author's "六段…连续性…按下文模版" storyboard contract. */
+function qwen3VlStoryPrompt(subject: string) {
+    const trimmed = subject.replace(/^根据下面的模版生成六段关于连续性的/, "").replace(/的分镜文字\s*$/, "").trim();
+    return trimmed ? `根据下面的模版生成六段关于连续性的${trimmed}的分镜文字` : "";
+}
+
+function isQwen3VlStoryWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    // The runtime id can arrive channel-encoded ("<channelId>::<model>") or prefixed ("rh-<id>").
+    return raw.split("::").some((segment) => segment.trim().replace(/^(rh|runninghub|workflow)[:_-]/, "").trim() === QWEN3VL_STORY_WORKFLOW_ID);
+}
+
+/** Public gate for callers outside this module (image/video paths, settings panels). */
+export function isQwen3VlStoryWorkflowId(workflowId?: string | null) {
+    return isQwen3VlStoryWorkflow(workflowId);
+}
+
+function applyQwen3VlStorySettings(workflow: ComfyWorkflow, prompt: string) {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+
+    // Storyboard instruction → the CR Prompt Text slot (366). Keep the author's six-frame contract
+    // and only replace the subject; an empty prompt leaves the saved directive untouched.
+    const instruction = qwen3VlStoryPrompt(prompt);
+    if (instruction) {
+        const node =
+            next[QWEN3VL_STORY_PROMPT_NODE] ||
+            findComfyNode(next, (item) => /CR\s*PromptText/i.test(String(item.class_type || "")) && typeof item.inputs?.prompt === "string");
+        if (node?.inputs && typeof node.inputs.prompt === "string") node.inputs.prompt = instruction;
+    }
+
+    // The KSampler bakes a fixed seed — identical inputs would render identical frames on every run.
+    const seedNode =
+        next[QWEN3VL_STORY_SEED_NODE] ||
+        findComfyNode(next, (item) => /^KSampler/i.test(String(item.class_type || "")) && typeof item.inputs?.seed === "number");
+    if (seedNode?.inputs && typeof seedNode.inputs.seed === "number") seedNode.inputs.seed = randomComfySeed();
+
+    return next;
+}
+
+/**
+ * A RunningHub model name doubles as its workflow id, so one model normally runs one workflow.
+ * The 自动分镜 model is the exception: its workflow renders images only, so generating video from
+ * the same model entry has to switch to a dedicated video-generation workflow. Point that model's
+ * script at the video workflow (`{"workflowId": "2103..."}` or a bare id) and the video path uses
+ * it, while the image path keeps the model's own id. Scoped to this workflow id — every other
+ * model keeps the previous order, where the model name always wins over the script.
+ */
+function switchRunningHubWorkflowForMedia(workflowId: string, media: "image" | "video" | undefined, script?: string) {
+    if (media !== "video" || !isQwen3VlStoryWorkflow(workflowId)) return workflowId;
+    const explicit = idFromScript(String(script || ""));
+    return explicit && explicit !== workflowId ? explicit : workflowId;
+}
+
 async function fetchWebappNodes(origin: string, apiKey: string, webappId: string, signal?: AbortSignal): Promise<WebappNode[]> {
     const token = apiKey.replace(/^Bearer\s+/i, "").trim();
     const response = await axios.get(proxyApiUrl(`${origin}/api/webapp/apiCallDemo`), {
@@ -779,6 +852,8 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const fallbackMegapixels = typeof pristineSelector?.inputs?.megapixels === "number" ? pristineSelector.inputs.megapixels : undefined;
         patched = applyMinimaxH3StorySettings(patched, prompt, seconds, aspect, megapixels, fallbackMegapixels);
     }
+    // Runs after the generic prompt writer so the storyboard contract wins over it.
+    if (isQwen3VlStoryWorkflow(workflowId)) patched = applyQwen3VlStorySettings(patched, prompt);
     const list: RunningHubNodeInfo[] = [];
     for (const [nodeId, node] of Object.entries(patched)) {
         const before = workflow[nodeId]?.inputs || {};
@@ -801,7 +876,9 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
               ? QWEN_IMAGE_21_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
               : isMinimaxH3StoryWorkflow(workflowId)
                 ? MINIMAX_H3_STORY_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
-                : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
+                : isQwen3VlStoryWorkflow(workflowId)
+                  ? QWEN3VL_STORY_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
+                  : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
     imageValues.forEach((value, index) => {
         const entry = loaders[index];
         if (!entry || !value) return;
@@ -1291,9 +1368,12 @@ export async function runRunningHubWorkflow(args: {
     signal?: AbortSignal;
 }): Promise<RunningHubMedia> {
     const origin = runningHubOrigin(args.baseUrl);
-    const workflowId = parseRunningHubWorkflowId(args.model, args.script, args.baseUrl);
+    const parsedWorkflowId = parseRunningHubWorkflowId(args.model, args.script, args.baseUrl);
     const primary = runningHubApiKey(args.baseUrl, args.apiKey);
-    if (!origin || !workflowId) throw new Error(apiText("runningHubWorkflowFetchFailed"));
+    if (!origin || !parsedWorkflowId) throw new Error(apiText("runningHubWorkflowFetchFailed"));
+    // Scoped media switch: the 自动分镜 model renders images only, so generating video from the same
+    // model entry needs a dedicated video workflow (see switchRunningHubWorkflowForMedia).
+    const workflowId = switchRunningHubWorkflowForMedia(parsedWorkflowId, args.media, args.script);
 
     // Key list: primary + backups, deduped. With multiple keys the order is shuffled per call
     // (Fisher-Yates below) so every generation spreads load across accounts at random — applies
