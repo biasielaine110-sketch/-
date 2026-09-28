@@ -23,6 +23,19 @@ export function audioExtension(mimeType?: string) {
     return "mp3";
 }
 
+/**
+ * Container extension for a video mime. Naming a WebM payload ".mp4" is not a cosmetic problem:
+ * save-blob rewrites the blob's type to match the extension, so the user gets a file that no
+ * player opens. Fall back to mp4 (the format every provider emits by default) when the type is
+ * unknown — ComfyUI /view and several proxies reply `application/octet-stream` for real MP4s.
+ */
+export function videoExtension(mimeType?: string) {
+    if (mimeType?.includes("webm")) return "webm";
+    if (mimeType?.includes("quicktime") || mimeType?.includes("mov")) return "mov";
+    if (mimeType?.includes("matroska")) return "mkv";
+    return "mp4";
+}
+
 export function generationReferenceUrls(context: { referenceImages: ReferenceImage[]; referenceVideos: Array<{ storageKey?: string; url?: string }>; referenceAudios?: Array<{ storageKey?: string; url?: string }> }) {
     return [
         ...context.referenceImages.map(referenceUrl).filter((url): url is string => Boolean(url)),

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { App } from "antd";
 import { ChevronRight, Clapperboard, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
 
 import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas-display-image";
@@ -7,8 +8,9 @@ import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
-import { refreshMediaUrl } from "@/services/file-storage";
-import { saveBlobAs } from "@/lib/fs/save-blob";
+import { videoExtension } from "@/lib/canvas/canvas-generation-helpers";
+import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
+import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasChatContent } from "./canvas-chat-content";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
@@ -1097,8 +1099,9 @@ export const registerCanvasMedia = (key: string, entry: CanvasMediaToggle) => {
 };
 export const getCanvasMediaToggle = (key: string) => canvasMediaRegistry.get(key);
 
-function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKeyProp }: { src: string; posterSrc?: string; storageKey?: string; memoryKey?: string }) {
+function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey: memoryKeyProp }: { src: string; posterSrc?: string; storageKey?: string; mimeType?: string; memoryKey?: string }) {
     const { t } = useTranslation();
+    const { message } = App.useApp();
     const videoRef = useRef<HTMLVideoElement>(null);
     // Prefer the caller's stable id (node/image id): src/storageKey can be filled in async
     // after a drop, which would otherwise split one video's memory across two keys.
@@ -1223,10 +1226,37 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, memoryKey: memoryKe
         setActivated(true);
     };
 
-    const handleDownload = (event: React.MouseEvent) => {
+    // The download re-fetches the video (a remote source goes through the media proxy), which can
+    // take a while — a second click must not start the whole transfer again.
+    const downloadingRef = useRef(false);
+    const handleDownload = async (event: React.MouseEvent) => {
         event.stopPropagation();
         event.preventDefault();
-        void saveBlobAs(playableSrc, "canvas-video.mp4");
+        if (downloadingRef.current) return;
+        downloadingRef.current = true;
+        try {
+            // Prefer the stored bytes: they are the ones on screen, need no network and cannot be
+            // refused by CORS. Only re-fetch the source URL when the stored blob is gone.
+            const stored = storageKey ? await getMediaBlob(storageKey).catch(() => null) : null;
+            const blob = stored && stored.size > 0 ? stored : await resolveBlobSource(playableSrc);
+            if (!blob.size) throw new Error("no media bytes");
+            // Name the file after the real container. Calling WebM bytes ".mp4" is not cosmetic:
+            // save-blob re-types the blob to match the extension, so the file would not play.
+            // The blob's own type is frequently the generic "application/octet-stream" (ComfyUI
+            // /view and several proxies reply that way), so fall back to the recorded mimeType.
+            const fromBlob = videoExtension(blob.type);
+            const extension = fromBlob !== "mp4" ? fromBlob : videoExtension(mimeType);
+            const result = await saveBlobAs(blob, `canvas-video.${extension}`);
+            if (result.method === "draft") {
+                message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
+            }
+        } catch (error) {
+            // Swallowing this is what made the button look dead: a CORS-blocked remote video, a
+            // dead blob URL or a lost permission all failed silently.
+            message.error(`${t("common.downloadFailed")}: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+            downloadingRef.current = false;
+        }
     };
 
     // Toggle play/pause. Only registered once the video is activated; Space switches playback
@@ -1398,7 +1428,7 @@ function VideoNodeContent({ node, theme, onDeleteBatchImage }: NodeContentRender
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
             <CanvasLazyMedia>
-                <CanvasNodeVideoPlayer src={node.metadata.content} posterSrc={node.metadata?.thumbnailContent} storageKey={node.metadata?.storageKey} memoryKey={node.id} />
+                <CanvasNodeVideoPlayer src={node.metadata.content} posterSrc={node.metadata?.thumbnailContent} storageKey={node.metadata?.storageKey} mimeType={node.metadata?.mimeType} memoryKey={node.id} />
             </CanvasLazyMedia>
             <button
                 type="button"
@@ -1537,7 +1567,7 @@ function ImageContent({
                 {displaySrc ? (
                     isVideo ? (
                         <CanvasLazyMedia>
-                            <CanvasNodeVideoPlayer src={displaySrc} posterSrc={primaryThumb} storageKey={primaryImage?.storageKey || node.metadata?.storageKey} memoryKey={`${node.id}:${primaryImageId || "primary"}`} />
+                            <CanvasNodeVideoPlayer src={displaySrc} posterSrc={primaryThumb} storageKey={primaryImage?.storageKey || node.metadata?.storageKey} mimeType={primaryImage?.mimeType || node.metadata?.mimeType} memoryKey={`${node.id}:${primaryImageId || "primary"}`} />
                         </CanvasLazyMedia>
                     ) : (
                         <>
@@ -1736,7 +1766,7 @@ function ExpandedImageCard({
             {image.content || image.thumbnailContent ? (
                 isVideo ? (
                     <CanvasLazyMedia className="h-full w-full">
-                        <CanvasNodeVideoPlayer src={image.content || image.thumbnailContent || ""} posterSrc={image.thumbnailContent} storageKey={image.storageKey} memoryKey={`${node.id}:${image.id}`} />
+                        <CanvasNodeVideoPlayer src={image.content || image.thumbnailContent || ""} posterSrc={image.thumbnailContent} storageKey={image.storageKey} mimeType={image.mimeType} memoryKey={`${node.id}:${image.id}`} />
                     </CanvasLazyMedia>
                 ) : (
                     <CanvasLazyMedia className="h-full w-full">

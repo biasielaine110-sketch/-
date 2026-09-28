@@ -146,11 +146,17 @@ export function CanvasImagePreviewModal({ open, src, title, fileName, projectId,
 
     const handleDownload = () => {
         const name = fileName || `image.${imageExtension(src)}`;
-        void saveBlobAs(src, name, { projectId }).then((result) => {
-            if (result.method === "draft") {
-                message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
-            }
-        });
+        // A remote image can render here yet still fail to download (fetch is CORS-checked,
+        // <img> is not), so surface the failure instead of leaving the menu item looking dead.
+        void saveBlobAs(src, name, { projectId })
+            .then((result) => {
+                if (result.method === "draft") {
+                    message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
+                }
+            })
+            .catch((error: unknown) => {
+                message.error(`${t("common.downloadFailed")}: ${error instanceof Error ? error.message : String(error)}`);
+            });
         setMenu(null);
     };
 

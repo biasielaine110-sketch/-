@@ -99,6 +99,7 @@ import {
     isGenerationCanceled,
     resetInterruptedGeneration,
     resolveMetadataReferences,
+    videoExtension,
 } from "@/lib/canvas/canvas-generation-helpers";
 import { isDocumentFile, readDocumentAsText } from "@/lib/canvas/document-text";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType } from "@/lib/canvas/node-registry";
@@ -3046,28 +3047,36 @@ function AtelierCanvasPage() {
 
     const downloadNodeImage = useCallback(
         async (node: CanvasNodeData) => {
-            if (node.type === CanvasNodeType.Text) {
-                const content = (node.metadata?.content || node.metadata?.prompt || "").trim();
-                if (!content) return message.error(t("canvas.projectPage.noTextToSave"));
-                const rawName = (node.title || t("canvas.projectPage.canvasText")).trim() || "document";
-                const safeName = rawName.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 48) || "document";
-                const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
-                const result = await saveBlobAs(blob, `${safeName}.md`, { projectId });
+            try {
+                if (node.type === CanvasNodeType.Text) {
+                    const content = (node.metadata?.content || node.metadata?.prompt || "").trim();
+                    if (!content) return message.error(t("canvas.projectPage.noTextToSave"));
+                    const rawName = (node.title || t("canvas.projectPage.canvasText")).trim() || "document";
+                    const safeName = rawName.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 48) || "document";
+                    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+                    const result = await saveBlobAs(blob, `${safeName}.md`, { projectId });
+                    if (result.method === "draft") {
+                        message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
+                    } else {
+                        message.success(t("canvas.nodeToolbar.exportDocumentDone", { name: result.fileName }));
+                        if (draftMeta && !draftMeta.hasDirectory) message.warning(t("canvas.draft.rebindForFolderSave"));
+                    }
+                    return;
+                }
+                if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
+                // mp4 for a WebM/Audio payload would be a container the bytes do not have, so ask the
+                // mime: save-blob re-types the blob after the extension it is given.
+                const extension = node.type === CanvasNodeType.Video ? videoExtension(node.metadata.mimeType) : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content);
+                const result = await saveBlobAs(node.metadata.content, `canvas-${node.type}-${node.id}.${extension}`, { projectId });
                 if (result.method === "draft") {
                     message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
-                } else {
-                    message.success(t("canvas.nodeToolbar.exportDocumentDone", { name: result.fileName }));
-                    if (draftMeta && !draftMeta.hasDirectory) message.warning(t("canvas.draft.rebindForFolderSave"));
+                } else if (result.method === "download" && draftMeta && !draftMeta.hasDirectory) {
+                    message.warning(t("canvas.draft.rebindForFolderSave"));
                 }
-                return;
-            }
-            if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Annotate && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
-            const extension = node.type === CanvasNodeType.Video ? "mp4" : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content);
-            const result = await saveBlobAs(node.metadata.content, `canvas-${node.type}-${node.id}.${extension}`, { projectId });
-            if (result.method === "draft") {
-                message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
-            } else if (result.method === "download" && draftMeta && !draftMeta.hasDirectory) {
-                message.warning(t("canvas.draft.rebindForFolderSave"));
+            } catch (error) {
+                // A dead blob URL, a lost folder permission or a CORS-blocked remote URL used to
+                // escape as an unhandled rejection and the click appeared to do nothing.
+                message.error(`${t("common.downloadFailed")}: ${error instanceof Error ? error.message : String(error)}`);
             }
         },
         [draftMeta, message, projectId, t],

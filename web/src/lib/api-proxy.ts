@@ -68,6 +68,25 @@ export function proxyMediaUrl(directUrl: string): string {
     }
 }
 
+/**
+ * Build the same-origin media proxy URL unconditionally, ignoring the "known CORS-open host"
+ * shortcut above. That list describes API POSTs that carry an Authorization header; a media
+ * download is a plain GET, so the shortcut is no evidence the GET will pass CORS. Returns "" when
+ * the proxy cannot help at all (same-origin / non-http scheme), letting callers keep the original
+ * error instead of retrying against a URL that is guaranteed not to work.
+ */
+export function forceProxyMediaUrl(directUrl: string): string {
+    const normalized = normalizeProxyTarget(directUrl);
+    try {
+        const target = new URL(normalized);
+        if (typeof window !== "undefined" && target.origin === window.location.origin) return "";
+        if (target.protocol !== "http:" && target.protocol !== "https:") return "";
+        return buildProxyUrl(normalized);
+    } catch {
+        return "";
+    }
+}
+
 function buildProxyUrl(directUrl: string) {
     const target = normalizeProxyTarget(directUrl);
     const path = import.meta.env.DEV ? "/api-proxy" : "/api/proxy";

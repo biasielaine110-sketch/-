@@ -1,5 +1,6 @@
 import { saveAs } from "file-saver";
 
+import { forceProxyMediaUrl, proxyMediaUrl } from "@/lib/api-proxy";
 import { supportsFileSystemAccess, writeBlobToDraftDirectory } from "@/lib/canvas/canvas-draft";
 
 export type SaveBlobOptions = {
@@ -11,10 +12,31 @@ export type SaveBlobResult =
     | { method: "draft"; fileName: string; folderName?: string }
     | { method: "download"; fileName: string };
 
+/**
+ * Turn a url/blob into bytes. A cross-origin media URL that a <video>/<img> renders happily still
+ * fails here: media elements are not CORS-checked, fetch() is. That is why a playing video could
+ * never be downloaded from an external host — the rejection escaped as an unhandled error and the
+ * button looked dead. Retry through the same-origin media proxy before giving up.
+ */
 export async function resolveBlobSource(source: Blob | string): Promise<Blob> {
     if (typeof source !== "string") return source;
-    const response = await fetch(source);
-    return response.blob();
+    try {
+        return await fetchBlobOrThrow(source);
+    } catch (error) {
+        // proxyMediaUrl declines to rewrite "known CORS-open" hosts, but that list is about API
+        // POSTs with Authorization — not media GETs — so force the proxy as a last resort.
+        const proxied = forceProxyMediaUrl(source) || proxyMediaUrl(source);
+        if (!proxied || proxied === source) throw error;
+        return await fetchBlobOrThrow(proxied);
+    }
+}
+
+async function fetchBlobOrThrow(url: string) {
+    const response = await fetch(url);
+    // A refused or dead proxy hop answers with an HTML error body; without this check that body
+    // would be saved as the media file, turning a visible failure into a corrupt download.
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.blob();
 }
 
 /** Current canvas project id from `/canvas/:id` when available. */
