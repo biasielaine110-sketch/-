@@ -717,12 +717,36 @@ async function referenceToUploadFile(
 }
 
 /**
+ * Strict allow-list of workflows whose reference uploads go through the size guard.
+ *
+ * The native path re-uploads reference *bytes* through /api/proxy, and Vercel's
+ * serverless request-body cap (~4.5MB) answers an oversized multipart post with
+ * HTTP 413 before ComfyUI ever sees it. Only the workflows listed here are re-encoded;
+ * every other channel's model keeps its exact previous behaviour, so a model is added
+ * here deliberately rather than by a blanket global change.
+ */
+export const COMFY_UPLOAD_GUARD_WORKFLOWS = [
+    "U24-文武双修T8版MiniMaxH3双采参考生视频V2",
+    "U06-minimax_h3_lightX2v多图参考生视频V5",
+] as const;
+
+/** True only for allow-listed workflows that must size-guard their reference uploads. */
+export function usesComfyUploadGuard(workflowId: string | undefined | null): boolean {
+    const keys = comfyWorkflowKeys(workflowId);
+    if (!keys.length) return false;
+    const allowed = new Set(COMFY_UPLOAD_GUARD_WORKFLOWS.flatMap((item) => comfyWorkflowKeys(item)));
+    return keys.some((key) => allowed.has(key));
+}
+
+/**
  * Vercel serverless proxies cap request bodies at ~4.5MB, so a reference image over
  * that budget fails the multipart upload with HTTP 413 before ComfyUI ever sees it.
  * Unlike the JSON-body providers, the native path re-uploads reference bytes (including
  * remote-URL refs), so any oversized image must be shrunk before it goes on the wire.
  * Images already within budget are returned untouched.
  */
+type ComfyUploadOptions = RequestOptions & { workflowId?: string };
+
 const COMFY_UPLOAD_BYTE_BUDGET = 2_400_000;
 const COMFY_UPLOAD_MAX_EDGE = 1536;
 
@@ -749,10 +773,11 @@ async function uploadComfyInputFile(
     source: string,
     fileName: string,
     fallbackType: string,
-    options?: RequestOptions,
+    options?: ComfyUploadOptions,
 ): Promise<string> {
     const upload = await referenceToUploadFile(source, fileName, options?.signal, fallbackType);
-    const file = await shrinkOversizedUpload(upload);
+    // Strict allow-list: only guarded workflows are re-encoded; every other model is untouched.
+    const file = usesComfyUploadGuard(options?.workflowId) ? await shrinkOversizedUpload(upload) : upload;
     const body = new FormData();
     // ComfyUI stores uploads under input/ via this endpoint for images and audio alike.
     body.append("image", file);
@@ -771,7 +796,7 @@ export async function uploadComfyImage(
     apiKey: string,
     dataUrl: string,
     fileName: string,
-    options?: RequestOptions,
+    options?: ComfyUploadOptions,
 ): Promise<string> {
     return uploadComfyInputFile(baseUrl, apiKey, dataUrl, fileName, "image/png", options);
 }
@@ -781,7 +806,7 @@ export async function uploadComfyAudio(
     apiKey: string,
     source: string,
     fileName: string,
-    options?: RequestOptions,
+    options?: ComfyUploadOptions,
 ): Promise<string> {
     const ext = /\.(mp3|wav|flac|ogg|m4a|aac)$/i.test(fileName) ? "" : ".mp3";
     return uploadComfyInputFile(baseUrl, apiKey, source, `${fileName}${ext}`, "audio/mpeg", options);
@@ -965,7 +990,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     if (refs.length) {
         const names: string[] = [];
         for (let i = 0; i < refs.length; i += 1) {
-            const uploaded = await uploadComfyImage(baseUrl, apiKey, refs[i], `ref-${i + 1}.png`, { signal });
+            const uploaded = await uploadComfyImage(baseUrl, apiKey, refs[i], `ref-${i + 1}.png`, { signal, workflowId: args.workflowId });
             names.push(uploaded);
         }
         workflow = applyComfyLoadImages(workflow, names, args.workflowId);
