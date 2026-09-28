@@ -1,0 +1,14 @@
+{
+  "name": "image-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "独立生图后端：把 RunningHub / OpenAI 兼容渠道封装为 HTTP 接口，供前端网站画布调用",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "axios": "^1.16.0"
+  }
+}

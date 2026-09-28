@@ -20,3 +20,10 @@ web/deploy-payload.json
 
 .vercel
 .env*
+
+# Miora 生图/生视频自动化：队列运行期状态与生成产物不入库
+miora-queue/new/
+miora-queue/done/
+miora-output/
+# image-api 服务端本地密钥配置（示例见 config.js 占位符）
+image-api/config.local.js
