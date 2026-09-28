@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { ArrowUp, GripVertical, LoaderCircle, Maximize2, Square, WandSparkles } from "lucide-react";
+import { ArrowUp, GripVertical, LoaderCircle, Maximize2, Square, WandSparkles, X } from "lucide-react";
 import { App, Button, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -30,11 +30,12 @@ type CanvasNodePromptPanelProps = {
     onStop: (nodeId: string) => void;
     mentionReferences?: CanvasResourceReference[];
     onReorderReferences?: (orderedNodeIds: string[]) => void;
+    onRemoveReference?: (referenceNodeId: string) => void;
     onImageSettingsOpenChange?: (open: boolean) => void;
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onReorderReferences, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onReorderReferences, onRemoveReference, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
@@ -227,7 +228,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                             <span
                                 key={reference.id}
                                 data-ref-chip={index}
-                                className={`inline-flex max-w-44 items-center gap-1 rounded-lg border px-1.5 py-1 text-xs ${isDropTarget ? "ring-2 ring-sky-500" : ""}`}
+                                className={`relative mr-1 inline-flex max-w-44 items-center gap-1 rounded-lg border px-1.5 py-1 text-xs ${isDropTarget ? "ring-2 ring-sky-500" : ""}`}
                                 style={{ background: theme.toolbar.itemHover, borderColor: isDropTarget ? "#0ea5e9" : theme.node.stroke, color: theme.node.text }}
                                 title={reference.title}
                                 onDragOver={onReorderReferences ? (event) => handleChipDragOver(event, index) : undefined}
@@ -246,6 +247,24 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                 </span>
                                 {reference.kind === "image" && reference.previewUrl ? <img src={reference.previewUrl} alt="" draggable={false} className="size-6 rounded object-cover" /> : null}
                                 <span className="truncate font-medium">{reference.label}</span>
+                                {onRemoveReference ? (
+                                    <button
+                                        type="button"
+                                        data-canvas-shortcuts-ignore
+                                        onClick={(event) => {
+                                            event.preventDefault();
+                                            event.stopPropagation();
+                                            onRemoveReference(reference.nodeId);
+                                        }}
+                                        onPointerDown={(event) => event.stopPropagation()}
+                                        className="absolute -right-1 -top-1 z-10 flex size-4 cursor-pointer items-center justify-center rounded-full border shadow-sm transition-transform hover:scale-110"
+                                        style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+                                        title={t("canvas.promptPanel.removeReference")}
+                                        aria-label={t("canvas.promptPanel.removeReference")}
+                                    >
+                                        <X className="size-2.5" />
+                                    </button>
+                                ) : null}
                             </span>
                         );
                     })}

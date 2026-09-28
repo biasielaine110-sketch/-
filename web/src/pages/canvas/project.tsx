@@ -1267,6 +1267,21 @@ function AtelierCanvasPage() {
         });
     }, []);
 
+    // Detach one reference chip from a panel. A reference can be wired straight into the node, or
+    // into a shared Config hub that feeds it — drop whichever connection actually carries that
+    // media so the chip disappears without hand-dragging the wire off the node.
+    const handleRemoveLinkedMedia = useCallback((nodeId: string, referenceNodeId: string) => {
+        setConnections((prev) => {
+            const targetIds = new Set<string>([nodeId]);
+            prev.forEach((conn) => {
+                if (conn.fromNodeId !== nodeId) return;
+                if (nodesRef.current.find((node) => node.id === conn.toNodeId)?.type === CanvasNodeType.Config) targetIds.add(conn.toNodeId);
+            });
+            const next = prev.filter((conn) => !(conn.fromNodeId === referenceNodeId && targetIds.has(conn.toNodeId)));
+            return next.length === prev.length ? prev : next;
+        });
+    }, []);
+
     const deselectCanvas = useCallback(() => {
         cancelPendingConnectionCreate();
         setSelectedNodeIds(new Set());
@@ -2399,7 +2414,73 @@ function AtelierCanvasPage() {
                 };
             }),
         );
-        message.success(t("canvas.shortcut.resetSizeDone", { count: eligible.length }));
+        message.success(t("canvas.shortcut.restoreSizeDone", { count: eligible.length }));
+    }, [message, t]);
+
+    // Backquote shortcut: put the selected node window(s) back to the size they were created
+    // with. Media nodes are filled into a per-type default box the moment their content
+    // arrives — every generation path funnels through fitNodeSize(natural, NODE_DEFAULT_SIZE
+    // ...) — so restoring "the initial size" means restoring that very same box. The 640×640
+    // "100% display" box used by the media scale menu is deliberately NOT reused here: it makes
+    // an image window jump to a size the user never saw (that is what the "." shortcut and the
+    // image toolbar "original size" action do). Every non-media node falls back to its registry
+    // default size. Windows keep their centre and the free-resize lock is restored.
+    const resetSelectedNodesWindowSize = useCallback((explicitIds?: Iterable<string>) => {
+        const selectedIds = new Set(explicitIds || selectedNodeIdsRef.current);
+        if (!selectedIds.size) {
+            const fallbackId = toolbarNodeIdRef.current || hoveredNodeIdRef.current;
+            if (fallbackId) selectedIds.add(fallbackId);
+        }
+        if (!selectedIds.size) {
+            message.warning(t("canvas.shortcut.selectNodeToResetWindow"));
+            return;
+        }
+
+        const targetSizeFor = (node: CanvasNodeData) => {
+            const spec = getNodeSpec(node.type);
+            if (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Annotate) {
+                const natural = resolveNodeMediaNaturalSize(node);
+                if (natural && natural.width > 0 && natural.height > 0) {
+                    if (node.type === CanvasNodeType.Video) return fitNodeSize(natural.width, natural.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                    return fitNodeSize(natural.width, natural.height, spec.width, spec.height);
+                }
+            }
+            return { width: spec.width, height: spec.height };
+        };
+
+        const eligible = nodesRef.current.filter((node) => {
+            if (!selectedIds.has(node.id)) return false;
+            // A group is a container region, not a window: shrinking it would strand its children.
+            if (node.type === CanvasNodeType.Group) return false;
+            const target = targetSizeFor(node);
+            const sizeChanged = Math.abs(target.width - node.width) >= 1 || Math.abs(target.height - node.height) >= 1;
+            return sizeChanged || Boolean(node.metadata?.freeResize);
+        });
+
+        if (!eligible.length) {
+            message.info(t("canvas.shortcut.resetWindowAlready"));
+            return;
+        }
+
+        const eligibleIds = new Set(eligible.map((node) => node.id));
+        setNodes((prev) =>
+            prev.map((node) => {
+                if (!eligibleIds.has(node.id)) return node;
+                const target = targetSizeFor(node);
+                const nextWidth = Math.max(1, Math.round(target.width));
+                const nextHeight = Math.max(1, Math.round(target.height));
+                const centerX = node.position.x + node.width / 2;
+                const centerY = node.position.y + node.height / 2;
+                return {
+                    ...node,
+                    width: nextWidth,
+                    height: nextHeight,
+                    position: { x: centerX - nextWidth / 2, y: centerY - nextHeight / 2 },
+                    metadata: { ...node.metadata, freeResize: false },
+                };
+            }),
+        );
+        message.success(t("canvas.shortcut.resetWindowDone", { count: eligible.length }));
     }, [message, t]);
 
     useEffect(() => {
@@ -2419,11 +2500,21 @@ function AtelierCanvasPage() {
             const key = event.key.toLowerCase();
             const isModifierShortcut = event.metaKey || event.ctrlKey;
 
-            // "." restores the selected node(s) to their original creation size (same path as the
-            // context-menu reset, but only acts when media actually got resized).
+            // "." is the media-only "100% display box" reset shared with the image toolbar
+            // ("original size"): it re-fits media into fitNodeSize(natural, 640, 640).
             if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === ".") {
                 event.preventDefault();
                 resetSelectedNodesToOriginalSize();
+                return;
+            }
+
+            // "`" (and Backquote on layouts where key is remapped) restores the selected node
+            // window(s) to the size they were created with (per-type default box for media,
+            // registry default for everything else). "." stays separate: it is the media-only
+            // "100% display box" action shared with the image toolbar.
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && (event.key === "`" || event.code === "Backquote")) {
+                event.preventDefault();
+                resetSelectedNodesWindowSize();
                 return;
             }
 
@@ -2584,7 +2675,7 @@ function AtelierCanvasPage() {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [copySelectedNodes, createNode, deleteConnection, deleteNodes, duplicateSelectedMediaAsNode, focusNode, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, resetSelectedNodesToOriginalSize, selectedConnectionId, setConnecting, t, undoCanvas]);
+    }, [copySelectedNodes, createNode, deleteConnection, deleteNodes, duplicateSelectedMediaAsNode, focusNode, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, resetSelectedNodesToOriginalSize, resetSelectedNodesWindowSize, selectedConnectionId, setConnecting, t, undoCanvas]);
 
     // Space toggles the active media node (an activated video, or a single-selected audio). This
     // runs in the capture phase so it can consume the event before the canvas pan listener (also
@@ -5717,6 +5808,7 @@ function AtelierCanvasPage() {
                     isRunning={isNodeGenerating(panelNode.id)}
                     mentionReferences={getMentionReferences(panelNode.id)}
                     onReorderReferences={(orderedNodeIds) => handleReorderLinkedMedia(panelNode.id, orderedNodeIds)}
+                    onRemoveReference={(referenceNodeId) => handleRemoveLinkedMedia(panelNode.id, referenceNodeId)}
                     onPromptChange={handleNodePromptChange}
                     onConfigChange={handleConfigNodeChange}
                     onContentChange={handleNodeContentChange}
@@ -5729,7 +5821,7 @@ function AtelierCanvasPage() {
                     }}
                 />
             ),
-        [getConfigInputs, getMentionReferences, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, handleReorderLinkedMedia, isNodeGenerating, stopGenerationForNode],
+        [getConfigInputs, getMentionReferences, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, handleRemoveLinkedMedia, handleReorderLinkedMedia, isNodeGenerating, stopGenerationForNode],
     );
 
     const handleDirectorExport = useCallback(
