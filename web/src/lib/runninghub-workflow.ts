@@ -721,6 +721,337 @@ function applyQwen3VlStorySettings(workflow: ComfyWorkflow, prompt: string) {
     return next;
 }
 
+// MiniMax H3 五段加速流 (参考生视频, 五段 × 二次采样) — RunningHub 2104606149466222593.
+// Five MiniMax H3 reference-to-video segments render back to back (a fast pass, then an upscaled
+// second pass each) and are stitched into one long clip, so one submission returns one video.
+// It is really a five-chapter film: every segment node (734/757/782/806/829, which is also the
+// order the stitched clip follows) carries its *own* plot prompt and all five share the same six
+// reference images. Its knobs do not match the generic heuristics:
+//   - the prompt is per chapter, and the app only asks for one. Segment 1 links a plain `Text` node
+//     while the other four hold literal strings, three of them titled 第N段剧情提示词 — which the
+//     generic prompt writer scores above the link source, so a naive write leaves chapters 1-2
+//     running the workflow author's baked-in demo story while only 3-5 follow the user. A prompt
+//     written in the workflow's own screenplay shape is split across the chapters instead (see
+//     minimaxH3SegmentPrompts); anything else is written to all five;
+//   - references are consumed through the named slots `ref_images.ref_image_0…5` (Picture 1…6) and
+//     the slot order is defined by the links, never by node-id order — the graph wires
+//     ref_image_0…5 to nodes 51/49/50/43/19/23, so sorting loaders by id scrambles every subject;
+//   - `ref_images` is an optional 0..9 socket, so a slot the user did not fill has to be
+//     disconnected: leaving it wired renders the author's baked-in demo characters;
+//   - per-segment duration is a PrimitiveFloat titled 视频时长（秒）(field `value`), which the
+//     generic duration writer (duration/seconds/video_length) cannot reach, and the
+//     ResolutionSelector stores a label enum ("16:9 (Widescreen)") the aspect writer cannot produce;
+//   - all five RandomNoise nodes ship the same fixed seed, so identical inputs repeated identical
+//     videos;
+//   - beside the stitched video the graph also saves one video per chapter, and its audio passes
+//     through a deprecated SaveAudio class — both make the task report more than the one video the
+//     caller wants (and a .flac that has no video extension lands in the image bucket).
+// Everything below is scoped to this workflow id only.
+const MINIMAX_H3_FIVE_SEGMENT_WORKFLOW_ID = "2104606149466222593";
+// MiniMax H3 is trained on ~124-362 frames at 24 fps (≈5.2-15.1 s) and its length formula snaps to
+// 17n+5, so keep the per-segment duration inside that band. Note this is the length of *each* of
+// the five segments — the finished clip is five times as long.
+const MINIMAX_H3_FIVE_SEGMENT_SECONDS = { min: 5, max: 15 };
+const AUDIO_FILE_RE = /\.(flac|wav|mp3|m4a|aac|ogg|opus)(\?|$)/i;
+
+function isMinimaxH3FiveSegmentWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    // The runtime id can arrive channel-encoded ("<channelId>::<model>") or prefixed ("rh-<id>") —
+    // the same shapes isQwen3VlStoryWorkflow has to accept — so a bare equality check would leave
+    // this whole adapter as dead code on those paths.
+    return raw.split("::").some((segment) => segment.trim().replace(/^(rh|runninghub|workflow)[:_-]/, "").trim() === MINIMAX_H3_FIVE_SEGMENT_WORKFLOW_ID);
+}
+
+function isMiniMaxH3ReferenceNode(node?: ComfyNode | null) {
+    return /MiniMaxH3ReferenceToVideo/i.test(String(node?.class_type || ""));
+}
+
+/**
+ * Every reference-to-video segment plus the reference slots they consume.
+ *
+ * Consumers come back in node-id order, which is also the chapter order the stitched video follows
+ * (734 → 757 → 782 → 806 → 829 render chapters 1..5). Slot 0 is `<Picture 1>`, so the slot indexes —
+ * not the node ids — decide which loader holds the user's first image.
+ */
+function minimaxH3ReferenceSlots(workflow: ComfyWorkflow) {
+    const consumers = Object.entries(workflow)
+        .filter(([, node]) => isMiniMaxH3ReferenceNode(node))
+        .sort(([left], [right]) => Number(left) - Number(right));
+    for (const [, consumer] of consumers) {
+        const inputs = consumer.inputs || {};
+        const slots: Array<{ index: number; key: string; loaderId: string }> = [];
+        for (const key of Object.keys(inputs)) {
+            const match = /^ref_images\.ref_image_(\d+)$/.exec(key);
+            if (!match) continue;
+            const value = inputs[key];
+            const loaderId = Array.isArray(value) ? String(value[0]) : "";
+            const loader = loaderId ? workflow[loaderId] : undefined;
+            if (!loader || !imageFieldName(loader)) continue;
+            slots.push({ index: Number(match[1]), key, loaderId });
+        }
+        if (slots.length < 2) continue;
+        slots.sort((a, b) => a.index - b.index);
+        return { consumers, slots };
+    }
+    return { consumers, slots: [] as Array<{ index: number; key: string; loaderId: string }> };
+}
+
+/**
+ * Loaders in `<Picture 1>…<Picture N>` order, or null when the graph does not expose reference
+ * slots (caller keeps the historical node-id order).
+ */
+function minimaxH3FiveSegmentLoaders(workflow: ComfyWorkflow) {
+    const { slots } = minimaxH3ReferenceSlots(workflow);
+    if (!slots.length) return null;
+    return slots
+        .map((slot) => [slot.loaderId, workflow[slot.loaderId]] as const)
+        .filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]));
+}
+
+/**
+ * Contiguous, as-even-as-possible shot counts — e.g. 10 shots over 5 chapters → 2,2,2,2,2.
+ * Callers guarantee `shots >= chapters`, so no chapter is ever left empty.
+ */
+function minimaxH3ShotCounts(shots: number, chapters: number) {
+    const base = Math.floor(shots / chapters);
+    const extra = shots % chapters;
+    return Array.from({ length: chapters }, (_, index) => base + (index < extra ? 1 : 0));
+}
+
+/**
+ * The saved graph is five *sequential chapters* and each segment node carries its own plot prompt —
+ * the author's baked-in text is a five-chapter story (each chapter declaring 15s) — while the app
+ * only asks the user for one prompt. So a prompt that already follows the workflow's own screenplay
+ * shape is distributed one slice per chapter.
+ *
+ * A slice keeps the shared preamble (subject_definitions / summary / retention_analysis) and the
+ * shared tail (overall_soundscape / non_diegetic_music), because every chapter has to redefine the
+ * same `<Subject N>` cast it references as `<Picture N>`; only the shot list is split.
+ *
+ * Returns null when the prompt cannot be split — plain prose, no `detailed_description:` section,
+ * or fewer `[Shot N]` blocks than chapters — and the caller then writes the same prompt to every
+ * chapter rather than leaving some of them on the author's baked-in demo story.
+ *
+ * The `detailed_description:` heading is required on purpose: it is what separates the shared
+ * preamble from the shot list, and without it a stray `[Shot N]` mention in `summary:` would be
+ * mistaken for the first shot and the cast definitions would be dropped from every chapter.
+ */
+function minimaxH3SegmentPrompts(prompt: string, chapters: number): string[] | null {
+    if (chapters < 2) return null;
+    const markers = [...prompt.matchAll(/\[Shot\s*\d+\]/g)];
+    if (markers.length < chapters) return null;
+
+    const header = /^[ \t]*detailed_description[ \t]*:/im.exec(prompt);
+    if (!header) return null;
+    const bodyStart = header.index + header[0].length;
+    const tailOffset = /^[ \t]*(?:overall_soundscape|non_diegetic_music|non_diegetic|soundscape)[ \t]*:/im.exec(prompt.slice(bodyStart));
+    const bodyEnd = tailOffset ? bodyStart + tailOffset.index : prompt.length;
+
+    // Only shots inside the description body count — a `summary:` line also mentions "[Shot 1]".
+    const starts = markers.map((marker) => marker.index ?? 0).filter((index) => index >= bodyStart && index < bodyEnd);
+    if (starts.length < chapters) return null;
+
+    const preamble = (prompt.slice(0, header.index) + header[0]).trimEnd();
+    const tail = prompt.slice(bodyEnd).trim();
+
+    const out: string[] = [];
+    let cursor = 0;
+    for (const count of minimaxH3ShotCounts(starts.length, chapters)) {
+        const from = starts[cursor];
+        const to = cursor + count < starts.length ? starts[cursor + count] : bodyEnd;
+        out.push([preamble, prompt.slice(from, to).trim(), tail].filter(Boolean).join("\n"));
+        cursor += count;
+    }
+    return out;
+}
+
+/**
+ * The stitched video is the one the caller wants, and its combiner is the only one fed by a batch
+ * node — the per-segment combiners all consume a single VAE decode. Returns the stitched combiner's
+ * `filename_prefix`, used to recognise it in the task results.
+ */
+function minimaxH3StitchedVideoPrefix(workflow: ComfyWorkflow | null) {
+    if (!workflow) return "";
+    const batched = new Set(
+        Object.entries(workflow)
+            .filter(([, node]) => /batch/i.test(String(node?.class_type || "")))
+            .map(([id]) => id),
+    );
+    if (!batched.size) return "";
+    for (const node of Object.values(workflow)) {
+        if (!/VHS_VideoCombine/i.test(String(node?.class_type || ""))) continue;
+        const images = node?.inputs?.images;
+        if (!Array.isArray(images) || !batched.has(String(images[0]))) continue;
+        const prefix = node?.inputs?.filename_prefix;
+        if (typeof prefix === "string" && prefix.trim()) return prefix.trim();
+    }
+    return "";
+}
+
+/** Consumed by any other node? Used to tell a redundant output node from a wired one. */
+function comfyConsumedIds(workflow: ComfyWorkflow) {
+    const consumed = new Set<string>();
+    for (const node of Object.values(workflow)) {
+        for (const value of Object.values(node?.inputs || {})) {
+            if (Array.isArray(value) && value[0] != null) consumed.add(String(value[0]));
+        }
+    }
+    return consumed;
+}
+
+/**
+ * Keep a single video output. Drops the per-segment VHS_VideoCombine nodes (the stitched combiner
+ * stays), and muxes the segment-stitched audio straight into the final combiner instead of routing
+ * it through the deprecated SaveAudio pass-through — the pass-through hands back the very bytes it
+ * was given, so the audio is identical while the graph stops emitting a stray .flac (and stops
+ * depending on a node class ComfyUI only keeps around for backwards compatibility).
+ */
+function pruneMinimaxH3FiveSegmentOutputs(workflow: ComfyWorkflow) {
+    let changed = false;
+
+    const finalCombiner = Object.values(workflow).find((node) => {
+        if (!/VHS_VideoCombine/i.test(String(node?.class_type || ""))) return false;
+        const images = node?.inputs?.images;
+        const source = Array.isArray(images) ? workflow[String(images[0])] : undefined;
+        return /batch/i.test(String(source?.class_type || ""));
+    });
+    if (finalCombiner?.inputs) {
+        const audio = finalCombiner.inputs.audio;
+        const passThrough = Array.isArray(audio) ? workflow[String(audio[0])] : undefined;
+        if (/^SaveAudio/i.test(String(passThrough?.class_type || ""))) {
+            const upstream = passThrough?.inputs?.audio;
+            if (Array.isArray(upstream) && workflow[String(upstream[0])]) {
+                finalCombiner.inputs.audio = upstream;
+                changed = true;
+            }
+        }
+    }
+
+    // Reachability has to be sampled *after* the rewire above: the SaveAudio node we just bypassed
+    // has no consumer left, and computing this first would keep it alive as if it were still wired.
+    const consumed = comfyConsumedIds(workflow);
+
+    // Only drop output nodes nothing consumes, so the render itself can never be cut short.
+    for (const [id, node] of Object.entries(workflow)) {
+        if (consumed.has(id)) continue;
+        if (/^SaveAudio/i.test(String(node?.class_type || ""))) {
+            delete workflow[id];
+            changed = true;
+            continue;
+        }
+        if (!/VHS_VideoCombine/i.test(String(node?.class_type || ""))) continue;
+        const images = node?.inputs?.images;
+        const source = Array.isArray(images) ? workflow[String(images[0])] : undefined;
+        if (/batch/i.test(String(source?.class_type || ""))) continue;
+        delete workflow[id];
+        changed = true;
+    }
+    return changed;
+}
+
+function applyMinimaxH3FiveSegmentSettings(workflow: ComfyWorkflow, prompt: string, imageValues: string[], seconds?: string, aspect = "", megapixels = "") {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    let structuralRepair = false;
+
+    // Segments in chapter order (734 → 757 → 782 → 806 → 829) plus the reference slots they consume.
+    const { consumers, slots } = minimaxH3ReferenceSlots(next);
+
+    // Prompt → every chapter. A prompt that carries the workflow's own shot structure is split one
+    // slice per chapter; anything else goes to all of them — either way no chapter keeps the author's
+    // baked-in demo story. A chapter holding a literal string is written directly; one that links a
+    // prompt node writes through to that node, so a link is never turned into a literal.
+    if (prompt.trim()) {
+        const perChapter = minimaxH3SegmentPrompts(prompt, consumers.length);
+        consumers.forEach(([, node], index) => {
+            const text = perChapter?.[index] || prompt;
+            if (!node.inputs) return;
+            const current = node.inputs.prompt;
+            if (typeof current === "string") {
+                node.inputs.prompt = text;
+                return;
+            }
+            const source = linkedNode(next, current);
+            if (source?.inputs && typeof source.inputs.text === "string") source.inputs.text = text;
+            else if (source?.inputs && typeof source.inputs.value === "string") source.inputs.value = text;
+        });
+    }
+
+    // Reference images → `<Picture 1>…` slot order. A slot the user did not fill is disconnected on
+    // every chapter, so the workflow author's baked-in demo characters never reach the render.
+    slots.forEach((slot, index) => {
+        const loader = next[slot.loaderId];
+        const field = loader ? imageFieldName(loader) : "";
+        const value = imageValues[index];
+        if (value && field && loader?.inputs) {
+            loader.inputs[field] = value;
+            return;
+        }
+        for (const [, consumer] of consumers) {
+            if (!consumer.inputs || !(slot.key in consumer.inputs)) continue;
+            delete consumer.inputs[slot.key];
+            structuralRepair = true;
+        }
+    });
+
+    // Duration (seconds) → PrimitiveFloat "视频时长（秒）" (node 259, field `value`); node 250 turns it
+    // into the segment frame count (24 fps snapped to 17n+5). Keep it inside the trained band.
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_FIVE_SEGMENT_SECONDS.max, Math.max(MINIMAX_H3_FIVE_SEGMENT_SECONDS.min, duration));
+        const durationNode =
+            next["259"] ||
+            findComfyNode(next, (node) => /Primitive(Float|Int)/i.test(String(node.class_type || "")) && /时长|duration/i.test(String(node._meta?.title || "")));
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
+    }
+
+    // Aspect + precision → ResolutionSelector (node 252). The generic size writer only understands a
+    // bare "16:9" value and cannot reach the "16:9 (Widescreen)" label this workflow stores.
+    const selector =
+        next["252"] ||
+        findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        if (aspect && typeof selector.inputs.aspect_ratio === "string") selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+        const requested = Number(megapixels);
+        if (typeof megapixels === "string" && megapixels.trim() && Number.isFinite(requested) && requested > 0 && typeof selector.inputs.megapixels === "number") {
+            selector.inputs.megapixels = requested;
+        }
+    }
+
+    // The graph bakes one fixed seed across all five noise nodes — identical inputs would render
+    // identical videos on every run. Randomize per submission.
+    for (const node of Object.values(next)) {
+        if (/RandomNoise/i.test(String(node.class_type || "")) && typeof node.inputs?.noise_seed === "number") {
+            node.inputs.noise_seed = randomComfySeed();
+        }
+    }
+
+    if (pruneMinimaxH3FiveSegmentOutputs(next)) structuralRepair = true;
+    return { workflow: next, structuralRepair };
+}
+
+/**
+ * The task reports one video per segment next to the stitched one, plus the audio save node's
+ * .flac (no video extension, so it lands in the image bucket). Put the stitched video first — its
+ * filename carries the final combiner's prefix — and drop the stray audio.
+ * Exported alongside buildWorkflowPatch so the selection can be exercised headlessly.
+ */
+export function normalizeMinimaxH3FiveSegmentResult(result: RunningHubMedia, workflow: ComfyWorkflow | null): RunningHubMedia {
+    const images = result.images.filter((url) => !AUDIO_FILE_RE.test(url));
+    const videos = result.videos.filter((url) => !AUDIO_FILE_RE.test(url));
+    if (videos.length < 2) return { images, videos };
+    const prefix = minimaxH3StitchedVideoPrefix(workflow);
+    if (prefix) {
+        const stitched = videos.filter((url) => url.includes(prefix) || decodeURIComponent(url).includes(prefix));
+        if (stitched.length) return { images, videos: [...stitched, ...videos.filter((url) => !stitched.includes(url))] };
+    }
+    // Every segment finishes before the stitched video (it depends on all of them), so the last
+    // result is the one the caller wants.
+    return { images, videos: [videos[videos.length - 1], ...videos.slice(0, -1)] };
+}
+
 /**
  * A RunningHub model name doubles as its workflow id, so one model normally runs one workflow.
  * The 自动分镜 model is the exception: its workflow renders images only, so generating video from
@@ -854,6 +1185,11 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
     }
     // Runs after the generic prompt writer so the storyboard contract wins over it.
     if (isQwen3VlStoryWorkflow(workflowId)) patched = applyQwen3VlStorySettings(patched, prompt);
+    if (isMinimaxH3FiveSegmentWorkflow(workflowId)) {
+        const fiveSegment = applyMinimaxH3FiveSegmentSettings(patched, prompt, imageValues, seconds, aspect, megapixels);
+        patched = fiveSegment.workflow;
+        if (fiveSegment.structuralRepair) structuralRepair = true;
+    }
     const list: RunningHubNodeInfo[] = [];
     for (const [nodeId, node] of Object.entries(patched)) {
         const before = workflow[nodeId]?.inputs || {};
@@ -869,8 +1205,10 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
     // applyQwenImage21Settings, so skip the generic mapping for it. The Qwen Image 2.1 dual
     // (文生/编辑) pair does the same inside applyQwenImage21DualSettings. Other Qwen workflows keep
     // the hard-coded loader order; everything else uses the class_type scan.
+    const fiveSegmentLoaders = isMinimaxH3FiveSegmentWorkflow(workflowId) ? minimaxH3FiveSegmentLoaders(workflow) : null;
     const loaders =
-        isQwenImage21I2IWorkflow(workflowId) || isQwenImage21DualWorkflow(workflowId)
+        fiveSegmentLoaders ||
+        (isQwenImage21I2IWorkflow(workflowId) || isQwenImage21DualWorkflow(workflowId)
             ? []
             : isQwenImage21Workflow(workflowId)
               ? QWEN_IMAGE_21_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
@@ -878,7 +1216,7 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
                 ? MINIMAX_H3_STORY_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
                 : isQwen3VlStoryWorkflow(workflowId)
                   ? QWEN3VL_STORY_LOAD_IMAGE_ORDER.map((nodeId) => [nodeId, workflow[nodeId]] as const).filter((entry): entry is readonly [string, ComfyNode] => Boolean(entry[1]))
-                  : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")));
+                  : Object.entries(workflow).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || ""))));
     imageValues.forEach((value, index) => {
         const entry = loaders[index];
         if (!entry || !value) return;
@@ -1520,7 +1858,8 @@ async function runRunningHubWorkflowWithKey(args: {
             throw error;
         }
     }
-    return { images: task.images, videos: task.videos };
+    const result: RunningHubMedia = { images: task.images, videos: task.videos };
+    return isMinimaxH3FiveSegmentWorkflow(workflowId) ? normalizeMinimaxH3FiveSegmentResult(result, workflow) : result;
 }
 
 export async function probeRunningHubWorkflow(baseUrl: string, apiKey: string, model: string, script?: string, signal?: AbortSignal) {
