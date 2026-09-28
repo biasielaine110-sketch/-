@@ -1101,6 +1101,10 @@ export default {
             play: "播放",
             pause: "暂停",
             maximize: "最大化显示",
+            convertToVideo: "转换为视频节点",
+            convertToImage: "转换为图像节点",
+            convertBusy: "该节点正在生成，请先停止生成再转换节点类型。",
+            convertKeptMedia: "节点类型已切换，原素材已保留；转换回原类型即可恢复。",
         },
         contextMenu: {
             reorderHint: "拖动手柄可调整按钮顺序（会写入配置，可导出/导入）",

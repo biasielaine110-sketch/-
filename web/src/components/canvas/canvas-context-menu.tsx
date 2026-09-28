@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Combine, Download, FolderPlus, GripVertical, Info, Maximize2, Plus, Copy, Scissors, Trash2, Unlink2 } from "lucide-react";
+import { Combine, Download, FolderPlus, GripVertical, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Trash2, Unlink2, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useConfigStore } from "@/stores/use-config-store";
 import { mergeOrderedIds, reorderIds, sortByOrder } from "@/lib/canvas/menu-order";
+import { nodeConversionTarget } from "@/lib/canvas/node-type-conversion";
 import { CanvasNodeType, type CanvasNodeData, type ContextMenuState } from "@/types/canvas";
 import {
     buildImageToolbarTools,
@@ -42,6 +43,7 @@ export function CanvasNodeContextMenu({
     onOpenVideoTools,
     onOpenAudioTools,
     onOpenAudioMerge,
+    onConvertType,
 }: {
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
@@ -63,6 +65,8 @@ export function CanvasNodeContextMenu({
     onOpenVideoTools?: (node: CanvasNodeData) => void;
     onOpenAudioTools?: (node: CanvasNodeData) => void;
     onOpenAudioMerge?: () => void;
+    /** Switch the node's generation type in place (image ↔ video); connections are kept. */
+    onConvertType?: (node: CanvasNodeData, targetType: CanvasNodeType) => void;
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -77,6 +81,9 @@ export function CanvasNodeContextMenu({
     const hasVideo = Boolean(node && node.type === CanvasNodeType.Video && node.metadata?.content);
     const hasAudio = Boolean(node && node.type === CanvasNodeType.Audio && node.metadata?.content);
     const isAudio = Boolean(node && node.type === CanvasNodeType.Audio);
+    // Image and video nodes are the same generation slot in two flavours, so either can become the
+    // other. Other node types have no counterpart and simply never show the entry.
+    const convertTarget = node ? nodeConversionTarget(node.type) : null;
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -297,6 +304,23 @@ export function CanvasNodeContextMenu({
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
         >
+            {/* Type conversion is a structural node operation, not a tool: it stays out of the
+                reorderable list (and its saved order) and sits above it. */}
+            {convertTarget && onConvertType && node ? (
+                <div className="mb-1 border-b pb-1" style={{ borderColor: theme.toolbar.border }}>
+                    <MenuButton
+                        icon={convertTarget === CanvasNodeType.Video ? <Video className="size-4" /> : <ImageIcon className="size-4" />}
+                        label={t(convertTarget === CanvasNodeType.Video ? "canvas.controls.convertToVideo" : "canvas.controls.convertToImage")}
+                        onClick={() => {
+                            // Close an open fullscreen preview first: it is showing the payload of the
+                            // type we are about to leave.
+                            onBeforeAction?.();
+                            onConvertType(node, convertTarget);
+                            onClose();
+                        }}
+                    />
+                </div>
+            ) : null}
             {canReorder ? (
                 <div className="px-3 pb-1 pt-1.5 text-[10px] opacity-45">{t("canvas.contextMenu.reorderHint")}</div>
             ) : null}

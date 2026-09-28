@@ -188,6 +188,49 @@ export type CanvasNodeMetadata = {
     midjourneyTaskId?: string;
     /** Midjourney tile index 1–4 when the primary image is a specific Imagine tile. */
     midjourneyIndex?: number;
+    /** Media + knobs parked by a node type conversion, keyed by the type they belong to. */
+    convertedMedia?: Partial<Record<CanvasNodeType, CanvasNodeConvertedSnapshot>>;
+};
+
+/**
+ * Everything a node type owns exclusively, parked here when the node is converted to the other
+ * generation type (image ↔ video) and restored when it converts back. Keeping the payload means
+ * converting is lossless: the parked `storageKey` is still scanned by the asset cleanup, so the
+ * file survives, and a convert-and-convert-back returns the node exactly as it was.
+ */
+export type CanvasNodeConvertedSnapshot = {
+    /** Media payload. */
+    content?: string;
+    storageKey?: string;
+    thumbnailContent?: string;
+    thumbnailStorageKey?: string;
+    mimeType?: string;
+    bytes?: number;
+    durationMs?: number;
+    naturalWidth?: number;
+    naturalHeight?: number;
+    images?: CanvasNodeImage[];
+    primaryImageId?: string;
+    midjourneyTaskId?: string;
+    midjourneyIndex?: number;
+    /** Generation knobs that only ever applied to the parked type. */
+    model?: string;
+    size?: string;
+    quality?: string;
+    count?: number;
+    background?: string;
+    mjVersion?: string;
+    generationType?: CanvasImageGenerationType;
+    freeResize?: boolean;
+    seconds?: string;
+    videoResolution?: string;
+    vquality?: string;
+    generateAudio?: string;
+    watermark?: string;
+    steps?: string;
+    refImageSize?: string;
+    samplerName?: string;
+    scheduler?: string;
 };
 
 export type CanvasNodeData = {

@@ -102,6 +102,7 @@ import {
 } from "@/lib/canvas/canvas-generation-helpers";
 import { isDocumentFile, readDocumentAsText } from "@/lib/canvas/document-text";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType } from "@/lib/canvas/node-registry";
+import { convertNodeType, convertedNodeKeptMedia, nodeConversionTarget } from "@/lib/canvas/node-type-conversion";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
 import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
 import { CanvasMediaLibraryNotice } from "@/components/canvas/canvas-media-library-notice";
@@ -1343,6 +1344,29 @@ function AtelierCanvasPage() {
         setSelectedConnectionId(null);
         if (next.type !== CanvasNodeType.Group) setDialogNodeId(id);
     }, []);
+
+    // Image and video nodes are the same generation slot in two flavours, so either can become the
+    // other. The node is rewritten in place rather than recreated: its id survives, and with it every
+    // connection, group membership, merge slot and mention label. The payload of the type being left
+    // is parked in metadata (see lib/canvas/node-type-conversion) instead of dropped, so converting
+    // back brings the previous media and knobs with it and the asset cleanup keeps the file.
+    const convertNodeTypeById = useCallback(
+        (nodeId: string, targetType: CanvasNodeType) => {
+            const node = nodesRef.current.find((item) => item.id === nodeId);
+            if (!node || nodeConversionTarget(node.type) !== targetType) return;
+            // Generation writes its result back into the node by id; switching the type underneath it
+            // would land image bytes on a video node (and vice versa).
+            if (isNodeGenerating(nodeId)) {
+                message.warning(t("canvas.controls.convertBusy"));
+                return;
+            }
+            const converted = convertNodeType(node, targetType);
+            if (converted === node) return;
+            setNodes((prev) => prev.map((item) => (item.id === nodeId ? converted : item)));
+            if (convertedNodeKeptMedia(converted, node.type as CanvasNodeType)) message.info(t("canvas.controls.convertKeptMedia"));
+        },
+        [isNodeGenerating, t],
+    );
 
     const copySelectedNodes = useCallback(() => {
         const selectedIds = selectedNodeIdsRef.current;
@@ -6150,6 +6174,10 @@ function AtelierCanvasPage() {
                         onOpenVideoTools={openVideoTools}
                         onOpenAudioTools={openAudioTools}
                         onOpenAudioMerge={openAudioMerge}
+                        onConvertType={(node, targetType) => {
+                            convertNodeTypeById(node.id, targetType);
+                            setContextMenu(null);
+                        }}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);

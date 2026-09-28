@@ -1102,6 +1102,10 @@ export default {
             play: "Play",
             pause: "Pause",
             maximize: "Maximize",
+            convertToVideo: "Convert to video node",
+            convertToImage: "Convert to image node",
+            convertBusy: "This node is still generating — stop it before switching the node type.",
+            convertKeptMedia: "Node type switched. The previous media was kept — switch back to restore it.",
         },
         contextMenu: {
             reorderHint: "Drag the handle to reorder buttons (saved to config for export/import)",
