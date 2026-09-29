@@ -1481,7 +1481,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
                 <button
                     type="button"
                     data-video-action
-                    className="absolute bottom-2 left-2 z-30 grid size-9 place-items-center rounded-full border border-white/25 bg-black/55 text-white shadow-[0_6px_18px_rgba(0,0,0,.35)] backdrop-blur-md transition hover:scale-[1.05] hover:bg-black/65"
+                    className="absolute bottom-11 left-2 z-30 grid size-9 place-items-center rounded-full border border-white/25 bg-black/55 text-white shadow-[0_6px_18px_rgba(0,0,0,.35)] backdrop-blur-md transition hover:scale-[1.05] hover:bg-black/65"
                     title={playing ? t("canvas.controls.pause") : t("canvas.controls.play")}
                     aria-label={playing ? t("canvas.controls.pause") : t("canvas.controls.play")}
                     onMouseDown={stopShell}
@@ -1494,11 +1494,11 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
                     {playing ? <Pause className="size-4 fill-current" /> : <Play className="size-4 translate-x-[1px] fill-current" />}
                 </button>
             ) : null}
-            {/* 非最大化状态下也能拖动选择播放位置：滑条独立于下面一排按钮，靠 data-video-action 阻止节点拖动 */}
+            {/* 非最大化状态下也能拖动选择播放位置：滑条排在最下方（按钮行之下），靠 data-video-action 阻止节点拖动 */}
             {activated ? (
                 <div
                     data-video-action
-                    className="absolute inset-x-3 bottom-12 z-30 flex items-center gap-2 rounded-full border border-white/15 bg-black/50 px-3 py-1.5 backdrop-blur-md"
+                    className="absolute inset-x-3 bottom-2 z-30 flex items-center gap-2 rounded-full border border-white/15 bg-black/50 px-3 py-1.5 backdrop-blur-md"
                     onMouseDown={stopShell}
                     onPointerDown={stopShell}
                     onClick={stopShell}
@@ -1537,7 +1537,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
             {activated ? (
                 <div
                     data-video-action
-                    className="absolute bottom-2 right-2 z-30 flex items-center gap-1.5"
+                    className="absolute bottom-11 right-2 z-30 flex items-center gap-1.5"
                     onMouseDown={stopShell}
                     onPointerDown={stopShell}
                     onClick={stopShell}
