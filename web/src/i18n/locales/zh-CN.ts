@@ -1102,6 +1102,7 @@ export default {
             play: "播放",
             pause: "暂停",
             maximize: "最大化显示",
+            seek: "拖动选择播放位置",
             convertToVideo: "转换为视频节点",
             convertToImage: "转换为图像节点",
             convertBusy: "该节点正在生成，请先停止生成再转换节点类型。",

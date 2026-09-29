@@ -1099,6 +1099,14 @@ export const registerCanvasMedia = (key: string, entry: CanvasMediaToggle) => {
 };
 export const getCanvasMediaToggle = (key: string) => canvasMediaRegistry.get(key);
 
+// Compact `m:ss` readout for the inline scrubber. Videos here are short generations, so minutes are
+// allowed past 60 instead of growing an hour segment.
+function formatClock(seconds: number) {
+    if (!Number.isFinite(seconds) || seconds <= 0) return "0:00";
+    const total = Math.floor(seconds);
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
 function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey: memoryKeyProp }: { src: string; posterSrc?: string; storageKey?: string; mimeType?: string; memoryKey?: string }) {
     const { t } = useTranslation();
     const { message } = App.useApp();
@@ -1118,6 +1126,13 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
     // A "最大化显示" request made while the player is still on its poster: activation has to render
     // the <video> first, so we remember the intent and honour it right after the element mounts.
     const pendingFullscreenRef = useRef(false);
+    // Inline scrubber state. `duration` 0 means "metadata not loaded yet" — the track then stays
+    // non-interactive rather than seeking into a zero-length timeline.
+    const [currentTime, setCurrentTime] = useState(0);
+    const [duration, setDuration] = useState(0);
+    const scrubTrackRef = useRef<HTMLDivElement>(null);
+    // While a drag is in flight the pointer owns the position; timeupdate must not fight it.
+    const scrubbingRef = useRef(false);
 
     // A real source switch (different video in this slot) resets the player — but a playableSrc
     // swap for the SAME video (blob URL refreshed after a load error) must not, or it would
@@ -1132,6 +1147,8 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
         wantPlayRef.current = false;
         setActivated(false);
         setPlaying(false);
+        setCurrentTime(0);
+        setDuration(0);
     }
 
     // A dead blob: URL (revoked mid-session / failed hydration) leaves a plain <video> black
@@ -1274,6 +1291,81 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
         }
     };
 
+    // ---- Inline scrubber -------------------------------------------------
+    // Prefer the element's own duration so the track stays correct, falling back to the value the
+    // last metadata event reported (some containers only expose a finite duration after a decode).
+    const readDuration = () => {
+        const raw = videoRef.current?.duration;
+        if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
+        return duration;
+    };
+
+    const seekToClientX = (clientX: number) => {
+        const track = scrubTrackRef.current;
+        const video = videoRef.current;
+        if (!track || !video) return;
+        const total = readDuration();
+        const rect = track.getBoundingClientRect();
+        if (!(total > 0) || rect.width <= 0) return;
+        const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+        const target = ratio * total;
+        // An explicit drag supersedes a not-yet-applied "restore last position" seek.
+        pendingSeekRef.current = null;
+        if (Math.abs(video.currentTime - target) < 0.02) return;
+        video.currentTime = target;
+        setCurrentTime(target);
+    };
+
+    const handleScrubStart = (event: React.PointerEvent<HTMLDivElement>) => {
+        // Keep the pointerdown off the node shell: otherwise dragging the handle would drag the
+        // whole node across the canvas instead of scrubbing.
+        event.stopPropagation();
+        event.preventDefault();
+        scrubbingRef.current = true;
+        try {
+            event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+            // Capture is best-effort; the move handler still works while the pointer stays inside.
+        }
+        seekToClientX(event.clientX);
+    };
+
+    const handleScrubMove = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (!scrubbingRef.current) return;
+        event.stopPropagation();
+        seekToClientX(event.clientX);
+    };
+
+    const handleScrubEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (!scrubbingRef.current) return;
+        event.stopPropagation();
+        scrubbingRef.current = false;
+        try {
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+        } catch {
+            // Already released (pointercancel / lost capture) — nothing to undo.
+        }
+        remember();
+    };
+
+    // Arrow keys nudge playback once the track has focus, bounded so it can never leave the clip.
+    const handleScrubKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+        const video = videoRef.current;
+        if (!video) return;
+        const total = readDuration();
+        if (!(total > 0)) return;
+        const step = event.key === "ArrowLeft" ? -5 : event.key === "ArrowRight" ? 5 : 0;
+        if (!step) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const target = Math.min(total, Math.max(0, video.currentTime + step));
+        video.currentTime = target;
+        setCurrentTime(target);
+        remember();
+    };
+
+    const scrubPercent = duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0;
+
     // Register the entry exposed to the canvas: `toggle` powers the global Space shortcut (only
     // once activated, so an un-started video leaves Space to the canvas pan) and `maximize` backs
     // the right-click "最大化显示" entry for this node. Keyed by memoryKey (the node id for
@@ -1325,14 +1417,29 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
                     data-canvas-no-zoom
                     onLoadedMetadata={() => {
                         const video = videoRef.current;
-                        if (video && pendingSeekRef.current != null) {
+                        if (!video) return;
+                        const known = typeof video.duration === "number" && Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+                        setDuration(known);
+                        if (pendingSeekRef.current != null) {
                             const target = pendingSeekRef.current;
                             pendingSeekRef.current = null;
-                            const duration = Number.isFinite(video.duration) ? video.duration : target;
-                            video.currentTime = Math.min(target, Math.max(0, duration - 0.05));
+                            const total = known > 0 ? known : target;
+                            video.currentTime = Math.min(target, Math.max(0, total - 0.05));
                         }
+                        setCurrentTime(video.currentTime);
                     }}
-                    onTimeUpdate={() => remember()}
+                    onDurationChange={() => {
+                        const raw = videoRef.current?.duration;
+                        setDuration(typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0);
+                    }}
+                    onTimeUpdate={() => {
+                        remember();
+                        const video = videoRef.current;
+                        // A drag owns the position while the pointer is down, and stepping the handle
+                        // only at 0.1s granularity keeps the node from re-rendering on every tick.
+                        if (!video || scrubbingRef.current) return;
+                        setCurrentTime((previous) => (Math.abs(previous - video.currentTime) >= 0.1 ? video.currentTime : previous));
+                    }}
                     onError={handleVideoError}
                     onPlay={() => {
                         wantPlayRef.current = true;
@@ -1347,6 +1454,9 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
                     onEnded={() => {
                         setPlaying(false);
                         rememberVideoPlayback(memoryKey, { time: 0 });
+                        // Park the handle at the end; the remembered position is still 0 so the next
+                        // activation replays from the start.
+                        setCurrentTime(readDuration());
                     }}
                 />
             ) : posterSrc ? (
@@ -1383,6 +1493,46 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
                 >
                     {playing ? <Pause className="size-4 fill-current" /> : <Play className="size-4 translate-x-[1px] fill-current" />}
                 </button>
+            ) : null}
+            {/* 非最大化状态下也能拖动选择播放位置：滑条独立于下面一排按钮，靠 data-video-action 阻止节点拖动 */}
+            {activated ? (
+                <div
+                    data-video-action
+                    className="absolute inset-x-3 bottom-12 z-30 flex items-center gap-2 rounded-full border border-white/15 bg-black/50 px-3 py-1.5 backdrop-blur-md"
+                    onMouseDown={stopShell}
+                    onPointerDown={stopShell}
+                    onClick={stopShell}
+                >
+                    <div
+                        ref={scrubTrackRef}
+                        role="slider"
+                        tabIndex={0}
+                        aria-label={t("canvas.controls.seek")}
+                        aria-valuemin={0}
+                        aria-valuemax={Math.round(duration)}
+                        aria-valuenow={Math.round(currentTime)}
+                        title={t("canvas.controls.seek")}
+                        className={`group relative h-4 flex-1 touch-none select-none ${duration > 0 ? "cursor-pointer" : "cursor-default"}`}
+                        onPointerDown={handleScrubStart}
+                        onPointerMove={handleScrubMove}
+                        onPointerUp={handleScrubEnd}
+                        onPointerCancel={handleScrubEnd}
+                        onKeyDown={handleScrubKeyDown}
+                    >
+                        <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-white/30">
+                            <div className="h-full rounded-full bg-white" style={{ width: `${scrubPercent}%` }} />
+                        </div>
+                        {duration > 0 ? (
+                            <div
+                                className="pointer-events-none absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white shadow-[0_2px_6px_rgba(0,0,0,.45)] transition-transform group-hover:scale-110"
+                                style={{ left: `${scrubPercent}%` }}
+                            />
+                        ) : null}
+                    </div>
+                    <span className="shrink-0 text-[10px] font-medium leading-none tabular-nums text-white/90">
+                        {formatClock(currentTime)} / {formatClock(duration)}
+                    </span>
+                </div>
             ) : null}
             {activated ? (
                 <div

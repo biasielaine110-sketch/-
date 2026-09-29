@@ -1103,6 +1103,7 @@ export default {
             play: "Play",
             pause: "Pause",
             maximize: "Maximize",
+            seek: "Drag to seek",
             convertToVideo: "Convert to video node",
             convertToImage: "Convert to image node",
             convertBusy: "This node is still generating — stop it before switching the node type.",
