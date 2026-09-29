@@ -2,11 +2,18 @@ export type TextPromptEntry = {
     id: string;
     title: string;
     content: string;
+    /** When false the entry stays in the library but is hidden from the text-node picker. Defaults to true. */
+    enabled?: boolean;
 };
 
 /** id / title of the built-in prompt-optimizer entry used by the composer button. */
 export const H3_PROMPT_OPTIMIZER_ID = "h3-prompt-optimizer";
 export const H3_PROMPT_OPTIMIZER_TITLE = "H3-提示词优化";
+
+/** Enabled unless explicitly turned off. Mirrors isChannelModelEnabled (undefined = enabled). */
+export function isTextPromptEnabled(entry: Pick<TextPromptEntry, "enabled"> | null | undefined): boolean {
+    return entry?.enabled !== false;
+}
 
 /** Standalone so the config-store migration and the composer button share one source. */
 export const h3PromptOptimizerEntry: TextPromptEntry = {
@@ -70,7 +77,10 @@ export function normalizeTextPrompts(value: unknown): TextPromptEntry[] {
         const id = String(entry.id || "").trim() || `prompt-${result.length + 1}`;
         if (seen.has(id)) continue;
         seen.add(id);
-        result.push({ id, title, content });
+        const normalized: TextPromptEntry = { id, title, content };
+        // Preserve the disabled flag; undefined means enabled (matches the channel-model convention).
+        if (entry.enabled === false) normalized.enabled = false;
+        result.push(normalized);
     }
     return result;
 }

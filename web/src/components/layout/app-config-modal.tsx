@@ -23,7 +23,7 @@ import {
     type LocalMediaMigrateProgress,
 } from "@/services/local-media-library";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { defaultTextPrompts } from "@/constant/text-prompt-library";
+import { defaultTextPrompts, isTextPromptEnabled } from "@/constant/text-prompt-library";
 import {
     channelProtocolSummary,
     createModelChannel,
@@ -524,7 +524,7 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
                             onDrop={(event) => handlePromptDrop(event, prompt.id)}
                             className={`rounded-lg border p-3 transition-colors dark:border-stone-800 ${
                                 draggingPromptId === prompt.id ? "opacity-50" : ""
-                            } ${
+                            } ${isTextPromptEnabled(prompt) ? "" : "opacity-60"} ${
                                 dragOverPromptId === prompt.id && draggingPromptId !== prompt.id
                                     ? "border-sky-400 bg-sky-50 dark:border-sky-500 dark:bg-sky-950/40"
                                     : "border-stone-200"
@@ -561,6 +561,14 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
                                     onClick={() => movePrompt(index, prompts.length - 1)}
                                 >
                                     ⇊                                </Button>
+                                <Switch
+                                    size="small"
+                                    checked={isTextPromptEnabled(prompt)}
+                                    onChange={(checked) => updatePrompt(prompt.id, { enabled: checked ? undefined : false })}
+                                    checkedChildren={t("config.preferences.textPromptEnabled")}
+                                    unCheckedChildren={t("config.preferences.textPromptDisabled")}
+                                    title={isTextPromptEnabled(prompt) ? t("config.preferences.textPromptDisableTitle") : t("config.preferences.textPromptEnableTitle")}
+                                />
                                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removePrompt(prompt.id)} />
                             </div>
                             <CanvasFindReplaceTextArea

@@ -3,6 +3,7 @@ import { Dropdown, type MenuProps } from "antd";
 import { BookMarked, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { isTextPromptEnabled } from "@/constant/text-prompt-library";
 import { useConfigStore, type TextPromptEntry } from "@/stores/use-config-store";
 
 type CanvasTextPromptPickerProps = {
@@ -19,6 +20,8 @@ export function CanvasTextPromptPicker({ onSelect, onOpenPreferences, size = "de
     const [open, setOpen] = useState(false);
     const textPrompts = useConfigStore((state) => state.config.textPrompts || []);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
+    // Entries switched off in preferences stay saved but are hidden from this picker.
+    const visiblePrompts = textPrompts.filter(isTextPromptEnabled);
 
     useEffect(() => {
         if (!open) return;
@@ -41,8 +44,8 @@ export function CanvasTextPromptPicker({ onSelect, onOpenPreferences, size = "de
     }, [open]);
 
     const items: MenuProps["items"] = [
-        ...(textPrompts.length
-            ? textPrompts.map((prompt) => ({
+        ...(visiblePrompts.length
+            ? visiblePrompts.map((prompt) => ({
                   key: prompt.id,
                   label: (
                       <div className="max-w-72">
