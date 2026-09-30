@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { App, Modal, Segmented, Tooltip } from "antd";
-import { Clapperboard, Combine, Download, Ellipsis, FolderPlus, Highlighter, Image as ImageIcon, Info, MessageSquare, MessageSquareText, Minus, Music2, Plus, RefreshCw, Scissors, Settings2, Trash2, Type, Upload, Video } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { App, Dropdown, Modal, Segmented, Tooltip } from "antd";
+import { ChevronDown, Clapperboard, Combine, Download, Ellipsis, FolderPlus, Highlighter, Image as ImageIcon, Info, MessageSquare, MessageSquareText, Minus, Music2, Plus, RefreshCw, Scissors, Settings2, Trash2, Type, Upload, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import type { TextExportFormat } from "@/lib/canvas/document-text";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
@@ -26,7 +27,7 @@ type CanvasNodeHoverToolbarProps = {
     onCreateChat: (node: CanvasNodeData) => void;
     onEditText: (node: CanvasNodeData) => void;
     onUpload: (node: CanvasNodeData) => void;
-    onDownload: (node: CanvasNodeData) => void;
+    onDownload: (node: CanvasNodeData, options?: { textFormat?: TextExportFormat }) => void;
     onSaveAsset: (node: CanvasNodeData) => void;
     onMaskEdit: (node: CanvasNodeData) => void;
     onAnnotate: (node: CanvasNodeData) => void;
@@ -49,6 +50,12 @@ type CanvasNodeHoverToolbarProps = {
     onOpenAudioMerge?: () => void;
 };
 
+type ToolbarMenuItem = {
+    key: string;
+    label: string;
+    onClick: () => void;
+};
+
 type ToolbarTool = {
     id: string;
     title: string;
@@ -57,6 +64,9 @@ type ToolbarTool = {
     onClick: () => void;
     active?: boolean;
     danger?: boolean;
+    /** Present when the button opens a picker instead of acting immediately (e.g. text export). */
+    menu?: ToolbarMenuItem[];
+    onMenuOpenChange?: (open: boolean) => void;
 };
 
 export function CanvasNodeHoverToolbar({
@@ -104,12 +114,17 @@ export function CanvasNodeHoverToolbar({
     const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
     const [draftShowImageToolLabels, setDraftShowImageToolLabels] = useState(false);
     const [imageToolSettingsOpen, setImageToolSettingsOpen] = useState(false);
+    // An open export picker lives in a portal, so a mouse leave must not tear the toolbar (and with
+    // it the picker) down — same reason imageToolSettingsOpen is guarded below and on mouse leave.
+    const [exportMenuOpen, setExportMenuOpen] = useState(false);
+    const toolbarHoverRef = useRef(false);
     const { message } = App.useApp();
     const { t } = useTranslation();
     const copyText = useCopyText();
 
     useEffect(() => {
         setImageToolSettingsOpen(false);
+        setExportMenuOpen(false);
     }, [node?.id]);
 
     if (!node) return null;
@@ -146,6 +161,21 @@ export function CanvasNodeHoverToolbar({
         setImageToolSettingsOpen(true);
     }
 
+    const handleToolbarEnter = () => {
+        toolbarHoverRef.current = true;
+        onKeep(activeNode.id);
+    };
+    const handleToolbarLeave = () => {
+        toolbarHoverRef.current = false;
+        if (!imageToolSettingsOpen && !exportMenuOpen) onLeave();
+    };
+    const handleExportMenuOpenChange = (open: boolean) => {
+        setExportMenuOpen(open);
+        // The picker renders in a portal, so it is normally closed with the pointer already outside
+        // the toolbar: no further mouseleave would fire and the toolbar would stay pinned forever.
+        if (!open && !toolbarHoverRef.current) onLeave();
+    };
+
     const baseToolbarTools: ToolbarTool[] = [
         { id: "info", title: t("canvas.nodeToolbar.infoTitle"), label: t("canvas.nodeToolbar.info"), icon: <Info className="size-[10px]" />, onClick: () => onInfo(node) },
         { id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-[10px]" />, onClick: () => onDelete(node), danger: true },
@@ -154,7 +184,22 @@ export function CanvasNodeHoverToolbar({
         ...(canRetry ? [{ id: "retry", title: t("canvas.nodeToolbar.retryTitle"), label: t("canvas.node.retry"), icon: <RefreshCw className="size-[10px]" />, onClick: () => onRetry(node) }] : []),
         ...(hasImage || hasVideo || isText ? [{ id: "saveAsset", title: t("common.addToAssets"), label: t("canvas.nodeToolbar.saveAsset"), icon: <FolderPlus className="size-[10px]" />, onClick: () => onSaveAsset(node) }] : []),
         ...(hasImage || hasVideo || hasAudio ? [{ id: "download", title: t(hasAudio ? "canvas.nodeToolbar.downloadAudio" : hasVideo ? "canvas.nodeToolbar.downloadVideo" : "canvas.nodeToolbar.downloadImage"), label: t("common.download"), icon: <Download className="size-[10px]" />, onClick: () => onDownload(node) }] : []),
-        ...(isText ? [{ id: "exportDocument", title: t("canvas.nodeToolbar.exportDocumentTitle"), label: t("canvas.nodeToolbar.exportDocument"), icon: <Download className="size-[10px]" />, onClick: () => onDownload(node) }] : []),
+        ...(isText
+            ? [
+                  {
+                      id: "exportDocument",
+                      title: t("canvas.nodeToolbar.exportDocumentTitle"),
+                      label: t("canvas.nodeToolbar.exportDocument"),
+                      icon: <Download className="size-[10px]" />,
+                      onClick: () => onDownload(node),
+                      onMenuOpenChange: handleExportMenuOpenChange,
+                      menu: [
+                          { key: "docx", label: t("canvas.nodeToolbar.exportDocumentDocx"), onClick: () => onDownload(node, { textFormat: "docx" }) },
+                          { key: "md", label: t("canvas.nodeToolbar.exportDocumentMarkdown"), onClick: () => onDownload(node, { textFormat: "md" }) },
+                      ],
+                  },
+              ]
+            : []),
         ...(isVideo ? [{ id: "edit", title: t("common.edit"), label: t("common.edit"), icon: <MessageSquare className="size-[10px]" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isText ? [{ id: "editText", title: t("canvas.nodeToolbar.editTextTitle"), label: t("canvas.nodeToolbar.editText"), icon: <Type className="size-[10px]" />, onClick: () => onEditText(node) }] : []),
         ...(isText ? [{ id: "createChat", title: t("canvas.node.createChatTitle"), label: t("canvas.node.createChat"), icon: <MessageSquareText className="size-[10px]" />, onClick: () => onCreateChat(node) }] : []),
@@ -212,10 +257,8 @@ export function CanvasNodeHoverToolbar({
                     isChat ? "h-10 rounded-2xl text-base" : "h-[31px] text-[10px]"
                 }`}
                 style={{ left, top }}
-                onMouseEnter={() => onKeep(node.id)}
-                onMouseLeave={() => {
-                    if (!imageToolSettingsOpen) onLeave();
-                }}
+                onMouseEnter={handleToolbarEnter}
+                onMouseLeave={handleToolbarLeave}
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
             >
@@ -311,16 +354,27 @@ export function CanvasNodeInfoModal({ node, open, onClose }: { node: CanvasNodeD
     );
 }
 
-function ToolbarAction({ title, label, icon, onClick, showLabel, active = false, danger = false, large = false }: ToolbarTool & { showLabel: boolean; large?: boolean }) {
+function ToolbarAction({ title, label, icon, onClick, menu, onMenuOpenChange, showLabel, active = false, danger = false, large = false }: ToolbarTool & { showLabel: boolean; large?: boolean }) {
     const hasText = showLabel && Boolean(label);
+    const button = (
+        <button type="button" className={`group relative flex items-center whitespace-nowrap px-[3px] ${large ? "h-10" : "h-[31px]"} ${danger ? "text-[#f87171]" : ""}`} onClick={menu?.length ? undefined : onClick} aria-label={title}>
+            <span className={`flex items-center ${large ? "h-8" : "h-[23px]"} ${hasText ? (large ? "gap-2 px-2.5" : "gap-1.5 px-2") : large ? "justify-center px-2" : "justify-center px-1.5"} rounded-md transition group-hover:bg-white/15 ${active ? "bg-white/20" : ""}`}>
+                {icon}
+                {hasText ? <span>{label}</span> : null}
+                {menu?.length ? <ChevronDown className="size-[9px] opacity-60" /> : null}
+            </span>
+        </button>
+    );
+    if (menu?.length) {
+        return (
+            <Dropdown trigger={["click"]} placement="top" onOpenChange={onMenuOpenChange} menu={{ items: menu.map((item) => ({ key: item.key, label: item.label, onClick: item.onClick })) }}>
+                {button}
+            </Dropdown>
+        );
+    }
     return (
         <Tooltip title={title} placement="top" mouseEnterDelay={0.2} color="rgba(64,64,64,.92)" styles={{ root: { color: "#f5f5f5", boxShadow: "0 4px 12px rgba(15,23,42,.2)", fontSize: large ? 16 : 14, fontWeight: 500 } }}>
-            <button type="button" className={`group relative flex items-center whitespace-nowrap px-[3px] ${large ? "h-10" : "h-[31px]"} ${danger ? "text-[#f87171]" : ""}`} onClick={onClick} aria-label={title}>
-                <span className={`flex items-center ${large ? "h-8" : "h-[23px]"} ${hasText ? (large ? "gap-2 px-2.5" : "gap-1.5 px-2") : large ? "justify-center px-2" : "justify-center px-1.5"} rounded-md transition group-hover:bg-white/15 ${active ? "bg-white/20" : ""}`}>
-                    {icon}
-                    {hasText ? <span>{label}</span> : null}
-                </span>
-            </button>
+            {button}
         </Tooltip>
     );
 }

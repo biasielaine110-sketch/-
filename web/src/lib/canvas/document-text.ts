@@ -128,6 +128,10 @@ function stripRtf(input: string) {
 // ---------------------------------------------------------------------------
 
 export const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+export const MARKDOWN_MIME_TYPE = "text/markdown;charset=utf-8";
+
+/** A text node leaves as either a formatted Word document or the raw markdown it stores. */
+export type TextExportFormat = "docx" | "md";
 
 /**
  * Word measures run sizes in half-points. The body is set at 21 (10.5pt ≈ 五号), the size Chinese
@@ -171,6 +175,14 @@ export function buildDocxBlob(markdown: string, options?: { title?: string }): B
         "word/document.xml": strToU8(buildDocumentXml(markdown)),
     };
     return new Blob([zipSync(entries)], { type: DOCX_MIME_TYPE });
+}
+
+/**
+ * Keep the markdown source verbatim. Routing this through the docx builder would strip the very
+ * `#` / `**` markers someone asking for a `.md` file wants to keep.
+ */
+export function buildMarkdownBlob(markdown: string): Blob {
+    return new Blob([markdown], { type: MARKDOWN_MIME_TYPE });
 }
 
 function escapeXmlText(value: string) {

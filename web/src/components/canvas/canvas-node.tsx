@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { App } from "antd";
-import { ChevronRight, Clapperboard, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
+import { App, Dropdown } from "antd";
+import { ChevronDown, ChevronRight, Clapperboard, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
 
 import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas-display-image";
 import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
+import type { TextExportFormat } from "@/lib/canvas/document-text";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
@@ -63,7 +64,7 @@ type CanvasNodeProps = {
     onCancelGeneration?: (nodeId: string) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onCreateChat?: (node: CanvasNodeData) => void;
-    onExportDocument?: (node: CanvasNodeData) => void;
+    onExportDocument?: (node: CanvasNodeData, options?: { textFormat?: TextExportFormat }) => void;
     onSendChat?: (nodeId: string, text: string, options?: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
     onChatModelChange?: (nodeId: string, model: string) => void;
     onChatImageModelChange?: (nodeId: string, model: string) => void;
@@ -95,7 +96,7 @@ type NodeContentRendererProps = {
     onCancelGeneration?: (nodeId: string) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onCreateChat?: (node: CanvasNodeData) => void;
-    onExportDocument?: (node: CanvasNodeData) => void;
+    onExportDocument?: (node: CanvasNodeData, options?: { textFormat?: TextExportFormat }) => void;
     onSendChat?: (nodeId: string, text: string, options?: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
     onChatModelChange?: (nodeId: string, model: string) => void;
     onChatImageModelChange?: (nodeId: string, model: string) => void;
@@ -936,23 +937,32 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
                     onSelect={(prompt) => onContentChange(node.id, prompt.content)}
                 />
-                <button
-                    type="button"
-                    className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100 disabled:opacity-35"
-                    style={actionButtonStyle}
+                <Dropdown
+                    trigger={["click"]}
+                    placement="bottomRight"
                     disabled={!((node.metadata?.content || node.metadata?.prompt || "").trim())}
-                    onClick={(event) => {
-                        event.stopPropagation();
-                        onExportDocument?.(node);
+                    menu={{
+                        items: [
+                            { key: "docx", label: t("canvas.nodeToolbar.exportDocumentDocx"), onClick: () => onExportDocument?.(node, { textFormat: "docx" }) },
+                            { key: "md", label: t("canvas.nodeToolbar.exportDocumentMarkdown"), onClick: () => onExportDocument?.(node, { textFormat: "md" }) },
+                        ],
                     }}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    title={t("canvas.nodeToolbar.exportDocumentTitle")}
-                    aria-label={t("canvas.nodeToolbar.exportDocument")}
                 >
-                    <Download className="size-3.5 shrink-0" />
-                    {t("canvas.nodeToolbar.exportDocument")}
-                </button>
+                    <button
+                        type="button"
+                        className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100 disabled:opacity-35"
+                        style={actionButtonStyle}
+                        disabled={!((node.metadata?.content || node.metadata?.prompt || "").trim())}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        title={t("canvas.nodeToolbar.exportDocumentTitle")}
+                        aria-label={t("canvas.nodeToolbar.exportDocument")}
+                    >
+                        <Download className="size-3.5 shrink-0" />
+                        {t("canvas.nodeToolbar.exportDocument")}
+                        <ChevronDown className="size-3 shrink-0 opacity-70" />
+                    </button>
+                </Dropdown>
                 <button
                     type="button"
                     className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
