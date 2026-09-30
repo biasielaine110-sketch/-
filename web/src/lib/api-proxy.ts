@@ -17,6 +17,11 @@ import { CONFIG_STORE_KEY, type ApiTransport } from "@/stores/use-config-store";
 const DIRECT_CORS_HOSTS = [
     "autodl.art",
     "runninghub.cn",
+    // RunningHub result-file CDN (rh-images/rh-videos *.xiaoyaoyou.com, ByteDance TOS fronted).
+    // Verified per-host: sends `Access-Control-Allow-Origin: *` + `Allow-Methods: GET, HEAD`, so a
+    // plain media GET passes CORS straight from the browser, while the Vercel edge (overseas)
+    // cannot reach this CN-only host and /api/proxy just 502s on it.
+    "xiaoyaoyou.com",
 ];
 
 function isDirectCorsHost(origin: string): boolean {
