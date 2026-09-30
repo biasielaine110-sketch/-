@@ -574,6 +574,72 @@ function applyQwenImage21DualSettings(
     return { workflow: next, rewired };
 }
 
+// Qwen Image 2.1 文生、图像编辑一体化 workflow (runninghub.cn 2105280251281625089 /
+// runninghub.ai 2105280279937130497). One graph serves both text-to-image and image editing:
+// the QwenImagePromptOptimizer (179) rewrites the user prompt with the PE model matching the mode
+// it detects, and a GoohaiRouteBlocker (170) either passes the LoadImageGoohai reference (193)
+// into the encoder's image_01 slot or blocks it. Its knobs do not match the generic heuristics:
+//   - the prompt lives in a DF_Text_Box (22) whose field is capitalised `Text` — PROMPT_FIELDS
+//     only knows lowercase `text`, so neither the generic writer nor applyComfyPrompt can reach
+//     it and the graph would keep running its baked demo prompt;
+//   - output size is decided by GoohaiRatioAndResolution (39), whose `比例` is a ratio enum
+//     ("原始比例" …) the generic size writer cannot produce — the canvas aspect choice would
+//     be silently ignored. Only the ratio is mapped: the author's 总像素 + 2MP mode stays as
+//     baked, so an unknown 百万像素 combo value can never hard-fail the task;
+//   - the KSampler (12) bakes a fixed seed, so identical inputs repeated identical images.
+// The single reference loader (193) also feeds the optimizer's 图像_01, so the generic LoadImage
+// mapping is enough — no graph rewiring. Everything below is scoped to these two ids only.
+const QWEN_IMAGE_21_UNIFIED_WORKFLOW_IDS = new Set(["2105280251281625089", "2105280279937130497"]);
+
+function isQwenImage21UnifiedWorkflow(workflowId?: string | null) {
+    return Boolean(workflowId && QWEN_IMAGE_21_UNIFIED_WORKFLOW_IDS.has(workflowId));
+}
+
+function applyQwenImage21UnifiedSettings(workflow: ComfyWorkflow, pristine: ComfyWorkflow, prompt: string, size?: { width: number; height: number } | null, aspect = "") {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+
+    // User prompt → DF_Text_Box "Text" (node 22), head of the
+    // 22 → QwenImagePromptOptimizer(179) → ShowText(111) → TextEncodeQwenImage21GH(118) chain.
+    // The optimizer rewrites/annotates it, so the raw user text must land here, not at the encoder.
+    if (prompt.trim()) {
+        const promptNode =
+            next["22"] ||
+            findComfyNode(next, (node) => typeof node.inputs?.Text === "string" && /提示词|prompt/i.test(`${node.class_type || ""} ${node._meta?.title || ""}`));
+        if (promptNode?.inputs && typeof promptNode.inputs.Text === "string") promptNode.inputs.Text = prompt;
+    }
+
+    // Drop inputs that are not part of the node's declared API surface. The generic prompt
+    // writer falls through to applyComfyPrompt here (DF_Text_Box's capitalised `Text` is outside
+    // PROMPT_FIELDS), whose force path invents a `text` input on the optimizer (179) that the node
+    // does not declare — RunningHub rejects overrides for unknown fields, and that rejection takes
+    // the whole nodeInfo batch with it, silently falling back to the baked demo prompt.
+    for (const [nodeId, node] of Object.entries(next)) {
+        if (!node?.inputs) continue;
+        const declared = pristine[nodeId]?.inputs || {};
+        for (const field of Object.keys(node.inputs)) {
+            if (!(field in declared)) delete node.inputs[field];
+        }
+    }
+
+    // Canvas aspect → GoohaiRatioAndResolution `比例` (node 39). Ratio strings are that node's own
+    // enum values ("原始比例" is just its "follow the reference" option), and
+    // closestResolutionSelectorAspect snaps the canvas size onto the shared 8-ratio set.
+    const ratioNode = next["39"] || findComfyNode(next, (node) => node.class_type === "GoohaiRatioAndResolution");
+    if (ratioNode?.inputs && typeof ratioNode.inputs["比例"] === "string") {
+        const nextAspect = aspect || (size?.width && size.height ? closestResolutionSelectorAspect(size.width, size.height) : "");
+        if (nextAspect) ratioNode.inputs["比例"] = nextAspect;
+    }
+
+    // Fixed seeds → identical results for identical inputs. Randomize per submission.
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        if (/RandomNoise/i.test(type) && typeof node.inputs?.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
+        else if (/KSampler|SamplerCustom/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+    }
+
+    return next;
+}
+
 // MiniMax H3 高一致性-故事多分镜图 workflow (reference-to-video + 6 storyboard frames).
 // Its knobs do not match the generic field-name heuristics: duration is a PrimitiveFloat
 // titled "Float (Duration)" (field "value", not "duration"), the ResolutionSelector stores a
@@ -1176,6 +1242,8 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         patched = dual.workflow;
         structuralRepair = dual.rewired;
     }
+    // Runs after the generic prompt writer so the scoped prompt slot wins over it.
+    if (isQwenImage21UnifiedWorkflow(workflowId)) patched = applyQwenImage21UnifiedSettings(patched, workflow, prompt, size, aspect);
     if (isMinimaxH3StoryWorkflow(workflowId)) {
         // Pristine (pre-tier) megapixels become the fallback so an unset precision keeps the
         // workflow's own default instead of the tier writer's 1k downgrade.
