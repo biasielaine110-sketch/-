@@ -3060,6 +3060,24 @@ export async function requestChatWithTools(
     return answer;
 }
 
+/**
+ * Most OpenAI-compatible servers (llama.cpp, Ollama, most CN relays) speak Chat Completions but not
+ * the newer Responses API. The first turn discovers that with a 404 and falls back, which is fine —
+ * but re-probing on every turn burns a round trip and prints a scary red 404 in the console, so a
+ * base URL that answers "no such route" is remembered for the rest of the session.
+ */
+const chatOnlyBaseUrls = new Set<string>();
+
+function chatCapabilityKey(config: AiConfig) {
+    return (config.baseUrl || "").trim().replace(/\/+$/, "").toLowerCase();
+}
+
+/** A missing route, not a transient failure — a 500 or a timeout must not pin the fallback. */
+function isResponsesRouteMissing(error: unknown) {
+    const message = error instanceof Error ? error.message : String(error || "");
+    return /(^|\D)404(\D|$)|not\s*found|接口地址不存在|unknown\s*url|invalid\s*url/i.test(message);
+}
+
 async function requestChatTurn(
     config: AiConfig,
     messages: ResponseInputMessage[],
@@ -3085,29 +3103,32 @@ async function requestChatTurn(
         );
     }
 
-    const preferChatCompletions = isVolcengineArkBaseUrl(config.baseUrl);
+    const capabilityKey = chatCapabilityKey(config);
+    const chatOnly = chatOnlyBaseUrls.has(capabilityKey);
+    const preferChatCompletions = chatOnly || isVolcengineArkBaseUrl(config.baseUrl);
     if (preferChatCompletions) {
         try {
             return await requestChatCompletionsTurn(config, messages, onDelta, options);
         } catch (chatError) {
-            if (!tools.length) {
-                try {
-                    return await requestStreamingResponse(
-                        config,
-                        {
-                            model: config.model,
-                            input: toResponseInput(messages),
-                            ...(config.reasoningEffort === "auto" ? {} : { reasoning: { effort: config.reasoningEffort } }),
-                            ...toolPayload,
-                        },
-                        onDelta,
-                        options,
-                    );
-                } catch {
-                    throw chatError;
-                }
+            // Nothing to gain from probing the Responses API when we already know it is absent.
+            if (tools.length || chatOnly) {
+                throw chatError;
             }
-            throw chatError;
+            try {
+                return await requestStreamingResponse(
+                    config,
+                    {
+                        model: config.model,
+                        input: toResponseInput(messages),
+                        ...(config.reasoningEffort === "auto" ? {} : { reasoning: { effort: config.reasoningEffort } }),
+                        ...toolPayload,
+                    },
+                    onDelta,
+                    options,
+                );
+            } catch {
+                throw chatError;
+            }
         }
     }
 
@@ -3125,6 +3146,7 @@ async function requestChatTurn(
         );
     } catch (responsesError) {
         if (!shouldFallbackToChatCompletions(responsesError)) throw responsesError;
+        if (isResponsesRouteMissing(responsesError)) chatOnlyBaseUrls.add(capabilityKey);
         return requestChatCompletionsTurn(config, messages, onDelta, options);
     }
 }
