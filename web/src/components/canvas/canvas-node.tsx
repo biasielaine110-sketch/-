@@ -885,6 +885,32 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
         onFontSizeChange(node.id, next);
     };
 
+    // The canvas swallows the bubbling pointerdown antd's own outside-click detection relies on, so
+    // the export picker is closed from a capture-phase listener instead — same as the prompt picker
+    // sitting next to it in this row.
+    const exportRootRef = useRef<HTMLSpanElement | null>(null);
+    const [exportOpen, setExportOpen] = useState(false);
+    const exportContent = (node.metadata?.content || node.metadata?.prompt || "").trim();
+
+    useEffect(() => {
+        if (!exportOpen) return;
+        const closeOnOutside = (event: PointerEvent | KeyboardEvent) => {
+            if (event instanceof KeyboardEvent) {
+                if (event.key === "Escape") setExportOpen(false);
+                return;
+            }
+            const target = event.target instanceof Element ? event.target : null;
+            if (target && (exportRootRef.current?.contains(target) || target.closest(".ant-dropdown"))) return;
+            setExportOpen(false);
+        };
+        window.addEventListener("pointerdown", closeOnOutside, true);
+        window.addEventListener("keydown", closeOnOutside);
+        return () => {
+            window.removeEventListener("pointerdown", closeOnOutside, true);
+            window.removeEventListener("keydown", closeOnOutside);
+        };
+    }, [exportOpen]);
+
     // Align with Chat: chrome/empty areas drag the node; only real text widgets block bubbling.
     const stopIfInteractive = (event: React.MouseEvent | React.PointerEvent) => {
         const target = event.target;
@@ -937,32 +963,41 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                     className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"
                     onSelect={(prompt) => onContentChange(node.id, prompt.content)}
                 />
-                <Dropdown
-                    trigger={["click"]}
-                    placement="bottomRight"
-                    disabled={!((node.metadata?.content || node.metadata?.prompt || "").trim())}
-                    menu={{
-                        items: [
-                            { key: "docx", label: t("canvas.nodeToolbar.exportDocumentDocx"), onClick: () => onExportDocument?.(node, { textFormat: "docx" }) },
-                            { key: "md", label: t("canvas.nodeToolbar.exportDocumentMarkdown"), onClick: () => onExportDocument?.(node, { textFormat: "md" }) },
-                        ],
-                    }}
-                >
-                    <button
-                        type="button"
-                        className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100 disabled:opacity-35"
-                        style={actionButtonStyle}
-                        disabled={!((node.metadata?.content || node.metadata?.prompt || "").trim())}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        title={t("canvas.nodeToolbar.exportDocumentTitle")}
-                        aria-label={t("canvas.nodeToolbar.exportDocument")}
+                <span ref={exportRootRef} className="inline-flex">
+                    <Dropdown
+                        open={exportOpen}
+                        onOpenChange={setExportOpen}
+                        trigger={["click"]}
+                        placement="bottomRight"
+                        // Keep the menu under the trigger (into the text node); auto-flip occasionally
+                        // puts it above the node on a transformed canvas.
+                        autoAdjustOverflow={false}
+                        getPopupContainer={() => document.body}
+                        disabled={!exportContent}
+                        menu={{
+                            items: [
+                                { key: "docx", label: t("canvas.nodeToolbar.exportDocumentDocx"), onClick: () => onExportDocument?.(node, { textFormat: "docx" }) },
+                                { key: "md", label: t("canvas.nodeToolbar.exportDocumentMarkdown"), onClick: () => onExportDocument?.(node, { textFormat: "md" }) },
+                            ],
+                        }}
                     >
-                        <Download className="size-3.5 shrink-0" />
-                        {t("canvas.nodeToolbar.exportDocument")}
-                        <ChevronDown className="size-3 shrink-0 opacity-70" />
-                    </button>
-                </Dropdown>
+                        <button
+                            type="button"
+                            className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100 disabled:opacity-35"
+                            style={actionButtonStyle}
+                            disabled={!exportContent}
+                            onClick={(event) => event.stopPropagation()}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            title={t("canvas.nodeToolbar.exportDocumentTitle")}
+                            aria-label={t("canvas.nodeToolbar.exportDocument")}
+                        >
+                            <Download className="size-3.5 shrink-0" />
+                            {t("canvas.nodeToolbar.exportDocument")}
+                            <ChevronDown className="size-3 shrink-0 opacity-70" />
+                        </button>
+                    </Dropdown>
+                </span>
                 <button
                     type="button"
                     className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11px] font-medium opacity-85 backdrop-blur-md transition hover:scale-[1.02] hover:opacity-100"

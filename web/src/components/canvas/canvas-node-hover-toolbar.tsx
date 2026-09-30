@@ -66,6 +66,7 @@ type ToolbarTool = {
     danger?: boolean;
     /** Present when the button opens a picker instead of acting immediately (e.g. text export). */
     menu?: ToolbarMenuItem[];
+    open?: boolean;
     onMenuOpenChange?: (open: boolean) => void;
 };
 
@@ -126,6 +127,29 @@ export function CanvasNodeHoverToolbar({
         setImageToolSettingsOpen(false);
         setExportMenuOpen(false);
     }, [node?.id]);
+
+    // Canvas pan/transform swallows the bubbling pointerdown antd's own outside-click detection
+    // relies on, so clicking empty canvas would leave the export picker open; close it from a
+    // capture-phase listener instead.
+    useEffect(() => {
+        if (!exportMenuOpen) return;
+        const closeOnOutside = (event: PointerEvent | KeyboardEvent) => {
+            if (event instanceof KeyboardEvent) {
+                if (event.key === "Escape") setExportMenuOpen(false);
+                return;
+            }
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.closest(".ant-dropdown")) return;
+            setExportMenuOpen(false);
+            if (!toolbarHoverRef.current) onLeave();
+        };
+        window.addEventListener("pointerdown", closeOnOutside, true);
+        window.addEventListener("keydown", closeOnOutside);
+        return () => {
+            window.removeEventListener("pointerdown", closeOnOutside, true);
+            window.removeEventListener("keydown", closeOnOutside);
+        };
+    }, [exportMenuOpen, onLeave]);
 
     if (!node) return null;
 
@@ -192,6 +216,7 @@ export function CanvasNodeHoverToolbar({
                       label: t("canvas.nodeToolbar.exportDocument"),
                       icon: <Download className="size-[10px]" />,
                       onClick: () => onDownload(node),
+                      open: exportMenuOpen,
                       onMenuOpenChange: handleExportMenuOpenChange,
                       menu: [
                           { key: "docx", label: t("canvas.nodeToolbar.exportDocumentDocx"), onClick: () => onDownload(node, { textFormat: "docx" }) },
@@ -354,7 +379,7 @@ export function CanvasNodeInfoModal({ node, open, onClose }: { node: CanvasNodeD
     );
 }
 
-function ToolbarAction({ title, label, icon, onClick, menu, onMenuOpenChange, showLabel, active = false, danger = false, large = false }: ToolbarTool & { showLabel: boolean; large?: boolean }) {
+function ToolbarAction({ title, label, icon, onClick, menu, open, onMenuOpenChange, showLabel, active = false, danger = false, large = false }: ToolbarTool & { showLabel: boolean; large?: boolean }) {
     const hasText = showLabel && Boolean(label);
     const button = (
         <button type="button" className={`group relative flex items-center whitespace-nowrap px-[3px] ${large ? "h-10" : "h-[31px]"} ${danger ? "text-[#f87171]" : ""}`} onClick={menu?.length ? undefined : onClick} aria-label={title}>
@@ -367,7 +392,7 @@ function ToolbarAction({ title, label, icon, onClick, menu, onMenuOpenChange, sh
     );
     if (menu?.length) {
         return (
-            <Dropdown trigger={["click"]} placement="top" onOpenChange={onMenuOpenChange} menu={{ items: menu.map((item) => ({ key: item.key, label: item.label, onClick: item.onClick })) }}>
+            <Dropdown trigger={["click"]} placement="top" open={open} onOpenChange={onMenuOpenChange} getPopupContainer={() => document.body} menu={{ items: menu.map((item) => ({ key: item.key, label: item.label, onClick: item.onClick })) }}>
                 {button}
             </Dropdown>
         );
