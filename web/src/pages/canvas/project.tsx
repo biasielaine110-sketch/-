@@ -101,7 +101,7 @@ import {
     resolveMetadataReferences,
     videoExtension,
 } from "@/lib/canvas/canvas-generation-helpers";
-import { isDocumentFile, readDocumentAsText } from "@/lib/canvas/document-text";
+import { buildDocxBlob, isDocumentFile, readDocumentAsText } from "@/lib/canvas/document-text";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType } from "@/lib/canvas/node-registry";
 import { convertNodeType, convertedNodeKeptMedia, nodeConversionTarget } from "@/lib/canvas/node-type-conversion";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
@@ -3053,8 +3053,10 @@ function AtelierCanvasPage() {
                     if (!content) return message.error(t("canvas.projectPage.noTextToSave"));
                     const rawName = (node.title || t("canvas.projectPage.canvasText")).trim() || "document";
                     const safeName = rawName.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 48) || "document";
-                    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
-                    const result = await saveBlobAs(blob, `${safeName}.md`, { projectId });
+                    // Word by default: the node's markdown is turned into real headings/lists, so the
+                    // .docx opens formatted rather than showing raw "#" and "**" markers.
+                    const blob = buildDocxBlob(content, { title: rawName });
+                    const result = await saveBlobAs(blob, `${safeName}.docx`, { projectId });
                     if (result.method === "draft") {
                         message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
                     } else {

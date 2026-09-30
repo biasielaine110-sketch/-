@@ -799,7 +799,7 @@ export default {
             downloadVideo: "Download video",
             downloadImage: "Download image",
             exportDocument: "Export doc",
-            exportDocumentTitle: "Export as Markdown document",
+            exportDocumentTitle: "Export as Word document (.docx)",
             exportDocumentDone: "Exported document: {{name}}",
             editTextTitle: "Edit text",
             editText: "Edit text",

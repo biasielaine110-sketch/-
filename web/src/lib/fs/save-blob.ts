@@ -105,4 +105,5 @@ const MIME_BY_EXT: Record<string, string> = {
     gif: "image/gif",
     webp: "image/webp",
     json: "application/json",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 };

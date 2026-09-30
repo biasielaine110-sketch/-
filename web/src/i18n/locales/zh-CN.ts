@@ -799,7 +799,7 @@ export default {
             downloadVideo: "下载视频",
             downloadImage: "下载图片",
             exportDocument: "导出文档",
-            exportDocumentTitle: "导出为 Markdown 文档",
+            exportDocumentTitle: "导出为 Word 文档（.docx）",
             exportDocumentDone: "已导出文档：{{name}}",
             editTextTitle: "编辑文本",
             editText: "编辑文字",
