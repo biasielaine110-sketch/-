@@ -4204,17 +4204,28 @@ function AtelierCanvasPage() {
                     const items = refs.length
                         ? await requestEdit({ ...generationConfig, count: "1" }, fullPrompt, refs, undefined, { signal: controller.signal })
                         : await requestGeneration({ ...generationConfig, count: "1" }, fullPrompt, { signal: controller.signal });
-                    const uploaded = await uploadGeneratedImage(items[0]);
-                    setNodes((prev) =>
-                        prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
-                    );
-                    if (items.length > 1) {
-                        void spawnExtraImageNodes(nodeId, items.slice(1).map((item) => item.dataUrl), { prompt: scene, model: generationConfig.model });
+                    if (items[0]?.videoUrls?.length) {
+                        // The request produced a clip and no image (the H3 four-view card's previews
+                        // and the 氛围感短视频 graph's only output both come back this way): leave the
+                        // node content as-is, mark the round done and spawn the video instead.
+                        setNodes((prev) =>
+                            prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
+                        );
+                        void spawnExtraVideoNodes(nodeId, items[0].videoUrls, { prompt: scene, model: generationConfig.model });
+                        setDialogNodeId(null);
+                    } else {
+                        const uploaded = await uploadGeneratedImage(items[0]);
+                        setNodes((prev) =>
+                            prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
+                        );
+                        if (items.length > 1) {
+                            void spawnExtraImageNodes(nodeId, items.slice(1).map((item) => item.dataUrl), { prompt: scene, model: generationConfig.model });
+                        }
+                        if (items[0]?.extraVideos?.length) {
+                            void spawnExtraVideoNodes(nodeId, items[0].extraVideos, { prompt: scene, model: generationConfig.model });
+                        }
+                        setDialogNodeId(null);
                     }
-                    if (items[0]?.extraVideos?.length) {
-                        void spawnExtraVideoNodes(nodeId, items[0].extraVideos, { prompt: scene, model: generationConfig.model });
-                    }
-                    setDialogNodeId(null);
                 } catch (error) {
                     if (!isGenerationCanceled(error)) {
                         const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
@@ -4505,14 +4516,29 @@ function AtelierCanvasPage() {
                                     const items = referenceImages.length
                                         ? await requestEdit({ ...generationConfig, count: "1" }, effectivePrompt, referenceImages, undefined, { signal: controller.signal })
                                         : await requestGeneration({ ...generationConfig, count: "1" }, effectivePrompt, { signal: controller.signal });
-                                    await applyGeneratedSlot(imageId, items[0]);
-                                    // Storyboard-style workflows return every frame regardless of the count
-                                    // param; place the leftovers instead of silently dropping them.
-                                    if (items.length > 1) {
-                                        void spawnExtraImageNodes(rootId, items.slice(1).map((item) => item.dataUrl), { prompt: effectivePrompt, model: generationConfig.model });
-                                    }
-                                    if (items[0]?.extraVideos?.length) {
-                                        void spawnExtraVideoNodes(rootId, items[0].extraVideos, { prompt: effectivePrompt, model: generationConfig.model });
+                                    if (items[0]?.videoUrls?.length) {
+                                        // The request produced a clip and no image: the slot has
+                                        // nothing to fill — park it as done (not an error) and spawn
+                                        // the video node instead.
+                                        hasSuccess = true;
+                                        setNodes((prev) =>
+                                            prev.map((node) =>
+                                                node.id === rootId
+                                                    ? { ...node, metadata: { ...node.metadata, images: node.metadata?.images?.map((current) => (current.id === imageId ? { ...current, status: NODE_STATUS_SUCCESS } : current)) } }
+                                                    : node,
+                                            ),
+                                        );
+                                        void spawnExtraVideoNodes(rootId, items[0].videoUrls, { prompt: effectivePrompt, model: generationConfig.model });
+                                    } else {
+                                        await applyGeneratedSlot(imageId, items[0]);
+                                        // Storyboard-style workflows return every frame regardless of the count
+                                        // param; place the leftovers instead of silently dropping them.
+                                        if (items.length > 1) {
+                                            void spawnExtraImageNodes(rootId, items.slice(1).map((item) => item.dataUrl), { prompt: effectivePrompt, model: generationConfig.model });
+                                        }
+                                        if (items[0]?.extraVideos?.length) {
+                                            void spawnExtraVideoNodes(rootId, items[0].extraVideos, { prompt: effectivePrompt, model: generationConfig.model });
+                                        }
                                     }
                                 } catch (error) {
                                     if (isGenerationCanceled(error)) return;
@@ -5105,6 +5131,19 @@ function AtelierCanvasPage() {
                 const retryItems = useReferenceImages
                     ? await requestEdit(generationConfig, prompt, retryImages, undefined, { signal: controller.signal })
                     : await requestGeneration(generationConfig, prompt, { signal: controller.signal });
+                if (retryItems[0]?.videoUrls?.length) {
+                    // The request produced a clip and no image: nothing to fill the image slot
+                    // with — mark the round done and spawn the video node instead.
+                    setNodes((prev) =>
+                        prev.map((item) =>
+                            item.id === node.id
+                                ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined } }
+                                : item,
+                        ),
+                    );
+                    void spawnExtraVideoNodes(node.id, retryItems[0].videoUrls, { prompt, model: generationConfig.model });
+                    return;
+                }
                 const image = retryItems[0];
                 const uploadedImage = await uploadGeneratedImage(image);
                 const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];

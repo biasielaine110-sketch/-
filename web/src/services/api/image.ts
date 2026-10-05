@@ -4,7 +4,7 @@ import i18n from "@/i18n";
 import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
-import { isMinimaxH3StoryWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
+import { isMinimaxH3FourViewWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { compressBodyImagesForProxy, compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
@@ -300,6 +300,14 @@ export type GeneratedImageResult = {
     midjourneyIndex?: number;
     /** Videos a multi-output workflow produced alongside images (e.g. RunningHub storyboard). Attached to the first result only. */
     extraVideos?: string[];
+    /**
+     * The workflow finished but produced no image at all — only clips. Two RunningHub graphs come
+     * back this way: the H3 four-view card (its previews are ComfyUI temp files, which never reach
+     * RunningHub's outputs endpoint) and the H3 氛围感短视频 graph (a clip is its only output by
+     * design). The consumer spawns video nodes for these instead of filling an image slot;
+     * `dataUrl` is empty.
+     */
+    videoUrls?: string[];
 };
 
 /** Agent Plan / Ark Seedream: OpenAI-shaped /images/generations with Volcengine-specific size rules. */
@@ -1638,6 +1646,15 @@ function runningHubWorkflowId(config: AiConfig, encodedModel: string, request: {
 
 async function requestRunningHubImages(config: AiConfig, prompt: string, referenceDataUrls: string[], script: string, options?: RequestOptions) {
     if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    // The storyboard graph renders a video next to its frames, so it honors the duration setting.
+    // The 氛围感短视频 graph renders a clip ONLY, so it honors the same two knobs on the image path
+    // (its output is handed back as a video, and the canvas spawns a video node for it).
+    const durationAware = isMinimaxH3StoryWorkflowId(config.model || config.imageModel) || isMinimaxH3VibeShortWorkflowId(config.model || config.imageModel);
+    // The 四视图 asset-card graph must NOT receive seconds/resolution on this path. It is a
+    // fixed 2-second four-shot design (its own prompt says so) whose sheet is cut from the clip
+    // and then run through SeedVR2 upscaling — pushing the duration to the canvas default (6s)
+    // renders 158 frames instead of 56 and blows the budget for a still image, while also
+    // contradicting the baked prompt. Its duration stays adjustable on the video path only.
     const result = await runRunningHubWorkflow({
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
@@ -1646,11 +1663,11 @@ async function requestRunningHubImages(config: AiConfig, prompt: string, referen
         script,
         prompt,
         size: config.size,
-        // Storyboard workflow renders a video too; honor the duration setting for it. Scoped to
-        // that workflow id so other image workflows never receive a seconds they don't expect.
-        seconds: isMinimaxH3StoryWorkflowId(config.model || config.imageModel) ? config.videoSeconds : undefined,
+        // Video-producing workflows render a clip too; honor the duration setting for them. Scoped
+        // to these workflow ids so other image workflows never receive a seconds they don't expect.
+        seconds: durationAware ? config.videoSeconds : undefined,
         // Same gate for the video resolution (ResolutionSelector megapixels).
-        resolution: isMinimaxH3StoryWorkflowId(config.model || config.imageModel) ? config.videoResolution : undefined,
+        resolution: durationAware ? config.videoResolution : undefined,
         referenceDataUrls,
         signal: options?.signal,
     });
@@ -1662,6 +1679,15 @@ async function requestRunningHubImages(config: AiConfig, prompt: string, referen
             dataUrl,
             ...(index === 0 && result.videos.length ? { extraVideos: result.videos } : {}),
         }));
+    }
+    // The four-view card graph saves its PreviewImage frames as ComfyUI temp files, which
+    // RunningHub's outputs endpoint never lists — a finished task can therefore carry nothing but
+    // the VHS_VideoCombine mp4. Hand that clip back instead of failing: the canvas spawns a video
+    // node for it. The 氛围感短视频 graph is the same shape by design (its only output is the clip),
+    // so it takes the same branch. Scoped to these workflow ids so every other image model keeps
+    // throwing.
+    if (result.videos.length && (isMinimaxH3FourViewWorkflowId(config.model || config.imageModel) || isMinimaxH3VibeShortWorkflowId(config.model || config.imageModel))) {
+        return [{ id: nanoid(), dataUrl: "", videoUrls: result.videos }];
     }
     throw new Error(apiText("runningHubNoImage"));
 }

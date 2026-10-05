@@ -307,6 +307,7 @@ export default {
         runningHubNoTaskId: "RunningHub 未返回 taskId",
         runningHubTaskFailed: "RunningHub 任务失败",
         runningHubNoImage: "RunningHub 任务完成但没有图片。若工作流输出的是视频，请在视频节点里生成。",
+        runningHubReferenceNotApplied: "参考图已上传，但未能写入这个工作流（节点结构与预期不符）。已停止提交以避免生成与参考图无关的结果；请在 RunningHub 网站确认该工作流已保存后重试。",
         runningHubNoVideo: "RunningHub 任务完成但没有视频。若工作流输出的是图片，请在生图节点里生成。",
         runningHubNoBalance: "RunningHub 账户余额不足（NOT_ENOUGH_BALANCE），无法生成。请到 RunningHub 网站充值后再试。",
         runningHubTimeout: "RunningHub 任务超时，请稍后重试",

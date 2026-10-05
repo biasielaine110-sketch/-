@@ -307,6 +307,7 @@ export default {
         runningHubNoTaskId: "RunningHub did not return a taskId",
         runningHubTaskFailed: "RunningHub task failed",
         runningHubNoImage: "RunningHub finished but returned no image. If the workflow outputs video, generate from a video node.",
+        runningHubReferenceNotApplied: "References were uploaded but could not be written into this workflow (unexpected node structure). The submission was stopped to avoid rendering unrelated to your references; confirm the workflow is saved on RunningHub and retry.",
         runningHubNoVideo: "RunningHub finished but returned no video. If the workflow outputs images, generate from an image node.",
         runningHubNoBalance: "RunningHub account balance is insufficient (NOT_ENOUGH_BALANCE). Top up your balance on RunningHub and try again.",
         runningHubTimeout: "RunningHub task timed out. Please try again later",

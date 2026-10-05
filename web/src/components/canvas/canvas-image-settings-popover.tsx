@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel, imageQualityLabel, imageSizeLabel, midjourneyVersionLabel } from "@/components/image-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { isMinimaxH3StoryWorkflowId } from "@/lib/runninghub-workflow";
+import { isMinimaxH3FourViewWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId } from "@/lib/runninghub-workflow";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { isMidjourneyModel } from "@/services/api/image";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
@@ -33,7 +33,10 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
     const count = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const activeSize = config.size || "auto";
     const midjourney = isMidjourneyModel(modelOptionName(config.model || config.imageModel || ""));
-    const storyboardVideo = isMinimaxH3StoryWorkflowId(modelOptionName(config.model || config.imageModel || ""));
+    const storyboardVideo =
+        isMinimaxH3StoryWorkflowId(modelOptionName(config.model || config.imageModel || "")) ||
+        isMinimaxH3FourViewWorkflowId(modelOptionName(config.model || config.imageModel || "")) ||
+        isMinimaxH3VibeShortWorkflowId(modelOptionName(config.model || config.imageModel || ""));
     const videoDuration = Math.max(1, Math.floor(Number(config.videoSeconds) || 6));
     const videoResolution = config.videoResolution || "2";
     const summary = midjourney

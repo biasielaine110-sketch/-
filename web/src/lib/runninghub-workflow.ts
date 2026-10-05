@@ -1118,6 +1118,603 @@ export function normalizeMinimaxH3FiveSegmentResult(result: RunningHubMedia, wor
     return { images, videos: [videos[videos.length - 1], ...videos.slice(0, -1)] };
 }
 
+// MiniMax H3 人物卡四视图 / 各种资产卡 (RunningHub 2106992929079386114).
+// One reference-to-video render per submission, then a still-frame sheet is cut out of the clip:
+// MiniMaxH3ReferenceToVideo (153) renders the video, GetImagesFromBatchIndexed (253) pulls four
+// evenly spread frames, ImageConcatFromBatch (442) lays them out 2-up, and a SeedVR2 upscale
+// (488:0..7) cleans the sheet up before it is previewed (492/493). The user wants both the clip
+// and the sheet, so the task legitimately reports one video plus several images.
+//
+// The generic writers all miss — or actively break — this graph, which is why it bypasses them:
+//   - the prompt lives in TWO PrimitiveStringMultiline nodes: 185 (English, the one Any Switch 409
+//     actually feeds to the sampler) and 323 (a Chinese reference copy that nothing consumes).
+//     Both score 40, so the generic writer overwrites BOTH — the user text lands in 185 (correct)
+//     but also clobbers the author's paired translation, which is documentation, not input;
+//   - duration is a PrimitiveFloat titled 视频长度（秒）(node 143, field `value`), which the
+//     duration/seconds/video_length probe cannot reach, so the canvas duration was ignored;
+//   - output shape is a ResolutionSelector (133) whose aspect_ratio is a *label* enum
+//     ("9:16 (Portrait Widescreen)") the aspect writer cannot produce, while its `megapixels` is
+//     a number the tier writer force-maps 1k/2k/4k → 1/2/4 (always downgrading the baked 2MP);
+//   - `writeRunningHubSize` matches ANY node carrying width+height or an `aspect_ratio`, so it
+//     overwrites AutoCropFaces (160) — where `aspect_ratio: "1:1"` is the *face crop* shape, not the
+//     output shape. Writing 9:16 there stretches every cropped face;
+//   - references are consumed through named `ref_images.ref_image_N` slots, but only two loaders
+//     exist (243 → AutoCropFaces → slot 0, 155 → slot 1) and node-id order (155, 243) is the
+//     *reverse* of the slot order, so a naive write swaps face and outfit references. Slot 0 goes
+//     through an AutoCropFaces/PreviewImage chain rather than a bare loader, so it has to be
+//     resolved by walking the links, not by listing LoadImage nodes;
+//   - both loaders ship the same baked demo face, so a slot the user did not fill leaks the
+//     author's character into the render. Unfilled slots are disconnected instead;
+//   - RandomNoise (139) bakes a fixed seed, so identical inputs repeated an identical clip.
+//
+// Everything below is scoped to this workflow id; every other model keeps the generic path.
+const MINIMAX_H3_FOUR_VIEW_WORKFLOW_ID = "2106992929079386114";
+/**
+ * Keep the baked prompt's hard-coded timing/shape in step with the knobs we just changed.
+ *
+ * The shipped English prompt states the design literally — "A 2-second 9:16 vertical video …
+ * four static shots of 0.5 seconds each" — and the Chinese counterpart repeats it. Change the
+ * duration or the aspect without touching those phrases and the model is simultaneously told to
+ * render 6 seconds and 2 seconds, which is how a coherent four-view sheet turns into four frames
+ * of the same pose. Rewriting only the numeric/label tokens keeps the prompt's structure (and the
+ * user's own text) intact, and only when the value actually differs from the baked one.
+ */
+function retargetMinimaxH3FourViewPrompt(text: string, seconds: number, aspectLabel: string) {
+    let next = text;
+    // The two copies word the timing differently: English says "A 2-second 9:16 vertical video …
+    // four static shots of 0.5 seconds each", Chinese says "2秒 9:16 竖屏 … 四个镜头各0.5秒".
+    // Both are handled so neither copy ends up contradicting the rendered length.
+    if (Number.isFinite(seconds) && seconds > 0) {
+        next = next.replace(/\b\d+(?:\.\d+)?-second\b/g, `${seconds}-second`);
+        next = next.replace(/(\d+(?:\.\d+)?)\s*秒/g, `${seconds} 秒`);
+        // Four shots share the clip evenly: each lasts duration/4. "1 seconds" is ungrammatical.
+        const perShot = Math.round((seconds / 4) * 100) / 100;
+        const each = `${perShot} ${perShot === 1 ? "second" : "seconds"} each`;
+        next = next.replace(/\b\d+(?:\.\d+)?\s*seconds?\s+each\b/g, each);
+        // "各0.5秒" (per-shot) must move with the per-shot length, not the total.
+        next = next.replace(/各\s*\d+(?:\.\d+)?\s*秒/g, `各${perShot} 秒`);
+        next = next.replace(/每\s*\d+(?:\.\d+)?\s*秒/g, `每 ${perShot} 秒`);
+    }
+    if (aspectLabel) {
+        // The label form the prompt uses ("9:16"), not the enum label.
+        const ratio = RUNNINGHUB_RESOLUTION_SELECTOR_ASPECTS.find((item) => item.label === aspectLabel)?.ratio || "";
+        // Only the ratio that names the *frame shape* — a "16:9" inside unrelated prose is not the
+        // output aspect, so the lookahead requires an orientation word right after it.
+        if (ratio) next = next.replace(/\b\d{1,2}:\d{1,2}\b(?=\s*(?:vertical|horizontal|竖屏|横屏))/g, ratio);
+    }
+    return next;
+}
+
+/**
+ * The asset-card sheet is four still frames; more than a couple of seconds per view is wasted render time.
+ */
+const MINIMAX_H3_FOUR_VIEW_SECONDS = { min: 2, max: 8 };
+function isMinimaxH3FourViewWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => segment.trim().replace(/^(rh|runninghub|workflow)[:_-]/, "").trim() === MINIMAX_H3_FOUR_VIEW_WORKFLOW_ID);
+}
+
+/** Public gate so the video settings panel can offer this graph's duration/resolution controls. */
+export function isMinimaxH3FourViewWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3FourViewWorkflow(workflowId);
+}
+
+/** Python-style modulo: the graph's math node relies on `%` returning a non-negative remainder. */
+function comfyMod(value: number, modulus: number) {
+    return ((value % modulus) + modulus) % modulus;
+}
+
+/**
+ * Frame count this graph will render for `seconds`, replicating ComfyMathExpression node 150:
+ * `max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17` — H3 only accepts lengths of
+ * the form 17n+5, so the expression snaps the requested duration up to the next valid length.
+ */
+function minimaxH3FourViewFrameCount(seconds: number) {
+    const base = Math.max(5, Math.round(seconds * 24));
+    return base + comfyMod(5 - comfyMod(base, 17), 17);
+}
+
+/** The reference-to-video node plus its `ref_images.ref_image_N` slots, in slot order. */
+function minimaxH3FourViewSlots(workflow: ComfyWorkflow) {
+    const consumer = Object.entries(workflow).find(([, node]) => /MiniMaxH3ReferenceToVideo/i.test(String(node?.class_type || "")));
+    if (!consumer) return null;
+    const [consumerId, node] = consumer;
+    const slots: Array<{ index: number; key: string; sourceId: string }> = [];
+    for (const [key, value] of Object.entries(node.inputs || {})) {
+        const match = /^ref_images\.ref_image_(\d+)$/.exec(key);
+        if (!match) continue;
+        const sourceId = Array.isArray(value) ? String(value[0]) : "";
+        if (sourceId) slots.push({ index: Number(match[1]), key, sourceId });
+    }
+    if (!slots.length) return null;
+    slots.sort((a, b) => a.index - b.index);
+    return { consumerId, consumer: node, slots };
+}
+
+/**
+ * Walk upstream from a reference slot to the LoadImage that feeds it. Slot 0 is not wired to a
+ * loader directly — it goes LoadImage → AutoCropFaces → PreviewImage — so the loader has to be
+ * found by following the links back, never by listing LoadImage nodes (whose id order is the
+ * reverse of the slot order here).
+ */
+function minimaxH3FourViewLoader(workflow: ComfyWorkflow, startId: string, depth = 0): string {
+    if (depth > 6) return "";
+    const node = workflow[startId];
+    if (!node) return "";
+    if (/LoadImage/i.test(String(node.class_type || "")) && imageFieldName(node)) return startId;
+    // Follow the first image-ish link this node consumes (the graph chains are linear per slot).
+    for (const [field, value] of Object.entries(node.inputs || {})) {
+        if (!Array.isArray(value) || value[0] == null) continue;
+        if (!/image/i.test(field)) continue;
+        const found = minimaxH3FourViewLoader(workflow, String(value[0]), depth + 1);
+        if (found) return found;
+    }
+    return "";
+}
+
+/**
+ * The asset-card sheet is four stills sampled across the clip (GetImagesFromBatchIndexed 253 pulls
+ * absolute frame indexes). The saved graph bakes "1, 21, 30, 49", which only lands one frame in
+ * each of the four views at the 2s bake — at any other duration the four shots collapse into the
+ * opening second (or run past the end and error). Re-space them evenly over the real frame count so
+ * every view is sampled mid-shot whatever duration was asked for.
+ */
+function minimaxH3FourViewFrameIndexes(frameCount: number) {
+    const views = 4;
+    const last = Math.max(1, frameCount - 1);
+    return Array.from({ length: views }, (_, i) => Math.min(last, Math.max(0, Math.round(((i + 0.5) * frameCount) / views))));
+}
+
+/** Prune the noise this graph's leftovers add to the task result. */
+function pruneMinimaxH3FourViewOutputs(workflow: ComfyWorkflow) {
+    let changed = false;
+    for (const [id, node] of Object.entries(workflow)) {
+        // The Image Comparer (rgthree) is an authoring leftover: it stores two baked preview URLs
+        // (audit tokens and all) and renders nothing, so it only adds payload.
+        if (/Image\s*Comparer/i.test(String(node?.class_type || ""))) {
+            delete workflow[id];
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+/** Every node reachable from `startId` in either direction (who consumes it, and what it consumes). */
+function comfyChainIds(workflow: ComfyWorkflow, startId: string) {
+    const consumers = new Map<string, string[]>();
+    for (const [id, node] of Object.entries(workflow)) {
+        for (const value of Object.values(node?.inputs || {})) {
+            if (!Array.isArray(value) || value[0] == null) continue;
+            const from = String(value[0]);
+            const list = consumers.get(from);
+            if (list) list.push(id);
+            else consumers.set(from, [id]);
+        }
+    }
+    const seen = new Set<string>([startId]);
+    const queue = [startId];
+    while (queue.length) {
+        const current = queue.pop() as string;
+        for (const next of [...(consumers.get(current) || []), ...Object.values(workflow[current]?.inputs || {}).filter(Array.isArray).map((value) => String((value as unknown[])[0]))]) {
+            if (!next || seen.has(next) || !workflow[next]) continue;
+            seen.add(next);
+            queue.push(next);
+        }
+    }
+    return seen;
+}
+
+/**
+ * Drop a disconnected reference branch (LoadImage → AutoCropFaces → PreviewImage chains). Leaving
+ * it in place keeps the workflow author's baked demo face loaded and previewed even though nothing
+ * consumes it any more. Iterated to a fixed point because dropping a node can orphan the next one.
+ */
+function pruneOrphanedReferenceChain(workflow: ComfyWorkflow, seedIds: string[]) {
+    const candidates = new Set<string>();
+    for (const seedId of seedIds) {
+        for (const id of comfyChainIds(workflow, seedId)) {
+            if (id !== seedId || /LoadImage|AutoCropFaces|PreviewImage|Resize/i.test(String(workflow[id]?.class_type || ""))) candidates.add(id);
+        }
+    }
+    let changed = false;
+    for (let pass = 0; pass < 8; pass += 1) {
+        const consumed = comfyConsumedIds(workflow);
+        let removed = false;
+        for (const id of candidates) {
+            if (!workflow[id] || consumed.has(id)) continue;
+            delete workflow[id];
+            removed = true;
+            changed = true;
+        }
+        if (!removed) break;
+    }
+    return changed;
+}
+
+function applyMinimaxH3FourViewSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    size?: { width: number; height: number } | null,
+    seconds?: string,
+    aspect = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow; structuralRepair: boolean } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    let structuralRepair = false;
+
+    // Prompt is written last: the baked text hard-codes "A 2-second 9:16 vertical video …", so it
+    // has to be retargeted against the duration/aspect this call actually settled on. Node 323
+    // holds the author's Chinese counterpart (nothing consumes it) and stays untouched.
+    //
+    // Reference images → `<Picture 1>…` slot order (resolved through each slot's link chain, so
+    // the face reference and the outfit reference cannot swap). A slot the user did not fill is
+    // disconnected: both loaders ship the author's baked demo face, and leaving it wired would put
+    // a stranger's character into the render.
+    let writtenReferences = 0;
+    const slotInfo = minimaxH3FourViewSlots(next);
+    if (slotInfo) {
+        const { consumer, slots } = slotInfo;
+        const disconnected: string[] = [];
+        slots.forEach((slot, position) => {
+            const loaderId = minimaxH3FourViewLoader(next, slot.sourceId);
+            const loader = loaderId ? next[loaderId] : undefined;
+            const field = loader ? imageFieldName(loader) : "";
+            const value = imageValues[position];
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+                return;
+            }
+            const consumerInputs = consumer.inputs;
+            if (consumerInputs && slot.key in consumerInputs) {
+                delete consumerInputs[slot.key];
+                disconnected.push(slot.sourceId);
+                structuralRepair = true;
+            }
+        });
+        // A disconnected slot's whole branch (loader + AutoCropFaces + its preview) is now dead
+        // weight, and it still carries the author's baked demo face — drop it.
+        if (disconnected.length && pruneOrphanedReferenceChain(next, disconnected)) structuralRepair = true;
+    } else if (imageValues.length) {
+        // The graph served by RunningHub doesn't match the saved structure closely enough to find
+        // the reference slots. Never silently render the baked demo images: fall back to the
+        // generic mapping (each uploaded reference onto a LoadImage, document order) so the
+        // references at least reach the task.
+        const loaders = Object.entries(next).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")) && imageFieldName(node));
+        imageValues.forEach((value, index) => {
+            const loader = loaders[index]?.[1];
+            const field = loader ? imageFieldName(loader) : "";
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+            }
+        });
+    }
+    // The one failure mode worse than an error: the user hands over references, the task renders
+    // anyway, and the clip has nothing to do with them. If none of the uploaded references landed
+    // in the graph, stop instead of burning credits on the baked demo.
+    if (imageValues.length && !writtenReferences) throw new Error(apiText("runningHubReferenceNotApplied"));
+
+    // Duration → PrimitiveFloat 视频长度（秒）(node 143, field `value`).
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_FOUR_VIEW_SECONDS.max, Math.max(MINIMAX_H3_FOUR_VIEW_SECONDS.min, duration));
+        const durationNode =
+            next["143"] ||
+            findComfyNode(next, (node) => /Primitive(Float|Int)/i.test(String(node.class_type || "")) && /时长|duration|长度/i.test(String(node._meta?.title || "")));
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") {
+            durationNode.inputs.value = clamped;
+            // Re-space the four sheet frames over the length actually rendered (17n+5 frames).
+            const extractor = next["253"] || findComfyNode(next, (node) => /GetImagesFromBatchIndexed/i.test(String(node.class_type || "")));
+            if (extractor?.inputs && typeof extractor.inputs.indexes === "string") {
+                extractor.inputs.indexes = minimaxH3FourViewFrameIndexes(minimaxH3FourViewFrameCount(clamped)).join(", ");
+            }
+        }
+    }
+
+    // Output shape → ResolutionSelector (133): aspect_ratio is a label enum, megapixels a number.
+    const selector = next["133"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    let aspectLabel = "";
+    if (selector?.inputs) {
+        const nextAspect = aspect || (size?.width && size.height ? closestResolutionSelectorAspect(size.width, size.height) : "");
+        if (nextAspect && typeof selector.inputs.aspect_ratio === "string") {
+            const label = resolutionSelectorAspectLabel(nextAspect);
+            selector.inputs.aspect_ratio = label;
+            aspectLabel = label;
+        }
+        const requested = Number(megapixels);
+        if (typeof megapixels === "string" && megapixels.trim() && Number.isFinite(requested) && requested > 0) {
+            const baked = typeof workflow["133"]?.inputs?.megapixels === "number" ? Number(workflow["133"].inputs?.megapixels) : 0;
+            if (typeof selector.inputs.megapixels === "number") selector.inputs.megapixels = Math.max(baked, requested);
+        }
+    }
+
+    // Prompt, once the duration and aspect this submission settled on are known: the baked text
+    // names both literally, so it is retargeted to match rather than left contradicting the graph.
+    // Runs whether or not the user typed a prompt — an empty prompt means the *baked* four-view
+    // prompt is what gets rendered, and that is precisely the text that names "2-second".
+    {
+        const consumer = minimaxH3FourViewSlots(next)?.consumer;
+        const sourceId = consumer ? minimaxH3FourViewPromptSource(next, consumer) : "";
+        const promptNode =
+            (sourceId ? next[sourceId] : undefined) ||
+            next["185"] ||
+            findComfyNode(
+                next,
+                (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string" && /英文|english/i.test(String(node._meta?.title || "")),
+            );
+        if (promptNode?.inputs && typeof promptNode.inputs.value === "string") {
+            const durationNode = next["143"];
+            const rendered = typeof durationNode?.inputs?.value === "number" ? Number(durationNode.inputs.value) : NaN;
+            // An empty canvas prompt means the *baked* four-view prompt is what will be rendered —
+            // so retarget that text rather than replacing it with nothing. A user prompt is used
+            // as typed, only retargeted when it actually names a duration or frame shape.
+            const base = prompt.trim() ? prompt : promptNode.inputs.value;
+            const text = retargetMinimaxH3FourViewPrompt(base, rendered, aspectLabel);
+            promptNode.inputs.value = text;
+            // The Chinese counterpart (323) is the author's translation of the baked English text.
+            // It retargets its own copy — the numeric rules above are language-agnostic, so the
+            // pair stays a translation of each other instead of the Chinese node silently turning
+            // into English. Like the English side it only follows the *baked* prompt; once the
+            // user supplies their own text the translation no longer describes anything.
+            const translated =
+                next["323"] ||
+                findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string" && /中文|chinese|对照/i.test(String(node._meta?.title || "")));
+            if (translated && translated !== promptNode && translated.inputs && typeof translated.inputs.value === "string" && !prompt.trim()) {
+                const zh = retargetMinimaxH3FourViewPrompt(translated.inputs.value, rendered, aspectLabel);
+                if (zh !== translated.inputs.value) translated.inputs.value = zh;
+            }
+        }
+    }
+
+    // The graph bakes a fixed noise seed — identical inputs would render an identical clip on
+    // every run. Randomize per submission.
+    for (const node of Object.values(next)) {
+        if (/RandomNoise/i.test(String(node.class_type || "")) && typeof node.inputs?.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
+    }
+
+    if (pruneMinimaxH3FourViewOutputs(next)) structuralRepair = true;
+    return { workflow: next, structuralRepair };
+}
+
+/**
+ * Follow the sampler's `prompt` link back to the string node that actually feeds it, so the user's
+ * text lands in the live prompt (185) and not in the unused translation copy (323).
+ */
+function minimaxH3FourViewPromptSource(workflow: ComfyWorkflow, consumer: ComfyNode, depth = 0): string {
+    if (depth > 6) return "";
+    const prompt = consumer.inputs?.prompt;
+    const sourceId = Array.isArray(prompt) ? String(prompt[0]) : "";
+    if (!sourceId) return "";
+    const source = workflow[sourceId];
+    if (!source) return "";
+    if (source.class_type === "PrimitiveStringMultiline" && typeof source.inputs?.value === "string") return sourceId;
+    // Any Switch (rgthree) and similar pass-throughs: keep walking.
+    for (const value of Object.values(source.inputs || {})) {
+        const upstreamId = Array.isArray(value) ? String(value[0]) : "";
+        if (!upstreamId || !workflow[upstreamId]) continue;
+        const found = minimaxH3FourViewPromptSource(workflow, workflow[upstreamId], depth + 1);
+        if (found) return found;
+    }
+    return "";
+}
+
+/**
+ * The task reports the clip plus several previews (the raw face-crop preview 162 and both sides of
+ * the SeedVR2 comparison). The concatenated four-view sheet is the deliverable image, so put it
+ * first; the clip is the only video and needs no ordering.
+ * Exported alongside buildWorkflowPatch so the selection can be exercised headlessly.
+ */
+export function normalizeMinimaxH3FourViewResult(result: RunningHubMedia, workflow: ComfyWorkflow | null): RunningHubMedia {
+    const sheet = minimaxH3FourViewSheetPrefix(workflow);
+    if (!sheet || result.images.length < 2) return result;
+    const preferred = result.images.filter((url) => url.includes(sheet) || decodeURIComponent(url).includes(sheet));
+    if (!preferred.length) return result;
+    return { images: [...preferred, ...result.images.filter((url) => !preferred.includes(url))], videos: result.videos };
+}
+
+/** `filename_prefix` of the PreviewImage fed by the concatenated sheet, used to recognise it. */
+function minimaxH3FourViewSheetPrefix(workflow: ComfyWorkflow | null) {
+    if (!workflow) return "";
+    const concat = Object.entries(workflow).find(([, node]) => /ImageConcatFromBatch/i.test(String(node?.class_type || "")));
+    if (!concat) return "";
+    // The sheet reaches its preview through ResizeImageMaskNode → Any Switch (and again through the
+    // SeedVR2 chain), so walk up from every preview until the concat node shows up.
+    for (const [id, node] of Object.entries(workflow)) {
+        if (!/PreviewImage/i.test(String(node?.class_type || ""))) continue;
+        let cursor = Array.isArray(node.inputs?.images) ? String((node.inputs?.images as unknown[])[0]) : "";
+        for (let depth = 0; cursor && depth < 8; depth += 1) {
+            if (cursor === concat[0]) return id;
+            const upstream = workflow[cursor];
+            if (!upstream) break;
+            const next = Object.entries(upstream.inputs || {}).find(([field, value]) => /image/i.test(field) && Array.isArray(value));
+            cursor = next && Array.isArray(next[1]) ? String((next[1] as unknown[])[0]) : "";
+        }
+    }
+    return "";
+}
+
+// MiniMax H3 氛围感短视频 (reference-to-video, no storyboard sheet). One graph serves both
+// RunningHub hosts: 2107016187795304449 (runninghub.cn) and 2107014873040396289 (runninghub.ai).
+// Its output is a single clip, so the task reports one video and nothing else.
+//
+// The generic writers reach the prompt and the two reference loaders by luck of the field names
+// (`value`/`image` are both in PROMPT_FIELDS / the LoadImage scan), but they miss everything else —
+// and the misses are not cosmetic:
+//   - duration is a PrimitiveFloat titled "Float (Duration)" (node 132, field `value`); the
+//     seconds writer only probes duration/seconds/video_length, so every render ignored the canvas
+//     duration and kept the author's baked 10s. Worse, `writeRunningHubSeconds` DOES match the
+//     sampler's `length` input and would overwrite the ComfyMathExpression node 131 output with a
+//     raw second count — H3 only accepts lengths of the form 17n+5, so that input is a *link*, and
+//     the guard there (`length <= 30`) happens to skip it. Pinning the duration at 132 is what
+//     makes the linked math expression re-derive a legal frame count;
+//   - output shape is a ResolutionSelector (115) whose aspect_ratio is a label enum
+//     ("9:16 (Portrait Widescreen)") the aspect writer cannot produce, and whose `megapixels` the
+//     tier writer force-maps 1k/2k/4k → 1/2/4 (this graph ships `megapixels: 1` and `multiple: 32`,
+//     so a 2k/4k canvas size would silently rescale the whole render);
+//   - `writeRunningHubSize` matches ANY node carrying width+height, so it would write the canvas
+//     pixel pair onto the sampler's linked `width`/`height` inputs — but those are *links* to the
+//     ResolutionSelector, so the write is skipped. The selector is the only real lever;
+//   - RandomNoise (129) bakes a fixed seed, so identical inputs repeated an identical clip.
+//
+// Reference images: both slots are wired LoadImage → sampler DIRECTLY (no AutoCropFaces chain,
+// unlike the four-view graph), so the loader for a slot is its link target — one hop, no walk.
+// Both loaders ship the author's baked demo photos; leaving an unfilled slot wired would render a
+// stranger's character into the clip, so unfilled slots are disconnected instead.
+const MINIMAX_H3_VIBE_SHORT_WORKFLOW_IDS = new Set(["2107016187795304449", "2107014873040396289"]);
+/** H3 accepts lengths of the form 17n+5; the graph's own math node enforces the minimum of 5. */
+const MINIMAX_H3_VIBE_SHORT_SECONDS = { min: 2, max: 20 };
+
+function isMinimaxH3VibeShortWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    // Both hosts share the graph shape but have their own saved copy under a different id, so the
+    // gate matches the bare id or any `::`-separated / prefixed runtime form of it.
+    return raw.split("::").some((segment) => {
+        const id = segment.trim().replace(/^(rh|runninghub|workflow)[:_-]/, "").trim();
+        return MINIMAX_H3_VIBE_SHORT_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate so the image path can hand a clip-only finish back to the canvas. */
+export function isMinimaxH3VibeShortWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3VibeShortWorkflow(workflowId);
+}
+
+/**
+ * The reference-to-video node and its `ref_images.ref_image_N` slots. Unlike the four-view graph
+ * the slot link target IS the loader, so no link walk is needed — but the slots are still resolved
+ * by index, never by LoadImage id order (which is the reverse here: slot 0 → 137, slot 1 → 139).
+ */
+function minimaxH3VibeShortSlots(workflow: ComfyWorkflow) {
+    const consumer = Object.entries(workflow).find(([, node]) => /MiniMaxH3ReferenceToVideo/i.test(String(node?.class_type || "")));
+    if (!consumer) return null;
+    const [consumerId, node] = consumer;
+    const slots: Array<{ index: number; key: string; sourceId: string }> = [];
+    for (const [key, value] of Object.entries(node.inputs || {})) {
+        const match = /^ref_images\.ref_image_(\d+)$/.exec(key);
+        if (!match) continue;
+        const sourceId = Array.isArray(value) ? String(value[0]) : "";
+        if (sourceId) slots.push({ index: Number(match[1]), key, sourceId });
+    }
+    if (!slots.length) return null;
+    slots.sort((a, b) => a.index - b.index);
+    return { consumerId, consumer: node, slots };
+}
+
+function applyMinimaxH3VibeShortSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    seconds?: string,
+    aspect = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow; structuralRepair: boolean } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    let structuralRepair = false;
+
+    // Reference images → `<Picture 1>`/`<Picture 2>` slot order. Each slot's link target is its
+    // loader, so writing the loader is enough; an unfilled slot is disconnected from the sampler
+    // so the author's baked demo photo cannot leak into the render.
+    let writtenReferences = 0;
+    const disconnected: string[] = [];
+    const slotInfo = minimaxH3VibeShortSlots(next);
+    if (slotInfo) {
+        const { consumer, slots } = slotInfo;
+        slots.forEach((slot, position) => {
+            const loader = next[slot.sourceId];
+            const field = loader ? imageFieldName(loader) : "";
+            const value = imageValues[position];
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+                return;
+            }
+            const consumerInputs = consumer.inputs;
+            if (consumerInputs && slot.key in consumerInputs) {
+                delete consumerInputs[slot.key];
+                disconnected.push(slot.sourceId);
+                structuralRepair = true;
+            }
+        });
+    } else if (imageValues.length) {
+        // The graph served by RunningHub doesn't match the saved structure closely enough to find
+        // the reference slots. Never silently render the baked demo images: fall back to the
+        // generic mapping (each uploaded reference onto a LoadImage, document order) so the
+        // references at least reach the task.
+        const loaders = Object.entries(next).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")) && imageFieldName(node));
+        imageValues.forEach((value, index) => {
+            const loader = loaders[index]?.[1];
+            const field = loader ? imageFieldName(loader) : "";
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+            }
+        });
+    }
+    // A disconnected slot's loader is now dead weight that still carries the author's baked demo
+    // photo — drop it so a stale filename cannot reach the task payload at all.
+    if (disconnected.length && pruneOrphanedReferenceChain(next, disconnected)) structuralRepair = true;
+    // The one failure mode worse than an error: the user hands over references, the task renders
+    // anyway, and the clip has nothing to do with them. If none of the uploaded references landed
+    // in the graph, stop instead of burning credits on the baked demo.
+    if (imageValues.length && !writtenReferences) throw new Error(apiText("runningHubReferenceNotApplied"));
+
+    // Duration → PrimitiveFloat "Float (Duration)" (node 132, field `value`). The linked
+    // ComfyMathExpression (131) turns this into a 17n+5 frame count, so only the seconds are set
+    // here — touching the sampler's `length` link would break H3's length constraint.
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_VIBE_SHORT_SECONDS.max, Math.max(MINIMAX_H3_VIBE_SHORT_SECONDS.min, duration));
+        const durationNode =
+            next["132"] ||
+            findComfyNode(next, (node) => /Primitive(Float|Int)/i.test(String(node.class_type || "")) && /时长|duration|长度/i.test(String(node._meta?.title || "")));
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
+    }
+
+    // Output shape → ResolutionSelector (115): aspect_ratio is a label enum, megapixels a number.
+    // The canvas aspect wins when given; otherwise the baked default stands. Megapixels is only
+    // written when the caller explicitly asks (video precision), and never below the baked floor —
+    // this graph bakes 1 with `multiple: 32`, and the generic tier writer would force 2/4 onto it.
+    const selector = next["115"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        if (aspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+        }
+        const requested = Number(megapixels);
+        if (typeof megapixels === "string" && megapixels.trim() && Number.isFinite(requested) && requested > 0) {
+            const baked = typeof selector.inputs.megapixels === "number" ? Number(selector.inputs.megapixels) : 0;
+            selector.inputs.megapixels = Math.max(baked, requested);
+        }
+    }
+
+    // Prompt → the multiline node the sampler's `prompt` link resolves to (node 138). Written last
+    // so an empty canvas prompt keeps the author's baked text rather than blanking it.
+    if (prompt.trim()) {
+        const consumer = minimaxH3VibeShortSlots(next)?.consumer;
+        const sourceId = consumer ? minimaxH3FourViewPromptSource(next, consumer) : "";
+        const promptNode =
+            (sourceId ? next[sourceId] : undefined) ||
+            next["138"] ||
+            findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
+        if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+    }
+
+    // The graph bakes a fixed noise seed — identical inputs would render an identical clip on
+    // every run. Randomize per submission.
+    for (const node of Object.values(next)) {
+        if (/RandomNoise/i.test(String(node.class_type || "")) && typeof node.inputs?.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
+    }
+
+    return { workflow: next, structuralRepair };
+}
+
 /**
  * A RunningHub model name doubles as its workflow id, so one model normally runs one workflow.
  * The 自动分镜 model is the exception: its workflow renders images only, so generating video from
@@ -1226,10 +1823,45 @@ export type RunningHubWorkflowPatch = {
     graph?: ComfyWorkflow;
 };
 
+/**
+ * Scalar overrides for everything the patch changed, in the `nodeInfoList` shape. Links and
+ * non-scalars are skipped: the body field can only override a scalar input of an existing node.
+ */
+function workflowNodeInfoList(before: ComfyWorkflow, after: ComfyWorkflow): RunningHubNodeInfo[] {
+    const list: RunningHubNodeInfo[] = [];
+    for (const [nodeId, node] of Object.entries(after)) {
+        const pristine = before[nodeId]?.inputs || {};
+        for (const [fieldName, value] of Object.entries(node.inputs || {})) {
+            if (Array.isArray(pristine[fieldName]) || Array.isArray(value)) continue;
+            if (pristine[fieldName] === value) continue;
+            if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") continue;
+            list.push({ nodeId, fieldName, fieldValue: String(value) });
+        }
+    }
+    return list;
+}
+
 // Exported for the workflow-diagnostics path and tests: the transformation is the risky part, so it
 // is exercised directly instead of only through a live task submission.
 export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string, megapixels = ""): RunningHubWorkflowPatch {
     let patched = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    // The 四视图 asset-card graph opts out of the generic writers entirely (see
+    // applyMinimaxH3FourViewSettings for what each of them would break here). Its own adapter
+    // produces the final graph, so the only remaining work is the scalar diff.
+    if (isMinimaxH3FourViewWorkflow(workflowId)) {
+        const fourView = applyMinimaxH3FourViewSettings(workflow, prompt, imageValues, size, seconds, aspect, megapixels);
+        const list = workflowNodeInfoList(workflow, fourView.workflow);
+        return fourView.structuralRepair ? { nodeInfoList: list, graph: fourView.workflow } : { nodeInfoList: list };
+    }
+    // The 氛围感短视频 clip graph opts out for the same reason (see applyMinimaxH3VibeShortSettings):
+    // the generic seconds writer cannot reach the Float (Duration) node, the aspect writer cannot
+    // produce the ResolutionSelector's label enum, and the tier writer would force a megapixels
+    // value this graph does not ask for.
+    if (isMinimaxH3VibeShortWorkflow(workflowId)) {
+        const vibe = applyMinimaxH3VibeShortSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
+        const list = workflowNodeInfoList(workflow, vibe.workflow);
+        return vibe.structuralRepair ? { nodeInfoList: list, graph: vibe.workflow } : { nodeInfoList: list };
+    }
     if (prompt.trim()) patched = writeRunningHubPrompt(patched, prompt);
     if (size) patched = writeRunningHubSize(patched, size.width, size.height, aspect);
     const tier = canvasResolutionTier(rawSize);
@@ -1258,17 +1890,7 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         patched = fiveSegment.workflow;
         if (fiveSegment.structuralRepair) structuralRepair = true;
     }
-    const list: RunningHubNodeInfo[] = [];
-    for (const [nodeId, node] of Object.entries(patched)) {
-        const before = workflow[nodeId]?.inputs || {};
-        const after = node.inputs || {};
-        for (const [fieldName, value] of Object.entries(after)) {
-            if (Array.isArray(before[fieldName]) || Array.isArray(value)) continue;
-            if (before[fieldName] === value) continue;
-            if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") continue;
-            list.push({ nodeId, fieldName, fieldValue: String(value) });
-        }
-    }
+    const list = workflowNodeInfoList(workflow, patched);
     // The 图生图 workflow already wires uploaded references (and clears baked-in ones) inside
     // applyQwenImage21Settings, so skip the generic mapping for it. The Qwen Image 2.1 dual
     // (文生/编辑) pair does the same inside applyQwenImage21DualSettings. Other Qwen workflows keep
@@ -1860,6 +2482,15 @@ async function runRunningHubWorkflowWithKey(args: {
     const overrides = patch.nodeInfoList;
     const repairedGraph = patch.graph;
     const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|resolution|megapixel|aspect_ratio|switch/i.test(item.fieldName));
+    // Observability for the "finished but unrelated to my references" class of bug: one line that
+    // shows whether the uploads and their overrides actually made it into the submission.
+    const referenceCount = (request.referenceDataUrls || []).filter(Boolean).length;
+    const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
+    if (referenceCount) {
+        console.info(
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) graph=${Boolean(repairedGraph)} overrides=${overrides.length}`,
+        );
+    }
     let task: RunningHubTaskView;
     try {
         if (workflow) {
@@ -1882,8 +2513,14 @@ async function runRunningHubWorkflowWithKey(args: {
         const canRetryPlain = Boolean(workflow) && (overrides.length > 0 || Boolean(repairedGraph)) && (Boolean(repairedGraph) || isUnknownServerError(message) || /APIKEY_INVALID_NODE_INFO|Node info error/i.test(message));
         if (canRetryPlain) {
             const fallback = keptOverrides.length && keptOverrides.length < overrides.length ? keptOverrides : [];
+            // A fallback without overrides runs the workflow exactly as saved — the author's baked
+            // demo images and all. With references on hand that is worse than failing: the task
+            // succeeds, renders something unrelated to them, and the user cannot tell why.
+            if (!fallback.length && referenceCount) throw explainRunningHubError(error, workflowId);
+            console.warn(`[runninghub] ${workflowId}: graph submission failed (${message.slice(0, 160)}), retrying with ${fallback.length} override(s)`);
             task = await submitWorkflowTask(origin, apiKey, workflowId, fallback, undefined, request.signal).catch(async (retryError: unknown) => {
                 if (!fallback.length) throw explainRunningHubError(retryError, workflowId);
+                if (referenceCount) console.warn(`[runninghub] ${workflowId}: override retry failed too; last resort drops ALL overrides`);
                 return submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((plainError: unknown) => {
                     throw explainRunningHubError(plainError, workflowId);
                 });
@@ -1927,7 +2564,9 @@ async function runRunningHubWorkflowWithKey(args: {
         }
     }
     const result: RunningHubMedia = { images: task.images, videos: task.videos };
-    return isMinimaxH3FiveSegmentWorkflow(workflowId) ? normalizeMinimaxH3FiveSegmentResult(result, workflow) : result;
+    if (isMinimaxH3FiveSegmentWorkflow(workflowId)) return normalizeMinimaxH3FiveSegmentResult(result, workflow);
+    if (isMinimaxH3FourViewWorkflow(workflowId)) return normalizeMinimaxH3FourViewResult(result, workflow);
+    return result;
 }
 
 export async function probeRunningHubWorkflow(baseUrl: string, apiKey: string, model: string, script?: string, signal?: AbortSignal) {
