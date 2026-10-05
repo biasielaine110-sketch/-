@@ -1538,9 +1538,13 @@ function minimaxH3FourViewSheetPrefix(workflow: ComfyWorkflow | null) {
     return "";
 }
 
-// MiniMax H3 氛围感短视频 (reference-to-video, no storyboard sheet). One graph serves both
-// RunningHub hosts: 2107016187795304449 (runninghub.cn) and 2107014873040396289 (runninghub.ai).
-// Its output is a single clip, so the task reports one video and nothing else.
+// MiniMax H3 reference-to-video clip graphs — one clip out, no storyboard sheet. The same graph
+// shape ships as two published models per host (the sampler chain differs — 8-step turbo LoRA vs a
+// 4-step DMAD LoRA with ExtendIntermediateSigmas/BlockSparseAttention/SigmaShift — but none of
+// those are user-facing knobs, and every knob the adapter does touch sits at the same node id):
+//   氛围感短视频:   2107016187795304449 (runninghub.cn) / 2107014873040396289 (runninghub.ai)
+//   官流单采极速文戏: 2107149772913201154 (runninghub.cn) / 2107045636834172929 (runninghub.ai)
+//                    + 2107156102268940290 (runninghub.cn, another published copy of the same graph)
 //
 // The generic writers reach the prompt and the two reference loaders by luck of the field names
 // (`value`/`image` are both in PROMPT_FIELDS / the LoadImage scan), but they miss everything else —
@@ -1565,11 +1569,17 @@ function minimaxH3FourViewSheetPrefix(workflow: ComfyWorkflow | null) {
 // unlike the four-view graph), so the loader for a slot is its link target — one hop, no walk.
 // Both loaders ship the author's baked demo photos; leaving an unfilled slot wired would render a
 // stranger's character into the clip, so unfilled slots are disconnected instead.
-const MINIMAX_H3_VIBE_SHORT_WORKFLOW_IDS = new Set(["2107016187795304449", "2107014873040396289"]);
+const MINIMAX_H3_REFERENCE_CLIP_WORKFLOW_IDS = new Set([
+    "2107016187795304449",
+    "2107014873040396289",
+    "2107149772913201154",
+    "2107045636834172929",
+    "2107156102268940290",
+]);
 /** H3 accepts lengths of the form 17n+5; the graph's own math node enforces the minimum of 5. */
 const MINIMAX_H3_VIBE_SHORT_SECONDS = { min: 2, max: 20 };
 
-function isMinimaxH3VibeShortWorkflow(workflowId?: string | null) {
+function isMinimaxH3ReferenceClipWorkflow(workflowId?: string | null) {
     const raw = String(workflowId || "")
         .trim()
         .toLowerCase();
@@ -1578,13 +1588,16 @@ function isMinimaxH3VibeShortWorkflow(workflowId?: string | null) {
     // gate matches the bare id or any `::`-separated / prefixed runtime form of it.
     return raw.split("::").some((segment) => {
         const id = segment.trim().replace(/^(rh|runninghub|workflow)[:_-]/, "").trim();
-        return MINIMAX_H3_VIBE_SHORT_WORKFLOW_IDS.has(id);
+        return MINIMAX_H3_REFERENCE_CLIP_WORKFLOW_IDS.has(id);
     });
 }
 
-/** Public gate so the image path can hand a clip-only finish back to the canvas. */
+/**
+ * Public gate for the H3 clip-only graph family (氛围感短视频 + 官流单采极速文戏): the image path
+ * hands a clip-only finish back to the canvas, and the duration/resolution knobs are honored there.
+ */
 export function isMinimaxH3VibeShortWorkflowId(workflowId?: string | null) {
-    return isMinimaxH3VibeShortWorkflow(workflowId);
+    return isMinimaxH3ReferenceClipWorkflow(workflowId);
 }
 
 /**
@@ -1857,7 +1870,7 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
     // the generic seconds writer cannot reach the Float (Duration) node, the aspect writer cannot
     // produce the ResolutionSelector's label enum, and the tier writer would force a megapixels
     // value this graph does not ask for.
-    if (isMinimaxH3VibeShortWorkflow(workflowId)) {
+    if (isMinimaxH3ReferenceClipWorkflow(workflowId)) {
         const vibe = applyMinimaxH3VibeShortSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
         const list = workflowNodeInfoList(workflow, vibe.workflow);
         return vibe.structuralRepair ? { nodeInfoList: list, graph: vibe.workflow } : { nodeInfoList: list };
