@@ -371,6 +371,23 @@ export function usesComfyReferenceSlotOrder(workflowId: string | undefined | nul
     return keys.some((key) => allowed.has(key));
 }
 
+/**
+ * Filename a graph uses as its own "empty slot" placeholder (e.g. `zealman-blank-image.png`).
+ *
+ * Templates that expose more reference slots than they expect to be filled park a blank image in
+ * the spare ones. Reusing that same asset to clear unused slots keeps the call sites honest
+ * (the blank file is part of the exported graph, so it already exists on the server) instead of
+ * inventing a name that would fail ComfyUI's LoadImage.
+ */
+function comfyBlankImagePlaceholder(workflow: ComfyWorkflow): string | null {
+    for (const node of Object.values(workflow)) {
+        if (!isComfyImageLoader(node)) continue;
+        const name = node.inputs?.image;
+        if (typeof name === "string" && /blank|empty|placeholder|transparent|^none\./i.test(name)) return name;
+    }
+    return null;
+}
+
 /** Map uploaded filenames onto LoadImage nodes in order. */
 export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[], workflowId?: string): ComfyWorkflow {
     if (!filenames.length) return workflow;
@@ -381,6 +398,11 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
         usesComfyReferenceSlotOrder(workflowId) || isComfyH3TwoPassReferenceWorkflow(next)
             ? comfyReferenceSlotOrder(next)
             : [];
+    // When a two-pass H3 graph declares its own blank placeholder, the spare slots are meant to stay
+    // empty. Repeating the last uploaded picture there (the legacy fallback) made the model see one
+    // reference 8× — e.g. U24 V927 exposes 9 slots where only the first few are real. Graphs without
+    // such a placeholder keep the legacy fill-up, so no other model changes behaviour.
+    const blankSlot = isComfyH3TwoPassReferenceWorkflow(next) ? comfyBlankImagePlaceholder(next) : null;
     const loaders = slotOrder.length
         ? slotOrder.map((id) => next[id]).filter((node): node is ComfyNode => Boolean(node))
         : Object.entries(next)
@@ -388,7 +410,8 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
               .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
               .map(([, node]) => node);
     loaders.forEach((node, index) => {
-        const name = filenames[index] || filenames[filenames.length - 1];
+        // Legacy fallback (repeat the last upload) is preserved when the graph has no blank slot.
+        const name = filenames[index] || blankSlot || filenames[filenames.length - 1];
         if (!name) return;
         if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
         if ("image" in node.inputs || !("url" in node.inputs)) node.inputs.image = name;
