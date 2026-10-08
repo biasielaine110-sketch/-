@@ -616,6 +616,11 @@ export function applyComfyVideoSettings(
         refImageSize?: string;
         samplerName?: string;
         scheduler?: string;
+        /**
+         * Geometry-locked graphs (the multi-reference H3 "two-pass" family) keep the resolution
+         * knobs the workflow author tuned — see the ResolutionSelector branch below.
+         */
+        keepTunedResolution?: boolean;
     },
 ): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
@@ -637,8 +642,18 @@ export function applyComfyVideoSettings(
         if (!node.inputs || typeof node.inputs !== "object") continue;
 
         if (/ResolutionSelector/i.test(type) || /分辨率/i.test(title)) {
-            if ("aspect_ratio" in node.inputs) node.inputs.aspect_ratio = aspectLabel;
-            if ("megapixels" in node.inputs) writeComfyNumberInput(node, "megapixels", megapixels);
+            // Geometry-locked graphs (H3 two-pass family): the HIGH refine pass takes its size from a
+            // fixed learned upscaler (target_width/height on the upscale node), so the
+            // ResolutionSelector only drives the cheap LOW draft pass — and the author tunes that
+            // draft deliberately small (0.4 MP in the U24/T8 template). Rewriting it with the canvas
+            // budget (auto quality → 0.94 MP) made the draft as heavy as the refine pass and pushed a
+            // 24 GB card over its limit ("allocation would exceed allowed memory"). Keep the saved
+            // aspect and never inflate `megapixels`; a lighter canvas request still gets through.
+            const tunedMegapixels = settings.keepTunedResolution && typeof node.inputs.megapixels === "number" ? node.inputs.megapixels : null;
+            if (tunedMegapixels == null && "aspect_ratio" in node.inputs) node.inputs.aspect_ratio = aspectLabel;
+            if ("megapixels" in node.inputs) {
+                writeComfyNumberInput(node, "megapixels", tunedMegapixels == null ? megapixels : Math.min(megapixels, tunedMegapixels));
+            }
         }
 
         if (seconds != null && (/duration|时长|seconds/i.test(title) || (/Primitive(Float|Int|Number)/i.test(type) && /duration|时长/i.test(title)))) {
@@ -817,6 +832,27 @@ async function shrinkOversizedUpload(file: File): Promise<File> {
     }
 }
 
+/**
+ * Read the stored-file name out of a ComfyUI /upload/image reply. ComfyUI answers
+ * `{ name, subfolder, type }`; a bare filename string is tolerated for compatible servers.
+ * Anything else (an HTML gateway page, an empty body) must NOT be accepted — the previous
+ * `response.data?.name || response.data?.filename || file.name` fallback silently kept the
+ * local name, so a wrong base URL looked like a successful upload and only blew up later as
+ * an unexplained prompt rejection.
+ */
+function readComfyUploadName(payload: unknown): string {
+    if (typeof payload === "string") {
+        const text = payload.trim();
+        return text && text.length <= 512 && !/[<>\r\n]/.test(text) ? text : "";
+    }
+    if (payload && typeof payload === "object") {
+        const record = payload as Record<string, unknown>;
+        const value = record.name ?? record.filename;
+        return typeof value === "string" ? value.trim() : "";
+    }
+    return "";
+}
+
 async function uploadComfyInputFile(
     baseUrl: string,
     apiKey: string,
@@ -838,9 +874,17 @@ async function uploadComfyInputFile(
         headers: authHeaders(apiKey),
         signal: options?.signal,
     });
-    const name = response.data?.name || response.data?.filename || file.name;
-    if (!name) throw new Error("ComfyUI upload did not return a filename");
-    return String(name);
+    const name = readComfyUploadName(response.data);
+    if (!name) {
+        const mime = String((response.headers as unknown as Record<string, unknown> | undefined)?.["content-type"] || "").split(";")[0].trim();
+        const raw = typeof response.data === "string" ? response.data : response.data == null ? "" : JSON.stringify(response.data);
+        const snippet = raw.replace(/\s+/g, " ").trim().slice(0, 200);
+        throw new Error(
+            `ComfyUI /upload/image did not return a filename (HTTP ${response.status}${mime ? `, ${mime}` : ""})` +
+                `${snippet ? `: ${snippet}` : ": the response body was empty"}. The Base URL is not answering as a ComfyUI API — verify the host/port (ComfyUI usually listens on 8188).`,
+        );
+    }
+    return name;
 }
 
 export async function uploadComfyImage(
@@ -960,6 +1004,35 @@ function readComfySubmit(data: unknown) {
     return { promptId, taskId, message };
 }
 
+/**
+ * Explain why a `/prompt` submission came back without a prompt_id.
+ *
+ * The old message was a bare "ComfyUI did not return prompt_id", which is indistinguishable
+ * between "the workflow was rejected", "the base URL is not ComfyUI", and "a gateway/WAF
+ * answered with an HTML page" — three completely different fixes. Surface the status,
+ * content type, an effective URL and a bounded body snippet instead. Never include the API
+ * key: it lives in a header, not in this string.
+ */
+function describeComfySubmitFailure(args: { status: number; contentType: string; data: unknown; url: string; message: string }) {
+    const record = readSubmitRecord(args.data);
+    const err = record?.error ?? record?.node_errors;
+    const errText = typeof err === "string" ? err.trim() : err && typeof err === "object" && Object.keys(err).length ? JSON.stringify(err) : "";
+    if (errText) return errText;
+    if (args.message) return args.message;
+
+    const raw = typeof args.data === "string" ? args.data : args.data == null ? "" : JSON.stringify(args.data);
+    const snippet = raw.replace(/\s+/g, " ").trim().slice(0, 300);
+    const mime = args.contentType.split(";")[0].trim();
+    const head = `ComfyUI did not return prompt_id (HTTP ${args.status}${mime ? `, ${mime}` : ""}, ${args.url})`;
+    if (!snippet || /^\{\s*\}$/.test(snippet) || /^\[\s*\]$/.test(snippet)) {
+        return `${head}: the response carried no fields. The base URL is not answering as a ComfyUI API — check the pod is running, that the port maps to ComfyUI (usually 8188), and open that URL in a browser to see what it serves.`;
+    }
+    if (mime.includes("text/html") || snippet.startsWith("<")) {
+        return `${head}: it returned an HTML page instead of ComfyUI JSON, so this URL is a web UI / gateway rather than the ComfyUI API root. Open it in a browser to confirm. Body starts with: ${snippet}`;
+    }
+    return `${head}: ${snippet}`;
+}
+
 async function finishRunningHubTask(baseUrl: string, apiKey: string, taskId: string, signal?: AbortSignal): Promise<NativeComfyUiResult> {
     const { pollRunningHubQuery, runningHubApiKey, runningHubOrigin } = await import("@/lib/runninghub-workflow");
     const origin = runningHubOrigin(baseUrl);
@@ -1024,6 +1097,51 @@ export type RunNativeComfyUiArgs = {
 /**
  * Upload references, inject prompt/images/audio/size/duration, queue prompt, poll history, download outputs.
  */
+/**
+ * Turn a failed `/history` entry into something the user can act on.
+ *
+ * ComfyUI reports execution failures as `status.messages` entries shaped
+ * `["execution_error", { node_id, node_type, exception_type, exception_message, traceback }]`.
+ * The bare "workflow execution failed" this used to throw hid the only fact that matters —
+ * for example that the GPU ran out of memory — so the node just said "failed" with no way
+ * forward.
+ */
+export function describeComfyExecutionError(entry: unknown): string {
+    const status = (entry as { status?: { messages?: unknown } } | undefined)?.status;
+    const messages = Array.isArray(status?.messages) ? status.messages : [];
+    const failure = messages.find((item) => Array.isArray(item) && item[0] === "execution_error")?.[1] as Record<string, unknown> | undefined;
+    const nodeType = String(failure?.node_type || "").trim();
+    const nodeId = failure?.node_id == null ? "" : String(failure.node_id);
+    const exception = String(failure?.exception_message || failure?.exception_type || "").trim();
+    const where = [nodeType, nodeId && `#${nodeId}`].filter(Boolean).join(" ");
+    const detail = [where, exception].filter(Boolean).join(": ");
+    const head = detail ? `ComfyUI workflow execution failed — ${detail}` : "ComfyUI workflow execution failed";
+    if (/exceeds allowed memory|out of memory|outofmemoryerror|allocation on device/i.test(detail)) {
+        return `${head}. The GPU ran out of VRAM — lower the video resolution or duration and retry (freeing VRAM on the server also helps).`;
+    }
+    return head;
+}
+
+/**
+ * Best-effort VRAM release before a heavy submission.
+ *
+ * Rented ComfyUI pods never free VRAM between tasks, which is the classic "first run succeeds,
+ * the second dies with 'allocation would exceed allowed memory'". ComfyUI's own `/free` endpoint
+ * is the remedy. Deliberately non-fatal: a channel whose ComfyUI does not expose `/free` (or
+ * answers slowly) must keep working exactly as it did before, so every failure is swallowed.
+ */
+async function freeComfyVram(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<void> {
+    try {
+        await axios.post(
+            comfyUiUrl(baseUrl, "/free"),
+            { unload_models: true, free_memory: true },
+            { headers: authHeaders(apiKey, "application/json"), signal, timeout: 30_000 },
+        );
+    } catch {
+        // Optimisation only — never let a missing/failing /free endpoint break a generation.
+    }
+}
+
 export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<NativeComfyUiResult> {
     const { baseUrl, apiKey, prompt, signal } = args;
     if (!normalizeComfyUiRoot(baseUrl)) throw new Error("ComfyUI Base URL is required");
@@ -1043,6 +1161,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         refImageSize: args.refImageSize,
         samplerName: args.samplerName,
         scheduler: args.scheduler,
+        keepTunedResolution: h3TwoPassRefs,
     });
     if (h3TwoPassRefs) workflow = applyComfyRandomSeed(workflow);
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
@@ -1081,7 +1200,13 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // Basic-Auth credentials authenticate via the Authorization header only — never as a body token.
     if (token && !/^(none|-|n\/a)$/i.test(token) && !isBasicAuthCredential(apiKey)) body.token = token;
 
-    const submit = await axios.post(comfyUiUrl(baseUrl, "/prompt"), body, {
+    // Heavy two-pass H3 graphs run right at the edge of a 24 GB card; release whatever the previous
+    // task left resident before asking for another render. Best-effort and family-scoped, so no
+    // other native ComfyUI channel changes behaviour.
+    if (h3TwoPassRefs) await freeComfyVram(baseUrl, apiKey, signal);
+
+    const submitUrl = comfyUiUrl(baseUrl, "/prompt");
+    const submit = await axios.post(submitUrl, body, {
         headers: authHeaders(apiKey, "application/json"),
         signal,
     });
@@ -1091,9 +1216,15 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     }
     const promptId = submitted.promptId;
     if (!promptId) {
-        const err = submit.data?.error || submit.data?.node_errors;
-        const errText = typeof err === "string" ? err : err && typeof err === "object" && Object.keys(err).length ? JSON.stringify(err) : "";
-        throw new Error(errText || submitted.message || "ComfyUI did not return prompt_id");
+        throw new Error(
+            describeComfySubmitFailure({
+                status: submit.status,
+                contentType: String((submit.headers as unknown as Record<string, unknown> | undefined)?.["content-type"] || ""),
+                data: submit.data,
+                url: submitUrl,
+                message: submitted.message,
+            }),
+        );
     }
 
     const deadline = performance.now() + HISTORY_TIMEOUT_MS;
@@ -1105,8 +1236,11 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             signal,
         });
         const entry = history.data?.[promptId] || history.data;
-        if (entry?.status?.status_str === "error" || entry?.status?.completed === false && entry?.status?.messages?.some?.((m: unknown) => Array.isArray(m) && m[0] === "execution_error")) {
-            throw new Error("ComfyUI workflow execution failed");
+        if (
+            entry?.status?.status_str === "error" ||
+            (entry?.status?.completed === false && entry?.status?.messages?.some?.((m: unknown) => Array.isArray(m) && m[0] === "execution_error"))
+        ) {
+            throw new Error(describeComfyExecutionError(entry));
         }
         if (entry?.outputs && Object.keys(entry.outputs).length) {
             outputs = entry.outputs as HistoryOutputs;
@@ -1144,7 +1278,34 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     return { images, videos };
 }
 
-/** Health probe: GET /system_stats or /object_info (any 2xx/4xx from live server counts). */
+/**
+ * A live ComfyUI answers /system_stats and /object_info with JSON. An HTML page or an empty
+ * body means we reached a gateway / WAF interstitial / web UI instead — and the old
+ * "any 2xx/4xx counts as healthy" rule reported exactly that as green, which is how a wrong
+ * base URL stays invisible until the first generation fails.
+ */
+function isComfyJsonResponse(response: { headers?: unknown; data?: unknown }): boolean {
+    const contentType = String((response.headers as Record<string, unknown> | undefined)?.["content-type"] || "").toLowerCase();
+    const data = response.data;
+    if (typeof data === "string") {
+        const text = data.trim();
+        if (!text || text.startsWith("<")) return false;
+        try {
+            const parsed = JSON.parse(text) as unknown;
+            return Boolean(parsed) && typeof parsed === "object";
+        } catch {
+            return false;
+        }
+    }
+    if (data && typeof data === "object") return true;
+    // No parsed body at all — only trust an explicit JSON content type.
+    return contentType.includes("json");
+}
+
+const NOT_COMFY_JSON_MESSAGE =
+    "the endpoint did not answer with ComfyUI JSON (an HTML/gateway page or an empty body). The Base URL looks like a web UI / gateway instead of the ComfyUI API root — verify host and port (ComfyUI usually listens on 8188), then open <Base URL>/system_stats in a browser: it must return JSON.";
+
+/** Health probe: GET /system_stats or /object_info (a live ComfyUI answers both with JSON). */
 export async function probeNativeComfyUi(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<{ ok: boolean; message: string }> {
     try {
         const response = await axios.get(comfyUiUrl(baseUrl, "/system_stats"), {
@@ -1160,11 +1321,17 @@ export async function probeNativeComfyUi(baseUrl: string, apiKey: string, signal
                 timeout: 12_000,
                 validateStatus: () => true,
             });
-            if (fallback.status >= 200 && fallback.status < 500) return { ok: true, message: `HTTP ${fallback.status}` };
+            if (fallback.status >= 200 && fallback.status < 300) {
+                return isComfyJsonResponse(fallback) ? { ok: true, message: `HTTP ${fallback.status}` } : { ok: false, message: `HTTP ${fallback.status}: ${NOT_COMFY_JSON_MESSAGE}` };
+            }
+            if (fallback.status < 500) return { ok: true, message: `HTTP ${fallback.status}` };
             return { ok: false, message: `HTTP ${fallback.status}` };
         }
         if (response.status === 401 || response.status === 403) return { ok: false, message: "ComfyUI auth failed (check API token)" };
-        if (response.status >= 200 && response.status < 500) return { ok: true, message: `HTTP ${response.status}` };
+        if (response.status >= 200 && response.status < 300) {
+            return isComfyJsonResponse(response) ? { ok: true, message: `HTTP ${response.status}` } : { ok: false, message: `HTTP ${response.status}: ${NOT_COMFY_JSON_MESSAGE}` };
+        }
+        if (response.status < 500) return { ok: true, message: `HTTP ${response.status}` };
         return { ok: false, message: `HTTP ${response.status}` };
     } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
