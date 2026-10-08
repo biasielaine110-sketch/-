@@ -327,13 +327,43 @@ export function isComfyH3SingleReferenceImageWorkflow(workflow: ComfyWorkflow): 
 }
 
 /**
- * True for every H3 family whose resolution/geometry is locked by the graph author rather than
- * by the canvas controls (the two-pass video family and the single-reference image family).
- * Drives `keepTunedResolution`, seed randomization and the upload size guard — and nothing else,
- * so all other native ComfyUI models are untouched.
+ * Structural fingerprint of the Krea2 image "character sheet / 4-view" edit family
+ * (e.g. T10-Krea2做剧图像4视图).
+ *
+ * Shape: at least one Krea2 Edit node (`Krea2EditModelPatch` / `Krea2EditGroundedEncode` — node
+ * types that exist only in the Krea2 edit pipeline), a plain `KSampler`, and a text-to-image
+ * `Empty*LatentImage`. These graphs push a single `LoadImage` reference through the edit encoder
+ * and bake the *output* canvas straight onto that latent node (1536×1024 = 3:2 in the T10
+ * template), because the `krea2_4panel` LoRA is trained for that exact grid — the canvas is part
+ * of the model, not a user knob.
+ *
+ * The image path passes no canvas size, so the shared geometry writer would otherwise invent its
+ * 16:9 @1280 default (1280×736 after the 32-px snap) and clobber the author's 3:2 canvas on every
+ * run, squashing the four panels into a strip.
+ *
+ * Disjoint from both H3 fingerprints (Krea2 node types never appear in an H3 graph), so every
+ * other graph keeps its previous behaviour.
+ */
+export function isComfyKrea2EditWorkflow(workflow: ComfyWorkflow): boolean {
+    const types = Object.values(workflow).map((node) => String(node?.class_type || ""));
+    if (!types.some((type) => /^Krea2Edit/i.test(type))) return false;
+    if (!types.some((type) => /^KSampler$/i.test(type))) return false;
+    return types.some((type) => /^Empty(?:SD3|SDXL|Latent|FLUX|SD)?LatentImage/i.test(type));
+}
+
+/**
+ * True for every family whose resolution/geometry is locked by the graph author rather than by
+ * the canvas controls: the two-pass H3 video family (ResolutionSelector megapixels), the
+ * single-reference H3 image family (the H3 node's own width/height), and the Krea2 edit image
+ * family (`Empty*LatentImage` canvas). Drives `keepTunedResolution`, seed randomization and the
+ * upload size guard — and nothing else, so all other native ComfyUI models are untouched.
  */
 export function isComfyGeometryLockedWorkflow(workflow: ComfyWorkflow): boolean {
-    return isComfyH3TwoPassReferenceWorkflow(workflow) || isComfyH3SingleReferenceImageWorkflow(workflow);
+    return (
+        isComfyH3TwoPassReferenceWorkflow(workflow) ||
+        isComfyH3SingleReferenceImageWorkflow(workflow) ||
+        isComfyKrea2EditWorkflow(workflow)
+    );
 }
 
 /**
@@ -757,11 +787,17 @@ export function applyComfyVideoSettings(
 
     // Text-to-image latent nodes (EmptySD3LatentImage / EmptyLatentImage / EmptySDXL...) expose
     // scalar width/height. Inject canvas dimensions so aspect-ratio switching works for these graphs.
-    for (const node of Object.values(next)) {
-        const type = String(node.class_type || "");
-        if (!/Empty(?:SD3|SDXL|Latent|FLUX|SD)?LatentImage/i.test(type) || !node.inputs) continue;
-        if (writeComfyNumberInput(node, "width", pixels.width) || writeLinkedComfyNumber(next, node.inputs.width, pixels.width)) {
-            writeComfyNumberInput(node, "height", pixels.height) || writeLinkedComfyNumber(next, node.inputs.height, pixels.height);
+    // Geometry-locked graphs (Krea2 edit family) instead carry the author's canvas here — and the
+    // image path passes no canvas size, so `pixels` is only the 16:9 @1280 fallback (1280×736 after
+    // the 32-px snap) that would clobber that author size. Skip the write for them; every other
+    // graph (which is not geometry-locked) still gets its canvas dimensions as before.
+    if (!settings.keepTunedResolution) {
+        for (const node of Object.values(next)) {
+            const type = String(node.class_type || "");
+            if (!/Empty(?:SD3|SDXL|Latent|FLUX|SD)?LatentImage/i.test(type) || !node.inputs) continue;
+            if (writeComfyNumberInput(node, "width", pixels.width) || writeLinkedComfyNumber(next, node.inputs.width, pixels.width)) {
+                writeComfyNumberInput(node, "height", pixels.height) || writeLinkedComfyNumber(next, node.inputs.height, pixels.height);
+            }
         }
     }
 
