@@ -9,7 +9,7 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import { applyComfyPrompt, parseComfyApiWorkflow, type ComfyNode, type ComfyWorkflow } from "@/lib/comfyui-native";
-import { dataUrlToFile } from "@/lib/image-utils";
+import { compressReferenceDataUrl, dataUrlToFile, getDataUrlByteSize } from "@/lib/image-utils";
 
 type RequestOptions = { signal?: AbortSignal };
 
@@ -2189,10 +2189,31 @@ function writeRunningHubSeconds(workflow: ComfyWorkflow, seconds: string) {
     return next;
 }
 
+// Vercel serverless /api/proxy caps request bodies at ~4.5MB, so an oversized reference
+// (e.g. a full-screen clipboard screenshot PNG) fails the multipart upload with HTTP 413
+// before RunningHub ever sees it. Mirrors the comfyui-native upload guard: only images
+// already within budget stay byte-identical; oversized ones are downscaled/re-encoded.
+const RUNNINGHUB_UPLOAD_BYTE_BUDGET = 2_400_000;
+const RUNNINGHUB_UPLOAD_MAX_EDGE = 1536;
+
+async function shrinkOversizedReferenceDataUrl(dataUrl: string) {
+    if (getDataUrlByteSize(dataUrl) <= RUNNINGHUB_UPLOAD_BYTE_BUDGET) return dataUrl;
+    try {
+        const compressed = await compressReferenceDataUrl(dataUrl, 1, {
+            maxEdge: RUNNINGHUB_UPLOAD_MAX_EDGE,
+            maxBytes: RUNNINGHUB_UPLOAD_BYTE_BUDGET,
+        });
+        return compressed.startsWith("data:") && getDataUrlByteSize(compressed) < getDataUrlByteSize(dataUrl) ? compressed : dataUrl;
+    } catch {
+        return dataUrl;
+    }
+}
+
 async function uploadImage(origin: string, apiKey: string, source: string, fileName: string, signal?: AbortSignal) {
     let file: File;
     if (source.startsWith("data:")) {
-        file = dataUrlToFile({ id: fileName, name: fileName, dataUrl: source, type: "image/png" });
+        const shrunk = await shrinkOversizedReferenceDataUrl(source);
+        file = dataUrlToFile({ id: fileName, name: fileName, dataUrl: shrunk, type: "image/png" });
     } else if (/^https?:\/\//i.test(source)) {
         return source;
     } else {
