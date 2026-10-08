@@ -295,6 +295,48 @@ export function isComfyH3TwoPassReferenceWorkflow(workflow: ComfyWorkflow): bool
 }
 
 /**
+ * Structural fingerprint of the MiniMax H3 "single-reference image edit" family
+ * (e.g. U33-Minimax-H3图像编辑全能工作流).
+ *
+ * Shape: exactly one H3 conditioning node carrying exactly one validated named reference
+ * slot (`ref_images.ref_image_N` → a real image loader), sampled by a plain `KSampler`,
+ * with none of the two-pass machinery (`ResolutionSelector` / `RandomNoise` / `SamplerCustom`
+ * / learned upscaler) that marks the video family. These graphs bake the output size straight
+ * onto the H3 node (`width`/`height` = 2048×2048 in the U33 template), and the *image* path
+ * passes no canvas size — so the shared geometry writer would otherwise invent a 16:9 @1280
+ * default and clobber the author's square size on every run.
+ *
+ * Deliberately disjoint from `isComfyH3TwoPassReferenceWorkflow` (that one requires ≥2 slots
+ * and ≥2 conditioning nodes). Any graph that does not match exactly keeps its previous
+ * behaviour, so no other channel/model is affected.
+ */
+export function isComfyH3SingleReferenceImageWorkflow(workflow: ComfyWorkflow): boolean {
+    const conditioning = Object.values(workflow).filter((node) => isMiniMaxH3ConditioningNode(node));
+    if (conditioning.length !== 1) return false;
+    const inputs = conditioning[0]?.inputs;
+    if (!inputs || typeof inputs !== "object") return false;
+    const slotKeys = Object.keys(inputs).filter((key) => /^ref_images\.ref_image_\d+$/.test(key));
+    if (slotKeys.length !== 1) return false;
+    const slotValue = (inputs as Record<string, unknown>)[slotKeys[0]];
+    if (!Array.isArray(slotValue) || slotValue[0] == null) return false;
+    const loader = workflow[String(slotValue[0])];
+    if (!loader || !isComfyImageLoader(loader)) return false;
+    const types = Object.values(workflow).map((node) => String(node?.class_type || ""));
+    if (types.some((type) => /ResolutionSelector|RandomNoise|SamplerCustom|LatentUpscale/i.test(type))) return false;
+    return types.some((type) => /^KSampler$/i.test(type));
+}
+
+/**
+ * True for every H3 family whose resolution/geometry is locked by the graph author rather than
+ * by the canvas controls (the two-pass video family and the single-reference image family).
+ * Drives `keepTunedResolution`, seed randomization and the upload size guard — and nothing else,
+ * so all other native ComfyUI models are untouched.
+ */
+export function isComfyGeometryLockedWorkflow(workflow: ComfyWorkflow): boolean {
+    return isComfyH3TwoPassReferenceWorkflow(workflow) || isComfyH3SingleReferenceImageWorkflow(workflow);
+}
+
+/**
  * Extra allow-list of workflows that map uploaded references by consumer slot order.
  *
  * The structural fingerprint above is the primary trigger; this list is only an escape hatch
@@ -617,8 +659,10 @@ export function applyComfyVideoSettings(
         samplerName?: string;
         scheduler?: string;
         /**
-         * Geometry-locked graphs (the multi-reference H3 "two-pass" family) keep the resolution
-         * knobs the workflow author tuned — see the ResolutionSelector branch below.
+         * Geometry-locked graphs keep the resolution knobs the workflow author tuned: the
+         * multi-reference H3 "two-pass" video family (ResolutionSelector megapixels) and the
+         * single-reference H3 image family (the H3 node's own width/height). See both branches
+         * below; every other graph is untouched.
          */
         keepTunedResolution?: boolean;
     },
@@ -701,8 +745,13 @@ export function applyComfyVideoSettings(
     // MiniMax H3 conditioning often exposes width/height/length (scalar or linked) and ref_image_size.
     for (const node of Object.values(next)) {
         if (!isMiniMaxH3ConditioningNode(node) || !node.inputs) continue;
-        if (!writeComfyNumberInput(node, "width", pixels.width)) writeLinkedComfyNumber(next, node.inputs.width, pixels.width);
-        if (!writeComfyNumberInput(node, "height", pixels.height)) writeLinkedComfyNumber(next, node.inputs.height, pixels.height);
+        // Geometry-locked H3 families keep the width/height the author baked onto the node. The
+        // image path passes no canvas size, so `pixels` is only the 16:9 @1280 fallback — writing it
+        // would silently rewrite a 2048×2048 author size on every run.
+        if (!settings.keepTunedResolution) {
+            if (!writeComfyNumberInput(node, "width", pixels.width)) writeLinkedComfyNumber(next, node.inputs.width, pixels.width);
+            if (!writeComfyNumberInput(node, "height", pixels.height)) writeLinkedComfyNumber(next, node.inputs.height, pixels.height);
+        }
         if (refImageSize && "ref_image_size" in node.inputs) {
             writeComfyStringInput(node, "ref_image_size", refImageSize);
         }
@@ -744,8 +793,8 @@ function randomComfySeed() {
 /**
  * Exported graphs bake a fixed `noise_seed`, so identical inputs render the *identical* video on
  * every run — the model looks frozen. Randomize per submission, mirroring the RunningHub
- * adapters. Only applied to the detected two-pass family (see
- * `isComfyH3TwoPassReferenceWorkflow`); every other native ComfyUI model keeps its saved seed and
+ * adapters. Only applied to the detected geometry-locked H3 families (see
+ * `isComfyGeometryLockedWorkflow`); every other native ComfyUI model keeps its saved seed and
  * its reproducibility. `restart_seed` and friends are deliberately left alone — they are not the
  * sampling seed.
  */
@@ -785,8 +834,8 @@ async function referenceToUploadFile(
 /**
  * Extra allow-list of workflows whose reference uploads go through the size guard.
  *
- * The structural fingerprint (`isComfyH3TwoPassReferenceWorkflow`) is the primary trigger;
- * this list stays for workflows that are not multi-reference H3 graphs. Unlike the
+ * The geometry-locked H3 fingerprints (`isComfyGeometryLockedWorkflow`) are the primary trigger;
+ * this list stays for workflows that are not those H3 graphs. Unlike the
  * reference-slot list, a wrong entry here is harmless (it only re-encodes an oversized image),
  * so the threshold for adding one is low — but it is still opt-in rather than global.
  */
@@ -1150,7 +1199,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // name — the name is user-typed and the exported file name changes every revision, so a
     // name-keyed adapter goes dead code silently.
     const h3TwoPassRefs = isComfyH3TwoPassReferenceWorkflow(args.workflow);
-    const guardUpload = h3TwoPassRefs || usesComfyUploadGuard(args.workflowId);
+    // Geometry-locked H3 families (two-pass video + single-reference image, e.g. U33) keep the
+    // size the author baked into the graph; the image path passes no canvas size to override it.
+    const keepTunedGeometry = isComfyGeometryLockedWorkflow(args.workflow);
+    const guardUpload = keepTunedGeometry || usesComfyUploadGuard(args.workflowId);
 
     let workflow = applyComfyPrompt(args.workflow, prompt);
     workflow = applyComfyVideoSettings(workflow, {
@@ -1161,9 +1213,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         refImageSize: args.refImageSize,
         samplerName: args.samplerName,
         scheduler: args.scheduler,
-        keepTunedResolution: h3TwoPassRefs,
+        keepTunedResolution: keepTunedGeometry,
     });
-    if (h3TwoPassRefs) workflow = applyComfyRandomSeed(workflow);
+    if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow);
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     if (refs.length) {
         const names: string[] = [];
