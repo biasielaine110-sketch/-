@@ -272,11 +272,35 @@ function comfyReferenceSlotOrder(workflow: ComfyWorkflow): string[] {
 }
 
 /**
- * Strict allow-list of workflows that map uploaded references by consumer slot order.
+ * Structural fingerprint of the MiniMax H3 "two-pass / 双采" multi-reference family.
  *
- * Every workflow NOT listed here keeps the historical node-id order untouched. Add a
- * workflow's model / option name only after verifying its `ref_images.ref_image_N` wiring —
- * a wrong entry would scramble that workflow's references.
+ * These graphs get re-exported and renamed constantly: the exported file name changes every
+ * revision (…V1 / …V2 / …V3) and the app's model option can be anything at all (e.g.
+ * "H3-video"). Keying behaviour off one exact name turns the adapter into dead code the moment
+ * either side is renamed — which is exactly how this workflow silently regressed. Detect the
+ * family by shape instead:
+ *
+ *  1. `comfyReferenceSlotOrder` finds >= 2 named reference slots (`ref_images.ref_image_N` on a
+ *     MiniMax H3 conditioning node) and *every* slot resolves to a real image loader. Those
+ *     slots are the picture ordinals (`<Picture N+1>` ↔ `ref_image_N`), so slot order is
+ *     correct by definition while node-id order is arbitrary;
+ *  2. the graph runs the LOW + HIGH two-pass pair (>= 2 H3 conditioning nodes).
+ *
+ * Both are required, so a single-pass H3 graph, an image graph, or any workflow without
+ * validated named slots never matches and keeps its previous behaviour.
+ */
+export function isComfyH3TwoPassReferenceWorkflow(workflow: ComfyWorkflow): boolean {
+    if (comfyReferenceSlotOrder(workflow).length < 2) return false;
+    return Object.values(workflow).filter((node) => isMiniMaxH3ConditioningNode(node)).length >= 2;
+}
+
+/**
+ * Extra allow-list of workflows that map uploaded references by consumer slot order.
+ *
+ * The structural fingerprint above is the primary trigger; this list is only an escape hatch
+ * for a graph whose shape stops matching (e.g. a single-pass rewrite) but whose
+ * `ref_images.ref_image_N` wiring is known to be ordinal. Add a name only after verifying that
+ * wiring — a wrong entry would scramble that workflow's references.
  */
 export const COMFY_REFERENCE_SLOT_WORKFLOWS = ["U24-文武双修T8版MiniMaxH3双采参考生视频V2"] as const;
 
@@ -309,9 +333,12 @@ export function usesComfyReferenceSlotOrder(workflowId: string | undefined | nul
 export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[], workflowId?: string): ComfyWorkflow {
     if (!filenames.length) return workflow;
     const next = cloneWorkflow(workflow);
-    // Strict allow-list: only the listed workflows map by consumer reference-slot links;
-    // every other workflow keeps the historical node-id order untouched.
-    const slotOrder = usesComfyReferenceSlotOrder(workflowId) ? comfyReferenceSlotOrder(next) : [];
+    // Name allow-list OR structural fingerprint. Without the fingerprint a renamed model fell back
+    // to node-id order and scrambled every reference (ref_image_0 got the last uploaded picture).
+    const slotOrder =
+        usesComfyReferenceSlotOrder(workflowId) || isComfyH3TwoPassReferenceWorkflow(next)
+            ? comfyReferenceSlotOrder(next)
+            : [];
     const loaders = slotOrder.length
         ? slotOrder.map((id) => next[id]).filter((node): node is ComfyNode => Boolean(node))
         : Object.entries(next)
@@ -694,6 +721,30 @@ export function applyComfyVideoSettings(
     return next;
 }
 
+/** Random 64-bit-safe seed (same convention as the RunningHub workflow adapters). */
+function randomComfySeed() {
+    return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+}
+
+/**
+ * Exported graphs bake a fixed `noise_seed`, so identical inputs render the *identical* video on
+ * every run — the model looks frozen. Randomize per submission, mirroring the RunningHub
+ * adapters. Only applied to the detected two-pass family (see
+ * `isComfyH3TwoPassReferenceWorkflow`); every other native ComfyUI model keeps its saved seed and
+ * its reproducibility. `restart_seed` and friends are deliberately left alone — they are not the
+ * sampling seed.
+ */
+export function applyComfyRandomSeed(workflow: ComfyWorkflow): ComfyWorkflow {
+    const next = cloneWorkflow(workflow);
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        if (!/RandomNoise|SamplerCustom|KSampler/i.test(type) || !node.inputs) continue;
+        if (typeof node.inputs.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
+        else if (typeof node.inputs.seed === "number") node.inputs.seed = randomComfySeed();
+    }
+    return next;
+}
+
 async function referenceToUploadFile(
     dataUrlOrHttp: string,
     fileName: string,
@@ -717,13 +768,12 @@ async function referenceToUploadFile(
 }
 
 /**
- * Strict allow-list of workflows whose reference uploads go through the size guard.
+ * Extra allow-list of workflows whose reference uploads go through the size guard.
  *
- * The native path re-uploads reference *bytes* through /api/proxy, and Vercel's
- * serverless request-body cap (~4.5MB) answers an oversized multipart post with
- * HTTP 413 before ComfyUI ever sees it. Only the workflows listed here are re-encoded;
- * every other channel's model keeps its exact previous behaviour, so a model is added
- * here deliberately rather than by a blanket global change.
+ * The structural fingerprint (`isComfyH3TwoPassReferenceWorkflow`) is the primary trigger;
+ * this list stays for workflows that are not multi-reference H3 graphs. Unlike the
+ * reference-slot list, a wrong entry here is harmless (it only re-encodes an oversized image),
+ * so the threshold for adding one is low — but it is still opt-in rather than global.
  */
 export const COMFY_UPLOAD_GUARD_WORKFLOWS = [
     "U24-文武双修T8版MiniMaxH3双采参考生视频V2",
@@ -745,7 +795,7 @@ export function usesComfyUploadGuard(workflowId: string | undefined | null): boo
  * remote-URL refs), so any oversized image must be shrunk before it goes on the wire.
  * Images already within budget are returned untouched.
  */
-type ComfyUploadOptions = RequestOptions & { workflowId?: string };
+type ComfyUploadOptions = RequestOptions & { workflowId?: string; guardUpload?: boolean };
 
 const COMFY_UPLOAD_BYTE_BUDGET = 2_400_000;
 const COMFY_UPLOAD_MAX_EDGE = 1536;
@@ -776,8 +826,10 @@ async function uploadComfyInputFile(
     options?: ComfyUploadOptions,
 ): Promise<string> {
     const upload = await referenceToUploadFile(source, fileName, options?.signal, fallbackType);
-    // Strict allow-list: only guarded workflows are re-encoded; every other model is untouched.
-    const file = usesComfyUploadGuard(options?.workflowId) ? await shrinkOversizedUpload(upload) : upload;
+    // Explicit flag (structural fingerprint, decided by the caller) wins over the name allow-list;
+    // every other model is left untouched.
+    const guarded = options?.guardUpload ?? usesComfyUploadGuard(options?.workflowId);
+    const file = guarded ? await shrinkOversizedUpload(upload) : upload;
     const body = new FormData();
     // ComfyUI stores uploads under input/ via this endpoint for images and audio alike.
     body.append("image", file);
@@ -976,6 +1028,12 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     const { baseUrl, apiKey, prompt, signal } = args;
     if (!normalizeComfyUiRoot(baseUrl)) throw new Error("ComfyUI Base URL is required");
 
+    // Decide the workflow family once, from the submitted graph's shape rather than its model
+    // name — the name is user-typed and the exported file name changes every revision, so a
+    // name-keyed adapter goes dead code silently.
+    const h3TwoPassRefs = isComfyH3TwoPassReferenceWorkflow(args.workflow);
+    const guardUpload = h3TwoPassRefs || usesComfyUploadGuard(args.workflowId);
+
     let workflow = applyComfyPrompt(args.workflow, prompt);
     workflow = applyComfyVideoSettings(workflow, {
         size: args.size,
@@ -986,11 +1044,16 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         samplerName: args.samplerName,
         scheduler: args.scheduler,
     });
+    if (h3TwoPassRefs) workflow = applyComfyRandomSeed(workflow);
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     if (refs.length) {
         const names: string[] = [];
         for (let i = 0; i < refs.length; i += 1) {
-            const uploaded = await uploadComfyImage(baseUrl, apiKey, refs[i], `ref-${i + 1}.png`, { signal, workflowId: args.workflowId });
+            const uploaded = await uploadComfyImage(baseUrl, apiKey, refs[i], `ref-${i + 1}.png`, {
+                signal,
+                workflowId: args.workflowId,
+                guardUpload,
+            });
             names.push(uploaded);
         }
         workflow = applyComfyLoadImages(workflow, names, args.workflowId);
@@ -1000,7 +1063,11 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     if (audioRefs.length) {
         const names: string[] = [];
         for (let i = 0; i < audioRefs.length; i += 1) {
-            const uploaded = await uploadComfyAudio(baseUrl, apiKey, audioRefs[i], `ref-audio-${i + 1}.mp3`, { signal });
+            const uploaded = await uploadComfyAudio(baseUrl, apiKey, audioRefs[i], `ref-audio-${i + 1}.mp3`, {
+                signal,
+                workflowId: args.workflowId,
+                guardUpload,
+            });
             names.push(uploaded);
         }
         workflow = applyComfyLoadAudios(workflow, names);
