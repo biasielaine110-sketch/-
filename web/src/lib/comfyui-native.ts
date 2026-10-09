@@ -710,7 +710,6 @@ function comfyBlankImagePlaceholder(workflow: ComfyWorkflow): string | null {
 
 /** Map uploaded filenames onto LoadImage nodes in order. */
 export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[], workflowId?: string): ComfyWorkflow {
-    if (!filenames.length) return workflow;
     const next = cloneWorkflow(workflow);
     // Name allow-list OR structural fingerprint. Without the fingerprint a renamed model fell back
     // to node-id order and scrambled every reference (ref_image_0 got the last uploaded picture).
@@ -718,20 +717,22 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
     // link one slot twice and orphan the loader the author meant to keep, so the verbatim order
     // would still shift every picture by one.
     const slotPlan = isComfyH3MultiReferenceVideoWorkflow(next) ? comfyMultiReferenceSlotPlan(next) : null;
-    const slotOrder =
-        usesComfyReferenceSlotOrder(workflowId) || isComfyH3TwoPassReferenceWorkflow(next)
-            ? comfyReferenceSlotOrder(next)
-            : slotPlan
-              ? slotPlan.ordered
-              : [];
-    // Repair duplicated `ref_image_N` links so each picture slot reads its own (spare) loader — a
-    // filename write alone cannot fix a slot that still points at the shared loader.
+    // U06 V8: always apply the slot rewire, even when the user uploaded no images. Leaving the
+    // duplicated `ref_image_0`/`ref_image_1` → `加载图像2` wiring intact made Picture 1/2 share one
+    // loader whenever generation ran without fresh uploads (early-return used to skip the repair).
     if (slotPlan) {
         const inputs = next[slotPlan.nodeId]?.inputs;
         for (const fix of slotPlan.rewire) {
             if (inputs && inputs[fix.key]) inputs[fix.key] = [fix.to, 0];
         }
     }
+    if (!filenames.length) return slotPlan ? next : workflow;
+    const slotOrder =
+        usesComfyReferenceSlotOrder(workflowId) || isComfyH3TwoPassReferenceWorkflow(next)
+            ? comfyReferenceSlotOrder(next)
+            : slotPlan
+              ? slotPlan.ordered
+              : [];
     // When a template declares its own blank placeholder, the spare slots are meant to stay empty.
     // Repeating the last uploaded picture there (the legacy fallback) made the model see one
     // reference up to 8× — e.g. U24 V927 and U37 both expose 9 slots where only the first few are
@@ -1095,11 +1096,12 @@ function shapeH3CanvasToSize(bakedWidth: number, bakedHeight: number, size: stri
  * no scalar to move and the app's size/ratio control was silently dead: every run delivered the
  * author's baked 1376×768 (43:24) regardless of the canvas.
  *
- * Follow the links one hop to the holder and rewrite its authoring fields instead. The reshape is
- * anchored on the holder's *own* baked long edge, so switching ratio never inflates the pixel budget
- * and the untouched "16:9" default reproduces the author's render exactly. The preset is pinned to
- * its custom mode so the rewritten dimensions are the ones that actually apply. A holder that
- * declares none of these fields is left alone, so no other graph is affected.
+ * Follow the links one hop to the holder and rewrite its authoring fields instead. Always anchored
+ * on the holder's *own* baked long edge — never the canvas's absolute `WxH`. The app default
+ * (`2048x1152`) is an "explicit" size, and feeding it through `shapeH3CanvasToSize`'s literal WxH
+ * path used to inflate V8 from 1376×768 to 2048×1152 (~2.25× pixels) and OOM the pod. A 16:9
+ * canvas against the author's 16:9 bake stays byte-identical; only the *ratio* changes the shape.
+ * The preset is pinned to custom mode so the rewritten dimensions are the ones that actually apply.
  */
 function reshapeLinkedH3Canvas(
     workflow: ComfyWorkflow,
@@ -1111,6 +1113,19 @@ function reshapeLinkedH3Canvas(
     for (const link of [widthLink, heightLink]) {
         if (Array.isArray(link) && link[0] != null) holders.add(String(link[0]));
     }
+    const snap = (value: number) => Math.max(64, Math.round(value / 32) * 32);
+    const aspectFromSize = (() => {
+        const explicit = String(size || "")
+            .trim()
+            .match(/^(\d+)\s*[x×]\s*(\d+)$/i);
+        if (explicit) {
+            const w = Number(explicit[1]);
+            const h = Number(explicit[2]);
+            if (w > 0 && h > 0) return w / h;
+        }
+        const ratio = parseCanvasAspectRatio(size);
+        return RESOLUTION_SELECTOR_ASPECTS.find((item) => item.ratio === ratio)?.value || 0;
+    })();
     for (const id of holders) {
         const holder = workflow[id];
         if (!holder?.inputs || typeof holder.inputs !== "object") continue;
@@ -1122,7 +1137,12 @@ function reshapeLinkedH3Canvas(
         const bakedWidth = Number(holder.inputs[fields[0]]);
         const bakedHeight = Number(holder.inputs[fields[1]]);
         if (!(bakedWidth > 0) || !(bakedHeight > 0)) continue;
-        const shaped = shapeH3CanvasToSize(bakedWidth, bakedHeight, size);
+        const aspect = aspectFromSize > 0 ? aspectFromSize : bakedWidth / bakedHeight;
+        const longEdge = snap(Math.max(bakedWidth, bakedHeight));
+        const shaped =
+            aspect >= 1
+                ? { width: longEdge, height: snap(longEdge / aspect) }
+                : { width: snap(longEdge * aspect), height: longEdge };
         if (!writeComfyNumberInput(holder, fields[0], shaped.width)) continue;
         writeComfyNumberInput(holder, fields[1], shaped.height);
         writeComfyStringInput(holder, "预设分辨率", "自定义");
@@ -1467,10 +1487,12 @@ export function applyComfyVideoSettings(
             const shaped = shapeH3CanvasToSize(node.inputs.width, node.inputs.height, String(settings.size));
             writeComfyNumberInput(node, "width", shaped.width);
             writeComfyNumberInput(node, "height", shaped.height);
-        } else if (!settings.keepTunedResolution) {
+        } else if (!settings.keepTunedResolution && !settings.multiRefH3Video) {
             // Geometry-locked H3 families keep the width/height the author baked onto the node. The
             // image path passes no canvas size, so `pixels` is only the 16:9 @1280 fallback — writing it
             // would silently rewrite a 2048×2048 author size on every run.
+            // U06 multi-ref: size lives on the linked WJILatentPreset rewritten above — never let the
+            // generic linked-number writer touch that holder (or any fallback) for this family.
             if (!writeComfyNumberInput(node, "width", pixels.width)) writeLinkedComfyNumber(next, node.inputs.width, pixels.width);
             if (!writeComfyNumberInput(node, "height", pixels.height)) writeLinkedComfyNumber(next, node.inputs.height, pixels.height);
         }
@@ -2095,6 +2117,11 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         workflow = textFamily
             ? applyComfyTextReferenceImages(workflow, names)
             : applyComfyLoadImages(workflow, names, args.workflowId);
+    } else if (!textFamily && h3MultiRefVideo && !h3SelfLift) {
+        // U06 V8 (and siblings): rewire duplicated ref slots even with zero uploads so Picture 1/2
+        // are not left sharing `加载图像2`. SelfLift keeps its own blank-placeholder path and is
+        // unchanged; graphs outside this family never enter applyComfyLoadImages here.
+        workflow = applyComfyLoadImages(workflow, [], args.workflowId);
     }
 
     const audioRefs = (args.referenceAudioSources || []).filter(Boolean).slice(0, 3);
