@@ -715,10 +715,88 @@ function writeComfyAudioFilename(node: ComfyNode, filename: string) {
     node.inputs.audio = filename;
 }
 
+/**
+ * The graph's own "empty audio slot" placeholder (e.g. `zealman-blank-audio.mp3`), mirroring
+ * `comfyBlankImagePlaceholder` on the audio side. Templates that expose more audio slots than they
+ * expect to be filled park that same asset in the spare `LoadAudio` nodes.
+ */
+function comfyBlankAudioPlaceholder(workflow: ComfyWorkflow): string | null {
+    for (const node of Object.values(workflow)) {
+        if (!isComfyAudioLoader(node)) continue;
+        for (const field of AUDIO_FILENAME_FIELDS) {
+            const name = node.inputs?.[field];
+            if (typeof name === "string" && /blank|empty|placeholder|silence|^none\./i.test(name)) return name;
+        }
+    }
+    return null;
+}
+
+/**
+ * Resolve the H3 conditioning node's declared `ref_audios.ref_audio_*` slots in **slot-index order**
+ * (the order the node consumes them), never by node id — the author's slot wiring is what the model
+ * reads, and id order can disagree with it.
+ */
+function minimaxH3AudioSlots(workflow: ComfyWorkflow) {
+    const consumer = Object.values(workflow).find(
+        (node) =>
+            isMiniMaxH3ConditioningNode(node) &&
+            node.inputs &&
+            Object.keys(node.inputs).some((key) => key.startsWith("ref_audios.")),
+    );
+    if (!consumer?.inputs) return null;
+    const slots = Object.entries(consumer.inputs)
+        .map(([key, value]) => {
+            const match = /^ref_audios\.ref_audio_(\d+)$/.exec(key);
+            if (!match || !Array.isArray(value)) return null;
+            return { index: Number(match[1]), loaderId: String(value[0]) };
+        })
+        .filter((slot): slot is { index: number; loaderId: string } => slot !== null)
+        .sort((a, b) => a.index - b.index);
+    return slots.length ? slots : null;
+}
+
+/**
+ * MiniMax H3 **SelfLift 双采** (e.g. U37) audio path — scoped to that structural fingerprint.
+ *
+ * Its single `MiniMaxH3ReferenceToVideo` node declares only plain `ref_audios.ref_audio_*` inputs
+ * (slot 0 = the author's own voice-timbre reference, slots 1–2 park `…blank-audio.mp3`). Two things
+ * the generic writers get wrong here:
+ *  - `applyComfyMiniMaxDriveAudio` stamps the Compshare contract (`drive_audio`, `final_audio`,
+ *    `audio_mode`, …) onto the node, but its `execute()` declares none of those and rejects the whole
+ *    submission — "got an unexpected keyword argument 'drive_audio'". This node consumes audio purely
+ *    through the baked `ref_audios.*` references, so nothing needs inventing.
+ *  - the generic loader pass repeats the *last* upload into every spare loader, feeding one canvas
+ *    audio to the voice reference three times. Map uploads onto the declared slots in order and leave
+ *    the trailing `…blank-audio…` placeholders exactly as authored (the same treatment the image side
+ *    already gives U37's blank image slots).
+ *
+ * Returns `null` when the graph declares no `ref_audios.*` slot, so the caller can fall back.
+ */
+function applyComfySelfLiftAudios(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow | null {
+    const slots = minimaxH3AudioSlots(workflow);
+    if (!slots) return null;
+    const blank = comfyBlankAudioPlaceholder(workflow);
+    slots.forEach((slot, position) => {
+        const name = filenames[position] || blank;
+        if (!name) return;
+        const loader = workflow[slot.loaderId];
+        if (loader) writeComfyAudioFilename(loader, name);
+    });
+    return workflow;
+}
+
 /** Map uploaded filenames onto LoadAudio nodes in order. */
 export function applyComfyLoadAudios(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
     if (!filenames.length) return workflow;
     const next = cloneWorkflow(workflow);
+    // U37 SelfLift 双采 consumes audio only through its declared `ref_audios.*` references, and its
+    // `execute()` rejects the Compshare `drive_audio` contract. Handle it on its own so neither the
+    // generic loader fill-up (repeat last) nor the drive-audio writer ever touches it. Every other
+    // graph keeps the previous path untouched.
+    if (isComfyH3SelfLiftWorkflow(next)) {
+        const selfLift = applyComfySelfLiftAudios(next, filenames);
+        if (selfLift) return selfLift;
+    }
     const loaders = Object.entries(next)
         .filter(([, node]) => isComfyAudioLoader(node))
         .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
