@@ -34,9 +34,13 @@ export type NativeComfyUiResult = {
 };
 
 const HISTORY_INTERVAL_MS = 2000;
+/** Faster poll once a video graph has started returning history (cut return latency after the pod finishes). */
+const HISTORY_FAST_INTERVAL_MS = 800;
 // H3 等 DiT 视频工作流在共享 GPU / 长队列下可能跑很久（排队 + 采样 + VAE 解码），
 // 60 分钟是实测安全上限；超时后任务仍在服务器跑，只是画布停止等待。
 const HISTORY_TIMEOUT_MS = 60 * 60 * 1000;
+/** After status=success, keep polling this many times for a late-persisted VHS mp4 (ComfyUI #11540). */
+const VIDEO_HISTORY_GRACE_POLLS = 12;
 
 /** True for typical rented / proxied ComfyUI endpoints (not AutoDL hosted workflow API). */
 export function isNativeComfyUiBaseUrl(baseUrl: string): boolean {
@@ -1870,6 +1874,22 @@ function collectMediaFromHistory(outputs: HistoryOutputs | undefined) {
     return { images, videos };
 }
 
+/**
+ * Pick the final delivered clip from a history media list.
+ *
+ * Preview / intermediate nodes often also land mp4/webm stubs in `gifs`; downloading every one
+ * through the seetacloud proxy added minutes after the workflow had already finished. Prefer a
+ * real `.mp4`, then the last entry (VHS_VideoCombine is typically the terminal writer).
+ */
+function pickPrimaryComfyVideo(
+    videos: Array<{ filename: string; subfolder: string; type: string }>,
+): { filename: string; subfolder: string; type: string } | null {
+    if (!videos.length) return null;
+    const mp4s = videos.filter((item) => /\.mp4$/i.test(item.filename));
+    const pool = mp4s.length ? mp4s : videos;
+    return pool[pool.length - 1] || null;
+}
+
 async function fetchComfyView(
     baseUrl: string,
     apiKey: string,
@@ -2287,12 +2307,16 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     if (signal?.aborted) stopOnAbort();
     else signal?.addEventListener("abort", stopOnAbort, { once: true });
 
+    // Video graphs: wait for a real VHS/mp4 artefact (not LoadImage / preview stills), and never
+    // download every preview frame through the proxy before fetching the clip — that was the
+    // "pod finished, canvas still blank for ~3 minutes" lag on seetacloud.
+    const waitForVideoArtifact = hasComfyVideoSink(args.workflow) || multiRefH3Video || h3Singularity || h3TwoPassRefs || h3SelfLift || h3ResSelectorVideo;
+
     try {
         const deadline = performance.now() + HISTORY_TIMEOUT_MS;
         let outputs: HistoryOutputs | undefined;
-        // U06: execution_success can land before VHS persists the mp4 — keep polling a short grace
-        // window after status=success when videos are still missing (see ComfyUI #11540).
-        let multiRefCompletedGrace = 0;
+        let videoCompletedGrace = 0;
+        let sawHistoryEntry = false;
         while (performance.now() < deadline) {
             if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
             const history = await axios.get(comfyUiUrl(baseUrl, `/history/${encodeURIComponent(promptId)}`), {
@@ -2308,12 +2332,8 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             }
             const entryOutputs = entry?.outputs && typeof entry.outputs === "object" ? (entry.outputs as HistoryOutputs) : undefined;
             if (entryOutputs && Object.keys(entryOutputs).length) {
-                // U06 multi-ref video: LoadImage nodes often land in `outputs` with preview stills
-                // (or empty ui dicts) while VHS has not persisted the mp4 yet — or after a cached
-                // empty finish. Breaking on *any* output key made the job look "done in ~7s" with
-                // no video. Wait for a real video artefact; only accept a completed status after a
-                // short grace window if the mp4 still never appears.
-                if (multiRefH3Video) {
+                sawHistoryEntry = true;
+                if (waitForVideoArtifact) {
                     const partial = collectMediaFromHistory(entryOutputs);
                     const completed = entry?.status?.completed === true || statusStr === "success";
                     if (partial.videos.length) {
@@ -2321,8 +2341,8 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
                         break;
                     }
                     if (completed) {
-                        multiRefCompletedGrace += 1;
-                        if (multiRefCompletedGrace >= 15) {
+                        videoCompletedGrace += 1;
+                        if (videoCompletedGrace >= VIDEO_HISTORY_GRACE_POLLS) {
                             outputs = entryOutputs;
                             break;
                         }
@@ -2332,7 +2352,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
                     break;
                 }
             }
-            await sleep(HISTORY_INTERVAL_MS, signal);
+            await sleep(sawHistoryEntry && waitForVideoArtifact ? HISTORY_FAST_INTERVAL_MS : HISTORY_INTERVAL_MS, signal);
         }
         if (!outputs) throw new Error("ComfyUI timed out waiting for /history");
 
@@ -2341,11 +2361,12 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         // Text-output graphs legitimately finish with no image/video at all. Only the detected text
         // family is exempt from the hard failure below, so every image/video workflow keeps throwing
         // exactly the same error it did before.
-        // U06 multi-ref: LoadImage preview stills must not count as a successful video run.
-        if (multiRefH3Video) {
+        if (waitForVideoArtifact) {
             if (!media.videos.length) {
                 throw new Error(
-                    "ComfyUI finished but returned no video. For U06 multi-reference video, connect reference images on the canvas (the workflow's baked Untitled*.jpg files are not on the server) and retry.",
+                    multiRefH3Video
+                        ? "ComfyUI finished but returned no video. For U06 multi-reference video, connect reference images on the canvas (the workflow's baked Untitled*.jpg files are not on the server) and retry."
+                        : "ComfyUI finished but returned no video",
                 );
             }
         } else if (!media.images.length && !media.videos.length && !(textFamily && texts.length)) {
@@ -2353,25 +2374,42 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         }
 
         const images: NativeComfyUiResult["images"] = [];
-        for (const file of media.images) {
-            const blob = await fetchComfyView(baseUrl, apiKey, file, { signal });
-            images.push({ id: nanoid(), dataUrl: await blobToDataUrl(blob) });
-        }
-
         const videos: NativeComfyUiResult["videos"] = [];
-        for (const file of media.videos) {
-            const blob = await fetchComfyView(baseUrl, apiKey, file, { signal });
-            // ComfyUI /view often replies with a generic application/octet-stream content-type,
-            // so trust the filename extension over blob.type when deciding the real MIME.
-            const extMime = /\.webm$/i.test(file.filename)
-                ? "video/webm"
-                : /\.(mov|mkv)$/i.test(file.filename)
-                  ? "video/quicktime"
-                  : /\.mp4$/i.test(file.filename)
-                    ? "video/mp4"
-                    : "";
-            const mimeType = extMime || (blob.type && blob.type.startsWith("video/") ? blob.type : "video/mp4");
-            videos.push({ blob, mimeType });
+
+        // Video workflows: fetch only the primary mp4. Preview stills / intermediate gifs used to
+        // be downloaded first (each as a proxied blob + data-URL), delaying canvas return by minutes
+        // after ComfyUI had already finished.
+        if (waitForVideoArtifact && media.videos.length) {
+            const primary = pickPrimaryComfyVideo(media.videos);
+            if (primary) {
+                const blob = await fetchComfyView(baseUrl, apiKey, primary, { signal });
+                const extMime = /\.webm$/i.test(primary.filename)
+                    ? "video/webm"
+                    : /\.(mov|mkv)$/i.test(primary.filename)
+                      ? "video/quicktime"
+                      : /\.mp4$/i.test(primary.filename)
+                        ? "video/mp4"
+                        : "";
+                const mimeType = extMime || (blob.type && blob.type.startsWith("video/") ? blob.type : "video/mp4");
+                videos.push({ blob, mimeType });
+            }
+        } else {
+            for (const file of media.images) {
+                const blob = await fetchComfyView(baseUrl, apiKey, file, { signal });
+                images.push({ id: nanoid(), dataUrl: await blobToDataUrl(blob) });
+            }
+            for (const file of media.videos) {
+                const blob = await fetchComfyView(baseUrl, apiKey, file, { signal });
+                const extMime = /\.webm$/i.test(file.filename)
+                    ? "video/webm"
+                    : /\.(mov|mkv)$/i.test(file.filename)
+                      ? "video/quicktime"
+                      : /\.mp4$/i.test(file.filename)
+                        ? "video/mp4"
+                        : "";
+                const mimeType = extMime || (blob.type && blob.type.startsWith("video/") ? blob.type : "video/mp4");
+                videos.push({ blob, mimeType });
+            }
         }
 
         return { images, videos, texts };
