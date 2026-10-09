@@ -229,7 +229,9 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
 }
 
 /**
- * RunningHub official workflow API. Model name = workflowId. Do not paste workflow JSON.
+ * RunningHub official workflow API. Model name = workflowId.
+ * SelfLift 双采(简易版) (`2108476378258038785`) is the exception: paste Export Workflow (API) JSON
+ * into the model script when the shared workflow denies API access.
  */
 async function createRunningHubVideoTask(
     config: AiConfig,

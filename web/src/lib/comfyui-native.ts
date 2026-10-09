@@ -277,6 +277,15 @@ function comfyReferenceSlotOrder(workflow: ComfyWorkflow): string[] {
     return [];
 }
 
+/** Ascending picture index from a loader title (`加载图像1` / `Load Image 2`), else null. */
+function comfyLoaderAscIndex(node: ComfyNode | undefined): number | null {
+    const title = String(node?._meta?.title || "");
+    const match = /(?:加载图像|Load\s*Image|Image)\s*(\d+)/i.exec(title);
+    if (!match) return null;
+    const value = Number(match[1]);
+    return Number.isFinite(value) ? value : null;
+}
+
 /**
  * Picture-slot plan for one H3 node, repaired so each `ref_image_N` slot reads its own loader.
  *
@@ -289,9 +298,12 @@ function comfyReferenceSlotOrder(workflow: ComfyWorkflow): string[] {
  * upload was silently dropped.
  *
  * Fixing the mapping therefore needs *two* things for a duplicated slot: point it at a spare loader
- * (the orphan the author clearly meant to keep, ascending id) **and** rewire the link, otherwise the
- * slot keeps reading the shared loader and the substitution is invisible. Only when no spare is left
- * drop the repeat, so no upload is ever wasted on the same loader twice.
+ * (the orphan the author clearly meant to keep, ascending title) **and** rewire the link, otherwise
+ * the slot keeps reading the shared loader and the substitution is invisible. When the *first*
+ * occurrence of a duplicated loader has an earlier-titled spare (`加载图像1` vs `加载图像2`), that
+ * spare is claimed for the earlier slot so `<Picture 1>` lands on `加载图像1` — assigning the spare
+ * only to the *second* occurrence would leave Picture 1/2 swapped. Only when no spare is left drop
+ * the repeat, so no upload is ever wasted on the same loader twice.
  *
  * Returns `null` when the node does not expose at least two validated slots, letting the caller keep
  * its previous behaviour.
@@ -326,6 +338,28 @@ function comfyMultiReferenceSlotPlan(
     const rewire: Array<{ key: string; to: string }> = [];
     for (const slot of slots) {
         if (!used.has(slot.id)) {
+            // U06 V8: first of a duplicated pair should claim the earlier orphan (`加载图像1`) so
+            // `<Picture 1>` is not stuck on `加载图像2`. Leave `slot.id` unused for the later twin.
+            const hasLaterDuplicate = slots.some((other) => other.index > slot.index && other.id === slot.id);
+            if (hasLaterDuplicate && spares.length) {
+                const currentIdx = comfyLoaderAscIndex(workflow[slot.id]) ?? Number(slot.id);
+                let bestPos = -1;
+                let bestIdx = Infinity;
+                for (let i = 0; i < spares.length; i += 1) {
+                    const spareIdx = comfyLoaderAscIndex(workflow[spares[i]]) ?? Number(spares[i]);
+                    if (spareIdx < currentIdx && spareIdx < bestIdx) {
+                        bestIdx = spareIdx;
+                        bestPos = i;
+                    }
+                }
+                if (bestPos >= 0) {
+                    const spare = spares.splice(bestPos, 1)[0];
+                    used.add(spare);
+                    ordered.push(spare);
+                    rewire.push({ key: slot.key, to: spare });
+                    continue;
+                }
+            }
             used.add(slot.id);
             ordered.push(slot.id);
             continue;
@@ -1208,9 +1242,11 @@ export function applyComfyVideoSettings(
          * node's width/height are *links* into it and `SelfLiftH3Sampler` splits that single target
          * into its internally-scaled low-res pass — so the selector is the *delivered* resolution
          * and resolving it from the canvas is what makes the size/ratio control work at all.
-         * Only an explicit canvas size (`auto`/empty keeps the author's 9:16 @2MP) writes it, and
-         * the write is confined to this family, so U24/U06/T10 and every other graph keep the exact
-         * geometry they have today.
+         * Only an explicit canvas size (`auto`/empty keeps the author's 9:16 @2MP) writes it.
+         * Also locks the author's sampling contract (`KSamplerSelect=euler`, BasicScheduler
+         * steps/scheduler untouched) — SelfLift hard-rejects any non-Euler sampler. Confined to
+         * this family, so U24/U06/T10 and every other graph keep the exact geometry/sampling they
+         * have today.
          */
         selfLiftH3Video?: boolean;
         /**
@@ -1222,6 +1258,8 @@ export function applyComfyVideoSettings(
          * what the canvas said. Reshape that linked holder instead (see `reshapeLinkedH3Canvas`).
          * Only an explicit canvas size writes it, anchored on the author's own long edge so the pixel
          * budget is unchanged; "auto"/empty (and the untouched "16:9" default) stays byte-identical.
+         * Also locks the author's sampling contract: V8 ships `KSamplerSelect=er_sde` +
+         * `ManualSigmas`, and the canvas default (`dpmpp_2m`) must not clobber that combo.
          */
         multiRefH3Video?: boolean;
     },
@@ -1299,8 +1337,10 @@ export function applyComfyVideoSettings(
     // Sampling steps: BasicScheduler / KSampler expose an integer `steps` field. Never for the
     // two-pass H3 video family — its steps are coupled to the learned parity plan, and the match
     // here is accidental anyway (`MiniMaxH3DualCloc` + `kSampler` reads as "KSampler" when the
-    // comparison is case-insensitive).
-    if (steps != null && !settings.twoPassH3Video) {
+    // comparison is case-insensitive). Same lock for the SelfLift 双采 family: its BasicScheduler
+    // ships an author-tuned 8-step `beta` schedule that `SelfLiftH3Sampler` consumes via sigmas,
+    // and the canvas default (40 / karras) would clobber that contract.
+    if (steps != null && !settings.twoPassH3Video && !settings.selfLiftH3Video) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
             if (!/BasicScheduler|KSampler|Scheduler/i.test(type) || !node.inputs) continue;
@@ -1309,7 +1349,7 @@ export function applyComfyVideoSettings(
     }
 
     // Scheduler (BasicScheduler.scheduler) — string combo.
-    if (scheduler && !settings.twoPassH3Video) {
+    if (scheduler && !settings.twoPassH3Video && !settings.selfLiftH3Video) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
             if (!/BasicScheduler|Scheduler/i.test(type) || !node.inputs) continue;
@@ -1321,7 +1361,20 @@ export function applyComfyVideoSettings(
     // family: its sampler is the custom `dual_clock_euler` enum, and the match here is accidental
     // (`MiniMaxH3DualCloc` + `kSampler` reads as "KSampler"), so writing a generic combo value would
     // be a hard validation error rather than a tweak.
-    if (samplerName && !settings.twoPassH3Video) {
+    // SelfLift 双采 family: `SelfLiftH3Sampler` hard-requires the standard Euler sampler (see the
+    // author's KSamplerSelect titled "Standard Euler · SelfLift required"). The canvas default
+    // `dpmpp_2m` used to overwrite that `euler` and fail the run with
+    // "SelfLift requires the standard Euler sampler". Keep / restore euler only for this family.
+    // U06 multi-reference video family: V8 ships `er_sde` paired with a fixed `ManualSigmas`
+    // schedule — overwriting with the canvas default breaks that contract. Leave the author's
+    // sampler untouched (do not force a value; just skip the generic write).
+    if (settings.selfLiftH3Video) {
+        for (const node of Object.values(next)) {
+            const type = String(node.class_type || "");
+            if (!/KSamplerSelect/i.test(type) || !node.inputs) continue;
+            if ("sampler_name" in node.inputs) writeComfyStringInput(node, "sampler_name", "euler");
+        }
+    } else if (samplerName && !settings.twoPassH3Video && !settings.multiRefH3Video) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
             if (!/KSamplerSelect|KSampler/i.test(type) || !node.inputs) continue;
@@ -1491,6 +1544,8 @@ async function referenceToUploadFile(
 export const COMFY_UPLOAD_GUARD_WORKFLOWS = [
     "U24-文武双修T8版MiniMaxH3双采参考生视频V2",
     "U06-minimax_h3_lightX2v多图参考生视频V5",
+    "U06-h3_多图参考生视频V8",
+    "U06-minimax_h3_多图参考生视频V8",
 ] as const;
 
 /** True only for allow-listed workflows that must size-guard their reference uploads. */

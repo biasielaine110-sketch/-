@@ -303,6 +303,7 @@ export default {
         comfyWorkflowRequired: "云端 ComfyUI 需要在模型「脚本」中粘贴 Export Workflow (API) 导出的 JSON（节点含 class_type）。普通 Save 的工作流无法直接调用。",
         runningHubWorkflowFetchFailed: "RunningHub 渠道已识别，但当前模型名「{{model}}」不是 workflowId。请在这个渠道里新增一个模型，名称只填地址栏 /workflow/ 或 /ai-detail/ 后面的数字，并在节点上选中它。也可以把完整工作流链接直接填进 Base URL。",
         runningHubWorkflowNotExists: "RunningHub 找不到这个 ID（{{id}}）。请填你自己账号里的数字：工作流页面是地址栏 /workflow/ 后面的数字，AI 应用页面是 /ai-detail/ 后面的数字。别人的分享链接要先保存到自己的工作流，并在网站上成功运行一次。",
+        runningHubSelfLiftScriptRequired: "RunningHub 工作流 {{id}}（SelfLift 双采简易版）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（如 MiniMax H3 真·上下文无缝无色差长视频 SelfLift双采简易版）粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
         runningHubWorkflowNotRun: "这个工作流还不能用接口调用。请先在 RunningHub 网站上打开它，保存并成功运行一次。",
         runningHubNoTaskId: "RunningHub 未返回 taskId",
         runningHubTaskFailed: "RunningHub 任务失败",

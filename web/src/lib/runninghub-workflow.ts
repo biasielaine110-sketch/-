@@ -221,6 +221,11 @@ function isAuthMessage(message: string) {
     return /APIKEY_UNAUTHORIZED|APIKEY_UNSUPPORTED_FREE_USER|TOKEN_INVALID|APIKEY_USER_NOT_FOUND|CORPAPIKEY_INVALID/i.test(message);
 }
 
+/** Shared/community workflow the caller's key cannot open via getJsonApiFormat / create. */
+function isWorkflowPermissionMessage(message: string) {
+    return /无权限访问该工作流|请联系作者开通|WORKFLOW_ACCESS_DENIED|WORKFLOW_NO_PERMISSION|ACCESS_DENIED.*WORKFLOW/i.test(message);
+}
+
 function isBalanceMessage(message: string) {
     return /NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message);
 }
@@ -238,6 +243,12 @@ function explainRunningHubError(error: unknown, workflowId: string): Error {
     const message = errorText(error);
     if (isMissingIdMessage(message)) return new Error(i18n.t("apiErrors.runningHubWorkflowNotExists", { id: workflowId }));
     if (/WORKFLOW_NOT_SAVED_OR_NOT_RUNNING/i.test(message)) return new Error(apiText("runningHubWorkflowNotRun"));
+    // SelfLift 双采(简易版) is a shared graph: without a local Export (API) JSON in the model
+    // script the caller cannot open the author's copy. Surface the paste-script hint only for
+    // that workflow id so every other model keeps the raw platform message.
+    if (isWorkflowPermissionMessage(message) && isMinimaxH3SelfLiftWorkflow(workflowId)) {
+        return new Error(i18n.t("apiErrors.runningHubSelfLiftScriptRequired", { id: workflowId }));
+    }
     if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) return new Error(apiText("runningHubNoBalance"));
     if (isUnknownServerError(message)) return new Error(apiText("runningHubUnknownError"));
     if (error instanceof Error && error.message && !isUnknownServerError(error.message)) return error;
@@ -1870,6 +1881,14 @@ function applyMinimaxH3SelfLiftSettings(
         }
     }
 
+    // SelfLift hard-requires the standard Euler sampler (KSamplerSelect → SelfLiftH3Sampler).
+    // Keep the author's `euler` even if a stale export drifted away from it.
+    for (const node of Object.values(next)) {
+        if (/KSamplerSelect/i.test(String(node.class_type || "")) && node.inputs && "sampler_name" in node.inputs) {
+            node.inputs.sampler_name = "euler";
+        }
+    }
+
     // `SelfLiftH3Sampler` parks the run seed in its own `seed` field, and its class name carries
     // neither "KSampler" nor "RandomNoise", so every shared randomizer misses it — identical inputs
     // would render an identical clip forever. Randomize per submission.
@@ -1879,7 +1898,10 @@ function applyMinimaxH3SelfLiftSettings(
         else if (/SamplerCustom|KSampler|SelfLiftH3Sampler/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
     }
 
-    return { workflow: next, structuralRepair };
+    // Always structural: unused reference slots are disconnected above, and the local Export (API)
+    // JSON path (used when the shared workflow denies getJsonApiFormat) can only run by submitting
+    // the full graph. Returning graph every time keeps both routes on the same contract.
+    return { workflow: next, structuralRepair: true };
 }
 
 /**
@@ -2033,10 +2055,13 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
     // render scale lives on a ResolutionSelector the size writer cannot reach and the tier writer
     // would clamp, while the duration sits on a Float (Duration) primitive behind a math link and
     // the run seed on `SelfLiftH3Sampler` — a class name no shared randomizer matches.
+    // Always ship `graph`: the shared workflow often denies getJsonApiFormat ("无权限访问该工作流"),
+    // and the model script's Export (API) JSON is the only runnable copy — nodeInfoList alone cannot
+    // stand in for a template the key cannot open.
     if (isMinimaxH3SelfLiftWorkflow(workflowId)) {
         const selfLift = applyMinimaxH3SelfLiftSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
         const list = workflowNodeInfoList(workflow, selfLift.workflow);
-        return selfLift.structuralRepair ? { nodeInfoList: list, graph: selfLift.workflow } : { nodeInfoList: list };
+        return { nodeInfoList: list, graph: selfLift.workflow };
     }
     if (prompt.trim()) patched = writeRunningHubPrompt(patched, prompt);
     if (size) patched = writeRunningHubSize(patched, size.width, size.height, aspect);
@@ -2419,6 +2444,26 @@ async function submitWorkflowTask(origin: string, apiKey: string, workflowId: st
     return created;
 }
 
+/**
+ * SelfLift-only escape hatch: `/task/openapi/comfy/run` accepts a full API graph without opening
+ * the shared workflowId the caller's key has no permission to fetch. Scoped to graphs we already
+ * decided to submit (never used as a generic create replacement).
+ */
+async function submitComfyRunTask(origin: string, apiKey: string, graph: ComfyWorkflow, signal?: AbortSignal) {
+    const token = apiKey.replace(/^Bearer\s+/i, "").trim();
+    const response = await axios.post(
+        proxyApiUrl(`${origin}/task/openapi/comfy/run`),
+        { apiKey: token, workflow: JSON.stringify(graph), addMetadata: true },
+        { headers: bearer(apiKey), signal, timeout: 60_000 },
+    );
+    assertOk(response.data, apiText("runningHubNoTaskId"));
+    const problem = readPromptProblems(response.data);
+    if (problem) throw new Error(problem);
+    const created = readTaskFromCreate(response.data);
+    if (!created?.taskId) throw new Error(readMessage(response.data) || apiText("runningHubNoTaskId"));
+    return created;
+}
+
 async function submitWebappTask(origin: string, apiKey: string, webappId: string, nodeInfoList: ReturnType<typeof buildWebappNodeInfoList>, signal?: AbortSignal) {
     const token = apiKey.replace(/^Bearer\s+/i, "").trim();
     const response = await axios.post(
@@ -2660,12 +2705,28 @@ async function runRunningHubWorkflowWithKey(args: {
 }): Promise<RunningHubMedia> {
     const { origin, workflowId, apiKey, isLastKey } = args;
     const request = args.args;
-    const workflow = await fetchWorkflow(origin, apiKey, workflowId, request.signal).catch((error: unknown) => {
-        if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
-        const message = errorText(error);
-        if (isAuthMessage(message)) throw explainRunningHubError(error, workflowId);
-        return null;
-    });
+    // SelfLift 双采(简易版) only: the shared workflowId often returns "您暂时无权限访问该工作流".
+    // Prefer the Export (API) JSON pasted into the model script (the同构简易版 graph) so create can
+    // run via `workflow` / comfy/run without opening the author's copy. Every other workflow keeps
+    // the remote getJsonApiFormat path unchanged.
+    const selfLiftLocal = isMinimaxH3SelfLiftWorkflow(workflowId) ? parseComfyApiWorkflow(request.script) : null;
+    let workflow = selfLiftLocal;
+    let fetchPermissionDenied = false;
+    if (!workflow) {
+        workflow = await fetchWorkflow(origin, apiKey, workflowId, request.signal).catch((error: unknown) => {
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+            const message = errorText(error);
+            if (isAuthMessage(message)) throw explainRunningHubError(error, workflowId);
+            if (isWorkflowPermissionMessage(message) && isMinimaxH3SelfLiftWorkflow(workflowId)) {
+                fetchPermissionDenied = true;
+                return null;
+            }
+            return null;
+        });
+    }
+    if (!workflow && fetchPermissionDenied && isMinimaxH3SelfLiftWorkflow(workflowId)) {
+        throw new Error(i18n.t("apiErrors.runningHubSelfLiftScriptRequired", { id: workflowId }));
+    }
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     const uploaded: string[] = [];
     for (let index = 0; index < refs.length; index += 1) {
@@ -2685,12 +2746,18 @@ async function runRunningHubWorkflowWithKey(args: {
     const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
     if (referenceCount) {
         console.info(
-            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) graph=${Boolean(repairedGraph)} overrides=${overrides.length}`,
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(selfLiftLocal)}`,
         );
     }
     let task: RunningHubTaskView;
     try {
-        if (workflow) {
+        // SelfLift 双采(简易版): the shared workflowId commonly denies create/getJsonApiFormat.
+        // When we already hold the patched API graph (from model script or a permitted fetch),
+        // submit it through `/task/openapi/comfy/run` so the run does not depend on author ACL.
+        // Every other workflow keeps the create + nodeInfoList path below.
+        if (isMinimaxH3SelfLiftWorkflow(workflowId) && repairedGraph) {
+            task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal);
+        } else if (workflow) {
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
         } else {
             throw new Error("WORKFLOW_NOT_EXISTS");
@@ -2705,36 +2772,48 @@ async function runRunningHubWorkflowWithKey(args: {
         if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message)) {
             throw error;
         }
-        // A repaired-graph submission is always retried without it, so an unrecognized `workflow`
-        // field or a rejected link degrades to the previous nodeInfoList-only behaviour.
-        const canRetryPlain = Boolean(workflow) && (overrides.length > 0 || Boolean(repairedGraph)) && (Boolean(repairedGraph) || isUnknownServerError(message) || /APIKEY_INVALID_NODE_INFO|Node info error/i.test(message));
-        if (canRetryPlain) {
-            const fallback = keptOverrides.length && keptOverrides.length < overrides.length ? keptOverrides : [];
-            // A fallback without overrides runs the workflow exactly as saved — the author's baked
-            // demo images and all. With references on hand that is worse than failing: the task
-            // succeeds, renders something unrelated to them, and the user cannot tell why.
-            if (!fallback.length && referenceCount) throw explainRunningHubError(error, workflowId);
-            console.warn(`[runninghub] ${workflowId}: graph submission failed (${message.slice(0, 160)}), retrying with ${fallback.length} override(s)`);
-            task = await submitWorkflowTask(origin, apiKey, workflowId, fallback, undefined, request.signal).catch(async (retryError: unknown) => {
-                if (!fallback.length) throw explainRunningHubError(retryError, workflowId);
-                if (referenceCount) console.warn(`[runninghub] ${workflowId}: override retry failed too; last resort drops ALL overrides`);
-                return submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((plainError: unknown) => {
-                    throw explainRunningHubError(plainError, workflowId);
-                });
+        // SelfLift already preferred comfy/run above. If that endpoint is unavailable on this
+        // origin, fall back once to create-with-workflow (docs: `workflow` overrides workflowId).
+        if (isMinimaxH3SelfLiftWorkflow(workflowId) && repairedGraph) {
+            console.warn(`[runninghub] ${workflowId}: comfy/run failed (${message.slice(0, 160)}), retrying SelfLift graph via create+workflow`);
+            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal).catch((retryError: unknown) => {
+                throw explainRunningHubError(retryError, workflowId);
             });
         } else {
-            const nodes = await fetchWebappNodes(origin, apiKey, workflowId, request.signal).catch((webappError: unknown) => {
-                if (isAuthMessage(errorText(webappError))) throw webappError;
-                return [] as WebappNode[];
-            });
-            if (nodes.length) {
-                task = await submitWebappTask(origin, apiKey, workflowId, buildWebappNodeInfoList(nodes, request.prompt, uploaded, request.size, request.seconds, request.media), request.signal);
-            } else if (!workflow) {
-                task = await submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((retryError: unknown) => {
-                    throw explainRunningHubError(retryError, workflowId);
+            // A repaired-graph submission is always retried without it, so an unrecognized `workflow`
+            // field or a rejected link degrades to the previous nodeInfoList-only behaviour.
+            const canRetryPlain =
+                Boolean(workflow) &&
+                (overrides.length > 0 || Boolean(repairedGraph)) &&
+                (Boolean(repairedGraph) || isUnknownServerError(message) || /APIKEY_INVALID_NODE_INFO|Node info error/i.test(message));
+            if (canRetryPlain) {
+                const fallback = keptOverrides.length && keptOverrides.length < overrides.length ? keptOverrides : [];
+                // A fallback without overrides runs the workflow exactly as saved — the author's baked
+                // demo images and all. With references on hand that is worse than failing: the task
+                // succeeds, renders something unrelated to them, and the user cannot tell why.
+                if (!fallback.length && referenceCount) throw explainRunningHubError(error, workflowId);
+                console.warn(`[runninghub] ${workflowId}: graph submission failed (${message.slice(0, 160)}), retrying with ${fallback.length} override(s)`);
+                task = await submitWorkflowTask(origin, apiKey, workflowId, fallback, undefined, request.signal).catch(async (retryError: unknown) => {
+                    if (!fallback.length) throw explainRunningHubError(retryError, workflowId);
+                    if (referenceCount) console.warn(`[runninghub] ${workflowId}: override retry failed too; last resort drops ALL overrides`);
+                    return submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((plainError: unknown) => {
+                        throw explainRunningHubError(plainError, workflowId);
+                    });
                 });
             } else {
-                throw explainRunningHubError(error, workflowId);
+                const nodes = await fetchWebappNodes(origin, apiKey, workflowId, request.signal).catch((webappError: unknown) => {
+                    if (isAuthMessage(errorText(webappError))) throw webappError;
+                    return [] as WebappNode[];
+                });
+                if (nodes.length) {
+                    task = await submitWebappTask(origin, apiKey, workflowId, buildWebappNodeInfoList(nodes, request.prompt, uploaded, request.size, request.seconds, request.media), request.signal);
+                } else if (!workflow) {
+                    task = await submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((retryError: unknown) => {
+                        throw explainRunningHubError(retryError, workflowId);
+                    });
+                } else {
+                    throw explainRunningHubError(error, workflowId);
+                }
             }
         }
     }
