@@ -516,6 +516,39 @@ export function isComfyH3SelfLiftWorkflow(workflow: ComfyWorkflow): boolean {
 }
 
 /**
+ * Structural fingerprint of the MiniMax H3 **官流 / ResolutionSelector-delivered** single-pass
+ * multi-reference video family (e.g. U35-H3官流-终极版-神棍).
+ *
+ * Shape: the same single-H3 + ≥2 ref slots + video sink as `isComfyH3MultiReferenceVideoWorkflow`,
+ * but the H3 node's width/height are *links into a `ResolutionSelector`* (aspect + megapixels) —
+ * not a `WJILatentPreset` (U06) and not a SelfLift sampler (U37). The selector is therefore the
+ * *delivered* resolution.
+ *
+ * Without this fingerprint the graph rides the generic multi-ref / `keepTunedResolution` path:
+ *  - aspect is frozen (authored megapixels is present, so the keep-tuned branch never rewrites it);
+ *  - megapixels is only clamped down, never driven by the canvas;
+ *  - `reshapeLinkedH3Canvas` looks for `自定义宽`/`width` scalars and finds none on a
+ *    ResolutionSelector, so size/ratio stay dead.
+ *
+ * Disjoint from SelfLift (no `SelfLiftH3Sampler`) and from U06 (no ResolutionSelector size link).
+ * Any graph that does not match keeps its previous behaviour untouched.
+ */
+export function isComfyH3ResolutionSelectorVideoWorkflow(workflow: ComfyWorkflow): boolean {
+    if (!isComfyH3MultiReferenceVideoWorkflow(workflow)) return false;
+    if (isComfyH3SelfLiftWorkflow(workflow)) return false;
+    const conditioning = Object.values(workflow).find((node) => isMiniMaxH3ConditioningNode(node));
+    const inputs = conditioning?.inputs;
+    if (!inputs || typeof inputs !== "object") return false;
+    for (const field of ["width", "height"]) {
+        const link = inputs[field];
+        if (!Array.isArray(link) || link[0] == null) continue;
+        const holder = workflow[String(link[0])];
+        if (/ResolutionSelector/i.test(String(holder?.class_type || ""))) return true;
+    }
+    return false;
+}
+
+/**
  * True for every family whose resolution/geometry is locked by the graph author rather than by
  * the canvas controls: the two-pass H3 video family (ResolutionSelector megapixels), the
  * single-reference H3 image family (the H3 node's own width/height), the single-pass H3
@@ -1262,6 +1295,14 @@ export function applyComfyVideoSettings(
          * `ManualSigmas`, and the canvas default (`dpmpp_2m`) must not clobber that combo.
          */
         multiRefH3Video?: boolean;
+        /**
+         * U35 官流 family only (see `isComfyH3ResolutionSelectorVideoWorkflow`). Same single-pass
+         * multi-ref shape as U06, but the delivered size lives on a linked `ResolutionSelector`
+         * (not `WJILatentPreset`). Drive that selector from an explicit canvas size — same contract
+         * as SelfLift's delivered-resolution branch — and leave sampling (`er_sde` + ManualSigmas /
+         * authored BasicScheduler) alone. Confined to this fingerprint.
+         */
+        resolutionSelectorH3Video?: boolean;
     },
 ): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
@@ -1301,12 +1342,12 @@ export function applyComfyVideoSettings(
                     const draft = megapixels / (scale * scale);
                     writeComfyNumberInput(node, "megapixels", Math.max(0.1, Math.round(draft * 100) / 100));
                 }
-            } else if (settings.selfLiftH3Video) {
-                // U37 SelfLift 双采 family. Its ResolutionSelector is the *delivered* size (the H3
-                // node links its width/height into it), so freezing it to the author's 9:16 @2MP
-                // made the canvas size/ratio dead for this model. Drive both halves from the canvas
-                // when — and only when — the canvas carries an explicit size; "auto"/empty keeps the
-                // author's own geometry verbatim. Scoped to this family, so no other graph changes.
+            } else if (settings.selfLiftH3Video || settings.resolutionSelectorH3Video) {
+                // Delivered-resolution families whose H3 width/height link into a ResolutionSelector:
+                // U37 SelfLift 双采, and U35 官流 (e.g. 终极版-神棍). Freezing the selector under
+                // `keepTunedResolution` made canvas size/ratio dead. Drive both halves from the
+                // canvas when — and only when — the canvas carries an explicit size; "auto"/empty
+                // keeps the author's own geometry verbatim. Scoped to these fingerprints.
                 if (isExplicitCanvasSize(settings.size)) {
                     if ("aspect_ratio" in node.inputs) node.inputs.aspect_ratio = aspectLabel;
                     if ("megapixels" in node.inputs) writeComfyNumberInput(node, "megapixels", megapixels);
@@ -1337,10 +1378,11 @@ export function applyComfyVideoSettings(
     // Sampling steps: BasicScheduler / KSampler expose an integer `steps` field. Never for the
     // two-pass H3 video family — its steps are coupled to the learned parity plan, and the match
     // here is accidental anyway (`MiniMaxH3DualCloc` + `kSampler` reads as "KSampler" when the
-    // comparison is case-insensitive). Same lock for the SelfLift 双采 family: its BasicScheduler
-    // ships an author-tuned 8-step `beta` schedule that `SelfLiftH3Sampler` consumes via sigmas,
-    // and the canvas default (40 / karras) would clobber that contract.
-    if (steps != null && !settings.twoPassH3Video && !settings.selfLiftH3Video) {
+    // comparison is case-insensitive). Same lock for SelfLift / U35 官流 / U06 multi-ref: those
+    // graphs ship author-tuned schedules (`ManualSigmas` and/or a baked BasicScheduler) that the
+    // canvas default (40 / karras) must not clobber.
+    const lockAuthoredSampling = Boolean(settings.twoPassH3Video || settings.selfLiftH3Video || settings.multiRefH3Video || settings.resolutionSelectorH3Video);
+    if (steps != null && !lockAuthoredSampling) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
             if (!/BasicScheduler|KSampler|Scheduler/i.test(type) || !node.inputs) continue;
@@ -1349,7 +1391,7 @@ export function applyComfyVideoSettings(
     }
 
     // Scheduler (BasicScheduler.scheduler) — string combo.
-    if (scheduler && !settings.twoPassH3Video && !settings.selfLiftH3Video) {
+    if (scheduler && !lockAuthoredSampling) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
             if (!/BasicScheduler|Scheduler/i.test(type) || !node.inputs) continue;
@@ -1365,7 +1407,7 @@ export function applyComfyVideoSettings(
     // author's KSamplerSelect titled "Standard Euler · SelfLift required"). The canvas default
     // `dpmpp_2m` used to overwrite that `euler` and fail the run with
     // "SelfLift requires the standard Euler sampler". Keep / restore euler only for this family.
-    // U06 multi-reference video family: V8 ships `er_sde` paired with a fixed `ManualSigmas`
+    // U06 / U35 multi-reference video families: ship `er_sde` paired with a fixed `ManualSigmas`
     // schedule — overwriting with the canvas default breaks that contract. Leave the author's
     // sampler untouched (do not force a value; just skip the generic write).
     if (settings.selfLiftH3Video) {
@@ -1374,7 +1416,7 @@ export function applyComfyVideoSettings(
             if (!/KSamplerSelect/i.test(type) || !node.inputs) continue;
             if ("sampler_name" in node.inputs) writeComfyStringInput(node, "sampler_name", "euler");
         }
-    } else if (samplerName && !settings.twoPassH3Video && !settings.multiRefH3Video) {
+    } else if (samplerName && !lockAuthoredSampling) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
             if (!/KSamplerSelect|KSampler/i.test(type) || !node.inputs) continue;
@@ -1546,6 +1588,7 @@ export const COMFY_UPLOAD_GUARD_WORKFLOWS = [
     "U06-minimax_h3_lightX2v多图参考生视频V5",
     "U06-h3_多图参考生视频V8",
     "U06-minimax_h3_多图参考生视频V8",
+    "U35-H3官流-终极版-神棍",
 ] as const;
 
 /** True only for allow-listed workflows that must size-guard their reference uploads. */
@@ -2007,6 +2050,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // delivered resolution rather than a draft, so it *must* follow the canvas. Stays geometry-locked
     // otherwise (seed randomisation + upload size guard keep working through `keepTunedGeometry`).
     const h3SelfLift = isComfyH3SelfLiftWorkflow(args.workflow);
+    // U35 官流 family: same single-pass multi-ref shape as U06, but size is a linked
+    // ResolutionSelector (delivered), not a WJILatentPreset — needs its own canvas drive.
+    const h3ResSelectorVideo = isComfyH3ResolutionSelectorVideoWorkflow(args.workflow);
     const guardUpload = keepTunedGeometry || usesComfyUploadGuard(args.workflowId);
     // Text-output family (e.g. U00 H3 prompt writer): prompt and references land on the LLM node's
     // own slots instead of the CLIP/LoadImage conventions the shared writers assume.
@@ -2028,10 +2074,11 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         // author's coupled dual-clock sampling contract must not be clobbered by accident.
         twoPassH3Video: h3TwoPassRefs,
         selfLiftH3Video: h3SelfLift,
-        // U06 single-pass multi-reference video family. The SelfLift family also matches
-        // `isComfyH3MultiReferenceVideoWorkflow`, so exclude it — its resolution lives in a
-        // ResolutionSelector that its own `selfLiftH3Video` branch above already drives.
-        multiRefH3Video: h3MultiRefVideo && !h3SelfLift,
+        resolutionSelectorH3Video: h3ResSelectorVideo,
+        // U06 single-pass multi-reference video family (WJILatentPreset size holder). SelfLift and
+        // U35 官流 also match `isComfyH3MultiReferenceVideoWorkflow`, so exclude them — their
+        // resolution lives in a ResolutionSelector their own branches above already drive.
+        multiRefH3Video: h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo,
     });
     if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
