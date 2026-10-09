@@ -873,6 +873,36 @@ function shapeH3CanvasToSize(bakedWidth: number, bakedHeight: number, size: stri
         : { width: snap(longEdge * aspect), height: longEdge };
 }
 
+/**
+ * The learned-latent-upscale factor of a two-pass H3 graph (the `scale_by` knob, normally wired to
+ * a `PrimitiveFloat` titled 2采放大倍率), or null when the graph has no ratio upscale.
+ *
+ * The HIGH refine pass runs at the LOW draft resolution times this factor (0.4 MP draft × 1.5 =
+ * 0.9 MP refine in the V2 template), so it is what converts a canvas *delivered* budget into a
+ * *draft* budget. Returning null keeps the caller from guessing a factor it could not read.
+ */
+function h3LatentUpscaleFactor(workflow: ComfyWorkflow): number | null {
+    for (const node of Object.values(workflow)) {
+        if (!/LatentUpscale/i.test(String(node?.class_type || ""))) continue;
+        const inputs = node?.inputs;
+        if (!inputs) continue;
+        // `target_size` graphs fix the refine resolution themselves — only `scale_by` multiplies the
+        // draft, so anything else is left to the author.
+        const mode = String(inputs.size_mode ?? "").trim().toLowerCase();
+        if (mode && mode !== "scale_by") continue;
+        const raw = inputs.scale_by;
+        if (typeof raw === "number" && raw > 0) return raw;
+        if (Array.isArray(raw) && raw[0] != null) {
+            const source = workflow[String(raw[0])]?.inputs as Record<string, unknown> | undefined;
+            for (const key of ["value", "float", "number", "Number", "int"]) {
+                const value = Number(source?.[key]);
+                if (Number.isFinite(value) && value > 0) return value;
+            }
+        }
+    }
+    return null;
+}
+
 function parseCanvasSeconds(seconds?: string | number) {
     const value = typeof seconds === "number" ? seconds : Number(String(seconds || "").trim());
     if (!Number.isFinite(value) || value <= 0) return null;
@@ -968,6 +998,21 @@ export function applyComfyVideoSettings(
          * family keeps `keepTunedResolution` semantics untouched.
          */
         reshapeCanvas?: boolean;
+        /**
+         * U24 two-pass H3 *video* family. Being this family has two consequences:
+         *  - the canvas must drive the delivered video, which needs both halves of the
+         *    ResolutionSelector to follow it (see the branch below) — the draft budget is the canvas
+         *    budget divided by the learned upscaler's `scale_by`², which lands the "auto" tier back
+         *    on the author's own draft, so the default run stays the author's render;
+         *  - the author's *coupled dual-clock sampling contract* must survive: the generic steps /
+         *    sampler / scheduler writers reach `MiniMaxH3DualClockSamplerT8` purely by accident
+         *    (`DualCloc` + `kSampler` reads as "KSampler" under a case-insensitive match), and
+         *    overwriting `dual_clock_euler` with a plain combo value — or resteps-ing a distilled
+         *    4-step schedule whose sigmas come from the learned two-pass parity plan — breaks the
+         *    pipeline rather than tuning it.
+         * Every other graph keeps the old behaviour untouched.
+         */
+        twoPassH3Video?: boolean;
     },
 ): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
@@ -989,17 +1034,39 @@ export function applyComfyVideoSettings(
         if (!node.inputs || typeof node.inputs !== "object") continue;
 
         if (/ResolutionSelector/i.test(type) || /分辨率/i.test(title)) {
-            // Geometry-locked graphs (H3 two-pass family): the HIGH refine pass takes its size from a
-            // fixed learned upscaler (target_width/height on the upscale node), so the
-            // ResolutionSelector only drives the cheap LOW draft pass — and the author tunes that
-            // draft deliberately small (0.4 MP in the U24/T8 template). Rewriting it with the canvas
-            // budget (auto quality → 0.94 MP) made the draft as heavy as the refine pass and pushed a
-            // 24 GB card over its limit ("allocation would exceed allowed memory"). Keep the saved
-            // aspect and never inflate `megapixels`; a lighter canvas request still gets through.
-            const tunedMegapixels = settings.keepTunedResolution && typeof node.inputs.megapixels === "number" ? node.inputs.megapixels : null;
-            if (tunedMegapixels == null && "aspect_ratio" in node.inputs) node.inputs.aspect_ratio = aspectLabel;
-            if ("megapixels" in node.inputs) {
-                writeComfyNumberInput(node, "megapixels", tunedMegapixels == null ? megapixels : Math.min(megapixels, tunedMegapixels));
+            const authoredMegapixels = typeof node.inputs.megapixels === "number" ? node.inputs.megapixels : null;
+            if (settings.twoPassH3Video) {
+                // U24 two-pass H3 video family. The canvas was ignored twice over here: the aspect was
+                // never rewritten and `megapixels` was clamped down to the author's draft budget, so a
+                // portrait canvas still delivered a 16:9 clip and "high" quality changed nothing.
+                // The selector drives the *cheap LOW draft* pass only — the HIGH refine pass is that
+                // draft times the learned upscaler's factor — so the canvas budget has to be divided by
+                // factor² before it can stand in for the delivered resolution. With the template's own
+                // 1.5× the "auto" tier lands on 0.42 MP against the author's 0.4 MP, i.e. the default
+                // run stays the author's render; asking for more now actually delivers more.
+                if (isExplicitCanvasSize(settings.size) && "aspect_ratio" in node.inputs) {
+                    node.inputs.aspect_ratio = aspectLabel;
+                }
+                const scale = h3LatentUpscaleFactor(next);
+                if (authoredMegapixels != null && scale != null && "megapixels" in node.inputs) {
+                    const draft = megapixels / (scale * scale);
+                    writeComfyNumberInput(node, "megapixels", Math.max(0.1, Math.round(draft * 100) / 100));
+                }
+            } else if (settings.keepTunedResolution) {
+                // Geometry-locked graphs (H3 two-pass family): the HIGH refine pass takes its size from a
+                // fixed learned upscaler (target_width/height on the upscale node), so the
+                // ResolutionSelector only drives the cheap LOW draft pass — and the author tunes that
+                // draft deliberately small (0.4 MP in the U24/T8 template). Rewriting it with the canvas
+                // budget (auto quality → 0.94 MP) made the draft as heavy as the refine pass and pushed a
+                // 24 GB card over its limit ("allocation would exceed allowed memory"). Keep the saved
+                // aspect and never inflate `megapixels`.
+                if (authoredMegapixels == null && "aspect_ratio" in node.inputs) node.inputs.aspect_ratio = aspectLabel;
+                if ("megapixels" in node.inputs) {
+                    writeComfyNumberInput(node, "megapixels", authoredMegapixels == null ? megapixels : Math.min(megapixels, authoredMegapixels));
+                }
+            } else {
+                if ("aspect_ratio" in node.inputs) node.inputs.aspect_ratio = aspectLabel;
+                if ("megapixels" in node.inputs) writeComfyNumberInput(node, "megapixels", megapixels);
             }
         }
 
@@ -1008,8 +1075,11 @@ export function applyComfyVideoSettings(
         }
     }
 
-    // Sampling steps: BasicScheduler / KSampler expose an integer `steps` field.
-    if (steps != null) {
+    // Sampling steps: BasicScheduler / KSampler expose an integer `steps` field. Never for the
+    // two-pass H3 video family — its steps are coupled to the learned parity plan, and the match
+    // here is accidental anyway (`MiniMaxH3DualCloc` + `kSampler` reads as "KSampler" when the
+    // comparison is case-insensitive).
+    if (steps != null && !settings.twoPassH3Video) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
             if (!/BasicScheduler|KSampler|Scheduler/i.test(type) || !node.inputs) continue;
@@ -1018,7 +1088,7 @@ export function applyComfyVideoSettings(
     }
 
     // Scheduler (BasicScheduler.scheduler) — string combo.
-    if (scheduler) {
+    if (scheduler && !settings.twoPassH3Video) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
             if (!/BasicScheduler|Scheduler/i.test(type) || !node.inputs) continue;
@@ -1026,8 +1096,11 @@ export function applyComfyVideoSettings(
         }
     }
 
-    // Sampler name (KSamplerSelect.sampler_name) — string combo.
-    if (samplerName) {
+    // Sampler name (KSamplerSelect.sampler_name) — string combo. Blocked for the two-pass H3 video
+    // family: its sampler is the custom `dual_clock_euler` enum, and the match here is accidental
+    // (`MiniMaxH3DualCloc` + `kSampler` reads as "KSampler"), so writing a generic combo value would
+    // be a hard validation error rather than a tweak.
+    if (samplerName && !settings.twoPassH3Video) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
             if (!/KSamplerSelect|KSampler/i.test(type) || !node.inputs) continue;
@@ -1576,6 +1649,52 @@ async function freeComfyVram(baseUrl: string, apiKey: string, signal?: AbortSign
     }
 }
 
+/**
+ * Stop a running/pending ComfyUI prompt *on the server*.
+ *
+ * Aborting the local request only closes the HTTP call: ComfyUI keeps executing, and a video job
+ * then finishes on its own and writes its MP4 into the pod's output folder — which is exactly the
+ * "I cancelled but it still produced a result" report. Cancelling has to reach the server, so
+ * `runNativeComfyUiJob` posts here when its signal aborts.
+ *
+ * The queue entry is located by `prompt_id` first, so a different job sharing the same pod is never
+ * touched (only the still-running match is interrupted, and a merely queued one is dequeued). The
+ * blind `/interrupt` is reserved for the case where `/queue` itself is unavailable. Best-effort by
+ * design: cancellation must never raise an error of its own, and a ComfyUI that blocks these
+ * endpoints must keep generating exactly as before.
+ */
+async function interruptComfyJob(baseUrl: string, apiKey: string, promptId: string): Promise<void> {
+    const jsonHeaders = authHeaders(apiKey, "application/json");
+    const actions: Array<() => Promise<unknown>> = [];
+    try {
+        const queue = await axios.get(comfyUiUrl(baseUrl, "/queue"), { headers: authHeaders(apiKey), timeout: 15_000 });
+        const pending = Array.isArray(queue.data?.queue_pending) ? queue.data.queue_pending : [];
+        const running = Array.isArray(queue.data?.queue_running) ? queue.data.queue_running : [];
+        const queued = pending.find((entry: unknown) => Array.isArray(entry) && String(entry[1]) === promptId);
+        const isRunning = running.some((entry: unknown) => Array.isArray(entry) && String(entry[1]) === promptId);
+        const queueNumber = Array.isArray(queued) ? Number(queued[0]) : NaN;
+        if (Number.isFinite(queueNumber)) {
+            actions.push(() => axios.post(comfyUiUrl(baseUrl, "/queue"), { delete: [queueNumber] }, { headers: jsonHeaders, timeout: 15_000 }));
+        } else if (isRunning || queued) {
+            // Running (or queued without a usable number): ask ComfyUI to stop the current execution.
+            actions.push(() => axios.post(comfyUiUrl(baseUrl, "/interrupt"), {}, { headers: jsonHeaders, timeout: 15_000 }));
+        } else {
+            // Neither queued nor running: the prompt already finished, so there is nothing to stop.
+            return;
+        }
+    } catch {
+        // `/queue` unavailable → fall back to interrupting whatever this pod is executing.
+        actions.push(() => axios.post(comfyUiUrl(baseUrl, "/interrupt"), {}, { headers: jsonHeaders, timeout: 15_000 }));
+    }
+    for (const action of actions) {
+        try {
+            await action();
+        } catch {
+            // Best-effort only.
+        }
+    }
+}
+
 export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<NativeComfyUiResult> {
     const { baseUrl, apiKey, prompt, signal } = args;
     if (!normalizeComfyUiRoot(baseUrl)) throw new Error("ComfyUI Base URL is required");
@@ -1611,6 +1730,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         scheduler: args.scheduler,
         keepTunedResolution: keepTunedGeometry,
         reshapeCanvas: h3SingleRefImage,
+        // The two-pass H3 video family is the one geometry-locked family where the canvas must win
+        // (it otherwise ignores both the aspect and the resolution the user picked) and where the
+        // author's coupled dual-clock sampling contract must not be clobbered by accident.
+        twoPassH3Video: h3TwoPassRefs,
     });
     if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
@@ -1678,61 +1801,74 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         );
     }
 
-    const deadline = performance.now() + HISTORY_TIMEOUT_MS;
-    let outputs: HistoryOutputs | undefined;
-    while (performance.now() < deadline) {
-        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const history = await axios.get(comfyUiUrl(baseUrl, `/history/${encodeURIComponent(promptId)}`), {
-            headers: authHeaders(apiKey),
-            signal,
-        });
-        const entry = history.data?.[promptId] || history.data;
-        if (
-            entry?.status?.status_str === "error" ||
-            (entry?.status?.completed === false && entry?.status?.messages?.some?.((m: unknown) => Array.isArray(m) && m[0] === "execution_error"))
-        ) {
-            throw new Error(describeComfyExecutionError(entry));
+    // Cancelling has to reach ComfyUI, not just close the local request: aborting the fetch alone
+    // leaves the job running on the pod, and a video job then finishes into its output folder on
+    // its own. Best-effort, matched by prompt_id, and native-path only — see `interruptComfyJob`.
+    const stopOnAbort = () => {
+        void interruptComfyJob(baseUrl, apiKey, promptId);
+    };
+    if (signal?.aborted) stopOnAbort();
+    else signal?.addEventListener("abort", stopOnAbort, { once: true });
+
+    try {
+        const deadline = performance.now() + HISTORY_TIMEOUT_MS;
+        let outputs: HistoryOutputs | undefined;
+        while (performance.now() < deadline) {
+            if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+            const history = await axios.get(comfyUiUrl(baseUrl, `/history/${encodeURIComponent(promptId)}`), {
+                headers: authHeaders(apiKey),
+                signal,
+            });
+            const entry = history.data?.[promptId] || history.data;
+            if (
+                entry?.status?.status_str === "error" ||
+                (entry?.status?.completed === false && entry?.status?.messages?.some?.((m: unknown) => Array.isArray(m) && m[0] === "execution_error"))
+            ) {
+                throw new Error(describeComfyExecutionError(entry));
+            }
+            if (entry?.outputs && Object.keys(entry.outputs).length) {
+                outputs = entry.outputs as HistoryOutputs;
+                break;
+            }
+            await sleep(HISTORY_INTERVAL_MS, signal);
         }
-        if (entry?.outputs && Object.keys(entry.outputs).length) {
-            outputs = entry.outputs as HistoryOutputs;
-            break;
+        if (!outputs) throw new Error("ComfyUI timed out waiting for /history");
+
+        const media = collectMediaFromHistory(outputs);
+        const texts = collectTextsFromHistory(outputs);
+        // Text-output graphs legitimately finish with no image/video at all. Only the detected text
+        // family is exempt from the hard failure below, so every image/video workflow keeps throwing
+        // exactly the same error it did before.
+        if (!media.images.length && !media.videos.length && !(textFamily && texts.length)) {
+            throw new Error("ComfyUI finished but returned no images/videos");
         }
-        await sleep(HISTORY_INTERVAL_MS, signal);
-    }
-    if (!outputs) throw new Error("ComfyUI timed out waiting for /history");
 
-    const media = collectMediaFromHistory(outputs);
-    const texts = collectTextsFromHistory(outputs);
-    // Text-output graphs legitimately finish with no image/video at all. Only the detected text
-    // family is exempt from the hard failure below, so every image/video workflow keeps throwing
-    // exactly the same error it did before.
-    if (!media.images.length && !media.videos.length && !(textFamily && texts.length)) {
-        throw new Error("ComfyUI finished but returned no images/videos");
-    }
+        const images: NativeComfyUiResult["images"] = [];
+        for (const file of media.images) {
+            const blob = await fetchComfyView(baseUrl, apiKey, file, { signal });
+            images.push({ id: nanoid(), dataUrl: await blobToDataUrl(blob) });
+        }
 
-    const images: NativeComfyUiResult["images"] = [];
-    for (const file of media.images) {
-        const blob = await fetchComfyView(baseUrl, apiKey, file, { signal });
-        images.push({ id: nanoid(), dataUrl: await blobToDataUrl(blob) });
-    }
+        const videos: NativeComfyUiResult["videos"] = [];
+        for (const file of media.videos) {
+            const blob = await fetchComfyView(baseUrl, apiKey, file, { signal });
+            // ComfyUI /view often replies with a generic application/octet-stream content-type,
+            // so trust the filename extension over blob.type when deciding the real MIME.
+            const extMime = /\.webm$/i.test(file.filename)
+                ? "video/webm"
+                : /\.(mov|mkv)$/i.test(file.filename)
+                  ? "video/quicktime"
+                  : /\.mp4$/i.test(file.filename)
+                    ? "video/mp4"
+                    : "";
+            const mimeType = extMime || (blob.type && blob.type.startsWith("video/") ? blob.type : "video/mp4");
+            videos.push({ blob, mimeType });
+        }
 
-    const videos: NativeComfyUiResult["videos"] = [];
-    for (const file of media.videos) {
-        const blob = await fetchComfyView(baseUrl, apiKey, file, { signal });
-        // ComfyUI /view often replies with a generic application/octet-stream content-type,
-        // so trust the filename extension over blob.type when deciding the real MIME.
-        const extMime = /\.webm$/i.test(file.filename)
-            ? "video/webm"
-            : /\.(mov|mkv)$/i.test(file.filename)
-              ? "video/quicktime"
-              : /\.mp4$/i.test(file.filename)
-                ? "video/mp4"
-                : "";
-        const mimeType = extMime || (blob.type && blob.type.startsWith("video/") ? blob.type : "video/mp4");
-        videos.push({ blob, mimeType });
+        return { images, videos, texts };
+    } finally {
+        signal?.removeEventListener("abort", stopOnAbort);
     }
-
-    return { images, videos, texts };
 }
 
 /**
