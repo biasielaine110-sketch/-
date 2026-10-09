@@ -44,10 +44,13 @@ const HISTORY_TIMEOUT_MS = 60 * 60 * 1000;
 /** After status=success, keep polling this many times for a late-persisted VHS mp4 (ComfyUI #11540). */
 const VIDEO_HISTORY_GRACE_POLLS = 8;
 /**
- * Draft megapixel ceiling for DualClock LOW pass (author bakes ~0.4; delivered ≈ draft × scale²).
- * 0.95 lets 1080p (≈0.92 draft at ×1.5) reach ~1920×1080; still clamps 2K drafts that OOM rented cards.
+ * U24 DualClock / H3-video on rented pods: long clips + HIGH refine routinely OOM the worker;
+ * seetacloud's nginx then answers every subsequent call with HTTP 502. Cap canvas duration for
+ * that family only (author template is 15s — still too heavy on ~24–32GB cards).
  */
-const TWO_PASS_H3_MAX_DRAFT_MEGAPIXELS = 0.95;
+const TWO_PASS_H3_MAX_SECONDS = 10;
+/** Draft megapixel ceiling for DualClock LOW pass (author bakes 0.4; 1080p ≈0.9 after ÷scale²). */
+const TWO_PASS_H3_MAX_DRAFT_MEGAPIXELS = 0.7;
 
 /** Rented / tunnel hosts whose nginx often returns 502 while ComfyUI is unloading or restarting. */
 function isFlakyComfyGatewayHost(baseUrl: string) {
@@ -1457,10 +1460,13 @@ export function applyComfyVideoSettings(
     const pixels = pixelsFromSizeAndQuality(settings.size, settings.vquality);
     const megapixels = megapixelsFromPixels(pixels.width, pixels.height);
     const aspectLabel = resolutionSelectorAspectLabel(pixels.ratio);
-    // Honor the canvas duration as selected (U24 author template is 15s). Do not silently clamp
-    // DualClock to 10s — that made "15s" settings produce ~10s clips. VRAM risk on rented pods is
-    // handled by the DualClock draft megapixel cap below, not by rewriting the user's length.
-    const seconds = parseCanvasSeconds(settings.seconds);
+    // DualClock only: clamp duration before the Float (Duration) write so long canvas defaults
+    // cannot push the HIGH refine past rented-card VRAM (which surfaces as seetacloud 502).
+    const parsedSeconds = parseCanvasSeconds(settings.seconds);
+    const seconds =
+        settings.twoPassH3Video && parsedSeconds != null
+            ? Math.min(parsedSeconds, TWO_PASS_H3_MAX_SECONDS)
+            : parsedSeconds;
 
     // Sampling steps for scheduler nodes (BasicScheduler / KSampler / Scheduler steps).
     const steps = parseComfySteps(settings.steps);
@@ -2516,7 +2522,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         if (isFlakyComfyGatewayHost(baseUrl) && isComfyGatewayRetryStatus(status)) {
             throw new Error(
                 h3TwoPassRefs
-                    ? `ComfyUI 网关错误（HTTP ${status}）。H3-video / U24 双采在 seetacloud 上常见于 OOM 或上一个重任务未结束 — 等待 30–60 秒后重试，建议 1080p、连接 1–2 张参考图；长时长更易占满显存。`
+                    ? `ComfyUI 网关错误（HTTP ${status}）。H3-video / U24 双采在 seetacloud 上常见于 OOM 或上一个重任务未结束 — 等待 30–60 秒后重试，时长 ≤10s、清晰度 1080p，并连接 1–2 张参考图。`
                     : `ComfyUI 网关错误（HTTP ${status}）。seetacloud 隧道短暂不可用（常在上一个重任务之后）— 等待 30–60 秒后重试，勿连续猛点生成。`,
             );
         }
