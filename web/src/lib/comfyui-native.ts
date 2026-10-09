@@ -2103,7 +2103,19 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         multiRefH3Video: h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo,
     });
     if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
+    // U06 single-pass multi-ref (WJILatentPreset holder), excluding SelfLift / U35 官流.
+    const multiRefH3Video = h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo;
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
+    // U06 V8 bakes author-machine filenames (`Untitled(3).jpg` …) into every LoadImage. Those files
+    // do not exist on the seetacloud pod, so a zero-reference submit fails inside LoadImage within a
+    // few seconds and history comes back with no VHS mp4 — the "ran ~7s, generated nothing" report.
+    // Require at least one uploaded reference for this family only; SelfLift has its own blank
+    // placeholder and is not gated here.
+    if (multiRefH3Video && !refs.length) {
+        throw new Error(
+            "U06 multi-reference video requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
+        );
+    }
     if (refs.length) {
         const names: string[] = [];
         for (let i = 0; i < refs.length; i += 1) {
@@ -2146,10 +2158,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // Basic-Auth credentials authenticate via the Authorization header only — never as a body token.
     if (token && !/^(none|-|n\/a)$/i.test(token) && !isBasicAuthCredential(apiKey)) body.token = token;
 
-    // Heavy two-pass H3 graphs run right at the edge of a 24 GB card; release whatever the previous
-    // task left resident before asking for another render. Best-effort and family-scoped, so no
-    // other native ComfyUI channel changes behaviour.
-    if (h3TwoPassRefs) await freeComfyVram(baseUrl, apiKey, signal);
+    // U06 single-pass multi-ref — same VRAM pressure class as two-pass once the hybrid UNET + 32B
+    // CLIP are resident. Free leftovers from the previous job before queueing. Scoped to this
+    // fingerprint (+ two-pass); SelfLift / U35 / every other graph stay unchanged.
+    if (h3TwoPassRefs || multiRefH3Video) await freeComfyVram(baseUrl, apiKey, signal);
 
     const submitUrl = comfyUiUrl(baseUrl, "/prompt");
     const submit = await axios.post(submitUrl, body, {
@@ -2161,6 +2173,23 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         return finishRunningHubTask(baseUrl, apiKey, submitted.taskId, signal);
     }
     const promptId = submitted.promptId;
+    // U06 only: ComfyUI can return a prompt_id together with node_errors (validation soft-fail).
+    // Treat that as a hard failure so we never poll an empty/aborted history entry.
+    if (multiRefH3Video) {
+        const submitRecord = readSubmitRecord(submit.data);
+        const nodeErrors = submitRecord?.node_errors;
+        if (nodeErrors && typeof nodeErrors === "object" && Object.keys(nodeErrors as object).length) {
+            throw new Error(
+                describeComfySubmitFailure({
+                    status: submit.status,
+                    contentType: String((submit.headers as unknown as Record<string, unknown> | undefined)?.["content-type"] || ""),
+                    data: submit.data,
+                    url: submitUrl,
+                    message: submitted.message,
+                }),
+            );
+        }
+    }
     if (!promptId) {
         throw new Error(
             describeComfySubmitFailure({
@@ -2185,6 +2214,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     try {
         const deadline = performance.now() + HISTORY_TIMEOUT_MS;
         let outputs: HistoryOutputs | undefined;
+        // U06: execution_success can land before VHS persists the mp4 — keep polling a short grace
+        // window after status=success when videos are still missing (see ComfyUI #11540).
+        let multiRefCompletedGrace = 0;
         while (performance.now() < deadline) {
             if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
             const history = await axios.get(comfyUiUrl(baseUrl, `/history/${encodeURIComponent(promptId)}`), {
@@ -2192,15 +2224,37 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
                 signal,
             });
             const entry = history.data?.[promptId] || history.data;
-            if (
-                entry?.status?.status_str === "error" ||
-                (entry?.status?.completed === false && entry?.status?.messages?.some?.((m: unknown) => Array.isArray(m) && m[0] === "execution_error"))
-            ) {
+            const statusStr = String(entry?.status?.status_str || "");
+            const messages = Array.isArray(entry?.status?.messages) ? entry.status.messages : [];
+            const hasExecutionError = messages.some((m: unknown) => Array.isArray(m) && m[0] === "execution_error");
+            if (statusStr === "error" || hasExecutionError) {
                 throw new Error(describeComfyExecutionError(entry));
             }
-            if (entry?.outputs && Object.keys(entry.outputs).length) {
-                outputs = entry.outputs as HistoryOutputs;
-                break;
+            const entryOutputs = entry?.outputs && typeof entry.outputs === "object" ? (entry.outputs as HistoryOutputs) : undefined;
+            if (entryOutputs && Object.keys(entryOutputs).length) {
+                // U06 multi-ref video: LoadImage nodes often land in `outputs` with preview stills
+                // (or empty ui dicts) while VHS has not persisted the mp4 yet — or after a cached
+                // empty finish. Breaking on *any* output key made the job look "done in ~7s" with
+                // no video. Wait for a real video artefact; only accept a completed status after a
+                // short grace window if the mp4 still never appears.
+                if (multiRefH3Video) {
+                    const partial = collectMediaFromHistory(entryOutputs);
+                    const completed = entry?.status?.completed === true || statusStr === "success";
+                    if (partial.videos.length) {
+                        outputs = entryOutputs;
+                        break;
+                    }
+                    if (completed) {
+                        multiRefCompletedGrace += 1;
+                        if (multiRefCompletedGrace >= 15) {
+                            outputs = entryOutputs;
+                            break;
+                        }
+                    }
+                } else {
+                    outputs = entryOutputs;
+                    break;
+                }
             }
             await sleep(HISTORY_INTERVAL_MS, signal);
         }
@@ -2211,7 +2265,14 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         // Text-output graphs legitimately finish with no image/video at all. Only the detected text
         // family is exempt from the hard failure below, so every image/video workflow keeps throwing
         // exactly the same error it did before.
-        if (!media.images.length && !media.videos.length && !(textFamily && texts.length)) {
+        // U06 multi-ref: LoadImage preview stills must not count as a successful video run.
+        if (multiRefH3Video) {
+            if (!media.videos.length) {
+                throw new Error(
+                    "ComfyUI finished but returned no video. For U06 multi-reference video, connect reference images on the canvas (the workflow's baked Untitled*.jpg files are not on the server) and retry.",
+                );
+            }
+        } else if (!media.images.length && !media.videos.length && !(textFamily && texts.length)) {
             throw new Error("ComfyUI finished but returned no images/videos");
         }
 
