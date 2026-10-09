@@ -77,6 +77,10 @@ export default {
             samplerName: "采样器",
             scheduler: "调度器",
             adaptive: "自适应",
+            twoPassQualityHint: "双采：常用选 1080p；需要更高成片可选 2K（显存占用更高）。",
+            u35QualityHint: "官流单采：作者默认约 1MP；选 1080p 可提到约 1080 档交付。",
+            u06QualityHint: "多图参考：选 1376 使用作者长边精度；画布比例仍可切换横竖。",
+            selfLiftOrientationHint: "SelfLift：点横屏 16:9 或竖屏 9:16 即可切换朝向（勿用「自动」若要强制朝向）。",
             sizes: {
                 landscape: "横屏",
                 portrait: "竖屏",

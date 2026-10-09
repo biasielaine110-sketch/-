@@ -77,6 +77,10 @@ export default {
             samplerName: "Sampler",
             scheduler: "Scheduler",
             adaptive: "Adaptive",
+            twoPassQualityHint: "Two-pass: use 1080p for everyday HD; pick 2K for higher delivery (more VRAM).",
+            u35QualityHint: "Official-stream single-pass: author default is ~1MP; pick 1080p to reach ~1080-tier delivery.",
+            u06QualityHint: "Multi-ref: pick 1376 for the author long-edge tier; aspect ratio still switches landscape/portrait.",
+            selfLiftOrientationHint: "SelfLift: tap Landscape 16:9 or Portrait 9:16 to switch orientation (avoid Auto if you need a fixed orientation).",
             sizes: {
                 landscape: "Landscape",
                 portrait: "Portrait",

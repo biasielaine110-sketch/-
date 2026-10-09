@@ -516,6 +516,44 @@ export function isComfyH3SelfLiftWorkflow(workflow: ComfyWorkflow): boolean {
 }
 
 /**
+ * True when an H3 conditioning node's width/height link into a `ResolutionSelector`.
+ * Shared by U35 官流 (selector = delivered) and U30 Singularity (selector = LOW draft).
+ */
+function h3LinksToResolutionSelector(workflow: ComfyWorkflow): boolean {
+    const conditioning = Object.values(workflow).find((node) => isMiniMaxH3ConditioningNode(node));
+    const inputs = conditioning?.inputs;
+    if (!inputs || typeof inputs !== "object") return false;
+    for (const field of ["width", "height"]) {
+        const link = inputs[field];
+        if (!Array.isArray(link) || link[0] == null) continue;
+        const holder = workflow[String(link[0])];
+        if (/ResolutionSelector/i.test(String(holder?.class_type || ""))) return true;
+    }
+    return false;
+}
+
+/**
+ * Structural fingerprint of the MiniMax H3 **Singularity 超双采放大** family
+ * (e.g. U30-Minimax-H3-Singularity超双采放大-AIGC特异点).
+ *
+ * Shape: the same single-H3 + ≥2 ref slots + video sink + ResolutionSelector-linked size as U35
+ * 官流, **plus** a `MinimaxH3LatentUpscaler3D` that multiplies the selector's geometry (author
+ * bake: selector 0.7 MP × 1.5 scale → ~1.6 MP delivered). Without this fingerprint the graph
+ * rides the U35 "selector = delivered" path and the canvas megapixels are written straight onto
+ * the *draft*, then multiplied again by 1.5² — inflating far past what the user asked for and
+ * OOMing the pod.
+ *
+ * Disjoint from DualClock two-pass (≥2 H3 conditioning nodes), SelfLift, and U35 (no 3D latent
+ * upscaler). Any graph that does not match keeps its previous behaviour untouched.
+ */
+export function isComfyH3SingularityUpscaleWorkflow(workflow: ComfyWorkflow): boolean {
+    if (!isComfyH3MultiReferenceVideoWorkflow(workflow)) return false;
+    if (isComfyH3SelfLiftWorkflow(workflow)) return false;
+    if (!h3LinksToResolutionSelector(workflow)) return false;
+    return Object.values(workflow).some((node) => /MinimaxH3LatentUpscaler3D/i.test(String(node?.class_type || "")));
+}
+
+/**
  * Structural fingerprint of the MiniMax H3 **官流 / ResolutionSelector-delivered** single-pass
  * multi-reference video family (e.g. U35-H3官流-终极版-神棍).
  *
@@ -530,22 +568,15 @@ export function isComfyH3SelfLiftWorkflow(workflow: ComfyWorkflow): boolean {
  *  - `reshapeLinkedH3Canvas` looks for `自定义宽`/`width` scalars and finds none on a
  *    ResolutionSelector, so size/ratio stay dead.
  *
- * Disjoint from SelfLift (no `SelfLiftH3Sampler`) and from U06 (no ResolutionSelector size link).
- * Any graph that does not match keeps its previous behaviour untouched.
+ * Disjoint from SelfLift (no `SelfLiftH3Sampler`), from U30 Singularity (has LatentUpscaler3D),
+ * and from U06 (no ResolutionSelector size link). Any graph that does not match keeps its
+ * previous behaviour untouched.
  */
 export function isComfyH3ResolutionSelectorVideoWorkflow(workflow: ComfyWorkflow): boolean {
     if (!isComfyH3MultiReferenceVideoWorkflow(workflow)) return false;
     if (isComfyH3SelfLiftWorkflow(workflow)) return false;
-    const conditioning = Object.values(workflow).find((node) => isMiniMaxH3ConditioningNode(node));
-    const inputs = conditioning?.inputs;
-    if (!inputs || typeof inputs !== "object") return false;
-    for (const field of ["width", "height"]) {
-        const link = inputs[field];
-        if (!Array.isArray(link) || link[0] == null) continue;
-        const holder = workflow[String(link[0])];
-        if (/ResolutionSelector/i.test(String(holder?.class_type || ""))) return true;
-    }
-    return false;
+    if (isComfyH3SingularityUpscaleWorkflow(workflow)) return false;
+    return h3LinksToResolutionSelector(workflow);
 }
 
 /**
@@ -1023,6 +1054,8 @@ function longSideFromQuality(vquality?: string) {
     if (!raw || raw === "auto" || raw === "medium") return 1280;
     if (/4k|2160|3840/.test(raw)) return 3840;
     if (/2k|1440|2560|high/.test(raw)) return 2560;
+    // U06 V8 author long edge — must win over the generic `>= 1080 → 1920` numeric ladder.
+    if (/^1376(?:p)?$/.test(raw)) return 1376;
     if (/1080|hd/.test(raw)) return 1920;
     if (/720|sd/.test(raw)) return 1280;
     if (/480|low/.test(raw)) return 854;
@@ -1030,6 +1063,7 @@ function longSideFromQuality(vquality?: string) {
     if (Number.isFinite(numeric) && numeric > 0) {
         if (numeric >= 3000) return 3840;
         if (numeric >= 2000) return 2560;
+        if (numeric === 1376) return 1376;
         if (numeric >= 1080) return 1920;
         if (numeric >= 720) return 1280;
         return 854;
@@ -1101,13 +1135,16 @@ function shapeH3CanvasToSize(bakedWidth: number, bakedHeight: number, size: stri
  * (`2048x1152`) is an "explicit" size, and feeding it through `shapeH3CanvasToSize`'s literal WxH
  * path used to inflate V8 from 1376×768 to 2048×1152 (~2.25× pixels) and OOM the pod. A 16:9
  * canvas against the author's 16:9 bake stays byte-identical; only the *ratio* changes the shape.
- * The preset is pinned to custom mode so the rewritten dimensions are the ones that actually apply.
+ * The sole quality override this family accepts is the explicit `1376` long-edge tier (the author
+ * bake); generic 1080/2k must not inflate the preset. The preset is pinned to custom mode so the
+ * rewritten dimensions are the ones that actually apply.
  */
 function reshapeLinkedH3Canvas(
     workflow: ComfyWorkflow,
     widthLink: unknown,
     heightLink: unknown,
     size: string,
+    vquality?: string,
 ): void {
     const holders = new Set<string>();
     for (const link of [widthLink, heightLink]) {
@@ -1126,6 +1163,9 @@ function reshapeLinkedH3Canvas(
         const ratio = parseCanvasAspectRatio(size);
         return RESOLUTION_SELECTOR_ASPECTS.find((item) => item.ratio === ratio)?.value || 0;
     })();
+    // Only the dedicated U06 "1376" quality pill may replace the baked long edge; every other
+    // vquality keeps the author's pixel budget so 1080/2k cannot OOM this family.
+    const qualityLong = /^1376(?:p)?$/i.test(String(vquality || "").trim()) ? 1376 : 0;
     for (const id of holders) {
         const holder = workflow[id];
         if (!holder?.inputs || typeof holder.inputs !== "object") continue;
@@ -1138,7 +1178,7 @@ function reshapeLinkedH3Canvas(
         const bakedHeight = Number(holder.inputs[fields[1]]);
         if (!(bakedWidth > 0) || !(bakedHeight > 0)) continue;
         const aspect = aspectFromSize > 0 ? aspectFromSize : bakedWidth / bakedHeight;
-        const longEdge = snap(Math.max(bakedWidth, bakedHeight));
+        const longEdge = snap(qualityLong > 0 ? qualityLong : Math.max(bakedWidth, bakedHeight));
         const shaped =
             aspect >= 1
                 ? { width: longEdge, height: snap(longEdge / aspect) }
@@ -1162,11 +1202,14 @@ function h3LatentUpscaleFactor(workflow: ComfyWorkflow): number | null {
         if (!/LatentUpscale/i.test(String(node?.class_type || ""))) continue;
         const inputs = node?.inputs;
         if (!inputs) continue;
-        // `target_size` graphs fix the refine resolution themselves — only `scale_by` multiplies the
-        // draft, so anything else is left to the author.
-        const mode = String(inputs.size_mode ?? "").trim().toLowerCase();
-        if (mode && mode !== "scale_by") continue;
-        const raw = inputs.scale_by;
+        // U24 T8: `size_mode=scale_by` + `scale_by`. U30 Singularity: `mode=scale by multiplier` +
+        // `mode.scale` (easy float). `target_size` / non-scale modes fix the refine resolution
+        // themselves — only a scale multiplier converts a delivered canvas budget into a draft.
+        const sizeMode = String(inputs.size_mode ?? "").trim().toLowerCase();
+        const mode = String(inputs.mode ?? "").trim().toLowerCase();
+        if (sizeMode && sizeMode !== "scale_by") continue;
+        if (!sizeMode && mode && !/scale\s*by|multiplier/i.test(mode)) continue;
+        const raw = inputs.scale_by ?? inputs["mode.scale"];
         if (typeof raw === "number" && raw > 0) return raw;
         if (Array.isArray(raw) && raw[0] != null) {
             const source = workflow[String(raw[0])]?.inputs as Record<string, unknown> | undefined;
@@ -1290,6 +1333,14 @@ export function applyComfyVideoSettings(
          */
         twoPassH3Video?: boolean;
         /**
+         * U30 Singularity 超双采放大 family only (see `isComfyH3SingularityUpscaleWorkflow`).
+         * Same draft-vs-delivered math as `twoPassH3Video` (ResolutionSelector × LatentUpscaler3D
+         * scale), but the graph has a single H3 conditioning node rather than DualClock — so it
+         * must not ride the U35 "selector = delivered" path. Sampling stays author-locked
+         * (`euler` + BasicScheduler steps=6).
+         */
+        singularityH3Video?: boolean;
+        /**
          * U37 SelfLift 双采 family only (see `isComfyH3SelfLiftWorkflow`). Unlike every other
          * geometry-locked family, this graph's `ResolutionSelector` is not a draft knob: the H3
          * node's width/height are *links* into it and `SelfLiftH3Sampler` splits that single target
@@ -1345,22 +1396,25 @@ export function applyComfyVideoSettings(
 
         if (/ResolutionSelector/i.test(type) || /分辨率/i.test(title)) {
             const authoredMegapixels = typeof node.inputs.megapixels === "number" ? node.inputs.megapixels : null;
-            if (settings.twoPassH3Video) {
-                // U24 two-pass H3 video family. The canvas was ignored twice over here: the aspect was
-                // never rewritten and `megapixels` was clamped down to the author's draft budget, so a
-                // portrait canvas still delivered a 16:9 clip and "high" quality changed nothing.
-                // The selector drives the *cheap LOW draft* pass only — the HIGH refine pass is that
-                // draft times the learned upscaler's factor — so the canvas budget has to be divided by
-                // factor² before it can stand in for the delivered resolution. With the template's own
-                // 1.5× the "auto" tier lands on 0.42 MP against the author's 0.4 MP, i.e. the default
-                // run stays the author's render; asking for more now actually delivers more.
+            if (settings.twoPassH3Video || settings.singularityH3Video) {
+                // U24 DualClock two-pass, and U30 Singularity 超双采放大. The selector drives the
+                // *cheap LOW draft* only — the HIGH / upscaled pass is that draft times the learned
+                // upscaler's factor — so the canvas budget has to be divided by factor² before it
+                // can stand in for the delivered resolution. U30 must NOT use the U35 "write full
+                // MP" path or the draft is inflated and then multiplied again by 1.5².
                 if (isExplicitCanvasSize(settings.size) && "aspect_ratio" in node.inputs) {
                     node.inputs.aspect_ratio = aspectLabel;
                 }
                 const scale = h3LatentUpscaleFactor(next);
                 if (authoredMegapixels != null && scale != null && "megapixels" in node.inputs) {
-                    const draft = megapixels / (scale * scale);
-                    writeComfyNumberInput(node, "megapixels", Math.max(0.1, Math.round(draft * 100) / 100));
+                    const draft = Math.max(0.1, Math.round((megapixels / (scale * scale)) * 100) / 100);
+                    // U30 author draft is 0.7 MP; a bare 720p canvas budget (~0.41 draft) must not
+                    // silently pull it down. Only raise (or match) the authored floor.
+                    writeComfyNumberInput(
+                        node,
+                        "megapixels",
+                        settings.singularityH3Video ? Math.max(authoredMegapixels, draft) : draft,
+                    );
                 }
             } else if (settings.selfLiftH3Video || settings.resolutionSelectorH3Video) {
                 // Delivered-resolution families whose H3 width/height link into a ResolutionSelector:
@@ -1401,7 +1455,13 @@ export function applyComfyVideoSettings(
     // comparison is case-insensitive). Same lock for SelfLift / U35 官流 / U06 multi-ref: those
     // graphs ship author-tuned schedules (`ManualSigmas` and/or a baked BasicScheduler) that the
     // canvas default (40 / karras) must not clobber.
-    const lockAuthoredSampling = Boolean(settings.twoPassH3Video || settings.selfLiftH3Video || settings.multiRefH3Video || settings.resolutionSelectorH3Video);
+    const lockAuthoredSampling = Boolean(
+        settings.twoPassH3Video ||
+            settings.singularityH3Video ||
+            settings.selfLiftH3Video ||
+            settings.multiRefH3Video ||
+            settings.resolutionSelectorH3Video,
+    );
     if (steps != null && !lockAuthoredSampling) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
@@ -1469,8 +1529,19 @@ export function applyComfyVideoSettings(
         // the helper); only an explicit canvas size writes it and the reshape preserves the author's
         // pixel budget, so the untouched default stays byte-identical. Scoped to this one family, so
         // U24/U37/U33 and every other graph keep the geometry handling around this block untouched.
-        if (settings.multiRefH3Video && isExplicitCanvasSize(settings.size)) {
-            reshapeLinkedH3Canvas(next, node.inputs.width, node.inputs.height, String(settings.size));
+        // Reshape on an explicit canvas size (ratio), or when the user picks the dedicated U06
+        // "1376" long-edge tier — that pill must work even if size is still "auto".
+        if (
+            settings.multiRefH3Video &&
+            (isExplicitCanvasSize(settings.size) || /^1376(?:p)?$/i.test(String(settings.vquality || "").trim()))
+        ) {
+            reshapeLinkedH3Canvas(
+                next,
+                node.inputs.width,
+                node.inputs.height,
+                String(settings.size || "16:9"),
+                settings.vquality,
+            );
         }
         // U33 single-reference H3 image family bakes a square canvas onto the node, so the user's
         // canvas size/ratio never took effect and every run came back square. When the canvas
@@ -1611,6 +1682,8 @@ export const COMFY_UPLOAD_GUARD_WORKFLOWS = [
     "U06-h3_多图参考生视频V8",
     "U06-minimax_h3_多图参考生视频V8",
     "U35-H3官流-终极版-神棍",
+    "U30-H3-Singularity超双采放大",
+    "U30-Minimax-H3-Singularity超双采放大-AIGC特异点",
 ] as const;
 
 /** True only for allow-listed workflows that must size-guard their reference uploads. */
@@ -2075,6 +2148,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // U35 官流 family: same single-pass multi-ref shape as U06, but size is a linked
     // ResolutionSelector (delivered), not a WJILatentPreset — needs its own canvas drive.
     const h3ResSelectorVideo = isComfyH3ResolutionSelectorVideoWorkflow(args.workflow);
+    // U30 Singularity 超双采放大: same single-H3 + ResolutionSelector shape as U35, but the
+    // selector is the LOW draft before MinimaxH3LatentUpscaler3D (×1.5) — must use draft math.
+    const h3Singularity = isComfyH3SingularityUpscaleWorkflow(args.workflow);
     const guardUpload = keepTunedGeometry || usesComfyUploadGuard(args.workflowId);
     // Text-output family (e.g. U00 H3 prompt writer): prompt and references land on the LLM node's
     // own slots instead of the CLIP/LoadImage conventions the shared writers assume.
@@ -2095,25 +2171,26 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         // (it otherwise ignores both the aspect and the resolution the user picked) and where the
         // author's coupled dual-clock sampling contract must not be clobbered by accident.
         twoPassH3Video: h3TwoPassRefs,
+        singularityH3Video: h3Singularity,
         selfLiftH3Video: h3SelfLift,
         resolutionSelectorH3Video: h3ResSelectorVideo,
-        // U06 single-pass multi-reference video family (WJILatentPreset size holder). SelfLift and
-        // U35 官流 also match `isComfyH3MultiReferenceVideoWorkflow`, so exclude them — their
-        // resolution lives in a ResolutionSelector their own branches above already drive.
-        multiRefH3Video: h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo,
+        // U06 single-pass multi-reference video family (WJILatentPreset size holder). SelfLift,
+        // U35 官流 and U30 Singularity also match `isComfyH3MultiReferenceVideoWorkflow`, so
+        // exclude them — their resolution lives in a ResolutionSelector their own branches drive.
+        multiRefH3Video: h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo && !h3Singularity,
     });
     if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
-    // U06 single-pass multi-ref (WJILatentPreset holder), excluding SelfLift / U35 官流.
-    const multiRefH3Video = h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo;
+    // U06 single-pass multi-ref (WJILatentPreset holder), excluding SelfLift / U35 / U30.
+    const multiRefH3Video = h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo && !h3Singularity;
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
-    // U06 V8 bakes author-machine filenames (`Untitled(3).jpg` …) into every LoadImage. Those files
+    // U06 V8 / U30 Singularity bake author-machine filenames into every LoadImage. Those files
     // do not exist on the seetacloud pod, so a zero-reference submit fails inside LoadImage within a
     // few seconds and history comes back with no VHS mp4 — the "ran ~7s, generated nothing" report.
-    // Require at least one uploaded reference for this family only; SelfLift has its own blank
+    // Require at least one uploaded reference for these families only; SelfLift has its own blank
     // placeholder and is not gated here.
-    if (multiRefH3Video && !refs.length) {
+    if ((multiRefH3Video || h3Singularity) && !refs.length) {
         throw new Error(
-            "U06 multi-reference video requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
+            "This multi-reference video workflow requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
         );
     }
     if (refs.length) {
@@ -2158,10 +2235,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // Basic-Auth credentials authenticate via the Authorization header only — never as a body token.
     if (token && !/^(none|-|n\/a)$/i.test(token) && !isBasicAuthCredential(apiKey)) body.token = token;
 
-    // U06 single-pass multi-ref — same VRAM pressure class as two-pass once the hybrid UNET + 32B
-    // CLIP are resident. Free leftovers from the previous job before queueing. Scoped to this
-    // fingerprint (+ two-pass); SelfLift / U35 / every other graph stay unchanged.
-    if (h3TwoPassRefs || multiRefH3Video) await freeComfyVram(baseUrl, apiKey, signal);
+    // Heavy H3 graphs (two-pass DualClock, U30 Singularity upscale, U06 multi-ref) — free leftovers
+    // from the previous job before queueing. SelfLift / U35 / every other graph stay unchanged.
+    if (h3TwoPassRefs || h3Singularity || multiRefH3Video) await freeComfyVram(baseUrl, apiKey, signal);
 
     const submitUrl = comfyUiUrl(baseUrl, "/prompt");
     const submit = await axios.post(submitUrl, body, {

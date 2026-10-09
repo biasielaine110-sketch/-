@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
@@ -15,10 +15,39 @@ import {
 } from "@/lib/autodl-h3-comfy";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { shouldUseNativeComfyUi } from "@/lib/comfyui-native";
+import {
+    isComfyH3MultiReferenceVideoWorkflow,
+    isComfyH3ResolutionSelectorVideoWorkflow,
+    isComfyH3SelfLiftWorkflow,
+    isComfyH3SingularityUpscaleWorkflow,
+    isComfyH3TwoPassReferenceWorkflow,
+    parseComfyApiWorkflow,
+    shouldUseNativeComfyUi,
+} from "@/lib/comfyui-native";
 
 const resolutionOptions = [
     { value: "720", label: "720p" },
+    { value: "480", label: "480p" },
+];
+
+/** U24 / H3-video two-pass: 1080 as everyday HD, plus 2K. */
+const twoPassResolutionOptions = [
+    { value: "720", label: "720p" },
+    { value: "1080", label: "1080p" },
+    { value: "2k", label: "2K" },
+];
+
+/** U35 官流: lift author 1MP up to ~1080-tier delivery. */
+const u35ResolutionOptions = [
+    { value: "720", label: "720p" },
+    { value: "1080", label: "1080p" },
+    { value: "2k", label: "2K" },
+];
+
+/** U06 multi-ref: author long-edge tier (WJILatentPreset 1376). */
+const u06ResolutionOptions = [
+    { value: "720", label: "720p" },
+    { value: "1376", label: "1376" },
     { value: "480", label: "480p" },
 ];
 
@@ -30,6 +59,53 @@ const sizeOptions = [
     { value: "3:4", labelKey: "tall", width: 768, height: 1024 },
     { value: "auto", labelKey: "auto", width: 0, height: 0 },
 ];
+
+/** U37 SelfLift: landscape/portrait first so orientation is one click. */
+const selfLiftSizeOptions = [
+    { value: "16:9", labelKey: "landscape", width: 1280, height: 720 },
+    { value: "9:16", labelKey: "portrait", width: 720, height: 1280 },
+    { value: "1:1", labelKey: "square", width: 1024, height: 1024 },
+    { value: "auto", labelKey: "auto", width: 0, height: 0 },
+];
+
+type NativeVideoFamily = "twoPass" | "u35" | "u06" | "selfLift" | "other";
+
+function detectNativeVideoFamily(config: AiConfig): NativeVideoFamily {
+    const model = config.model || config.videoModel || "";
+    const script = resolveModelScript(config, model);
+    const workflow = parseComfyApiWorkflow(script);
+    if (workflow) {
+        if (isComfyH3SelfLiftWorkflow(workflow)) return "selfLift";
+        // U30 Singularity shares draft×upscale math with DualClock two-pass — offer 1080/2K.
+        if (isComfyH3SingularityUpscaleWorkflow(workflow) || isComfyH3TwoPassReferenceWorkflow(workflow)) return "twoPass";
+        if (isComfyH3ResolutionSelectorVideoWorkflow(workflow)) return "u35";
+        if (isComfyH3MultiReferenceVideoWorkflow(workflow)) return "u06";
+    }
+    const name = String(model)
+        .split("::")
+        .pop()
+        ?.trim()
+        .toLowerCase() || "";
+    if (/u37|selflift|无缝无色差/.test(name)) return "selfLift";
+    if (/u30|singularity|超双采放大/.test(name)) return "twoPass";
+    if (/u35|官流|神棍/.test(name)) return "u35";
+    if (/u24|v927|文武|h3-video|h3_video|双采参考/.test(name)) return "twoPass";
+    if (/u06|多图参考/.test(name)) return "u06";
+    return "other";
+}
+
+function resolutionOptionsForFamily(family: NativeVideoFamily) {
+    if (family === "twoPass") return twoPassResolutionOptions;
+    if (family === "u35") return u35ResolutionOptions;
+    if (family === "u06") return u06ResolutionOptions;
+    if (family === "selfLift") return twoPassResolutionOptions;
+    return resolutionOptions;
+}
+
+function sizeOptionsForFamily(family: NativeVideoFamily) {
+    if (family === "selfLift") return selfLiftSizeOptions;
+    return sizeOptions;
+}
 
 const secondOptions = [6, 10, 12, 16, 20];
 
@@ -58,6 +134,9 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const model = config.model || config.videoModel || "";
     const h3Comfy = isAutodlH3ComfyVideoModel(model, resolveModelRequestConfig(config, model).baseUrl);
     const nativeComfy = shouldUseNativeComfyUi(resolveModelRequestConfig(config, model).baseUrl, model, resolveModelScript(config, model));
+    const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
+    const qualityChoices = useMemo(() => (nativeComfy && !h3Comfy ? resolutionOptionsForFamily(nativeFamily) : resolutionOptions), [nativeComfy, h3Comfy, nativeFamily]);
+    const aspectChoices = useMemo(() => (nativeComfy && !h3Comfy ? sizeOptionsForFamily(nativeFamily) : sizeOptions), [nativeComfy, h3Comfy, nativeFamily]);
 
     if (h3Comfy) {
         const resolutionChoices = autodlH3ResolutionOptions(model);
@@ -120,8 +199,18 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
             <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.video.title")}</div> : null}
                 <SettingGroup title={t("settingsPanels.video.quality")} color={theme.node.muted}>
-                    <div className="grid grid-cols-3 gap-2.5">
-                        {resolutionOptions.map((item) => (
+                    {nativeFamily === "u06" ? (
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.u06QualityHint")}
+                        </div>
+                    ) : null}
+                    {(nativeFamily === "twoPass" || nativeFamily === "u35") && (
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {nativeFamily === "twoPass" ? t("settingsPanels.video.twoPassQualityHint") : t("settingsPanels.video.u35QualityHint")}
+                        </div>
+                    )}
+                    <div className={`grid gap-2.5 ${qualityChoices.length >= 3 ? "grid-cols-4" : "grid-cols-3"}`}>
+                        {qualityChoices.map((item) => (
                             <OptionPill key={item.value} selected={resolution === item.value} theme={theme} onClick={() => onConfigChange("vquality", item.value)}>
                                 {item.label}
                             </OptionPill>
@@ -130,13 +219,18 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     </div>
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.size")} color={theme.node.muted}>
+                    {nativeFamily === "selfLift" ? (
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.selfLiftOrientationHint")}
+                        </div>
+                    ) : null}
                     <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
                         <DimensionInput prefix="W" value={dimensions.width} disabled={size === "auto" || size.includes(":")} theme={theme} onChange={(value) => updateDimension("width", value)} />
                         <span className="text-lg opacity-45">↔</span>
                         <DimensionInput prefix="H" value={dimensions.height} disabled={size === "auto" || size.includes(":")} theme={theme} onChange={(value) => updateDimension("height", value)} />
                     </div>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {sizeOptions.map((item) => (
+                        {aspectChoices.map((item) => (
                             <button
                                 key={item.value}
                                 type="button"
@@ -223,7 +317,11 @@ export function videoSettingsSummary(config: AiConfig) {
 
 export function videoResolutionLabel(value: string) {
     if (/[竖横]|\(1:1\)/i.test(value || "")) return autodlH3ResolutionLabel(value);
-    return `${normalizeVideoResolutionValue(value)}p`;
+    const normalized = normalizeVideoResolutionValue(value);
+    if (/^2k$/i.test(normalized)) return "2K";
+    if (/^1376$/i.test(normalized)) return "1376";
+    if (/^4k$/i.test(normalized)) return "4K";
+    return `${normalized}p`;
 }
 
 export function videoSizeLabel(value: string) {
@@ -265,9 +363,14 @@ export function normalizeVideoSizeValue(value: string) {
 
 export function normalizeVideoResolutionValue(value: string) {
     if (/[竖横]|\(1:1\)/i.test(value || "")) return normalizeAutodlH3Resolution(value).replace(/p.*$/, "") || "768";
-    if (value === "480p" || value === "low") return "480";
-    if (value === "720p" || value === "auto" || value === "high" || value === "medium") return "720";
-    return value.replace(/p$/i, "") || "720";
+    const raw = String(value || "").trim().toLowerCase();
+    if (raw === "480p" || raw === "low") return "480";
+    if (raw === "720p" || raw === "auto" || raw === "medium") return "720";
+    if (raw === "1080p" || raw === "hd") return "1080";
+    if (raw === "2k" || raw === "1440" || raw === "1440p" || raw === "high") return "2k";
+    if (raw === "1376" || raw === "1376p") return "1376";
+    if (raw === "4k" || raw === "2160" || raw === "2160p") return "4k";
+    return raw.replace(/p$/i, "") || "720";
 }
 
 function OptionPill({ selected, disabled = false, theme, onClick, children }: { selected: boolean; disabled?: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {
