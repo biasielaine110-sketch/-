@@ -1201,6 +1201,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
     // retries are exhausted, surface a toast — silent play() rejection used to look like a dead
     // Play button when the stored bytes were a non-video (e.g. a VHS preview gif mislabeled mp4).
     const handleVideoError = () => {
+        if (!playableSrc) return;
         if (storageKey && retriesRef.current < 2) {
             retriesRef.current += 1;
             void refreshMediaUrl(storageKey).then((next) => {
@@ -1208,25 +1209,53 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
             });
             return;
         }
-        message.error(t("canvas.video.playbackFailed"));
+        const mediaErr = videoRef.current?.error;
+        const detail = mediaErr?.message || (mediaErr ? `code ${mediaErr.code}` : "");
+        message.error(detail ? `${t("canvas.video.playbackFailed")} (${detail})` : t("canvas.video.playbackFailed"));
     };
 
-    useEffect(() => {
-        if (!activated) return;
+    const runPlay = (video: HTMLVideoElement) => {
+        void video
+            .play()
+            .then(() => setPlaying(true))
+            .catch(() => {
+                // First-click play used to run from a post-render effect and lost the user gesture;
+                // muted play is a last-resort unlock for that class of rejection, then unmute.
+                const wasMuted = video.muted;
+                video.muted = true;
+                void video
+                    .play()
+                    .then(() => {
+                        setPlaying(true);
+                        video.muted = wasMuted;
+                    })
+                    .catch(() => {
+                        video.muted = wasMuted;
+                        setPlaying(false);
+                        message.error(t("canvas.video.playbackFailed"));
+                    });
+            });
+    };
+
+    // <source src> updates do not always reload the element — force load() on URL refresh.
+    // After a blob-URL retry, resume if the user still wants playback.
+    useLayoutEffect(() => {
         const video = videoRef.current;
-        if (!video) return;
+        if (!video || !playableSrc) return;
+        try {
+            video.load();
+        } catch {
+            // ignore
+        }
         const restored = restoredRef.current;
         if (restored) {
             restoredRef.current = null;
             if (restored.time > 0) pendingSeekRef.current = restored.time;
         }
-        if (!wantPlayRef.current) return;
-        void video
-            .play()
-            .then(() => setPlaying(true))
-            .catch(() => setPlaying(false));
+        if (!wantPlayRef.current || !activated) return;
+        runPlay(video);
         // playableSrc dep: after a blob-URL refresh, resume (or stay paused) per the same intent.
-    }, [activated, playableSrc]);
+    }, [playableSrc]);
 
     const remember = () => {
         const video = videoRef.current;
@@ -1243,19 +1272,12 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
     const handlePlayClick = (event: React.MouseEvent) => {
         event.stopPropagation();
         event.preventDefault();
-        if (!activated) {
-            // Explicit click starts playback; the saved position (if any) becomes the seek target.
-            wantPlayRef.current = true;
-            setActivated(true);
-            return;
-        }
-        const video = videoRef.current;
-        if (!video) return;
         wantPlayRef.current = true;
-        void video
-            .play()
-            .then(() => setPlaying(true))
-            .catch(() => setPlaying(false));
+        setActivated(true);
+        // <video> stays mounted (see below), so play() runs inside the click gesture — deferred
+        // play() from a post-mount effect used to lose activation and look "unplayable".
+        const video = videoRef.current;
+        if (video) runPlay(video);
     };
 
     // Enter/leave fullscreen on the <video> element itself. Shared by the bottom-right button and
@@ -1281,16 +1303,16 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
         requestVideoFullscreen();
     };
 
-    // "最大化显示": while the player is still on its poster there is no <video> to fullscreen, so
-    // activate it first and replay the request once the element exists (effect below). Activation
-    // on its own never starts playback — playback stays tied to the play button / Space.
+    // "最大化显示": reveal controls (activated) then fullscreen the always-mounted <video>.
+    // Activation alone never starts playback — playback stays tied to the play button / Space.
     const maximizeVideo = () => {
-        if (videoRef.current) {
+        setActivated(true);
+        const video = videoRef.current;
+        if (video) {
             requestVideoFullscreen();
             return;
         }
         pendingFullscreenRef.current = true;
-        setActivated(true);
     };
 
     // The download re-fetches the video (a remote source goes through the media proxy), which can
@@ -1333,7 +1355,8 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
         if (!video) return;
         if (video.paused) {
             wantPlayRef.current = true;
-            void video.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+            setActivated(true);
+            runPlay(video);
         } else {
             wantPlayRef.current = false;
             video.pause();
@@ -1456,64 +1479,68 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
                 }
             }}
         >
-            {activated ? (
-                <video
-                    ref={videoRef}
-                    src={playableSrc}
-                    poster={posterSrc || undefined}
-                    className="h-full w-full rounded-[18px] bg-black object-contain"
-                    playsInline
-                    preload="metadata"
-                    data-canvas-no-zoom
-                    onLoadedMetadata={() => {
-                        const video = videoRef.current;
-                        if (!video) return;
-                        const known = typeof video.duration === "number" && Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
-                        setDuration(known);
-                        if (pendingSeekRef.current != null) {
-                            const target = pendingSeekRef.current;
-                            pendingSeekRef.current = null;
-                            const total = known > 0 ? known : target;
-                            video.currentTime = Math.min(target, Math.max(0, total - 0.05));
-                        }
-                        setCurrentTime(video.currentTime);
-                    }}
-                    onDurationChange={() => {
-                        const raw = videoRef.current?.duration;
-                        setDuration(typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0);
-                    }}
-                    onTimeUpdate={() => {
-                        remember();
-                        const video = videoRef.current;
-                        // A drag owns the position while the pointer is down, and stepping the handle
-                        // only at 0.1s granularity keeps the node from re-rendering on every tick.
-                        if (!video || scrubbingRef.current) return;
-                        setCurrentTime((previous) => (Math.abs(previous - video.currentTime) >= 0.1 ? video.currentTime : previous));
-                    }}
-                    onError={handleVideoError}
-                    onPlay={() => {
-                        wantPlayRef.current = true;
-                        setPlaying(true);
-                        remember();
-                    }}
-                    onPause={() => {
-                        wantPlayRef.current = false;
-                        setPlaying(false);
-                        remember();
-                    }}
-                    onEnded={() => {
-                        setPlaying(false);
-                        rememberVideoPlayback(memoryKey, { time: 0 });
-                        // Park the handle at the end; the remembered position is still 0 so the next
-                        // activation replays from the start.
-                        setCurrentTime(readDuration());
-                    }}
-                />
-            ) : posterSrc ? (
-                <img src={posterSrc} alt="" decoding="async" draggable={false} className="pointer-events-none h-full w-full rounded-[18px] bg-black object-contain" />
-            ) : (
-                <div className="h-full w-full rounded-[18px] bg-black" aria-hidden />
-            )}
+            {/* Keep <video> mounted so the first Play click can call play() inside the user gesture. */}
+            <video
+                ref={videoRef}
+                poster={posterSrc || undefined}
+                className={`h-full w-full rounded-[18px] bg-black object-contain ${activated ? "" : "opacity-0"}`}
+                playsInline
+                preload={activated ? "auto" : "metadata"}
+                data-canvas-no-zoom
+                onLoadedMetadata={() => {
+                    const video = videoRef.current;
+                    if (!video) return;
+                    const known = typeof video.duration === "number" && Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+                    setDuration(known);
+                    if (pendingSeekRef.current != null) {
+                        const target = pendingSeekRef.current;
+                        pendingSeekRef.current = null;
+                        const total = known > 0 ? known : target;
+                        video.currentTime = Math.min(target, Math.max(0, total - 0.05));
+                    }
+                    setCurrentTime(video.currentTime);
+                }}
+                onDurationChange={() => {
+                    const raw = videoRef.current?.duration;
+                    setDuration(typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0);
+                }}
+                onTimeUpdate={() => {
+                    remember();
+                    const video = videoRef.current;
+                    // A drag owns the position while the pointer is down, and stepping the handle
+                    // only at 0.1s granularity keeps the node from re-rendering on every tick.
+                    if (!video || scrubbingRef.current) return;
+                    setCurrentTime((previous) => (Math.abs(previous - video.currentTime) >= 0.1 ? video.currentTime : previous));
+                }}
+                onError={handleVideoError}
+                onPlay={() => {
+                    wantPlayRef.current = true;
+                    setPlaying(true);
+                    remember();
+                }}
+                onPause={() => {
+                    wantPlayRef.current = false;
+                    setPlaying(false);
+                    remember();
+                }}
+                onEnded={() => {
+                    setPlaying(false);
+                    rememberVideoPlayback(memoryKey, { time: 0 });
+                    // Park the handle at the end; the remembered position is still 0 so the next
+                    // activation replays from the start.
+                    setCurrentTime(readDuration());
+                }}
+            >
+                {/* Explicit type helps Chrome treat ComfyUI /view octet-stream blobs as mp4. */}
+                <source src={playableSrc} type={mimeType && mimeType.startsWith("video/") ? mimeType : "video/mp4"} />
+            </video>
+            {!activated ? (
+                posterSrc ? (
+                    <img src={posterSrc} alt="" decoding="async" draggable={false} className="pointer-events-none absolute inset-0 h-full w-full rounded-[18px] bg-black object-contain" />
+                ) : (
+                    <div className="absolute inset-0 rounded-[18px] bg-black" aria-hidden />
+                )
+            ) : null}
             {!activated ? (
                 <button
                     type="button"

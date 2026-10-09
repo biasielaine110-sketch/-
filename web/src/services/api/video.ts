@@ -505,9 +505,14 @@ function videoPluginResult(result: unknown): VideoGenerationResult {
 export async function storeGeneratedVideo(result: VideoGenerationResult): Promise<UploadedFile> {
     if (result.blob) {
         // ComfyUI /view and some proxies reply with application/octet-stream for real
-        // media; when the caller carries an explicit mimeType, rebuild the blob with it
-        // so downstream metadata/detection treat it as video.
-        const blob = result.mimeType && result.blob.type !== result.mimeType ? new Blob([result.blob], { type: result.mimeType }) : result.blob;
+        // media; retype with slice (no full copy) so IndexedDB / <video> see video/mp4.
+        const desired =
+            result.mimeType && result.mimeType.startsWith("video/")
+                ? result.mimeType
+                : result.blob.type.startsWith("video/")
+                  ? result.blob.type
+                  : "video/mp4";
+        const blob = result.blob.type === desired ? result.blob : result.blob.slice(0, result.blob.size, desired);
         return uploadMediaFile(blob, "video");
     }
     if (result.url) {

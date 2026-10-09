@@ -19,13 +19,31 @@ function proxyRemoteMediaUrl(url: string) {
 }
 
 export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
-    const blob = typeof input === "string" ? await (await fetch(proxyRemoteMediaUrl(input))).blob() : input;
+    const raw = typeof input === "string" ? await (await fetch(proxyRemoteMediaUrl(input))).blob() : input;
+    // ComfyUI /view often lands as application/octet-stream; without a video/* type, Chrome
+    // may refuse to decode the blob URL even when the bytes are a valid mp4.
+    const desiredType =
+        raw.type.startsWith("video/") || raw.type.startsWith("audio/") || raw.type.startsWith("image/")
+            ? raw.type
+            : prefix === "video"
+              ? "video/mp4"
+              : prefix === "audio"
+                ? "audio/mpeg"
+                : raw.type || "application/octet-stream";
+    const blob = raw.type === desiredType ? raw : raw.slice(0, raw.size, desiredType);
     const storageKey = `${prefix}:${nanoid()}`;
-    await persistMediaBlob(storageKey, blob);
+    // Publish the object URL immediately so callers can paint the canvas while IndexedDB / disk
+    // writes and metadata probing overlap — large ComfyUI DualClock mp4s used to wait on these
+    // serially and felt like "pod finished, canvas blank for minutes".
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
-    const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : blob.type.startsWith("audio/") ? await readAudioMeta(url) : {};
-    return { url, storageKey, bytes: blob.size, mimeType: blob.type || "application/octet-stream", ...meta };
+    const isVideo = blob.type.startsWith("video/") || prefix === "video";
+    const isAudio = blob.type.startsWith("audio/") || prefix === "audio";
+    const [meta] = await Promise.all([
+        isVideo ? readVideoMeta(url) : isAudio ? readAudioMeta(url) : Promise.resolve({}),
+        persistMediaBlob(storageKey, blob, { deferLocalMirror: isVideo && blob.size > 1_500_000 }),
+    ]);
+    return { url, storageKey, bytes: blob.size, mimeType: blob.type || desiredType, ...meta };
 }
 
 export async function resolveMediaUrl(storageKey?: string, fallback = "") {
@@ -131,8 +149,28 @@ export async function removeIndexedDbMedia(keys: Iterable<string>) {
 /**
  * Mirror the blob into the bound local folder *and* IndexedDB (see image-storage.persistImageBlob).
  * Dropping the IndexedDB copy while the folder permission can lapse is what made media disappear.
+ *
+ * `deferLocalMirror`: for large videos, IndexedDB is the durability that blocks canvas return;
+ * the local-folder mirror is best-effort and runs in the background so a 50MB+ write does not
+ * sit on the critical path after ComfyUI has already finished.
  */
-async function persistMediaBlob(storageKey: string, blob: Blob) {
+async function persistMediaBlob(storageKey: string, blob: Blob, options?: { deferLocalMirror?: boolean }) {
+    if (options?.deferLocalMirror) {
+        void (async () => {
+            try {
+                if (await isLocalMediaLibraryReady()) await writeLocalMediaBlob(storageKey, blob);
+            } catch {
+                // Best-effort mirror only.
+            }
+        })();
+        try {
+            await store.setItem(storageKey, blob);
+        } catch (error) {
+            // No local mirror guaranteed yet — still surface quota errors.
+            throw error;
+        }
+        return;
+    }
     const wroteLocal = (await isLocalMediaLibraryReady()) && (await writeLocalMediaBlob(storageKey, blob));
     try {
         await store.setItem(storageKey, blob);
@@ -145,9 +183,29 @@ async function persistMediaBlob(storageKey: string, blob: Blob) {
 function readVideoMeta(url: string) {
     return new Promise<{ width: number; height: number; durationMs?: number }>((resolve) => {
         const video = document.createElement("video");
-        const done = () => resolve({ width: video.videoWidth || 1280, height: video.videoHeight || 720, durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1000) : undefined });
-        video.onloadedmetadata = done;
-        video.onerror = done;
+        video.preload = "metadata";
+        let settled = false;
+        const done = () => {
+            if (settled) return;
+            settled = true;
+            resolve({
+                width: video.videoWidth || 1280,
+                height: video.videoHeight || 720,
+                durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1000) : undefined,
+            });
+            video.removeAttribute("src");
+            video.load();
+        };
+        // Large mp4s through a cold blob URL can stall metadata; do not block canvas return.
+        const timer = window.setTimeout(done, 900);
+        video.onloadedmetadata = () => {
+            window.clearTimeout(timer);
+            done();
+        };
+        video.onerror = () => {
+            window.clearTimeout(timer);
+            done();
+        };
         video.src = url;
     });
 }
