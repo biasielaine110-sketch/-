@@ -278,6 +278,68 @@ function comfyReferenceSlotOrder(workflow: ComfyWorkflow): string[] {
 }
 
 /**
+ * Picture-slot plan for one H3 node, repaired so each `ref_image_N` slot reads its own loader.
+ *
+ * `comfyReferenceSlotOrder` returns the slot links verbatim. The multi-reference *video* family
+ * (U06 …多图参考生视频) additionally names its loaders with ascending titles (`加载图像1…N`), and
+ * re-exports have shipped with one slot linked twice to the same loader while the intended loader
+ * sits unreferenced — exactly the U06 V8 template, where `ref_image_0`/`ref_image_1` both point at
+ * `加载图像2` and `加载图像1` is orphaned. Under a verbatim mapping the first upload landed on the
+ * orphan node and every picture shifted by one, so `<Picture 1>` showed the 2nd upload and the last
+ * upload was silently dropped.
+ *
+ * Fixing the mapping therefore needs *two* things for a duplicated slot: point it at a spare loader
+ * (the orphan the author clearly meant to keep, ascending id) **and** rewire the link, otherwise the
+ * slot keeps reading the shared loader and the substitution is invisible. Only when no spare is left
+ * drop the repeat, so no upload is ever wasted on the same loader twice.
+ *
+ * Returns `null` when the node does not expose at least two validated slots, letting the caller keep
+ * its previous behaviour.
+ */
+function comfyMultiReferenceSlotPlan(
+    workflow: ComfyWorkflow,
+): { nodeId: string; ordered: string[]; rewire: Array<{ key: string; to: string }> } | null {
+    const entry = Object.entries(workflow)
+        .filter(([, candidate]) => isMiniMaxH3ConditioningNode(candidate))
+        .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))[0];
+    const inputs = entry?.[1]?.inputs;
+    if (!entry || !inputs || typeof inputs !== "object") return null;
+    const slots: Array<{ key: string; index: number; id: string }> = [];
+    for (const key of Object.keys(inputs)) {
+        const match = /^ref_images\.ref_image_(\d+)$/.exec(key);
+        if (!match) continue;
+        const value = (inputs as Record<string, unknown>)[key];
+        if (!Array.isArray(value) || value[0] == null) continue;
+        const id = String(value[0]);
+        if (!workflow[id] || !isComfyImageLoader(workflow[id])) continue;
+        slots.push({ key, index: Number(match[1]), id });
+    }
+    if (slots.length < 2) return null;
+    slots.sort((a, b) => a.index - b.index);
+    const referenced = new Set(slots.map((slot) => slot.id));
+    const spares = Object.entries(workflow)
+        .filter(([id, candidate]) => isComfyImageLoader(candidate) && !referenced.has(id))
+        .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
+        .map(([id]) => id);
+    const used = new Set<string>();
+    const ordered: string[] = [];
+    const rewire: Array<{ key: string; to: string }> = [];
+    for (const slot of slots) {
+        if (!used.has(slot.id)) {
+            used.add(slot.id);
+            ordered.push(slot.id);
+            continue;
+        }
+        const spare = spares.shift();
+        if (!spare) continue; // duplicate with no spare — drop rather than overwrite the same loader twice
+        used.add(spare);
+        ordered.push(spare);
+        rewire.push({ key: slot.key, to: spare });
+    }
+    return { nodeId: entry[0], ordered, rewire };
+}
+
+/**
  * Structural fingerprint of the MiniMax H3 "two-pass / 双采" multi-reference family.
  *
  * These graphs get re-exported and renamed constantly: the exported file name changes every
@@ -358,16 +420,46 @@ export function isComfyKrea2EditWorkflow(workflow: ComfyWorkflow): boolean {
 }
 
 /**
+ * Structural fingerprint of the MiniMax H3 **single-pass multi-reference video** family
+ * (e.g. U06-h3_多图参考生视频V8).
+ *
+ * Shape: *exactly one* H3 conditioning node that carries >= 2 validated named reference slots
+ * (`ref_images.ref_image_N`, every slot pointing at a real image loader) and a video sink
+ * (`VHS_VideoCombine` / `SaveVideo`). This is the third H3 family the codebase had no adapter for:
+ * it is neither the two-pass video family (that one runs two H3 conditioning nodes) nor the
+ * single-reference *image* family (that one has exactly one slot and no video sink), so it fell
+ * through every fingerprint.
+ *
+ * Consequences of falling through (both fixed by opting in here):
+ *  - the reference-slot mapping never engaged, so uploads were spread over loaders in node-id order
+ *    (see `comfyMultiReferenceSlotPlan`) — see that helper for the U06 V8 off-by-one;
+ *  - `keepTunedResolution` stayed false, so a variant that bakes a scalar size straight onto the H3
+ *    node would have had it rewritten from the 16:9 @1280 image-path fallback.
+ *
+ * Strictly disjoint from every other fingerprint: two-pass needs >= 2 H3 nodes, the image family
+ * needs exactly 1 slot, and Krea2/text families need node types that never appear here. Any graph
+ * that does not match exactly keeps its previous behaviour.
+ */
+export function isComfyH3MultiReferenceVideoWorkflow(workflow: ComfyWorkflow): boolean {
+    const conditioning = Object.values(workflow).filter((node) => isMiniMaxH3ConditioningNode(node));
+    if (conditioning.length !== 1) return false;
+    if (comfyReferenceSlotOrder(workflow).length < 2) return false;
+    return Object.values(workflow).some((node) => /VideoCombine|SaveVideo/i.test(String(node?.class_type || "")));
+}
+
+/**
  * True for every family whose resolution/geometry is locked by the graph author rather than by
  * the canvas controls: the two-pass H3 video family (ResolutionSelector megapixels), the
- * single-reference H3 image family (the H3 node's own width/height), and the Krea2 edit image
- * family (`Empty*LatentImage` canvas). Drives `keepTunedResolution`, seed randomization and the
- * upload size guard — and nothing else, so all other native ComfyUI models are untouched.
+ * single-reference H3 image family (the H3 node's own width/height), the single-pass H3
+ * multi-reference video family (the linked `WJILatentPreset` / H3 node size), and the Krea2 edit
+ * image family (`Empty*LatentImage` canvas). Drives `keepTunedResolution`, seed randomization and
+ * the upload size guard — and nothing else, so all other native ComfyUI models are untouched.
  */
 export function isComfyGeometryLockedWorkflow(workflow: ComfyWorkflow): boolean {
     return (
         isComfyH3TwoPassReferenceWorkflow(workflow) ||
         isComfyH3SingleReferenceImageWorkflow(workflow) ||
+        isComfyH3MultiReferenceVideoWorkflow(workflow) ||
         isComfyKrea2EditWorkflow(workflow)
     );
 }
@@ -521,10 +613,24 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
     const next = cloneWorkflow(workflow);
     // Name allow-list OR structural fingerprint. Without the fingerprint a renamed model fell back
     // to node-id order and scrambled every reference (ref_image_0 got the last uploaded picture).
+    // The single-pass multi-reference video family needs the *repaired* slot order: its export can
+    // link one slot twice and orphan the loader the author meant to keep, so the verbatim order
+    // would still shift every picture by one.
+    const slotPlan = isComfyH3MultiReferenceVideoWorkflow(next) ? comfyMultiReferenceSlotPlan(next) : null;
     const slotOrder =
         usesComfyReferenceSlotOrder(workflowId) || isComfyH3TwoPassReferenceWorkflow(next)
             ? comfyReferenceSlotOrder(next)
-            : [];
+            : slotPlan
+              ? slotPlan.ordered
+              : [];
+    // Repair duplicated `ref_image_N` links so each picture slot reads its own (spare) loader — a
+    // filename write alone cannot fix a slot that still points at the shared loader.
+    if (slotPlan) {
+        const inputs = next[slotPlan.nodeId]?.inputs;
+        for (const fix of slotPlan.rewire) {
+            if (inputs && inputs[fix.key]) inputs[fix.key] = [fix.to, 0];
+        }
+    }
     // When a two-pass H3 graph declares its own blank placeholder, the spare slots are meant to stay
     // empty. Repeating the last uploaded picture there (the legacy fallback) made the model see one
     // reference 8× — e.g. U24 V927 exposes 9 slots where only the first few are real. Graphs without
@@ -953,14 +1059,32 @@ function randomComfySeed() {
  * `isComfyGeometryLockedWorkflow`); every other native ComfyUI model keeps its saved seed and
  * its reproducibility. `restart_seed` and friends are deliberately left alone — they are not the
  * sampling seed.
+ *
+ * Some templates park the seed in a separate node (e.g. the `easy seed` node) and *link*
+ * `noise_seed` to it, so a flat numeric write finds nothing and the run stays frozen. Pass
+ * `followLinkedSeed` to follow such a link one hop to its numeric `seed` / `noise_seed` source.
+ * It is opt-in so the families that already randomize keep the exact same behaviour.
  */
-export function applyComfyRandomSeed(workflow: ComfyWorkflow): ComfyWorkflow {
+export function applyComfyRandomSeed(
+    workflow: ComfyWorkflow,
+    options?: { followLinkedSeed?: boolean },
+): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
     for (const node of Object.values(next)) {
         const type = String(node.class_type || "");
         if (!/RandomNoise|SamplerCustom|KSampler/i.test(type) || !node.inputs) continue;
         if (typeof node.inputs.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
         else if (typeof node.inputs.seed === "number") node.inputs.seed = randomComfySeed();
+        else if (options?.followLinkedSeed) {
+            for (const field of ["noise_seed", "seed"]) {
+                const link = node.inputs[field];
+                if (!Array.isArray(link) || link[0] == null) continue;
+                const source = next[String(link[0])];
+                if (!source?.inputs || typeof source.inputs !== "object") continue;
+                if (writeComfyNumberInput(source, "seed", randomComfySeed())) break;
+                if (writeComfyNumberInput(source, "noise_seed", randomComfySeed())) break;
+            }
+        }
     }
     return next;
 }
@@ -1398,6 +1522,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // name — the name is user-typed and the exported file name changes every revision, so a
     // name-keyed adapter goes dead code silently.
     const h3TwoPassRefs = isComfyH3TwoPassReferenceWorkflow(args.workflow);
+    // Multi-reference video family (U06 …): single H3 node + >= 2 ref slots — its seed lives behind
+    // an `easy seed` link, so randomization must follow that link.
+    const h3MultiRefVideo = isComfyH3MultiReferenceVideoWorkflow(args.workflow);
     // Geometry-locked H3 families (two-pass video + single-reference image, e.g. U33) keep the
     // size the author baked into the graph; the image path passes no canvas size to override it.
     const keepTunedGeometry = isComfyGeometryLockedWorkflow(args.workflow);
@@ -1417,7 +1544,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         scheduler: args.scheduler,
         keepTunedResolution: keepTunedGeometry,
     });
-    if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow);
+    if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     if (refs.length) {
         const names: string[] = [];
