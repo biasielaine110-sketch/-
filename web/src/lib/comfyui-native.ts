@@ -44,10 +44,11 @@ const HISTORY_TIMEOUT_MS = 60 * 60 * 1000;
 /** After status=success, keep polling this many times for a late-persisted VHS mp4 (ComfyUI #11540). */
 const VIDEO_HISTORY_GRACE_POLLS = 8;
 /**
- * Draft megapixel ceiling for DualClock LOW pass (author bakes ~0.4; delivered ≈ draft × scale²).
- * 0.95 lets 1080p (≈0.92 draft at ×1.5) reach ~1920×1080; still clamps 2K drafts that OOM rented cards.
+ * Draft megapixel ceiling for DualClock LOW pass (V927 author bakes 0.5; scale_by is 1.2).
+ * Raising this to ~0.95 to chase full 1080p made seetacloud `/prompt` fail again — keep the
+ * working ceiling. 720 vs 1080 still differ (720 drafts lower; 1080 hits this cap).
  */
-const TWO_PASS_H3_MAX_DRAFT_MEGAPIXELS = 0.95;
+const TWO_PASS_H3_MAX_DRAFT_MEGAPIXELS = 0.7;
 
 /** Rented / tunnel hosts whose nginx often returns 502 while ComfyUI is unloading or restarting. */
 function isFlakyComfyGatewayHost(baseUrl: string) {
@@ -749,9 +750,13 @@ export function applyComfyTextReferenceImages(workflow: ComfyWorkflow, filenames
  */
 export const COMFY_REFERENCE_SLOT_WORKFLOWS = [
     "U24-文武双修T8版MiniMaxH3双采参考生视频V2",
-    // Same DualClock graph under the seetacloud model display name.
+    "U24-文武双修T8版MiniMaxH3双采参考生视频V927",
+    // Same DualClock graph under seetacloud / channel model display names.
     "H3-video",
     "H3_video",
+    "u24_v927",
+    "U24_v927",
+    "U24-V927",
 ] as const;
 
 /**
@@ -780,12 +785,10 @@ export function usesComfyReferenceSlotOrder(workflowId: string | undefined | nul
 }
 
 /**
- * Filename a graph uses as its own "empty slot" placeholder (e.g. `zealman-blank-image.png`).
+ * Filename a graph uses as its own "empty slot" placeholder (e.g. V927 `zealman-blank-image.png`).
  *
- * Templates that expose more reference slots than they expect to be filled park a blank image in
- * the spare ones. Reusing that same asset to clear unused slots keeps the call sites honest
- * (the blank file is part of the exported graph, so it already exists on the server) instead of
- * inventing a name that would fail ComfyUI's LoadImage.
+ * Spare slots park this name in Export JSON; on rented pods the file is usually missing, so DualClock
+ * submits upload a 1×1 under the same name before `/prompt` (see `runNativeComfyUiJob`).
  */
 function comfyBlankImagePlaceholder(workflow: ComfyWorkflow): string | null {
     for (const node of Object.values(workflow)) {
@@ -825,7 +828,8 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
     // Repeating the last uploaded picture there (the legacy fallback) made the model see one
     // reference up to 8× — e.g. U24 V927 and U37 both expose 9 slots where only the first few are
     // real. Graphs without such a placeholder keep the legacy fill-up, so no other model changes
-    // behaviour — except the DualClock two-pass family below, which disconnects unfilled slots.
+    // behaviour — except the DualClock two-pass family below, which disconnects unfilled slots
+    // when the graph has no blank placeholder name.
     const twoPassRefs = isComfyH3TwoPassReferenceWorkflow(next);
     const blankSlot =
         twoPassRefs || isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null;
@@ -835,10 +839,8 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
               .filter(([, node]) => isComfyImageLoader(node))
               .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
               .map(([, node]) => node);
-    // U24 DualClock / H3-video: no blank placeholder in Export JSON. Repeating the last upload into
-    // spare slots OOMs rented cards. Disconnect unfilled `ref_images.ref_image_N` on every H3
-    // conditioning node instead (keeps /prompt queueable; blank-upload path was a regression that
-    // blocked submits when /upload failed). Scoped to the two-pass fingerprint only.
+    // DualClock without a usable blank name: disconnect spare ref slots (avoids repeating large refs).
+    // V927 already parks `zealman-blank-image.png` in spare loaders — blankSlot is set, so this is skipped.
     if (twoPassRefs && !blankSlot && slotOrder.length) {
         const filled = new Set(slotOrder.filter((_, index) => Boolean(filenames[index])));
         for (const node of Object.values(next)) {
@@ -855,8 +857,6 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
         }
     }
     loaders.forEach((node, index) => {
-        // Legacy fallback (repeat the last upload) when the graph has no blank slot and is not
-        // the DualClock two-pass family (that family disconnects spare slots above instead).
         const name =
             filenames[index] || blankSlot || (twoPassRefs && !blankSlot ? "" : filenames[filenames.length - 1]);
         if (!name) return;
@@ -1311,6 +1311,33 @@ function h3LengthFromSeconds(seconds: number) {
     return frames + ((5 - (frames % 17)) % 17);
 }
 
+/** V927 conditioning ships `reference_video_policy: official_2_to_15s` (max 15s @24fps = 360 frames). */
+function workflowHasOfficial15sPolicy(workflow: ComfyWorkflow): boolean {
+    return Object.values(workflow).some((node) =>
+        /official_2_to_15s/i.test(String(node?.inputs?.reference_video_policy ?? "")),
+    );
+}
+
+/**
+ * Largest duration that still yields a legal 17n+5 length ≤ 15×24 after snap-up.
+ * Plain 15s snaps to 362 frames (>360) and MiniMaxH3 rejects the `/prompt`.
+ */
+function h3MaxOfficialDurationSeconds(): number {
+    const maxFrames = 15 * 24;
+    let length = h3LengthFromSeconds(15);
+    while (length > maxFrames) length -= 17;
+    return Math.max(5, length) / 24;
+}
+
+/** Clamp DualClock canvas seconds so official_2_to_15s graphs stay queueable at "15s". */
+function clampDualClockOfficialSeconds(seconds: number, workflow: ComfyWorkflow): number {
+    if (!workflowHasOfficial15sPolicy(workflow)) return seconds;
+    const maxSeconds = h3MaxOfficialDurationSeconds();
+    const capped = Math.min(seconds, 15);
+    if (h3LengthFromSeconds(capped) <= 15 * 24) return capped;
+    return maxSeconds;
+}
+
 function writeComfyNumberInput(node: ComfyNode, field: string, nextValue: number) {
     if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
     const current = node.inputs[field];
@@ -1457,10 +1484,13 @@ export function applyComfyVideoSettings(
     const pixels = pixelsFromSizeAndQuality(settings.size, settings.vquality);
     const megapixels = megapixelsFromPixels(pixels.width, pixels.height);
     const aspectLabel = resolutionSelectorAspectLabel(pixels.ratio);
-    // Honor the canvas duration as selected (U24 author template is 15s). Do not silently clamp
-    // DualClock to 10s — that made "15s" settings produce ~10s clips. VRAM risk on rented pods is
-    // handled by the DualClock draft megapixel cap below, not by rewriting the user's length.
-    const seconds = parseCanvasSeconds(settings.seconds);
+    // DualClock: honor canvas duration (no hard 10s cap). V927 `official_2_to_15s` cannot accept
+    // a snapped length of 362 from plain 15s — clamp to the largest legal ≤15s frame budget.
+    const parsedSeconds = parseCanvasSeconds(settings.seconds);
+    const seconds =
+        settings.twoPassH3Video && parsedSeconds != null
+            ? clampDualClockOfficialSeconds(parsedSeconds, next)
+            : parsedSeconds;
 
     // Sampling steps for scheduler nodes (BasicScheduler / KSampler / Scheduler steps).
     const steps = parseComfySteps(settings.steps);
