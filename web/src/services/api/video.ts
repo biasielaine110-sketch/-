@@ -335,9 +335,9 @@ async function createNativeComfyUiVideoTask(
         // keep the short gateway label so users are not left with a bare Axios status string.
         if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
             throw new Error(
-                error.message?.includes("认证")
+                error.message?.includes("认证") || error.message?.includes("ComfyUI-Login")
                     ? error.message
-                    : `ComfyUI 认证失败（HTTP ${error.response.status}）。seetacloud 请在渠道 API Key 填写 Basic 账号密码（user:pass）。`,
+                    : `ComfyUI 认证失败（HTTP ${error.response.status}）。seetacloud / ComfyUI-Login 请填写启动日志里的 API token（token=$2b$…），不要填浏览器登录密码。`,
             );
         }
         if (axios.isAxiosError(error) && (error.response?.status === 502 || error.response?.status === 503 || error.response?.status === 504)) {

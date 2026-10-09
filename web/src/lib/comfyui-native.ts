@@ -164,26 +164,47 @@ export function comfyUiUrl(baseUrl: string, path: string): string {
     return proxyApiUrl(`${root}${normalizedPath}`);
 }
 
-/** `user:pass` (Basic Auth) vs a Bearer/raw token. Returns the Basic credential, or null. */
+/**
+ * Normalize the channel API Key for ComfyUI.
+ * Console copy-paste often looks like `token=$2b$12$…` (ComfyUI-Login); strip that prefix.
+ */
+function normalizeComfyApiToken(apiKey: string): string {
+    let raw = String(apiKey || "").trim();
+    if (!raw || /^(none|-|n\/a)$/i.test(raw)) return "";
+    raw = raw.replace(/^Bearer\s+/i, "").trim();
+    raw = raw.replace(/^token\s*=\s*/i, "").trim();
+    return raw;
+}
+
+/** ComfyUI-Login API token (bcrypt), from console `token=$2b$…` or `login/PASSWORD`. */
+function isComfyLoginApiToken(apiKey: string): boolean {
+    return /^\$2[aby]?\$\d{2}\$/.test(normalizeComfyApiToken(apiKey));
+}
+
+/**
+ * `user:pass` (HTTP Basic) vs a Bearer / ComfyUI-Login token.
+ * Never treat `$2b$…` Login tokens as Basic — a mistaken Basic header makes every /prompt 401
+ * with `{"error":"unauthorized"}` on seetacloud pods that run ComfyUI-Login.
+ */
 function parseBasicCredential(apiKey: string): { user: string; pass: string } | null {
     const raw = String(apiKey || "").trim();
     if (!raw || /^(none|-|n\/a)$/i.test(raw)) return null;
-    if (/^Bearer\s+/i.test(raw)) return null;
+    if (/^Bearer\s+/i.test(raw) || /^token\s*=/i.test(raw)) return null;
+    if (isComfyLoginApiToken(raw)) return null;
     const colon = raw.indexOf(":");
     if (colon <= 0 || colon === raw.length - 1) return null;
     return { user: raw.slice(0, colon), pass: raw.slice(colon + 1) };
 }
 
 function authHeaders(apiKey: string, contentType?: string): Record<string, string> {
-    const token = String(apiKey || "")
-        .replace(/^Bearer\s+/i, "")
-        .trim();
+    const token = normalizeComfyApiToken(apiKey);
     const headers: Record<string, string> = {};
     if (contentType) headers["Content-Type"] = contentType;
     const basic = parseBasicCredential(apiKey);
     if (basic) {
         headers.Authorization = `Basic ${btoa(`${basic.user}:${basic.pass}`)}`;
-    } else if (token && !/^(none|-|n\/a)$/i.test(token)) {
+    } else if (token) {
+        // ComfyUI-Login and most rented ComfyUI gateways expect Bearer (or body `token`).
         headers.Authorization = `Bearer ${token}`;
     }
     return headers;
@@ -2225,7 +2246,11 @@ function describeComfySubmitFailure(args: { status: number; contentType: string;
     const errText = typeof err === "string" ? err.trim() : err && typeof err === "object" && Object.keys(err).length ? JSON.stringify(err) : "";
     const combined = `${errText} ${args.message || ""}`.toLowerCase();
     if (args.status === 401 || args.status === 403 || /unauthorized|forbidden|auth/i.test(combined)) {
-        return `ComfyUI 认证失败（HTTP ${args.status || 401}）。seetacloud 请在渠道 API Key 填写 Basic 账号密码（格式 user:pass），保存后再生成。`;
+        return (
+            `ComfyUI 认证失败（HTTP ${args.status || 401}）。` +
+            `若实例装了 ComfyUI-Login（返回 {"error":"unauthorized"}），请把启动日志里的 API token（token=$2b$…，或 login/PASSWORD 首行）填进渠道 API Key，不要填浏览器登录用的 user:pass。` +
+            `也可写成 Bearer $2b$… 或直接贴 $2b$…。`
+        );
     }
     if (errText) return errText;
     if (args.message) return args.message;
@@ -2505,12 +2530,12 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     }
 
     const clientId = nanoid(12);
-    const token = String(apiKey || "")
-        .replace(/^Bearer\s+/i, "")
-        .trim();
+    const token = normalizeComfyApiToken(apiKey);
     const body: Record<string, unknown> = { prompt: workflow, client_id: clientId };
-    // Basic-Auth credentials authenticate via the Authorization header only — never as a body token.
-    if (token && !/^(none|-|n\/a)$/i.test(token) && !isBasicAuthCredential(apiKey)) body.token = token;
+    // ComfyUI-Login accepts Authorization: Bearer <token> and/or JSON body `token`.
+    // Mirror into the body for every non-Basic key (incl. `$2b$…` Login tokens). HTTP Basic
+    // user:pass is header-only and does not authorize ComfyUI-Login — those pods need the token.
+    if (token && !isBasicAuthCredential(apiKey)) body.token = token;
 
     const submitUrl = comfyUiUrl(baseUrl, "/prompt");
     // seetacloud: /prompt under load commonly 502s; retry for the whole host.
@@ -2799,7 +2824,13 @@ export async function probeNativeComfyUi(baseUrl: string, apiKey: string, signal
             if (fallback.status < 500) return { ok: true, message: `HTTP ${fallback.status}` };
             return { ok: false, message: `HTTP ${fallback.status}` };
         }
-        if (response.status === 401 || response.status === 403) return { ok: false, message: "ComfyUI auth failed (check API token)" };
+        if (response.status === 401 || response.status === 403) {
+            return {
+                ok: false,
+                message:
+                    "ComfyUI 认证失败。若使用 ComfyUI-Login，请在 API Key 填写启动日志中的 token=$2b$…（或 login/PASSWORD 首行），不要填浏览器 user:pass。",
+            };
+        }
         if (response.status >= 200 && response.status < 300) {
             return isComfyJsonResponse(response) ? { ok: true, message: `HTTP ${response.status}` } : { ok: false, message: `HTTP ${response.status}: ${NOT_COMFY_JSON_MESSAGE}` };
         }
