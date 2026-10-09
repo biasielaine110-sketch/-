@@ -453,6 +453,35 @@ function hasComfyVideoSink(workflow: ComfyWorkflow): boolean {
 }
 
 /**
+ * Structural fingerprint of the MiniMax H3 **SelfLift 自采/双采「上下文无缝无色差长视频」** family
+ * (e.g. U37-真-上下文无缝无色差长视频-SelfLift双采).
+ *
+ * Shape: exactly one H3 conditioning node sampled by the family's own `SelfLiftH3Sampler` — a
+ * progressive low→high resolution sampler with a learned upscaler whose node type appears in no
+ * other H3 graph — and a video sink.
+ *
+ * It also satisfies `isComfyH3MultiReferenceVideoWorkflow`, but rides that family's behaviour
+ * wrongly on all three counts this adapter exists to fix:
+ *  - the `ResolutionSelector` *is* this graph's delivered resolution (the H3 node's width/height are
+ *    links into it and the sampler only splits that one target into a cheap low-res pass
+ *    internally), so treating it as a tuned draft left the canvas size/ratio with no effect;
+ *  - its spare reference slots park the author's own `…blank…` placeholder, while the generic
+ *    fill-up repeated the *last* upload there — handing the model one picture up to eight times;
+ *  - its seed sits in `SelfLiftH3Sampler.seed`, whose class name contains no "KSampler" substring,
+ *    so the shared seed randomiser never reached it and every run replayed the identical video.
+ *
+ * Disjoint from every other fingerprint: the two-pass family runs >= 2 H3 nodes, the single-
+ * reference image family owns exactly one slot, and the U06 single-pass video family has no
+ * SelfLift sampler. Any graph that does not match keeps its previous behaviour untouched.
+ */
+export function isComfyH3SelfLiftWorkflow(workflow: ComfyWorkflow): boolean {
+    const conditioning = Object.values(workflow).filter((node) => isMiniMaxH3ConditioningNode(node));
+    if (conditioning.length !== 1) return false;
+    if (!hasComfyVideoSink(workflow)) return false;
+    return Object.values(workflow).some((node) => /^SelfLiftH3Sampler$/i.test(String(node?.class_type || "")));
+}
+
+/**
  * True for every family whose resolution/geometry is locked by the graph author rather than by
  * the canvas controls: the two-pass H3 video family (ResolutionSelector megapixels), the
  * single-reference H3 image family (the H3 node's own width/height), the single-pass H3
@@ -636,11 +665,15 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
             if (inputs && inputs[fix.key]) inputs[fix.key] = [fix.to, 0];
         }
     }
-    // When a two-pass H3 graph declares its own blank placeholder, the spare slots are meant to stay
-    // empty. Repeating the last uploaded picture there (the legacy fallback) made the model see one
-    // reference 8× — e.g. U24 V927 exposes 9 slots where only the first few are real. Graphs without
-    // such a placeholder keep the legacy fill-up, so no other model changes behaviour.
-    const blankSlot = isComfyH3TwoPassReferenceWorkflow(next) ? comfyBlankImagePlaceholder(next) : null;
+    // When a template declares its own blank placeholder, the spare slots are meant to stay empty.
+    // Repeating the last uploaded picture there (the legacy fallback) made the model see one
+    // reference up to 8× — e.g. U24 V927 and U37 both expose 9 slots where only the first few are
+    // real. Graphs without such a placeholder keep the legacy fill-up, so no other model changes
+    // behaviour.
+    const blankSlot =
+        isComfyH3TwoPassReferenceWorkflow(next) || isComfyH3SelfLiftWorkflow(next)
+            ? comfyBlankImagePlaceholder(next)
+            : null;
     const loaders = slotOrder.length
         ? slotOrder.map((id) => next[id]).filter((node): node is ComfyNode => Boolean(node))
         : Object.entries(next)
@@ -1013,6 +1046,17 @@ export function applyComfyVideoSettings(
          * Every other graph keeps the old behaviour untouched.
          */
         twoPassH3Video?: boolean;
+        /**
+         * U37 SelfLift 双采 family only (see `isComfyH3SelfLiftWorkflow`). Unlike every other
+         * geometry-locked family, this graph's `ResolutionSelector` is not a draft knob: the H3
+         * node's width/height are *links* into it and `SelfLiftH3Sampler` splits that single target
+         * into its internally-scaled low-res pass — so the selector is the *delivered* resolution
+         * and resolving it from the canvas is what makes the size/ratio control work at all.
+         * Only an explicit canvas size (`auto`/empty keeps the author's 9:16 @2MP) writes it, and
+         * the write is confined to this family, so U24/U06/T10 and every other graph keep the exact
+         * geometry they have today.
+         */
+        selfLiftH3Video?: boolean;
     },
 ): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
@@ -1051,6 +1095,16 @@ export function applyComfyVideoSettings(
                 if (authoredMegapixels != null && scale != null && "megapixels" in node.inputs) {
                     const draft = megapixels / (scale * scale);
                     writeComfyNumberInput(node, "megapixels", Math.max(0.1, Math.round(draft * 100) / 100));
+                }
+            } else if (settings.selfLiftH3Video) {
+                // U37 SelfLift 双采 family. Its ResolutionSelector is the *delivered* size (the H3
+                // node links its width/height into it), so freezing it to the author's 9:16 @2MP
+                // made the canvas size/ratio dead for this model. Drive both halves from the canvas
+                // when — and only when — the canvas carries an explicit size; "auto"/empty keeps the
+                // author's own geometry verbatim. Scoped to this family, so no other graph changes.
+                if (isExplicitCanvasSize(settings.size)) {
+                    if ("aspect_ratio" in node.inputs) node.inputs.aspect_ratio = aspectLabel;
+                    if ("megapixels" in node.inputs) writeComfyNumberInput(node, "megapixels", megapixels);
                 }
             } else if (settings.keepTunedResolution) {
                 // Geometry-locked graphs (H3 two-pass family): the HIGH refine pass takes its size from a
@@ -1207,7 +1261,11 @@ export function applyComfyRandomSeed(
     const next = cloneWorkflow(workflow);
     for (const node of Object.values(next)) {
         const type = String(node.class_type || "");
-        if (!/RandomNoise|SamplerCustom|KSampler/i.test(type) || !node.inputs) continue;
+        // `SelfLiftH3Sampler` is the U37 SelfLift 双采 sampler: it parks the run seed straight in
+        // `seed`, but its class name contains no "KSampler" substring so the previous match never
+        // reached it and that family replayed the identical video on every submission. Listed
+        // explicitly, and only that family's graphs contain the type — no other model is touched.
+        if (!/RandomNoise|SamplerCustom|KSampler|SelfLiftH3Sampler/i.test(type) || !node.inputs) continue;
         if (typeof node.inputs.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
         else if (typeof node.inputs.seed === "number") node.inputs.seed = randomComfySeed();
         else if (options?.followLinkedSeed) {
@@ -1714,6 +1772,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // ignore the canvas entirely. Scoped to this family, and excluding any graph that ends in a
     // video sink, so U24/U06/T10 and every video graph keep their tuned geometry untouched.
     const h3SingleRefImage = isComfyH3SingleReferenceImageWorkflow(args.workflow) && !hasComfyVideoSink(args.workflow);
+    // U37 SelfLift 双采 family: the one geometry-locked family whose ResolutionSelector is the
+    // delivered resolution rather than a draft, so it *must* follow the canvas. Stays geometry-locked
+    // otherwise (seed randomisation + upload size guard keep working through `keepTunedGeometry`).
+    const h3SelfLift = isComfyH3SelfLiftWorkflow(args.workflow);
     const guardUpload = keepTunedGeometry || usesComfyUploadGuard(args.workflowId);
     // Text-output family (e.g. U00 H3 prompt writer): prompt and references land on the LLM node's
     // own slots instead of the CLIP/LoadImage conventions the shared writers assume.
@@ -1734,6 +1796,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         // (it otherwise ignores both the aspect and the resolution the user picked) and where the
         // author's coupled dual-clock sampling contract must not be clobbered by accident.
         twoPassH3Video: h3TwoPassRefs,
+        selfLiftH3Video: h3SelfLift,
     });
     if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
