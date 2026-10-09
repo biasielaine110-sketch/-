@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import { isMinimaxH3FourViewWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId } from "@/lib/runninghub-workflow";
+import { isMinimaxH3FourViewWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId } from "@/lib/runninghub-workflow";
 import { isMidjourneyModel } from "@/services/api/image";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
@@ -81,11 +81,13 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
     // MiniMax H3 story storyboard workflow renders a video next to the frames — surface its
     // duration control here (the workflow receives it as the Float (Duration) node value). The
     // 四视图 asset-card graph reads the same two knobs (视频长度（秒）/ ResolutionSelector megapixels),
-    // and so does the 氛围感短视频 graph (Float (Duration) node 132 / ResolutionSelector 115).
+    // and so do the 氛围感短视频 graph (Float (Duration) node 132 / ResolutionSelector 115) and the
+    // SelfLift 双采(简易版) graph (same 132 / 115 pairing).
     const storyboardVideo =
         isMinimaxH3StoryWorkflowId(modelOptionName(config.model || config.imageModel || "")) ||
         isMinimaxH3FourViewWorkflowId(modelOptionName(config.model || config.imageModel || "")) ||
-        isMinimaxH3VibeShortWorkflowId(modelOptionName(config.model || config.imageModel || ""));
+        isMinimaxH3VibeShortWorkflowId(modelOptionName(config.model || config.imageModel || "")) ||
+        isMinimaxH3SelfLiftWorkflowId(modelOptionName(config.model || config.imageModel || ""));
     const videoDuration = Math.max(1, Math.floor(Number(config.videoSeconds) || 6));
     const selectedAspect = aspectOptions.find((item) => (item.size || item.value) === activeSize || item.value === activeSize);
     const dimensions = readSizeDimensions(activeSize, selectedAspect || aspectOptions[0]);

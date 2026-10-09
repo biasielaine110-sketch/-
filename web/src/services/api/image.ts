@@ -4,7 +4,7 @@ import i18n from "@/i18n";
 import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import { isComfyH3SingleReferenceImageWorkflow, parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi, type ComfyWorkflow } from "@/lib/comfyui-native";
-import { isMinimaxH3FourViewWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
+import { isMinimaxH3FourViewWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { compressBodyImagesForProxy, compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
@@ -1648,8 +1648,13 @@ async function requestRunningHubImages(config: AiConfig, prompt: string, referen
     if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
     // The storyboard graph renders a video next to its frames, so it honors the duration setting.
     // The 氛围感短视频 graph renders a clip ONLY, so it honors the same two knobs on the image path
-    // (its output is handed back as a video, and the canvas spawns a video node for it).
-    const durationAware = isMinimaxH3StoryWorkflowId(config.model || config.imageModel) || isMinimaxH3VibeShortWorkflowId(config.model || config.imageModel);
+    // (its output is handed back as a video, and the canvas spawns a video node for it). The SelfLift
+    // 双采(简易版) graph is the same shape: a clip-only finish whose duration/scale come from the
+    // canvas, so it takes the same gate.
+    const durationAware =
+        isMinimaxH3StoryWorkflowId(config.model || config.imageModel) ||
+        isMinimaxH3VibeShortWorkflowId(config.model || config.imageModel) ||
+        isMinimaxH3SelfLiftWorkflowId(config.model || config.imageModel);
     // The 四视图 asset-card graph must NOT receive seconds/resolution on this path. It is a
     // fixed 2-second four-shot design (its own prompt says so) whose sheet is cut from the clip
     // and then run through SeedVR2 upscaling — pushing the duration to the canvas default (6s)
@@ -1684,9 +1689,9 @@ async function requestRunningHubImages(config: AiConfig, prompt: string, referen
     // RunningHub's outputs endpoint never lists — a finished task can therefore carry nothing but
     // the VHS_VideoCombine mp4. Hand that clip back instead of failing: the canvas spawns a video
     // node for it. The 氛围感短视频 graph is the same shape by design (its only output is the clip),
-    // so it takes the same branch. Scoped to these workflow ids so every other image model keeps
-    // throwing.
-    if (result.videos.length && (isMinimaxH3FourViewWorkflowId(config.model || config.imageModel) || isMinimaxH3VibeShortWorkflowId(config.model || config.imageModel))) {
+    // and so is the SelfLift 双采(简易版) graph (SaveVideo is its only sink), so both take the same
+    // branch. Scoped to these workflow ids so every other image model keeps throwing.
+    if (result.videos.length && (isMinimaxH3FourViewWorkflowId(config.model || config.imageModel) || isMinimaxH3VibeShortWorkflowId(config.model || config.imageModel) || isMinimaxH3SelfLiftWorkflowId(config.model || config.imageModel))) {
         return [{ id: nanoid(), dataUrl: "", videoUrls: result.videos }];
     }
     throw new Error(apiText("runningHubNoImage"));

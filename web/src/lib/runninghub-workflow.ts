@@ -1605,7 +1605,7 @@ export function isMinimaxH3VibeShortWorkflowId(workflowId?: string | null) {
  * the slot link target IS the loader, so no link walk is needed — but the slots are still resolved
  * by index, never by LoadImage id order (which is the reverse here: slot 0 → 137, slot 1 → 139).
  */
-function minimaxH3VibeShortSlots(workflow: ComfyWorkflow) {
+function minimaxH3ReferenceVideoSlots(workflow: ComfyWorkflow) {
     const consumer = Object.entries(workflow).find(([, node]) => /MiniMaxH3ReferenceToVideo/i.test(String(node?.class_type || "")));
     if (!consumer) return null;
     const [consumerId, node] = consumer;
@@ -1637,7 +1637,7 @@ function applyMinimaxH3VibeShortSettings(
     // so the author's baked demo photo cannot leak into the render.
     let writtenReferences = 0;
     const disconnected: string[] = [];
-    const slotInfo = minimaxH3VibeShortSlots(next);
+    const slotInfo = minimaxH3ReferenceVideoSlots(next);
     if (slotInfo) {
         const { consumer, slots } = slotInfo;
         slots.forEach((slot, position) => {
@@ -1710,7 +1710,7 @@ function applyMinimaxH3VibeShortSettings(
     // Prompt → the multiline node the sampler's `prompt` link resolves to (node 138). Written last
     // so an empty canvas prompt keeps the author's baked text rather than blanking it.
     if (prompt.trim()) {
-        const consumer = minimaxH3VibeShortSlots(next)?.consumer;
+        const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;
         const sourceId = consumer ? minimaxH3FourViewPromptSource(next, consumer) : "";
         const promptNode =
             (sourceId ? next[sourceId] : undefined) ||
@@ -1723,6 +1723,148 @@ function applyMinimaxH3VibeShortSettings(
     // every run. Randomize per submission.
     for (const node of Object.values(next)) {
         if (/RandomNoise/i.test(String(node.class_type || "")) && typeof node.inputs?.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
+    }
+
+    return { workflow: next, structuralRepair };
+}
+
+// MiniMax H3 真·上下文无缝无色差长视频 SelfLift 双采(简易版) — runninghub.ai 2108476378258038785.
+// The same SelfLift family as the native U37 graph: a single H3 reference-to-video node (136) whose
+// `width`/`height` are LINKS into the delivered ResolutionSelector (115) and whose `length` is a LINK
+// to a ComfyMathExpression (131, 17n+5) driven by the Float (Duration) primitive (132), sampled by
+// `SelfLiftH3Sampler` (250). None of the generic RunningHub writers reach those knobs:
+//   - writeRunningHubSize only writes onto a node that exposes scalar `width`+`height`; 136's pair
+//     are links it follows into 115, which holds a label enum ("9:16 (Portrait Widescreen)") and no
+//     scalar `value`/`int`/`number` field — so the canvas shape was silently ignored;
+//   - writeRunningHubTier sees the selector's numeric `megapixels: 2` inside its [1,2,4] set and
+//     force-maps it to the size tier, silently rescaling the render;
+//   - writeRunningHubSeconds only rewrites a scalar `length` ≤ 30; the clip's sole length is the math
+//     link and the duration scalar is 132's `value` (a field none of its names match), so the canvas
+//     duration never landed — every run stayed at the baked 5s;
+//   - nothing generic randomizes seeds, so `SelfLiftH3Sampler.seed: 42` replayed the same clip.
+// Reference slots are resolved by `ref_images.ref_image_N` index, never by LoadImage node id order:
+// here the id order swaps slots 5/6 (313 < 314 as ids, yet ref_image_5 → 314, ref_image_6 → 313).
+const MINIMAX_H3_SELFLIFT_WORKFLOW_IDS = new Set(["2108476378258038785"]);
+/** H3 lengths are 17n+5; the graph's math node floors that at 5s and the canvas UI caps duration at 30s. */
+const MINIMAX_H3_SELFLIFT_SECONDS = { min: 2, max: 30 };
+
+function isMinimaxH3SelfLiftWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment.trim().replace(/^(rh|runninghub|workflow)[:_-]/, "").trim();
+        return MINIMAX_H3_SELFLIFT_WORKFLOW_IDS.has(id);
+    });
+}
+
+/**
+ * Public gate for the SelfLift 双采(简易版) graph: it renders a clip only (SaveVideo → CreateVideo),
+ * so the image path hands a video back and the duration/resolution knobs are honored there.
+ */
+export function isMinimaxH3SelfLiftWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3SelfLiftWorkflow(workflowId);
+}
+
+function applyMinimaxH3SelfLiftSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    seconds?: string,
+    aspect = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow; structuralRepair: boolean } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    let structuralRepair = false;
+
+    // Reference images → `<Picture 1>`… slot order, keyed by `ref_images.ref_image_N` index. A slot
+    // the user did not fill is disconnected and its loader pruned: slot 0 ships the author's baked
+    // character sheet (a stranger's face would otherwise render into the clip), and leaving the
+    // spare slots wired keeps their literal "None" loaders in the task payload for nothing.
+    let writtenReferences = 0;
+    const disconnected: string[] = [];
+    const slotInfo = minimaxH3ReferenceVideoSlots(next);
+    if (slotInfo) {
+        const { consumer, slots } = slotInfo;
+        slots.forEach((slot, position) => {
+            const loader = next[slot.sourceId];
+            const field = loader ? imageFieldName(loader) : "";
+            const value = imageValues[position];
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+                return;
+            }
+            const consumerInputs = consumer.inputs;
+            if (consumerInputs && slot.key in consumerInputs) {
+                delete consumerInputs[slot.key];
+                disconnected.push(slot.sourceId);
+                structuralRepair = true;
+            }
+        });
+    } else if (imageValues.length) {
+        // The graph served by RunningHub does not expose the reference slots we expect. Never
+        // silently render the baked character sheet: fall back to the generic mapping (each upload
+        // onto a LoadImage, document order) so the references at least reach the task.
+        const loaders = Object.entries(next).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")) && imageFieldName(node));
+        imageValues.forEach((value, index) => {
+            const loader = loaders[index]?.[1];
+            const field = loader ? imageFieldName(loader) : "";
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+            }
+        });
+    }
+    if (disconnected.length && pruneOrphanedReferenceChain(next, disconnected)) structuralRepair = true;
+    if (imageValues.length && !writtenReferences) throw new Error(apiText("runningHubReferenceNotApplied"));
+
+    // Duration → the PrimitiveFloat (132) the sampler's `length` math link reads. Only the seconds
+    // are written: 131 turns them into a 17n+5 frame count, so touching the `length` link would break
+    // H3's length constraint.
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_SELFLIFT_SECONDS.max, Math.max(MINIMAX_H3_SELFLIFT_SECONDS.min, duration));
+        const durationNode =
+            next["132"] ||
+            findComfyNode(next, (node) => /Primitive(Float|Int)/i.test(String(node.class_type || "")) && /时长|duration|长度/i.test(String(node._meta?.title || "")));
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
+    }
+
+    // Output shape → ResolutionSelector (115), the *delivered* size since the H3 node links into it.
+    // The canvas aspect wins when given, and an explicit precision follows the picker; an unset
+    // ("auto"/empty) pair keeps the author's baked 9:16 @2MP verbatim.
+    const selector = next["115"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        if (aspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+        }
+        const requested = Number(megapixels);
+        if (typeof megapixels === "string" && megapixels.trim() && Number.isFinite(requested) && requested > 0 && typeof selector.inputs.megapixels === "number") {
+            selector.inputs.megapixels = requested;
+        }
+    }
+
+    // Prompt → the multiline node the sampler's `prompt` link resolves to (138). Written last so an
+    // empty canvas prompt keeps the author's baked text rather than blanking it.
+    if (prompt.trim()) {
+        const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;
+        const sourceId = consumer ? minimaxH3FourViewPromptSource(next, consumer) : "";
+        const promptNode =
+            (sourceId ? next[sourceId] : undefined) ||
+            next["138"] ||
+            findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
+        if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+    }
+
+    // `SelfLiftH3Sampler` parks the run seed in its own `seed` field, and its class name carries
+    // neither "KSampler" nor "RandomNoise", so every shared randomizer misses it — identical inputs
+    // would render an identical clip forever. Randomize per submission.
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        if (/RandomNoise/i.test(type) && typeof node.inputs?.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
+        else if (/SamplerCustom|KSampler|SelfLiftH3Sampler/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
     }
 
     return { workflow: next, structuralRepair };
@@ -1874,6 +2016,15 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const vibe = applyMinimaxH3VibeShortSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
         const list = workflowNodeInfoList(workflow, vibe.workflow);
         return vibe.structuralRepair ? { nodeInfoList: list, graph: vibe.workflow } : { nodeInfoList: list };
+    }
+    // The SelfLift 双采(简易版) clip graph opts out too (see applyMinimaxH3SelfLiftSettings): the
+    // render scale lives on a ResolutionSelector the size writer cannot reach and the tier writer
+    // would clamp, while the duration sits on a Float (Duration) primitive behind a math link and
+    // the run seed on `SelfLiftH3Sampler` — a class name no shared randomizer matches.
+    if (isMinimaxH3SelfLiftWorkflow(workflowId)) {
+        const selfLift = applyMinimaxH3SelfLiftSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
+        const list = workflowNodeInfoList(workflow, selfLift.workflow);
+        return selfLift.structuralRepair ? { nodeInfoList: list, graph: selfLift.workflow } : { nodeInfoList: list };
     }
     if (prompt.trim()) patched = writeRunningHubPrompt(patched, prompt);
     if (size) patched = writeRunningHubSize(patched, size.width, size.height, aspect);
