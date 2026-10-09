@@ -1214,11 +1214,34 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
         message.error(detail ? `${t("canvas.video.playbackFailed")} (${detail})` : t("canvas.video.playbackFailed"));
     };
 
+    const reportPlayFailure = (reason?: unknown) => {
+        const mediaErr = videoRef.current?.error;
+        const dom =
+            reason && typeof reason === "object" && "name" in reason
+                ? String((reason as { name?: string }).name || "")
+                : "";
+        const detail =
+            mediaErr?.message ||
+            (mediaErr ? `code ${mediaErr.code}` : "") ||
+            (dom && dom !== "AbortError" ? dom : "");
+        message.error(detail ? `${t("canvas.video.playbackFailed")} (${detail})` : t("canvas.video.playbackFailed"));
+    };
+
     const runPlay = (video: HTMLVideoElement) => {
+        // Prefer fetching bytes once the user asked to play — avoid React toggling preload=
+        // mid-flight, which can abort an in-progress play() and surface a false "损坏" toast.
+        try {
+            video.preload = "auto";
+        } catch {
+            // ignore
+        }
         void video
             .play()
             .then(() => setPlaying(true))
-            .catch(() => {
+            .catch((error: unknown) => {
+                const name = error && typeof error === "object" && "name" in error ? String((error as { name?: string }).name) : "";
+                // load()/src swaps abort the previous play() — ignore and let the next attempt win.
+                if (name === "AbortError") return;
                 // First-click play used to run from a post-render effect and lost the user gesture;
                 // muted play is a last-resort unlock for that class of rejection, then unmute.
                 const wasMuted = video.muted;
@@ -1229,24 +1252,24 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
                         setPlaying(true);
                         video.muted = wasMuted;
                     })
-                    .catch(() => {
+                    .catch((retryError: unknown) => {
+                        const retryName =
+                            retryError && typeof retryError === "object" && "name" in retryError
+                                ? String((retryError as { name?: string }).name)
+                                : "";
                         video.muted = wasMuted;
+                        if (retryName === "AbortError") return;
                         setPlaying(false);
-                        message.error(t("canvas.video.playbackFailed"));
+                        reportPlayFailure(retryError);
                     });
             });
     };
 
-    // <source src> updates do not always reload the element — force load() on URL refresh.
-    // After a blob-URL retry, resume if the user still wants playback.
+    // After a blob-URL refresh, resume if the user still wants playback. Do NOT call video.load()
+    // here — it aborts an in-flight play() from the click handler and looked like a corrupt file.
     useLayoutEffect(() => {
         const video = videoRef.current;
         if (!video || !playableSrc) return;
-        try {
-            video.load();
-        } catch {
-            // ignore
-        }
         const restored = restoredRef.current;
         if (restored) {
             restoredRef.current = null;
@@ -1482,10 +1505,11 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
             {/* Keep <video> mounted so the first Play click can call play() inside the user gesture. */}
             <video
                 ref={videoRef}
+                src={playableSrc || undefined}
                 poster={posterSrc || undefined}
                 className={`h-full w-full rounded-[18px] bg-black object-contain ${activated ? "" : "opacity-0"}`}
                 playsInline
-                preload={activated ? "auto" : "metadata"}
+                preload="metadata"
                 data-canvas-no-zoom
                 onLoadedMetadata={() => {
                     const video = videoRef.current;
@@ -1530,10 +1554,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
                     // activation replays from the start.
                     setCurrentTime(readDuration());
                 }}
-            >
-                {/* Explicit type helps Chrome treat ComfyUI /view octet-stream blobs as mp4. */}
-                <source src={playableSrc} type={mimeType && mimeType.startsWith("video/") ? mimeType : "video/mp4"} />
-            </video>
+            />
             {!activated ? (
                 posterSrc ? (
                     <img src={posterSrc} alt="" decoding="async" draggable={false} className="pointer-events-none absolute inset-0 h-full w-full rounded-[18px] bg-black object-contain" />

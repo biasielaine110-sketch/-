@@ -443,7 +443,16 @@ function comfyMultiReferenceSlotPlan(
  */
 export function isComfyH3TwoPassReferenceWorkflow(workflow: ComfyWorkflow): boolean {
     if (comfyReferenceSlotOrder(workflow).length < 2) return false;
-    return Object.values(workflow).filter((node) => isMiniMaxH3ConditioningNode(node)).length >= 2;
+    const conditioning = Object.values(workflow).filter((node) => isMiniMaxH3ConditioningNode(node)).length;
+    if (conditioning < 2) return false;
+    // U24 / H3-video Export always ships MiniMaxH3DualClockSamplerT8 (+ learned two-pass plan).
+    // Require the DualClock sampler so a coincidental pair of H3 nodes cannot steal this adapter.
+    return Object.values(workflow).some((node) => /MiniMaxH3DualClockSampler/i.test(String(node?.class_type || "")));
+}
+
+/** True for the DualClock sampler node whose class name accidentally matches `/KSampler/i`. */
+function isComfyDualClockSamplerNode(node: ComfyNode) {
+    return /MiniMaxH3DualClockSampler/i.test(String(node?.class_type || ""));
 }
 
 /**
@@ -795,7 +804,12 @@ function comfyBlankImagePlaceholder(workflow: ComfyWorkflow): string | null {
 }
 
 /** Map uploaded filenames onto LoadImage nodes in order. */
-export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[], workflowId?: string): ComfyWorkflow {
+export function applyComfyLoadImages(
+    workflow: ComfyWorkflow,
+    filenames: string[],
+    workflowId?: string,
+    options?: { blankFilename?: string },
+): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
     // Name allow-list OR structural fingerprint. Without the fingerprint a renamed model fell back
     // to node-id order and scrambled every reference (ref_image_0 got the last uploaded picture).
@@ -823,41 +837,26 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
     // Repeating the last uploaded picture there (the legacy fallback) made the model see one
     // reference up to 8× — e.g. U24 V927 and U37 both expose 9 slots where only the first few are
     // real. Graphs without such a placeholder keep the legacy fill-up, so no other model changes
-    // behaviour — except the DualClock two-pass family below, which disconnects unfilled slots.
+    // behaviour — except the DualClock two-pass family, which parks an uploaded 1×1 blank.
     const twoPassRefs = isComfyH3TwoPassReferenceWorkflow(next);
     const blankSlot =
-        twoPassRefs || isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null;
+        (options?.blankFilename || "").trim() ||
+        (twoPassRefs || isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null);
     const loaders = slotOrder.length
         ? slotOrder.map((id) => next[id]).filter((node): node is ComfyNode => Boolean(node))
         : Object.entries(next)
               .filter(([, node]) => isComfyImageLoader(node))
               .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
               .map(([, node]) => node);
-    // U24 DualClock / H3-video: no blank placeholder ships in the Export (API) JSON, so the legacy
-    // fill-up repeated the last upload into every spare `ref_image_N` on BOTH LOW and HIGH
-    // conditioning nodes. That made the pod re-encode the same large reference up to 4× per pass
-    // and routinely OOMed the rented seetacloud card — the process died mid-job and the seetacloud
-    // gateway answered subsequent /history|/view calls with HTTP 502. Disconnect unfilled slots on
-    // every H3 conditioning node instead (same contract SelfLift uses when it has a blank asset).
-    // Scoped to the two-pass fingerprint only.
-    if (twoPassRefs && !blankSlot && slotOrder.length) {
-        const filled = new Set(slotOrder.filter((_, index) => Boolean(filenames[index])));
-        for (const node of Object.values(next)) {
-            if (!isMiniMaxH3ConditioningNode(node) || !node.inputs) continue;
-            for (const key of Object.keys(node.inputs)) {
-                const match = /^ref_images\.ref_image_(\d+)$/.exec(key);
-                if (!match) continue;
-                const value = node.inputs[key];
-                if (!Array.isArray(value) || value[0] == null) continue;
-                const loaderId = String(value[0]);
-                if (filled.has(loaderId)) continue;
-                delete node.inputs[key];
-            }
-        }
-    }
+    // U24 DualClock / H3-video: Export JSON has no author blank asset. Repeating the last upload
+    // into spare slots OOMs rented cards; *deleting* spare `ref_images.ref_image_N` keys made
+    // MiniMaxH3AudioConditioningT8 fail `/prompt` validation ("required input missing") so the
+    // job never reached the ComfyUI queue. Prefer an uploaded 1×1 blank (see runNativeComfyUiJob)
+    // via `blankSlot`. If that upload is unavailable, leave spare loaders untouched only when a
+    // filename exists — never delete slot keys on this family.
     loaders.forEach((node, index) => {
         // Legacy fallback (repeat the last upload) is preserved when the graph has no blank slot
-        // and is not the DualClock two-pass family (that family disconnects above instead).
+        // and is not the DualClock two-pass family (that family needs an explicit blank upload).
         const name =
             filenames[index] || blankSlot || (twoPassRefs && !blankSlot ? "" : filenames[filenames.length - 1]);
         if (!name) return;
@@ -1551,6 +1550,9 @@ export function applyComfyVideoSettings(
     if (steps != null && !lockAuthoredSampling) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
+            // DualClockSamplerT8 class name contains the substring "kSampler" (…Clock + Sampler…);
+            // never rewrite its coupled steps/shift contract even if the family lock is off.
+            if (isComfyDualClockSamplerNode(node)) continue;
             if (!/BasicScheduler|KSampler|Scheduler/i.test(type) || !node.inputs) continue;
             if ("steps" in node.inputs) writeComfyNumberInput(node, "steps", steps);
         }
@@ -1560,6 +1562,7 @@ export function applyComfyVideoSettings(
     if (scheduler && !lockAuthoredSampling) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
+            if (isComfyDualClockSamplerNode(node)) continue;
             if (!/BasicScheduler|Scheduler/i.test(type) || !node.inputs) continue;
             if ("scheduler" in node.inputs) writeComfyStringInput(node, "scheduler", scheduler);
         }
@@ -1585,6 +1588,7 @@ export function applyComfyVideoSettings(
     } else if (samplerName && !lockAuthoredSampling) {
         for (const node of Object.values(next)) {
             const type = String(node.class_type || "");
+            if (isComfyDualClockSamplerNode(node)) continue;
             if (!/KSamplerSelect|KSampler/i.test(type) || !node.inputs) continue;
             if ("sampler_name" in node.inputs) writeComfyStringInput(node, "sampler_name", samplerName);
         }
@@ -1683,6 +1687,25 @@ export function applyComfyVideoSettings(
         }
     }
 
+    return next;
+}
+
+/**
+ * Canvas `<video>` only reliably plays browser-safe H.264/yuv420p MP4. Author templates often leave
+ * VHS_VideoCombine on `image/gif`, `video/webm`, or an nvenc/ffmpeg variant that still lands a
+ * `.mp4` filename but Chrome rejects at play() — the node looks ready then shows "无法播放".
+ * Scoped to the U24 DualClock / H3-video family only (see call site).
+ */
+function applyBrowserSafeVhsFormat(workflow: ComfyWorkflow): ComfyWorkflow {
+    const next = cloneWorkflow(workflow);
+    for (const node of Object.values(next)) {
+        const type = String(node?.class_type || "");
+        if (!/VideoCombine/i.test(type) || !node.inputs || typeof node.inputs !== "object") continue;
+        node.inputs.format = "video/h264-mp4";
+        if ("pix_fmt" in node.inputs && typeof node.inputs.pix_fmt === "string") {
+            node.inputs.pix_fmt = "yuv420p";
+        }
+    }
     return next;
 }
 
@@ -2049,6 +2072,56 @@ async function assertPlayableComfyVideoBlob(blob: Blob, mimeHint: string) {
     }
 }
 
+/**
+ * Container sniff is not enough: VHS can write an `.mp4` whose codec/profile Chrome refuses
+ * (yuv444, mpeg4-ASP, broken audio). Ask the browser to decode one frame before the canvas
+ * accepts the clip, so failures surface at generate-time instead of a dead Play button.
+ */
+function assertBrowserCanDecodeVideo(blob: Blob, mimeHint: string): Promise<void> {
+    if (typeof document === "undefined") return Promise.resolve();
+    const typed =
+        blob.type && blob.type.startsWith("video/")
+            ? blob
+            : blob.slice(0, blob.size, mimeHint.startsWith("video/") ? mimeHint : "video/mp4");
+    const url = URL.createObjectURL(typed);
+    return new Promise((resolve, reject) => {
+        const video = document.createElement("video");
+        video.preload = "auto";
+        video.muted = true;
+        video.playsInline = true;
+        let settled = false;
+        const finish = (error?: Error) => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(timer);
+            video.removeAttribute("src");
+            try {
+                video.load();
+            } catch {
+                // ignore
+            }
+            URL.revokeObjectURL(url);
+            if (error) reject(error);
+            else resolve();
+        };
+        const timer = window.setTimeout(
+            () => finish(new Error("Browser could not decode the ComfyUI MP4 in time — check VHS format is video/h264-mp4")),
+            12_000,
+        );
+        video.onloadeddata = () => {
+            if (video.videoWidth > 0 || video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) finish();
+            else finish(new Error("ComfyUI returned an MP4 with no decodable video track"));
+        };
+        video.onerror = () =>
+            finish(
+                new Error(
+                    "Browser cannot play this ComfyUI MP4 (codec/profile). Set VHS_VideoCombine format to video/h264-mp4 and retry.",
+                ),
+            );
+        video.src = url;
+    });
+}
+
 async function fetchComfyView(
     baseUrl: string,
     apiKey: string,
@@ -2150,6 +2223,10 @@ function describeComfySubmitFailure(args: { status: number; contentType: string;
     const record = readSubmitRecord(args.data);
     const err = record?.error ?? record?.node_errors;
     const errText = typeof err === "string" ? err.trim() : err && typeof err === "object" && Object.keys(err).length ? JSON.stringify(err) : "";
+    const combined = `${errText} ${args.message || ""}`.toLowerCase();
+    if (args.status === 401 || args.status === 403 || /unauthorized|forbidden|auth/i.test(combined)) {
+        return `ComfyUI 认证失败（HTTP ${args.status || 401}）。seetacloud 请在渠道 API Key 填写 Basic 账号密码（格式 user:pass），保存后再生成。`;
+    }
     if (errText) return errText;
     if (args.message) return args.message;
 
@@ -2260,12 +2337,13 @@ export function describeComfyExecutionError(entry: unknown): string {
 }
 
 /**
- * Best-effort VRAM release before a heavy submission.
+ * Best-effort VRAM release before a heavy DualClock submission.
  *
  * Rented ComfyUI pods never free VRAM between tasks, which is the classic "first run succeeds,
  * the second dies with 'allocation would exceed allowed memory'". ComfyUI's own `/free` endpoint
- * is the remedy. Deliberately non-fatal: a channel whose ComfyUI does not expose `/free` (or
- * answers slowly) must keep working exactly as it did before, so every failure is swallowed.
+ * is the remedy — but calling it before *every* video sink (U06/U35/…) was wedging seetacloud
+ * nginx into a lasting HTTP 502, so every model on the channel failed to queue. Keep this
+ * DualClock-only and non-fatal.
  */
 async function freeComfyVram(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<void> {
     try {
@@ -2274,9 +2352,9 @@ async function freeComfyVram(baseUrl: string, apiKey: string, signal?: AbortSign
             { unload_models: true, free_memory: true },
             { headers: authHeaders(apiKey, "application/json"), signal, timeout: 30_000 },
         );
-        // Seetacloud nginx often 502s the very next /prompt while models are still unloading.
-        // A short settle is scoped to those flaky tunnel hosts so other channels stay snappy.
-        if (isFlakyComfyGatewayHost(baseUrl)) await sleep(2500, signal);
+        // Seetacloud nginx 502s /prompt while models are still unloading — wait longer than a
+        // single retry window so the gateway can come back before we POST.
+        if (isFlakyComfyGatewayHost(baseUrl)) await sleep(8000, signal);
     } catch {
         // Optimisation only — never let a missing/failing /free endpoint break a generation.
     }
@@ -2385,6 +2463,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         // exclude them — their resolution lives in a ResolutionSelector their own branches drive.
         multiRefH3Video: h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo && !h3Singularity,
     });
+    // U24 DualClock / H3-video only: force browser-safe VHS h264 (author template already ships it;
+    // this keeps a mis-exported gif/webm sink from landing unplayable on the canvas).
+    if (h3TwoPassRefs) workflow = applyBrowserSafeVhsFormat(workflow);
     if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
     // U06 single-pass multi-ref (WJILatentPreset holder), excluding SelfLift / U35 / U30.
     const multiRefH3Video = h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo && !h3Singularity;
@@ -2396,7 +2477,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // families only; SelfLift has its own blank placeholder and is not gated here.
     if ((multiRefH3Video || h3Singularity || h3TwoPassRefs) && !refs.length) {
         throw new Error(
-            "This multi-reference video workflow requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
+            h3TwoPassRefs
+                ? "H3-video / U24 双采需要至少一张参考图。工作流里的 Untitled*.jpg / snowtp.png 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
+                : "This multi-reference video workflow requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
         );
     }
     if (refs.length) {
@@ -2409,9 +2492,29 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             });
             names.push(uploaded);
         }
+        // DualClock spare slots: park a 1×1 blank instead of repeating the last large ref (OOM) or
+        // deleting `ref_images.ref_image_N` (ComfyUI rejects the /prompt — job never queues).
+        let blankFilename: string | undefined;
+        if (h3TwoPassRefs) {
+            const slotCount = comfyReferenceSlotOrder(workflow).length;
+            if (slotCount > names.length) {
+                try {
+                    blankFilename = await uploadComfyImage(
+                        baseUrl,
+                        apiKey,
+                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5W1Z8AAAAASUVORK5CYII=",
+                        "h3-dualclock-blank.png",
+                        { signal, workflowId: args.workflowId, guardUpload: false },
+                    );
+                } catch (error) {
+                    const detail = error instanceof Error ? error.message : String(error);
+                    throw new Error(`H3-video / U24 双采空槽占位图上传失败，无法推送到工作流：${detail}`);
+                }
+            }
+        }
         workflow = textFamily
             ? applyComfyTextReferenceImages(workflow, names)
-            : applyComfyLoadImages(workflow, names, args.workflowId);
+            : applyComfyLoadImages(workflow, names, args.workflowId, blankFilename ? { blankFilename } : undefined);
     } else if (!textFamily && h3MultiRefVideo && !h3SelfLift) {
         // U06 V8 (and siblings): rewire duplicated ref slots even with zero uploads so Picture 1/2
         // are not left sharing `加载图像2`. SelfLift keeps its own blank-placeholder path and is
@@ -2441,27 +2544,40 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // Basic-Auth credentials authenticate via the Authorization header only — never as a body token.
     if (token && !/^(none|-|n\/a)$/i.test(token) && !isBasicAuthCredential(apiKey)) body.token = token;
 
-    // H3 video on rented pods (seetacloud ~32GB) leaves 20–28GB resident after a run; the next
-    // SamplerCustomAdvanced then dies with "Allocation on device would exceed allowed memory"
-    // despite the new job alone fitting. Unload before every native video-sink submit — including
-    // U35/U37 which previously skipped /free. Non-video graphs are untouched.
-    if (hasComfyVideoSink(args.workflow)) await freeComfyVram(baseUrl, apiKey, signal);
+    // DualClock / H3-video only: leftover H3 weights (~20GB) otherwise OOM the next refine.
+    // Do NOT /free before every video sink — that wedged seetacloud so U06/U35/image models
+    // could not queue either.
+    if (h3TwoPassRefs) await freeComfyVram(baseUrl, apiKey, signal);
 
     const submitUrl = comfyUiUrl(baseUrl, "/prompt");
-    // DualClock / seetacloud: /prompt right after /free commonly 502s once; retry absorbs that
-    // without changing behaviour for stable self-hosted ComfyUI.
-    const submitRetries = h3TwoPassRefs || isFlakyComfyGatewayHost(baseUrl) ? 3 : 1;
+    // seetacloud: /prompt after /free or under load commonly 502s; retry for the whole host.
+    const submitRetries = isFlakyComfyGatewayHost(baseUrl) ? 4 : h3TwoPassRefs ? 3 : 1;
+    const submitBackoffMs = isFlakyComfyGatewayHost(baseUrl) ? 2000 : 800;
     let submit: { status: number; headers: unknown; data: unknown };
     try {
         submit = await comfyRequestWithGatewayRetry(
             () => axios.post(submitUrl, body, { headers: authHeaders(apiKey, "application/json"), signal }),
-            { signal, attempts: submitRetries, label: "ComfyUI /prompt" },
+            { signal, attempts: submitRetries, backoffMs: submitBackoffMs, label: "ComfyUI /prompt" },
         );
     } catch (error) {
         const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-        if (h3TwoPassRefs && isComfyGatewayRetryStatus(status)) {
+        const data = axios.isAxiosError(error) ? error.response?.data : undefined;
+        if (status === 401 || status === 403 || (typeof data === "object" && data && /unauthorized/i.test(JSON.stringify(data)))) {
             throw new Error(
-                `ComfyUI gateway error (HTTP ${status}). For H3-video / U24 DualClock on seetacloud this usually means the pod OOM'd or is still unloading after /free — wait ~30s, use ≤10s + 1080p (not 2K), keep 1–2 reference images, then retry.`,
+                describeComfySubmitFailure({
+                    status: status || 401,
+                    contentType: String(axios.isAxiosError(error) ? error.response?.headers?.["content-type"] || "" : ""),
+                    data,
+                    url: submitUrl,
+                    message: "",
+                }),
+            );
+        }
+        if (isFlakyComfyGatewayHost(baseUrl) && isComfyGatewayRetryStatus(status)) {
+            throw new Error(
+                h3TwoPassRefs
+                    ? `ComfyUI 网关错误（HTTP ${status}）。H3-video / U24 双采在 seetacloud 上常见于 OOM 或 /free 卸载中 — 等待 30–60 秒后重试，时长 ≤10s、清晰度 1080p，并连接 1–2 张参考图。`
+                    : `ComfyUI 网关错误（HTTP ${status}）。seetacloud 隧道短暂不可用（常在显存清理或上一个重任务之后）— 等待 30–60 秒后重试，勿连续猛点生成。`,
             );
         }
         throw error;
@@ -2478,14 +2594,17 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         const submitRecord = readSubmitRecord(submit.data);
         const nodeErrors = submitRecord?.node_errors;
         if (nodeErrors && typeof nodeErrors === "object" && Object.keys(nodeErrors as object).length) {
+            const detail = describeComfySubmitFailure({
+                status: submit.status,
+                contentType: String((submit.headers as unknown as Record<string, unknown> | undefined)?.["content-type"] || ""),
+                data: submit.data,
+                url: submitUrl,
+                message: submitted.message,
+            });
             throw new Error(
-                describeComfySubmitFailure({
-                    status: submit.status,
-                    contentType: String((submit.headers as unknown as Record<string, unknown> | undefined)?.["content-type"] || ""),
-                    data: submit.data,
-                    url: submitUrl,
-                    message: submitted.message,
-                }),
+                h3TwoPassRefs
+                    ? `H3-video / U24 双采无法推送到工作流（节点校验失败）。请确认模型脚本已粘贴 U24 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                    : detail,
             );
         }
     }
@@ -2639,6 +2758,8 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             // `slice` retypes without copying the whole mp4 into a second ArrayBuffer (unlike
             // `new Blob([blob])`), which mattered for 30–100MB DualClock clips on the return path.
             const typed = blob.type === mimeType ? blob : blob.slice(0, blob.size, mimeType);
+            // Decode probe only for DualClock / H3-video — other video families keep prior behaviour.
+            if (h3TwoPassRefs) await assertBrowserCanDecodeVideo(typed, mimeType);
             videos.push({ blob: typed, mimeType });
         } else {
             for (const file of media.images) {

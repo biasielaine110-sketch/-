@@ -333,11 +333,18 @@ async function createNativeComfyUiVideoTask(
         if (error instanceof Error && (error.message.includes("comfy") || error.message.includes("ComfyUI"))) throw error;
         // Surface seetacloud / proxy 502 with the native job's own wording when present; otherwise
         // keep the short gateway label so users are not left with a bare Axios status string.
-        if (axios.isAxiosError(error) && (error.response?.status === 502 || error.response?.status === 503)) {
+        if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
             throw new Error(
-                error.message?.includes("H3-video") || error.message?.includes("DualClock")
+                error.message?.includes("认证")
                     ? error.message
-                    : `${apiText("badGateway")}（ComfyUI / seetacloud）。H3-video 双采请缩短时长至 ≤10s、清晰度用 1080p，并确保已粘贴 U24 Export JSON。`,
+                    : `ComfyUI 认证失败（HTTP ${error.response.status}）。seetacloud 请在渠道 API Key 填写 Basic 账号密码（user:pass）。`,
+            );
+        }
+        if (axios.isAxiosError(error) && (error.response?.status === 502 || error.response?.status === 503 || error.response?.status === 504)) {
+            throw new Error(
+                error.message?.includes("网关") || error.message?.includes("H3-video") || error.message?.includes("DualClock")
+                    ? error.message
+                    : `${apiText("badGateway")}（ComfyUI / seetacloud）。请等待 30–60 秒后重试；若刚跑过重任务，勿连续提交。H3-video 双采请用 ≤10s + 1080p，并确认已粘贴 U24 Export JSON。`,
             );
         }
         throw new Error(error instanceof Error ? error.message : apiText("requestFailed"));

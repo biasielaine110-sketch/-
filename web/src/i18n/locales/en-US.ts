@@ -1210,7 +1210,7 @@ export default {
             rebindForFolderSave: "This draft is not bound to a folder. Press Ctrl/Cmd+S to choose a draft folder, then downloads can save there directly.",
         },
         video: {
-            playbackFailed: "This video cannot be played — the file is invalid or corrupted. Regenerate and wait for the final MP4 (not a preview GIF).",
+            playbackFailed: "This video cannot be played. Regenerate and confirm the final MP4 was returned (VHS format should be video/h264-mp4).",
         },
     },
     navigation: {
