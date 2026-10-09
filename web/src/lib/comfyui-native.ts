@@ -62,8 +62,8 @@ function isComfyGatewayRetryStatus(status: number | undefined) {
 }
 
 /**
- * Retry transient gateway failures (502/503/504) that rented ComfyUI proxies emit right after
- * `/free`, during model unload, or under brief upstream blips. Does not retry 4xx / abort.
+ * Retry transient gateway failures (502/503/504) that rented ComfyUI proxies emit under load
+ * or brief upstream blips. Does not retry 4xx / abort.
  */
 async function comfyRequestWithGatewayRetry<T>(
     run: () => Promise<T>,
@@ -2329,50 +2329,18 @@ export function describeComfyExecutionError(entry: unknown): string {
     if (/exceeds allowed memory|out of memory|outofmemoryerror|allocation on device/i.test(detail)) {
         return (
             `${head}. The GPU ran out of VRAM (this pod is ~32GB). ` +
-            `Use 720p or 1080p instead of 2K, shorten the duration, then retry — ` +
-            `the next submit will unload leftover models first.`
+            `Use 720p or 1080p instead of 2K, shorten the duration, wait ~30s for VRAM to settle, then retry.`
         );
     }
     return head;
 }
 
 /**
- * Best-effort VRAM release before a heavy DualClock submission.
- *
- * Rented ComfyUI pods never free VRAM between tasks, which is the classic "first run succeeds,
- * the second dies with 'allocation would exceed allowed memory'". ComfyUI's own `/free` endpoint
- * is the remedy — but calling it before *every* video sink (U06/U35/…) was wedging seetacloud
- * nginx into a lasting HTTP 502, so every model on the channel failed to queue. Keep this
- * DualClock-only and non-fatal.
- */
-async function freeComfyVram(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<void> {
-    try {
-        await axios.post(
-            comfyUiUrl(baseUrl, "/free"),
-            { unload_models: true, free_memory: true },
-            { headers: authHeaders(apiKey, "application/json"), signal, timeout: 30_000 },
-        );
-        // Seetacloud nginx 502s /prompt while models are still unloading — wait longer than a
-        // single retry window so the gateway can come back before we POST.
-        if (isFlakyComfyGatewayHost(baseUrl)) await sleep(8000, signal);
-    } catch {
-        // Optimisation only — never let a missing/failing /free endpoint break a generation.
-    }
-}
-
-/**
  * Stop a running/pending ComfyUI prompt *on the server*.
  *
  * Aborting the local request only closes the HTTP call: ComfyUI keeps executing, and a video job
- * then finishes on its own and writes its MP4 into the pod's output folder — which is exactly the
- * "I cancelled but it still produced a result" report. Cancelling has to reach the server, so
- * `runNativeComfyUiJob` posts here when its signal aborts.
- *
- * The queue entry is located by `prompt_id` first, so a different job sharing the same pod is never
- * touched (only the still-running match is interrupted, and a merely queued one is dequeued). The
- * blind `/interrupt` is reserved for the case where `/queue` itself is unavailable. Best-effort by
- * design: cancellation must never raise an error of its own, and a ComfyUI that blocks these
- * endpoints must keep generating exactly as before.
+ * then finishes on its own and writes its MP4 into the pod's output folder. Cancelling has to
+ * reach the server, so `runNativeComfyUiJob` posts here when its signal aborts. Best-effort.
  */
 async function interruptComfyJob(baseUrl: string, apiKey: string, promptId: string): Promise<void> {
     const jsonHeaders = authHeaders(apiKey, "application/json");
@@ -2544,13 +2512,8 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // Basic-Auth credentials authenticate via the Authorization header only — never as a body token.
     if (token && !/^(none|-|n\/a)$/i.test(token) && !isBasicAuthCredential(apiKey)) body.token = token;
 
-    // DualClock / H3-video only: leftover H3 weights (~20GB) otherwise OOM the next refine.
-    // Do NOT /free before every video sink — that wedged seetacloud so U06/U35/image models
-    // could not queue either.
-    if (h3TwoPassRefs) await freeComfyVram(baseUrl, apiKey, signal);
-
     const submitUrl = comfyUiUrl(baseUrl, "/prompt");
-    // seetacloud: /prompt after /free or under load commonly 502s; retry for the whole host.
+    // seetacloud: /prompt under load commonly 502s; retry for the whole host.
     const submitRetries = isFlakyComfyGatewayHost(baseUrl) ? 4 : h3TwoPassRefs ? 3 : 1;
     const submitBackoffMs = isFlakyComfyGatewayHost(baseUrl) ? 2000 : 800;
     let submit: { status: number; headers: unknown; data: unknown };
@@ -2576,8 +2539,8 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         if (isFlakyComfyGatewayHost(baseUrl) && isComfyGatewayRetryStatus(status)) {
             throw new Error(
                 h3TwoPassRefs
-                    ? `ComfyUI 网关错误（HTTP ${status}）。H3-video / U24 双采在 seetacloud 上常见于 OOM 或 /free 卸载中 — 等待 30–60 秒后重试，时长 ≤10s、清晰度 1080p，并连接 1–2 张参考图。`
-                    : `ComfyUI 网关错误（HTTP ${status}）。seetacloud 隧道短暂不可用（常在显存清理或上一个重任务之后）— 等待 30–60 秒后重试，勿连续猛点生成。`,
+                    ? `ComfyUI 网关错误（HTTP ${status}）。H3-video / U24 双采在 seetacloud 上常见于 OOM 或上一个重任务未结束 — 等待 30–60 秒后重试，时长 ≤10s、清晰度 1080p，并连接 1–2 张参考图。`
+                    : `ComfyUI 网关错误（HTTP ${status}）。seetacloud 隧道短暂不可用（常在上一个重任务之后）— 等待 30–60 秒后重试，勿连续猛点生成。`,
             );
         }
         throw error;
