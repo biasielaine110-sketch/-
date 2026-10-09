@@ -444,6 +444,11 @@ export function isComfyH3MultiReferenceVideoWorkflow(workflow: ComfyWorkflow): b
     const conditioning = Object.values(workflow).filter((node) => isMiniMaxH3ConditioningNode(node));
     if (conditioning.length !== 1) return false;
     if (comfyReferenceSlotOrder(workflow).length < 2) return false;
+    return hasComfyVideoSink(workflow);
+}
+
+/** True when the graph ends in a video sink (`VHS_VideoCombine` / `SaveVideo`). */
+function hasComfyVideoSink(workflow: ComfyWorkflow): boolean {
     return Object.values(workflow).some((node) => /VideoCombine|SaveVideo/i.test(String(node?.class_type || "")));
 }
 
@@ -834,6 +839,40 @@ function megapixelsFromPixels(width: number, height: number) {
     return Math.max(0.1, Math.min(16, Math.round(((width * height) / 1_000_000) * 100) / 100));
 }
 
+/**
+ * True when the canvas size is an actual user choice rather than the "auto"/empty sentinel.
+ *
+ * The canvas Size control offers "auto" plus concrete ratios, and the global default is a pixel
+ * string ("2048x1152"). "auto"/"" must leave the workflow's own baked geometry alone, so callers
+ * gate any canvas-driven override on this.
+ */
+function isExplicitCanvasSize(size?: string): boolean {
+    const raw = String(size || "").trim();
+    return Boolean(raw) && !/^(?:auto|adaptive)$/i.test(raw);
+}
+
+/**
+ * Reshape an H3 node's authored canvas to the user's canvas size.
+ *
+ * The U33 template bakes a square 2048×2048 straight onto its MiniMax H3 node, so the canvas
+ * ratio is ignored and every run comes back square regardless of what the user picked. Anchoring
+ * the reshape on the *author's own long edge* fixes that without ever inflating past the geometry
+ * the author tuned (a 1:1 request therefore returns the template's own 2048×2048 verbatim), and an
+ * explicit `WxH` string is honored literally. Everything snaps to a multiple of 32, which ComfyUI
+ * latents require.
+ */
+function shapeH3CanvasToSize(bakedWidth: number, bakedHeight: number, size: string) {
+    const snap = (value: number) => Math.max(64, Math.round(value / 32) * 32);
+    const explicit = size.trim().match(/^(\d+)\s*[x×]\s*(\d+)$/i);
+    if (explicit) return { width: snap(Number(explicit[1])), height: snap(Number(explicit[2])) };
+    const ratio = parseCanvasAspectRatio(size);
+    const aspect = RESOLUTION_SELECTOR_ASPECTS.find((item) => item.ratio === ratio)?.value || 1;
+    const longEdge = snap(Math.max(bakedWidth, bakedHeight));
+    return aspect >= 1
+        ? { width: longEdge, height: snap(longEdge / aspect) }
+        : { width: snap(longEdge * aspect), height: longEdge };
+}
+
 function parseCanvasSeconds(seconds?: string | number) {
     const value = typeof seconds === "number" ? seconds : Number(String(seconds || "").trim());
     if (!Number.isFinite(value) || value <= 0) return null;
@@ -921,6 +960,14 @@ export function applyComfyVideoSettings(
          * below; every other graph is untouched.
          */
         keepTunedResolution?: boolean;
+        /**
+         * U33 single-reference H3 image family only: the template bakes a *square* canvas onto its
+         * H3 node, so the user's canvas size/ratio is otherwise ignored and every run is square.
+         * When set together with an explicit canvas size, reshape that baked canvas to the user's
+         * ratio (see `shapeH3CanvasToSize`) instead of freezing it. Every other geometry-locked
+         * family keeps `keepTunedResolution` semantics untouched.
+         */
+        reshapeCanvas?: boolean;
     },
 ): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
@@ -1007,10 +1054,25 @@ export function applyComfyVideoSettings(
     // MiniMax H3 conditioning often exposes width/height/length (scalar or linked) and ref_image_size.
     for (const node of Object.values(next)) {
         if (!isMiniMaxH3ConditioningNode(node) || !node.inputs) continue;
-        // Geometry-locked H3 families keep the width/height the author baked onto the node. The
-        // image path passes no canvas size, so `pixels` is only the 16:9 @1280 fallback — writing it
-        // would silently rewrite a 2048×2048 author size on every run.
-        if (!settings.keepTunedResolution) {
+        // U33 single-reference H3 image family bakes a square canvas onto the node, so the user's
+        // canvas size/ratio never took effect and every run came back square. When the canvas
+        // carries an explicit size, reshape the baked canvas to it (anchored on the author's own
+        // long edge so resolution is never inflated). "auto"/empty keeps the author's geometry, and
+        // a graph whose width/height are *links* is left alone (deliberately scalar-only, so this
+        // can never rewrite a size parked in a separate preset node).
+        if (
+            settings.reshapeCanvas &&
+            isExplicitCanvasSize(settings.size) &&
+            typeof node.inputs.width === "number" &&
+            typeof node.inputs.height === "number"
+        ) {
+            const shaped = shapeH3CanvasToSize(node.inputs.width, node.inputs.height, String(settings.size));
+            writeComfyNumberInput(node, "width", shaped.width);
+            writeComfyNumberInput(node, "height", shaped.height);
+        } else if (!settings.keepTunedResolution) {
+            // Geometry-locked H3 families keep the width/height the author baked onto the node. The
+            // image path passes no canvas size, so `pixels` is only the 16:9 @1280 fallback — writing it
+            // would silently rewrite a 2048×2048 author size on every run.
             if (!writeComfyNumberInput(node, "width", pixels.width)) writeLinkedComfyNumber(next, node.inputs.width, pixels.width);
             if (!writeComfyNumberInput(node, "height", pixels.height)) writeLinkedComfyNumber(next, node.inputs.height, pixels.height);
         }
@@ -1528,6 +1590,11 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // Geometry-locked H3 families (two-pass video + single-reference image, e.g. U33) keep the
     // size the author baked into the graph; the image path passes no canvas size to override it.
     const keepTunedGeometry = isComfyGeometryLockedWorkflow(args.workflow);
+    // The single-reference H3 image family (U33) is the one geometry-locked family whose baked
+    // canvas must *follow* the user's size/ratio — its template bakes a square and would otherwise
+    // ignore the canvas entirely. Scoped to this family, and excluding any graph that ends in a
+    // video sink, so U24/U06/T10 and every video graph keep their tuned geometry untouched.
+    const h3SingleRefImage = isComfyH3SingleReferenceImageWorkflow(args.workflow) && !hasComfyVideoSink(args.workflow);
     const guardUpload = keepTunedGeometry || usesComfyUploadGuard(args.workflowId);
     // Text-output family (e.g. U00 H3 prompt writer): prompt and references land on the LLM node's
     // own slots instead of the CLIP/LoadImage conventions the shared writers assume.
@@ -1543,6 +1610,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         samplerName: args.samplerName,
         scheduler: args.scheduler,
         keepTunedResolution: keepTunedGeometry,
+        reshapeCanvas: h3SingleRefImage,
     });
     if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);

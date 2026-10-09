@@ -3,7 +3,7 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
-import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi, type ComfyWorkflow } from "@/lib/comfyui-native";
+import { isComfyH3SingleReferenceImageWorkflow, parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi, type ComfyWorkflow } from "@/lib/comfyui-native";
 import { isMinimaxH3FourViewWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
@@ -1697,6 +1697,11 @@ async function requestNativeComfyUiImages(config: AiConfig, prompt: string, refe
     const workflow = parseComfyApiWorkflow(script);
     if (!workflow) throw new Error(apiText("comfyWorkflowRequired"));
     if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    // The U33 single-reference H3 image family bakes a *square* canvas onto its node, so its output
+    // ignores the user's canvas size/ratio and always comes back square. Forward the canvas size for
+    // that family only — every other native image workflow keeps receiving no size, because the
+    // shared geometry writer would otherwise turn the 16:9 @1280 fallback into a real write.
+    const honorCanvasSize = isComfyH3SingleReferenceImageWorkflow(workflow);
     const result = await runNativeComfyUiJob({
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
@@ -1704,6 +1709,7 @@ async function requestNativeComfyUiImages(config: AiConfig, prompt: string, refe
         workflowId: config.model || config.imageModel,
         prompt,
         referenceDataUrls,
+        size: honorCanvasSize ? config.size : undefined,
         signal: options?.signal,
     });
     if (result.images.length) return result.images;
