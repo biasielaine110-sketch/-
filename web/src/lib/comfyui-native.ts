@@ -1019,6 +1019,50 @@ function shapeH3CanvasToSize(bakedWidth: number, bakedHeight: number, size: stri
 }
 
 /**
+ * Reshape the *linked* canvas of the U06 「h3_多图参考生视频」 family (see
+ * `isComfyH3MultiReferenceVideoWorkflow`).
+ *
+ * That graph parks its delivered size in a separate size holder — a `WJILatentPreset` node whose
+ * `自定义宽`/`自定义高` are the only thing the H3 node consumes (its `width`/`height` are *links* into
+ * it, and the preset's own latent output goes nowhere). So `shapeH3CanvasToSize` on the H3 node has
+ * no scalar to move and the app's size/ratio control was silently dead: every run delivered the
+ * author's baked 1376×768 (43:24) regardless of the canvas.
+ *
+ * Follow the links one hop to the holder and rewrite its authoring fields instead. The reshape is
+ * anchored on the holder's *own* baked long edge, so switching ratio never inflates the pixel budget
+ * and the untouched "16:9" default reproduces the author's render exactly. The preset is pinned to
+ * its custom mode so the rewritten dimensions are the ones that actually apply. A holder that
+ * declares none of these fields is left alone, so no other graph is affected.
+ */
+function reshapeLinkedH3Canvas(
+    workflow: ComfyWorkflow,
+    widthLink: unknown,
+    heightLink: unknown,
+    size: string,
+): void {
+    const holders = new Set<string>();
+    for (const link of [widthLink, heightLink]) {
+        if (Array.isArray(link) && link[0] != null) holders.add(String(link[0]));
+    }
+    for (const id of holders) {
+        const holder = workflow[id];
+        if (!holder?.inputs || typeof holder.inputs !== "object") continue;
+        // `WJILatentPreset` keeps its authoring fields in Chinese; other size holders use width/height.
+        const fields: [string, string] =
+            typeof holder.inputs["自定义宽"] === "number" && typeof holder.inputs["自定义高"] === "number"
+                ? ["自定义宽", "自定义高"]
+                : ["width", "height"];
+        const bakedWidth = Number(holder.inputs[fields[0]]);
+        const bakedHeight = Number(holder.inputs[fields[1]]);
+        if (!(bakedWidth > 0) || !(bakedHeight > 0)) continue;
+        const shaped = shapeH3CanvasToSize(bakedWidth, bakedHeight, size);
+        if (!writeComfyNumberInput(holder, fields[0], shaped.width)) continue;
+        writeComfyNumberInput(holder, fields[1], shaped.height);
+        writeComfyStringInput(holder, "预设分辨率", "自定义");
+    }
+}
+
+/**
  * The learned-latent-upscale factor of a two-pass H3 graph (the `scale_by` knob, normally wired to
  * a `PrimitiveFloat` titled 2采放大倍率), or null when the graph has no ratio upscale.
  *
@@ -1169,6 +1213,17 @@ export function applyComfyVideoSettings(
          * geometry they have today.
          */
         selfLiftH3Video?: boolean;
+        /**
+         * U06 single-pass multi-reference H3 *video* family only (see
+         * `isComfyH3MultiReferenceVideoWorkflow`). Its canvas is not on the H3 node: `width`/`height`
+         * are *links* into a separate size holder (the `WJILatentPreset`, whose own latent output
+         * nothing consumes), so the geometry writers never found a scalar to move and the app's
+         * size/ratio control was dead — every run delivered the author's baked 1376×768 no matter
+         * what the canvas said. Reshape that linked holder instead (see `reshapeLinkedH3Canvas`).
+         * Only an explicit canvas size writes it, anchored on the author's own long edge so the pixel
+         * budget is unchanged; "auto"/empty (and the untouched "16:9" default) stays byte-identical.
+         */
+        multiRefH3Video?: boolean;
     },
 ): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
@@ -1293,12 +1348,21 @@ export function applyComfyVideoSettings(
     // MiniMax H3 conditioning often exposes width/height/length (scalar or linked) and ref_image_size.
     for (const node of Object.values(next)) {
         if (!isMiniMaxH3ConditioningNode(node) || !node.inputs) continue;
+        // U06 single-pass multi-reference video family: its canvas is *not* on the H3 node — width and
+        // height are links into a separate size holder — so the scalar writers above/below can never
+        // reach it and the app's size/ratio control was dead. Reshape that linked holder instead (see
+        // the helper); only an explicit canvas size writes it and the reshape preserves the author's
+        // pixel budget, so the untouched default stays byte-identical. Scoped to this one family, so
+        // U24/U37/U33 and every other graph keep the geometry handling around this block untouched.
+        if (settings.multiRefH3Video && isExplicitCanvasSize(settings.size)) {
+            reshapeLinkedH3Canvas(next, node.inputs.width, node.inputs.height, String(settings.size));
+        }
         // U33 single-reference H3 image family bakes a square canvas onto the node, so the user's
         // canvas size/ratio never took effect and every run came back square. When the canvas
         // carries an explicit size, reshape the baked canvas to it (anchored on the author's own
         // long edge so resolution is never inflated). "auto"/empty keeps the author's geometry, and
-        // a graph whose width/height are *links* is left alone (deliberately scalar-only, so this
-        // can never rewrite a size parked in a separate preset node).
+        // a graph whose width/height are *links* is left to its own family (U06 above routes those
+        // into the linked size holder) rather than being guessed at here.
         if (
             settings.reshapeCanvas &&
             isExplicitCanvasSize(settings.size) &&
@@ -1909,6 +1973,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         // author's coupled dual-clock sampling contract must not be clobbered by accident.
         twoPassH3Video: h3TwoPassRefs,
         selfLiftH3Video: h3SelfLift,
+        // U06 single-pass multi-reference video family. The SelfLift family also matches
+        // `isComfyH3MultiReferenceVideoWorkflow`, so exclude it — its resolution lives in a
+        // ResolutionSelector that its own `selfLiftH3Video` branch above already drives.
+        multiRefH3Video: h3MultiRefVideo && !h3SelfLift,
     });
     if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
