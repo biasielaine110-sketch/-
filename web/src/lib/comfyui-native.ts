@@ -44,9 +44,12 @@ const HISTORY_TIMEOUT_MS = 60 * 60 * 1000;
 /** After status=success, keep polling this many times for a late-persisted VHS mp4 (ComfyUI #11540). */
 const VIDEO_HISTORY_GRACE_POLLS = 8;
 /**
- * U24 DualClock / H3-video on rented pods: long clips + HIGH refine routinely OOM the worker;
- * seetacloud's nginx then answers every subsequent call with HTTP 502. Cap canvas duration for
- * that family only (author template is 15s — still too heavy on ~24–32GB cards).
+ * U24 DualClock / H3-video on rented pods: long clips + HIGH refine routinely OOM the worker and
+ * seetacloud's nginx then answers every subsequent call with HTTP 502. This is the *floor* of the
+ * duration guard only — the effective ceiling is `max(this, the graph's own baked duration)` so the
+ * guard never clamps below a default run (see `h3AuthoredDurationSeconds`). V927 bakes 20 s, so a
+ * 15 s pick reaches the graph; a template that bakes 15 s reaches 15 s. Only a graph whose baked
+ * duration is smaller than this — or unreadable — keeps this 10 s floor.
  */
 const TWO_PASS_H3_MAX_SECONDS = 10;
 /** Draft megapixel ceiling for DualClock LOW pass (author bakes 0.4; 1080p ≈0.9 after ÷scale²). */
@@ -1314,6 +1317,55 @@ function h3LengthFromSeconds(seconds: number) {
     return frames + ((5 - (frames % 17)) % 17);
 }
 
+/**
+ * The duration the graph's **author** baked in, in seconds — the upstream duration float that feeds
+ * the H3 frame-length formula (`length` → ComfyMathExpression → `values.a`).
+ *
+ * This is the anchor for the two-pass duration guard. That guard exists to keep long clips off
+ * rented cards, but it must never clamp *below the graph's own default run*: a template whose baked
+ * default is 20 s would otherwise be forced to 10 s even when the operator asks for 15 s, so the app
+ * silently delivers less than a plain default run would.
+ */
+function h3AuthoredDurationSeconds(workflow: ComfyWorkflow): number | null {
+    const readNumber = (value: unknown): number | null => {
+        if (typeof value === "number") return Number.isFinite(value) && value > 0 ? value : null;
+        if (Array.isArray(value) && value[0] != null) {
+            const source = workflow[String(value[0])]?.inputs as Record<string, unknown> | undefined;
+            for (const key of ["value", "float", "number", "Number", "int"]) {
+                const n = Number(source?.[key]);
+                if (Number.isFinite(n) && n > 0) return n;
+            }
+        }
+        return null;
+    };
+    // Preferred: follow the H3 `length` link (length → math expression → seconds float).
+    for (const node of Object.values(workflow)) {
+        if (!isMiniMaxH3ConditioningNode(node)) continue;
+        const inputs = node?.inputs as Record<string, unknown> | undefined;
+        if (!inputs) continue;
+        const lengthLink = inputs.length;
+        if (!Array.isArray(lengthLink) || lengthLink[0] == null) {
+            // A scalar `length` is already in frames.
+            const frames = Number(lengthLink);
+            if (Number.isFinite(frames) && frames > 0) return frames / 24;
+            continue;
+        }
+        const mathInputs = workflow[String(lengthLink[0])]?.inputs as Record<string, unknown> | undefined;
+        const seconds = readNumber(mathInputs?.["values.a"] ?? mathInputs?.a);
+        if (seconds != null) return seconds;
+    }
+    // Fallback: a standalone float/int the author titled for the duration.
+    for (const node of Object.values(workflow)) {
+        const type = String(node?.class_type || "");
+        const title = String(node?._meta?.title || "");
+        if (!/Primitive(Float|Int|Number)|Float|Int/i.test(type)) continue;
+        if (!/duration|时长/i.test(title)) continue;
+        const value = Number((node?.inputs as Record<string, unknown> | undefined)?.value);
+        if (Number.isFinite(value) && value > 0) return value;
+    }
+    return null;
+}
+
 function writeComfyNumberInput(node: ComfyNode, field: string, nextValue: number) {
     if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
     const current = node.inputs[field];
@@ -1460,12 +1512,14 @@ export function applyComfyVideoSettings(
     const pixels = pixelsFromSizeAndQuality(settings.size, settings.vquality);
     const megapixels = megapixelsFromPixels(pixels.width, pixels.height);
     const aspectLabel = resolutionSelectorAspectLabel(pixels.ratio);
-    // DualClock only: clamp duration before the Float (Duration) write so long canvas defaults
-    // cannot push the HIGH refine past rented-card VRAM (which surfaces as seetacloud 502).
+    // Two-pass H3 video: the VRAM guard keeps long clips off rented cards, but it is anchored on the
+    // graph's own baked duration so it can never reach below what a default run already produces
+    // (see `h3AuthoredDurationSeconds`). Without that anchor the V927 template — which bakes 20 s —
+    // silently clamped every operator request down to 10 s, so a 15 s pick came back as 10 s.
     const parsedSeconds = parseCanvasSeconds(settings.seconds);
     const seconds =
         settings.twoPassH3Video && parsedSeconds != null
-            ? Math.min(parsedSeconds, TWO_PASS_H3_MAX_SECONDS)
+            ? Math.min(parsedSeconds, Math.max(TWO_PASS_H3_MAX_SECONDS, h3AuthoredDurationSeconds(next) ?? 0))
             : parsedSeconds;
 
     // Sampling steps for scheduler nodes (BasicScheduler / KSampler / Scheduler steps).
@@ -2522,7 +2576,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         if (isFlakyComfyGatewayHost(baseUrl) && isComfyGatewayRetryStatus(status)) {
             throw new Error(
                 h3TwoPassRefs
-                    ? `ComfyUI 网关错误（HTTP ${status}）。H3-video / U24 双采在 seetacloud 上常见于 OOM 或上一个重任务未结束 — 等待 30–60 秒后重试，时长 ≤10s、清晰度 1080p，并连接 1–2 张参考图。`
+                    ? `ComfyUI 网关错误（HTTP ${status}）。H3-video / U24 双采在 seetacloud 上常见于 OOM 或上一个重任务未结束 — 等待 30–60 秒后重试，建议 1080p、连接 1–2 张参考图；长时长更易占满显存。`
                     : `ComfyUI 网关错误（HTTP ${status}）。seetacloud 隧道短暂不可用（常在上一个重任务之后）— 等待 30–60 秒后重试，勿连续猛点生成。`,
             );
         }

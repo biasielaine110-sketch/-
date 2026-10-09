@@ -344,7 +344,7 @@ async function createNativeComfyUiVideoTask(
             throw new Error(
                 error.message?.includes("网关") || error.message?.includes("H3-video") || error.message?.includes("DualClock")
                     ? error.message
-                    : `${apiText("badGateway")}（ComfyUI / seetacloud）。请等待 30–60 秒后重试；若刚跑过重任务，勿连续提交。H3-video 双采请用 ≤10s + 1080p，并确认已粘贴 U24 Export JSON。`,
+                    : `${apiText("badGateway")}（ComfyUI / seetacloud）。请等待 30–60 秒后重试；若刚跑过重任务，勿连续提交。H3-video 双采建议 1080p（长时长更易占满显存），并确认已粘贴 U24 Export JSON。`,
             );
         }
         throw new Error(error instanceof Error ? error.message : apiText("requestFailed"));
