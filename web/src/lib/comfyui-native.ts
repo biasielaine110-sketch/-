@@ -2071,7 +2071,11 @@ export function describeComfyExecutionError(entry: unknown): string {
     const detail = [where, exception].filter(Boolean).join(": ");
     const head = detail ? `ComfyUI workflow execution failed — ${detail}` : "ComfyUI workflow execution failed";
     if (/exceeds allowed memory|out of memory|outofmemoryerror|allocation on device/i.test(detail)) {
-        return `${head}. The GPU ran out of VRAM — lower the video resolution or duration and retry (freeing VRAM on the server also helps).`;
+        return (
+            `${head}. The GPU ran out of VRAM (this pod is ~32GB). ` +
+            `Use 720p or 1080p instead of 2K, shorten the duration, then retry — ` +
+            `the next submit will unload leftover models first.`
+        );
     }
     return head;
 }
@@ -2255,9 +2259,11 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // Basic-Auth credentials authenticate via the Authorization header only — never as a body token.
     if (token && !/^(none|-|n\/a)$/i.test(token) && !isBasicAuthCredential(apiKey)) body.token = token;
 
-    // Heavy H3 graphs (two-pass DualClock, U30 Singularity upscale, U06 multi-ref) — free leftovers
-    // from the previous job before queueing. SelfLift / U35 / every other graph stay unchanged.
-    if (h3TwoPassRefs || h3Singularity || multiRefH3Video) await freeComfyVram(baseUrl, apiKey, signal);
+    // H3 video on rented pods (seetacloud ~32GB) leaves 20–28GB resident after a run; the next
+    // SamplerCustomAdvanced then dies with "Allocation on device would exceed allowed memory"
+    // despite the new job alone fitting. Unload before every native video-sink submit — including
+    // U35/U37 which previously skipped /free. Non-video graphs are untouched.
+    if (hasComfyVideoSink(args.workflow)) await freeComfyVram(baseUrl, apiKey, signal);
 
     const submitUrl = comfyUiUrl(baseUrl, "/prompt");
     const submit = await axios.post(submitUrl, body, {
