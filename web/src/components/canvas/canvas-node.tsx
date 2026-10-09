@@ -1197,13 +1197,18 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
     }
 
     // A dead blob: URL (revoked mid-session / failed hydration) leaves a plain <video> black
-    // forever. Rebuild a fresh object URL from the stored blob and retry a few times.
+    // forever. Rebuild a fresh object URL from the stored blob and retry a few times. After the
+    // retries are exhausted, surface a toast — silent play() rejection used to look like a dead
+    // Play button when the stored bytes were a non-video (e.g. a VHS preview gif mislabeled mp4).
     const handleVideoError = () => {
-        if (!storageKey || retriesRef.current >= 2) return;
-        retriesRef.current += 1;
-        void refreshMediaUrl(storageKey).then((next) => {
-            if (next && next !== playableSrc) setPlayableSrc(next);
-        });
+        if (storageKey && retriesRef.current < 2) {
+            retriesRef.current += 1;
+            void refreshMediaUrl(storageKey).then((next) => {
+                if (next && next !== playableSrc) setPlayableSrc(next);
+            });
+            return;
+        }
+        message.error(t("canvas.video.playbackFailed"));
     };
 
     useEffect(() => {

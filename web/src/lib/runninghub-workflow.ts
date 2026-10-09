@@ -252,6 +252,9 @@ function explainRunningHubError(error: unknown, workflowId: string): Error {
     if (isWorkflowPermissionMessage(message) && isQwenKleinSkinWorkflow(workflowId)) {
         return new Error(i18n.t("apiErrors.runningHubKleinSkinScriptRequired", { id: workflowId }));
     }
+    if (isWorkflowPermissionMessage(message) && isMinimaxH3RefTopWorkflow(workflowId)) {
+        return new Error(i18n.t("apiErrors.runningHubH3RefTopScriptRequired", { id: workflowId }));
+    }
     if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) return new Error(apiText("runningHubNoBalance"));
     if (isUnknownServerError(message)) return new Error(apiText("runningHubUnknownError"));
     if (error instanceof Error && error.message && !isUnknownServerError(error.message)) return error;
@@ -1907,18 +1910,188 @@ function applyMinimaxH3SelfLiftSettings(
     return { workflow: next, structuralRepair: true };
 }
 
+// MiniMax H3 Ref 顶级多参（不偏色不油光）— runninghub.cn 2108554342591717378.
+// Single-pass Ref2VA: MiniMaxH3ReferenceToVideo (153) with width/height links into
+// ResolutionSelector (115), length via Float (Duration) (132) → ComfyMathExpression (131).
+// The user idea text lives in PrimitiveStringMultiline (220) → QwenH3PromptLocal (219) →
+// YC_ShowText (215) → H3 `prompt`; CLIPTextEncode (199) is a fixed anti-oil negative.
+// Reference slot `ref_image_0` links through ImageResizeKJv2 (155) into LoadImage (137) — the
+// vibe-short writer only knows direct LoadImage targets, so it would disconnect the only slot
+// and throw "reference not applied". Generic prompt/size/tier writers also miss 220 / 115 / 132.
+// Scoped to this one id only (previously mis-listed under the Klein T2I allow-list).
+const MINIMAX_H3_REF_TOP_WORKFLOW_IDS = new Set(["2108554342591717378"]);
+const MINIMAX_H3_REF_TOP_SECONDS = { min: 2, max: 30 };
+
+function isMinimaxH3RefTopWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment.trim().replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "").trim();
+        return MINIMAX_H3_REF_TOP_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate: clip-only H3 Ref graph (image path may hand a video back). */
+export function isMinimaxH3RefTopWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3RefTopWorkflow(workflowId);
+}
+
+/** Walk ImageResize / pass-throughs to the LoadImage that actually holds the filename. */
+function resolveComfyImageLoaderId(workflow: ComfyWorkflow, startId: string, depth = 0): string {
+    if (!startId || depth > 6) return "";
+    const node = workflow[startId];
+    if (!node) return "";
+    if (/LoadImage/i.test(String(node.class_type || "")) && imageFieldName(node)) return startId;
+    for (const field of ["image", "images", "url", "source", "input"]) {
+        const value = node.inputs?.[field];
+        if (!Array.isArray(value) || value[0] == null) continue;
+        const found = resolveComfyImageLoaderId(workflow, String(value[0]), depth + 1);
+        if (found) return found;
+    }
+    for (const value of Object.values(node.inputs || {})) {
+        if (!Array.isArray(value) || value[0] == null) continue;
+        const found = resolveComfyImageLoaderId(workflow, String(value[0]), depth + 1);
+        if (found) return found;
+    }
+    return "";
+}
+
+/**
+ * User idea text for QwenH3PromptLocal: prefer the multiline feeding that node's `prompt`, not the
+ * H3 sampler's baked ShowText / negative CLIP slots the generic scorer would hit.
+ */
+function minimaxH3RefTopPromptNodeId(workflow: ComfyWorkflow): string {
+    const optimizer = Object.entries(workflow).find(([, node]) => /QwenH3PromptLocal/i.test(String(node?.class_type || "")));
+    if (optimizer) {
+        const link = optimizer[1].inputs?.prompt;
+        const sourceId = Array.isArray(link) ? String(link[0]) : "";
+        if (sourceId && workflow[sourceId]?.class_type === "PrimitiveStringMultiline") return sourceId;
+    }
+    const titled = Object.entries(workflow).find(
+        ([, node]) =>
+            node.class_type === "PrimitiveStringMultiline" &&
+            typeof node.inputs?.value === "string" &&
+            /Input Text \(Prompt\)|提示词|prompt/i.test(String(node._meta?.title || "")),
+    );
+    if (titled) return titled[0];
+    return workflow["220"] ? "220" : "";
+}
+
+function applyMinimaxH3RefTopSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    seconds?: string,
+    aspect = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow; structuralRepair: boolean } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    let structuralRepair = false;
+
+    // Reference → walk Resize → LoadImage. Unfilled slots are disconnected so the author's baked
+    // demo face cannot leak; require at least one upload when the user provided any.
+    let writtenReferences = 0;
+    const disconnected: string[] = [];
+    const slotInfo = minimaxH3ReferenceVideoSlots(next);
+    if (slotInfo) {
+        const { consumer, slots } = slotInfo;
+        slots.forEach((slot, position) => {
+            const loaderId = resolveComfyImageLoaderId(next, slot.sourceId) || slot.sourceId;
+            const loader = next[loaderId];
+            const field = loader ? imageFieldName(loader) : "";
+            const value = imageValues[position];
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+                return;
+            }
+            const consumerInputs = consumer.inputs;
+            if (consumerInputs && slot.key in consumerInputs) {
+                delete consumerInputs[slot.key];
+                disconnected.push(slot.sourceId);
+                if (loaderId !== slot.sourceId) disconnected.push(loaderId);
+                structuralRepair = true;
+            }
+        });
+        // QwenH3PromptLocal also wires `reference_images.reference_image_0` into the same resize —
+        // drop unused keys there too so a disconnected resize chain is fully unused.
+        for (const node of Object.values(next)) {
+            if (!/QwenH3PromptLocal/i.test(String(node.class_type || "")) || !node.inputs) continue;
+            for (const key of Object.keys(node.inputs)) {
+                if (!/^reference_images\.reference_image_\d+$/.test(key)) continue;
+                const link = node.inputs[key];
+                const sourceId = Array.isArray(link) ? String(link[0]) : "";
+                if (sourceId && disconnected.includes(sourceId)) {
+                    delete node.inputs[key];
+                    structuralRepair = true;
+                }
+            }
+        }
+    } else if (imageValues.length) {
+        const loaders = Object.entries(next).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")) && imageFieldName(node));
+        imageValues.forEach((value, index) => {
+            const loader = loaders[index]?.[1];
+            const field = loader ? imageFieldName(loader) : "";
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+            }
+        });
+    }
+    if (disconnected.length && pruneOrphanedReferenceChain(next, disconnected)) structuralRepair = true;
+    if (imageValues.length && !writtenReferences) throw new Error(apiText("runningHubReferenceNotApplied"));
+
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_REF_TOP_SECONDS.max, Math.max(MINIMAX_H3_REF_TOP_SECONDS.min, duration));
+        const durationNode =
+            next["132"] ||
+            findComfyNode(next, (node) => /Primitive(Float|Int)/i.test(String(node.class_type || "")) && /时长|duration|长度/i.test(String(node._meta?.title || "")));
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
+    }
+
+    const selector = next["115"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        if (aspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+        }
+        const requested = Number(megapixels);
+        if (typeof megapixels === "string" && megapixels.trim() && Number.isFinite(requested) && requested > 0) {
+            const baked = typeof selector.inputs.megapixels === "number" ? Number(selector.inputs.megapixels) : 0;
+            selector.inputs.megapixels = Math.max(baked > 0 ? baked : 0, requested);
+        }
+    }
+
+    if (prompt.trim()) {
+        const promptId = minimaxH3RefTopPromptNodeId(next);
+        const promptNode = promptId ? next[promptId] : undefined;
+        if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+    }
+
+    // RandomNoise + QwenH3PromptLocal seed — fixed seeds would replay the same clip / rewrite.
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        if (/RandomNoise/i.test(type) && typeof node.inputs?.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
+        if (/QwenH3PromptLocal/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+    }
+
+    // Always structural: local Export (API) JSON is the runnable copy when getJsonApiFormat denies.
+    return { workflow: next, structuralRepair: true };
+}
+
 // Qwen Image 2.1 + Flux2 Klein 皮肤肌理 T2I (runninghub.ai U2108554415855054850 /
-// runninghub.cn 2108554405246226433 / 2108554342591717378). Two-stage graph: KSampler (161) drafts
-// from CLIPTextEncode (5)/(7), then SamplerCustomAdvanced + RandomNoise (50) refines with a fixed
-// Klein enhance prompt on CLIPTextEncode (54). EmptyLatentImage size is a link into
-// ResolutionSelector (168); Klein's ImageScaleToTotalPixels (56) is a separate 4MP refine target.
-// Generic writers break this graph:
+// runninghub.cn 2108554405246226433). Two-stage graph: KSampler (161) drafts from CLIPTextEncode
+// (5)/(7), then SamplerCustomAdvanced + RandomNoise (50) refines with a fixed Klein enhance prompt
+// on CLIPTextEncode (54). EmptyLatentImage size is a link into ResolutionSelector (168); Klein's
+// ImageScaleToTotalPixels (56) is a separate 4MP refine target. Generic writers break this graph:
 //   - writeRunningHubPrompt scores every CLIPTextEncode titled "(Prompt)" at 40, so it would paint
 //     the user text onto 5 *and* the negative (7) *and* the Klein enhance slot (54);
 //   - writeRunningHubSize cannot produce ResolutionSelector's label enum ("2:3 (Portrait Photo)");
 //   - writeRunningHubTier force-maps any `megapixels` in {1,2,4}, including the refine node's 4MP.
 // Pure T2I — no LoadImage. Scoped to these ids only.
-const QWEN_KLEIN_SKIN_WORKFLOW_IDS = new Set(["2108554415855054850", "2108554405246226433", "2108554342591717378"]);
+const QWEN_KLEIN_SKIN_WORKFLOW_IDS = new Set(["2108554415855054850", "2108554405246226433"]);
 
 function isQwenKleinSkinWorkflow(workflowId?: string | null) {
     const raw = String(workflowId || "")
@@ -1941,7 +2114,7 @@ export function isQwenKleinSkinWorkflowId(workflowId?: string | null) {
 
 /** Workflows that prefer model-script Export (API) JSON + comfy/run when the shared id denies ACL. */
 function usesRunningHubLocalExportGraph(workflowId?: string | null) {
-    return isMinimaxH3SelfLiftWorkflow(workflowId) || isQwenKleinSkinWorkflow(workflowId);
+    return isMinimaxH3SelfLiftWorkflow(workflowId) || isQwenKleinSkinWorkflow(workflowId) || isMinimaxH3RefTopWorkflow(workflowId);
 }
 
 function applyQwenKleinSkinSettings(
@@ -2154,6 +2327,14 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const selfLift = applyMinimaxH3SelfLiftSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
         const list = workflowNodeInfoList(workflow, selfLift.workflow);
         return { nodeInfoList: list, graph: selfLift.workflow };
+    }
+    // H3 Ref 顶级多参 opts out (see applyMinimaxH3RefTopSettings): ref slot goes through
+    // ImageResizeKJv2, user text feeds QwenH3PromptLocal (220), and duration/size sit behind links
+    // the generic writers miss. Always ship `graph` for the local Export (API) JSON path.
+    if (isMinimaxH3RefTopWorkflow(workflowId)) {
+        const refTop = applyMinimaxH3RefTopSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
+        const list = workflowNodeInfoList(workflow, refTop.workflow);
+        return { nodeInfoList: list, graph: refTop.workflow };
     }
     // Qwen+Klein 皮肤肌理 T2I opts out for the same class of reasons (see applyQwenKleinSkinSettings):
     // the generic prompt scorer would overwrite the negative and Klein enhance CLIP slots, the size
@@ -2830,6 +3011,9 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     if (!workflow && fetchPermissionDenied && isQwenKleinSkinWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubKleinSkinScriptRequired", { id: workflowId }));
+    }
+    if (!workflow && fetchPermissionDenied && isMinimaxH3RefTopWorkflow(workflowId)) {
+        throw new Error(i18n.t("apiErrors.runningHubH3RefTopScriptRequired", { id: workflowId }));
     }
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     const uploaded: string[] = [];

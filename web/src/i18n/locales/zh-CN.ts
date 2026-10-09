@@ -309,6 +309,7 @@ export default {
         runningHubWorkflowNotExists: "RunningHub 找不到这个 ID（{{id}}）。请填你自己账号里的数字：工作流页面是地址栏 /workflow/ 后面的数字，AI 应用页面是 /ai-detail/ 后面的数字。别人的分享链接要先保存到自己的工作流，并在网站上成功运行一次。",
         runningHubSelfLiftScriptRequired: "RunningHub 工作流 {{id}}（SelfLift 双采简易版）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（如 MiniMax H3 真·上下文无缝无色差长视频 SelfLift双采简易版）粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
         runningHubKleinSkinScriptRequired: "RunningHub 工作流 {{id}}（Qwen Image 2.1 + Klein 皮肤肌理）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（如 QwenImage2.1+Klein 无敌真实皮肤肌理）粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
+        runningHubH3RefTopScriptRequired: "RunningHub 工作流 {{id}}（MiniMax H3 Ref 顶级多参）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（如 Minimax H3 Ref 顶级多参，不偏色，不油光）粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
         runningHubWorkflowNotRun: "这个工作流还不能用接口调用。请先在 RunningHub 网站上打开它，保存并成功运行一次。",
         runningHubNoTaskId: "RunningHub 未返回 taskId",
         runningHubTaskFailed: "RunningHub 任务失败",
@@ -1206,6 +1207,9 @@ export default {
             permissionDenied: "没有写入权限，请重新选择草稿文件夹",
             savedToFolder: "已保存到草稿文件夹「{{folder}}」：{{name}}",
             rebindForFolderSave: "当前草稿未绑定文件夹，请用 Ctrl/Cmd+S 重新选择草稿文件夹后，即可直接保存到该路径",
+        },
+        video: {
+            playbackFailed: "视频无法播放：文件格式无效或已损坏。请重新生成（需等待最终 MP4，而非预览 GIF）。",
         },
     },
     navigation: {

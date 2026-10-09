@@ -41,6 +41,49 @@ const HISTORY_FAST_INTERVAL_MS = 800;
 const HISTORY_TIMEOUT_MS = 60 * 60 * 1000;
 /** After status=success, keep polling this many times for a late-persisted VHS mp4 (ComfyUI #11540). */
 const VIDEO_HISTORY_GRACE_POLLS = 12;
+/**
+ * U24 DualClock / H3-video on rented pods: long clips + HIGH refine routinely OOM the worker;
+ * seetacloud's nginx then answers every subsequent call with HTTP 502. Cap canvas duration for
+ * that family only (author template is 15s — still too heavy on ~24–32GB cards).
+ */
+const TWO_PASS_H3_MAX_SECONDS = 10;
+/** Draft megapixel ceiling for DualClock LOW pass (author bakes 0.4; 1080p ≈0.9 after ÷scale²). */
+const TWO_PASS_H3_MAX_DRAFT_MEGAPIXELS = 0.7;
+
+/** Rented / tunnel hosts whose nginx often returns 502 while ComfyUI is unloading or restarting. */
+function isFlakyComfyGatewayHost(baseUrl: string) {
+    return /seetacloud\.com|cloud\.ai\.cpolar|ngrok|trycloudflare|compshare\.cn/i.test(String(baseUrl || ""));
+}
+
+function isComfyGatewayRetryStatus(status: number | undefined) {
+    return status === 502 || status === 503 || status === 504;
+}
+
+/**
+ * Retry transient gateway failures (502/503/504) that rented ComfyUI proxies emit right after
+ * `/free`, during model unload, or under brief upstream blips. Does not retry 4xx / abort.
+ */
+async function comfyRequestWithGatewayRetry<T>(
+    run: () => Promise<T>,
+    options?: { signal?: AbortSignal; attempts?: number; label?: string },
+): Promise<T> {
+    const attempts = Math.max(1, options?.attempts ?? 3);
+    let lastError: unknown;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        try {
+            return await run();
+        } catch (error) {
+            lastError = error;
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+            const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+            const network = axios.isAxiosError(error) && !error.response;
+            if ((!isComfyGatewayRetryStatus(status) && !network) || attempt >= attempts - 1) throw error;
+            await sleep(1200 * (attempt + 1), options?.signal);
+        }
+    }
+    throw lastError instanceof Error ? lastError : new Error(options?.label || "ComfyUI gateway request failed");
+}
 
 /** True for typical rented / proxied ComfyUI endpoints (not AutoDL hosted workflow API). */
 export function isNativeComfyUiBaseUrl(baseUrl: string): boolean {
@@ -1412,7 +1455,13 @@ export function applyComfyVideoSettings(
     const pixels = pixelsFromSizeAndQuality(settings.size, settings.vquality);
     const megapixels = megapixelsFromPixels(pixels.width, pixels.height);
     const aspectLabel = resolutionSelectorAspectLabel(pixels.ratio);
-    const seconds = parseCanvasSeconds(settings.seconds);
+    // DualClock only: clamp duration before the Float (Duration) write so long canvas defaults
+    // cannot push the HIGH refine past rented-card VRAM (which surfaces as seetacloud 502).
+    const parsedSeconds = parseCanvasSeconds(settings.seconds);
+    const seconds =
+        settings.twoPassH3Video && parsedSeconds != null
+            ? Math.min(parsedSeconds, TWO_PASS_H3_MAX_SECONDS)
+            : parsedSeconds;
 
     // Sampling steps for scheduler nodes (BasicScheduler / KSampler / Scheduler steps).
     const steps = parseComfySteps(settings.steps);
@@ -1444,11 +1493,10 @@ export function applyComfyVideoSettings(
                     // silently pull it down. Only raise (or match) the authored floor.
                     // U24 DualClock on rented ~24–32GB pods: an uncapped 2K canvas budget yields
                     // ~1.6 MP draft then ×1.5² refine and OOMs the worker — seetacloud's gateway
-                    // then returns HTTP 502 on /history|/view. Cap the DualClock draft only
-                    // (Singularity keeps its raise-floor math untouched).
+                    // then returns HTTP 502. Cap the DualClock draft only (Singularity untouched).
                     const nextMegapixels = settings.singularityH3Video
                         ? Math.max(authoredMegapixels, draft)
-                        : Math.min(draft, Math.max(authoredMegapixels, 1));
+                        : Math.min(draft, Math.max(authoredMegapixels, TWO_PASS_H3_MAX_DRAFT_MEGAPIXELS));
                     writeComfyNumberInput(node, "megapixels", nextMegapixels);
                 }
             } else if (settings.selfLiftH3Video || settings.resolutionSelectorH3Video) {
@@ -1798,10 +1846,14 @@ async function uploadComfyInputFile(
     // ComfyUI stores uploads under input/ via this endpoint for images and audio alike.
     body.append("image", file);
     body.append("overwrite", "true");
-    const response = await axios.post(comfyUiUrl(baseUrl, "/upload/image"), body, {
-        headers: authHeaders(apiKey),
-        signal: options?.signal,
-    });
+    const response = await comfyRequestWithGatewayRetry(
+        () =>
+            axios.post(comfyUiUrl(baseUrl, "/upload/image"), body, {
+                headers: authHeaders(apiKey),
+                signal: options?.signal,
+            }),
+        { signal: options?.signal, attempts: isFlakyComfyGatewayHost(baseUrl) ? 3 : 1, label: "ComfyUI /upload/image" },
+    );
     const name = readComfyUploadName(response.data);
     if (!name) {
         const mime = String((response.headers as unknown as Record<string, unknown> | undefined)?.["content-type"] || "").split(";")[0].trim();
@@ -1888,6 +1940,11 @@ function collectTextsFromHistory(outputs: HistoryOutputs | undefined): string[] 
     return texts;
 }
 
+/** True for a ComfyUI history filename that is a real playable video container (not a preview gif). */
+function isComfyVideoFilename(filename: string) {
+    return /\.(mp4|webm|mov|mkv)$/i.test(filename || "");
+}
+
 function collectMediaFromHistory(outputs: HistoryOutputs | undefined) {
     const images: Array<{ filename: string; subfolder: string; type: string }> = [];
     const videos: Array<{ filename: string; subfolder: string; type: string }> = [];
@@ -1896,12 +1953,19 @@ function collectMediaFromHistory(outputs: HistoryOutputs | undefined) {
         for (const item of node.images || []) {
             if (!item?.filename) continue;
             const entry = { filename: item.filename, subfolder: item.subfolder || "", type: item.type || "output" };
-            if (/\.(mp4|webm|mov)$/i.test(item.filename)) videos.push(entry);
+            if (isComfyVideoFilename(item.filename)) videos.push(entry);
             else images.push(entry);
         }
+        // VHS_VideoCombine parks animated *preview* stills in `gifs` (often `.gif` / `.webp`) while
+        // the delivered clip is the `.mp4` in the same array (or in `videos`). Treating every `gifs`
+        // entry as a video made the poll break as soon as a preview appeared, then
+        // `pickPrimaryComfyVideo` fell back to that gif and stamped it `video/mp4` — the canvas
+        // node looked ready but click-to-play failed. Only real video containers count here.
         for (const item of [...(node.gifs || []), ...(node.videos || [])]) {
             if (!item?.filename) continue;
-            videos.push({ filename: item.filename, subfolder: item.subfolder || "", type: item.type || "output" });
+            const entry = { filename: item.filename, subfolder: item.subfolder || "", type: item.type || "output" };
+            if (isComfyVideoFilename(item.filename)) videos.push(entry);
+            else if (/\.(gif|webp|png|jpe?g)$/i.test(item.filename)) images.push(entry);
         }
     }
     return { images, videos };
@@ -1910,17 +1974,53 @@ function collectMediaFromHistory(outputs: HistoryOutputs | undefined) {
 /**
  * Pick the final delivered clip from a history media list.
  *
- * Preview / intermediate nodes often also land mp4/webm stubs in `gifs`; downloading every one
- * through the seetacloud proxy added minutes after the workflow had already finished. Prefer a
- * real `.mp4`, then the last entry (VHS_VideoCombine is typically the terminal writer).
+ * Preview / intermediate nodes often also land stubs in `gifs`; downloading every one through the
+ * seetacloud proxy added minutes after the workflow had already finished. Prefer a real `.mp4`,
+ * else the last playable container (VHS_VideoCombine is typically the terminal writer). Never fall
+ * back to a non-video filename — that path produced unplayable canvas nodes.
  */
 function pickPrimaryComfyVideo(
     videos: Array<{ filename: string; subfolder: string; type: string }>,
 ): { filename: string; subfolder: string; type: string } | null {
-    if (!videos.length) return null;
-    const mp4s = videos.filter((item) => /\.mp4$/i.test(item.filename));
-    const pool = mp4s.length ? mp4s : videos;
+    const playable = videos.filter((item) => isComfyVideoFilename(item.filename));
+    if (!playable.length) return null;
+    const mp4s = playable.filter((item) => /\.mp4$/i.test(item.filename));
+    const pool = mp4s.length ? mp4s : playable;
     return pool[pool.length - 1] || null;
+}
+
+/**
+ * Reject empty / HTML / JSON / GIF bodies that proxies sometimes return with HTTP 200 for `/view`.
+ * Without this check those bytes get force-typed as `video/mp4` and land on the canvas as a black,
+ * unplayable node.
+ */
+async function assertPlayableComfyVideoBlob(blob: Blob, mimeHint: string) {
+    if (!blob || blob.size < 32) throw new Error("ComfyUI returned an empty video file");
+    const head = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
+    const asLatin = String.fromCharCode(...head);
+    if (head[0] === 0x3c /* < */ || /^\s*</.test(asLatin)) {
+        throw new Error("ComfyUI /view returned an HTML page instead of a video file (check the Base URL / proxy)");
+    }
+    if (head[0] === 0x7b /* { */ || head[0] === 0x5b /* [ */) {
+        throw new Error("ComfyUI /view returned JSON instead of a video file");
+    }
+    // GIF87a / GIF89a — the classic VHS preview mis-labeled as mp4.
+    if (asLatin.startsWith("GIF8")) {
+        throw new Error("ComfyUI returned a GIF preview instead of the final MP4 — wait for the VHS output and retry");
+    }
+    const isFtyp = head[4] === 0x66 && head[5] === 0x74 && head[6] === 0x79 && head[7] === 0x70; // ....ftyp
+    const isWebm = head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3;
+    const isRiff = asLatin.startsWith("RIFF");
+    const hint = String(mimeHint || "").toLowerCase();
+    if (hint.includes("webm")) {
+        if (!isWebm) throw new Error("ComfyUI returned a file that is not a WebM video");
+        return;
+    }
+    if (hint.includes("mp4") || hint.includes("quicktime") || !hint) {
+        if (!isFtyp && !isRiff && !isWebm) {
+            throw new Error("ComfyUI returned a file that is not a playable MP4/WebM video");
+        }
+    }
 }
 
 async function fetchComfyView(
@@ -2137,6 +2237,9 @@ async function freeComfyVram(baseUrl: string, apiKey: string, signal?: AbortSign
             { unload_models: true, free_memory: true },
             { headers: authHeaders(apiKey, "application/json"), signal, timeout: 30_000 },
         );
+        // Seetacloud nginx often 502s the very next /prompt while models are still unloading.
+        // A short settle is scoped to those flaky tunnel hosts so other channels stay snappy.
+        if (isFlakyComfyGatewayHost(baseUrl)) await sleep(2500, signal);
     } catch {
         // Optimisation only — never let a missing/failing /free endpoint break a generation.
     }
@@ -2308,10 +2411,24 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     if (hasComfyVideoSink(args.workflow)) await freeComfyVram(baseUrl, apiKey, signal);
 
     const submitUrl = comfyUiUrl(baseUrl, "/prompt");
-    const submit = await axios.post(submitUrl, body, {
-        headers: authHeaders(apiKey, "application/json"),
-        signal,
-    });
+    // DualClock / seetacloud: /prompt right after /free commonly 502s once; retry absorbs that
+    // without changing behaviour for stable self-hosted ComfyUI.
+    const submitRetries = h3TwoPassRefs || isFlakyComfyGatewayHost(baseUrl) ? 3 : 1;
+    let submit: { status: number; headers: unknown; data: unknown };
+    try {
+        submit = await comfyRequestWithGatewayRetry(
+            () => axios.post(submitUrl, body, { headers: authHeaders(apiKey, "application/json"), signal }),
+            { signal, attempts: submitRetries, label: "ComfyUI /prompt" },
+        );
+    } catch (error) {
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        if (h3TwoPassRefs && isComfyGatewayRetryStatus(status)) {
+            throw new Error(
+                `ComfyUI gateway error (HTTP ${status}). For H3-video / U24 DualClock on seetacloud this usually means the pod OOM'd or is still unloading after /free — wait ~30s, use ≤10s + 1080p (not 2K), keep 1–2 reference images, then retry.`,
+            );
+        }
+        throw error;
+    }
     const submitted = readComfySubmit(submit.data);
     if (!submitted.promptId && submitted.taskId && /runninghub\.(cn|ai)/i.test(baseUrl)) {
         return finishRunningHubTask(baseUrl, apiKey, submitted.taskId, signal);
@@ -2368,21 +2485,46 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         let sawHistoryEntry = false;
         while (performance.now() < deadline) {
             if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-            const history = await axios.get(comfyUiUrl(baseUrl, `/history/${encodeURIComponent(promptId)}`), {
-                headers: authHeaders(apiKey),
-                signal,
-            });
-            const entry = history.data?.[promptId] || history.data;
+            const historyRetries = waitForVideoArtifact || isFlakyComfyGatewayHost(baseUrl) ? 3 : 1;
+            let history: { data: unknown };
+            try {
+                history = await comfyRequestWithGatewayRetry(
+                    () =>
+                        axios.get(comfyUiUrl(baseUrl, `/history/${encodeURIComponent(promptId)}`), {
+                            headers: authHeaders(apiKey),
+                            signal,
+                        }),
+                    { signal, attempts: historyRetries, label: "ComfyUI /history" },
+                );
+            } catch (error) {
+                const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+                // A mid-poll 502 often means the DualClock worker died; keep waiting a bit longer
+                // instead of failing the whole job on one flaky gateway response.
+                if (h3TwoPassRefs && isComfyGatewayRetryStatus(status)) {
+                    await sleep(HISTORY_INTERVAL_MS * 2, signal);
+                    continue;
+                }
+                throw error;
+            }
+            const historyRoot = history.data as Record<string, unknown> | undefined;
+            const entry = (historyRoot?.[promptId] || historyRoot) as
+                | {
+                      status?: { status_str?: string; messages?: unknown[]; completed?: boolean };
+                      outputs?: HistoryOutputs;
+                  }
+                | undefined;
             const statusStr = String(entry?.status?.status_str || "");
             const messages = Array.isArray(entry?.status?.messages) ? entry.status.messages : [];
             const hasExecutionError = messages.some((m: unknown) => Array.isArray(m) && m[0] === "execution_error");
             if (statusStr === "error" || hasExecutionError) {
                 throw new Error(describeComfyExecutionError(entry));
             }
-            const entryOutputs = entry?.outputs && typeof entry.outputs === "object" ? (entry.outputs as HistoryOutputs) : undefined;
+            const entryOutputs = entry?.outputs && typeof entry.outputs === "object" ? entry.outputs : undefined;
             if (entryOutputs && Object.keys(entryOutputs).length) {
                 sawHistoryEntry = true;
                 if (waitForVideoArtifact) {
+                    // `collectMediaFromHistory` only counts real containers (.mp4/.webm/…); preview
+                    // gifs no longer trip this branch, so we keep polling until VHS writes the clip.
                     const partial = collectMediaFromHistory(entryOutputs);
                     const completed = entry?.status?.completed === true || statusStr === "success";
                     if (partial.videos.length) {
@@ -2430,18 +2572,22 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         // after ComfyUI had already finished.
         if (waitForVideoArtifact && media.videos.length) {
             const primary = pickPrimaryComfyVideo(media.videos);
-            if (primary) {
-                const blob = await fetchComfyView(baseUrl, apiKey, primary, { signal });
-                const extMime = /\.webm$/i.test(primary.filename)
-                    ? "video/webm"
-                    : /\.(mov|mkv)$/i.test(primary.filename)
-                      ? "video/quicktime"
-                      : /\.mp4$/i.test(primary.filename)
-                        ? "video/mp4"
-                        : "";
-                const mimeType = extMime || (blob.type && blob.type.startsWith("video/") ? blob.type : "video/mp4");
-                videos.push({ blob, mimeType });
+            if (!primary) {
+                throw new Error("ComfyUI finished but returned no playable video file (mp4/webm)");
             }
+            const blob = await fetchComfyView(baseUrl, apiKey, primary, { signal });
+            const extMime = /\.webm$/i.test(primary.filename)
+                ? "video/webm"
+                : /\.(mov|mkv)$/i.test(primary.filename)
+                  ? "video/quicktime"
+                  : "video/mp4";
+            const mimeType = blob.type && blob.type.startsWith("video/") ? blob.type : extMime;
+            // Force a typed blob so IndexedDB / <video> see a real video MIME even when /view
+            // answered with application/octet-stream — but only after the bytes pass the
+            // container sniff (rejects HTML/JSON/GIF previews that used to land unplayable).
+            await assertPlayableComfyVideoBlob(blob, mimeType);
+            const typed = blob.type === mimeType ? blob : new Blob([blob], { type: mimeType });
+            videos.push({ blob: typed, mimeType });
         } else {
             for (const file of media.images) {
                 const blob = await fetchComfyView(baseUrl, apiKey, file, { signal });

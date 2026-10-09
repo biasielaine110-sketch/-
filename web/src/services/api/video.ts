@@ -331,6 +331,15 @@ async function createNativeComfyUiVideoTask(
         return { id, provider: "plugin", model };
     } catch (error) {
         if (error instanceof Error && (error.message.includes("comfy") || error.message.includes("ComfyUI"))) throw error;
+        // Surface seetacloud / proxy 502 with the native job's own wording when present; otherwise
+        // keep the short gateway label so users are not left with a bare Axios status string.
+        if (axios.isAxiosError(error) && (error.response?.status === 502 || error.response?.status === 503)) {
+            throw new Error(
+                error.message?.includes("H3-video") || error.message?.includes("DualClock")
+                    ? error.message
+                    : `${apiText("badGateway")}（ComfyUI / seetacloud）。H3-video 双采请缩短时长至 ≤10s、清晰度用 1080p，并确保已粘贴 U24 Export JSON。`,
+            );
+        }
         throw new Error(error instanceof Error ? error.message : apiText("requestFailed"));
     }
 }
