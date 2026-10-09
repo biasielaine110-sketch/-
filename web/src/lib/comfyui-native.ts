@@ -738,6 +738,34 @@ function isMiniMaxH3ConditioningNode(node: ComfyNode) {
     return /MiniMaxH3(?:AudioConditioning|ReferenceToVideo|TextToVideo|VideoConditioning)/i.test(String(node?.class_type || ""));
 }
 
+/** The exact inputs the Compshare drive-audio contract writes onto an H3 conditioning node. */
+const H3_AUDIO_DRIVING_FIELDS = [
+    "drive_audio",
+    "final_audio",
+    "audio_mode",
+    "add_source_as_reference",
+    "prompt_primary_audio_ordinal",
+];
+
+/**
+ * True for an H3 conditioning node that declares *some* audio-driving surface, i.e. the contract in
+ * `applyComfyMiniMaxDriveAudio` has somewhere legitimate to land.
+ *
+ * The U06 「多图参考生视频」 `MiniMaxH3ReferenceToVideo` node declares none of these — only an
+ * `audio_vae` for its own native track — yet the writer still stamped `drive_audio` onto it, and the
+ * server's `MiniMaxH3ReferenceToVideo.execute()` rejects that keyword, failing the whole submission
+ * before a single step ran. Gating on the node's own declared surface touches only nodes whose every
+ * injected field would be an invention: Compshare's `MiniMaxH3AudioConditioningT8` declares
+ * `audio_mode` / `add_source_as_reference` / `prompt_primary_audio_ordinal`, and any graph that wires
+ * real `ref_audios.*` slots keeps the exact injection it had before.
+ */
+function isComfyMiniMaxAudioDrivingNode(node: ComfyNode) {
+    if (!isMiniMaxH3ConditioningNode(node) || !node.inputs) return false;
+    return Object.keys(node.inputs).some(
+        (key) => key.startsWith("ref_audios.") || H3_AUDIO_DRIVING_FIELDS.includes(key),
+    );
+}
+
 function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
     let index = 1;
     while (workflow[`${prefix}${index}`]) index += 1;
@@ -752,7 +780,13 @@ function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
 export function applyComfyMiniMaxDriveAudio(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
     if (!filenames.length) return workflow;
     const next = cloneWorkflow(workflow);
-    const targets = Object.values(next).filter(isMiniMaxH3ConditioningNode);
+    // Only inject where the node itself declares an audio-driving surface (see the helper). The U06
+    // 「多图参考生视频」 `MiniMaxH3ReferenceToVideo` declares none and its `execute()` rejects
+    // `drive_audio`, so stamping it there failed every submission with "got an unexpected keyword
+    // argument 'drive_audio'". Nodes that do expose the surface keep the exact injection as before.
+    const targets = Object.values(next).filter(isComfyMiniMaxAudioDrivingNode);
+    // No node in this graph can consume audio, so the upload is unusable here. Leave the graph
+    // exactly as authored instead of planting orphan `LoadAudio` nodes nothing links to.
     if (!targets.length) return next;
 
     const existingLoaders = Object.entries(next)
