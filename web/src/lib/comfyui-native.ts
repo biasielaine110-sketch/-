@@ -164,47 +164,26 @@ export function comfyUiUrl(baseUrl: string, path: string): string {
     return proxyApiUrl(`${root}${normalizedPath}`);
 }
 
-/**
- * Normalize the channel API Key for ComfyUI.
- * Console copy-paste often looks like `token=$2b$12$…` (ComfyUI-Login); strip that prefix.
- */
-function normalizeComfyApiToken(apiKey: string): string {
-    let raw = String(apiKey || "").trim();
-    if (!raw || /^(none|-|n\/a)$/i.test(raw)) return "";
-    raw = raw.replace(/^Bearer\s+/i, "").trim();
-    raw = raw.replace(/^token\s*=\s*/i, "").trim();
-    return raw;
-}
-
-/** ComfyUI-Login API token (bcrypt), from console `token=$2b$…` or `login/PASSWORD`. */
-function isComfyLoginApiToken(apiKey: string): boolean {
-    return /^\$2[aby]?\$\d{2}\$/.test(normalizeComfyApiToken(apiKey));
-}
-
-/**
- * `user:pass` (HTTP Basic) vs a Bearer / ComfyUI-Login token.
- * Never treat `$2b$…` Login tokens as Basic — a mistaken Basic header makes every /prompt 401
- * with `{"error":"unauthorized"}` on seetacloud pods that run ComfyUI-Login.
- */
+/** `user:pass` (Basic Auth) vs a Bearer/raw token. Returns the Basic credential, or null. */
 function parseBasicCredential(apiKey: string): { user: string; pass: string } | null {
     const raw = String(apiKey || "").trim();
     if (!raw || /^(none|-|n\/a)$/i.test(raw)) return null;
-    if (/^Bearer\s+/i.test(raw) || /^token\s*=/i.test(raw)) return null;
-    if (isComfyLoginApiToken(raw)) return null;
+    if (/^Bearer\s+/i.test(raw)) return null;
     const colon = raw.indexOf(":");
     if (colon <= 0 || colon === raw.length - 1) return null;
     return { user: raw.slice(0, colon), pass: raw.slice(colon + 1) };
 }
 
 function authHeaders(apiKey: string, contentType?: string): Record<string, string> {
-    const token = normalizeComfyApiToken(apiKey);
+    const token = String(apiKey || "")
+        .replace(/^Bearer\s+/i, "")
+        .trim();
     const headers: Record<string, string> = {};
     if (contentType) headers["Content-Type"] = contentType;
     const basic = parseBasicCredential(apiKey);
     if (basic) {
         headers.Authorization = `Basic ${btoa(`${basic.user}:${basic.pass}`)}`;
-    } else if (token) {
-        // ComfyUI-Login and most rented ComfyUI gateways expect Bearer (or body `token`).
+    } else if (token && !/^(none|-|n\/a)$/i.test(token)) {
         headers.Authorization = `Bearer ${token}`;
     }
     return headers;
@@ -464,11 +443,7 @@ function comfyMultiReferenceSlotPlan(
  */
 export function isComfyH3TwoPassReferenceWorkflow(workflow: ComfyWorkflow): boolean {
     if (comfyReferenceSlotOrder(workflow).length < 2) return false;
-    const conditioning = Object.values(workflow).filter((node) => isMiniMaxH3ConditioningNode(node)).length;
-    if (conditioning < 2) return false;
-    // U24 / H3-video Export always ships MiniMaxH3DualClockSamplerT8 (+ learned two-pass plan).
-    // Require the DualClock sampler so a coincidental pair of H3 nodes cannot steal this adapter.
-    return Object.values(workflow).some((node) => /MiniMaxH3DualClockSampler/i.test(String(node?.class_type || "")));
+    return Object.values(workflow).filter((node) => isMiniMaxH3ConditioningNode(node)).length >= 2;
 }
 
 /** True for the DualClock sampler node whose class name accidentally matches `/KSampler/i`. */
@@ -825,12 +800,7 @@ function comfyBlankImagePlaceholder(workflow: ComfyWorkflow): string | null {
 }
 
 /** Map uploaded filenames onto LoadImage nodes in order. */
-export function applyComfyLoadImages(
-    workflow: ComfyWorkflow,
-    filenames: string[],
-    workflowId?: string,
-    options?: { blankFilename?: string },
-): ComfyWorkflow {
+export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[], workflowId?: string): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
     // Name allow-list OR structural fingerprint. Without the fingerprint a renamed model fell back
     // to node-id order and scrambled every reference (ref_image_0 got the last uploaded picture).
@@ -858,26 +828,38 @@ export function applyComfyLoadImages(
     // Repeating the last uploaded picture there (the legacy fallback) made the model see one
     // reference up to 8× — e.g. U24 V927 and U37 both expose 9 slots where only the first few are
     // real. Graphs without such a placeholder keep the legacy fill-up, so no other model changes
-    // behaviour — except the DualClock two-pass family, which parks an uploaded 1×1 blank.
+    // behaviour — except the DualClock two-pass family below, which disconnects unfilled slots.
     const twoPassRefs = isComfyH3TwoPassReferenceWorkflow(next);
     const blankSlot =
-        (options?.blankFilename || "").trim() ||
-        (twoPassRefs || isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null);
+        twoPassRefs || isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null;
     const loaders = slotOrder.length
         ? slotOrder.map((id) => next[id]).filter((node): node is ComfyNode => Boolean(node))
         : Object.entries(next)
               .filter(([, node]) => isComfyImageLoader(node))
               .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
               .map(([, node]) => node);
-    // U24 DualClock / H3-video: Export JSON has no author blank asset. Repeating the last upload
-    // into spare slots OOMs rented cards; *deleting* spare `ref_images.ref_image_N` keys made
-    // MiniMaxH3AudioConditioningT8 fail `/prompt` validation ("required input missing") so the
-    // job never reached the ComfyUI queue. Prefer an uploaded 1×1 blank (see runNativeComfyUiJob)
-    // via `blankSlot`. If that upload is unavailable, leave spare loaders untouched only when a
-    // filename exists — never delete slot keys on this family.
+    // U24 DualClock / H3-video: no blank placeholder in Export JSON. Repeating the last upload into
+    // spare slots OOMs rented cards. Disconnect unfilled `ref_images.ref_image_N` on every H3
+    // conditioning node instead (keeps /prompt queueable; blank-upload path was a regression that
+    // blocked submits when /upload failed). Scoped to the two-pass fingerprint only.
+    if (twoPassRefs && !blankSlot && slotOrder.length) {
+        const filled = new Set(slotOrder.filter((_, index) => Boolean(filenames[index])));
+        for (const node of Object.values(next)) {
+            if (!isMiniMaxH3ConditioningNode(node) || !node.inputs) continue;
+            for (const key of Object.keys(node.inputs)) {
+                const match = /^ref_images\.ref_image_(\d+)$/.exec(key);
+                if (!match) continue;
+                const value = node.inputs[key];
+                if (!Array.isArray(value) || value[0] == null) continue;
+                const loaderId = String(value[0]);
+                if (filled.has(loaderId)) continue;
+                delete node.inputs[key];
+            }
+        }
+    }
     loaders.forEach((node, index) => {
-        // Legacy fallback (repeat the last upload) is preserved when the graph has no blank slot
-        // and is not the DualClock two-pass family (that family needs an explicit blank upload).
+        // Legacy fallback (repeat the last upload) when the graph has no blank slot and is not
+        // the DualClock two-pass family (that family disconnects spare slots above instead).
         const name =
             filenames[index] || blankSlot || (twoPassRefs && !blankSlot ? "" : filenames[filenames.length - 1]);
         if (!name) return;
@@ -2246,11 +2228,7 @@ function describeComfySubmitFailure(args: { status: number; contentType: string;
     const errText = typeof err === "string" ? err.trim() : err && typeof err === "object" && Object.keys(err).length ? JSON.stringify(err) : "";
     const combined = `${errText} ${args.message || ""}`.toLowerCase();
     if (args.status === 401 || args.status === 403 || /unauthorized|forbidden|auth/i.test(combined)) {
-        return (
-            `ComfyUI 认证失败（HTTP ${args.status || 401}）。` +
-            `若实例装了 ComfyUI-Login（返回 {"error":"unauthorized"}），请把启动日志里的 API token（token=$2b$…，或 login/PASSWORD 首行）填进渠道 API Key，不要填浏览器登录用的 user:pass。` +
-            `也可写成 Bearer $2b$… 或直接贴 $2b$…。`
-        );
+        return `ComfyUI 认证失败（HTTP ${args.status || 401}）。请确认渠道 API Key 与实例要求一致后重试。`;
     }
     if (errText) return errText;
     if (args.message) return args.message;
@@ -2485,29 +2463,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             });
             names.push(uploaded);
         }
-        // DualClock spare slots: park a 1×1 blank instead of repeating the last large ref (OOM) or
-        // deleting `ref_images.ref_image_N` (ComfyUI rejects the /prompt — job never queues).
-        let blankFilename: string | undefined;
-        if (h3TwoPassRefs) {
-            const slotCount = comfyReferenceSlotOrder(workflow).length;
-            if (slotCount > names.length) {
-                try {
-                    blankFilename = await uploadComfyImage(
-                        baseUrl,
-                        apiKey,
-                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5W1Z8AAAAASUVORK5CYII=",
-                        "h3-dualclock-blank.png",
-                        { signal, workflowId: args.workflowId, guardUpload: false },
-                    );
-                } catch (error) {
-                    const detail = error instanceof Error ? error.message : String(error);
-                    throw new Error(`H3-video / U24 双采空槽占位图上传失败，无法推送到工作流：${detail}`);
-                }
-            }
-        }
         workflow = textFamily
             ? applyComfyTextReferenceImages(workflow, names)
-            : applyComfyLoadImages(workflow, names, args.workflowId, blankFilename ? { blankFilename } : undefined);
+            : applyComfyLoadImages(workflow, names, args.workflowId);
     } else if (!textFamily && h3MultiRefVideo && !h3SelfLift) {
         // U06 V8 (and siblings): rewire duplicated ref slots even with zero uploads so Picture 1/2
         // are not left sharing `加载图像2`. SelfLift keeps its own blank-placeholder path and is
@@ -2530,12 +2488,12 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     }
 
     const clientId = nanoid(12);
-    const token = normalizeComfyApiToken(apiKey);
+    const token = String(apiKey || "")
+        .replace(/^Bearer\s+/i, "")
+        .trim();
     const body: Record<string, unknown> = { prompt: workflow, client_id: clientId };
-    // ComfyUI-Login accepts Authorization: Bearer <token> and/or JSON body `token`.
-    // Mirror into the body for every non-Basic key (incl. `$2b$…` Login tokens). HTTP Basic
-    // user:pass is header-only and does not authorize ComfyUI-Login — those pods need the token.
-    if (token && !isBasicAuthCredential(apiKey)) body.token = token;
+    // Some ComfyUI gateways accept the key in the JSON body as well as (or instead of) the header.
+    if (token && !/^(none|-|n\/a)$/i.test(token) && !isBasicAuthCredential(apiKey)) body.token = token;
 
     const submitUrl = comfyUiUrl(baseUrl, "/prompt");
     // seetacloud: /prompt under load commonly 502s; retry for the whole host.
@@ -2825,11 +2783,7 @@ export async function probeNativeComfyUi(baseUrl: string, apiKey: string, signal
             return { ok: false, message: `HTTP ${fallback.status}` };
         }
         if (response.status === 401 || response.status === 403) {
-            return {
-                ok: false,
-                message:
-                    "ComfyUI 认证失败。若使用 ComfyUI-Login，请在 API Key 填写启动日志中的 token=$2b$…（或 login/PASSWORD 首行），不要填浏览器 user:pass。",
-            };
+            return { ok: false, message: `ComfyUI 认证失败（HTTP ${response.status}）。请确认渠道 API Key 后重试。` };
         }
         if (response.status >= 200 && response.status < 300) {
             return isComfyJsonResponse(response) ? { ok: true, message: `HTTP ${response.status}` } : { ok: false, message: `HTTP ${response.status}: ${NOT_COMFY_JSON_MESSAGE}` };
