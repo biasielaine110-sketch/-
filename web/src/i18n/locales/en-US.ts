@@ -308,6 +308,7 @@ export default {
         runningHubWorkflowFetchFailed: "This RunningHub channel is set, but the current model name \"{{model}}\" is not a workflowId. Add a model whose name is only the number after /workflow/ or /ai-detail/ in the page URL, then select that model on the node. You can also paste the full workflow link into Base URL.",
         runningHubWorkflowNotExists: "RunningHub cannot find this ID ({{id}}). Use the number from your own account: /workflow/… for a workflow, or /ai-detail/… for an AI app. Save shared links into your workflows and run them once on the site first.",
         runningHubSelfLiftScriptRequired: "RunningHub workflow {{id}} (SelfLift dual-pass lite) is not open for API access. Paste its Export Workflow (API) JSON into this model's script field and retry — you do not need the author to unlock it.",
+        runningHubKleinSkinScriptRequired: "RunningHub workflow {{id}} (Qwen Image 2.1 + Klein skin) is not open for API access. Paste its Export Workflow (API) JSON into this model's script field and retry — you do not need the author to unlock it.",
         runningHubWorkflowNotRun: "This workflow cannot be called yet. Open it on RunningHub, save it, and run it successfully once.",
         runningHubNoTaskId: "RunningHub did not return a taskId",
         runningHubTaskFailed: "RunningHub task failed",

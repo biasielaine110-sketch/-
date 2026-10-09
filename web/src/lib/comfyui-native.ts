@@ -699,7 +699,12 @@ export function applyComfyTextReferenceImages(workflow: ComfyWorkflow, filenames
  * `ref_images.ref_image_N` wiring is known to be ordinal. Add a name only after verifying that
  * wiring — a wrong entry would scramble that workflow's references.
  */
-export const COMFY_REFERENCE_SLOT_WORKFLOWS = ["U24-文武双修T8版MiniMaxH3双采参考生视频V2"] as const;
+export const COMFY_REFERENCE_SLOT_WORKFLOWS = [
+    "U24-文武双修T8版MiniMaxH3双采参考生视频V2",
+    // Same DualClock graph under the seetacloud model display name.
+    "H3-video",
+    "H3_video",
+] as const;
 
 /**
  * Every comparable spelling of a workflow option value: the whole string plus each
@@ -772,20 +777,43 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
     // Repeating the last uploaded picture there (the legacy fallback) made the model see one
     // reference up to 8× — e.g. U24 V927 and U37 both expose 9 slots where only the first few are
     // real. Graphs without such a placeholder keep the legacy fill-up, so no other model changes
-    // behaviour.
+    // behaviour — except the DualClock two-pass family below, which disconnects unfilled slots.
+    const twoPassRefs = isComfyH3TwoPassReferenceWorkflow(next);
     const blankSlot =
-        isComfyH3TwoPassReferenceWorkflow(next) || isComfyH3SelfLiftWorkflow(next)
-            ? comfyBlankImagePlaceholder(next)
-            : null;
+        twoPassRefs || isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null;
     const loaders = slotOrder.length
         ? slotOrder.map((id) => next[id]).filter((node): node is ComfyNode => Boolean(node))
         : Object.entries(next)
               .filter(([, node]) => isComfyImageLoader(node))
               .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
               .map(([, node]) => node);
+    // U24 DualClock / H3-video: no blank placeholder ships in the Export (API) JSON, so the legacy
+    // fill-up repeated the last upload into every spare `ref_image_N` on BOTH LOW and HIGH
+    // conditioning nodes. That made the pod re-encode the same large reference up to 4× per pass
+    // and routinely OOMed the rented seetacloud card — the process died mid-job and the seetacloud
+    // gateway answered subsequent /history|/view calls with HTTP 502. Disconnect unfilled slots on
+    // every H3 conditioning node instead (same contract SelfLift uses when it has a blank asset).
+    // Scoped to the two-pass fingerprint only.
+    if (twoPassRefs && !blankSlot && slotOrder.length) {
+        const filled = new Set(slotOrder.filter((_, index) => Boolean(filenames[index])));
+        for (const node of Object.values(next)) {
+            if (!isMiniMaxH3ConditioningNode(node) || !node.inputs) continue;
+            for (const key of Object.keys(node.inputs)) {
+                const match = /^ref_images\.ref_image_(\d+)$/.exec(key);
+                if (!match) continue;
+                const value = node.inputs[key];
+                if (!Array.isArray(value) || value[0] == null) continue;
+                const loaderId = String(value[0]);
+                if (filled.has(loaderId)) continue;
+                delete node.inputs[key];
+            }
+        }
+    }
     loaders.forEach((node, index) => {
-        // Legacy fallback (repeat the last upload) is preserved when the graph has no blank slot.
-        const name = filenames[index] || blankSlot || filenames[filenames.length - 1];
+        // Legacy fallback (repeat the last upload) is preserved when the graph has no blank slot
+        // and is not the DualClock two-pass family (that family disconnects above instead).
+        const name =
+            filenames[index] || blankSlot || (twoPassRefs && !blankSlot ? "" : filenames[filenames.length - 1]);
         if (!name) return;
         if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
         if ("image" in node.inputs || !("url" in node.inputs)) node.inputs.image = name;
@@ -1414,11 +1442,14 @@ export function applyComfyVideoSettings(
                     const draft = Math.max(0.1, Math.round((megapixels / (scale * scale)) * 100) / 100);
                     // U30 author draft is 0.7 MP; a bare 720p canvas budget (~0.41 draft) must not
                     // silently pull it down. Only raise (or match) the authored floor.
-                    writeComfyNumberInput(
-                        node,
-                        "megapixels",
-                        settings.singularityH3Video ? Math.max(authoredMegapixels, draft) : draft,
-                    );
+                    // U24 DualClock on rented ~24–32GB pods: an uncapped 2K canvas budget yields
+                    // ~1.6 MP draft then ×1.5² refine and OOMs the worker — seetacloud's gateway
+                    // then returns HTTP 502 on /history|/view. Cap the DualClock draft only
+                    // (Singularity keeps its raise-floor math untouched).
+                    const nextMegapixels = settings.singularityH3Video
+                        ? Math.max(authoredMegapixels, draft)
+                        : Math.min(draft, Math.max(authoredMegapixels, 1));
+                    writeComfyNumberInput(node, "megapixels", nextMegapixels);
                 }
             } else if (settings.selfLiftH3Video || settings.resolutionSelectorH3Video) {
                 // Delivered-resolution families whose H3 width/height link into a ResolutionSelector:
@@ -1682,6 +1713,8 @@ async function referenceToUploadFile(
  */
 export const COMFY_UPLOAD_GUARD_WORKFLOWS = [
     "U24-文武双修T8版MiniMaxH3双采参考生视频V2",
+    "H3-video",
+    "H3_video",
     "U06-minimax_h3_lightX2v多图参考生视频V5",
     "U06-h3_多图参考生视频V8",
     "U06-minimax_h3_多图参考生视频V8",
@@ -1904,12 +1937,21 @@ async function fetchComfyView(
         subfolder: file.subfolder || "",
         type: file.type || "output",
     });
-    const response = await axios.get(comfyUiUrl(baseUrl, `/view?${query.toString()}`), {
-        headers: authHeaders(apiKey),
-        responseType: "blob",
-        signal: options?.signal,
-    });
-    return response.data as Blob;
+    const url = comfyUiUrl(baseUrl, `/view?${query.toString()}`);
+    const headers = authHeaders(apiKey);
+    try {
+        const response = await axios.get(url, { headers, responseType: "blob", signal: options?.signal });
+        return response.data as Blob;
+    } catch (error) {
+        // Transient seetacloud / Vercel proxy 502s are common right after a heavy DualClock job
+        // finishes (worker still restarting). One short retry absorbs that class of failure without
+        // changing behaviour for any other status or host.
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        if (status !== 502 && status !== 503) throw error;
+        await sleep(1500, options?.signal);
+        const retry = await axios.get(url, { headers, responseType: "blob", signal: options?.signal });
+        return retry.data as Blob;
+    }
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -2207,12 +2249,12 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // U06 single-pass multi-ref (WJILatentPreset holder), excluding SelfLift / U35 / U30.
     const multiRefH3Video = h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo && !h3Singularity;
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
-    // U06 V8 / U30 Singularity bake author-machine filenames into every LoadImage. Those files
-    // do not exist on the seetacloud pod, so a zero-reference submit fails inside LoadImage within a
-    // few seconds and history comes back with no VHS mp4 — the "ran ~7s, generated nothing" report.
-    // Require at least one uploaded reference for these families only; SelfLift has its own blank
-    // placeholder and is not gated here.
-    if ((multiRefH3Video || h3Singularity) && !refs.length) {
+    // U06 V8 / U30 Singularity / U24 DualClock (H3-video) bake author-machine filenames into every
+    // LoadImage. Those files do not exist on the seetacloud pod, so a zero-reference submit fails
+    // inside LoadImage within a few seconds — or, for DualClock, leaves the worker wedged and the
+    // gateway answers later polls with HTTP 502. Require at least one uploaded reference for these
+    // families only; SelfLift has its own blank placeholder and is not gated here.
+    if ((multiRefH3Video || h3Singularity || h3TwoPassRefs) && !refs.length) {
         throw new Error(
             "This multi-reference video workflow requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
         );
@@ -2275,9 +2317,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         return finishRunningHubTask(baseUrl, apiKey, submitted.taskId, signal);
     }
     const promptId = submitted.promptId;
-    // U06 only: ComfyUI can return a prompt_id together with node_errors (validation soft-fail).
-    // Treat that as a hard failure so we never poll an empty/aborted history entry.
-    if (multiRefH3Video) {
+    // U06 / U24 DualClock: ComfyUI can return a prompt_id together with node_errors (validation
+    // soft-fail). Treat that as a hard failure so we never poll an empty/aborted history entry that
+    // later surfaces as a seetacloud gateway 502.
+    if (multiRefH3Video || h3TwoPassRefs) {
         const submitRecord = readSubmitRecord(submit.data);
         const nodeErrors = submitRecord?.node_errors;
         if (nodeErrors && typeof nodeErrors === "object" && Object.keys(nodeErrors as object).length) {
@@ -2370,8 +2413,8 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         if (waitForVideoArtifact) {
             if (!media.videos.length) {
                 throw new Error(
-                    multiRefH3Video
-                        ? "ComfyUI finished but returned no video. For U06 multi-reference video, connect reference images on the canvas (the workflow's baked Untitled*.jpg files are not on the server) and retry."
+                    multiRefH3Video || h3TwoPassRefs
+                        ? "ComfyUI finished but returned no video. Connect reference images on the canvas (the workflow's baked Untitled*.jpg / snowtp.png files are not on this server) and retry."
                         : "ComfyUI finished but returned no video",
                 );
             }

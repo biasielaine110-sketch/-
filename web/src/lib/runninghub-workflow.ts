@@ -249,6 +249,9 @@ function explainRunningHubError(error: unknown, workflowId: string): Error {
     if (isWorkflowPermissionMessage(message) && isMinimaxH3SelfLiftWorkflow(workflowId)) {
         return new Error(i18n.t("apiErrors.runningHubSelfLiftScriptRequired", { id: workflowId }));
     }
+    if (isWorkflowPermissionMessage(message) && isQwenKleinSkinWorkflow(workflowId)) {
+        return new Error(i18n.t("apiErrors.runningHubKleinSkinScriptRequired", { id: workflowId }));
+    }
     if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) return new Error(apiText("runningHubNoBalance"));
     if (isUnknownServerError(message)) return new Error(apiText("runningHubUnknownError"));
     if (error instanceof Error && error.message && !isUnknownServerError(error.message)) return error;
@@ -1904,6 +1907,95 @@ function applyMinimaxH3SelfLiftSettings(
     return { workflow: next, structuralRepair: true };
 }
 
+// Qwen Image 2.1 + Flux2 Klein 皮肤肌理 T2I (runninghub.ai U2108554415855054850 /
+// runninghub.cn 2108554405246226433 / 2108554342591717378). Two-stage graph: KSampler (161) drafts
+// from CLIPTextEncode (5)/(7), then SamplerCustomAdvanced + RandomNoise (50) refines with a fixed
+// Klein enhance prompt on CLIPTextEncode (54). EmptyLatentImage size is a link into
+// ResolutionSelector (168); Klein's ImageScaleToTotalPixels (56) is a separate 4MP refine target.
+// Generic writers break this graph:
+//   - writeRunningHubPrompt scores every CLIPTextEncode titled "(Prompt)" at 40, so it would paint
+//     the user text onto 5 *and* the negative (7) *and* the Klein enhance slot (54);
+//   - writeRunningHubSize cannot produce ResolutionSelector's label enum ("2:3 (Portrait Photo)");
+//   - writeRunningHubTier force-maps any `megapixels` in {1,2,4}, including the refine node's 4MP.
+// Pure T2I — no LoadImage. Scoped to these ids only.
+const QWEN_KLEIN_SKIN_WORKFLOW_IDS = new Set(["2108554415855054850", "2108554405246226433", "2108554342591717378"]);
+
+function isQwenKleinSkinWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return QWEN_KLEIN_SKIN_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate for the Qwen+Klein skin T2I graph (RH.ai / RH.cn id pair above). */
+export function isQwenKleinSkinWorkflowId(workflowId?: string | null) {
+    return isQwenKleinSkinWorkflow(workflowId);
+}
+
+/** Workflows that prefer model-script Export (API) JSON + comfy/run when the shared id denies ACL. */
+function usesRunningHubLocalExportGraph(workflowId?: string | null) {
+    return isMinimaxH3SelfLiftWorkflow(workflowId) || isQwenKleinSkinWorkflow(workflowId);
+}
+
+function applyQwenKleinSkinSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    size?: { width: number; height: number } | null,
+    aspect = "",
+    rawSize = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+
+    // User prompt → only the KSampler positive CLIP (5). Never touch negative (7) or the Klein
+    // refine enhance text (54): both share the same "(Prompt)" title the generic scorer trusts.
+    if (prompt.trim()) {
+        const sampler =
+            next["161"] || findComfyNode(next, (node) => /^KSampler$/i.test(String(node.class_type || "")) && Array.isArray(node.inputs?.positive));
+        const positiveLink = sampler?.inputs?.positive;
+        const positiveId = Array.isArray(positiveLink) && positiveLink[0] != null ? String(positiveLink[0]) : "5";
+        const promptNode = next[positiveId] || next["5"];
+        if (promptNode?.inputs && typeof promptNode.inputs.text === "string") promptNode.inputs.text = prompt;
+    }
+
+    // Draft latent size → ResolutionSelector (168). Leave ImageScaleToTotalPixels (56) at the
+    // author's 4MP refine target — that node is not the canvas resolution knob.
+    const selector = next["168"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        const nextAspect = aspect || (size?.width && size.height ? closestResolutionSelectorAspect(size.width, size.height) : "");
+        if (nextAspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(nextAspect);
+        }
+        const explicit = Number(megapixels);
+        if (typeof megapixels === "string" && megapixels.trim() && Number.isFinite(explicit) && explicit > 0 && typeof selector.inputs.megapixels === "number") {
+            selector.inputs.megapixels = explicit;
+        } else if (typeof selector.inputs.megapixels === "number") {
+            const tier = canvasResolutionTier(rawSize);
+            if (tier) {
+                const tierMegapixels = tier === "4k" ? 4 : tier === "2k" ? 2 : 1;
+                const baked = selector.inputs.megapixels;
+                selector.inputs.megapixels = Number.isFinite(baked) && baked > 0 ? Math.max(baked, tierMegapixels) : tierMegapixels;
+            }
+        }
+    }
+
+    // Fixed seeds on KSampler (161) and RandomNoise (50) → identical images; randomize per run.
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        if (/RandomNoise/i.test(type) && typeof node.inputs?.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
+        else if (/KSampler|SamplerCustom/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+    }
+
+    return { workflow: next };
+}
+
 /**
  * A RunningHub model name doubles as its workflow id, so one model normally runs one workflow.
  * The 自动分镜 model is the exception: its workflow renders images only, so generating video from
@@ -2062,6 +2154,15 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const selfLift = applyMinimaxH3SelfLiftSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
         const list = workflowNodeInfoList(workflow, selfLift.workflow);
         return { nodeInfoList: list, graph: selfLift.workflow };
+    }
+    // Qwen+Klein 皮肤肌理 T2I opts out for the same class of reasons (see applyQwenKleinSkinSettings):
+    // the generic prompt scorer would overwrite the negative and Klein enhance CLIP slots, the size
+    // writer cannot produce ResolutionSelector labels, and the tier writer would clamp the refine
+    // node's 4MP. Always ship `graph` so a denied getJsonApiFormat can still run via model script.
+    if (isQwenKleinSkinWorkflow(workflowId)) {
+        const klein = applyQwenKleinSkinSettings(workflow, prompt, size, aspect, rawSize, megapixels);
+        const list = workflowNodeInfoList(workflow, klein.workflow);
+        return { nodeInfoList: list, graph: klein.workflow };
     }
     if (prompt.trim()) patched = writeRunningHubPrompt(patched, prompt);
     if (size) patched = writeRunningHubSize(patched, size.width, size.height, aspect);
@@ -2705,19 +2806,19 @@ async function runRunningHubWorkflowWithKey(args: {
 }): Promise<RunningHubMedia> {
     const { origin, workflowId, apiKey, isLastKey } = args;
     const request = args.args;
-    // SelfLift 双采(简易版) only: the shared workflowId often returns "您暂时无权限访问该工作流".
-    // Prefer the Export (API) JSON pasted into the model script (the同构简易版 graph) so create can
-    // run via `workflow` / comfy/run without opening the author's copy. Every other workflow keeps
-    // the remote getJsonApiFormat path unchanged.
-    const selfLiftLocal = isMinimaxH3SelfLiftWorkflow(workflowId) ? parseComfyApiWorkflow(request.script) : null;
-    let workflow = selfLiftLocal;
+    // SelfLift 双采(简易版) / Qwen+Klein 皮肤肌理: the shared workflowId often returns
+    // "您暂时无权限访问该工作流". Prefer the Export (API) JSON pasted into the model script so
+    // create can run via `workflow` / comfy/run without opening the author's copy. Every other
+    // workflow keeps the remote getJsonApiFormat path unchanged.
+    const localExportGraph = usesRunningHubLocalExportGraph(workflowId) ? parseComfyApiWorkflow(request.script) : null;
+    let workflow = localExportGraph;
     let fetchPermissionDenied = false;
     if (!workflow) {
         workflow = await fetchWorkflow(origin, apiKey, workflowId, request.signal).catch((error: unknown) => {
             if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
             const message = errorText(error);
             if (isAuthMessage(message)) throw explainRunningHubError(error, workflowId);
-            if (isWorkflowPermissionMessage(message) && isMinimaxH3SelfLiftWorkflow(workflowId)) {
+            if (isWorkflowPermissionMessage(message) && usesRunningHubLocalExportGraph(workflowId)) {
                 fetchPermissionDenied = true;
                 return null;
             }
@@ -2726,6 +2827,9 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     if (!workflow && fetchPermissionDenied && isMinimaxH3SelfLiftWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubSelfLiftScriptRequired", { id: workflowId }));
+    }
+    if (!workflow && fetchPermissionDenied && isQwenKleinSkinWorkflow(workflowId)) {
+        throw new Error(i18n.t("apiErrors.runningHubKleinSkinScriptRequired", { id: workflowId }));
     }
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     const uploaded: string[] = [];
@@ -2746,16 +2850,16 @@ async function runRunningHubWorkflowWithKey(args: {
     const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
     if (referenceCount) {
         console.info(
-            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(selfLiftLocal)}`,
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
         );
     }
     let task: RunningHubTaskView;
     try {
-        // SelfLift 双采(简易版): the shared workflowId commonly denies create/getJsonApiFormat.
+        // SelfLift / Qwen+Klein: the shared workflowId commonly denies create/getJsonApiFormat.
         // When we already hold the patched API graph (from model script or a permitted fetch),
         // submit it through `/task/openapi/comfy/run` so the run does not depend on author ACL.
         // Every other workflow keeps the create + nodeInfoList path below.
-        if (isMinimaxH3SelfLiftWorkflow(workflowId) && repairedGraph) {
+        if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal);
         } else if (workflow) {
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
@@ -2772,10 +2876,10 @@ async function runRunningHubWorkflowWithKey(args: {
         if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message)) {
             throw error;
         }
-        // SelfLift already preferred comfy/run above. If that endpoint is unavailable on this
-        // origin, fall back once to create-with-workflow (docs: `workflow` overrides workflowId).
-        if (isMinimaxH3SelfLiftWorkflow(workflowId) && repairedGraph) {
-            console.warn(`[runninghub] ${workflowId}: comfy/run failed (${message.slice(0, 160)}), retrying SelfLift graph via create+workflow`);
+        // Local-export graphs already preferred comfy/run above. If that endpoint is unavailable on
+        // this origin, fall back once to create-with-workflow (docs: `workflow` overrides workflowId).
+        if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
+            console.warn(`[runninghub] ${workflowId}: comfy/run failed (${message.slice(0, 160)}), retrying local-export graph via create+workflow`);
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal).catch((retryError: unknown) => {
                 throw explainRunningHubError(retryError, workflowId);
             });
