@@ -25,6 +25,12 @@ type RequestOptions = { signal?: AbortSignal };
 export type NativeComfyUiResult = {
     images: Array<{ id: string; dataUrl: string }>;
     videos: Array<{ blob: Blob; mimeType: string; url?: string }>;
+    /**
+     * Text outputs collected from text-sink nodes (`ShowText|pysssss` …). Populated only for the
+     * detected text-output family (see `isComfyTextOutputWorkflow`); empty for every other graph,
+     * so image/video callers are unaffected by its presence.
+     */
+    texts?: string[];
 };
 
 const HISTORY_INTERVAL_MS = 2000;
@@ -364,6 +370,97 @@ export function isComfyGeometryLockedWorkflow(workflow: ComfyWorkflow): boolean 
         isComfyH3SingleReferenceImageWorkflow(workflow) ||
         isComfyKrea2EditWorkflow(workflow)
     );
+}
+
+/**
+ * The 群主版 "H3 prompt writer" LLM node (`ZealmanLLM_Generate`), which holds the user-facing
+ * instruction in the Chinese field `提示词`.
+ *
+ * Deliberately exact: the sibling `ZealmanLLM_ModelLoader` is only the weights loader and must
+ * never be treated as a generate target.
+ */
+function isComfyLlmGenerateNode(node: ComfyNode): boolean {
+    return /^ZealmanLLM_Generate$/i.test(String(node?.class_type || ""));
+}
+
+/**
+ * Structural fingerprint of the "群主版 Qwen3.8-VL H3 prompt writer" *text-output* family (U00).
+ *
+ * These graphs are not image/video pipelines at all: four `LoadImage` references feed a local
+ * LLM node whose answer is displayed by a `ShowText|pysssss` sink. The app's native ComfyUI path
+ * only knew how to collect images/videos, so a text graph used to look like a run that returned
+ * nothing. Detect the family by shape — a `ZealmanLLM_Generate` node *and* a text sink — so a
+ * graph missing either half keeps its previous (unchanged) behaviour.
+ */
+export function isComfyTextOutputWorkflow(workflow: ComfyWorkflow): boolean {
+    const nodes = Object.values(workflow);
+    if (!nodes.some((node) => isComfyLlmGenerateNode(node))) return false;
+    return nodes.some((node) => /ShowText/i.test(String(node?.class_type || "")));
+}
+
+/**
+ * Inject the user prompt into a native ComfyUI *text* workflow's LLM node.
+ *
+ * `applyComfyPrompt` keys off `PROMPT_FIELDS` / node titles, and neither `提示词` (the user
+ * instruction) nor `系统提示词` (the family's own rewrite rules) is in that list — so the generic
+ * writer leaves this graph untouched and its blind fallback could even append a bogus `text`
+ * input. This writer is scoped to the detected text family and writes `提示词` only, never the
+ * authored `系统提示词`. No other native ComfyUI workflow is affected.
+ */
+export function applyComfyTextPrompt(workflow: ComfyWorkflow, prompt: string): ComfyWorkflow {
+    const next = cloneWorkflow(workflow);
+    const value = String(prompt ?? "");
+    for (const node of Object.values(next)) {
+        if (!isComfyLlmGenerateNode(node) || !node.inputs || typeof node.inputs !== "object") continue;
+        for (const field of ["提示词", "prompt", "text"]) {
+            if (typeof node.inputs[field] === "string") {
+                node.inputs[field] = value;
+                break;
+            }
+        }
+    }
+    return next;
+}
+
+/**
+ * Map uploaded references onto the image slots a text LLM node actually consumes.
+ *
+ * The shared `applyComfyLoadImages` spreads references over *every* `LoadImage` node in node-id
+ * order, but a text graph only reads the loaders wired to its LLM node (`图片N` inputs). In the
+ * U00 template only `图片4` is linked, so an id-order fill would hand the single upload to `图片1`
+ * and leave the LLM reading the author's baked sample. Order by the numeric `图片N` suffix and
+ * touch consumed slots only — unreachable `LoadImage` nodes are never executed by ComfyUI, so
+ * their baked filenames are harmless and are deliberately left alone.
+ */
+export function applyComfyTextReferenceImages(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
+    if (!filenames.length) return workflow;
+    const next = cloneWorkflow(workflow);
+    const slots: Array<{ index: number; id: string }> = [];
+    for (const node of Object.values(next)) {
+        if (!isComfyLlmGenerateNode(node)) continue;
+        const inputs = node.inputs;
+        if (!inputs || typeof inputs !== "object") continue;
+        for (const key of Object.keys(inputs)) {
+            const match = /^图片\s*(\d+)$/.exec(key);
+            if (!match) continue;
+            const link: unknown = inputs[key];
+            if (!Array.isArray(link) || link[0] == null) continue;
+            const id = String(link[0]);
+            if (!next[id] || !isComfyImageLoader(next[id])) continue;
+            slots.push({ index: Number(match[1]), id });
+        }
+        break;
+    }
+    slots.sort((a, b) => a.index - b.index);
+    slots.forEach((slot, position) => {
+        const name = filenames[position];
+        if (!name) return;
+        const loader = next[slot.id];
+        if (!loader.inputs || typeof loader.inputs !== "object") loader.inputs = {};
+        if ("image" in loader.inputs || !("url" in loader.inputs)) loader.inputs.image = name;
+        else loader.inputs.url = name;
+    });
+    return next;
 }
 
 /**
@@ -1022,8 +1119,51 @@ type HistoryOutputs = Record<
         images?: Array<{ filename: string; subfolder?: string; type?: string }>;
         gifs?: Array<{ filename: string; subfolder?: string; type?: string }>;
         videos?: Array<{ filename: string; subfolder?: string; type?: string }>;
+        /** Text sink payload. ComfyUI flattens a node's `ui` dict into its output entry, so a
+         *  `ShowText|pysssss` node lands here as `text: ["..."]`; some packs also nest it under
+         *  `ui.text`. Both shapes are read. */
+        text?: unknown;
+        string?: unknown;
+        ui?: { text?: unknown } | null;
     }
 >;
+
+/** Flatten the string (or string[]) payload a text-sink node reports. */
+function pushComfyText(target: string[], value: unknown, depth = 0): void {
+    if (depth > 3 || value == null) return;
+    if (typeof value === "string") {
+        if (value.trim()) target.push(value);
+        return;
+    }
+    if (Array.isArray(value)) {
+        for (const item of value) pushComfyText(target, item, depth + 1);
+        return;
+    }
+    if (typeof value === "object") {
+        const record = value as Record<string, unknown>;
+        pushComfyText(target, record.text, depth + 1);
+        pushComfyText(target, record.string, depth + 1);
+    }
+}
+
+/**
+ * Text outputs from `/history` (`ShowText|pysssss` and friends).
+ *
+ * `collectMediaFromHistory` only understands images/gifs/videos, so a text-only graph used to look
+ * like a graph that returned nothing at all. This reads the text payload of every output node,
+ * tolerating both the flattened (`{ text: [...] }`) and the nested (`{ ui: { text: [...] } }`)
+ * shape a text sink can report.
+ */
+function collectTextsFromHistory(outputs: HistoryOutputs | undefined): string[] {
+    const texts: string[] = [];
+    if (!outputs || typeof outputs !== "object") return texts;
+    for (const node of Object.values(outputs)) {
+        if (!node || typeof node !== "object") continue;
+        pushComfyText(texts, node.text);
+        pushComfyText(texts, node.ui?.text);
+    }
+    return texts;
+}
 
 function collectMediaFromHistory(outputs: HistoryOutputs | undefined) {
     const images: Array<{ filename: string; subfolder: string; type: string }> = [];
@@ -1262,8 +1402,11 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // size the author baked into the graph; the image path passes no canvas size to override it.
     const keepTunedGeometry = isComfyGeometryLockedWorkflow(args.workflow);
     const guardUpload = keepTunedGeometry || usesComfyUploadGuard(args.workflowId);
+    // Text-output family (e.g. U00 H3 prompt writer): prompt and references land on the LLM node's
+    // own slots instead of the CLIP/LoadImage conventions the shared writers assume.
+    const textFamily = isComfyTextOutputWorkflow(args.workflow);
 
-    let workflow = applyComfyPrompt(args.workflow, prompt);
+    let workflow = textFamily ? applyComfyTextPrompt(args.workflow, prompt) : applyComfyPrompt(args.workflow, prompt);
     workflow = applyComfyVideoSettings(workflow, {
         size: args.size,
         seconds: args.seconds,
@@ -1286,7 +1429,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             });
             names.push(uploaded);
         }
-        workflow = applyComfyLoadImages(workflow, names, args.workflowId);
+        workflow = textFamily
+            ? applyComfyTextReferenceImages(workflow, names)
+            : applyComfyLoadImages(workflow, names, args.workflowId);
     }
 
     const audioRefs = (args.referenceAudioSources || []).filter(Boolean).slice(0, 3);
@@ -1362,7 +1507,13 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     if (!outputs) throw new Error("ComfyUI timed out waiting for /history");
 
     const media = collectMediaFromHistory(outputs);
-    if (!media.images.length && !media.videos.length) throw new Error("ComfyUI finished but returned no images/videos");
+    const texts = collectTextsFromHistory(outputs);
+    // Text-output graphs legitimately finish with no image/video at all. Only the detected text
+    // family is exempt from the hard failure below, so every image/video workflow keeps throwing
+    // exactly the same error it did before.
+    if (!media.images.length && !media.videos.length && !(textFamily && texts.length)) {
+        throw new Error("ComfyUI finished but returned no images/videos");
+    }
 
     const images: NativeComfyUiResult["images"] = [];
     for (const file of media.images) {
@@ -1386,7 +1537,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         videos.push({ blob, mimeType });
     }
 
-    return { images, videos };
+    return { images, videos, texts };
 }
 
 /**

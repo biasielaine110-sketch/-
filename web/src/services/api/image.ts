@@ -3,7 +3,7 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { proxyApiUrl } from "@/lib/api-proxy";
-import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
+import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi, type ComfyWorkflow } from "@/lib/comfyui-native";
 import { isMinimaxH3FourViewWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
@@ -1710,6 +1710,63 @@ async function requestNativeComfyUiImages(config: AiConfig, prompt: string, refe
     throw new Error(apiText("comfyNoImage"));
 }
 
+/**
+ * Split text-model messages into the scalar prompt + ordered reference images a native ComfyUI
+ * *text* workflow needs.
+ *
+ * The canvas Text node sends `[{ role: "user", content: string | (text|image_url parts)[] }]`,
+ * and the H3 optimize button sends `[system, user]`. The native LLM node wants one plain
+ * instruction, so the last user turn's text wins and every `image_url` part (in order) becomes a
+ * reference upload.
+ */
+function extractComfyTextInputs(messages: AiTextMessage[]) {
+    let prompt = "";
+    const referenceDataUrls: string[] = [];
+    for (const message of messages) {
+        if (message.role !== "user") continue;
+        if (typeof message.content === "string") {
+            prompt = message.content;
+            continue;
+        }
+        const parts = Array.isArray(message.content) ? message.content : [];
+        const text = parts
+            .filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
+            .map((part) => part.text)
+            .join("\n");
+        if (text) prompt = text;
+        for (const part of parts) {
+            const url = part.type === "image_url" ? part.image_url?.url : "";
+            if (typeof url === "string" && url) referenceDataUrls.push(url);
+        }
+    }
+    return { prompt, referenceDataUrls };
+}
+
+/** Run a native ComfyUI *text* workflow (e.g. U00 H3 prompt writer) and return its text output. */
+async function requestNativeComfyUiText(
+    config: AiConfig,
+    workflow: ComfyWorkflow,
+    messages: AiTextMessage[],
+    onDelta: (text: string) => void,
+    options?: RequestOptions,
+): Promise<string> {
+    if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    const { prompt, referenceDataUrls } = extractComfyTextInputs(messages);
+    const result = await runNativeComfyUiJob({
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        workflow,
+        workflowId: config.model || config.textModel,
+        prompt,
+        referenceDataUrls,
+        signal: options?.signal,
+    });
+    const text = (result.texts || []).join("\n").trim();
+    if (!text) throw new Error(apiText("noContent"));
+    onDelta(text);
+    return text;
+}
+
 /** hfsyapi mj_imagine: POST {origin}/mj/submit/imagine, then GET /mj/task/{id}/fetch. Not /v1/midjourney/generations. */
 function hfsyApiOrigin(baseUrl: string) {
     try {
@@ -2991,6 +3048,19 @@ export async function requestImageQuestion(config: AiConfig, messages: AiTextMes
     }
     const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel);
     const script = resolveModelScript(config, config.model || config.textModel);
+    // A text model whose "script" is a ComfyUI API workflow JSON (e.g. U00 H3 prompt writer) is a
+    // native ComfyUI *text* workflow, not a JS plugin body — the plugin template would choke on the
+    // JSON. Route it to the native runner first. Only a graph that actually parses as a ComfyUI
+    // workflow on a native ComfyUI channel takes this branch, so every other text model (plugin
+    // scripts, OpenAI/Gemini chat) keeps its existing behaviour.
+    const comfyWorkflow = script ? parseComfyApiWorkflow(script) : null;
+    if (comfyWorkflow && shouldUseNativeComfyUi(requestConfig.baseUrl, requestConfig.model, script)) {
+        try {
+            return await requestNativeComfyUiText(requestConfig, comfyWorkflow, messages, onDelta, options);
+        } catch (error) {
+            throw new Error(readAxiosError(error, apiText("requestFailed")));
+        }
+    }
     if (script) {
         try {
             const answer = await runModelPlugin<string>({
