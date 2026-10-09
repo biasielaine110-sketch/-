@@ -1858,6 +1858,18 @@ function applyMinimaxH3SelfLiftSettings(
         if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
     }
 
+    // VRAM: `SelfLiftH3Sampler` ("SelfLift Progressive Sampler") draws a low-res pass at
+    // `lowres_scale` and then upscales the whole frame to full size. This export ships
+    // `highres_tiling: false`, so that upscale pass holds the entire frame in VRAM at once and long
+    // clips die with an OOM ("显存不足"). Flip the sampler's own memory switch on: it tiles the
+    // high-res pass, cutting peak VRAM only — the delivered duration and resolution are untouched.
+    // The sibling SelfLift graph (U32) ships it on, so this is the author's supported mode.
+    for (const node of Object.values(next)) {
+        if (/SelfLiftH3Sampler/i.test(String(node.class_type || "")) && typeof node.inputs?.highres_tiling === "boolean") {
+            node.inputs.highres_tiling = true;
+        }
+    }
+
     // `SelfLiftH3Sampler` parks the run seed in its own `seed` field, and its class name carries
     // neither "KSampler" nor "RandomNoise", so every shared randomizer misses it — identical inputs
     // would render an identical clip forever. Randomize per submission.
