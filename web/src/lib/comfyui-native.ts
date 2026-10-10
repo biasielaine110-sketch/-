@@ -803,10 +803,8 @@ export function usesComfyReferenceSlotOrder(workflowId: string | undefined | nul
 /**
  * Filename a graph uses as its own "empty slot" placeholder (e.g. `zealman-blank-image.png`).
  *
- * Templates that expose more reference slots than they expect to be filled park a blank image in
- * the spare ones. Reusing that same asset to clear unused slots keeps the call sites honest
- * (the blank file is part of the exported graph, so it already exists on the server) instead of
- * inventing a name that would fail ComfyUI's LoadImage.
+ * On rented pods that file is usually missing or broken — DualClock must upload a real blank and
+ * rewrite spare LoadImages to that uploaded name (never trust the authored string alone).
  */
 function comfyBlankImagePlaceholder(workflow: ComfyWorkflow): string | null {
     for (const node of Object.values(workflow)) {
@@ -815,6 +813,37 @@ function comfyBlankImagePlaceholder(workflow: ComfyWorkflow): string | null {
         if (typeof name === "string" && /blank|empty|placeholder|transparent|^none\./i.test(name)) return name;
     }
     return null;
+}
+
+/** Author-machine LoadImage names that are not on seetacloud (V927 Untitled / snowtp / zealman). */
+function isComfyAuthorLocalImageName(name: string) {
+    return /blank|empty|placeholder|transparent|untitled|snowtp|^none\./i.test(String(name || ""));
+}
+
+/**
+ * Solid 64×64 PNG for DualClock spare slots. A 1×1 blank triggered LoadImage
+ * "Invalid argument returned 22" on seetacloud; keep the file small but large enough for PIL/H3.
+ */
+const COMFY_DUALCLOCK_BLANK_PNG_DATA_URL =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAY0lEQVR42u3QQREAAAgDoEVfc83hyYMCpO18FgECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIOC+BYjT8kqKv7OUAAAAAElFTkSuQmCC";
+
+function dualClockBlankPngDataUrl(): string {
+    try {
+        if (typeof document !== "undefined") {
+            const canvas = document.createElement("canvas");
+            canvas.width = 64;
+            canvas.height = 64;
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+                ctx.fillStyle = "#808080";
+                ctx.fillRect(0, 0, 64, 64);
+                return canvas.toDataURL("image/png");
+            }
+        }
+    } catch {
+        /* fall through */
+    }
+    return COMFY_DUALCLOCK_BLANK_PNG_DATA_URL;
 }
 
 /** Map uploaded filenames onto LoadImage nodes in order. */
@@ -850,12 +879,14 @@ export function applyComfyLoadImages(
     // When a template declares its own blank placeholder, the spare slots are meant to stay empty.
     // Repeating the last uploaded picture there (the legacy fallback) made the model see one
     // reference up to 8× — e.g. U24 V927 and U37 both expose 9 slots where only the first few are
-    // real. Graphs without such a placeholder keep the legacy fill-up, so no other model changes
-    // behaviour — except the DualClock two-pass family, which parks an uploaded 1×1 blank.
+    // real. Graphs without such a placeholder keep the legacy fill-up.
+    // DualClock: ONLY the uploaded blank counts — never the authored zealman-blank string alone
+    // (missing/broken file → LoadImage #94 "Invalid argument returned 22" on seetacloud).
     const twoPassRefs = isComfyH3TwoPassReferenceWorkflow(next);
+    const uploadedBlank = (options?.blankFilename || "").trim();
     const blankSlot =
-        (options?.blankFilename || "").trim() ||
-        (twoPassRefs || isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null);
+        uploadedBlank ||
+        (!twoPassRefs && isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null);
     const loaders = slotOrder.length
         ? slotOrder.map((id) => next[id]).filter((node): node is ComfyNode => Boolean(node))
         : Object.entries(next)
@@ -865,6 +896,7 @@ export function applyComfyLoadImages(
     // U24 DualClock: never delete spare `ref_images.ref_image_N` — MiniMaxH3AudioConditioningT8
     // then fails `/prompt` ("required input missing"). Never repeat the last large ref into spare
     // slots (OOM). Use the uploaded blank from runNativeComfyUiJob when present.
+    const uploadedSet = new Set(filenames.filter(Boolean));
     loaders.forEach((node, index) => {
         const name =
             filenames[index] || blankSlot || (twoPassRefs && !blankSlot ? "" : filenames[filenames.length - 1]);
@@ -873,6 +905,18 @@ export function applyComfyLoadImages(
         if ("image" in node.inputs || !("url" in node.inputs)) node.inputs.image = name;
         else node.inputs.url = name;
     });
+    // Scrub any leftover author-local LoadImage names (incl. node 94 zealman-blank) to the uploaded blank.
+    if (twoPassRefs && uploadedBlank) {
+        for (const node of Object.values(next)) {
+            if (!isComfyImageLoader(node) || !node.inputs) continue;
+            const field = "image" in node.inputs || !("url" in node.inputs) ? "image" : "url";
+            const current = node.inputs[field];
+            if (typeof current !== "string" || !current.trim()) continue;
+            if (uploadedSet.has(current)) continue;
+            if (!isComfyAuthorLocalImageName(current)) continue;
+            node.inputs[field] = uploadedBlank;
+        }
+    }
     return next;
 }
 
@@ -2572,25 +2616,19 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             });
             names.push(uploaded);
         }
-        // DualClock spare slots: upload a real 1×1 blank onto the pod (V927's zealman-blank name if
-        // present). Do not delete ref_images keys; do not leave author-only blank filenames that
-        // are missing on seetacloud. This is the path that previously queued successfully.
+        // DualClock spare slots (e.g. LoadImage #94 zealman-blank): upload a real 64×64 blank under
+        // a dedicated name. Do not reuse the authored zealman filename (often missing/broken on
+        // seetacloud → "Invalid argument returned 22"), and do not upload a 1×1 (same errno).
         let blankFilename: string | undefined;
         if (h3TwoPassRefs && !textFamily) {
             const slotCount = comfyReferenceSlotOrder(workflow).length;
             if (slotCount > names.length) {
-                const authoredBlank = comfyBlankImagePlaceholder(workflow);
-                const blankName = (() => {
-                    if (!authoredBlank) return "h3-dualclock-blank.png";
-                    const base = authoredBlank.replace(/^.*[/\\]/, "").trim();
-                    return base && /\.(png|jpe?g|webp|gif)$/i.test(base) ? base : "h3-dualclock-blank.png";
-                })();
                 try {
                     blankFilename = await uploadComfyImage(
                         baseUrl,
                         apiKey,
-                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5W1Z8AAAAASUVORK5CYII=",
-                        blankName,
+                        dualClockBlankPngDataUrl(),
+                        "h3-dualclock-blank.png",
                         { signal, workflowId: args.workflowId, guardUpload: false },
                     );
                 } catch (error) {
