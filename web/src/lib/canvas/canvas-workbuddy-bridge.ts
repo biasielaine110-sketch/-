@@ -105,7 +105,13 @@ async function bridgeFetch(path: string, init?: RequestInit) {
 
 async function postJson(path: string, body: unknown) {
     const response = await bridgeFetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    return Boolean(response?.ok);
+    return response;
+}
+
+/** WorkBuddy bridge only — do not poll on production unless a bridge token is present. */
+function shouldRunCanvasBridge() {
+    if (LOCAL_HOSTS.has(window.location.hostname)) return true;
+    return Boolean(bridgeToken());
 }
 
 export function startCanvasWorkbuddyBridge(options: {
@@ -117,26 +123,52 @@ export function startCanvasWorkbuddyBridge(options: {
     setSize: (nodeId: string, size: string) => void;
     generate: (nodeId: string, mode: CanvasGenerationMode, prompt: string) => Promise<void>;
 }) {
+    // Production users without WorkBuddy were hitting /api/canvas-bridge every 1s and burning
+    // Vercel Hobby quotas → HTTP 402 Payment Required on the whole deployment.
+    if (!shouldRunCanvasBridge()) return () => undefined;
+
     let stopped = false;
     let lastPosted = "";
+    let warnedQuota = false;
+    const stopForQuota = (status: number) => {
+        if (status !== 402) return;
+        stopped = true;
+        if (!warnedQuota) {
+            warnedQuota = true;
+            console.warn(
+                "[canvas-bridge] Vercel returned HTTP 402 (Payment Required / quota). Bridge polling stopped. Check Vercel Dashboard → Usage/Billing, wait for the cycle reset or upgrade, then redeploy.",
+            );
+        }
+    };
     const tick = async () => {
         if (stopped) return;
         const nodes = options.getNodes();
         const summary = JSON.stringify({ projectId: options.projectId, nodes: nodes.map(summarizeNode) });
         if (summary !== lastPosted) {
-            const posted = await postJson("/api/canvas-bridge/state", JSON.parse(summary)).catch(() => false);
-            if (posted) lastPosted = summary;
+            const posted = await postJson("/api/canvas-bridge/state", JSON.parse(summary)).catch(() => null);
+            if (posted && !posted.ok) {
+                stopForQuota(posted.status);
+                return;
+            }
+            if (posted?.ok) lastPosted = summary;
         }
         const response = await bridgeFetch("/api/canvas-bridge/commands").catch(() => null);
-        if (!response?.ok) return;
+        if (!response) return;
+        if (!response.ok) {
+            stopForQuota(response.status);
+            return;
+        }
         const payload = (await response.json()) as { commands?: BridgeCommand[] };
         for (const command of payload.commands || []) {
+            if (stopped) return;
             const result = await runCommand(command, nodes, options).catch((error: unknown) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
-            await postJson("/api/canvas-bridge/result", { id: command.id, ...result }).catch(() => undefined);
+            const resultResponse = await postJson("/api/canvas-bridge/result", { id: command.id, ...result }).catch(() => null);
+            if (resultResponse && !resultResponse.ok) stopForQuota(resultResponse.status);
             lastPosted = "";
         }
     };
-    const timer = window.setInterval(() => void tick(), 1000);
+    // 5s is enough for WorkBuddy; 1s was ~2.6M Hobby invocations/month per open tab.
+    const timer = window.setInterval(() => void tick(), 5000);
     void tick();
     return () => {
         stopped = true;
