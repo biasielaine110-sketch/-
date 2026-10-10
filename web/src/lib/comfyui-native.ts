@@ -818,7 +818,12 @@ function comfyBlankImagePlaceholder(workflow: ComfyWorkflow): string | null {
 }
 
 /** Map uploaded filenames onto LoadImage nodes in order. */
-export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[], workflowId?: string): ComfyWorkflow {
+export function applyComfyLoadImages(
+    workflow: ComfyWorkflow,
+    filenames: string[],
+    workflowId?: string,
+    options?: { blankFilename?: string },
+): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
     // Name allow-list OR structural fingerprint. Without the fingerprint a renamed model fell back
     // to node-id order and scrambled every reference (ref_image_0 got the last uploaded picture).
@@ -846,38 +851,21 @@ export function applyComfyLoadImages(workflow: ComfyWorkflow, filenames: string[
     // Repeating the last uploaded picture there (the legacy fallback) made the model see one
     // reference up to 8× — e.g. U24 V927 and U37 both expose 9 slots where only the first few are
     // real. Graphs without such a placeholder keep the legacy fill-up, so no other model changes
-    // behaviour — except the DualClock two-pass family below, which disconnects unfilled slots.
+    // behaviour — except the DualClock two-pass family, which parks an uploaded 1×1 blank.
     const twoPassRefs = isComfyH3TwoPassReferenceWorkflow(next);
     const blankSlot =
-        twoPassRefs || isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null;
+        (options?.blankFilename || "").trim() ||
+        (twoPassRefs || isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null);
     const loaders = slotOrder.length
         ? slotOrder.map((id) => next[id]).filter((node): node is ComfyNode => Boolean(node))
         : Object.entries(next)
               .filter(([, node]) => isComfyImageLoader(node))
               .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
               .map(([, node]) => node);
-    // U24 DualClock / H3-video: no blank placeholder in Export JSON. Repeating the last upload into
-    // spare slots OOMs rented cards. Disconnect unfilled `ref_images.ref_image_N` on every H3
-    // conditioning node instead (keeps /prompt queueable; blank-upload path was a regression that
-    // blocked submits when /upload failed). Scoped to the two-pass fingerprint only.
-    if (twoPassRefs && !blankSlot && slotOrder.length) {
-        const filled = new Set(slotOrder.filter((_, index) => Boolean(filenames[index])));
-        for (const node of Object.values(next)) {
-            if (!isMiniMaxH3ConditioningNode(node) || !node.inputs) continue;
-            for (const key of Object.keys(node.inputs)) {
-                const match = /^ref_images\.ref_image_(\d+)$/.exec(key);
-                if (!match) continue;
-                const value = node.inputs[key];
-                if (!Array.isArray(value) || value[0] == null) continue;
-                const loaderId = String(value[0]);
-                if (filled.has(loaderId)) continue;
-                delete node.inputs[key];
-            }
-        }
-    }
+    // U24 DualClock: never delete spare `ref_images.ref_image_N` — MiniMaxH3AudioConditioningT8
+    // then fails `/prompt` ("required input missing"). Never repeat the last large ref into spare
+    // slots (OOM). Use the uploaded blank from runNativeComfyUiJob when present.
     loaders.forEach((node, index) => {
-        // Legacy fallback (repeat the last upload) when the graph has no blank slot and is not
-        // the DualClock two-pass family (that family disconnects spare slots above instead).
         const name =
             filenames[index] || blankSlot || (twoPassRefs && !blankSlot ? "" : filenames[filenames.length - 1]);
         if (!name) return;
@@ -2584,9 +2572,36 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             });
             names.push(uploaded);
         }
+        // DualClock spare slots: upload a real 1×1 blank onto the pod (V927's zealman-blank name if
+        // present). Do not delete ref_images keys; do not leave author-only blank filenames that
+        // are missing on seetacloud. This is the path that previously queued successfully.
+        let blankFilename: string | undefined;
+        if (h3TwoPassRefs && !textFamily) {
+            const slotCount = comfyReferenceSlotOrder(workflow).length;
+            if (slotCount > names.length) {
+                const authoredBlank = comfyBlankImagePlaceholder(workflow);
+                const blankName = (() => {
+                    if (!authoredBlank) return "h3-dualclock-blank.png";
+                    const base = authoredBlank.replace(/^.*[/\\]/, "").trim();
+                    return base && /\.(png|jpe?g|webp|gif)$/i.test(base) ? base : "h3-dualclock-blank.png";
+                })();
+                try {
+                    blankFilename = await uploadComfyImage(
+                        baseUrl,
+                        apiKey,
+                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO5W1Z8AAAAASUVORK5CYII=",
+                        blankName,
+                        { signal, workflowId: args.workflowId, guardUpload: false },
+                    );
+                } catch (error) {
+                    const detail = error instanceof Error ? error.message : String(error);
+                    throw new Error(`H3-video / U24 双采空槽占位图上传失败，无法推送到工作流：${detail}`);
+                }
+            }
+        }
         workflow = textFamily
             ? applyComfyTextReferenceImages(workflow, names)
-            : applyComfyLoadImages(workflow, names, args.workflowId);
+            : applyComfyLoadImages(workflow, names, args.workflowId, blankFilename ? { blankFilename } : undefined);
     } else if (!textFamily && h3MultiRefVideo && !h3SelfLift) {
         // U06 V8 (and siblings): rewire duplicated ref slots even with zero uploads so Picture 1/2
         // are not left sharing `加载图像2`. SelfLift keeps its own blank-placeholder path and is
