@@ -830,22 +830,17 @@ const COMFY_DUALCLOCK_BLANK_PNG_DATA_URL =
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAG4ElEQVR42u3WMQEAAAjDsEmfczDBR44Y6NW0HQDgl4gAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAGAAhAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAADAAIgAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAGAAhAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAADAAIgAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAGAAhAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAADAAIgAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAGAAhAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAADAAIgAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAGAAhAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAADAAIgAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAAGAAAAADAAAYAADAAAAABgAAMAAAgAEAAAwAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAAMAAAAAGAAAwAACAAQAADAAAYAAAAAMAABgAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAAYAADAAAGAAhAAAAwAAGAAAwAAAAAYAADAAAIABAAAMAABgAAAAAwAAGAAAwAAAAHcW2v+VxS3lhnoAAAAASUVORK5CYII=";
 
 function dualClockBlankPngDataUrl(): string {
-    try {
-        if (typeof document !== "undefined") {
-            const canvas = document.createElement("canvas");
-            canvas.width = 512;
-            canvas.height = 512;
-            const ctx = canvas.getContext("2d");
-            if (ctx) {
-                ctx.fillStyle = "#808080";
-                ctx.fillRect(0, 0, 512, 512);
-                return canvas.toDataURL("image/png");
-            }
-        }
-    } catch {
-        /* fall through */
-    }
+    // Prefer the embedded PNG — canvas.toDataURL can race with abort during submit and surface
+    // as axios "canceled" on the blank upload even when the user did not cancel.
     return COMFY_DUALCLOCK_BLANK_PNG_DATA_URL;
+}
+
+function isComfyUploadAbortError(error: unknown, signal?: AbortSignal): boolean {
+    if (signal?.aborted) return true;
+    if (axios.isCancel(error)) return true;
+    if (error instanceof DOMException && error.name === "AbortError") return true;
+    const message = (error instanceof Error ? error.message : String(error || "")).trim();
+    return /^(canceled|cancelled|aborted)$/i.test(message);
 }
 
 /** Map uploaded filenames onto LoadImage nodes in order. */
@@ -2619,8 +2614,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             });
             names.push(uploaded);
         }
-        // DualClock: always upload a 512×512 blank for spare LoadImages (graph has 9 slots; canvas
-        // may send 1–8 refs — there is no "stop at 2" gate). Tiny blanks / missing zealman → errno 22.
+        // DualClock: upload a 512×512 blank for spare LoadImages (9 slots; 1–8 canvas refs OK).
+        // If blank upload is aborted, rethrow cleanly (do not mislabel as "占位图失败：canceled").
+        // If upload fails for another reason, fall back to the first already-uploaded ref filename
+        // so `/prompt` still queues (same file on the pod — no second round-trip).
         let blankFilename: string | undefined;
         if (h3TwoPassRefs && !textFamily) {
             try {
@@ -2632,8 +2629,26 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
                     { signal, workflowId: args.workflowId, guardUpload: false },
                 );
             } catch (error) {
-                const detail = error instanceof Error ? error.message : String(error);
-                throw new Error(`H3-video / U24 双采空槽占位图上传失败，无法推送到工作流：${detail}`);
+                if (isComfyUploadAbortError(error, signal)) {
+                    if (error instanceof DOMException) throw error;
+                    throw new DOMException("Aborted", "AbortError");
+                }
+                // One retry — seetacloud sometimes drops the blank upload after several ref uploads.
+                try {
+                    blankFilename = await uploadComfyImage(
+                        baseUrl,
+                        apiKey,
+                        dualClockBlankPngDataUrl(),
+                        "h3-dualclock-blank.png",
+                        { signal, workflowId: args.workflowId, guardUpload: false },
+                    );
+                } catch (retryError) {
+                    if (isComfyUploadAbortError(retryError, signal)) {
+                        if (retryError instanceof DOMException) throw retryError;
+                        throw new DOMException("Aborted", "AbortError");
+                    }
+                    blankFilename = names[0];
+                }
             }
         }
         workflow = textFamily
