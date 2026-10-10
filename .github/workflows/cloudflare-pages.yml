@@ -18,6 +18,8 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Cloudflare API occasionally returns 10429 rate-limit during burst deploys.
+    continue-on-error: false
     defaults:
       run:
         working-directory: web
@@ -37,3 +39,17 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: web
           command: pages deploy dist --project-name=infinite-atelier --branch=main
+        # wrangler-action has no built-in backoff; a short shell retry covers 10429 spikes.
+      - name: Retry deploy if rate-limited
+        if: failure()
+        working-directory: web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          for i in 1 2 3; do
+            echo "Retry deploy attempt $i after rate-limit cooldown..."
+            sleep $((i * 40))
+            npx wrangler pages deploy dist --project-name=infinite-atelier --branch=main && exit 0
+          done
+          exit 1
