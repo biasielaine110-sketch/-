@@ -905,15 +905,16 @@ export function applyComfyLoadImages(
         if ("image" in node.inputs || !("url" in node.inputs)) node.inputs.image = name;
         else node.inputs.url = name;
     });
-    // Scrub any leftover author-local LoadImage names (incl. node 94 zealman-blank) to the uploaded blank.
+    // DualClock: every LoadImage that is not one of the user's uploads must point at the uploaded
+    // blank — including #94 zealman-blank and any Untitled/snowtp leftovers. Matching only
+    // "author-local" names was too narrow if the pod still had a stale/broken filename.
     if (twoPassRefs && uploadedBlank) {
         for (const node of Object.values(next)) {
-            if (!isComfyImageLoader(node) || !node.inputs) continue;
+            if (!isComfyImageLoader(node)) continue;
+            if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
             const field = "image" in node.inputs || !("url" in node.inputs) ? "image" : "url";
             const current = node.inputs[field];
-            if (typeof current !== "string" || !current.trim()) continue;
-            if (uploadedSet.has(current)) continue;
-            if (!isComfyAuthorLocalImageName(current)) continue;
+            if (typeof current === "string" && uploadedSet.has(current)) continue;
             node.inputs[field] = uploadedBlank;
         }
     }
@@ -2616,25 +2617,22 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             });
             names.push(uploaded);
         }
-        // DualClock spare slots (e.g. LoadImage #94 zealman-blank): upload a real 64×64 blank under
-        // a dedicated name. Do not reuse the authored zealman filename (often missing/broken on
-        // seetacloud → "Invalid argument returned 22"), and do not upload a 1×1 (same errno).
+        // DualClock: always materialize a 64×64 blank when any refs were uploaded. Gating on
+        // `slotCount > names.length` skipped the upload when slot discovery failed, leaving
+        // LoadImage #94 on author-only `zealman-blank-image.png` → execution errno 22.
         let blankFilename: string | undefined;
         if (h3TwoPassRefs && !textFamily) {
-            const slotCount = comfyReferenceSlotOrder(workflow).length;
-            if (slotCount > names.length) {
-                try {
-                    blankFilename = await uploadComfyImage(
-                        baseUrl,
-                        apiKey,
-                        dualClockBlankPngDataUrl(),
-                        "h3-dualclock-blank.png",
-                        { signal, workflowId: args.workflowId, guardUpload: false },
-                    );
-                } catch (error) {
-                    const detail = error instanceof Error ? error.message : String(error);
-                    throw new Error(`H3-video / U24 双采空槽占位图上传失败，无法推送到工作流：${detail}`);
-                }
+            try {
+                blankFilename = await uploadComfyImage(
+                    baseUrl,
+                    apiKey,
+                    dualClockBlankPngDataUrl(),
+                    "h3-dualclock-blank.png",
+                    { signal, workflowId: args.workflowId, guardUpload: false },
+                );
+            } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                throw new Error(`H3-video / U24 双采空槽占位图上传失败，无法推送到工作流：${detail}`);
             }
         }
         workflow = textFamily
