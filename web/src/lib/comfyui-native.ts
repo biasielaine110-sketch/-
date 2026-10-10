@@ -2049,13 +2049,22 @@ async function uploadComfyInputFile(
     // ComfyUI stores uploads under input/ via this endpoint for images and audio alike.
     body.append("image", file);
     body.append("overwrite", "true");
+    // seetacloud :8443 via Cloudflare proxy intermittently returns 520/522 under load; more
+    // attempts + longer backoff absorb that without changing behaviour for stable hosts.
     const response = await comfyRequestWithGatewayRetry(
         () =>
             axios.post(comfyUiUrl(baseUrl, "/upload/image"), body, {
                 headers: authHeaders(apiKey),
                 signal: options?.signal,
+                // Large refs through CF→CN can exceed axios' default; keep the socket open.
+                timeout: isFlakyComfyGatewayHost(baseUrl) ? 120_000 : 60_000,
             }),
-        { signal: options?.signal, attempts: isFlakyComfyGatewayHost(baseUrl) ? 3 : 1, label: "ComfyUI /upload/image" },
+        {
+            signal: options?.signal,
+            attempts: isFlakyComfyGatewayHost(baseUrl) ? 6 : 1,
+            backoffMs: isFlakyComfyGatewayHost(baseUrl) ? 2500 : 800,
+            label: "ComfyUI /upload/image",
+        },
     );
     const name = readComfyUploadName(response.data);
     if (!name) {
