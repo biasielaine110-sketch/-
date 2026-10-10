@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
-import { ArrowUp, GripVertical, LoaderCircle, Maximize2, Square, WandSparkles, X } from "lucide-react";
+import { ArrowUp, Clock, GripVertical, LoaderCircle, Maximize2, Square, WandSparkles, X } from "lucide-react";
 import { App, Button, Tooltip } from "antd";
+import dayjs from "dayjs";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -15,6 +16,7 @@ import { CanvasPromptChipInput } from "./canvas-prompt-chip-input";
 import { useCanvasTextEditDialog } from "./use-canvas-text-edit-dialog";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
 import { CanvasTextSettingsPopover } from "./canvas-text-settings-popover";
+import { CanvasScheduleDialog } from "./canvas-schedule-dialog";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
@@ -32,10 +34,16 @@ type CanvasNodePromptPanelProps = {
     onReorderReferences?: (orderedNodeIds: string[]) => void;
     onRemoveReference?: (referenceNodeId: string) => void;
     onImageSettingsOpenChange?: (open: boolean) => void;
+    /** 排期生成时间（epoch ms）。设置后到点由画布调度器自动触发一次生成。 */
+    scheduledAt?: number;
+    /** 设定/更新排期时间。 */
+    onSchedule?: (at: number) => void;
+    /** 取消当前排期。 */
+    onCancelSchedule?: () => void;
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onReorderReferences, onRemoveReference, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onReorderReferences, onRemoveReference, onImageSettingsOpenChange, scheduledAt, onSchedule, onCancelSchedule, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
@@ -50,6 +58,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const [prompt, setPrompt] = useState(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
     const [localRunning, setLocalRunning] = useState(false);
     const [optimizing, setOptimizing] = useState(false);
+    const [scheduleOpen, setScheduleOpen] = useState(false);
     const optimizeControllerRef = useRef<AbortController | null>(null);
     const running = isRunning || localRunning;
     const promptPlaceholder = t(`canvas.promptPanel.${mode === "text" && hasTextContent ? "editText" : mode}`);
@@ -147,11 +156,25 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         .join("\n\n");
     const canSubmit = Boolean(prompt.trim() || connectedTextPrompt);
 
+    // 已有排期时，发送不再直接生成——避免「刚设好排期就被立刻跑掉」。要马上跑请用「立即生成」。
     const submit = () => {
         // Pass only the user-typed prompt. Connected text is merged once in buildNodeGenerationContext.
         // Passing connectedTextPrompt here used to duplicate it: once as `prompt`, again as upstreamText.
         const userPrompt = prompt.trim();
         if ((!userPrompt && !connectedTextPrompt) || running) return;
+        if (scheduledAt) {
+            message.info(t("canvas.schedule.pendingHint", { time: dayjs(scheduledAt).format("MM-DD HH:mm") }));
+            return;
+        }
+        setLocalRunning(true);
+        onGenerate(node.id, mode, userPrompt);
+    };
+
+    // 显式「立即生成」：清掉当前排期后马上生成一次。
+    const generateNow = () => {
+        const userPrompt = prompt.trim();
+        if ((!userPrompt && !connectedTextPrompt) || running) return;
+        if (scheduledAt) onCancelSchedule?.();
         setLocalRunning(true);
         onGenerate(node.id, mode, userPrompt);
     };
@@ -331,27 +354,90 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         </>
                     )}
                 </div>
-                <Button
-                    type="primary"
-                    className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
-                    danger={running}
-                    disabled={!running && !canSubmit}
-                    onClick={() => (running ? handleStop() : submit())}
-                    aria-label={t(running ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
-                >
-                    <span className="flex items-center gap-1.5">
-                        {running ? (
-                            <>
-                                <LoaderCircle className="size-4 animate-spin" />
-                                <Square className="size-3.5 fill-current" />
-                                <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
-                            </>
-                        ) : (
-                            <ArrowUp className="size-4" />
-                        )}
-                    </span>
-                </Button>
+                <div className="flex shrink-0 items-center gap-1.5">
+                    {scheduledAt ? (
+                        <>
+                            {/* 已排期：发送不再直接生成——「立即生成」才是马上跑，主按钮改为打开排期面板（改时间/取消）。 */}
+                            <Button
+                                type="text"
+                                size="small"
+                                className="!h-10 !rounded-full !px-2.5"
+                                style={{ color: theme.node.text }}
+                                disabled={running}
+                                onClick={generateNow}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                            >
+                                <span className="text-xs font-medium">{t("canvas.schedule.generateNow")}</span>
+                            </Button>
+                            <Tooltip title={t("canvas.schedule.current", { time: dayjs(scheduledAt).format("MM-DD HH:mm") })}>
+                                <Button
+                                    type="primary"
+                                    className="!h-10 shrink-0 !rounded-full !px-3"
+                                    danger={running}
+                                    onClick={() => (running ? handleStop() : setScheduleOpen(true))}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    aria-label={t("canvas.promptPanel.schedule")}
+                                >
+                                    <span className="flex items-center gap-1.5">
+                                        <Clock className="size-4" />
+                                        <span className="text-xs font-medium">{dayjs(scheduledAt).format("MM-DD HH:mm")}</span>
+                                    </span>
+                                </Button>
+                            </Tooltip>
+                        </>
+                    ) : (
+                        <>
+                            <Tooltip title={t("canvas.promptPanel.schedule")}>
+                                <span className="shrink-0">
+                                    <Button
+                                        type="text"
+                                        size="small"
+                                        className="!h-10 !w-10 !min-w-10 !rounded-full !p-0"
+                                        style={{ color: theme.node.text }}
+                                        disabled={running}
+                                        onClick={() => setScheduleOpen(true)}
+                                        onMouseDown={(event) => event.stopPropagation()}
+                                        onPointerDown={(event) => event.stopPropagation()}
+                                        icon={<Clock className="size-4" />}
+                                        aria-label={t("canvas.promptPanel.schedule")}
+                                    />
+                                </span>
+                            </Tooltip>
+                            <Button
+                                type="primary"
+                                className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
+                                danger={running}
+                                disabled={!running && !canSubmit}
+                                onClick={() => (running ? handleStop() : submit())}
+                                aria-label={t(running ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
+                            >
+                                <span className="flex items-center gap-1.5">
+                                    {running ? (
+                                        <>
+                                            <LoaderCircle className="size-4 animate-spin" />
+                                            <Square className="size-3.5 fill-current" />
+                                            <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
+                                        </>
+                                    ) : (
+                                        <ArrowUp className="size-4" />
+                                    )}
+                                </span>
+                            </Button>
+                        </>
+                    )}
+                </div>
             </div>
+            {onSchedule ? (
+                <CanvasScheduleDialog
+                    open={scheduleOpen}
+                    scheduledAt={scheduledAt}
+                    onClose={() => setScheduleOpen(false)}
+                    onSchedule={onSchedule}
+                    onCancelSchedule={() => onCancelSchedule?.()}
+                />
+            ) : null}
             {textEdit.dialog}
         </div>
     );

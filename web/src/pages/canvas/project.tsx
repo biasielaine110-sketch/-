@@ -528,6 +528,33 @@ function AtelierCanvasPage() {
         });
     }, [generationEpoch, runningNodeId]);
 
+    const isNodeGeneratingRef = useRef(isNodeGenerating);
+    useEffect(() => {
+        isNodeGeneratingRef.current = isNodeGenerating;
+    }, [isNodeGenerating]);
+
+    // 定时生成调度器：每秒扫描带 scheduledAt 的节点，到点后走与手动点击完全相同的生成入口。
+    // 页面关闭会暂停；再次打开时已过期但未执行的排期会立刻补跑。
+    const scheduleClaimRef = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        const timer = window.setInterval(() => {
+            const now = Date.now();
+            const due = nodesRef.current.filter((node) => typeof node.metadata?.scheduledAt === "number" && (node.metadata.scheduledAt as number) <= now);
+            if (!due.length) return;
+            for (const node of due) {
+                if (scheduleClaimRef.current.has(node.id)) continue;
+                if (isNodeGeneratingRef.current(node.id)) continue;
+                scheduleClaimRef.current.add(node.id);
+                window.setTimeout(() => scheduleClaimRef.current.delete(node.id), 120_000);
+                setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, scheduledAt: undefined } } : item)));
+                const mode: CanvasNodeGenerationMode = node.metadata?.generationMode || (node.type === CanvasNodeType.Text ? "text" : node.type === CanvasNodeType.Video ? "video" : node.type === CanvasNodeType.Audio ? "audio" : "image");
+                const prompt = node.metadata?.composerContent ?? node.metadata?.prompt ?? "";
+                void generateNodeRef.current?.(node.id, mode, prompt);
+            }
+        }, 1000);
+        return () => window.clearInterval(timer);
+    }, []);
+
     useEffect(() => {
         if (!hydrated) return;
         setProjectLoaded(false);
@@ -5869,6 +5896,14 @@ function AtelierCanvasPage() {
         [handleUploadRequest],
     );
 
+    const handleNodeSchedule = useCallback((nodeId: string, at: number) => {
+        setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scheduledAt: at } } : node)));
+    }, []);
+
+    const handleCancelNodeSchedule = useCallback((nodeId: string) => {
+        setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scheduledAt: undefined } } : node)));
+    }, []);
+
     const renderNodePanel = useCallback(
         (panelNode: CanvasNodeData) =>
             panelNode.type === CanvasNodeType.Director ? null : panelNode.type === CanvasNodeType.Config ? (
@@ -5890,6 +5925,9 @@ function AtelierCanvasPage() {
                     onContentChange={handleNodeContentChange}
                     onGenerate={handleGenerateNode}
                     onStop={stopGenerationForNode}
+                    scheduledAt={panelNode.metadata?.scheduledAt}
+                    onSchedule={(at) => handleNodeSchedule(panelNode.id, at)}
+                    onCancelSchedule={() => handleCancelNodeSchedule(panelNode.id)}
                     modeOverride={getNodeDefinition(panelNode.type)?.useBuiltinPanel?.mode}
                     onImageSettingsOpenChange={(open) => {
                         setNodeImageSettingsOpen(open);
@@ -5897,7 +5935,7 @@ function AtelierCanvasPage() {
                     }}
                 />
             ),
-        [getConfigInputs, getMentionReferences, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, handleRemoveLinkedMedia, handleReorderLinkedMedia, isNodeGenerating, stopGenerationForNode],
+        [getConfigInputs, getMentionReferences, handleCancelNodeSchedule, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, handleNodeSchedule, handleRemoveLinkedMedia, handleReorderLinkedMedia, isNodeGenerating, stopGenerationForNode],
     );
 
     const handleDirectorExport = useCallback(

@@ -114,6 +114,8 @@ export type CanvasNodeMetadata = {
     prompt?: string;
     /** Bumped when chat skills (or similar) write prompt text so the prompt panel can sync. */
     promptSyncAt?: number;
+    /** 定时生成：到点（epoch ms）后自动触发一次生成；生成开始后清空。 */
+    scheduledAt?: number;
     status?: CanvasNodeStatus;
     errorDetails?: string;
     fontSize?: number;

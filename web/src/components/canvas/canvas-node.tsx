@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { App, Dropdown } from "antd";
-import { ChevronDown, ChevronRight, Clapperboard, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
+import { ChevronDown, ChevronRight, Clapperboard, Clock, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
 
 import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas-display-image";
 import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
@@ -564,6 +564,17 @@ export const CanvasNode = React.memo(function CanvasNode({
 
                 {!isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? (
                     <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} />
+                ) : null}
+
+                {typeof data.metadata?.scheduledAt === "number" && !isGroup ? (
+                    <div
+                        className="pointer-events-none absolute right-2 top-2 z-[60] flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium shadow-sm"
+                        style={{ background: theme.toolbar.panel, border: `1px solid ${theme.node.stroke}`, color: theme.node.text }}
+                        title={t("canvas.schedule.current", { time: formatScheduledAt(data.metadata.scheduledAt) })}
+                    >
+                        <Clock className="size-3" />
+                        <span>{formatScheduledAt(data.metadata.scheduledAt)}</span>
+                    </div>
                 ) : null}
 
                 <ResizeHandle corner="top-left" onMouseDown={handleResizeMouseDown} />
@@ -1143,6 +1154,16 @@ export const registerCanvasMedia = (key: string, entry: CanvasMediaToggle) => {
     };
 };
 export const getCanvasMediaToggle = (key: string) => canvasMediaRegistry.get(key);
+
+// Scheduled-generation badge label: today shows `HH:mm`, other days prefix `MM-DD`.
+function formatScheduledAt(at: number) {
+    const date = new Date(at);
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const now = new Date();
+    const sameDay = date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+    const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    return sameDay ? clock : `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock}`;
+}
 
 // Compact `m:ss` readout for the inline scrubber. Videos here are short generations, so minutes are
 // allowed past 60 instead of growing an hour segment.
