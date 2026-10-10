@@ -52,8 +52,23 @@ const VIDEO_HISTORY_GRACE_POLLS = 8;
  * duration is smaller than this — or unreadable — keeps this 10 s floor.
  */
 const TWO_PASS_H3_MAX_SECONDS = 10;
-/** Draft megapixel ceiling for DualClock LOW pass (author bakes 0.4; 1080p ≈0.9 after ÷scale²). */
-const TWO_PASS_H3_MAX_DRAFT_MEGAPIXELS = 0.7;
+/**
+ * **Delivered**-resolution ceiling for the DualClock two-pass H3 video family (U24 …).
+ *
+ * The delivered clip is the ResolutionSelector's `megapixels` multiplied back up by the learned
+ * latent upscaler's factor, so a ceiling placed on the *draft* silently caps the output: the
+ * shipped 0.7 MP draft cap delivered ≈1.0 MP (≈720p) for **every** canvas tier — picking 1080p or
+ * 2K still came back 720p, contradicting the app's own "常用选 1080p；需要更高成片可选 2K" hint.
+ *
+ * A draft number also cannot be shared across templates: it is only correct for the exact
+ * `scale_by` it was measured against (0.95 was tuned for the V2 template's ×1.5), while the V927
+ * template ships ×1.2 — so restoring "0.95" would land 1080p at ≈1.37 MP there, not 1920×1080.
+ * Expressed on the **delivered** megapixels the guard is factor-independent: 720p / 1080p / 2K
+ * each land exactly on the canvas tier, and only the VRAM-infeasible 4K tier is clamped back
+ * (≈2K). This is the same guard that was accidentally removed along with the duration clamp when
+ * `7ddd219` ("full 1080p draft budget") was reverted by `1525ca8`.
+ */
+const TWO_PASS_H3_MAX_DELIVERED_MEGAPIXELS = 4;
 
 /** Rented / tunnel hosts whose nginx often returns 502 while ComfyUI is unloading or restarting. */
 function isFlakyComfyGatewayHost(baseUrl: string) {
@@ -1547,15 +1562,20 @@ export function applyComfyVideoSettings(
                 }
                 const scale = h3LatentUpscaleFactor(next);
                 if (authoredMegapixels != null && scale != null && "megapixels" in node.inputs) {
-                    const draft = Math.max(0.1, Math.round((megapixels / (scale * scale)) * 100) / 100);
-                    // U30 author draft is 0.7 MP; a bare 720p canvas budget (~0.41 draft) must not
-                    // silently pull it down. Only raise (or match) the authored floor.
-                    // U24 DualClock on rented ~24–32GB pods: an uncapped 2K canvas budget yields
-                    // ~1.6 MP draft then ×1.5² refine and OOMs the worker — seetacloud's gateway
-                    // then returns HTTP 502. Cap the DualClock draft only (Singularity untouched).
-                    const nextMegapixels = settings.singularityH3Video
-                        ? Math.max(authoredMegapixels, draft)
-                        : Math.min(draft, Math.max(authoredMegapixels, TWO_PASS_H3_MAX_DRAFT_MEGAPIXELS));
+                    // The canvas budget is the DELIVERED target; the selector only drives the cheap LOW
+                    // draft that the learned upscaler multiplies by `scale` on the refine pass, so the
+                    // budget is divided by scale² to become a draft. Measuring the guard on the
+                    // *delivered* megapixels (not the draft) keeps it independent of each template's
+                    // factor: 720p / 1080p / 2K each land exactly on the canvas tier and only the
+                    // infeasible 4K tier is clamped back to ≈2K. A draft-numbered cap WAS the bug — the
+                    // shipped 0.7 silently delivered ≈1.0 MP (720p) for every tier, and it could not be
+                    // shared across templates anyway (0.95 was tuned for a ×1.5 sibling, but V927 ships
+                    // ×1.2, so 0.95 would have landed 1080p at ≈1.37 MP, still short).
+                    const deliveredBudget = Math.min(megapixels, TWO_PASS_H3_MAX_DELIVERED_MEGAPIXELS);
+                    const draft = Math.max(0.1, Math.round((deliveredBudget / (scale * scale)) * 100) / 100);
+                    // Never pull below the author's own tuned draft (U24 0.5 / U30 0.7), mirroring the
+                    // duration guard's "never clamp below a default run" contract.
+                    const nextMegapixels = Math.max(authoredMegapixels, draft);
                     writeComfyNumberInput(node, "megapixels", nextMegapixels);
                 }
             } else if (settings.selfLiftH3Video || settings.resolutionSelectorH3Video) {
@@ -1762,6 +1782,50 @@ function applyBrowserSafeVhsFormat(workflow: ComfyWorkflow): ComfyWorkflow {
         if ("pix_fmt" in node.inputs && typeof node.inputs.pix_fmt === "string") {
             node.inputs.pix_fmt = "yuv420p";
         }
+    }
+    return next;
+}
+
+/**
+ * Structural repair for the U30 Singularity 超双采放大 family's `MinimaxH3LatentUpscaler3D`.
+ *
+ * The shipped export carries a **mis-mapped widget order**: the two BOOLEAN switches
+ * `enable_temporal_chunking` / `force_unload` hold the strings `"cuda"` / `"bf16"` — which are the
+ * values of the neighbouring `device` / `precision` widgets — while `precision` is `"fp16"` on a
+ * node that loads `minimax_h3_latent_upscaler_3d_bf16.safetensors`.
+ *
+ * The node pack's own contract (LBH-123 ComfyUI-Easy-Media "Minimax H3 Latent Upscaler (3D)") is
+ * `enable_temporal_chunking BOOLEAN True` / `force_unload BOOLEAN True` / `device cuda|rocm|cpu` /
+ * `precision fp32|fp16|bf16`. The sibling U17 template (`…latent放大模型双采加速…`), which ships the
+ * *same* node delivering ≈1080p (selector 0.9 MP × 1.5² ≈ 2.0 MP), ships `true / true / "cuda" /
+ * "bf16"` and renders cleanly.
+ *
+ * Running the learned latent upscaler in fp16 against bf16 weights is the classic source of the
+ * "画面花掉" the operator reports: the upscaler's latent activations leave fp16's usable range and
+ * the decoded frames come back as noise. It is invisible at the author's small baked draft
+ * (selector 0.7 MP → ≈1.6 MP delivered) and only appears once the canvas pushes the draft up —
+ * i.e. exactly when 1080p / 2K is picked.
+ *
+ * Normalize the node to the pack's documented defaults, and only ever repair a value that is
+ * plainly wrong, so a template that already ships sane values stays byte-identical. Scoped to the
+ * Singularity fingerprint at the call site; every other native ComfyUI workflow is untouched.
+ */
+export function repairSingularityLatentUpscaler(workflow: ComfyWorkflow): ComfyWorkflow {
+    const next = cloneWorkflow(workflow);
+    for (const node of Object.values(next)) {
+        if (!/MinimaxH3LatentUpscaler3D/i.test(String(node?.class_type || ""))) continue;
+        if (!node.inputs || typeof node.inputs !== "object") continue;
+        // BOOLEAN switches must be real booleans. Defaults are "on": temporal chunking lowers the
+        // peak memory of long latents, force_unload frees VRAM for the following refine pass.
+        if (typeof node.inputs.enable_temporal_chunking !== "boolean") node.inputs.enable_temporal_chunking = true;
+        if (typeof node.inputs.force_unload !== "boolean") node.inputs.force_unload = true;
+        // Inference precision must match the loaded checkpoint's dtype.
+        const model = String(node.inputs.model_name || "");
+        const precision = String(node.inputs.precision || "");
+        if (/fp16/i.test(precision) && /bf16/i.test(model)) node.inputs.precision = "bf16";
+        else if (/bf16/i.test(precision) && /fp16/i.test(model)) node.inputs.precision = "fp16";
+        // Device must be a backend the pack knows; anything else silently falls back to a bad path.
+        if (!/^(cuda|rocm|cpu)$/i.test(String(node.inputs.device || ""))) node.inputs.device = "cuda";
     }
     return next;
 }
@@ -2491,6 +2555,9 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // U24 DualClock / H3-video only: force browser-safe VHS h264 (author template already ships it;
     // this keeps a mis-exported gif/webm sink from landing unplayable on the canvas).
     if (h3TwoPassRefs) workflow = applyBrowserSafeVhsFormat(workflow);
+    // U30 Singularity only: normalize the learned latent upscaler's mis-mapped widget values
+    // (see `repairSingularityLatentUpscaler`) so 1080p/2K do not decode to noise.
+    if (h3Singularity) workflow = repairSingularityLatentUpscaler(workflow);
     if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
     // U06 single-pass multi-ref (WJILatentPreset holder), excluding SelfLift / U35 / U30.
     const multiRefH3Video = h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo && !h3Singularity;
