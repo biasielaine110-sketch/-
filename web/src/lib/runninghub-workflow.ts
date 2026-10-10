@@ -255,6 +255,9 @@ function explainRunningHubError(error: unknown, workflowId: string): Error {
     if (isWorkflowPermissionMessage(message) && isMinimaxH3RefTopWorkflow(workflowId)) {
         return new Error(i18n.t("apiErrors.runningHubH3RefTopScriptRequired", { id: workflowId }));
     }
+    if (isWorkflowPermissionMessage(message) && isKrea2PastoralMjWorkflow(workflowId)) {
+        return new Error(i18n.t("apiErrors.runningHubKrea2PastoralMjScriptRequired", { id: workflowId }));
+    }
     if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) return new Error(apiText("runningHubNoBalance"));
     if (isUnknownServerError(message)) return new Error(apiText("runningHubUnknownError"));
     if (error instanceof Error && error.message && !isUnknownServerError(error.message)) return error;
@@ -2112,9 +2115,88 @@ export function isQwenKleinSkinWorkflowId(workflowId?: string | null) {
     return isQwenKleinSkinWorkflow(workflowId);
 }
 
+// Krea2 田园风格 MJ 感 T2I (runninghub.cn 2108931536983773186 /
+// runninghub.ai 2108931356129599489). User text lands on CR PromptText (102) → llama_cpp_instruct
+// (113) → CLIPTextEncode (3). Canvas size is EmptyLatentImage ← TTResolutionSelector (10) with
+// `custom_width`/`custom_height` (not scalar width/height). Generic writers miss the selector and
+// can leave the author's fixed KSampler / llama seeds — scoped to these two ids only.
+const KREA2_PASTORAL_MJ_WORKFLOW_IDS = new Set(["2108931536983773186", "2108931356129599489"]);
+
+function isKrea2PastoralMjWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return KREA2_PASTORAL_MJ_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate for the Krea2 pastoral MJ T2I graph (RH.cn / RH.ai id pair above). */
+export function isKrea2PastoralMjWorkflowId(workflowId?: string | null) {
+    return isKrea2PastoralMjWorkflow(workflowId);
+}
+
+function snap16(value: number) {
+    return Math.max(64, Math.round(value / 16) * 16);
+}
+
+function applyKrea2PastoralMjSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    size?: { width: number; height: number } | null,
+): { workflow: ComfyWorkflow } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+
+    // User text → CR PromptText (102) only. Do not overwrite llama system_prompt or the linked
+    // CLIPTextEncode slot — those carry the Krea2 reverse/edit contract.
+    if (prompt.trim()) {
+        const promptNode =
+            next["102"] ||
+            findComfyNode(next, (node) => /CR\s*PromptText/i.test(String(node.class_type || "")) && typeof node.inputs?.prompt === "string");
+        if (promptNode?.inputs && typeof promptNode.inputs.prompt === "string") promptNode.inputs.prompt = prompt;
+    }
+
+    // Canvas size → TTResolutionSelector (10). EmptyLatentImage width/height are links into this
+    // node; writeRunningHubSize only follows links looking for value/int/number, never custom_*.
+    if (size?.width && size.height) {
+        const selector =
+            next["10"] ||
+            findComfyNode(next, (node) => /TTResolutionSelector/i.test(String(node.class_type || "")) && "custom_width" in (node.inputs || {}));
+        if (selector?.inputs) {
+            // Keep the combo `resolution` label as authored; with custom mode the pixel knobs win.
+            if ("use_custom_resolution" in selector.inputs) selector.inputs.use_custom_resolution = true;
+            if (typeof selector.inputs.custom_width === "number" || typeof selector.inputs.custom_width === "string") {
+                writeScalar(selector.inputs, "custom_width", snap16(size.width));
+            }
+            if (typeof selector.inputs.custom_height === "number" || typeof selector.inputs.custom_height === "string") {
+                writeScalar(selector.inputs, "custom_height", snap16(size.height));
+            }
+        }
+    }
+
+    // Fixed seeds on KSampler (97) and llama_cpp_instruct_adv (113) → identical images; randomize.
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        if (/KSampler/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+        else if (/llama_cpp_instruct/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+    }
+
+    return { workflow: next };
+}
+
 /** Workflows that prefer model-script Export (API) JSON + comfy/run when the shared id denies ACL. */
 function usesRunningHubLocalExportGraph(workflowId?: string | null) {
-    return isMinimaxH3SelfLiftWorkflow(workflowId) || isQwenKleinSkinWorkflow(workflowId) || isMinimaxH3RefTopWorkflow(workflowId);
+    return (
+        isMinimaxH3SelfLiftWorkflow(workflowId) ||
+        isQwenKleinSkinWorkflow(workflowId) ||
+        isMinimaxH3RefTopWorkflow(workflowId) ||
+        isKrea2PastoralMjWorkflow(workflowId)
+    );
 }
 
 function applyQwenKleinSkinSettings(
@@ -2344,6 +2426,13 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const klein = applyQwenKleinSkinSettings(workflow, prompt, size, aspect, rawSize, megapixels);
         const list = workflowNodeInfoList(workflow, klein.workflow);
         return { nodeInfoList: list, graph: klein.workflow };
+    }
+    // Krea2 田园 MJ opts out (see applyKrea2PastoralMjSettings): size lives on TTResolutionSelector
+    // custom_width/height the generic size writer never reaches. Always ship `graph` for local Export.
+    if (isKrea2PastoralMjWorkflow(workflowId)) {
+        const pastoral = applyKrea2PastoralMjSettings(workflow, prompt, size);
+        const list = workflowNodeInfoList(workflow, pastoral.workflow);
+        return { nodeInfoList: list, graph: pastoral.workflow };
     }
     if (prompt.trim()) patched = writeRunningHubPrompt(patched, prompt);
     if (size) patched = writeRunningHubSize(patched, size.width, size.height, aspect);
@@ -3014,6 +3103,9 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     if (!workflow && fetchPermissionDenied && isMinimaxH3RefTopWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubH3RefTopScriptRequired", { id: workflowId }));
+    }
+    if (!workflow && fetchPermissionDenied && isKrea2PastoralMjWorkflow(workflowId)) {
+        throw new Error(i18n.t("apiErrors.runningHubKrea2PastoralMjScriptRequired", { id: workflowId }));
     }
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     const uploaded: string[] = [];

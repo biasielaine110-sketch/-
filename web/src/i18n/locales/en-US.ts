@@ -310,6 +310,7 @@ export default {
         runningHubSelfLiftScriptRequired: "RunningHub workflow {{id}} (SelfLift dual-pass lite) is not open for API access. Paste its Export Workflow (API) JSON into this model's script field and retry — you do not need the author to unlock it.",
         runningHubKleinSkinScriptRequired: "RunningHub workflow {{id}} (Qwen Image 2.1 + Klein skin) is not open for API access. Paste its Export Workflow (API) JSON into this model's script field and retry — you do not need the author to unlock it.",
         runningHubH3RefTopScriptRequired: "RunningHub workflow {{id}} (MiniMax H3 Ref top multi-param) is not open for API access. Paste its Export Workflow (API) JSON into this model's script field and retry — you do not need the author to unlock it.",
+        runningHubKrea2PastoralMjScriptRequired: "RunningHub workflow {{id}} (Krea2 pastoral MJ) is not open for API access. Paste its Export Workflow (API) JSON into this model's script field and retry — you do not need the author to unlock it.",
         runningHubWorkflowNotRun: "This workflow cannot be called yet. Open it on RunningHub, save it, and run it successfully once.",
         runningHubNoTaskId: "RunningHub did not return a taskId",
         runningHubTaskFailed: "RunningHub task failed",
