@@ -773,9 +773,14 @@ export function applyComfyTextReferenceImages(workflow: ComfyWorkflow, filenames
  */
 export const COMFY_REFERENCE_SLOT_WORKFLOWS = [
     "U24-文武双修T8版MiniMaxH3双采参考生视频V2",
-    // Same DualClock graph under the seetacloud model display name.
+    "U24-文武双修T8版MiniMaxH3双采参考生视频V927",
+    // Same DualClock graph under seetacloud / canvas model display names.
     "H3-video",
     "H3_video",
+    "u24_v927",
+    "u24-v927",
+    "U24_V927",
+    "U24-V927",
 ] as const;
 
 /**
@@ -1083,7 +1088,9 @@ function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
 /**
  * Compshare MiniMax H3: inject canvas audio by adding LoadAudio nodes and linking
  * `drive_audio` / `ref_audios.ref_audio_*` on MiniMaxH3AudioConditioningT8.
- * When audio is provided, switch `audio_mode` away from `native` so the source is used.
+ * When audio is provided, switch `audio_mode` away from `native` so the source is used —
+ * except DualClock U24/V927 graphs that author `audio_mode=native` with no `ref_audios.*`
+ * slots: forcing `lock_source` there plays sound over closed-mouth faces (no lip sync).
  */
 export function applyComfyMiniMaxDriveAudio(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
     if (!filenames.length) return workflow;
@@ -1096,6 +1103,17 @@ export function applyComfyMiniMaxDriveAudio(workflow: ComfyWorkflow, filenames: 
     // No node in this graph can consume audio, so the upload is unusable here. Leave the graph
     // exactly as authored instead of planting orphan `LoadAudio` nodes nothing links to.
     if (!targets.length) return next;
+
+    // U24 DualClock / V927: both LOW+HIGH conditioning nodes declare `audio_mode: native` and
+    // have zero `ref_audios.*` slots. Stamping `drive_audio` + `lock_source` muxes canvas audio
+    // onto a clip whose faces stay locked to still references (sound yes, mouth no). Keep native
+    // AV generation; canvas audio is ignored for this family (prompt `<d>…</d>` drives speech).
+    if (isComfyH3TwoPassReferenceWorkflow(next)) {
+        const hasRefAudioSlots = targets.some((node) =>
+            Object.keys(node.inputs || {}).some((key) => key.startsWith("ref_audios.")),
+        );
+        if (!hasRefAudioSlots) return next;
+    }
 
     const existingLoaders = Object.entries(next)
         .filter(([, node]) => isComfyAudioLoader(node))
@@ -1941,8 +1959,13 @@ async function referenceToUploadFile(
  */
 export const COMFY_UPLOAD_GUARD_WORKFLOWS = [
     "U24-文武双修T8版MiniMaxH3双采参考生视频V2",
+    "U24-文武双修T8版MiniMaxH3双采参考生视频V927",
     "H3-video",
     "H3_video",
+    "u24_v927",
+    "u24-v927",
+    "U24_V927",
+    "U24-V927",
     "U06-minimax_h3_lightX2v多图参考生视频V5",
     "U06-h3_多图参考生视频V8",
     "U06-minimax_h3_多图参考生视频V8",
@@ -2240,7 +2263,9 @@ function assertBrowserCanDecodeVideo(blob: Blob, mimeHint: string): Promise<void
     const url = URL.createObjectURL(typed);
     return new Promise((resolve, reject) => {
         const video = document.createElement("video");
-        video.preload = "auto";
+        // `metadata` is enough to prove a video track; `auto` re-buffered large DualClock mp4s
+        // and added seconds–minutes after the proxy download had already finished.
+        video.preload = "metadata";
         video.muted = true;
         video.playsInline = true;
         let settled = false;
@@ -2260,10 +2285,10 @@ function assertBrowserCanDecodeVideo(blob: Blob, mimeHint: string): Promise<void
         };
         const timer = window.setTimeout(
             () => finish(new Error("Browser could not decode the ComfyUI MP4 in time — check VHS format is video/h264-mp4")),
-            12_000,
+            8_000,
         );
-        video.onloadeddata = () => {
-            if (video.videoWidth > 0 || video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) finish();
+        video.onloadedmetadata = () => {
+            if (video.videoWidth > 0 || video.readyState >= HTMLMediaElement.HAVE_METADATA) finish();
             else finish(new Error("ComfyUI returned an MP4 with no decodable video track"));
         };
         video.onerror = () =>
@@ -2304,15 +2329,39 @@ async function fetchComfyView(
         return blob;
     };
     try {
+        // Flaky tunnels: native fetch streams the body and often finishes large DualClock mp4s
+        // faster than axios+XHR through the same /api/proxy hop.
+        if (isFlakyComfyGatewayHost(baseUrl) && typeof fetch === "function") {
+            const response = await fetch(url, { headers, signal: options?.signal });
+            if (!response.ok) {
+                const err = new Error(`ComfyUI /view HTTP ${response.status}`);
+                (err as Error & { response?: { status: number } }).response = { status: response.status };
+                throw err;
+            }
+            const data = await response.blob();
+            const contentLength = response.headers.get("content-length");
+            return takeBlob({ data, headers: contentLength ? { "content-length": contentLength } : {} });
+        }
         const response = await axios.get(url, { headers, responseType: "blob", signal: options?.signal });
         return takeBlob(response);
     } catch (error) {
         // Transient seetacloud / Vercel proxy 502s are common right after a heavy DualClock job
         // finishes (worker still restarting). One short retry absorbs that class of failure without
         // changing behaviour for any other status or host.
-        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        const status = axios.isAxiosError(error)
+            ? error.response?.status
+            : typeof (error as { response?: { status?: number } })?.response?.status === "number"
+              ? (error as { response: { status: number } }).response.status
+              : undefined;
         if (status !== 502 && status !== 503) throw error;
         await sleep(1500, options?.signal);
+        if (isFlakyComfyGatewayHost(baseUrl) && typeof fetch === "function") {
+            const retry = await fetch(url, { headers, signal: options?.signal });
+            if (!retry.ok) throw new Error(`ComfyUI /view HTTP ${retry.status}`);
+            const data = await retry.blob();
+            const contentLength = retry.headers.get("content-length");
+            return takeBlob({ data, headers: contentLength ? { "content-length": contentLength } : {} });
+        }
         const retry = await axios.get(url, { headers, responseType: "blob", signal: options?.signal });
         return takeBlob(retry);
     }
@@ -2895,8 +2944,12 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             // `slice` retypes without copying the whole mp4 into a second ArrayBuffer (unlike
             // `new Blob([blob])`), which mattered for 30–100MB DualClock clips on the return path.
             const typed = blob.type === mimeType ? blob : blob.slice(0, blob.size, mimeType);
-            // Decode probe only for DualClock / H3-video — other video families keep prior behaviour.
-            if (h3TwoPassRefs) await assertBrowserCanDecodeVideo(typed, mimeType);
+            // Decode probe for DualClock — skip on seetacloud-class hosts: container sniff already
+            // validated the mp4, and a full decode pass after a multi-minute proxy download only
+            // delays canvas return further.
+            if (h3TwoPassRefs && !isFlakyComfyGatewayHost(baseUrl)) {
+                await assertBrowserCanDecodeVideo(typed, mimeType);
+            }
             videos.push({ blob: typed, mimeType });
         } else {
             for (const file of media.images) {
