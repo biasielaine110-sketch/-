@@ -2051,21 +2051,34 @@ async function uploadComfyInputFile(
     body.append("overwrite", "true");
     // seetacloud :8443 via Cloudflare proxy intermittently returns 520/522 under load; more
     // attempts + longer backoff absorb that without changing behaviour for stable hosts.
-    const response = await comfyRequestWithGatewayRetry(
-        () =>
-            axios.post(comfyUiUrl(baseUrl, "/upload/image"), body, {
-                headers: authHeaders(apiKey),
+    let response: { status: number; headers: unknown; data: unknown };
+    try {
+        response = await comfyRequestWithGatewayRetry(
+            () =>
+                axios.post(comfyUiUrl(baseUrl, "/upload/image"), body, {
+                    headers: authHeaders(apiKey),
+                    signal: options?.signal,
+                    // Large refs through CF→CN can exceed axios' default; keep the socket open.
+                    timeout: isFlakyComfyGatewayHost(baseUrl) ? 120_000 : 60_000,
+                }),
+            {
                 signal: options?.signal,
-                // Large refs through CF→CN can exceed axios' default; keep the socket open.
-                timeout: isFlakyComfyGatewayHost(baseUrl) ? 120_000 : 60_000,
-            }),
-        {
-            signal: options?.signal,
-            attempts: isFlakyComfyGatewayHost(baseUrl) ? 6 : 1,
-            backoffMs: isFlakyComfyGatewayHost(baseUrl) ? 2500 : 800,
-            label: "ComfyUI /upload/image",
-        },
-    );
+                attempts: isFlakyComfyGatewayHost(baseUrl) ? 6 : 1,
+                backoffMs: isFlakyComfyGatewayHost(baseUrl) ? 2500 : 800,
+                label: "ComfyUI /upload/image",
+            },
+        );
+    } catch (error) {
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+        if (isFlakyComfyGatewayHost(baseUrl) && (status === 520 || status === 522 || status === 502 || !status)) {
+            throw new Error(
+                `无法经 Cloudflare 代理上传到 seetacloud:8443（HTTP ${status || "网络错误"}）。` +
+                    `请任选其一：① ComfyUI 启动加 --enable-cors-header，设置里把「API 请求方式」改为「浏览器直连」；` +
+                    `② 本机 npm run dev 再用画布；③ 等 GPU 空闲 30–60 秒后重试。`,
+            );
+        }
+        throw error;
+    }
     const name = readComfyUploadName(response.data);
     if (!name) {
         const mime = String((response.headers as unknown as Record<string, unknown> | undefined)?.["content-type"] || "").split(";")[0].trim();
