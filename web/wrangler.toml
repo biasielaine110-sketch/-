@@ -1,0 +1,6 @@
+# Cloudflare Pages — project root is this `web/` directory.
+# Dashboard: Framework preset = Vite, Build = npm run build, Output = dist
+name = "infinite-atelier"
+compatibility_date = "2025-03-01"
+pages_build_output_dir = "dist"
+compatibility_flags = ["nodejs_compat"]

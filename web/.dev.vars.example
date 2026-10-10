@@ -1,0 +1,4 @@
+# Copy to web/.dev.vars for `npm run cf:dev` (do not commit secrets).
+CANVAS_BRIDGE_TOKEN=
+UPSTASH_REDIS_REST_URL=
+UPSTASH_REDIS_REST_TOKEN=

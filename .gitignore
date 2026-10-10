@@ -19,6 +19,8 @@ web/output/
 web/deploy-payload.json
 
 .vercel
+.wrangler
+.dev.vars
 .env*
 
 # Miora 生图/生视频自动化：队列运行期状态与生成产物不入库
