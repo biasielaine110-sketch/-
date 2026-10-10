@@ -76,7 +76,8 @@ function isFlakyComfyGatewayHost(baseUrl: string) {
 }
 
 function isComfyGatewayRetryStatus(status: number | undefined) {
-    return status === 502 || status === 503 || status === 504;
+    // 520/522: Cloudflare edge could not complete the proxied hop to the rented pod.
+    return status === 502 || status === 503 || status === 504 || status === 520 || status === 522;
 }
 
 /**

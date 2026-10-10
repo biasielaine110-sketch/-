@@ -2,10 +2,10 @@
 
 const PROXY_TIMEOUT_MS = 110_000;
 
+// Do not strip content-length: streaming multipart uploads to ComfyUI/nginx need it.
 const SKIP_HEADERS = new Set([
     "host",
     "connection",
-    "content-length",
     "transfer-encoding",
     "accept-encoding",
     "origin",
@@ -69,15 +69,21 @@ export async function handleProxy(request) {
 
         const method = request.method || "GET";
         const hasBody = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
-        const body = hasBody ? await request.arrayBuffer() : undefined;
-
-        const upstream = await fetch(targetUrl, {
+        // Stream the body — buffering with arrayBuffer() OOMs / 520/522s large ComfyUI uploads.
+        /** @type {RequestInit} */
+        const init = {
             method,
             headers,
-            body: body && body.byteLength ? body : undefined,
+            body: hasBody ? request.body : undefined,
             signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
             redirect: "follow",
-        });
+        };
+        // Required by undici/CF when forwarding a stream body from an incoming request.
+        if (hasBody && request.body) {
+            init.duplex = "half";
+        }
+
+        const upstream = await fetch(targetUrl, init);
 
         const outHeaders = new Headers();
         upstream.headers.forEach((value, key) => {
