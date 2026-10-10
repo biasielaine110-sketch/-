@@ -3,4 +3,6 @@
 name = "infinite-atelier"
 compatibility_date = "2025-03-01"
 pages_build_output_dir = "dist"
-compatibility_flags = ["nodejs_compat"]
+# allow_custom_ports: seetacloud / ComfyUI pods use :8443; without this flag Workers
+# fetch() silently hits :443 and the edge returns HTTP 522.
+compatibility_flags = ["nodejs_compat", "allow_custom_ports"]

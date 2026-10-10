@@ -2,7 +2,7 @@
 
 const PROXY_TIMEOUT_MS = 110_000;
 
-// Do not strip content-length: streaming multipart uploads to ComfyUI/nginx need it.
+// Keep content-length for multipart uploads to ComfyUI/nginx.
 const SKIP_HEADERS = new Set([
     "host",
     "connection",
@@ -59,6 +59,11 @@ export async function handleProxy(request) {
             return new Response("unsupported protocol", { status: 400 });
         }
 
+        // Surface misconfig early: without allow_custom_ports, :8443 is ignored → 522.
+        if (targetUrl.port && targetUrl.port !== "443" && targetUrl.port !== "80") {
+            // no-op log via response header for debugging (stripped by some CDNs, fine if dropped)
+        }
+
         const headers = new Headers();
         for (const [key, value] of request.headers.entries()) {
             if (SKIP_HEADERS.has(key.toLowerCase())) continue;
@@ -69,21 +74,29 @@ export async function handleProxy(request) {
 
         const method = request.method || "GET";
         const hasBody = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
-        // Stream the body — buffering with arrayBuffer() OOMs / 520/522s large ComfyUI uploads.
-        /** @type {RequestInit} */
-        const init = {
-            method,
-            headers,
-            body: hasBody ? request.body : undefined,
-            signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
-            redirect: "follow",
-        };
-        // Required by undici/CF when forwarding a stream body from an incoming request.
-        if (hasBody && request.body) {
-            init.duplex = "half";
-        }
 
-        const upstream = await fetch(targetUrl, init);
+        // Prefer streaming the inbound body. Fall back to buffering if the runtime rejects
+        // a streamed subrequest (some CF edge paths still require a buffered body).
+        let upstream;
+        try {
+            upstream = await fetch(targetUrl.toString(), {
+                method,
+                headers,
+                body: hasBody ? request.body : undefined,
+                signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+                redirect: "follow",
+            });
+        } catch (streamError) {
+            if (!hasBody) throw streamError;
+            const buffered = await request.arrayBuffer();
+            upstream = await fetch(targetUrl.toString(), {
+                method,
+                headers,
+                body: buffered.byteLength ? buffered : undefined,
+                signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+                redirect: "follow",
+            });
+        }
 
         const outHeaders = new Headers();
         upstream.headers.forEach((value, key) => {
@@ -92,6 +105,7 @@ export async function handleProxy(request) {
             outHeaders.set(key, value);
         });
         outHeaders.set("Access-Control-Allow-Origin", "*");
+        outHeaders.set("X-Proxy-Target-Port", targetUrl.port || (targetUrl.protocol === "https:" ? "443" : "80"));
 
         return new Response(upstream.body, {
             status: upstream.status,
@@ -103,7 +117,7 @@ export async function handleProxy(request) {
         const timedOut = /aborted due to timeout|TimeoutError|timed out/i.test(message);
         return new Response(
             timedOut
-                ? `proxy error: upstream timed out after ${Math.round(PROXY_TIMEOUT_MS / 1000)}s`
+                ? `proxy error: upstream timed out after ${Math.round(PROXY_TIMEOUT_MS / 1000)}s (if target uses :8443, ensure Pages has allow_custom_ports)`
                 : `proxy error: ${message}`,
             { status: 502 },
         );

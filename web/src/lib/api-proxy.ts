@@ -22,6 +22,15 @@ const DIRECT_CORS_HOSTS = [
     // plain media GET passes CORS straight from the browser, while the Vercel edge (overseas)
     // cannot reach this CN-only host and /api/proxy just 502s on it.
     "xiaoyaoyou.com",
+    // Rented ComfyUI (seetacloud :8443 etc.): Cloudflare Pages proxy cannot reliably fetch
+    // custom ports / CN GPU gateways (HTTP 522). Browser → pod direct is required.
+    "seetacloud.com",
+    "compshare.cn",
+    "cpolar.top",
+    "cpolar.cn",
+    "ngrok-free.app",
+    "ngrok.io",
+    "runpod.net",
 ];
 
 function isDirectCorsHost(origin: string): boolean {

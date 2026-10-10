@@ -180,7 +180,15 @@ export function normalizeComfyUiRoot(baseUrl: string): string {
 export function comfyUiUrl(baseUrl: string, path: string): string {
     const root = normalizeComfyUiRoot(baseUrl);
     const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-    return proxyApiUrl(`${root}${normalizedPath}`);
+    const absolute = `${root}${normalizedPath}`;
+    // Cloudflare Pages Functions historically drop custom ports (e.g. seetacloud :8443) unless
+    // allow_custom_ports is on — and even then CN GPU gateways often 522 from the edge.
+    // Prefer the absolute URL so the browser talks to the pod directly; CORS is usually open
+    // on these ComfyUI frontends. Fall back to site proxy for other hosts / when needed.
+    if (isFlakyComfyGatewayHost(baseUrl) || isNativeComfyUiBaseUrl(baseUrl)) {
+        return absolute;
+    }
+    return proxyApiUrl(absolute);
 }
 
 /** `user:pass` (Basic Auth) vs a Bearer/raw token. Returns the Basic credential, or null. */
