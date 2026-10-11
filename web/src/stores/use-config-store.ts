@@ -37,6 +37,12 @@ export type ModelChannel = {
     /** When false the whole channel is hidden from model pickers. Defaults to true. */
     enabled?: boolean;
     /**
+     * Per-channel API transport. When omitted, the global Preferences `apiTransport` applies.
+     * Use `direct` for rented ComfyUI / seetacloud hosts that expose CORS so uploads skip the
+     * Cloudflare Pages edge (HTTP 522 on :8443).
+     */
+    apiTransport?: ApiTransport;
+    /**
      * Additional API keys for the same provider. When a key hits a "balance exhausted"
      * error the request automatically retries with the next key. `apiKey` is kept equal to
      * `apiKeys[0]` for backward compatibility with every `config.apiKey` reader downstream.
@@ -86,6 +92,10 @@ export type AiConfig = {
     videoSamplerName: string;
     /** ComfyUI scheduler (BasicScheduler.scheduler). */
     videoScheduler: string;
+    /** U30/U35 seed mode: `random` per run, or `fixed` with `videoSeed`. */
+    videoSeedMode: string;
+    /** Fixed seed when `videoSeedMode` is `fixed` (default matches U24 V927 authored seed). */
+    videoSeed: string;
     systemPrompt: string;
     reasoningEffort: ReasoningEffort;
     /** direct = browser→API (no Vercel 60s cap); proxy = via /api/proxy for CORS. */
@@ -158,6 +168,8 @@ export const defaultConfig: AiConfig = {
     videoRefImageSize: "max",
     videoSamplerName: "dpmpp_2m",
     videoScheduler: "karras",
+    videoSeedMode: "fixed",
+    videoSeed: "19960422",
     systemPrompt: "",
     reasoningEffort: "auto",
     // Default via same-origin proxy — most relay APIs block browser CORS.
@@ -433,6 +445,8 @@ export const useConfigStore = create<ConfigStore>()(
                         videoRefImageSize: config.videoRefImageSize || defaultConfig.videoRefImageSize,
                         videoSamplerName: config.videoSamplerName || defaultConfig.videoSamplerName,
                         videoScheduler: config.videoScheduler || defaultConfig.videoScheduler,
+                        videoSeedMode: config.videoSeedMode === "random" ? "random" : "fixed",
+                        videoSeed: config.videoSeed || defaultConfig.videoSeed,
                         canvasImageCount: config.canvasImageCount || "1",
                         mjVersion: config.mjVersion || defaultConfig.mjVersion,
                         quality: config.quality || "medium",
@@ -495,9 +509,19 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
         models: normalizeChannelModels(channel?.models),
     };
     if (channel?.enabled === false) next.enabled = false;
+    if (channel?.apiTransport === "direct" || channel?.apiTransport === "proxy") next.apiTransport = channel.apiTransport;
     const extraKeys = Array.isArray(channel?.apiKeys) ? channel.apiKeys.map((key) => sanitizeApiKey(key)).filter(Boolean) : [];
     if (extraKeys.length) next.apiKeys = Array.from(new Set(extraKeys));
     return next;
+}
+
+/** Effective transport for a channel: channel override, else global Preferences default. */
+export function resolveChannelApiTransport(
+    channel?: Pick<ModelChannel, "apiTransport"> | null,
+    globalTransport?: ApiTransport | null,
+): ApiTransport {
+    if (channel?.apiTransport === "direct" || channel?.apiTransport === "proxy") return channel.apiTransport;
+    return globalTransport === "direct" ? "direct" : "proxy";
 }
 
 export function encodeChannelModel(channelId: string, model: string) {
@@ -571,6 +595,7 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
         apiKey: sanitizeApiKey(channel.apiKey),
         apiKeys: channelApiKeys(channel),
         apiFormat: resolveChannelModelApiFormat(channel, model),
+        apiTransport: resolveChannelApiTransport(channel, config.apiTransport),
     };
 }
 

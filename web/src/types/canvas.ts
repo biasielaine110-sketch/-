@@ -143,6 +143,10 @@ export type CanvasNodeMetadata = {
     samplerName?: string;
     /** ComfyUI scheduler. */
     scheduler?: string;
+    /** U30/U35 seed mode: `random` | `fixed`. */
+    seedMode?: string;
+    /** Fixed seed when `seedMode` is `fixed`. */
+    seed?: string;
     audioVoice?: string;
     audioFormat?: string;
     audioSpeed?: string;

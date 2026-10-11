@@ -1864,13 +1864,16 @@ export function applyComfyVideoSettings(
             } else if (settings.selfLiftH3Video || settings.resolutionSelectorH3Video) {
                 // Delivered-resolution families whose H3 width/height link into a ResolutionSelector:
                 // U37 SelfLift 双采, and U35 官流 (e.g. 终极版-神棍). Freezing the selector under
-                // `keepTunedResolution` made canvas size/ratio dead. Drive both halves from the
-                // canvas when — and only when — the canvas carries an explicit size; "auto"/empty
-                // keeps the author's own geometry verbatim. Scoped to these fingerprints.
-                if (isExplicitCanvasSize(settings.size)) {
-                    if ("aspect_ratio" in node.inputs) node.inputs.aspect_ratio = aspectLabel;
-                    if ("megapixels" in node.inputs) writeComfyNumberInput(node, "megapixels", megapixels);
+                // `keepTunedResolution` made canvas size/ratio dead.
+                // Aspect: only rewrite when the canvas carries an explicit ratio ("auto" keeps the
+                // author's 16:9 etc.). Megapixels: always honor the canvas quality tier — U35's
+                // Export bakes megapixels=1 (~1 MP ≈ 720p for 16:9), so picking 1080p while size
+                // stayed "auto" used to leave the selector stuck at 1 and every "1080p" run still
+                // looked like 720p. SelfLift shares this delivered-selector contract.
+                if (isExplicitCanvasSize(settings.size) && "aspect_ratio" in node.inputs) {
+                    node.inputs.aspect_ratio = aspectLabel;
                 }
+                if ("megapixels" in node.inputs) writeComfyNumberInput(node, "megapixels", megapixels);
             } else if (settings.keepTunedResolution) {
                 // Geometry-locked graphs (H3 two-pass family): the HIGH refine pass takes its size from a
                 // fixed learned upscaler (target_width/height on the upscale node), so the
@@ -2113,9 +2116,20 @@ export function repairSingularityLatentUpscaler(workflow: ComfyWorkflow): ComfyW
     return next;
 }
 
+/** Default fixed seed aligned with U24 V927's authored `RandomNoise.noise_seed` (stable A/B). */
+export const COMFY_H3_STABLE_SEED = 19_960_422;
+
 /** Random 64-bit-safe seed (same convention as the RunningHub workflow adapters). */
 function randomComfySeed() {
     return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+}
+
+/** Parse a canvas seed string; invalid / empty → null (caller falls back to random). */
+export function parseComfySeedValue(value?: string | number | null): number | null {
+    if (value == null || value === "") return null;
+    const numeric = typeof value === "number" ? value : Number(String(value).trim());
+    if (!Number.isFinite(numeric)) return null;
+    return Math.max(0, Math.floor(numeric));
 }
 
 /**
@@ -2130,12 +2144,16 @@ function randomComfySeed() {
  * `noise_seed` to it, so a flat numeric write finds nothing and the run stays frozen. Pass
  * `followLinkedSeed` to follow such a link one hop to its numeric `seed` / `noise_seed` source.
  * It is opt-in so the families that already randomize keep the exact same behaviour.
+ *
+ * Pass `seed` to force a fixed value (U30/U35 stable mode); omit for per-run random.
  */
 export function applyComfyRandomSeed(
     workflow: ComfyWorkflow,
-    options?: { followLinkedSeed?: boolean },
+    options?: { followLinkedSeed?: boolean; seed?: number | null },
 ): ComfyWorkflow {
     const next = cloneWorkflow(workflow);
+    const forced = options?.seed != null && Number.isFinite(options.seed) ? Math.floor(options.seed) : null;
+    const nextSeed = () => (forced != null ? forced : randomComfySeed());
     for (const node of Object.values(next)) {
         const type = String(node.class_type || "");
         // `SelfLiftH3Sampler` is the U37 SelfLift 双采 sampler: it parks the run seed straight in
@@ -2143,16 +2161,16 @@ export function applyComfyRandomSeed(
         // reached it and that family replayed the identical video on every submission. Listed
         // explicitly, and only that family's graphs contain the type — no other model is touched.
         if (!/RandomNoise|SamplerCustom|KSampler|SelfLiftH3Sampler/i.test(type) || !node.inputs) continue;
-        if (typeof node.inputs.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
-        else if (typeof node.inputs.seed === "number") node.inputs.seed = randomComfySeed();
+        if (typeof node.inputs.noise_seed === "number") node.inputs.noise_seed = nextSeed();
+        else if (typeof node.inputs.seed === "number") node.inputs.seed = nextSeed();
         else if (options?.followLinkedSeed) {
             for (const field of ["noise_seed", "seed"]) {
                 const link = node.inputs[field];
                 if (!Array.isArray(link) || link[0] == null) continue;
                 const source = next[String(link[0])];
                 if (!source?.inputs || typeof source.inputs !== "object") continue;
-                if (writeComfyNumberInput(source, "seed", randomComfySeed())) break;
-                if (writeComfyNumberInput(source, "noise_seed", randomComfySeed())) break;
+                if (writeComfyNumberInput(source, "seed", nextSeed())) break;
+                if (writeComfyNumberInput(source, "noise_seed", nextSeed())) break;
             }
         }
     }
@@ -2802,6 +2820,13 @@ export type RunNativeComfyUiArgs = {
     samplerName?: string;
     /** ComfyUI scheduler (BasicScheduler.scheduler). */
     scheduler?: string;
+    /**
+     * Seed mode for U30 / U35 (and other callers that pass a fixed seed).
+     * `fixed` uses `seed`; anything else randomizes per run.
+     */
+    seedMode?: string;
+    /** Fixed seed when `seedMode` is `fixed` (default stable value: COMFY_H3_STABLE_SEED). */
+    seed?: string | number;
     signal?: AbortSignal;
 };
 
@@ -2949,7 +2974,13 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // U30 Singularity only: normalize the learned latent upscaler's mis-mapped widget values
     // (see `repairSingularityLatentUpscaler`) so 1080p/2K do not decode to noise.
     if (h3Singularity) workflow = repairSingularityLatentUpscaler(workflow);
-    if (keepTunedGeometry) workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo });
+    if (keepTunedGeometry) {
+        // Honor canvas fixed-seed (default 19960422 from U24 V927) when seedMode=fixed.
+        // UI exposes this for U30/U35; other geometry-locked families stay random unless wired.
+        const wantFixed = /^(fixed|lock)$/i.test(String(args.seedMode || ""));
+        const fixedSeed = wantFixed ? (parseComfySeedValue(args.seed) ?? COMFY_H3_STABLE_SEED) : null;
+        workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo, seed: fixedSeed });
+    }
     // U06 single-pass multi-ref (WJILatentPreset holder), excluding SelfLift / U35 / U30.
     const multiRefH3Video = h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo && !h3Singularity;
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);

@@ -1722,6 +1722,7 @@ async function requestNativeComfyUiImages(config: AiConfig, prompt: string, refe
         prompt,
         referenceDataUrls,
         size: honorCanvasSize ? config.size : undefined,
+        apiTransport: config.apiTransport,
         signal: options?.signal,
     });
     if (result.images.length) return result.images;
@@ -1777,6 +1778,7 @@ async function requestNativeComfyUiText(
         workflowId: config.model || config.textModel,
         prompt,
         referenceDataUrls,
+        apiTransport: config.apiTransport,
         signal: options?.signal,
     });
     const text = (result.texts || []).join("\n").trim();
@@ -2174,7 +2176,7 @@ function resolveSeedanceNzResolution(model: string, quality: string) {
 }
 
 function aiApiUrl(config: AiConfig, path: string) {
-    return proxyApiUrl(buildApiUrl(config.baseUrl, path));
+    return proxyApiUrl(buildApiUrl(config.baseUrl, path), config.apiTransport);
 }
 
 /** Seedream / image APIs often take 1–3 minutes; keep client wait aligned with the site proxy (Hobby ≤300s). */

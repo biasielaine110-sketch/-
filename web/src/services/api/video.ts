@@ -37,7 +37,7 @@ export type VideoGenerationTaskState = { status: "pending" } | { status: "comple
 const pluginVideoResults = new Map<string, VideoGenerationResult>();
 
 function aiApiUrl(config: AiConfig, path: string) {
-    return proxyApiUrl(buildApiUrl(config.baseUrl, path));
+    return proxyApiUrl(buildApiUrl(config.baseUrl, path), config.apiTransport);
 }
 
 function aiHeaders(config: AiConfig, contentType?: string) {
@@ -316,6 +316,8 @@ async function createNativeComfyUiVideoTask(
             refImageSize: config.videoRefImageSize,
             samplerName: config.videoSamplerName,
             scheduler: config.videoScheduler,
+            seedMode: config.videoSeedMode,
+            seed: config.videoSeed,
             signal: options?.signal,
         });
         const video = result.videos[0];

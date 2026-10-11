@@ -31,7 +31,12 @@ function isDirectCorsHost(origin: string): boolean {
     return DIRECT_CORS_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
 }
 
-export function resolveApiTransport(): ApiTransport {
+/**
+ * Resolve API transport. Optional `override` comes from a channel's `apiTransport`
+ * (via resolveModelRequestConfig); when omitted, fall back to global Preferences.
+ */
+export function resolveApiTransport(override?: ApiTransport | null): ApiTransport {
+    if (override === "direct" || override === "proxy") return override;
     try {
         if (typeof window === "undefined") return "proxy";
         const raw = window.localStorage.getItem(CONFIG_STORE_KEY);
@@ -45,13 +50,13 @@ export function resolveApiTransport(): ApiTransport {
     return "proxy";
 }
 
-export function proxyApiUrl(directUrl: string): string {
+export function proxyApiUrl(directUrl: string, transport?: ApiTransport | null): string {
     const normalized = normalizeProxyTarget(directUrl);
     try {
         const target = new URL(normalized);
         if (typeof window !== "undefined" && target.origin === window.location.origin) return normalized;
         if (target.protocol !== "http:" && target.protocol !== "https:") return normalized;
-        if (resolveApiTransport() === "direct") return normalized;
+        if (resolveApiTransport(transport) === "direct") return normalized;
         // CORS-open CN hosts are unreachable from the serverless edge — go direct.
         if (isDirectCorsHost(target.host)) return normalized;
         return buildProxyUrl(normalized);

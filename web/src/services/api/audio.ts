@@ -34,7 +34,7 @@ const SUNO_POLL_INTERVAL_MS = 4_000;
 const SUNO_MAX_WAIT_MS = 15 * 60_000;
 
 function aiApiUrl(config: AiConfig, path: string) {
-    return proxyApiUrl(buildApiUrl(config.baseUrl, path));
+    return proxyApiUrl(buildApiUrl(config.baseUrl, path), config.apiTransport);
 }
 
 function aiHeaders(config: AiConfig) {

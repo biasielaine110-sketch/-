@@ -16,6 +16,7 @@ import {
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import {
+    COMFY_H3_STABLE_SEED,
     isComfyH3MultiReferenceVideoWorkflow,
     isComfyH3ResolutionSelectorVideoWorkflow,
     isComfyH3SelfLiftWorkflow,
@@ -107,6 +108,22 @@ function sizeOptionsForFamily(family: NativeVideoFamily) {
     return sizeOptions;
 }
 
+/** Seed controls are for U30 Singularity + U35 only (not U24 DualClock / U06). */
+function supportsVideoSeedControls(config: AiConfig, family: NativeVideoFamily) {
+    if (family === "u35") return true;
+    if (family !== "twoPass") return false;
+    const model = config.model || config.videoModel || "";
+    const script = resolveModelScript(config, model);
+    const workflow = parseComfyApiWorkflow(script);
+    if (workflow && isComfyH3SingularityUpscaleWorkflow(workflow)) return true;
+    const name = String(model)
+        .split("::")
+        .pop()
+        ?.trim()
+        .toLowerCase() || "";
+    return /u30|singularity|超双采放大/.test(name);
+}
+
 const secondOptions = [6, 10, 12, 16, 20];
 
 const stepOptions = [20, 25, 30, 40, 50];
@@ -123,7 +140,7 @@ export const videoSecondOptions = secondOptions.map((value) => String(value));
 
 type VideoSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoSteps" | "videoRefImageSize" | "videoSamplerName" | "videoScheduler", value: string) => void;
+    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoSteps" | "videoRefImageSize" | "videoSamplerName" | "videoScheduler" | "videoSeedMode" | "videoSeed", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
@@ -137,6 +154,10 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
     const qualityChoices = useMemo(() => (nativeComfy && !h3Comfy ? resolutionOptionsForFamily(nativeFamily) : resolutionOptions), [nativeComfy, h3Comfy, nativeFamily]);
     const aspectChoices = useMemo(() => (nativeComfy && !h3Comfy ? sizeOptionsForFamily(nativeFamily) : sizeOptions), [nativeComfy, h3Comfy, nativeFamily]);
+    const showSeedControls = useMemo(
+        () => nativeComfy && !h3Comfy && supportsVideoSeedControls(config, nativeFamily),
+        [config, nativeComfy, h3Comfy, nativeFamily],
+    );
 
     if (h3Comfy) {
         const resolutionChoices = autodlH3ResolutionOptions(model);
@@ -189,6 +210,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const refImageSize = (config.videoRefImageSize || "max") === "max" ? "max" : "match";
     const samplerName = config.videoSamplerName || "dpmpp_2m";
     const scheduler = config.videoScheduler || "karras";
+    const seedMode = config.videoSeedMode === "random" ? "random" : "fixed";
+    const seedValue = config.videoSeed || String(COMFY_H3_STABLE_SEED);
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 720));
         onConfigChange("size", `${key === "width" ? next : dimensions.width}x${key === "height" ? next : dimensions.height}`);
@@ -300,6 +323,30 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                                 ))}
                             </div>
                         </SettingGroup>
+                        {showSeedControls ? (
+                            <SettingGroup title={t("settingsPanels.video.seed")} color={theme.node.muted}>
+                                <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                                    {t("settingsPanels.video.seedHint")}
+                                </div>
+                                <div className="grid grid-cols-2 gap-2.5">
+                                    <OptionPill selected={seedMode === "random"} theme={theme} onClick={() => onConfigChange("videoSeedMode", "random")}>
+                                        {t("settingsPanels.video.seedRandom")}
+                                    </OptionPill>
+                                    <OptionPill selected={seedMode === "fixed"} theme={theme} onClick={() => onConfigChange("videoSeedMode", "fixed")}>
+                                        {t("settingsPanels.video.seedFixed")}
+                                    </OptionPill>
+                                </div>
+                                {seedMode === "fixed" ? (
+                                    <NumberInput
+                                        value={seedValue}
+                                        min={0}
+                                        max={Number.MAX_SAFE_INTEGER}
+                                        theme={theme}
+                                        onChange={(value) => onConfigChange("videoSeed", value || String(COMFY_H3_STABLE_SEED))}
+                                    />
+                                ) : null}
+                            </SettingGroup>
+                        ) : null}
                     </>
                 ) : null}
             </div>
