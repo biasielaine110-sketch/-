@@ -75,6 +75,105 @@ function isFlakyComfyGatewayHost(baseUrl: string) {
     return /seetacloud\.com|cloud\.ai\.cpolar|ngrok|trycloudflare|compshare\.cn/i.test(String(baseUrl || ""));
 }
 
+/** True only for SeeTaCloud ComfyUI pods (the channel the five H3 packs below target). */
+function isSeetaCloudComfyHost(baseUrl: string) {
+    return /seetacloud\.com/i.test(String(baseUrl || ""));
+}
+
+/**
+ * Exact model packs for https://…seetacloud.com:8443 — H3-video / u24_v927 / U30 / U35 / U06.
+ *
+ * Matched by **host + model option name only**. Structural fingerprints still drive geometry /
+ * sampling; this pack layer adds channel-scoped push repairs (author-local LoadImage scrub,
+ * zero-ref gate for U35, blank spares, node_errors hard-fail) without changing other channels
+ * or other model names on the same pod.
+ */
+type SeetaCloudH3ModelPackId = "h3-video" | "u24_v927" | "u30-singularity" | "u35-official" | "u06-multiref";
+
+type SeetaCloudH3ModelPack = {
+    id: SeetaCloudH3ModelPackId;
+    /** Exact model option names (matched via `comfyWorkflowKeys`, case-insensitive). */
+    modelNames: readonly string[];
+    family: "dualclock" | "u06" | "u30" | "u35";
+    /** Reject submit when the canvas has no reference image. */
+    requireRefs: boolean;
+    /** Upload a real blank PNG for spare LoadImage slots (DualClock + multi-ref spares). */
+    uploadBlankForSpareLoaders: boolean;
+    /** Rewrite leftover author-machine filenames after slot mapping. */
+    scrubAuthorLocalLoaders: boolean;
+    /** Treat `/prompt` `node_errors` as a hard failure (never poll an aborted history). */
+    hardFailNodeErrors: boolean;
+};
+
+const SEETACLOUD_H3_MODEL_PACKS: readonly SeetaCloudH3ModelPack[] = [
+    {
+        id: "h3-video",
+        modelNames: ["H3-video", "H3_video", "U24-文武双修T8版MiniMaxH3双采参考生视频V2"],
+        family: "dualclock",
+        requireRefs: true,
+        uploadBlankForSpareLoaders: true,
+        scrubAuthorLocalLoaders: true,
+        hardFailNodeErrors: true,
+    },
+    {
+        id: "u24_v927",
+        modelNames: [
+            "u24_v927",
+            "u24-v927",
+            "U24_V927",
+            "U24-V927",
+            "U24-文武双修T8版MiniMaxH3双采参考生视频V927",
+        ],
+        family: "dualclock",
+        requireRefs: true,
+        uploadBlankForSpareLoaders: true,
+        scrubAuthorLocalLoaders: true,
+        hardFailNodeErrors: true,
+    },
+    {
+        id: "u30-singularity",
+        modelNames: ["U30-H3-Singularity超双采放大", "U30-Minimax-H3-Singularity超双采放大-AIGC特异点"],
+        family: "u30",
+        requireRefs: true,
+        uploadBlankForSpareLoaders: true,
+        scrubAuthorLocalLoaders: true,
+        hardFailNodeErrors: true,
+    },
+    {
+        id: "u35-official",
+        modelNames: ["U35-H3官流-终极版-神棍"],
+        family: "u35",
+        requireRefs: true,
+        uploadBlankForSpareLoaders: true,
+        scrubAuthorLocalLoaders: true,
+        hardFailNodeErrors: true,
+    },
+    {
+        id: "u06-multiref",
+        modelNames: ["U06-h3_多图参考生视频V8", "U06-minimax_h3_多图参考生视频V8"],
+        family: "u06",
+        requireRefs: true,
+        uploadBlankForSpareLoaders: true,
+        scrubAuthorLocalLoaders: true,
+        hardFailNodeErrors: true,
+    },
+] as const;
+
+/** Resolve a seetacloud-only H3 model pack, or null when the host/model is outside the five packs. */
+export function matchSeetaCloudH3ModelPack(
+    baseUrl: string,
+    workflowId?: string | null,
+): SeetaCloudH3ModelPack | null {
+    if (!isSeetaCloudComfyHost(baseUrl)) return null;
+    const keys = comfyWorkflowKeys(workflowId);
+    if (!keys.length) return null;
+    for (const pack of SEETACLOUD_H3_MODEL_PACKS) {
+        const allowed = new Set(pack.modelNames.flatMap((name) => comfyWorkflowKeys(name)));
+        if (keys.some((key) => allowed.has(key))) return pack;
+    }
+    return null;
+}
+
 function isComfyGatewayRetryStatus(status: number | undefined) {
     // 520/522: Cloudflare edge could not complete the proxied hop to the rented pod.
     return status === 502 || status === 503 || status === 504 || status === 520 || status === 522;
@@ -829,6 +928,82 @@ function isComfyAuthorLocalImageName(name: string) {
 }
 
 /**
+ * Broader author-local names for the five seetacloud H3 packs only.
+ * Covers DualClock Untitled/snowtp/zealman, U30 content-hash PNGs, and U35 nv/nan/changj.
+ */
+function isSeetaCloudAuthorLocalImageName(name: string) {
+    const raw = String(name || "").trim();
+    if (!raw) return true;
+    if (isComfyAuthorLocalImageName(raw)) return true;
+    // U30 Singularity exports bake ComfyUI content-hash filenames from the author's machine.
+    if (/^[a-f0-9]{40,}\.(png|jpe?g|webp|gif)$/i.test(raw)) return true;
+    // U35 官流 template parks nv.jpg / nan.png / changj.png in its three LoadImages.
+    if (/^(nv|nan|changj)\.(png|jpe?g|webp|gif)$/i.test(raw)) return true;
+    return false;
+}
+
+/**
+ * After slot mapping, rewrite LoadImages that still point at author-machine filenames — or any
+ * name that is not one of this run's uploads when a blank/fallback is available.
+ * Scoped to seetacloud packs via the call site — never runs for other channels/models.
+ */
+function scrubSeetaCloudAuthorLocalLoadImages(
+    workflow: ComfyWorkflow,
+    fallbackFilename: string,
+    uploadedFilenames: string[] = [],
+): ComfyWorkflow {
+    const fallback = String(fallbackFilename || "").trim();
+    if (!fallback) return workflow;
+    const uploaded = new Set(uploadedFilenames.filter(Boolean));
+    const next = cloneWorkflow(workflow);
+    for (const node of Object.values(next)) {
+        if (!isComfyImageLoader(node)) continue;
+        if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
+        const field = "image" in node.inputs || !("url" in node.inputs) ? "image" : "url";
+        const current = node.inputs[field];
+        if (typeof current !== "string") continue;
+        if (uploaded.has(current)) continue;
+        if (uploaded.size > 0 || isSeetaCloudAuthorLocalImageName(current)) {
+            node.inputs[field] = fallback;
+        }
+    }
+    return next;
+}
+
+/** Clear error when a seetacloud pack's model script is not the expected Export (API) graph. */
+function assertSeetaCloudH3PackWorkflow(pack: SeetaCloudH3ModelPack, workflow: ComfyWorkflow): void {
+    const twoPass = isComfyH3TwoPassReferenceWorkflow(workflow);
+    const multiRef = isComfyH3MultiReferenceVideoWorkflow(workflow);
+    const singularity = isComfyH3SingularityUpscaleWorkflow(workflow);
+    const resSelector = isComfyH3ResolutionSelectorVideoWorkflow(workflow);
+    const selfLift = isComfyH3SelfLiftWorkflow(workflow);
+    const u06Shape = multiRef && !selfLift && !resSelector && !singularity;
+
+    if (pack.family === "dualclock" && !twoPass) {
+        throw new Error(
+            pack.id === "u24_v927"
+                ? "u24_v927 模型脚本不是 U24 V927 DualClock Export (API) JSON（需要 ≥2 个 MiniMaxH3AudioConditioningT8 + 多参考槽）。请粘贴「U24-文武双修T8版MiniMaxH3双采参考生视频V927」Export JSON 后重试。"
+                : "H3-video 模型脚本不是 U24 V2 DualClock Export (API) JSON（需要 ≥2 个 MiniMaxH3AudioConditioningT8 + 多参考槽）。请粘贴「U24-文武双修T8版MiniMaxH3双采参考生视频V2」Export JSON 后重试。",
+        );
+    }
+    if (pack.family === "u30" && !singularity) {
+        throw new Error(
+            "U30-H3-Singularity超双采放大 模型脚本不是 Singularity Export (API) JSON（需要单 H3 + ResolutionSelector + MinimaxH3LatentUpscaler3D）。请粘贴「U30-Minimax-H3-Singularity超双采放大-AIGC特异点」Export JSON 后重试。",
+        );
+    }
+    if (pack.family === "u35" && !resSelector) {
+        throw new Error(
+            "U35-H3官流-终极版-神棍 模型脚本不是官流 Export (API) JSON（需要单 H3 + ResolutionSelector 尺寸链路）。请粘贴「U35-H3官流-终极版-神棍」Export JSON 后重试。",
+        );
+    }
+    if (pack.family === "u06" && !u06Shape) {
+        throw new Error(
+            "U06-h3_多图参考生视频V8 模型脚本不是 U06 V8 Export (API) JSON（需要单 MiniMaxH3ReferenceToVideo + WJILatentPreset 尺寸）。请粘贴「U06-minimax_h3_多图参考生视频V8」Export JSON 后重试。",
+        );
+    }
+}
+
+/**
  * Solid 512×512 PNG for DualClock spare slots. 1×1 / 64×64 blanks triggered LoadImage
  * "Invalid argument returned 22" on seetacloud (PIL/H3 reject tiny inputs). There is NO
  * "max 2 references" gate — up to 8 canvas refs are accepted; spare slots among the 9
@@ -913,6 +1088,8 @@ export function applyComfyLoadImages(
     // DualClock: every LoadImage that is not one of the user's uploads must point at the uploaded
     // blank — including #94 zealman-blank and any Untitled/snowtp leftovers. Matching only
     // "author-local" names was too narrow if the pod still had a stale/broken filename.
+    // Confined to the two-pass fingerprint so single-pass graphs (U06/U30/U35) keep spare-slot
+    // fill from the forEach above; seetacloud packs scrub author-local leftovers at the call site.
     if (twoPassRefs && uploadedBlank) {
         for (const node of Object.values(next)) {
             if (!isComfyImageLoader(node)) continue;
@@ -2603,6 +2780,11 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     const { baseUrl, apiKey, prompt, signal } = args;
     if (!normalizeComfyUiRoot(baseUrl)) throw new Error("ComfyUI Base URL is required");
 
+    // Seetacloud-only exact model packs (H3-video / u24_v927 / U30 / U35 / U06). Null on every
+    // other channel and on every other model name on the same pod — pack repairs stay scoped.
+    const seetaPack = matchSeetaCloudH3ModelPack(baseUrl, args.workflowId);
+    if (seetaPack) assertSeetaCloudH3PackWorkflow(seetaPack, args.workflow);
+
     // Decide the workflow family once, from the submitted graph's shape rather than its model
     // name — the name is user-typed and the exported file name changes every revision, so a
     // name-keyed adapter goes dead code silently.
@@ -2628,7 +2810,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // U30 Singularity 超双采放大: same single-H3 + ResolutionSelector shape as U35, but the
     // selector is the LOW draft before MinimaxH3LatentUpscaler3D (×1.5) — must use draft math.
     const h3Singularity = isComfyH3SingularityUpscaleWorkflow(args.workflow);
-    const guardUpload = keepTunedGeometry || usesComfyUploadGuard(args.workflowId);
+    const guardUpload = keepTunedGeometry || usesComfyUploadGuard(args.workflowId) || Boolean(seetaPack);
     // Text-output family (e.g. U00 H3 prompt writer): prompt and references land on the LLM node's
     // own slots instead of the CLIP/LoadImage conventions the shared writers assume.
     const textFamily = isComfyTextOutputWorkflow(args.workflow);
@@ -2666,16 +2848,27 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // U06 single-pass multi-ref (WJILatentPreset holder), excluding SelfLift / U35 / U30.
     const multiRefH3Video = h3MultiRefVideo && !h3SelfLift && !h3ResSelectorVideo && !h3Singularity;
     const refs = (args.referenceDataUrls || []).filter(Boolean).slice(0, 8);
-    // U06 V8 / U30 Singularity / U24 DualClock (H3-video) bake author-machine filenames into every
+    // U06 V8 / U30 Singularity / U35 官流 / U24 DualClock bake author-machine filenames into every
     // LoadImage. Those files do not exist on the seetacloud pod, so a zero-reference submit fails
     // inside LoadImage within a few seconds — or, for DualClock, leaves the worker wedged and the
     // gateway answers later polls with HTTP 502. Require at least one uploaded reference for these
-    // families only; SelfLift has its own blank placeholder and is not gated here.
-    if ((multiRefH3Video || h3Singularity || h3TwoPassRefs) && !refs.length) {
+    // families (and for the five seetacloud packs, including U35 which previously slipped the gate).
+    // SelfLift has its own blank placeholder and is not gated here.
+    // U35 zero-ref is gated only via `seetaPack.requireRefs` (exact model on seetacloud), not by
+    // the ResolutionSelector fingerprint alone — so other channels/models stay untouched.
+    const requireRefs =
+        Boolean(seetaPack?.requireRefs) || multiRefH3Video || h3Singularity || h3TwoPassRefs;
+    if (requireRefs && !refs.length) {
         throw new Error(
-            h3TwoPassRefs
+            h3TwoPassRefs || seetaPack?.family === "dualclock"
                 ? "H3-video / U24 双采需要至少一张参考图。工作流里的 Untitled*.jpg / snowtp.png 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
-                : "This multi-reference video workflow requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
+                : seetaPack?.family === "u35"
+                  ? "U35-H3官流-终极版-神棍 需要至少一张参考图。工作流里的 nv.jpg / nan.png / changj.png 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
+                  : seetaPack?.family === "u30"
+                    ? "U30-H3-Singularity超双采放大 需要至少一张参考图。工作流里的 hash 文件名只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
+                    : seetaPack?.family === "u06"
+                      ? "U06-h3_多图参考生视频V8 需要至少一张参考图。工作流里的 Untitled*.jpg / snowtp.png 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
+                      : "This multi-reference video workflow requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
         );
     }
     if (refs.length) {
@@ -2688,12 +2881,14 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             });
             names.push(uploaded);
         }
-        // DualClock: upload a 512×512 blank for spare LoadImages (9 slots; 1–8 canvas refs OK).
+        // DualClock + seetacloud packs: upload a 512×512 blank for spare LoadImages.
         // If blank upload is aborted, rethrow cleanly (do not mislabel as "占位图失败：canceled").
         // If upload fails for another reason, fall back to the first already-uploaded ref filename
         // so `/prompt` still queues (same file on the pod — no second round-trip).
         let blankFilename: string | undefined;
-        if (h3TwoPassRefs && !textFamily) {
+        const needsBlankUpload =
+            !textFamily && (h3TwoPassRefs || Boolean(seetaPack?.uploadBlankForSpareLoaders));
+        if (needsBlankUpload) {
             try {
                 blankFilename = await uploadComfyImage(
                     baseUrl,
@@ -2728,6 +2923,11 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         workflow = textFamily
             ? applyComfyTextReferenceImages(workflow, names)
             : applyComfyLoadImages(workflow, names, args.workflowId, blankFilename ? { blankFilename } : undefined);
+        // Seetacloud packs only: scrub leftover author-machine filenames (U30 hashes, U35 nv/nan,
+        // DualClock Untitled leftovers) so `/prompt` never references files missing on the pod.
+        if (seetaPack?.scrubAuthorLocalLoaders && !textFamily) {
+            workflow = scrubSeetaCloudAuthorLocalLoadImages(workflow, blankFilename || names[0], names);
+        }
     } else if (!textFamily && h3MultiRefVideo && !h3SelfLift) {
         // U06 V8 (and siblings): rewire duplicated ref slots even with zero uploads so Picture 1/2
         // are not left sharing `加载图像2`. SelfLift keeps its own blank-placeholder path and is
@@ -2795,10 +2995,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         return finishRunningHubTask(baseUrl, apiKey, submitted.taskId, signal);
     }
     const promptId = submitted.promptId;
-    // U06 / U24 DualClock: ComfyUI can return a prompt_id together with node_errors (validation
-    // soft-fail). Treat that as a hard failure so we never poll an empty/aborted history entry that
-    // later surfaces as a seetacloud gateway 502.
-    if (multiRefH3Video || h3TwoPassRefs) {
+    // U06 / U24 DualClock / seetacloud H3 packs: ComfyUI can return a prompt_id together with
+    // node_errors (validation soft-fail). Treat that as a hard failure so we never poll an
+    // empty/aborted history entry that later surfaces as a seetacloud gateway 502.
+    if (multiRefH3Video || h3TwoPassRefs || seetaPack?.hardFailNodeErrors) {
         const submitRecord = readSubmitRecord(submit.data);
         const nodeErrors = submitRecord?.node_errors;
         if (nodeErrors && typeof nodeErrors === "object" && Object.keys(nodeErrors as object).length) {
@@ -2809,11 +3009,17 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
                 url: submitUrl,
                 message: submitted.message,
             });
-            throw new Error(
-                h3TwoPassRefs
-                    ? `H3-video / U24 双采无法推送到工作流（节点校验失败）。请确认模型脚本已粘贴 U24 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
-                    : detail,
-            );
+            const packHint =
+                seetaPack?.family === "dualclock" || h3TwoPassRefs
+                    ? `H3-video / U24 双采无法推送到工作流（节点校验失败）。请确认模型脚本已粘贴对应 U24 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                    : seetaPack?.family === "u30"
+                      ? `U30-H3-Singularity超双采放大 无法推送到工作流（节点校验失败）。请确认已粘贴 U30 Singularity Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                      : seetaPack?.family === "u35"
+                        ? `U35-H3官流-终极版-神棍 无法推送到工作流（节点校验失败）。请确认已粘贴 U35 官流 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                        : seetaPack?.family === "u06"
+                          ? `U06-h3_多图参考生视频V8 无法推送到工作流（节点校验失败）。请确认已粘贴 U06 V8 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                          : detail;
+            throw new Error(packHint);
         }
     }
     if (!promptId) {
