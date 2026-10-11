@@ -17,6 +17,7 @@ import { type CanvasTheme } from "@/lib/canvas-theme";
 import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import {
     COMFY_H3_STABLE_SEED,
+    COMFY_H3_STABLE_SEED_B,
     isComfyH3MultiReferenceVideoWorkflow,
     isComfyH3ResolutionSelectorVideoWorkflow,
     isComfyH3SelfLiftWorkflow,
@@ -210,8 +211,20 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const refImageSize = (config.videoRefImageSize || "max") === "max" ? "max" : "match";
     const samplerName = config.videoSamplerName || "dpmpp_2m";
     const scheduler = config.videoScheduler || "karras";
-    const seedMode = config.videoSeedMode === "random" ? "random" : "fixed";
-    const seedValue = config.videoSeed || String(COMFY_H3_STABLE_SEED);
+    const seedPreset = /^(fixedb|fixed_b|fixed-b)$/i.test(String(config.videoSeedMode || ""))
+        ? "fixedB"
+        : config.videoSeedMode === "random"
+          ? "random"
+          : config.videoSeed === String(COMFY_H3_STABLE_SEED_B)
+            ? "fixedB"
+            : "fixedA";
+    const applySeedPreset = (preset: "random" | "fixedA" | "fixedB") => {
+        // Single metadata write; native job maps fixed → 19960422, fixedB → 683072603085674.
+        onConfigChange(
+            "videoSeedMode",
+            preset === "random" ? "random" : preset === "fixedB" ? "fixedB" : "fixed",
+        );
+    };
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 720));
         onConfigChange("size", `${key === "width" ? next : dimensions.width}x${key === "height" ? next : dimensions.height}`);
@@ -328,22 +341,21 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                                 <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                                     {t("settingsPanels.video.seedHint")}
                                 </div>
-                                <div className="grid grid-cols-2 gap-2.5">
-                                    <OptionPill selected={seedMode === "random"} theme={theme} onClick={() => onConfigChange("videoSeedMode", "random")}>
+                                <div className="grid grid-cols-3 gap-2.5">
+                                    <OptionPill selected={seedPreset === "random"} theme={theme} onClick={() => applySeedPreset("random")}>
                                         {t("settingsPanels.video.seedRandom")}
                                     </OptionPill>
-                                    <OptionPill selected={seedMode === "fixed"} theme={theme} onClick={() => onConfigChange("videoSeedMode", "fixed")}>
-                                        {t("settingsPanels.video.seedFixed")}
+                                    <OptionPill selected={seedPreset === "fixedA"} theme={theme} onClick={() => applySeedPreset("fixedA")}>
+                                        {t("settingsPanels.video.seedFixedA")}
+                                    </OptionPill>
+                                    <OptionPill selected={seedPreset === "fixedB"} theme={theme} onClick={() => applySeedPreset("fixedB")}>
+                                        {t("settingsPanels.video.seedFixedB")}
                                     </OptionPill>
                                 </div>
-                                {seedMode === "fixed" ? (
-                                    <NumberInput
-                                        value={seedValue}
-                                        min={0}
-                                        max={Number.MAX_SAFE_INTEGER}
-                                        theme={theme}
-                                        onChange={(value) => onConfigChange("videoSeed", value || String(COMFY_H3_STABLE_SEED))}
-                                    />
+                                {seedPreset === "fixedA" || seedPreset === "fixedB" ? (
+                                    <div className="rounded-full border px-3 py-2 text-center text-[11px] tabular-nums opacity-80" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                                        {seedPreset === "fixedB" ? String(COMFY_H3_STABLE_SEED_B) : String(COMFY_H3_STABLE_SEED)}
+                                    </div>
                                 ) : null}
                             </SettingGroup>
                         ) : null}

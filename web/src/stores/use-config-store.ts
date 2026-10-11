@@ -445,7 +445,12 @@ export const useConfigStore = create<ConfigStore>()(
                         videoRefImageSize: config.videoRefImageSize || defaultConfig.videoRefImageSize,
                         videoSamplerName: config.videoSamplerName || defaultConfig.videoSamplerName,
                         videoScheduler: config.videoScheduler || defaultConfig.videoScheduler,
-                        videoSeedMode: config.videoSeedMode === "random" ? "random" : "fixed",
+                        videoSeedMode:
+                            config.videoSeedMode === "random"
+                                ? "random"
+                                : /^(fixedb|fixed_b|fixed-b)$/i.test(String(config.videoSeedMode || ""))
+                                  ? "fixedB"
+                                  : "fixed",
                         videoSeed: config.videoSeed || defaultConfig.videoSeed,
                         canvasImageCount: config.canvasImageCount || "1",
                         mjVersion: config.mjVersion || defaultConfig.mjVersion,

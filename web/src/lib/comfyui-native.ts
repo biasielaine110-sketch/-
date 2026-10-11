@@ -2116,8 +2116,10 @@ export function repairSingularityLatentUpscaler(workflow: ComfyWorkflow): ComfyW
     return next;
 }
 
-/** Default fixed seed aligned with U24 V927's authored `RandomNoise.noise_seed` (stable A/B). */
+/** Fixed seed A — aligned with U24 V927's authored `RandomNoise.noise_seed` (stable A/B). */
 export const COMFY_H3_STABLE_SEED = 19_960_422;
+/** Fixed seed B — alternate locked seed for U30/U35 A/B comparison. */
+export const COMFY_H3_STABLE_SEED_B = 683_072_603_085_674;
 
 /** Random 64-bit-safe seed (same convention as the RunningHub workflow adapters). */
 function randomComfySeed() {
@@ -2821,11 +2823,13 @@ export type RunNativeComfyUiArgs = {
     /** ComfyUI scheduler (BasicScheduler.scheduler). */
     scheduler?: string;
     /**
-     * Seed mode for U30 / U35 (and other callers that pass a fixed seed).
-     * `fixed` uses `seed`; anything else randomizes per run.
+     * Seed mode for U30 / U35.
+     * `fixed` → COMFY_H3_STABLE_SEED (or `seed` if provided);
+     * `fixedB` → COMFY_H3_STABLE_SEED_B;
+     * anything else randomizes per run.
      */
     seedMode?: string;
-    /** Fixed seed when `seedMode` is `fixed` (default stable value: COMFY_H3_STABLE_SEED). */
+    /** Optional override when `seedMode` is `fixed` (default: COMFY_H3_STABLE_SEED). */
     seed?: string | number;
     signal?: AbortSignal;
 };
@@ -2975,10 +2979,16 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // (see `repairSingularityLatentUpscaler`) so 1080p/2K do not decode to noise.
     if (h3Singularity) workflow = repairSingularityLatentUpscaler(workflow);
     if (keepTunedGeometry) {
-        // Honor canvas fixed-seed (default 19960422 from U24 V927) when seedMode=fixed.
-        // UI exposes this for U30/U35; other geometry-locked families stay random unless wired.
-        const wantFixed = /^(fixed|lock)$/i.test(String(args.seedMode || ""));
-        const fixedSeed = wantFixed ? (parseComfySeedValue(args.seed) ?? COMFY_H3_STABLE_SEED) : null;
+        // Honor canvas fixed-seed when seedMode is fixed / fixedB (U30/U35 presets).
+        // fixed → 19960422 (U24 V927); fixedB → 683072603085674; else random per run.
+        const mode = String(args.seedMode || "");
+        const wantFixedB = /^(fixedb|fixed_b|fixed-b)$/i.test(mode);
+        const wantFixed = wantFixedB || /^(fixed|lock)$/i.test(mode);
+        const fixedSeed = wantFixed
+            ? wantFixedB
+                ? COMFY_H3_STABLE_SEED_B
+                : (parseComfySeedValue(args.seed) ?? COMFY_H3_STABLE_SEED)
+            : null;
         workflow = applyComfyRandomSeed(workflow, { followLinkedSeed: h3MultiRefVideo, seed: fixedSeed });
     }
     // U06 single-pass multi-ref (WJILatentPreset holder), excluding SelfLift / U35 / U30.
