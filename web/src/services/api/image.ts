@@ -1722,7 +1722,6 @@ async function requestNativeComfyUiImages(config: AiConfig, prompt: string, refe
         prompt,
         referenceDataUrls,
         size: honorCanvasSize ? config.size : undefined,
-        apiTransport: config.apiTransport,
         signal: options?.signal,
     });
     if (result.images.length) return result.images;
@@ -1778,7 +1777,6 @@ async function requestNativeComfyUiText(
         workflowId: config.model || config.textModel,
         prompt,
         referenceDataUrls,
-        apiTransport: config.apiTransport,
         signal: options?.signal,
     });
     const text = (result.texts || []).join("\n").trim();
