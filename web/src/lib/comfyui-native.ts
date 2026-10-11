@@ -276,12 +276,67 @@ export function normalizeComfyUiRoot(baseUrl: string): string {
         .replace(/\/v1$/i, "");
 }
 
-export function comfyUiUrl(baseUrl: string, path: string): string {
+/** Absolute ComfyUI URL (never rewritten through the site proxy). */
+export function comfyUiAbsoluteUrl(baseUrl: string, path: string): string {
     const root = normalizeComfyUiRoot(baseUrl);
     const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-    // Always same-origin proxy: seetacloud/ComfyUI pods do not send Access-Control-Allow-Origin
-    // for infinite-atelier.pages.dev. Cloudflare Pages needs allow_custom_ports for :8443.
-    return proxyApiUrl(`${root}${normalizedPath}`);
+    return `${root}${normalizedPath}`;
+}
+
+/**
+ * Session cache: can the browser talk to this ComfyUI root directly (CORS open)?
+ * true → prefer direct (avoids Cloudflare→seetacloud :8443 HTTP 522)
+ * false → site proxy only
+ */
+const comfyBrowserDirectOk = new Map<string, boolean>();
+
+/**
+ * Probe whether browser→pod direct works (any HTTP response counts; CORS block has no response).
+ * Cached per root for the page session. Seetacloud :8443 from Pages is otherwise stuck on CF 522.
+ */
+export async function ensureComfyBrowserDirect(
+    baseUrl: string,
+    apiKey = "",
+    signal?: AbortSignal,
+): Promise<boolean> {
+    const root = normalizeComfyUiRoot(baseUrl);
+    if (!root) return false;
+    // Preferences already set to 浏览器直连 → proxyApiUrl is a no-op.
+    if (proxyApiUrl(`${root}/system_stats`) === `${root}/system_stats`) {
+        comfyBrowserDirectOk.set(root, true);
+        return true;
+    }
+    const cached = comfyBrowserDirectOk.get(root);
+    if (cached !== undefined) return cached;
+    // Only worth probing flaky tunnel hosts; stable LAN ComfyUI keeps the proxy default.
+    if (!isFlakyComfyGatewayHost(baseUrl)) {
+        comfyBrowserDirectOk.set(root, false);
+        return false;
+    }
+    try {
+        await axios.get(`${root}/system_stats`, {
+            headers: authHeaders(apiKey),
+            timeout: 10_000,
+            signal,
+            // 401/404 still prove CORS + TCP work; only a missing response means blocked.
+            validateStatus: () => true,
+        });
+        comfyBrowserDirectOk.set(root, true);
+        return true;
+    } catch {
+        comfyBrowserDirectOk.set(root, false);
+        return false;
+    }
+}
+
+export function comfyUiUrl(baseUrl: string, path: string): string {
+    const absolute = comfyUiAbsoluteUrl(baseUrl, path);
+    const root = normalizeComfyUiRoot(baseUrl);
+    // After a successful probe (or user chose 浏览器直连), skip the CF edge entirely.
+    // Cloudflare Pages → seetacloud:8443 commonly returns HTTP 522 (origin connect timeout);
+    // browser→pod stays in-region and is the only reliable path for H3-video uploads.
+    if (comfyBrowserDirectOk.get(root) === true) return absolute;
+    return proxyApiUrl(absolute);
 }
 
 /** `user:pass` (Basic Auth) vs a Bearer/raw token. Returns the Basic credential, or null. */
@@ -2209,6 +2264,22 @@ function readComfyUploadName(payload: unknown): string {
     return "";
 }
 
+function seetaCloudUploadError(status: number | undefined, usedDirect: boolean) {
+    if (usedDirect) {
+        return (
+            `H3-video / seetacloud 直连上传失败（HTTP ${status || "网络错误"}）。` +
+                `请确认 ComfyUI 已加 --enable-cors-header（Login 插件勿拦截 OPTIONS），GPU 空闲后重试。`
+        );
+    }
+    return (
+        `H3-video 无法经 Cloudflare 代理上传到 seetacloud:8443（HTTP ${status || "网络错误"}）。` +
+            `线上 Pages 边缘经常连不上国内 GPU 的 :8443（HTTP 522），且该机未对画布域名开放 CORS。请任选其一：` +
+            `① ComfyUI 启动加 --enable-cors-header，设置里把「API 请求方式」改为「浏览器直连」；` +
+            `② 本机 npm run dev 再用画布（走本机代理，不经 Cloudflare）；` +
+            `③ 等 GPU 空闲 30–60 秒后重试。`
+    );
+}
+
 async function uploadComfyInputFile(
     baseUrl: string,
     apiKey: string,
@@ -2226,35 +2297,63 @@ async function uploadComfyInputFile(
     // ComfyUI stores uploads under input/ via this endpoint for images and audio alike.
     body.append("image", file);
     body.append("overwrite", "true");
-    // seetacloud :8443 via Cloudflare proxy intermittently returns 520/522 under load; more
-    // attempts + longer backoff absorb that without changing behaviour for stable hosts.
+
+    const flaky = isFlakyComfyGatewayHost(baseUrl);
+    // Prefer browser→pod when CORS works. Proxy path on seetacloud :8443 often 522s from CF —
+    // keep that attempt short so H3-video fails in ~20s with actionable guidance, not ~2 minutes.
+    const useDirect = flaky ? await ensureComfyBrowserDirect(baseUrl, apiKey, options?.signal) : false;
+    const uploadUrl = useDirect
+        ? comfyUiAbsoluteUrl(baseUrl, "/upload/image")
+        : comfyUiUrl(baseUrl, "/upload/image");
+    const attempts = useDirect ? 3 : flaky ? 1 : 1;
+    const timeout = useDirect ? 60_000 : flaky ? 20_000 : 60_000;
+
     let response: { status: number; headers: unknown; data: unknown };
     try {
         response = await comfyRequestWithGatewayRetry(
             () =>
-                axios.post(comfyUiUrl(baseUrl, "/upload/image"), body, {
+                axios.post(uploadUrl, body, {
                     headers: authHeaders(apiKey),
                     signal: options?.signal,
-                    // Large refs through CF→CN can exceed axios' default; keep the socket open.
-                    timeout: isFlakyComfyGatewayHost(baseUrl) ? 120_000 : 60_000,
+                    timeout,
                 }),
             {
                 signal: options?.signal,
-                attempts: isFlakyComfyGatewayHost(baseUrl) ? 6 : 1,
-                backoffMs: isFlakyComfyGatewayHost(baseUrl) ? 2500 : 800,
+                attempts,
+                backoffMs: useDirect ? 800 : 1500,
                 label: "ComfyUI /upload/image",
             },
         );
     } catch (error) {
         const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-        if (isFlakyComfyGatewayHost(baseUrl) && (status === 520 || status === 522 || status === 502 || !status)) {
-            throw new Error(
-                `无法经 Cloudflare 代理上传到 seetacloud:8443（HTTP ${status || "网络错误"}）。` +
-                    `请任选其一：① ComfyUI 启动加 --enable-cors-header，设置里把「API 请求方式」改为「浏览器直连」；` +
-                    `② 本机 npm run dev 再用画布；③ 等 GPU 空闲 30–60 秒后重试。`,
-            );
+        // Proxy path failed → one last direct attempt (user may have just enabled CORS).
+        if (!useDirect && flaky && (status === 520 || status === 522 || status === 502 || !status)) {
+            const root = normalizeComfyUiRoot(baseUrl);
+            comfyBrowserDirectOk.delete(root);
+            const directNow = await ensureComfyBrowserDirect(baseUrl, apiKey, options?.signal);
+            if (directNow) {
+                try {
+                    response = await comfyRequestWithGatewayRetry(
+                        () =>
+                            axios.post(comfyUiAbsoluteUrl(baseUrl, "/upload/image"), body, {
+                                headers: authHeaders(apiKey),
+                                signal: options?.signal,
+                                timeout: 60_000,
+                            }),
+                        { signal: options?.signal, attempts: 2, backoffMs: 800, label: "ComfyUI /upload/image (direct)" },
+                    );
+                } catch (directError) {
+                    const directStatus = axios.isAxiosError(directError) ? directError.response?.status : undefined;
+                    throw new Error(seetaCloudUploadError(directStatus ?? status, true));
+                }
+            } else {
+                throw new Error(seetaCloudUploadError(status, false));
+            }
+        } else if (flaky && (status === 520 || status === 522 || status === 502 || !status)) {
+            throw new Error(seetaCloudUploadError(status, useDirect));
+        } else {
+            throw error;
         }
-        throw error;
     }
     const name = readComfyUploadName(response.data);
     if (!name) {
@@ -2779,6 +2878,12 @@ async function interruptComfyJob(baseUrl: string, apiKey: string, promptId: stri
 export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<NativeComfyUiResult> {
     const { baseUrl, apiKey, prompt, signal } = args;
     if (!normalizeComfyUiRoot(baseUrl)) throw new Error("ComfyUI Base URL is required");
+
+    // seetacloud / tunnel hosts: probe browser→pod CORS once so /upload、/prompt、/history all skip
+    // the Cloudflare edge that returns HTTP 522 on :8443. No-op for stable hosts.
+    if (isFlakyComfyGatewayHost(baseUrl)) {
+        await ensureComfyBrowserDirect(baseUrl, apiKey, signal);
+    }
 
     // Seetacloud-only exact model packs (H3-video / u24_v927 / U30 / U35 / U06). Null on every
     // other channel and on every other model name on the same pod — pack repairs stay scoped.
