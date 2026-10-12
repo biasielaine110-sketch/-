@@ -1115,37 +1115,38 @@ export function applyComfyLoadImages(
     // Repeating the last uploaded picture there (the legacy fallback) made the model see one
     // reference up to 8× — e.g. U24 V927 and U37 both expose 9 slots where only the first few are
     // real. Graphs without such a placeholder keep the legacy fill-up.
-    // DualClock: ONLY the uploaded blank counts — never the authored zealman-blank string alone
-    // (missing/broken file → LoadImage #94 "Invalid argument returned 22" on seetacloud).
+    // DualClock + SelfLift: ONLY the uploaded blank counts — never the authored
+    // `zealman-blank-image.png` string alone (missing/broken on seetacloud → LoadImage
+    // "Invalid argument returned 22", e.g. DualClock #94 / U37 #316).
     const twoPassRefs = isComfyH3TwoPassReferenceWorkflow(next);
+    const selfLiftRefs = isComfyH3SelfLiftWorkflow(next);
+    const needsUploadedBlank = twoPassRefs || selfLiftRefs;
     const uploadedBlank = (options?.blankFilename || "").trim();
-    const blankSlot =
-        uploadedBlank ||
-        (!twoPassRefs && isComfyH3SelfLiftWorkflow(next) ? comfyBlankImagePlaceholder(next) : null);
+    const blankSlot = uploadedBlank || null;
     const loaders = slotOrder.length
         ? slotOrder.map((id) => next[id]).filter((node): node is ComfyNode => Boolean(node))
         : Object.entries(next)
               .filter(([, node]) => isComfyImageLoader(node))
               .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }))
               .map(([, node]) => node);
-    // U24 DualClock: never delete spare `ref_images.ref_image_N` — MiniMaxH3AudioConditioningT8
-    // then fails `/prompt` ("required input missing"). Never repeat the last large ref into spare
-    // slots (OOM). Use the uploaded blank from runNativeComfyUiJob when present.
+    // DualClock / SelfLift: never delete spare `ref_images.*` slots; never repeat the last large
+    // ref into spares (OOM). Use the uploaded blank from runNativeComfyUiJob when present.
     const uploadedSet = new Set(filenames.filter(Boolean));
     loaders.forEach((node, index) => {
         const name =
-            filenames[index] || blankSlot || (twoPassRefs && !blankSlot ? "" : filenames[filenames.length - 1]);
+            filenames[index] ||
+            blankSlot ||
+            (needsUploadedBlank && !blankSlot ? "" : filenames[filenames.length - 1]);
         if (!name) return;
         if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
         if ("image" in node.inputs || !("url" in node.inputs)) node.inputs.image = name;
         else node.inputs.url = name;
     });
-    // DualClock: every LoadImage that is not one of the user's uploads must point at the uploaded
-    // blank — including #94 zealman-blank and any Untitled/snowtp leftovers. Matching only
-    // "author-local" names was too narrow if the pod still had a stale/broken filename.
-    // Confined to the two-pass fingerprint so single-pass graphs (U06/U30/U35) keep spare-slot
-    // fill from the forEach above; seetacloud packs scrub author-local leftovers at the call site.
-    if (twoPassRefs && uploadedBlank) {
+    // DualClock + SelfLift: every LoadImage that is not one of the user's uploads must point at
+    // the uploaded blank — including U37 #316 zealman-blank and any Untitled leftovers.
+    // Confined to these fingerprints so U06/U30/U35 keep spare-slot fill from the forEach above;
+    // seetacloud packs scrub author-local leftovers at the call site.
+    if (needsUploadedBlank && uploadedBlank) {
         for (const node of Object.values(next)) {
             if (!isComfyImageLoader(node)) continue;
             if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
@@ -3112,8 +3113,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         // If upload fails for another reason, fall back to the first already-uploaded ref filename
         // so `/prompt` still queues (same file on the pod — no second round-trip).
         let blankFilename: string | undefined;
+        // SelfLift (U37) also parks spare slots on `zealman-blank-image.png` — same seetacloud
+        // LoadImage "Invalid argument returned 22" as DualClock unless a real blank is uploaded.
         const needsBlankUpload =
-            !textFamily && (h3TwoPassRefs || Boolean(seetaPack?.uploadBlankForSpareLoaders));
+            !textFamily && (h3TwoPassRefs || h3SelfLift || Boolean(seetaPack?.uploadBlankForSpareLoaders));
         if (needsBlankUpload) {
             try {
                 blankFilename = await uploadComfyImage(
@@ -3149,15 +3152,15 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         workflow = textFamily
             ? applyComfyTextReferenceImages(workflow, names)
             : applyComfyLoadImages(workflow, names, args.workflowId, blankFilename ? { blankFilename } : undefined);
-        // Seetacloud packs only: scrub leftover author-machine filenames (U30 hashes, U35 nv/nan,
-        // DualClock Untitled leftovers) so `/prompt` never references files missing on the pod.
-        if (seetaPack?.scrubAuthorLocalLoaders && !textFamily) {
+        // Seetacloud packs + SelfLift: scrub leftover author-machine filenames so `/prompt`
+        // never references files missing on the pod (U37 南宫婉.png / zealman-blank leftovers).
+        if ((seetaPack?.scrubAuthorLocalLoaders || h3SelfLift) && !textFamily) {
             workflow = scrubSeetaCloudAuthorLocalLoadImages(workflow, blankFilename || names[0], names);
         }
     } else if (!textFamily && h3MultiRefVideo && !h3SelfLift) {
         // U06 V8 (and siblings): rewire duplicated ref slots even with zero uploads so Picture 1/2
-        // are not left sharing `加载图像2`. SelfLift keeps its own blank-placeholder path and is
-        // unchanged; graphs outside this family never enter applyComfyLoadImages here.
+        // are not left sharing `加载图像2`. SelfLift requires uploaded refs + blank (above).
+        // Graphs outside this family never enter applyComfyLoadImages here.
         workflow = applyComfyLoadImages(workflow, [], args.workflowId);
     }
 
