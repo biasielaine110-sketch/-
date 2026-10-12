@@ -96,6 +96,11 @@ export type AiConfig = {
     videoSeedMode: string;
     /** Fixed seed when `videoSeedMode` is `fixed` (default matches U24 V927 authored seed). */
     videoSeed: string;
+    /**
+     * DualClock (H3-video / u24_v927) when canvas audio is connected:
+     * `reference_only` (default) or `lock_source`.
+     */
+    videoAudioMode: string;
     systemPrompt: string;
     reasoningEffort: ReasoningEffort;
     /** direct = browser→API (no Vercel 60s cap); proxy = via /api/proxy for CORS. */
@@ -170,6 +175,7 @@ export const defaultConfig: AiConfig = {
     videoScheduler: "karras",
     videoSeedMode: "fixed",
     videoSeed: "19960422",
+    videoAudioMode: "reference_only",
     systemPrompt: "",
     reasoningEffort: "auto",
     // Default via same-origin proxy — most relay APIs block browser CORS.
@@ -452,6 +458,9 @@ export const useConfigStore = create<ConfigStore>()(
                                   ? "fixedB"
                                   : "fixed",
                         videoSeed: config.videoSeed || defaultConfig.videoSeed,
+                        videoAudioMode: /^(lock_source|lock)$/i.test(String(config.videoAudioMode || ""))
+                            ? "lock_source"
+                            : "reference_only",
                         canvasImageCount: config.canvasImageCount || "1",
                         mjVersion: config.mjVersion || defaultConfig.mjVersion,
                         quality: config.quality || "medium",

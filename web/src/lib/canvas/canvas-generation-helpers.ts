@@ -399,6 +399,7 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         videoScheduler: node?.metadata?.scheduler || config.videoScheduler || defaultConfig.videoScheduler,
         videoSeedMode: node?.metadata?.seedMode || config.videoSeedMode || defaultConfig.videoSeedMode,
         videoSeed: node?.metadata?.seed || config.videoSeed || defaultConfig.videoSeed,
+        videoAudioMode: node?.metadata?.audioMode || config.videoAudioMode || defaultConfig.videoAudioMode,
         audioVoice: node?.metadata?.audioVoice || config.audioVoice || defaultConfig.audioVoice,
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,

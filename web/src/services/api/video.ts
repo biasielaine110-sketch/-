@@ -318,6 +318,7 @@ async function createNativeComfyUiVideoTask(
             scheduler: config.videoScheduler,
             seedMode: config.videoSeedMode,
             seed: config.videoSeed,
+            audioMode: config.videoAudioMode,
             signal: options?.signal,
         });
         const video = result.videos[0];

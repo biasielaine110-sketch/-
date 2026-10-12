@@ -147,6 +147,8 @@ export type CanvasNodeMetadata = {
     seedMode?: string;
     /** Fixed seed when `seedMode` is `fixed`. */
     seed?: string;
+    /** DualClock audio strategy: `reference_only` | `lock_source`. */
+    audioMode?: string;
     audioVoice?: string;
     audioFormat?: string;
     audioSpeed?: string;

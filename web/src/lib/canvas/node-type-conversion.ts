@@ -43,7 +43,7 @@ const MEDIA_FIELDS = [
 
 /** Generation knobs that only ever applied to one of the two types. */
 const IMAGE_ONLY_FIELDS = ["size", "quality", "count", "background", "mjVersion", "generationType", "freeResize"] as const;
-const VIDEO_ONLY_FIELDS = ["seconds", "videoResolution", "vquality", "generateAudio", "watermark", "steps", "refImageSize", "samplerName", "scheduler", "seedMode", "seed"] as const;
+const VIDEO_ONLY_FIELDS = ["seconds", "videoResolution", "vquality", "generateAudio", "watermark", "steps", "refImageSize", "samplerName", "scheduler", "seedMode", "seed", "audioMode"] as const;
 
 /** Knobs are a real user choice even when falsy (`generateAudio: false`), so they always travel. */
 const SOURCE_TYPE_KNOBS: Record<string, readonly string[]> = {

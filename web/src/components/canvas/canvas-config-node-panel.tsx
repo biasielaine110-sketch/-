@@ -189,6 +189,7 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
         videoScheduler: node.metadata?.scheduler || globalConfig.videoScheduler || defaultConfig.videoScheduler,
         videoSeedMode: node.metadata?.seedMode || globalConfig.videoSeedMode || defaultConfig.videoSeedMode,
         videoSeed: node.metadata?.seed || globalConfig.videoSeed || defaultConfig.videoSeed,
+        videoAudioMode: node.metadata?.audioMode || globalConfig.videoAudioMode || defaultConfig.videoAudioMode,
         audioVoice: node.metadata?.audioVoice || globalConfig.audioVoice || defaultConfig.audioVoice,
         audioFormat: node.metadata?.audioFormat || globalConfig.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node.metadata?.audioSpeed || globalConfig.audioSpeed || defaultConfig.audioSpeed,
@@ -214,6 +215,7 @@ function videoConfigPatch(key: keyof AiConfig, value: string) {
     if (key === "videoScheduler") return { scheduler: value };
     if (key === "videoSeedMode") return { seedMode: value };
     if (key === "videoSeed") return { seed: value };
+    if (key === "videoAudioMode") return { audioMode: value };
     return { [key]: value };
 }
 

@@ -1252,8 +1252,77 @@ function applyComfySelfLiftAudios(workflow: ComfyWorkflow, filenames: string[]):
     return workflow;
 }
 
+/** Normalize canvas DualClock audio strategy: reference timbre (default) or lock source track. */
+export function normalizeComfyH3AudioMode(value?: string | null): "reference_only" | "lock_source" {
+    return /^(lock_source|lock)$/i.test(String(value || "")) ? "lock_source" : "reference_only";
+}
+
+/**
+ * True for U30 / U35 / U06-style graphs: single `MiniMaxH3ReferenceToVideo` with image refs, no
+ * authored `ref_audios` / drive-audio contract (SelfLift already has slots; DualClock uses T8).
+ */
+export function isComfyH3ReferenceToVideoTimbreFamily(workflow: ComfyWorkflow): boolean {
+    if (!isComfyH3MultiReferenceVideoWorkflow(workflow)) return false;
+    if (isComfyH3SelfLiftWorkflow(workflow)) return false;
+    return true;
+}
+
+/**
+ * U30 / U35 / U06 Path A: plant `LoadAudio` and wire `ref_audios.ref_audio_*` onto
+ * `MiniMaxH3ReferenceToVideo` (same surface SelfLift uses for voice-timbre). Never stamp
+ * `drive_audio` / `audio_mode` — this node class rejects those keywords.
+ */
+export function applyComfyReferenceToVideoTimbreAudios(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
+    if (!filenames.length) return workflow;
+    if (!isComfyH3ReferenceToVideoTimbreFamily(workflow)) return workflow;
+
+    const next = cloneWorkflow(workflow);
+    const bareTargets = Object.values(next).filter((node) => {
+        if (!/MiniMaxH3ReferenceToVideo/i.test(String(node?.class_type || "")) || !node.inputs) return false;
+        const keys = Object.keys(node.inputs);
+        // Already authored or previously injected — leave alone.
+        if (keys.some((key) => key.startsWith("ref_audios.") || H3_AUDIO_DRIVING_FIELDS.includes(key))) return false;
+        return true;
+    });
+    if (!bareTargets.length) return workflow;
+
+    const existingLoaders = Object.entries(next)
+        .filter(([, node]) => isComfyAudioLoader(node))
+        .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+
+    const loaderIds: string[] = [];
+    filenames.forEach((filename, index) => {
+        if (!filename) return;
+        let loaderId = existingLoaders[index]?.[0];
+        if (loaderId) {
+            writeComfyAudioFilename(next[loaderId], filename);
+        } else {
+            loaderId = nextComfyNodeId(next, "ia_timbre_");
+            next[loaderId] = {
+                class_type: "LoadAudio",
+                inputs: { audio: filename },
+                _meta: { title: `Canvas Timbre ${index + 1}` },
+            };
+        }
+        loaderIds.push(loaderId);
+    });
+    if (!loaderIds.length) return workflow;
+
+    for (const node of bareTargets) {
+        if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
+        loaderIds.forEach((id, index) => {
+            node.inputs![`ref_audios.ref_audio_${index}`] = [id, 0];
+        });
+    }
+    return next;
+}
+
 /** Map uploaded filenames onto LoadAudio nodes in order. */
-export function applyComfyLoadAudios(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
+export function applyComfyLoadAudios(
+    workflow: ComfyWorkflow,
+    filenames: string[],
+    options?: { audioMode?: string | null },
+): ComfyWorkflow {
     if (!filenames.length) return workflow;
     const next = cloneWorkflow(workflow);
     // U37 SelfLift 双采 consumes audio only through its declared `ref_audios.*` references, and its
@@ -1273,8 +1342,10 @@ export function applyComfyLoadAudios(workflow: ComfyWorkflow, filenames: string[
         if (!name) return;
         writeComfyAudioFilename(node, name);
     });
-    // MiniMax H3 graphs often have no LoadAudio — wire drive_audio / ref_audios instead.
-    return applyComfyMiniMaxDriveAudio(next, filenames);
+    // DualClock / Compshare T8: drive_audio + audio_mode when the node declares that surface.
+    const driven = applyComfyMiniMaxDriveAudio(next, filenames, options);
+    // U30 / U35 / U06: same ReferenceToVideo class, but only `ref_audios.*` (no drive_audio).
+    return applyComfyReferenceToVideoTimbreAudios(driven, filenames);
 }
 
 function isMiniMaxH3ConditioningNode(node: ComfyNode) {
@@ -1320,11 +1391,17 @@ function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
 /**
  * Compshare MiniMax H3: inject canvas audio by adding LoadAudio nodes and linking
  * `drive_audio` / `ref_audios.ref_audio_*` on MiniMaxH3AudioConditioningT8.
- * When audio is provided, switch `audio_mode` away from `native` so the source is used —
- * except DualClock U24/V927 graphs that author `audio_mode=native` with no `ref_audios.*`
- * slots: forcing `lock_source` there plays sound over closed-mouth faces (no lip sync).
+ *
+ * DualClock U24/V927 authors `audio_mode=native` with no `ref_audios.*` slots. When the canvas
+ * supplies audio we still inject, defaulting to `reference_only` (timbre/rhythm reference; model
+ * still synthesizes the track). Optional `audioMode=lock_source` keeps the source track instead —
+ * that can sound right while mouths stay closed on still-reference faces.
  */
-export function applyComfyMiniMaxDriveAudio(workflow: ComfyWorkflow, filenames: string[]): ComfyWorkflow {
+export function applyComfyMiniMaxDriveAudio(
+    workflow: ComfyWorkflow,
+    filenames: string[],
+    options?: { audioMode?: string | null },
+): ComfyWorkflow {
     if (!filenames.length) return workflow;
     const next = cloneWorkflow(workflow);
     // Only inject where the node itself declares an audio-driving surface (see the helper). The U06
@@ -1336,16 +1413,12 @@ export function applyComfyMiniMaxDriveAudio(workflow: ComfyWorkflow, filenames: 
     // exactly as authored instead of planting orphan `LoadAudio` nodes nothing links to.
     if (!targets.length) return next;
 
-    // U24 DualClock / V927: both LOW+HIGH conditioning nodes declare `audio_mode: native` and
-    // have zero `ref_audios.*` slots. Stamping `drive_audio` + `lock_source` muxes canvas audio
-    // onto a clip whose faces stay locked to still references (sound yes, mouth no). Keep native
-    // AV generation; canvas audio is ignored for this family (prompt `<d>…</d>` drives speech).
-    if (isComfyH3TwoPassReferenceWorkflow(next)) {
-        const hasRefAudioSlots = targets.some((node) =>
-            Object.keys(node.inputs || {}).some((key) => key.startsWith("ref_audios.")),
-        );
-        if (!hasRefAudioSlots) return next;
-    }
+    const hasRefAudioSlots = targets.some((node) =>
+        Object.keys(node.inputs || {}).some((key) => key.startsWith("ref_audios.")),
+    );
+    // DualClock authored without ref slots: prefer reference_only over lock_source (see docstring).
+    const dualClockNative = isComfyH3TwoPassReferenceWorkflow(next) && !hasRefAudioSlots;
+    const requestedMode = normalizeComfyH3AudioMode(options?.audioMode);
 
     const existingLoaders = Object.entries(next)
         .filter(([, node]) => isComfyAudioLoader(node))
@@ -1378,9 +1451,11 @@ export function applyComfyMiniMaxDriveAudio(workflow: ComfyWorkflow, filenames: 
         loaderIds.forEach((id, index) => {
             node.inputs![`ref_audios.ref_audio_${index}`] = [id, 0];
         });
-        // `native` ignores drive_audio and synthesizes sound — force lock when canvas audio exists.
         const mode = String(node.inputs.audio_mode || "");
-        if (!mode || /^native$/i.test(mode)) {
+        if (dualClockNative) {
+            node.inputs.audio_mode = requestedMode;
+        } else if (!mode || /^native$/i.test(mode)) {
+            // Non-DualClock graphs that already expose the contract: lock when canvas audio exists.
             node.inputs.audio_mode = "lock_source";
         }
         node.inputs.add_source_as_reference = true;
@@ -2831,6 +2906,11 @@ export type RunNativeComfyUiArgs = {
     seedMode?: string;
     /** Optional override when `seedMode` is `fixed` (default: COMFY_H3_STABLE_SEED). */
     seed?: string | number;
+    /**
+     * DualClock (H3-video / u24_v927) audio strategy when canvas audio is connected.
+     * `reference_only` (default) = timbre/rhythm reference; `lock_source` = keep source track.
+     */
+    audioMode?: string;
     signal?: AbortSignal;
 };
 
@@ -3092,7 +3172,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
             });
             names.push(uploaded);
         }
-        workflow = applyComfyLoadAudios(workflow, names);
+        workflow = applyComfyLoadAudios(workflow, names, { audioMode: args.audioMode });
     }
 
     const clientId = nanoid(12);

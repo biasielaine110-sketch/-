@@ -23,6 +23,7 @@ import {
     isComfyH3SelfLiftWorkflow,
     isComfyH3SingularityUpscaleWorkflow,
     isComfyH3TwoPassReferenceWorkflow,
+    normalizeComfyH3AudioMode,
     parseComfyApiWorkflow,
     shouldUseNativeComfyUi,
 } from "@/lib/comfyui-native";
@@ -125,6 +126,32 @@ function supportsVideoSeedControls(config: AiConfig, family: NativeVideoFamily) 
     return /u30|singularity|超双采放大/.test(name);
 }
 
+/** DualClock H3-video / u24_v927: canvas audio → reference_only or lock_source. */
+function supportsDualClockAudioControls(config: AiConfig, family: NativeVideoFamily) {
+    if (family !== "twoPass") return false;
+    const model = config.model || config.videoModel || "";
+    const script = resolveModelScript(config, model);
+    const workflow = parseComfyApiWorkflow(script);
+    if (workflow) {
+        if (isComfyH3SingularityUpscaleWorkflow(workflow)) return false;
+        if (isComfyH3TwoPassReferenceWorkflow(workflow)) return true;
+    }
+    const name = String(model)
+        .split("::")
+        .pop()
+        ?.trim()
+        .toLowerCase() || "";
+    if (/u30|singularity|超双采放大/.test(name)) return false;
+    return /u24|v927|文武|h3-video|h3_video|双采参考/.test(name);
+}
+
+/** U30 / U35 / U06: informational tip for ref_audios timbre injection. */
+function supportsTimbreAudioHint(config: AiConfig, family: NativeVideoFamily) {
+    if (family === "u35" || family === "u06") return true;
+    if (family !== "twoPass") return false;
+    return supportsVideoSeedControls(config, family);
+}
+
 const secondOptions = [6, 10, 12, 16, 20];
 
 const stepOptions = [20, 25, 30, 40, 50];
@@ -141,7 +168,7 @@ export const videoSecondOptions = secondOptions.map((value) => String(value));
 
 type VideoSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoSteps" | "videoRefImageSize" | "videoSamplerName" | "videoScheduler" | "videoSeedMode" | "videoSeed", value: string) => void;
+    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoSteps" | "videoRefImageSize" | "videoSamplerName" | "videoScheduler" | "videoSeedMode" | "videoSeed" | "videoAudioMode", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
@@ -157,6 +184,14 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const aspectChoices = useMemo(() => (nativeComfy && !h3Comfy ? sizeOptionsForFamily(nativeFamily) : sizeOptions), [nativeComfy, h3Comfy, nativeFamily]);
     const showSeedControls = useMemo(
         () => nativeComfy && !h3Comfy && supportsVideoSeedControls(config, nativeFamily),
+        [config, nativeComfy, h3Comfy, nativeFamily],
+    );
+    const showAudioModeControls = useMemo(
+        () => nativeComfy && !h3Comfy && supportsDualClockAudioControls(config, nativeFamily),
+        [config, nativeComfy, h3Comfy, nativeFamily],
+    );
+    const showTimbreHint = useMemo(
+        () => nativeComfy && !h3Comfy && supportsTimbreAudioHint(config, nativeFamily),
         [config, nativeComfy, h3Comfy, nativeFamily],
     );
 
@@ -225,6 +260,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
             preset === "random" ? "random" : preset === "fixedB" ? "fixedB" : "fixed",
         );
     };
+    const audioMode = normalizeComfyH3AudioMode(config.videoAudioMode);
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 720));
         onConfigChange("size", `${key === "width" ? next : dimensions.width}x${key === "height" ? next : dimensions.height}`);
@@ -357,6 +393,28 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                                         {seedPreset === "fixedB" ? String(COMFY_H3_STABLE_SEED_B) : String(COMFY_H3_STABLE_SEED)}
                                     </div>
                                 ) : null}
+                            </SettingGroup>
+                        ) : null}
+                        {showAudioModeControls ? (
+                            <SettingGroup title={t("settingsPanels.video.audioMode")} color={theme.node.muted}>
+                                <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                                    {t("settingsPanels.video.audioModeHint")}
+                                </div>
+                                <div className="grid grid-cols-2 gap-2.5">
+                                    <OptionPill selected={audioMode === "reference_only"} theme={theme} onClick={() => onConfigChange("videoAudioMode", "reference_only")}>
+                                        {t("settingsPanels.video.audioModeReference")}
+                                    </OptionPill>
+                                    <OptionPill selected={audioMode === "lock_source"} theme={theme} onClick={() => onConfigChange("videoAudioMode", "lock_source")}>
+                                        {t("settingsPanels.video.audioModeLock")}
+                                    </OptionPill>
+                                </div>
+                            </SettingGroup>
+                        ) : null}
+                        {showTimbreHint ? (
+                            <SettingGroup title={t("settingsPanels.video.audioMode")} color={theme.node.muted}>
+                                <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                                    {t("settingsPanels.video.timbreHint")}
+                                </div>
                             </SettingGroup>
                         ) : null}
                     </>
