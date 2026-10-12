@@ -1261,7 +1261,7 @@ export function normalizeComfyH3AudioMode(value?: string | null): "reference_onl
 /**
  * Per-family canvas defaults when node/global knobs are unset.
  * - DualClock (U24 / H3-video): 900p + reference_only
- * - U35: 900p
+ * - U35: 1080p
  * - U06: 1376
  * U30 / U37 / others: no override (keep global/defaultConfig).
  */
@@ -1282,7 +1282,7 @@ export function resolveNativeH3VideoSettingDefaults(
             return { vquality: "900", videoAudioMode: "reference_only" };
         }
         if (isComfyH3ResolutionSelectorVideoWorkflow(workflow)) {
-            return { vquality: "900" };
+            return { vquality: "1080" };
         }
         if (isComfyH3MultiReferenceVideoWorkflow(workflow)) {
             return { vquality: "1376" };
@@ -1294,7 +1294,7 @@ export function resolveNativeH3VideoSettingDefaults(
     if (/u24|v927|文武|h3-video|h3_video|双采参考/.test(name)) {
         return { vquality: "900", videoAudioMode: "reference_only" };
     }
-    if (/u35|官流|神棍/.test(name)) return { vquality: "900" };
+    if (/u35|官流|神棍/.test(name)) return { vquality: "1080" };
     if (/u06|多图参考/.test(name)) return { vquality: "1376" };
     return {};
 }
