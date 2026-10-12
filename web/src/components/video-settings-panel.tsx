@@ -33,23 +33,26 @@ const resolutionOptions = [
     { value: "480", label: "480p" },
 ];
 
-/** U24 / H3-video two-pass: 1080 as everyday HD, plus 2K. */
+/** U24 / H3-video two-pass: 900p mid tier between 720 and full 1080 (VRAM-friendly). */
 const twoPassResolutionOptions = [
     { value: "720", label: "720p" },
+    { value: "900", label: "900p" },
     { value: "1080", label: "1080p" },
     { value: "2k", label: "2K" },
 ];
 
-/** U35 官流: lift author 1MP up to ~1080-tier delivery. */
+/** U35 官流: lift author 1MP up to ~1080-tier delivery; 900p mid tier for VRAM. */
 const u35ResolutionOptions = [
     { value: "720", label: "720p" },
+    { value: "900", label: "900p" },
     { value: "1080", label: "1080p" },
     { value: "2k", label: "2K" },
 ];
 
-/** U06 multi-ref: author long-edge tier (WJILatentPreset 1376). */
+/** U06 multi-ref: author long-edge tier (WJILatentPreset 1376); 900p mid tier for VRAM. */
 const u06ResolutionOptions = [
     { value: "720", label: "720p" },
+    { value: "900", label: "900p" },
     { value: "1376", label: "1376" },
     { value: "480", label: "480p" },
 ];
@@ -483,6 +486,7 @@ export function normalizeVideoResolutionValue(value: string) {
     const raw = String(value || "").trim().toLowerCase();
     if (raw === "480p" || raw === "low") return "480";
     if (raw === "720p" || raw === "auto" || raw === "medium") return "720";
+    if (raw === "900p" || raw === "900" || raw === "准高清" || raw === "mid") return "900";
     if (raw === "1080p" || raw === "hd") return "1080";
     if (raw === "2k" || raw === "1440" || raw === "1440p" || raw === "high") return "2k";
     if (raw === "1376" || raw === "1376p") return "1376";

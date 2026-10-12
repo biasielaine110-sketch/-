@@ -88,9 +88,9 @@ export default {
             audioModeHint: "H3-video / u24_v927：连上音频节点后生效。参考音色=模型另合成、靠近你的声线；锁源=尽量保留你的原音轨（口型可能对不齐）。",
             timbreHint: "U30 / U35 / U06：连上音频节点后，会作为音色参考写入 ref_audios（模型另合成音轨，不是原文件直出）。",
             adaptive: "自适应",
-            twoPassQualityHint: "双采：常用选 1080p；需要更高成片可选 2K（显存占用更高）。",
-            u35QualityHint: "官流单采：作者默认约 1MP；选 1080p 可提到约 1080 档交付。",
-            u06QualityHint: "多图参考：选 1376 使用作者长边精度；画布比例仍可切换横竖。",
+            twoPassQualityHint: "双采：显存紧用 720p；想比 720 更清又怕 1080 OOM 可选 900p（约 1600×900）；稳了再试 1080p / 2K。",
+            u35QualityHint: "官流单采：作者默认约 1MP；显存紧用 720/900p，稳了再试 1080p / 2K。",
+            u06QualityHint: "多图参考：900p≈长边 1152（比 1376 省显存）；要作者长边精度选 1376；画布比例仍可切换横竖。",
             selfLiftOrientationHint: "SelfLift：点横屏 16:9 或竖屏 9:16 即可切换朝向（勿用「自动」若要强制朝向）。",
             sizes: {
                 landscape: "横屏",

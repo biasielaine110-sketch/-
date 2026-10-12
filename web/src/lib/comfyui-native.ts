@@ -1514,6 +1514,8 @@ function longSideFromQuality(vquality?: string) {
     // U06 V8 author long edge — must win over the generic `>= 1080 → 1920` numeric ladder.
     if (/^1376(?:p)?$/.test(raw)) return 1376;
     if (/1080|hd/.test(raw)) return 1920;
+    // Mid tier between 720 and 1080 — ~1600×900 (16:9), less VRAM than full 1080 for DualClock.
+    if (/^900(?:p)?$|准高清|mid/.test(raw)) return 1600;
     if (/720|sd/.test(raw)) return 1280;
     if (/480|low/.test(raw)) return 854;
     const numeric = Number(raw.replace(/p$/i, ""));
@@ -1522,6 +1524,7 @@ function longSideFromQuality(vquality?: string) {
         if (numeric >= 2000) return 2560;
         if (numeric === 1376) return 1376;
         if (numeric >= 1080) return 1920;
+        if (numeric >= 900) return 1600;
         if (numeric >= 720) return 1280;
         return 854;
     }
@@ -1592,9 +1595,9 @@ function shapeH3CanvasToSize(bakedWidth: number, bakedHeight: number, size: stri
  * (`2048x1152`) is an "explicit" size, and feeding it through `shapeH3CanvasToSize`'s literal WxH
  * path used to inflate V8 from 1376×768 to 2048×1152 (~2.25× pixels) and OOM the pod. A 16:9
  * canvas against the author's 16:9 bake stays byte-identical; only the *ratio* changes the shape.
- * The sole quality override this family accepts is the explicit `1376` long-edge tier (the author
- * bake); generic 1080/2k must not inflate the preset. The preset is pinned to custom mode so the
- * rewritten dimensions are the ones that actually apply.
+ * Quality overrides this family accepts: `1376` (author long-edge) and `900` (VRAM mid tier,
+ * long edge 1152). Generic 1080/2k must not inflate the preset. The preset is pinned to custom
+ * mode so the rewritten dimensions are the ones that actually apply.
  */
 function reshapeLinkedH3Canvas(
     workflow: ComfyWorkflow,
@@ -1620,9 +1623,10 @@ function reshapeLinkedH3Canvas(
         const ratio = parseCanvasAspectRatio(size);
         return RESOLUTION_SELECTOR_ASPECTS.find((item) => item.ratio === ratio)?.value || 0;
     })();
-    // Only the dedicated U06 "1376" quality pill may replace the baked long edge; every other
+    // U06 long-edge pills: 1376 = author tier; 900 = mid VRAM tier (~1152 long edge). Other
     // vquality keeps the author's pixel budget so 1080/2k cannot OOM this family.
-    const qualityLong = /^1376(?:p)?$/i.test(String(vquality || "").trim()) ? 1376 : 0;
+    const qualityRaw = String(vquality || "").trim();
+    const qualityLong = /^1376(?:p)?$/i.test(qualityRaw) ? 1376 : /^900(?:p)?$/i.test(qualityRaw) ? 1152 : 0;
     for (const id of holders) {
         const holder = workflow[id];
         if (!holder?.inputs || typeof holder.inputs !== "object") continue;
@@ -2058,11 +2062,12 @@ export function applyComfyVideoSettings(
         // the helper); only an explicit canvas size writes it and the reshape preserves the author's
         // pixel budget, so the untouched default stays byte-identical. Scoped to this one family, so
         // U24/U37/U33 and every other graph keep the geometry handling around this block untouched.
-        // Reshape on an explicit canvas size (ratio), or when the user picks the dedicated U06
-        // "1376" long-edge tier — that pill must work even if size is still "auto".
+        // Reshape on an explicit canvas size (ratio), or when the user picks a U06 long-edge
+        // tier (1376 / 900) — those pills must work even if size is still "auto".
         if (
             settings.multiRefH3Video &&
-            (isExplicitCanvasSize(settings.size) || /^1376(?:p)?$/i.test(String(settings.vquality || "").trim()))
+            (isExplicitCanvasSize(settings.size) ||
+                /^(?:1376|900)(?:p)?$/i.test(String(settings.vquality || "").trim()))
         ) {
             reshapeLinkedH3Canvas(
                 next,
