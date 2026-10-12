@@ -85,7 +85,7 @@ export default {
             audioMode: "参考音频",
             audioModeReference: "参考音色",
             audioModeLock: "锁源原音",
-            audioModeHint: "H3-video / u24_v927：连上音频节点后生效。参考音色=模型另合成、靠近你的声线；锁源=尽量保留你的原音轨（口型可能对不齐）。",
+            audioModeHint: "H3-video / u24_v927：连上音频节点后生效，默认参考音色。参考音色=模型另合成、靠近你的声线；锁源=尽量保留你的原音轨（口型可能对不齐）。",
             timbreHint: "U30 / U35 / U06：连上音频节点后，会作为音色参考写入 ref_audios（模型另合成音轨，不是原文件直出）。",
             adaptive: "自适应",
             twoPassQualityHint: "双采：显存紧用 720p；想比 720 更清又怕 1080 OOM 可选 900p（约 1600×900）；稳了再试 1080p / 2K。",

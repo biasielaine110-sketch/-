@@ -1,5 +1,6 @@
-import { defaultConfig, resolveModelForCapability, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, resolveModelForCapability, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import i18n from "@/i18n";
+import { resolveNativeH3VideoSettingDefaults } from "@/lib/comfyui-native";
 import { ensureImageThumbnail, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
 import { isLocalMediaLibraryPermissionLost } from "@/services/local-media-library";
@@ -381,16 +382,19 @@ export function getInputSummary(inputs: NodeGenerationInput[]) {
 }
 
 export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode): AiConfig {
+    const model = resolveModelForCapability(config, node?.metadata?.model, mode);
+    const nativeVideoDefaults =
+        mode === "video" ? resolveNativeH3VideoSettingDefaults(model, resolveModelScript(config, model)) : {};
     return {
         ...config,
-        model: resolveModelForCapability(config, node?.metadata?.model, mode),
+        model,
         reasoningEffort: node?.metadata?.reasoningEffort || config.reasoningEffort || defaultConfig.reasoningEffort,
         quality: node?.metadata?.quality || config.quality || defaultConfig.quality,
         size: node?.metadata?.size || config.size || defaultConfig.size,
         background: node?.metadata?.background ?? config.background ?? defaultConfig.background,
         videoSeconds: node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds,
         videoResolution: node?.metadata?.videoResolution || config.videoResolution || "",
-        vquality: node?.metadata?.vquality || config.vquality || defaultConfig.vquality,
+        vquality: node?.metadata?.vquality || nativeVideoDefaults.vquality || config.vquality || defaultConfig.vquality,
         videoGenerateAudio: node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
         videoWatermark: node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark,
         videoSteps: node?.metadata?.steps || config.videoSteps || defaultConfig.videoSteps,
@@ -399,7 +403,8 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         videoScheduler: node?.metadata?.scheduler || config.videoScheduler || defaultConfig.videoScheduler,
         videoSeedMode: node?.metadata?.seedMode || config.videoSeedMode || defaultConfig.videoSeedMode,
         videoSeed: node?.metadata?.seed || config.videoSeed || defaultConfig.videoSeed,
-        videoAudioMode: node?.metadata?.audioMode || config.videoAudioMode || defaultConfig.videoAudioMode,
+        videoAudioMode:
+            node?.metadata?.audioMode || nativeVideoDefaults.videoAudioMode || config.videoAudioMode || defaultConfig.videoAudioMode,
         audioVoice: node?.metadata?.audioVoice || config.audioVoice || defaultConfig.audioVoice,
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,

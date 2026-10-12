@@ -1253,9 +1253,50 @@ function applyComfySelfLiftAudios(workflow: ComfyWorkflow, filenames: string[]):
     return workflow;
 }
 
-/** Normalize canvas DualClock audio strategy: reference timbre (default) or lock source track. */
+/** Normalize canvas DualClock audio strategy: reference timbre or lock source track. */
 export function normalizeComfyH3AudioMode(value?: string | null): "reference_only" | "lock_source" {
     return /^(lock_source|lock)$/i.test(String(value || "")) ? "lock_source" : "reference_only";
+}
+
+/**
+ * Per-family canvas defaults when node/global knobs are unset.
+ * - DualClock (U24 / H3-video): 900p + reference_only
+ * - U35: 900p
+ * - U06: 1376
+ * U30 / U37 / others: no override (keep global/defaultConfig).
+ */
+export function resolveNativeH3VideoSettingDefaults(
+    workflowId?: string | null,
+    script?: string | null,
+): { vquality?: string; videoAudioMode?: string } {
+    const workflow = parseComfyApiWorkflow(script);
+    const name = String(workflowId || "")
+        .split("::")
+        .pop()
+        ?.trim()
+        .toLowerCase() || "";
+
+    if (workflow) {
+        if (isComfyH3SelfLiftWorkflow(workflow) || isComfyH3SingularityUpscaleWorkflow(workflow)) return {};
+        if (isComfyH3TwoPassReferenceWorkflow(workflow)) {
+            return { vquality: "900", videoAudioMode: "reference_only" };
+        }
+        if (isComfyH3ResolutionSelectorVideoWorkflow(workflow)) {
+            return { vquality: "900" };
+        }
+        if (isComfyH3MultiReferenceVideoWorkflow(workflow)) {
+            return { vquality: "1376" };
+        }
+        return {};
+    }
+
+    if (/u30|singularity|超双采放大/.test(name) || /u37|selflift|无缝无色差/.test(name)) return {};
+    if (/u24|v927|文武|h3-video|h3_video|双采参考/.test(name)) {
+        return { vquality: "900", videoAudioMode: "reference_only" };
+    }
+    if (/u35|官流|神棍/.test(name)) return { vquality: "900" };
+    if (/u06|多图参考/.test(name)) return { vquality: "1376" };
+    return {};
 }
 
 /**
@@ -1394,9 +1435,8 @@ function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
  * `drive_audio` / `ref_audios.ref_audio_*` on MiniMaxH3AudioConditioningT8.
  *
  * DualClock U24/V927 authors `audio_mode=native` with no `ref_audios.*` slots. When the canvas
- * supplies audio we still inject, defaulting to `reference_only` (timbre/rhythm reference; model
- * still synthesizes the track from prompt speech tags). Optional `audioMode=lock_source` keeps
- * the source track instead — that can sound right while mouths stay closed on still-reference faces.
+ * supplies audio we still inject; UI/family default is `reference_only` (timbre/rhythm; model
+ * synthesizes speech). Optional `audioMode=lock_source` keeps the source track instead.
  *
  * Across DualClock + Path A: `final_audio` is only set for `lock_source`. Under `reference_only`,
  * muxing the canvas clip as final_audio can wipe synthesized dialogue (no 台词). DualClock also
@@ -1421,9 +1461,11 @@ export function applyComfyMiniMaxDriveAudio(
     const hasRefAudioSlots = targets.some((node) =>
         Object.keys(node.inputs || {}).some((key) => key.startsWith("ref_audios.")),
     );
-    // DualClock authored without ref slots: prefer reference_only over lock_source (see docstring).
+    // DualClock authored without ref slots: family default is reference_only when mode unset.
     const dualClockNative = isComfyH3TwoPassReferenceWorkflow(next) && !hasRefAudioSlots;
-    const requestedMode = normalizeComfyH3AudioMode(options?.audioMode);
+    const requestedMode = normalizeComfyH3AudioMode(
+        dualClockNative ? options?.audioMode ?? "reference_only" : options?.audioMode,
+    );
 
     const existingLoaders = Object.entries(next)
         .filter(([, node]) => isComfyAudioLoader(node))
