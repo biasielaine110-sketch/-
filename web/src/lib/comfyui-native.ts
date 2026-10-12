@@ -1395,8 +1395,12 @@ function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
  *
  * DualClock U24/V927 authors `audio_mode=native` with no `ref_audios.*` slots. When the canvas
  * supplies audio we still inject, defaulting to `reference_only` (timbre/rhythm reference; model
- * still synthesizes the track). Optional `audioMode=lock_source` keeps the source track instead —
- * that can sound right while mouths stay closed on still-reference faces.
+ * still synthesizes the track from prompt speech tags). Optional `audioMode=lock_source` keeps
+ * the source track instead — that can sound right while mouths stay closed on still-reference faces.
+ *
+ * Across DualClock + Path A: `final_audio` is only set for `lock_source`. Under `reference_only`,
+ * muxing the canvas clip as final_audio can wipe synthesized dialogue (no 台词). DualClock also
+ * keeps `prompt_primary_audio_ordinal=0` under reference_only so lines stay prompt-driven.
  */
 export function applyComfyMiniMaxDriveAudio(
     workflow: ComfyWorkflow,
@@ -1448,10 +1452,10 @@ export function applyComfyMiniMaxDriveAudio(
     for (const node of targets) {
         if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
         node.inputs.drive_audio = [primary, 0];
-        node.inputs.final_audio = [primary, 0];
         loaderIds.forEach((id, index) => {
             node.inputs![`ref_audios.ref_audio_${index}`] = [id, 0];
         });
+
         const mode = String(node.inputs.audio_mode || "");
         if (dualClockNative) {
             node.inputs.audio_mode = requestedMode;
@@ -1459,10 +1463,29 @@ export function applyComfyMiniMaxDriveAudio(
             // Non-DualClock graphs that already expose the contract: lock when canvas audio exists.
             node.inputs.audio_mode = "lock_source";
         }
-        node.inputs.add_source_as_reference = true;
-        if (!node.inputs.prompt_primary_audio_ordinal || node.inputs.prompt_primary_audio_ordinal === 0) {
-            node.inputs.prompt_primary_audio_ordinal = 1;
+
+        const effectiveMode = String(node.inputs.audio_mode || "");
+        const isLockSource = /^lock_source$/i.test(effectiveMode);
+        // final_audio is the mux track — only lock_source should wire the canvas clip here.
+        // reference_only: leave synthesized dialogue alone (DualClock + Path A).
+        if (isLockSource) {
+            node.inputs.final_audio = [primary, 0];
+        } else {
+            delete node.inputs.final_audio;
         }
+
+        node.inputs.add_source_as_reference = true;
+        if (isLockSource) {
+            if (!node.inputs.prompt_primary_audio_ordinal || node.inputs.prompt_primary_audio_ordinal === 0) {
+                node.inputs.prompt_primary_audio_ordinal = 1;
+            }
+        } else if (!dualClockNative) {
+            // Path A reference_only: keep/bump ordinal for authored ref_audios slots.
+            if (!node.inputs.prompt_primary_audio_ordinal || node.inputs.prompt_primary_audio_ordinal === 0) {
+                node.inputs.prompt_primary_audio_ordinal = 1;
+            }
+        }
+        // dualClockNative + reference_only: leave prompt_primary_audio_ordinal as authored (0)
     }
     return next;
 }
