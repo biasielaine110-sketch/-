@@ -782,6 +782,19 @@ export function isComfyH3SelfLiftWorkflow(workflow: ComfyWorkflow): boolean {
 }
 
 /**
+ * U32-style SelfLift whose conditioning is `MiniMaxH3AudioConditioningT8` (Compshare drive-audio
+ * surface) rather than U37's `MiniMaxH3ReferenceToVideo` + authored `ref_audios.*`.
+ *
+ * Locking canvas audio onto this node (`audio_mode=lock_source` + `final_audio`) embeds an H3
+ * AV `noise_mask` that SelfLiftH3Sampler rejects ("noise_mask must have shape…") — and SelfLift
+ * documents that `noise_mask` is incompatible with `highres_tiling` anyway.
+ */
+export function isComfyH3SelfLiftAudioConditioningWorkflow(workflow: ComfyWorkflow): boolean {
+    if (!isComfyH3SelfLiftWorkflow(workflow)) return false;
+    return Object.values(workflow).some((node) => /MiniMaxH3AudioConditioningT8/i.test(String(node?.class_type || "")));
+}
+
+/**
  * True when an H3 conditioning node's width/height link into a `ResolutionSelector`.
  * Shared by U35 官流 (selector = delivered) and U30 Singularity (selector = LOW draft).
  */
@@ -1335,7 +1348,12 @@ export function resolveNativeH3VideoSettingDefaults(
         }
         if (isComfyH3SelfLiftWorkflow(workflow)) {
             // U32 model name is 1080P; other SelfLift graphs stay on the safer 900p default.
-            return { vquality: isU32 ? "1080" : "900" };
+            // U32 AudioConditioningT8 must not inherit the global DualClock lock_source default —
+            // lock_source embeds a noise_mask SelfLiftH3Sampler cannot consume.
+            if (isU32 || isComfyH3SelfLiftAudioConditioningWorkflow(workflow)) {
+                return { vquality: isU32 ? "1080" : "900", videoAudioMode: "reference_only" };
+            }
+            return { vquality: "900" };
         }
         if (isComfyH3TwoPassReferenceWorkflow(workflow)) {
             return { vquality: "900", videoAudioMode: "lock_source" };
@@ -1350,7 +1368,7 @@ export function resolveNativeH3VideoSettingDefaults(
     }
 
     if (isU17) return { vquality: "900" };
-    if (isU32) return { vquality: "1080" };
+    if (isU32) return { vquality: "1080", videoAudioMode: "reference_only" };
     if (/u30|singularity|超双采放大/.test(name)) return { vquality: "720" };
     if (/u37|selflift|无缝无色差/.test(name)) return { vquality: "900" };
     if (/u24|v927|文武|h3-video|h3_video|双采参考/.test(name)) {
@@ -1506,6 +1524,9 @@ function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
  *   - delete `final_audio` (muxing the canvas clip wipes synthesized 台词)
  *   - force `prompt_primary_audio_ordinal=0` (台词 stay prompt-driven)
  * DualClock always honors the canvas `audioMode` — even when the export already has ref slots.
+ *
+ * U32 SelfLift + AudioConditioningT8 defaults to `reference_only` (not lock_source): locking the
+ * canvas clip as final_audio embeds an H3 AV noise_mask that SelfLiftH3Sampler rejects.
  */
 export function applyComfyMiniMaxDriveAudio(
     workflow: ComfyWorkflow,
@@ -1527,9 +1548,15 @@ export function applyComfyMiniMaxDriveAudio(
         Object.keys(node.inputs || {}).some((key) => key.startsWith("ref_audios.")),
     );
     const isDualClock = isComfyH3TwoPassReferenceWorkflow(next);
-    // DualClock family default is lock_source when the canvas mode is unset.
+    const selfLiftT8 = isComfyH3SelfLiftAudioConditioningWorkflow(next);
+    // DualClock default lock_source. SelfLift+T8 always reference_only: lock_source embeds an
+    // H3 AV noise_mask SelfLiftH3Sampler rejects (and docs say masks forbid highres_tiling).
     const requestedMode = normalizeComfyH3AudioMode(
-        isDualClock ? options?.audioMode ?? "lock_source" : options?.audioMode,
+        selfLiftT8
+            ? "reference_only"
+            : isDualClock
+              ? options?.audioMode ?? "lock_source"
+              : options?.audioMode,
     );
 
     const existingLoaders = Object.entries(next)
@@ -1561,20 +1588,20 @@ export function applyComfyMiniMaxDriveAudio(
         node.inputs.drive_audio = [primary, 0];
 
         const mode = String(node.inputs.audio_mode || "");
-        if (isDualClock) {
-            // Always honor the canvas DualClock mode (reference_only vs lock_source).
+        if (isDualClock || selfLiftT8) {
+            // DualClock / U32 SelfLift-T8: honor canvas mode (never silently force lock_source).
             node.inputs.audio_mode = requestedMode;
         } else if (!mode || /^native$/i.test(mode)) {
-            // Non-DualClock graphs that already expose the contract: lock when canvas audio exists.
+            // Other graphs that already expose the contract: lock when canvas audio exists.
             node.inputs.audio_mode = "lock_source";
         }
 
         const effectiveMode = String(node.inputs.audio_mode || "");
         const isLockSource = /^lock_source$/i.test(effectiveMode);
 
-        // DualClock reference_only: only drive_audio — inventing ref_audios on a native DualClock
-        // export can pull ASR/台词 off the prompt. Only fill authored ref slots (or lock_source).
-        if (!isDualClock || isLockSource || hasRefAudioSlots) {
+        // DualClock / SelfLift-T8 reference_only: only drive_audio — inventing ref_audios on a
+        // native export can pull ASR/台词 off the prompt. Only fill authored ref slots (or lock).
+        if ((!isDualClock && !selfLiftT8) || isLockSource || hasRefAudioSlots) {
             loaderIds.forEach((id, index) => {
                 node.inputs![`ref_audios.ref_audio_${index}`] = [id, 0];
             });
@@ -1587,9 +1614,10 @@ export function applyComfyMiniMaxDriveAudio(
             delete node.inputs.final_audio;
         }
 
-        node.inputs.add_source_as_reference = true;
-        if (isDualClock && !isLockSource) {
-            // DualClock reference_only: force ordinal 0 so 台词 stay prompt-driven.
+        // SelfLift-T8 authored add_source_as_reference=false; forcing true with lock embeds masks.
+        node.inputs.add_source_as_reference = selfLiftT8 ? isLockSource : true;
+        if ((isDualClock || selfLiftT8) && !isLockSource) {
+            // reference_only: force ordinal 0 so 台词 stay prompt-driven / avoid AV denoise masks.
             node.inputs.prompt_primary_audio_ordinal = 0;
         } else if (isLockSource) {
             if (!node.inputs.prompt_primary_audio_ordinal || node.inputs.prompt_primary_audio_ordinal === 0) {
