@@ -3039,15 +3039,18 @@ async function interruptComfyJob(baseUrl: string, apiKey: string, promptId: stri
         if (Number.isFinite(queueNumber)) {
             actions.push(() => axios.post(comfyUiUrl(baseUrl, "/queue"), { delete: [queueNumber] }, { headers: jsonHeaders, timeout: 15_000 }));
         } else if (isRunning || queued) {
-            // Running (or queued without a usable number): ask ComfyUI to stop the current execution.
+            // Only interrupt when *this* prompt_id is the one running — never blindly kill
+            // whatever the pod is executing (that used to cancel a still-active prior job when
+            // a queued follow-up aborted or /queue briefly failed).
             actions.push(() => axios.post(comfyUiUrl(baseUrl, "/interrupt"), {}, { headers: jsonHeaders, timeout: 15_000 }));
         } else {
             // Neither queued nor running: the prompt already finished, so there is nothing to stop.
             return;
         }
     } catch {
-        // `/queue` unavailable → fall back to interrupting whatever this pod is executing.
-        actions.push(() => axios.post(comfyUiUrl(baseUrl, "/interrupt"), {}, { headers: jsonHeaders, timeout: 15_000 }));
+        // Do NOT fall back to a blanket /interrupt here: on seetacloud a transient /queue 502
+        // would cancel whichever H3 job is actually running (often the previous canvas item).
+        return;
     }
     for (const action of actions) {
         try {

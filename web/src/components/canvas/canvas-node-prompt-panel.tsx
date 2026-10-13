@@ -157,12 +157,16 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         .join("\n\n");
     const canSubmit = Boolean(prompt.trim() || connectedTextPrompt);
 
+    // Native H3 video: allow another submit while one is running — canvas FIFO queues it.
+    // Other modes still block until the current run finishes (button becomes Stop).
+    const allowQueueWhileRunning = mode === "video";
+
     // 已有排期时，发送不再直接生成——避免「刚设好排期就被立刻跑掉」。要马上跑请用「立即生成」。
     const submit = () => {
         // Pass only the user-typed prompt. Connected text is merged once in buildNodeGenerationContext.
         // Passing connectedTextPrompt here used to duplicate it: once as `prompt`, again as upstreamText.
         const userPrompt = prompt.trim();
-        if ((!userPrompt && !connectedTextPrompt) || running) return;
+        if ((!userPrompt && !connectedTextPrompt) || (running && !allowQueueWhileRunning)) return;
         if (scheduledAt) {
             message.info(t("canvas.schedule.pendingHint", { time: dayjs(scheduledAt).format("MM-DD HH:mm") }));
             return;
@@ -174,7 +178,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     // 显式「立即生成」：清掉当前排期后马上生成一次。
     const generateNow = () => {
         const userPrompt = prompt.trim();
-        if ((!userPrompt && !connectedTextPrompt) || running) return;
+        if ((!userPrompt && !connectedTextPrompt) || (running && !allowQueueWhileRunning)) return;
         if (scheduledAt) onCancelSchedule?.();
         setLocalRunning(true);
         onGenerate(node.id, mode, userPrompt);
@@ -406,26 +410,53 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                     />
                                 </span>
                             </Tooltip>
-                            <Button
-                                type="primary"
-                                className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
-                                danger={running}
-                                disabled={!running && !canSubmit}
-                                onClick={() => (running ? handleStop() : submit())}
-                                aria-label={t(running ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
-                            >
-                                <span className="flex items-center gap-1.5">
-                                    {running ? (
-                                        <>
+                            {running && allowQueueWhileRunning ? (
+                                <>
+                                    <Button
+                                        type="primary"
+                                        className="!h-10 !min-w-12 shrink-0 !rounded-full !px-3"
+                                        disabled={!canSubmit}
+                                        onClick={submit}
+                                        aria-label={t("canvas.promptPanel.generate")}
+                                    >
+                                        <ArrowUp className="size-4" />
+                                    </Button>
+                                    <Button
+                                        type="primary"
+                                        danger
+                                        className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
+                                        onClick={handleStop}
+                                        aria-label={t("canvas.promptPanel.stopGeneration")}
+                                    >
+                                        <span className="flex items-center gap-1.5">
                                             <LoaderCircle className="size-4 animate-spin" />
                                             <Square className="size-3.5 fill-current" />
                                             <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
-                                        </>
-                                    ) : (
-                                        <ArrowUp className="size-4" />
-                                    )}
-                                </span>
-                            </Button>
+                                        </span>
+                                    </Button>
+                                </>
+                            ) : (
+                                <Button
+                                    type="primary"
+                                    className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
+                                    danger={running}
+                                    disabled={!running && !canSubmit}
+                                    onClick={() => (running ? handleStop() : submit())}
+                                    aria-label={t(running ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
+                                >
+                                    <span className="flex items-center gap-1.5">
+                                        {running ? (
+                                            <>
+                                                <LoaderCircle className="size-4 animate-spin" />
+                                                <Square className="size-3.5 fill-current" />
+                                                <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
+                                            </>
+                                        ) : (
+                                            <ArrowUp className="size-4" />
+                                        )}
+                                    </span>
+                                </Button>
+                            )}
                         </>
                     )}
                 </div>

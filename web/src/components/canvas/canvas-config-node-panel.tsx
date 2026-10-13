@@ -48,8 +48,11 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
         return () => window.clearTimeout(timer);
     }, [isRunning, localRunning, node.id]);
 
+    // Video mode: allow another submit while one is running (canvas FIFO queues native H3 jobs).
+    const allowQueueWhileRunning = mode === "video";
+
     const handleGenerate = () => {
-        if (running || !canGenerate) return;
+        if ((running && !allowQueueWhileRunning) || !canGenerate) return;
         setLocalRunning(true);
         onGenerate(node.id);
     };
@@ -135,29 +138,59 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                 )}
             </div>
 
-            <Button
-                type="primary"
-                className="mt-auto !h-9 !w-full !cursor-pointer !rounded-lg"
-                danger={running}
-                disabled={!running && !canGenerate}
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={() => (running ? handleStop() : handleGenerate())}
-            >
-                <span className="inline-flex items-center gap-1.5">
-                    {running ? (
-                        <>
+            {running && allowQueueWhileRunning ? (
+                <div className="mt-auto grid grid-cols-2 gap-2">
+                    <Button
+                        type="primary"
+                        className="!h-9 !w-full !cursor-pointer !rounded-lg"
+                        disabled={!canGenerate}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onClick={handleGenerate}
+                    >
+                        <span className="inline-flex items-center gap-1.5">
+                            <Play className="size-4" />
+                            <span>{t("canvas.configNode.generate")}</span>
+                        </span>
+                    </Button>
+                    <Button
+                        type="primary"
+                        danger
+                        className="!h-9 !w-full !cursor-pointer !rounded-lg"
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onClick={handleStop}
+                    >
+                        <span className="inline-flex items-center gap-1.5">
                             <LoaderCircle className="size-4 animate-spin" />
                             <Square className="size-3.5 fill-current" />
                             <span>{t("canvas.configNode.stop")}</span>
-                        </>
-                    ) : (
-                        <>
-                            <Play className="size-4" />
-                            <span>{t("canvas.configNode.generate")}</span>
-                        </>
-                    )}
-                </span>
-            </Button>
+                        </span>
+                    </Button>
+                </div>
+            ) : (
+                <Button
+                    type="primary"
+                    className="mt-auto !h-9 !w-full !cursor-pointer !rounded-lg"
+                    danger={running}
+                    disabled={!running && !canGenerate}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={() => (running ? handleStop() : handleGenerate())}
+                >
+                    <span className="inline-flex items-center gap-1.5">
+                        {running ? (
+                            <>
+                                <LoaderCircle className="size-4 animate-spin" />
+                                <Square className="size-3.5 fill-current" />
+                                <span>{t("canvas.configNode.stop")}</span>
+                            </>
+                        ) : (
+                            <>
+                                <Play className="size-4" />
+                                <span>{t("canvas.configNode.generate")}</span>
+                            </>
+                        )}
+                    </span>
+                </Button>
+            )}
         </div>
     );
 }

@@ -152,6 +152,8 @@ type CanvasHistoryEntry = Pick<CanvasClipboard, "nodes" | "connections"> & {
 };
 
 type CanvasGenerationRequest = {
+    /** Unique per submit — allows several native-video jobs to stay tracked without aborting peers. */
+    jobId: string;
     targetNodeId: string;
     originNodeId: string;
     runningNodeId: string;
@@ -428,6 +430,7 @@ function AtelierCanvasPage() {
     const audioMergeSelectedRef = useRef<string[]>([]);
     const selectionBoxRef = useRef(selectionBox);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
+    /** Keyed by jobId (not targetNodeId) so queued native-video submits do not abort the running job. */
     const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
     /** True when this video config hits a native ComfyUI / H3 graph (must be serialized). */
     const isNativeComfyVideoConfig = useCallback((config: AiConfig) => {
@@ -460,19 +463,47 @@ function AtelierCanvasPage() {
         [cleanupAssetImages],
     );
 
-    const startGenerationRequest = useCallback((targetNodeId: string, originNodeId: string, runningId = originNodeId, controller = new AbortController()) => {
-        const previous = generationRequestsRef.current.get(targetNodeId);
-        if (previous?.controller !== controller) previous?.controller.abort();
-        generationRequestsRef.current.set(targetNodeId, { targetNodeId, originNodeId, runningNodeId: runningId, controller });
-        setGenerationEpoch((value) => value + 1);
-        return controller;
-    }, []);
-
-    const finishGenerationRequest = useCallback((targetNodeId: string, controller: AbortController) => {
-        const request = generationRequestsRef.current.get(targetNodeId);
-        if (request?.controller === controller) {
-            generationRequestsRef.current.delete(targetNodeId);
+    const startGenerationRequest = useCallback(
+        (
+            targetNodeId: string,
+            originNodeId: string,
+            runningId = originNodeId,
+            controller = new AbortController(),
+            options?: { replaceTarget?: boolean },
+        ) => {
+            // Default replaceTarget=true keeps prior behaviour (re-generate aborts the same target).
+            // Native H3 video FIFO passes replaceTarget=false so queueing the next clip does not
+            // abort()/interrupt the job that is still running on the pod.
+            const replaceTarget = options?.replaceTarget !== false;
+            if (replaceTarget) {
+                for (const [jobId, request] of [...generationRequestsRef.current]) {
+                    if (request.targetNodeId === targetNodeId && request.controller !== controller) {
+                        request.controller.abort();
+                        generationRequestsRef.current.delete(jobId);
+                    }
+                }
+            }
+            const jobId = nanoid(10);
+            generationRequestsRef.current.set(jobId, {
+                jobId,
+                targetNodeId,
+                originNodeId,
+                runningNodeId: runningId,
+                controller,
+            });
             setGenerationEpoch((value) => value + 1);
+            return controller;
+        },
+        [],
+    );
+
+    const finishGenerationRequest = useCallback((_targetNodeId: string, controller: AbortController) => {
+        for (const [jobId, request] of [...generationRequestsRef.current]) {
+            if (request.controller === controller) {
+                generationRequestsRef.current.delete(jobId);
+                setGenerationEpoch((value) => value + 1);
+                return;
+            }
         }
     }, []);
 
@@ -480,14 +511,14 @@ function AtelierCanvasPage() {
         (nodeId: string) => {
             const affectedNodeIds = new Set<string>([nodeId]);
             const runningIdsToClear = new Set<string>();
-            generationRequestsRef.current.forEach((request) => {
-                if (request.runningNodeId !== nodeId && request.originNodeId !== nodeId && request.targetNodeId !== nodeId) return;
+            for (const [jobId, request] of [...generationRequestsRef.current]) {
+                if (request.runningNodeId !== nodeId && request.originNodeId !== nodeId && request.targetNodeId !== nodeId) continue;
                 request.controller.abort();
-                generationRequestsRef.current.delete(request.targetNodeId);
+                generationRequestsRef.current.delete(jobId);
                 affectedNodeIds.add(request.targetNodeId);
                 affectedNodeIds.add(request.originNodeId);
                 runningIdsToClear.add(request.runningNodeId);
-            });
+            }
             setRunningNodeId((current) => (current && (current === nodeId || runningIdsToClear.has(current) || affectedNodeIds.has(current)) ? null : current));
             setGenerationEpoch((value) => value + 1);
             setNodes((prev) =>
@@ -4276,7 +4307,15 @@ function AtelierCanvasPage() {
             }
 
             setRunningNodeId(nodeId);
-            const runController = startGenerationRequest(nodeId, nodeId, nodeId);
+            // Native H3 video FIFO: do not abort an in-flight job when another submit is queued.
+            const nativeVideoSerial = mode === "video" && isNativeComfyVideoConfig(generationConfig);
+            const runController = startGenerationRequest(
+                nodeId,
+                nodeId,
+                nodeId,
+                new AbortController(),
+                nativeVideoSerial ? { replaceTarget: false } : undefined,
+            );
             const sourceTextContent = sourceNode?.type === CanvasNodeType.Text ? sourceNode.metadata?.content?.trim() || "" : "";
             const editingTextNode = mode === "text" && Boolean(sourceTextContent);
             const generationContext = await hydrateNodeGenerationContext(
@@ -4709,9 +4748,18 @@ function AtelierCanvasPage() {
                     );
                     if (!writeVideoToSelf) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: videoId }]);
                     setDialogNodeId(nodeId);
-                    // Own AbortController per child clip — sharing the origin controller used to abort
-                    // an in-flight first video when the user queued the next generate from the same source.
-                    const controller = videoId === nodeId ? runController : startGenerationRequest(videoId, nodeId, nodeId);
+                    // Own AbortController per child clip; replaceTarget=false so queueing the next
+                    // native job never abort()/interrupt the one still running on the pod.
+                    const controller =
+                        videoId === nodeId
+                            ? runController
+                            : startGenerationRequest(
+                                  videoId,
+                                  nodeId,
+                                  nodeId,
+                                  new AbortController(),
+                                  nativeVideoSerial ? { replaceTarget: false } : undefined,
+                              );
                     const runNativeVideoJob = async () => {
                         if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
                         const videoResult = await requestVideoGeneration(generationConfig, effectivePrompt, referenceImages, {
@@ -5047,7 +5095,14 @@ function AtelierCanvasPage() {
                         : item,
                 ),
             );
-            const controller = startGenerationRequest(node.id, sourceNode.id, node.id);
+            const nativeVideoSerial = node.type === CanvasNodeType.Video && isNativeComfyVideoConfig(generationConfig);
+            const controller = startGenerationRequest(
+                node.id,
+                sourceNode.id,
+                node.id,
+                new AbortController(),
+                nativeVideoSerial ? { replaceTarget: false } : undefined,
+            );
 
             try {
                 if (node.type === CanvasNodeType.Text) {
