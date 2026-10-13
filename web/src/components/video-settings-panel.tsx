@@ -92,8 +92,9 @@ function detectNativeVideoFamily(config: AiConfig): NativeVideoFamily {
         .pop()
         ?.trim()
         .toLowerCase() || "";
-    if (/u37|selflift|无缝无色差/.test(name)) return "selfLift";
-    if (/u30|singularity|超双采放大/.test(name)) return "twoPass";
+    if (/u32|1080p.?高动态不糊|bunny-selflift|u37|selflift|无缝无色差/.test(name)) return "selfLift";
+    // U17 shares Singularity draft×upscale math with U30 (LatentUpscaler3D).
+    if (/u17|去油腻|修音频-全能|latent放大模型双采加速|u30|singularity|超双采放大/.test(name)) return "twoPass";
     if (/u35|官流|神棍/.test(name)) return "u35";
     if (/u24|v927|文武|h3-video|h3_video|双采参考/.test(name)) return "twoPass";
     if (/u06|多图参考/.test(name)) return "u06";
@@ -126,7 +127,7 @@ function supportsVideoSeedControls(config: AiConfig, family: NativeVideoFamily) 
         .pop()
         ?.trim()
         .toLowerCase() || "";
-    return /u30|singularity|超双采放大/.test(name);
+    return /u17|去油腻|修音频-全能|latent放大模型双采加速|u30|singularity|超双采放大/.test(name);
 }
 
 /** DualClock H3-video / u24_v927: canvas audio → reference_only or lock_source. */
@@ -144,7 +145,7 @@ function supportsDualClockAudioControls(config: AiConfig, family: NativeVideoFam
         .pop()
         ?.trim()
         .toLowerCase() || "";
-    if (/u30|singularity|超双采放大/.test(name)) return false;
+    if (/u17|去油腻|修音频-全能|latent放大模型双采加速|u30|singularity|超双采放大/.test(name)) return false;
     return /u24|v927|文武|h3-video|h3_video|双采参考/.test(name);
 }
 

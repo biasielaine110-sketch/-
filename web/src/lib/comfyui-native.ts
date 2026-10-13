@@ -81,20 +81,28 @@ function isSeetaCloudComfyHost(baseUrl: string) {
 }
 
 /**
- * Exact model packs for https://…seetacloud.com:8443 — H3-video / u24_v927 / U30 / U35 / U06.
+ * Exact model packs for https://…seetacloud.com:8443 — H3-video / u24_v927 / U30 / U35 / U06 /
+ * U17 / U32.
  *
  * Matched by **host + model option name only**. Structural fingerprints still drive geometry /
  * sampling; this pack layer adds channel-scoped push repairs (author-local LoadImage scrub,
- * zero-ref gate for U35, blank spares, node_errors hard-fail) without changing other channels
+ * zero-ref gate, blank spares, node_errors hard-fail) without changing other channels
  * or other model names on the same pod.
  */
-type SeetaCloudH3ModelPackId = "h3-video" | "u24_v927" | "u30-singularity" | "u35-official" | "u06-multiref";
+type SeetaCloudH3ModelPackId =
+    | "h3-video"
+    | "u24_v927"
+    | "u30-singularity"
+    | "u35-official"
+    | "u06-multiref"
+    | "u17-dynamic"
+    | "u32-selflift";
 
 type SeetaCloudH3ModelPack = {
     id: SeetaCloudH3ModelPackId;
     /** Exact model option names (matched via `comfyWorkflowKeys`, case-insensitive). */
     modelNames: readonly string[];
-    family: "dualclock" | "u06" | "u30" | "u35";
+    family: "dualclock" | "u06" | "u30" | "u35" | "u17" | "u32";
     /** Reject submit when the canvas has no reference image. */
     requireRefs: boolean;
     /** Upload a real blank PNG for spare LoadImage slots (DualClock + multi-ref spares). */
@@ -157,9 +165,37 @@ const SEETACLOUD_H3_MODEL_PACKS: readonly SeetaCloudH3ModelPack[] = [
         scrubAuthorLocalLoaders: true,
         hardFailNodeErrors: true,
     },
+    {
+        // Singularity-shaped: MiniMaxH3ReferenceToVideo + ResolutionSelector + LatentUpscaler3D.
+        // Export: U17-MiniMax-H3-latent放大模型双采加速-高动态不糊-去油腻-修音频-全能工作流.
+        id: "u17-dynamic",
+        modelNames: [
+            "U17-高动态不糊-去油腻-修音频",
+            "U17-MiniMax-H3-latent放大模型双采加速-高动态不糊-去油腻-修音频-全能工作流",
+        ],
+        family: "u17",
+        requireRefs: true,
+        uploadBlankForSpareLoaders: true,
+        scrubAuthorLocalLoaders: true,
+        hardFailNodeErrors: true,
+    },
+    {
+        // SelfLift-shaped: SelfLiftH3Sampler + MiniMaxH3AudioConditioningT8 + ResolutionSelector.
+        // Export: U32-Minimax-H3-1080P-高动态不糊-BUNNY-SelfLift.
+        id: "u32-selflift",
+        modelNames: [
+            "U32-H3-1080P-高动态不糊",
+            "U32-Minimax-H3-1080P-高动态不糊-BUNNY-SelfLift",
+        ],
+        family: "u32",
+        requireRefs: true,
+        uploadBlankForSpareLoaders: true,
+        scrubAuthorLocalLoaders: true,
+        hardFailNodeErrors: true,
+    },
 ] as const;
 
-/** Resolve a seetacloud-only H3 model pack, or null when the host/model is outside the five packs. */
+/** Resolve a seetacloud-only H3 model pack, or null when the host/model is outside the packs. */
 export function matchSeetaCloudH3ModelPack(
     baseUrl: string,
     workflowId?: string | null,
@@ -983,8 +1019,8 @@ function isComfyAuthorLocalImageName(name: string) {
 }
 
 /**
- * Broader author-local names for the five seetacloud H3 packs only.
- * Covers DualClock Untitled/snowtp/zealman, U30 content-hash PNGs, and U35 nv/nan/changj.
+ * Broader author-local names for seetacloud H3 packs only.
+ * Covers DualClock Untitled/snowtp/zealman, U30/U32 content-hash PNGs, U17 Untitled, and U35 nv/nan/changj.
  */
 function isSeetaCloudAuthorLocalImageName(name: string) {
     const raw = String(name || "").trim();
@@ -1046,6 +1082,11 @@ function assertSeetaCloudH3PackWorkflow(pack: SeetaCloudH3ModelPack, workflow: C
             "U30-H3-Singularity超双采放大 模型脚本不是 Singularity Export (API) JSON（需要单 H3 + ResolutionSelector + MinimaxH3LatentUpscaler3D）。请粘贴「U30-Minimax-H3-Singularity超双采放大-AIGC特异点」Export JSON 后重试。",
         );
     }
+    if (pack.family === "u17" && !singularity) {
+        throw new Error(
+            "U17-高动态不糊-去油腻-修音频 模型脚本不是 U17 Export (API) JSON（需要单 H3 + ResolutionSelector + MinimaxH3LatentUpscaler3D）。请粘贴「U17-MiniMax-H3-latent放大模型双采加速-高动态不糊-去油腻-修音频-全能工作流」Export JSON 后重试。",
+        );
+    }
     if (pack.family === "u35" && !resSelector) {
         throw new Error(
             "U35-H3官流-终极版-神棍 模型脚本不是官流 Export (API) JSON（需要单 H3 + ResolutionSelector 尺寸链路）。请粘贴「U35-H3官流-终极版-神棍」Export JSON 后重试。",
@@ -1054,6 +1095,11 @@ function assertSeetaCloudH3PackWorkflow(pack: SeetaCloudH3ModelPack, workflow: C
     if (pack.family === "u06" && !u06Shape) {
         throw new Error(
             "U06-h3_多图参考生视频V8 模型脚本不是 U06 V8 Export (API) JSON（需要单 MiniMaxH3ReferenceToVideo + WJILatentPreset 尺寸）。请粘贴「U06-minimax_h3_多图参考生视频V8」Export JSON 后重试。",
+        );
+    }
+    if (pack.family === "u32" && !selfLift) {
+        throw new Error(
+            "U32-H3-1080P-高动态不糊 模型脚本不是 U32 SelfLift Export (API) JSON（需要 SelfLiftH3Sampler + MiniMaxH3AudioConditioningT8）。请粘贴「U32-Minimax-H3-1080P-高动态不糊-BUNNY-SelfLift」Export JSON 后重试。",
         );
     }
 }
@@ -1263,8 +1309,10 @@ export function normalizeComfyH3AudioMode(value?: string | null): "reference_onl
  * Per-family canvas defaults when node/global knobs are unset.
  * - DualClock (U24 / H3-video): 900p + lock_source
  * - U30 Singularity: 720p
+ * - U17 Singularity-shaped (authored 0.9 MP draft): 900p
  * - U35: 1080p
  * - U37 SelfLift: 900p
+ * - U32 SelfLift 1080P: 1080p
  * - U06: 1376
  */
 export function resolveNativeH3VideoSettingDefaults(
@@ -1277,10 +1325,18 @@ export function resolveNativeH3VideoSettingDefaults(
         .pop()
         ?.trim()
         .toLowerCase() || "";
+    const isU17 = /u17|去油腻|修音频-全能|latent放大模型双采加速/.test(name);
+    const isU32 = /u32|1080p.?高动态不糊|bunny-selflift/.test(name);
 
     if (workflow) {
-        if (isComfyH3SingularityUpscaleWorkflow(workflow)) return { vquality: "720" };
-        if (isComfyH3SelfLiftWorkflow(workflow)) return { vquality: "900" };
+        if (isComfyH3SingularityUpscaleWorkflow(workflow)) {
+            // U17 ships selector 0.9 MP (clean sibling of U30's 0.7 draft); default 900p.
+            return { vquality: isU17 ? "900" : "720" };
+        }
+        if (isComfyH3SelfLiftWorkflow(workflow)) {
+            // U32 model name is 1080P; other SelfLift graphs stay on the safer 900p default.
+            return { vquality: isU32 ? "1080" : "900" };
+        }
         if (isComfyH3TwoPassReferenceWorkflow(workflow)) {
             return { vquality: "900", videoAudioMode: "lock_source" };
         }
@@ -1293,6 +1349,8 @@ export function resolveNativeH3VideoSettingDefaults(
         return {};
     }
 
+    if (isU17) return { vquality: "900" };
+    if (isU32) return { vquality: "1080" };
     if (/u30|singularity|超双采放大/.test(name)) return { vquality: "720" };
     if (/u37|selflift|无缝无色差/.test(name)) return { vquality: "900" };
     if (/u24|v927|文武|h3-video|h3_video|双采参考/.test(name)) {
@@ -2385,6 +2443,10 @@ export const COMFY_UPLOAD_GUARD_WORKFLOWS = [
     "U35-H3官流-终极版-神棍",
     "U30-H3-Singularity超双采放大",
     "U30-Minimax-H3-Singularity超双采放大-AIGC特异点",
+    "U17-高动态不糊-去油腻-修音频",
+    "U17-MiniMax-H3-latent放大模型双采加速-高动态不糊-去油腻-修音频-全能工作流",
+    "U32-H3-1080P-高动态不糊",
+    "U32-Minimax-H3-1080P-高动态不糊-BUNNY-SelfLift",
 ] as const;
 
 /** True only for allow-listed workflows that must size-guard their reference uploads. */
@@ -3083,8 +3145,8 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         await ensureComfyBrowserDirect(baseUrl, apiKey, signal);
     }
 
-    // Seetacloud-only exact model packs (H3-video / u24_v927 / U30 / U35 / U06). Null on every
-    // other channel and on every other model name on the same pod — pack repairs stay scoped.
+    // Seetacloud-only exact model packs (H3-video / u24_v927 / U30 / U35 / U06 / U17 / U32).
+    // Null on every other channel and on every other model name on the same pod — pack repairs stay scoped.
     const seetaPack = matchSeetaCloudH3ModelPack(baseUrl, args.workflowId);
     if (seetaPack) assertSeetaCloudH3PackWorkflow(seetaPack, args.workflow);
 
@@ -3167,10 +3229,10 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
     // LoadImage. Those files do not exist on the seetacloud pod, so a zero-reference submit fails
     // inside LoadImage within a few seconds — or, for DualClock, leaves the worker wedged and the
     // gateway answers later polls with HTTP 502. Require at least one uploaded reference for these
-    // families (and for the five seetacloud packs, including U35 which previously slipped the gate).
-    // SelfLift has its own blank placeholder and is not gated here.
-    // U35 zero-ref is gated only via `seetaPack.requireRefs` (exact model on seetacloud), not by
-    // the ResolutionSelector fingerprint alone — so other channels/models stay untouched.
+    // families (and for seetacloud packs, including U35/U17/U32 which previously slipped the gate).
+    // SelfLift without a seeta pack has its own blank placeholder and is not gated here.
+    // U35/U17/U32 zero-ref is gated only via `seetaPack.requireRefs` (exact model on seetacloud),
+    // not by fingerprint alone — so other channels/models stay untouched.
     const requireRefs =
         Boolean(seetaPack?.requireRefs) || multiRefH3Video || h3Singularity || h3TwoPassRefs;
     if (requireRefs && !refs.length) {
@@ -3181,9 +3243,13 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
                   ? "U35-H3官流-终极版-神棍 需要至少一张参考图。工作流里的 nv.jpg / nan.png / changj.png 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
                   : seetaPack?.family === "u30"
                     ? "U30-H3-Singularity超双采放大 需要至少一张参考图。工作流里的 hash 文件名只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
-                    : seetaPack?.family === "u06"
-                      ? "U06-h3_多图参考生视频V8 需要至少一张参考图。工作流里的 Untitled*.jpg / snowtp.png 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
-                      : "This multi-reference video workflow requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
+                    : seetaPack?.family === "u17"
+                      ? "U17-高动态不糊-去油腻-修音频 需要至少一张参考图。工作流里的 Untitled*.jpg 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
+                      : seetaPack?.family === "u32"
+                        ? "U32-H3-1080P-高动态不糊 需要至少一张参考图。工作流里的 hash 文件名只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
+                        : seetaPack?.family === "u06"
+                          ? "U06-h3_多图参考生视频V8 需要至少一张参考图。工作流里的 Untitled*.jpg / snowtp.png 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
+                          : "This multi-reference video workflow requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
         );
     }
     if (refs.length) {
@@ -3331,11 +3397,15 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
                     ? `H3-video / U24 双采无法推送到工作流（节点校验失败）。请确认模型脚本已粘贴对应 U24 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
                     : seetaPack?.family === "u30"
                       ? `U30-H3-Singularity超双采放大 无法推送到工作流（节点校验失败）。请确认已粘贴 U30 Singularity Export (API) JSON，并连接至少一张参考图。详情：${detail}`
-                      : seetaPack?.family === "u35"
-                        ? `U35-H3官流-终极版-神棍 无法推送到工作流（节点校验失败）。请确认已粘贴 U35 官流 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
-                        : seetaPack?.family === "u06"
-                          ? `U06-h3_多图参考生视频V8 无法推送到工作流（节点校验失败）。请确认已粘贴 U06 V8 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
-                          : detail;
+                      : seetaPack?.family === "u17"
+                        ? `U17-高动态不糊-去油腻-修音频 无法推送到工作流（节点校验失败）。请确认已粘贴 U17 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                        : seetaPack?.family === "u35"
+                          ? `U35-H3官流-终极版-神棍 无法推送到工作流（节点校验失败）。请确认已粘贴 U35 官流 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                          : seetaPack?.family === "u32"
+                            ? `U32-H3-1080P-高动态不糊 无法推送到工作流（节点校验失败）。请确认已粘贴 U32 SelfLift Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                            : seetaPack?.family === "u06"
+                              ? `U06-h3_多图参考生视频V8 无法推送到工作流（节点校验失败）。请确认已粘贴 U06 V8 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                              : detail;
             throw new Error(packHint);
         }
     }
