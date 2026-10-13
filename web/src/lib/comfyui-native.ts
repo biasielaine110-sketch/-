@@ -1261,10 +1261,10 @@ export function normalizeComfyH3AudioMode(value?: string | null): "reference_onl
 /**
  * Per-family canvas defaults when node/global knobs are unset.
  * - DualClock (U24 / H3-video): 900p + reference_only
+ * - U30 Singularity: 720p
  * - U35: 1080p
  * - U37 SelfLift: 900p
  * - U06: 1376
- * U30 / others: no override (keep global/defaultConfig).
  */
 export function resolveNativeH3VideoSettingDefaults(
     workflowId?: string | null,
@@ -1278,7 +1278,7 @@ export function resolveNativeH3VideoSettingDefaults(
         .toLowerCase() || "";
 
     if (workflow) {
-        if (isComfyH3SingularityUpscaleWorkflow(workflow)) return {};
+        if (isComfyH3SingularityUpscaleWorkflow(workflow)) return { vquality: "720" };
         if (isComfyH3SelfLiftWorkflow(workflow)) return { vquality: "900" };
         if (isComfyH3TwoPassReferenceWorkflow(workflow)) {
             return { vquality: "900", videoAudioMode: "reference_only" };
@@ -1292,7 +1292,7 @@ export function resolveNativeH3VideoSettingDefaults(
         return {};
     }
 
-    if (/u30|singularity|超双采放大/.test(name)) return {};
+    if (/u30|singularity|超双采放大/.test(name)) return { vquality: "720" };
     if (/u37|selflift|无缝无色差/.test(name)) return { vquality: "900" };
     if (/u24|v927|文武|h3-video|h3_video|双采参考/.test(name)) {
         return { vquality: "900", videoAudioMode: "reference_only" };
