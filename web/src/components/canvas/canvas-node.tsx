@@ -23,17 +23,32 @@ import { useTranslation } from "react-i18next";
 
 import { DEFAULT_CANVAS_FONT_SIZE } from "@/constant/canvas";
 
-function useNativeVideoQueueLabel(nodeId: string) {
+function formatNativeVideoQueueLabel(
+    t: (key: string, options?: Record<string, unknown>) => string,
+    position?: number,
+    total?: number,
+    phase?: "queued" | "running",
+) {
+    if (!(position && total && total > 0 && phase)) return null;
+    if (total === 1 && phase === "running") return t("canvas.node.generating");
+    if (phase === "running") return t("canvas.node.queueRunning", { position, total });
+    return t("canvas.node.queueWaiting", { position, total });
+}
+
+/** Prefer metadata (synced from project page); fall back to live FIFO store. */
+function useNativeVideoQueueLabel(nodeId: string, metadata?: CanvasNodeData["metadata"]) {
     const { t } = useTranslation();
     const snapshot = useSyncExternalStore(subscribeNativeVideoQueue, getNativeVideoQueueSnapshot, getNativeVideoQueueSnapshot);
+    const fromMeta = formatNativeVideoQueueLabel(
+        t,
+        metadata?.nativeVideoQueuePosition,
+        metadata?.nativeVideoQueueTotal,
+        metadata?.nativeVideoQueuePhase,
+    );
+    if (fromMeta) return fromMeta;
     if (!nodeId) return null;
     const entry = snapshot.find((job) => job.targetNodeId === nodeId);
-    if (!entry || entry.total < 1) return null;
-    if (entry.total === 1 && entry.phase === "running") return t("canvas.node.generating");
-    if (entry.phase === "running") {
-        return t("canvas.node.queueRunning", { position: entry.position, total: entry.total });
-    }
-    return t("canvas.node.queueWaiting", { position: entry.position, total: entry.total });
+    return formatNativeVideoQueueLabel(t, entry?.position, entry?.total, entry?.phase);
 }
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -621,6 +636,7 @@ function NodeContent(props: NodeContentRendererProps) {
             <LoadingContent
                 theme={props.theme}
                 nodeId={props.node.id}
+                metadata={props.node.metadata}
                 onCancel={props.onCancelGeneration ? () => props.onCancelGeneration?.(props.node.id) : undefined}
             />
         );
@@ -797,14 +813,19 @@ function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererP
 function LoadingContent({
     theme,
     nodeId,
+    metadata,
     onCancel,
-}: Pick<NodeContentRendererProps, "theme"> & { nodeId?: string; onCancel?: () => void }) {
+}: Pick<NodeContentRendererProps, "theme"> & {
+    nodeId?: string;
+    metadata?: CanvasNodeData["metadata"];
+    onCancel?: () => void;
+}) {
     const { t } = useTranslation();
-    const queueLabel = useNativeVideoQueueLabel(nodeId || "");
+    const queueLabel = useNativeVideoQueueLabel(nodeId || "", metadata);
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.activeStroke }}>
             <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
-            <span className="text-[10px] tracking-[0.2em]">{queueLabel || t("canvas.node.generating")}</span>
+            <span className="text-xs font-semibold tracking-wide">{queueLabel || t("canvas.node.generating")}</span>
             {onCancel ? (
                 <button
                     type="button"
@@ -1816,6 +1837,7 @@ function ImageContent({
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const isGenerating = node.metadata?.status === "loading" || images.some((image) => image.status === "loading");
     const canCancel = Boolean(onCancelGeneration) && isGenerating;
+    const queueLabel = useNativeVideoQueueLabel(node.id, node.metadata);
 
     useEffect(() => {
         if (!batchExpanded) setSelectedIds(new Set());
@@ -1913,6 +1935,7 @@ function ImageContent({
                 ) : (
                     <ImageSlotStatus
                         nodeId={node.id}
+                        metadata={node.metadata}
                         image={
                             primaryImage || {
                                 id: "__missing__",
@@ -1930,6 +1953,14 @@ function ImageContent({
                     />
                 )}
             </div>
+            {isGenerating && (isVideo || queueLabel) ? (
+                <div
+                    className="pointer-events-none absolute left-1/2 top-2.5 z-40 -translate-x-1/2 rounded-full border px-3 py-1 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                >
+                    {queueLabel || t("canvas.node.generating")}
+                </div>
+            ) : null}
             {canCancel && displaySrc ? (
                 <button
                     type="button"
@@ -2079,7 +2110,7 @@ function ExpandedImageCard({
                     </CanvasLazyMedia>
                 )
             ) : (
-                <ImageSlotStatus nodeId={node.id} image={image} onCancel={onCancel} />
+                <ImageSlotStatus nodeId={node.id} metadata={node.metadata} image={image} onCancel={onCancel} />
             )}
             {image.content || image.thumbnailContent ? (
                 <div className="absolute inset-x-2 top-2 z-30 flex items-center gap-1">
@@ -2158,10 +2189,20 @@ function BatchImageFailureActions({ placement, onRetry, onDelete }: { placement:
     );
 }
 
-function ImageSlotStatus({ image, onCancel, nodeId }: { image?: CanvasNodeImage; onCancel?: () => void; nodeId?: string }) {
+function ImageSlotStatus({
+    image,
+    onCancel,
+    nodeId,
+    metadata,
+}: {
+    image?: CanvasNodeImage;
+    onCancel?: () => void;
+    nodeId?: string;
+    metadata?: CanvasNodeData["metadata"];
+}) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
-    const queueLabel = useNativeVideoQueueLabel(nodeId || "");
+    const queueLabel = useNativeVideoQueueLabel(nodeId || "", metadata);
     const isLoading = image?.status === "loading";
     const failed = image?.status === "error" || (!isLoading && !image?.content && !image?.thumbnailContent);
     const message = failed
@@ -2174,7 +2215,7 @@ function ImageSlotStatus({ image, onCancel, nodeId }: { image?: CanvasNodeImage;
             ) : (
                 <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
             )}
-            {!failed ? <span className="text-[10px] tracking-[0.2em]">{message}</span> : null}
+            {!failed ? <span className="text-xs font-semibold tracking-wide">{message}</span> : null}
             {isLoading && onCancel ? (
                 <button
                     type="button"

@@ -10,7 +10,7 @@ import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audi
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
 import { defaultConfig, modelOptionLabel, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { parseComfyApiWorkflow, resolveNativeH3VideoSettingDefaults, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
-import { enqueueNativeComfyVideoJob } from "@/lib/canvas/native-video-job-queue";
+import { enqueueNativeComfyVideoJob, getNativeVideoQueueSnapshot, subscribeNativeVideoQueue } from "@/lib/canvas/native-video-job-queue";
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
 import { subscribeLocalMediaLibraryAccess } from "@/services/local-media-library";
@@ -567,6 +567,50 @@ function AtelierCanvasPage() {
             return filtered.size === prev.size ? prev : filtered;
         });
     }, [generationEpoch, runningNodeId]);
+
+    // Mirror native-video FIFO order onto node metadata so canvas nodes re-render with 排队中 2/3.
+    useEffect(() => {
+        const syncQueueLabels = () => {
+            const snap = getNativeVideoQueueSnapshot();
+            const byId = new Map(snap.map((job) => [job.targetNodeId, job]));
+            setNodes((prev) => {
+                let changed = false;
+                const next = prev.map((node) => {
+                    const job = byId.get(node.id);
+                    const prevPos = node.metadata?.nativeVideoQueuePosition;
+                    const prevTotal = node.metadata?.nativeVideoQueueTotal;
+                    const prevPhase = node.metadata?.nativeVideoQueuePhase;
+                    if (!job) {
+                        if (prevPos == null && prevTotal == null && !prevPhase) return node;
+                        changed = true;
+                        return {
+                            ...node,
+                            metadata: {
+                                ...node.metadata,
+                                nativeVideoQueuePosition: undefined,
+                                nativeVideoQueueTotal: undefined,
+                                nativeVideoQueuePhase: undefined,
+                            },
+                        };
+                    }
+                    if (prevPos === job.position && prevTotal === job.total && prevPhase === job.phase) return node;
+                    changed = true;
+                    return {
+                        ...node,
+                        metadata: {
+                            ...node.metadata,
+                            nativeVideoQueuePosition: job.position,
+                            nativeVideoQueueTotal: job.total,
+                            nativeVideoQueuePhase: job.phase,
+                        },
+                    };
+                });
+                return changed ? next : prev;
+            });
+        };
+        syncQueueLabels();
+        return subscribeNativeVideoQueue(syncQueueLabels);
+    }, []);
 
     const isNodeGeneratingRef = useRef(isNodeGenerating);
     useEffect(() => {
