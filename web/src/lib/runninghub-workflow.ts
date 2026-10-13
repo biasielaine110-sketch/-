@@ -2178,6 +2178,51 @@ export function isKrea2AidenLoraWorkflowId(workflowId?: string | null) {
     return isKrea2AidenLoraWorkflow(workflowId);
 }
 
+/**
+ * Drop authoring leftovers that break RunningHub comfy/run validation on this graph:
+ * - `忽略多组孤海` (#142): Chinese class_type with empty inputs; RH workers reject unknown types;
+ * - Image Comparer (rgthree) (#149): ships Rh-Comfy-Auth preview URLs that fail off-author machines;
+ * - unused easy positive templates (#89 / #136) that nothing references.
+ * Also rewires ImageScaleToTotalPixels (#150) off PreviewImage output slot 1 (PreviewImage often
+ * has no slot 1 on RH) onto VAEDecode (#123) output 0 — SeedVR still sees the same pixels.
+ */
+function pruneKrea2AidenLoraGraph(workflow: ComfyWorkflow) {
+    const scale =
+        workflow["150"] ||
+        findComfyNode(workflow, (node) => /ImageScaleToTotalPixels/i.test(String(node.class_type || "")) && "megapixels" in (node.inputs || {}));
+    const decode =
+        workflow["123"] || findComfyNode(workflow, (node) => /^VAEDecode$/i.test(String(node.class_type || "")) && "samples" in (node.inputs || {}));
+    if (scale?.inputs && decode) {
+        const decodeId =
+            Object.entries(workflow).find(([, node]) => node === decode)?.[0] ||
+            (workflow["123"] === decode ? "123" : "");
+        if (decodeId) scale.inputs.image = [decodeId, 0];
+    }
+
+    for (const [id, node] of Object.entries(workflow)) {
+        const type = String(node?.class_type || "");
+        if (/忽略多组|孤海/.test(type)) delete workflow[id];
+        else if (/Image\s*Comparer/i.test(type)) delete workflow[id];
+    }
+
+    // Dead expander drafts (#89 / #136) — keep live #18 (user) and #139 (active template).
+    const consumedBefore = comfyConsumedIds(workflow);
+    for (const [id, node] of Object.entries(workflow)) {
+        if (id === "18" || id === "139") continue;
+        if (!/easy\s*positive/i.test(String(node?.class_type || ""))) continue;
+        if (typeof node.inputs?.positive !== "string") continue;
+        if (!/You are an expert prompt/i.test(String(node.inputs.positive))) continue;
+        if (consumedBefore.has(id)) continue;
+        delete workflow[id];
+    }
+
+    // PreviewImage is only needed when Scale still linked into it; after the rewire it is orphan.
+    const consumed = comfyConsumedIds(workflow);
+    for (const [id, node] of Object.entries(workflow)) {
+        if (/^PreviewImage$/i.test(String(node?.class_type || "")) && !consumed.has(id)) delete workflow[id];
+    }
+}
+
 function applyKrea2AidenLoraSettings(
     workflow: ComfyWorkflow,
     prompt: string,
@@ -2234,6 +2279,7 @@ function applyKrea2AidenLoraSettings(
         else if (/SeedVR2VideoUpscaler/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
     }
 
+    pruneKrea2AidenLoraGraph(next);
     return { workflow: next };
 }
 
@@ -3212,7 +3258,9 @@ async function runRunningHubWorkflowWithKey(args: {
     if (!workflow && fetchPermissionDenied && isKrea2PastoralMjWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubKrea2PastoralMjScriptRequired", { id: workflowId }));
     }
-    if (!workflow && fetchPermissionDenied && isKrea2AidenLoraWorkflow(workflowId)) {
+    // Aiden KREA2 always needs the Export (API) JSON in the model script — remote getJsonApiFormat
+    // is commonly ACL-denied, and falling through to webapp/nodeInfo would clobber llama templates.
+    if (!workflow && isKrea2AidenLoraWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubKrea2AidenLoraScriptRequired", { id: workflowId }));
     }
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
@@ -3262,11 +3310,14 @@ async function runRunningHubWorkflowWithKey(args: {
         }
         // Local-export graphs already preferred comfy/run above. If that endpoint is unavailable on
         // this origin, fall back once to create-with-workflow (docs: `workflow` overrides workflowId).
+        // Aiden must not degrade further into webapp/nodeInfo (generic writers smash llama templates).
         if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             console.warn(`[runninghub] ${workflowId}: comfy/run failed (${message.slice(0, 160)}), retrying local-export graph via create+workflow`);
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal).catch((retryError: unknown) => {
                 throw explainRunningHubError(retryError, workflowId);
             });
+        } else if (isKrea2AidenLoraWorkflow(workflowId)) {
+            throw explainRunningHubError(error, workflowId);
         } else {
             // A repaired-graph submission is always retried without it, so an unrecognized `workflow`
             // field or a rejected link degrades to the previous nodeInfoList-only behaviour.

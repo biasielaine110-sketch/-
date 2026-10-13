@@ -1339,13 +1339,14 @@ export function normalizeComfyH3AudioMode(value?: string | null): "reference_onl
 /**
  * Per-family canvas defaults when node/global knobs are unset.
  * - DualClock (U24 / H3-video): 900p + lock_source
- * - U30 Singularity: 720p
- * - U17 Singularity-shaped (authored 0.9 MP draft): 900p
+ * - U30 / U17 Singularity: 720p
  * - U35: 1080p
  * - U37 SelfLift: 900p
  * - U32 SelfLift 1080P: 1080p
- * - U06: 1376
- * - U01 基础版: keep author WJILatentPreset bake (864×480) — do not inherit U06's 1376
+ * - U06 / U01 基础版: 1376
+ *
+ * Applied on video model switch (see canvas project `updateNodeConfig`); later manual vquality
+ * edits stick until the next model change.
  */
 export function resolveNativeH3VideoSettingDefaults(
     workflowId?: string | null,
@@ -1359,13 +1360,12 @@ export function resolveNativeH3VideoSettingDefaults(
         .toLowerCase() || "";
     const isU17 = /u17|去油腻|修音频-全能|latent放大模型双采加速/.test(name);
     const isU32 = /u32|1080p.?高动态不糊|bunny-selflift/.test(name);
-    // U01 基础版 — before the broad `多图参考` match that would otherwise force U06's 1376.
     const isU01 = /u01(?:[-_]|$)|多图参考生视频基础/.test(name);
 
     if (workflow) {
         if (isComfyH3SingularityUpscaleWorkflow(workflow)) {
-            // U17 ships selector 0.9 MP (clean sibling of U30's 0.7 draft); default 900p.
-            return { vquality: isU17 ? "900" : "720" };
+            // U17 / U30: canvas default 720p on model select.
+            return { vquality: "720" };
         }
         if (isComfyH3SelfLiftWorkflow(workflow)) {
             // U32 model name is 1080P; other SelfLift graphs stay on the safer 900p default.
@@ -1383,14 +1383,13 @@ export function resolveNativeH3VideoSettingDefaults(
             return { vquality: "1080" };
         }
         if (isComfyH3MultiReferenceVideoWorkflow(workflow)) {
-            // U01 author bake is 864×480; forcing 1376 OOMs the基础版 and is a U06-only tier.
-            if (isU01) return {};
+            // U01 / U06 WJILatentPreset multi-ref: default author long-edge tier 1376.
             return { vquality: "1376" };
         }
         return {};
     }
 
-    if (isU17) return { vquality: "900" };
+    if (isU17) return { vquality: "720" };
     if (isU32) return { vquality: "1080", videoAudioMode: "reference_only" };
     if (/u30|singularity|超双采放大/.test(name)) return { vquality: "720" };
     if (/u37|selflift|无缝无色差/.test(name)) return { vquality: "900" };
@@ -1398,8 +1397,7 @@ export function resolveNativeH3VideoSettingDefaults(
         return { vquality: "900", videoAudioMode: "lock_source" };
     }
     if (/u35|官流|神棍/.test(name)) return { vquality: "1080" };
-    if (isU01) return {};
-    if (/u06|多图参考/.test(name)) return { vquality: "1376" };
+    if (isU01 || /u06|多图参考/.test(name)) return { vquality: "1376" };
     return {};
 }
 
