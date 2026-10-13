@@ -82,7 +82,7 @@ function isSeetaCloudComfyHost(baseUrl: string) {
 
 /**
  * Exact model packs for https://…seetacloud.com:8443 — H3-video / u24_v927 / U30 / U35 / U06 /
- * U17 / U32.
+ * U01 / U17 / U32.
  *
  * Matched by **host + model option name only**. Structural fingerprints still drive geometry /
  * sampling; this pack layer adds channel-scoped push repairs (author-local LoadImage scrub,
@@ -95,6 +95,7 @@ type SeetaCloudH3ModelPackId =
     | "u30-singularity"
     | "u35-official"
     | "u06-multiref"
+    | "u01-multiref"
     | "u17-dynamic"
     | "u32-selflift";
 
@@ -102,7 +103,7 @@ type SeetaCloudH3ModelPack = {
     id: SeetaCloudH3ModelPackId;
     /** Exact model option names (matched via `comfyWorkflowKeys`, case-insensitive). */
     modelNames: readonly string[];
-    family: "dualclock" | "u06" | "u30" | "u35" | "u17" | "u32";
+    family: "dualclock" | "u06" | "u01" | "u30" | "u35" | "u17" | "u32";
     /** Reject submit when the canvas has no reference image. */
     requireRefs: boolean;
     /** Upload a real blank PNG for spare LoadImage slots (DualClock + multi-ref spares). */
@@ -160,6 +161,18 @@ const SEETACLOUD_H3_MODEL_PACKS: readonly SeetaCloudH3ModelPack[] = [
         id: "u06-multiref",
         modelNames: ["U06-h3_多图参考生视频V8", "U06-minimax_h3_多图参考生视频V8"],
         family: "u06",
+        requireRefs: true,
+        uploadBlankForSpareLoaders: true,
+        scrubAuthorLocalLoaders: true,
+        hardFailNodeErrors: true,
+    },
+    {
+        // Same U06 multi-ref shape (single MiniMaxH3ReferenceToVideo + WJILatentPreset), but the
+        // author bake is 864×480 — not U06's 1376 long edge. Export: U01-minimax_h3_多图参考生视频基础版.
+        // Exact names only; other channels / other models on this pod stay untouched.
+        id: "u01-multiref",
+        modelNames: ["U01-多图参考生视频基础版", "U01-minimax_h3_多图参考生视频基础版"],
+        family: "u01",
         requireRefs: true,
         uploadBlankForSpareLoaders: true,
         scrubAuthorLocalLoaders: true,
@@ -1110,6 +1123,11 @@ function assertSeetaCloudH3PackWorkflow(pack: SeetaCloudH3ModelPack, workflow: C
             "U06-h3_多图参考生视频V8 模型脚本不是 U06 V8 Export (API) JSON（需要单 MiniMaxH3ReferenceToVideo + WJILatentPreset 尺寸）。请粘贴「U06-minimax_h3_多图参考生视频V8」Export JSON 后重试。",
         );
     }
+    if (pack.family === "u01" && !u06Shape) {
+        throw new Error(
+            "U01-多图参考生视频基础版 模型脚本不是 U01 Export (API) JSON（需要单 MiniMaxH3ReferenceToVideo + WJILatentPreset 尺寸）。请粘贴「U01-minimax_h3_多图参考生视频基础版」Export JSON 后重试。",
+        );
+    }
     if (pack.family === "u32" && !selfLift) {
         throw new Error(
             "U32-H3-1080P-高动态不糊 模型脚本不是 U32 SelfLift Export (API) JSON（需要 SelfLiftH3Sampler + MiniMaxH3AudioConditioningT8）。请粘贴「U32-Minimax-H3-1080P-高动态不糊-BUNNY-SelfLift」Export JSON 后重试。",
@@ -1327,6 +1345,7 @@ export function normalizeComfyH3AudioMode(value?: string | null): "reference_onl
  * - U37 SelfLift: 900p
  * - U32 SelfLift 1080P: 1080p
  * - U06: 1376
+ * - U01 基础版: keep author WJILatentPreset bake (864×480) — do not inherit U06's 1376
  */
 export function resolveNativeH3VideoSettingDefaults(
     workflowId?: string | null,
@@ -1340,6 +1359,8 @@ export function resolveNativeH3VideoSettingDefaults(
         .toLowerCase() || "";
     const isU17 = /u17|去油腻|修音频-全能|latent放大模型双采加速/.test(name);
     const isU32 = /u32|1080p.?高动态不糊|bunny-selflift/.test(name);
+    // U01 基础版 — before the broad `多图参考` match that would otherwise force U06's 1376.
+    const isU01 = /u01(?:[-_]|$)|多图参考生视频基础/.test(name);
 
     if (workflow) {
         if (isComfyH3SingularityUpscaleWorkflow(workflow)) {
@@ -1362,6 +1383,8 @@ export function resolveNativeH3VideoSettingDefaults(
             return { vquality: "1080" };
         }
         if (isComfyH3MultiReferenceVideoWorkflow(workflow)) {
+            // U01 author bake is 864×480; forcing 1376 OOMs the基础版 and is a U06-only tier.
+            if (isU01) return {};
             return { vquality: "1376" };
         }
         return {};
@@ -1375,6 +1398,7 @@ export function resolveNativeH3VideoSettingDefaults(
         return { vquality: "900", videoAudioMode: "lock_source" };
     }
     if (/u35|官流|神棍/.test(name)) return { vquality: "1080" };
+    if (isU01) return {};
     if (/u06|多图参考/.test(name)) return { vquality: "1376" };
     return {};
 }
@@ -3173,7 +3197,7 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
         await ensureComfyBrowserDirect(baseUrl, apiKey, signal);
     }
 
-    // Seetacloud-only exact model packs (H3-video / u24_v927 / U30 / U35 / U06 / U17 / U32).
+    // Seetacloud-only exact model packs (H3-video / u24_v927 / U30 / U35 / U06 / U01 / U17 / U32).
     // Null on every other channel and on every other model name on the same pod — pack repairs stay scoped.
     const seetaPack = matchSeetaCloudH3ModelPack(baseUrl, args.workflowId);
     if (seetaPack) assertSeetaCloudH3PackWorkflow(seetaPack, args.workflow);
@@ -3273,11 +3297,13 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
                     ? "U30-H3-Singularity超双采放大 需要至少一张参考图。工作流里的 hash 文件名只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
                     : seetaPack?.family === "u17"
                       ? "U17-高动态不糊-去油腻-修音频 需要至少一张参考图。工作流里的 Untitled*.jpg 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
-                      : seetaPack?.family === "u32"
+                        : seetaPack?.family === "u32"
                         ? "U32-H3-1080P-高动态不糊 需要至少一张参考图。工作流里的 hash 文件名只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
-                        : seetaPack?.family === "u06"
-                          ? "U06-h3_多图参考生视频V8 需要至少一张参考图。工作流里的 Untitled*.jpg / snowtp.png 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
-                          : "This multi-reference video workflow requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
+                        : seetaPack?.family === "u01"
+                          ? "U01-多图参考生视频基础版 需要至少一张参考图。工作流里的 Untitled*.jpg 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
+                          : seetaPack?.family === "u06"
+                            ? "U06-h3_多图参考生视频V8 需要至少一张参考图。工作流里的 Untitled*.jpg / snowtp.png 只在作者本机，seetacloud 上不存在，请在画布连接参考图后再生成。"
+                            : "This multi-reference video workflow requires at least one reference image. The workflow's baked LoadImage filenames are local to the author's machine and are not on this ComfyUI server.",
         );
     }
     if (refs.length) {
@@ -3431,9 +3457,11 @@ export async function runNativeComfyUiJob(args: RunNativeComfyUiArgs): Promise<N
                           ? `U35-H3官流-终极版-神棍 无法推送到工作流（节点校验失败）。请确认已粘贴 U35 官流 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
                           : seetaPack?.family === "u32"
                             ? `U32-H3-1080P-高动态不糊 无法推送到工作流（节点校验失败）。请确认已粘贴 U32 SelfLift Export (API) JSON，并连接至少一张参考图。详情：${detail}`
-                            : seetaPack?.family === "u06"
-                              ? `U06-h3_多图参考生视频V8 无法推送到工作流（节点校验失败）。请确认已粘贴 U06 V8 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
-                              : detail;
+                            : seetaPack?.family === "u01"
+                              ? `U01-多图参考生视频基础版 无法推送到工作流（节点校验失败）。请确认已粘贴 U01 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                              : seetaPack?.family === "u06"
+                                ? `U06-h3_多图参考生视频V8 无法推送到工作流（节点校验失败）。请确认已粘贴 U06 V8 Export (API) JSON，并连接至少一张参考图。详情：${detail}`
+                                : detail;
             throw new Error(packHint);
         }
     }

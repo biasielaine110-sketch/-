@@ -97,7 +97,9 @@ function detectNativeVideoFamily(config: AiConfig): NativeVideoFamily {
     if (/u17|去油腻|修音频-全能|latent放大模型双采加速|u30|singularity|超双采放大/.test(name)) return "twoPass";
     if (/u35|官流|神棍/.test(name)) return "u35";
     if (/u24|v927|文武|h3-video|h3_video|双采参考/.test(name)) return "twoPass";
-    if (/u06|多图参考/.test(name)) return "u06";
+    // U01 基础版 shares the U06 WJILatentPreset multi-ref UI (long-edge pills); match before the
+    // broader `多图参考` pattern so the family is explicit.
+    if (/u01(?:[-_]|$)|多图参考生视频基础|u06|多图参考/.test(name)) return "u06";
     return "other";
 }
 

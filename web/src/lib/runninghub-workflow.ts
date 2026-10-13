@@ -258,6 +258,9 @@ function explainRunningHubError(error: unknown, workflowId: string): Error {
     if (isWorkflowPermissionMessage(message) && isKrea2PastoralMjWorkflow(workflowId)) {
         return new Error(i18n.t("apiErrors.runningHubKrea2PastoralMjScriptRequired", { id: workflowId }));
     }
+    if (isWorkflowPermissionMessage(message) && isKrea2AidenLoraWorkflow(workflowId)) {
+        return new Error(i18n.t("apiErrors.runningHubKrea2AidenLoraScriptRequired", { id: workflowId }));
+    }
     if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) return new Error(apiText("runningHubNoBalance"));
     if (isUnknownServerError(message)) return new Error(apiText("runningHubUnknownError"));
     if (error instanceof Error && error.message && !isUnknownServerError(error.message)) return error;
@@ -2141,6 +2144,99 @@ export function isKrea2PastoralMjWorkflowId(workflowId?: string | null) {
     return isKrea2PastoralMjWorkflow(workflowId);
 }
 
+// Aiden KREA2 提示词优化 + LoRA 加持 T2I
+// (runninghub.cn 2109993221349793794 / runninghub.ai 2109995692252229633).
+// Export: 1-Aiden-KREA2模型提示词优化lora加持工作流 _api.json
+//
+// Why the generic writers break this graph:
+//   - writeRunningHubPrompt scores every easy positive titled "Positive" at 40, so it overwrites
+//     the llama expander templates (89 / 136 / 139) together with the user caption (18) — llama
+//     then expands garbage / empty instructions and the run fails or ignores the canvas prompt;
+//   - EmptyLatentImage width/height are *links* into ResolutionSelector (23); writeRunningHubSize
+//     never produces that node's aspect_ratio label enum, and writeRunningHubTier would also clobber
+//     ImageScaleToTotalPixels (150) megapixels=0.3 (the intentional SeedVR downscale);
+//   - KSampler / llama_cpp_instruct / SeedVR2 bake fixed seeds → identical images.
+// Scoped to these two ids only.
+const KREA2_AIDEN_LORA_WORKFLOW_IDS = new Set(["2109993221349793794", "2109995692252229633"]);
+
+function isKrea2AidenLoraWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return KREA2_AIDEN_LORA_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate for the Aiden KREA2 LoRA + prompt-optimize T2I graph. */
+export function isKrea2AidenLoraWorkflowId(workflowId?: string | null) {
+    return isKrea2AidenLoraWorkflow(workflowId);
+}
+
+function applyKrea2AidenLoraSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    size?: { width: number; height: number } | null,
+    aspect = "",
+    rawSize = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+
+    // User caption → easy positive (18) only — wired as llama_cpp_instruct_adv.system_prompt.
+    // Never touch 89 / 136 / 139 (expander instruction templates) or CLIPTextEncode (7) (linked
+    // from llama output via showAnything 11).
+    if (prompt.trim()) {
+        const promptNode =
+            next["18"] ||
+            findComfyNode(
+                next,
+                (node) =>
+                    /easy\s*positive/i.test(String(node.class_type || "")) &&
+                    typeof node.inputs?.positive === "string" &&
+                    !/You are an expert prompt/i.test(String(node.inputs.positive)),
+            );
+        if (promptNode?.inputs && typeof promptNode.inputs.positive === "string") promptNode.inputs.positive = prompt;
+    }
+
+    // Canvas size → ResolutionSelector (23). Leave ImageScaleToTotalPixels (150) at 0.3 MP —
+    // that node only downscales before SeedVR2 and is not the canvas resolution knob.
+    const selector =
+        next["23"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        const nextAspect = aspect || (size?.width && size.height ? closestResolutionSelectorAspect(size.width, size.height) : "");
+        if (nextAspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(nextAspect);
+        }
+        const explicit = Number(megapixels);
+        if (typeof megapixels === "string" && megapixels.trim() && Number.isFinite(explicit) && explicit > 0 && typeof selector.inputs.megapixels === "number") {
+            selector.inputs.megapixels = explicit;
+        } else if (typeof selector.inputs.megapixels === "number") {
+            const tier = canvasResolutionTier(rawSize);
+            if (tier) {
+                const tierMegapixels = tier === "4k" ? 4 : tier === "2k" ? 2 : 1;
+                const baked = selector.inputs.megapixels;
+                selector.inputs.megapixels = Number.isFinite(baked) && baked > 0 ? Math.max(baked, tierMegapixels) : tierMegapixels;
+            }
+        }
+    }
+
+    // Fixed seeds → identical images; randomize KSampler / llama / SeedVR2 per run.
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        if (/KSampler/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+        else if (/llama_cpp_instruct/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+        else if (/SeedVR2VideoUpscaler/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+    }
+
+    return { workflow: next };
+}
+
 function snap16(value: number) {
     return Math.max(64, Math.round(value / 16) * 16);
 }
@@ -2195,7 +2291,8 @@ function usesRunningHubLocalExportGraph(workflowId?: string | null) {
         isMinimaxH3SelfLiftWorkflow(workflowId) ||
         isQwenKleinSkinWorkflow(workflowId) ||
         isMinimaxH3RefTopWorkflow(workflowId) ||
-        isKrea2PastoralMjWorkflow(workflowId)
+        isKrea2PastoralMjWorkflow(workflowId) ||
+        isKrea2AidenLoraWorkflow(workflowId)
     );
 }
 
@@ -2433,6 +2530,14 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const pastoral = applyKrea2PastoralMjSettings(workflow, prompt, size);
         const list = workflowNodeInfoList(workflow, pastoral.workflow);
         return { nodeInfoList: list, graph: pastoral.workflow };
+    }
+    // Aiden KREA2 LoRA + prompt-optimize opts out (see applyKrea2AidenLoraSettings): generic prompt
+    // writer clobbers llama expander templates; size/tier writers miss ResolutionSelector and would
+    // smash the SeedVR downscale megapixels. Always ship `graph` for local Export.
+    if (isKrea2AidenLoraWorkflow(workflowId)) {
+        const aiden = applyKrea2AidenLoraSettings(workflow, prompt, size, aspect, rawSize, megapixels);
+        const list = workflowNodeInfoList(workflow, aiden.workflow);
+        return { nodeInfoList: list, graph: aiden.workflow };
     }
     if (prompt.trim()) patched = writeRunningHubPrompt(patched, prompt);
     if (size) patched = writeRunningHubSize(patched, size.width, size.height, aspect);
@@ -3106,6 +3211,9 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     if (!workflow && fetchPermissionDenied && isKrea2PastoralMjWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubKrea2PastoralMjScriptRequired", { id: workflowId }));
+    }
+    if (!workflow && fetchPermissionDenied && isKrea2AidenLoraWorkflow(workflowId)) {
+        throw new Error(i18n.t("apiErrors.runningHubKrea2AidenLoraScriptRequired", { id: workflowId }));
     }
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     const uploaded: string[] = [];
