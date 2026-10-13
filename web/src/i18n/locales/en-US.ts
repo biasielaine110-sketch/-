@@ -85,7 +85,7 @@ export default {
             audioMode: "Reference audio",
             audioModeReference: "Timbre reference",
             audioModeLock: "Lock source",
-            audioModeHint: "H3-video / u24_v927: applies when an audio node is connected; default is Timbre reference. Timbre reference = model synthesizes a new track near your voice; Lock source = keep your track (lips may not match).",
+            audioModeHint: "H3-video / u24_v927: applies when an audio node is connected; default is Lock source. Lock source = keep your track (lips may not match); Timbre reference = model synthesizes a new track near your voice.",
             timbreHint: "U30 / U35 / U06: when an audio node is connected, it is wired as ref_audios timbre reference (model synthesizes audio; not a direct mux of your file).",
             adaptive: "Adaptive",
             twoPassQualityHint: "Two-pass: use 720p when VRAM is tight; pick 900p (~1600×900) between 720 and full 1080 if 1080 OOMs; try 1080p / 2K only when stable.",

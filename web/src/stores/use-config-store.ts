@@ -98,7 +98,7 @@ export type AiConfig = {
     videoSeed: string;
     /**
      * DualClock (H3-video / u24_v927) when canvas audio is connected:
-     * `reference_only` (default) or `lock_source`.
+     * DualClock: `lock_source` (default) or `reference_only`.
      */
     videoAudioMode: string;
     systemPrompt: string;
@@ -175,7 +175,7 @@ export const defaultConfig: AiConfig = {
     videoScheduler: "karras",
     videoSeedMode: "fixed",
     videoSeed: "19960422",
-    videoAudioMode: "reference_only",
+    videoAudioMode: "lock_source",
     systemPrompt: "",
     reasoningEffort: "auto",
     // Default via same-origin proxy — most relay APIs block browser CORS.
@@ -458,9 +458,9 @@ export const useConfigStore = create<ConfigStore>()(
                                   ? "fixedB"
                                   : "fixed",
                         videoSeed: config.videoSeed || defaultConfig.videoSeed,
-                        videoAudioMode: /^(lock_source|lock)$/i.test(String(config.videoAudioMode || ""))
-                            ? "lock_source"
-                            : "reference_only",
+                        videoAudioMode: /^(reference_only|reference|timbre)$/i.test(String(config.videoAudioMode || ""))
+                            ? "reference_only"
+                            : "lock_source",
                         canvasImageCount: config.canvasImageCount || "1",
                         mjVersion: config.mjVersion || defaultConfig.mjVersion,
                         quality: config.quality || "medium",

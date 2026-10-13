@@ -1253,14 +1253,15 @@ function applyComfySelfLiftAudios(workflow: ComfyWorkflow, filenames: string[]):
     return workflow;
 }
 
-/** Normalize canvas DualClock audio strategy: reference timbre or lock source track. */
+/** Normalize canvas DualClock audio strategy: lock source track or reference timbre. */
 export function normalizeComfyH3AudioMode(value?: string | null): "reference_only" | "lock_source" {
-    return /^(lock_source|lock)$/i.test(String(value || "")) ? "lock_source" : "reference_only";
+    // Empty / unknown → lock_source (H3-video / U24 family default).
+    return /^(reference_only|reference|timbre)$/i.test(String(value || "")) ? "reference_only" : "lock_source";
 }
 
 /**
  * Per-family canvas defaults when node/global knobs are unset.
- * - DualClock (U24 / H3-video): 900p + reference_only
+ * - DualClock (U24 / H3-video): 900p + lock_source
  * - U30 Singularity: 720p
  * - U35: 1080p
  * - U37 SelfLift: 900p
@@ -1281,7 +1282,7 @@ export function resolveNativeH3VideoSettingDefaults(
         if (isComfyH3SingularityUpscaleWorkflow(workflow)) return { vquality: "720" };
         if (isComfyH3SelfLiftWorkflow(workflow)) return { vquality: "900" };
         if (isComfyH3TwoPassReferenceWorkflow(workflow)) {
-            return { vquality: "900", videoAudioMode: "reference_only" };
+            return { vquality: "900", videoAudioMode: "lock_source" };
         }
         if (isComfyH3ResolutionSelectorVideoWorkflow(workflow)) {
             return { vquality: "1080" };
@@ -1295,7 +1296,7 @@ export function resolveNativeH3VideoSettingDefaults(
     if (/u30|singularity|超双采放大/.test(name)) return { vquality: "720" };
     if (/u37|selflift|无缝无色差/.test(name)) return { vquality: "900" };
     if (/u24|v927|文武|h3-video|h3_video|双采参考/.test(name)) {
-        return { vquality: "900", videoAudioMode: "reference_only" };
+        return { vquality: "900", videoAudioMode: "lock_source" };
     }
     if (/u35|官流|神棍/.test(name)) return { vquality: "1080" };
     if (/u06|多图参考/.test(name)) return { vquality: "1376" };
@@ -1438,8 +1439,9 @@ function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
  * `drive_audio` / `ref_audios.ref_audio_*` on MiniMaxH3AudioConditioningT8.
  *
  * DualClock U24/V927 authors `audio_mode=native` with no `ref_audios.*` slots. When the canvas
- * supplies audio we still inject; UI/family default is `reference_only` (timbre/rhythm; model
- * synthesizes speech). Optional `audioMode=lock_source` keeps the source track instead.
+ * supplies audio we still inject; UI/family default is `lock_source` (keep source track /
+ * final_audio). Optional `audioMode=reference_only` uses the clip as timbre/rhythm only so the
+ * model can synthesize speech.
  *
  * Across DualClock + Path A: `final_audio` is only set for `lock_source`. Under `reference_only`,
  * muxing the canvas clip as final_audio can wipe synthesized dialogue (no 台词). DualClock also
@@ -1464,10 +1466,10 @@ export function applyComfyMiniMaxDriveAudio(
     const hasRefAudioSlots = targets.some((node) =>
         Object.keys(node.inputs || {}).some((key) => key.startsWith("ref_audios.")),
     );
-    // DualClock authored without ref slots: family default is reference_only when mode unset.
+    // DualClock authored without ref slots: family default is lock_source when mode unset.
     const dualClockNative = isComfyH3TwoPassReferenceWorkflow(next) && !hasRefAudioSlots;
     const requestedMode = normalizeComfyH3AudioMode(
-        dualClockNative ? options?.audioMode ?? "reference_only" : options?.audioMode,
+        dualClockNative ? options?.audioMode ?? "lock_source" : options?.audioMode,
     );
 
     const existingLoaders = Object.entries(next)
@@ -2982,7 +2984,7 @@ export type RunNativeComfyUiArgs = {
     seed?: string | number;
     /**
      * DualClock (H3-video / u24_v927) audio strategy when canvas audio is connected.
-     * `reference_only` (default) = timbre/rhythm reference; `lock_source` = keep source track.
+     * `lock_source` (DualClock default) = keep source track; `reference_only` = timbre/rhythm reference.
      */
     audioMode?: string;
     signal?: AbortSignal;
