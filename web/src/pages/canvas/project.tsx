@@ -4849,9 +4849,15 @@ function AtelierCanvasPage() {
                         }
                     };
                     try {
-                        // Native H3 / ComfyUI: FIFO — next /prompt only after prior clip is on the canvas.
+                        // Native H3: only start the next /prompt after this job writes back or fails.
+                        // Success and error both release the FIFO (tail always advances) so a failure
+                        // cannot stall later queued generates. replaceTarget:false + no blind
+                        // /interrupt keep the running job from being killed when more are queued.
                         if (isNativeComfyVideoConfig(generationConfig)) {
-                            await enqueueNativeComfyVideoJob(runNativeVideoJob);
+                            await enqueueNativeComfyVideoJob(runNativeVideoJob, {
+                                targetNodeId: videoId,
+                                versionId,
+                            });
                         } else {
                             await runNativeVideoJob();
                         }
@@ -5218,7 +5224,7 @@ function AtelierCanvasPage() {
                         }
                     };
                     if (isNativeComfyVideoConfig(generationConfig)) {
-                        await enqueueNativeComfyVideoJob(runRetryVideoJob);
+                        await enqueueNativeComfyVideoJob(runRetryVideoJob, { targetNodeId: node.id, versionId: imageId });
                     } else {
                         await runRetryVideoJob();
                     }

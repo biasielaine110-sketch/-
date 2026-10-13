@@ -527,6 +527,8 @@ export default {
             group: "Group",
             nodeCount: "{{count}} nodes",
             generating: "Generating",
+            queueRunning: "Generating {{position}}/{{total}}",
+            queueWaiting: "Queued {{position}}/{{total}}",
             cancel: "Cancel",
             failed: "Generation failed",
             retry: "Retry",

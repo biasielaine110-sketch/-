@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { App, Dropdown } from "antd";
 import { ChevronDown, ChevronRight, Clapperboard, Clock, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
@@ -10,6 +10,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { videoExtension } from "@/lib/canvas/canvas-generation-helpers";
+import { getNativeVideoQueueSnapshot, subscribeNativeVideoQueue } from "@/lib/canvas/native-video-job-queue";
 import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -21,6 +22,19 @@ import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-refer
 import { useTranslation } from "react-i18next";
 
 import { DEFAULT_CANVAS_FONT_SIZE } from "@/constant/canvas";
+
+function useNativeVideoQueueLabel(nodeId: string) {
+    const { t } = useTranslation();
+    const snapshot = useSyncExternalStore(subscribeNativeVideoQueue, getNativeVideoQueueSnapshot, getNativeVideoQueueSnapshot);
+    if (!nodeId) return null;
+    const entry = snapshot.find((job) => job.targetNodeId === nodeId);
+    if (!entry || entry.total < 1) return null;
+    if (entry.total === 1 && entry.phase === "running") return t("canvas.node.generating");
+    if (entry.phase === "running") {
+        return t("canvas.node.queueRunning", { position: entry.position, total: entry.total });
+    }
+    return t("canvas.node.queueWaiting", { position: entry.position, total: entry.total });
+}
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
@@ -602,7 +616,15 @@ function NodeContent(props: NodeContentRendererProps) {
     if (props.isBatchRoot || ((props.node.type === CanvasNodeType.Image || props.node.type === CanvasNodeType.Video) && (props.node.metadata?.images?.length || 0) > 0)) {
         return props.node.type === CanvasNodeType.Video ? <VideoBatchContent {...props} /> : <ImageNodeContent {...props} />;
     }
-    if (props.node.metadata?.status === "loading") return <LoadingContent theme={props.theme} onCancel={props.onCancelGeneration ? () => props.onCancelGeneration?.(props.node.id) : undefined} />;
+    if (props.node.metadata?.status === "loading") {
+        return (
+            <LoadingContent
+                theme={props.theme}
+                nodeId={props.node.id}
+                onCancel={props.onCancelGeneration ? () => props.onCancelGeneration?.(props.node.id) : undefined}
+            />
+        );
+    }
     if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
 
     const Renderer = nodeContentRenderers[props.node.type as CanvasNodeType];
@@ -772,12 +794,17 @@ function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererP
     );
 }
 
-function LoadingContent({ theme, onCancel }: Pick<NodeContentRendererProps, "theme"> & { onCancel?: () => void }) {
+function LoadingContent({
+    theme,
+    nodeId,
+    onCancel,
+}: Pick<NodeContentRendererProps, "theme"> & { nodeId?: string; onCancel?: () => void }) {
     const { t } = useTranslation();
+    const queueLabel = useNativeVideoQueueLabel(nodeId || "");
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.activeStroke }}>
             <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
-            <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span>
+            <span className="text-[10px] tracking-[0.2em]">{queueLabel || t("canvas.node.generating")}</span>
             {onCancel ? (
                 <button
                     type="button"
@@ -1885,6 +1912,7 @@ function ImageContent({
                     )
                 ) : (
                     <ImageSlotStatus
+                        nodeId={node.id}
                         image={
                             primaryImage || {
                                 id: "__missing__",
@@ -2051,7 +2079,7 @@ function ExpandedImageCard({
                     </CanvasLazyMedia>
                 )
             ) : (
-                <ImageSlotStatus image={image} onCancel={onCancel} />
+                <ImageSlotStatus nodeId={node.id} image={image} onCancel={onCancel} />
             )}
             {image.content || image.thumbnailContent ? (
                 <div className="absolute inset-x-2 top-2 z-30 flex items-center gap-1">
@@ -2130,14 +2158,15 @@ function BatchImageFailureActions({ placement, onRetry, onDelete }: { placement:
     );
 }
 
-function ImageSlotStatus({ image, onCancel }: { image?: CanvasNodeImage; onCancel?: () => void }) {
+function ImageSlotStatus({ image, onCancel, nodeId }: { image?: CanvasNodeImage; onCancel?: () => void; nodeId?: string }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
+    const queueLabel = useNativeVideoQueueLabel(nodeId || "");
     const isLoading = image?.status === "loading";
     const failed = image?.status === "error" || (!isLoading && !image?.content && !image?.thumbnailContent);
     const message = failed
         ? image?.errorDetails || (image?.status === "error" ? t("canvas.node.failed") : t("canvas.generation.mediaMissing"))
-        : t("canvas.node.generating");
+        : queueLabel || t("canvas.node.generating");
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center" style={{ background: theme.node.fill, color: failed ? theme.node.text : theme.node.activeStroke }}>
             {failed ? (

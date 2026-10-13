@@ -527,6 +527,8 @@ export default {
             group: "组",
             nodeCount: "{{count}} 个节点",
             generating: "生成中",
+            queueRunning: "生成中 {{position}}/{{total}}",
+            queueWaiting: "排队中 {{position}}/{{total}}",
             cancel: "取消",
             failed: "生成失败",
             retry: "重试",
