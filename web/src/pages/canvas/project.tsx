@@ -10,7 +10,13 @@ import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audi
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
 import { defaultConfig, modelOptionLabel, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { parseComfyApiWorkflow, resolveNativeH3VideoSettingDefaults, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
-import { enqueueNativeComfyVideoJob, getNativeVideoQueueSnapshot, subscribeNativeVideoQueue } from "@/lib/canvas/native-video-job-queue";
+import {
+    cancelNativeVideoQueueJobsForNodes,
+    enqueueNativeComfyVideoJob,
+    getNativeVideoQueueSnapshot,
+    pickNativeVideoQueueEntryForNode,
+    subscribeNativeVideoQueue,
+} from "@/lib/canvas/native-video-job-queue";
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
 import { subscribeLocalMediaLibraryAccess } from "@/services/local-media-library";
@@ -519,18 +525,30 @@ function AtelierCanvasPage() {
                 affectedNodeIds.add(request.originNodeId);
                 runningIdsToClear.add(request.runningNodeId);
             }
+            // Drop FIFO entries immediately so remaining badges re-number (2/3 → 1/2).
+            cancelNativeVideoQueueJobsForNodes(affectedNodeIds);
             setRunningNodeId((current) => (current && (current === nodeId || runningIdsToClear.has(current) || affectedNodeIds.has(current)) ? null : current));
             setGenerationEpoch((value) => value + 1);
             setNodes((prev) =>
                 prev.map((node) =>
-                    affectedNodeIds.has(node.id) && (node.metadata?.status === NODE_STATUS_LOADING || node.metadata?.images?.some((image) => image.status === NODE_STATUS_LOADING))
+                    affectedNodeIds.has(node.id) &&
+                    (node.metadata?.status === NODE_STATUS_LOADING ||
+                        node.metadata?.images?.some((image) => image.status === NODE_STATUS_LOADING) ||
+                        node.metadata?.nativeVideoQueuePosition != null)
                         ? {
                               ...node,
                               metadata: {
                                   ...node.metadata,
                                   status: node.metadata?.status === NODE_STATUS_LOADING ? NODE_STATUS_IDLE : node.metadata?.status,
                                   errorDetails: undefined,
-                                  images: node.metadata.images?.map((image) => (image.status === NODE_STATUS_LOADING ? { ...image, status: NODE_STATUS_ERROR, errorDetails: t("common.requestCanceled") } : image)),
+                                  nativeVideoQueuePosition: undefined,
+                                  nativeVideoQueueTotal: undefined,
+                                  nativeVideoQueuePhase: undefined,
+                                  images: node.metadata.images?.map((image) =>
+                                      image.status === NODE_STATUS_LOADING
+                                          ? { ...image, status: NODE_STATUS_ERROR, errorDetails: t("common.requestCanceled") }
+                                          : image,
+                                  ),
                               },
                           }
                         : node,
@@ -568,15 +586,15 @@ function AtelierCanvasPage() {
         });
     }, [generationEpoch, runningNodeId]);
 
-    // Mirror native-video FIFO order onto node metadata so canvas nodes re-render with 排队中 2/3.
+    // Mirror native-video FIFO order onto node metadata (live store is primary for badges).
     useEffect(() => {
         const syncQueueLabels = () => {
             const snap = getNativeVideoQueueSnapshot();
-            const byId = new Map(snap.map((job) => [job.targetNodeId, job]));
+            const nodeIds = new Set(snap.map((job) => job.targetNodeId));
             setNodes((prev) => {
                 let changed = false;
                 const next = prev.map((node) => {
-                    const job = byId.get(node.id);
+                    const job = nodeIds.has(node.id) ? pickNativeVideoQueueEntryForNode(snap, node.id) : undefined;
                     const prevPos = node.metadata?.nativeVideoQueuePosition;
                     const prevTotal = node.metadata?.nativeVideoQueueTotal;
                     const prevPhase = node.metadata?.nativeVideoQueuePhase;
@@ -4901,6 +4919,7 @@ function AtelierCanvasPage() {
                             await enqueueNativeComfyVideoJob(runNativeVideoJob, {
                                 targetNodeId: videoId,
                                 versionId,
+                                signal: controller.signal,
                             });
                         } else {
                             await runNativeVideoJob();
@@ -5268,7 +5287,11 @@ function AtelierCanvasPage() {
                         }
                     };
                     if (isNativeComfyVideoConfig(generationConfig)) {
-                        await enqueueNativeComfyVideoJob(runRetryVideoJob, { targetNodeId: node.id, versionId: imageId });
+                        await enqueueNativeComfyVideoJob(runRetryVideoJob, {
+                            targetNodeId: node.id,
+                            versionId: imageId,
+                            signal: controller.signal,
+                        });
                     } else {
                         await runRetryVideoJob();
                     }

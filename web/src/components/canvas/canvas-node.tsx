@@ -10,7 +10,11 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { videoExtension } from "@/lib/canvas/canvas-generation-helpers";
-import { getNativeVideoQueueSnapshot, subscribeNativeVideoQueue } from "@/lib/canvas/native-video-job-queue";
+import {
+    getNativeVideoQueueSnapshot,
+    pickNativeVideoQueueEntryForNode,
+    subscribeNativeVideoQueue,
+} from "@/lib/canvas/native-video-job-queue";
 import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -35,19 +39,12 @@ function formatNativeVideoQueueLabel(
     return t("canvas.node.queueWaiting", { position, total });
 }
 
-/** Prefer metadata (synced from project page); fall back to live FIFO store. */
-function useNativeVideoQueueLabel(nodeId: string, metadata?: CanvasNodeData["metadata"]) {
+/** Always read the live FIFO — metadata goes stale on cancel and would keep dead jobs in the total. */
+function useNativeVideoQueueLabel(nodeId: string, _metadata?: CanvasNodeData["metadata"]) {
     const { t } = useTranslation();
     const snapshot = useSyncExternalStore(subscribeNativeVideoQueue, getNativeVideoQueueSnapshot, getNativeVideoQueueSnapshot);
-    const fromMeta = formatNativeVideoQueueLabel(
-        t,
-        metadata?.nativeVideoQueuePosition,
-        metadata?.nativeVideoQueueTotal,
-        metadata?.nativeVideoQueuePhase,
-    );
-    if (fromMeta) return fromMeta;
     if (!nodeId) return null;
-    const entry = snapshot.find((job) => job.targetNodeId === nodeId);
+    const entry = pickNativeVideoQueueEntryForNode(snapshot, nodeId);
     return formatNativeVideoQueueLabel(t, entry?.position, entry?.total, entry?.phase);
 }
 
