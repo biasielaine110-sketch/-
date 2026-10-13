@@ -8,7 +8,9 @@ import { isMidjourneyModel, requestEdit, requestGeneration, requestImageQuestion
 import { chatSkillsSystemHint, executeChatSkillTool, resolveChatSkillIds, resolveChatSkillTools } from "@/lib/chat-skills";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
-import { defaultConfig, modelOptionLabel, resolveModelForCapability, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelOptionLabel, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { parseComfyApiWorkflow, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
+import { enqueueNativeComfyVideoJob } from "@/lib/canvas/native-video-job-queue";
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
 import { subscribeLocalMediaLibraryAccess } from "@/services/local-media-library";
@@ -427,6 +429,13 @@ function AtelierCanvasPage() {
     const selectionBoxRef = useRef(selectionBox);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
+    /** True when this video config hits a native ComfyUI / H3 graph (must be serialized). */
+    const isNativeComfyVideoConfig = useCallback((config: AiConfig) => {
+        const model = config.model || config.videoModel || "";
+        const request = resolveModelRequestConfig(config, model);
+        const script = resolveModelScript(config, model);
+        return shouldUseNativeComfyUi(request.baseUrl, model, script) || Boolean(parseComfyApiWorkflow(script));
+    }, []);
     const mouseWorldRef = useRef<Position | null>(null);
     const draftMetaRef = useRef<CanvasDraftMeta | null>(null);
     const draftSavingRef = useRef(false);
@@ -4700,12 +4709,16 @@ function AtelierCanvasPage() {
                     );
                     if (!writeVideoToSelf) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: videoId }]);
                     setDialogNodeId(nodeId);
-                    const controller = videoId === nodeId ? runController : startGenerationRequest(videoId, nodeId, nodeId, runController);
-                    try {
+                    // Own AbortController per child clip — sharing the origin controller used to abort
+                    // an in-flight first video when the user queued the next generate from the same source.
+                    const controller = videoId === nodeId ? runController : startGenerationRequest(videoId, nodeId, nodeId);
+                    const runNativeVideoJob = async () => {
+                        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
                         const videoResult = await requestVideoGeneration(generationConfig, effectivePrompt, referenceImages, {
                             signal: controller.signal,
                             referenceAudios: generationContext.referenceAudios || [],
                         });
+                        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
                         const video = await storeGeneratedVideo(videoResult);
                         const videoSize = fitNodeSize(video.width || spec.width, video.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
                         const meta = videoMetadata(video);
@@ -4748,6 +4761,14 @@ function AtelierCanvasPage() {
                         );
                         if (videoResult.extraImages?.length) {
                             void spawnExtraImageNodes(videoId, videoResult.extraImages, { prompt: effectivePrompt, model: generationConfig.model });
+                        }
+                    };
+                    try {
+                        // Native H3 / ComfyUI: FIFO — next /prompt only after prior clip is on the canvas.
+                        if (isNativeComfyVideoConfig(generationConfig)) {
+                            await enqueueNativeComfyVideoJob(runNativeVideoJob);
+                        } else {
+                            await runNativeVideoJob();
                         }
                     } catch (error) {
                         if (!isGenerationCanceled(error)) {
@@ -4927,7 +4948,7 @@ function AtelierCanvasPage() {
                 setRunningNodeId(null);
             }
         },
-        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest, t],
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNativeComfyVideoConfig, message, openConfigDialog, startGenerationRequest, t],
     );
     useEffect(() => {
         generateNodeRef.current = handleGenerateNode;
@@ -5045,60 +5066,69 @@ function AtelierCanvasPage() {
                     return;
                 }
                 if (node.type === CanvasNodeType.Video) {
-                    const videoResult = await requestVideoGeneration(generationConfig, prompt, retryImages, {
-                        signal: controller.signal,
-                        referenceAudios: context?.referenceAudios || [],
-                    });
-                    const video = await storeGeneratedVideo(videoResult);
-                    const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
-                    const meta = videoMetadata(video);
-                    const retryVideo: CanvasNodeImage = {
-                        id: imageId || node.metadata?.primaryImageId || nanoid(),
-                        status: NODE_STATUS_SUCCESS,
-                        content: meta.content || "",
-                        storageKey: meta.storageKey || "",
-                        naturalWidth: meta.naturalWidth || 0,
-                        naturalHeight: meta.naturalHeight || 0,
-                        bytes: meta.bytes || 0,
-                        mimeType: meta.mimeType || "video/mp4",
+                    const runRetryVideoJob = async () => {
+                        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+                        const videoResult = await requestVideoGeneration(generationConfig, prompt, retryImages, {
+                            signal: controller.signal,
+                            referenceAudios: context?.referenceAudios || [],
+                        });
+                        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+                        const video = await storeGeneratedVideo(videoResult);
+                        const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                        const meta = videoMetadata(video);
+                        const retryVideo: CanvasNodeImage = {
+                            id: imageId || node.metadata?.primaryImageId || nanoid(),
+                            status: NODE_STATUS_SUCCESS,
+                            content: meta.content || "",
+                            storageKey: meta.storageKey || "",
+                            naturalWidth: meta.naturalWidth || 0,
+                            naturalHeight: meta.naturalHeight || 0,
+                            bytes: meta.bytes || 0,
+                            mimeType: meta.mimeType || "video/mp4",
+                        };
+                        setNodes((prev) =>
+                            prev.map((item) => {
+                                if (item.id !== node.id) return item;
+                                const makePrimary = !imageId || !item.metadata?.content || item.metadata?.primaryImageId === retryVideo.id;
+                                const images = item.metadata?.images?.some((current) => current.id === retryVideo.id)
+                                    ? item.metadata.images.map((current) => (current.id === retryVideo.id ? retryVideo : current))
+                                    : item.metadata?.images?.length
+                                      ? [...item.metadata.images, retryVideo]
+                                      : [retryVideo];
+                                return {
+                                    ...item,
+                                    ...(makePrimary
+                                        ? {
+                                              width: videoSize.width,
+                                              height: videoSize.height,
+                                              position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 },
+                                          }
+                                        : {}),
+                                    metadata: {
+                                        ...item.metadata,
+                                        ...(makePrimary ? meta : { status: NODE_STATUS_SUCCESS }),
+                                        prompt,
+                                        model: generationConfig.model,
+                                        size: generationConfig.size,
+                                        seconds: generationConfig.videoSeconds,
+                                        vquality: generationConfig.vquality,
+                                        generateAudio: generationConfig.videoGenerateAudio,
+                                        watermark: generationConfig.videoWatermark,
+                                        images,
+                                        primaryImageId: makePrimary ? retryVideo.id : item.metadata?.primaryImageId,
+                                        errorDetails: undefined,
+                                    },
+                                };
+                            }),
+                        );
+                        if (videoResult.extraImages?.length) {
+                            void spawnExtraImageNodes(node.id, videoResult.extraImages, { prompt, model: generationConfig.model });
+                        }
                     };
-                    setNodes((prev) =>
-                        prev.map((item) => {
-                            if (item.id !== node.id) return item;
-                            const makePrimary = !imageId || !item.metadata?.content || item.metadata?.primaryImageId === retryVideo.id;
-                            const images = item.metadata?.images?.some((current) => current.id === retryVideo.id)
-                                ? item.metadata.images.map((current) => (current.id === retryVideo.id ? retryVideo : current))
-                                : item.metadata?.images?.length
-                                  ? [...item.metadata.images, retryVideo]
-                                  : [retryVideo];
-                            return {
-                                ...item,
-                                ...(makePrimary
-                                    ? {
-                                          width: videoSize.width,
-                                          height: videoSize.height,
-                                          position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 },
-                                      }
-                                    : {}),
-                                metadata: {
-                                    ...item.metadata,
-                                    ...(makePrimary ? meta : { status: NODE_STATUS_SUCCESS }),
-                                    prompt,
-                                    model: generationConfig.model,
-                                    size: generationConfig.size,
-                                    seconds: generationConfig.videoSeconds,
-                                    vquality: generationConfig.vquality,
-                                    generateAudio: generationConfig.videoGenerateAudio,
-                                    watermark: generationConfig.videoWatermark,
-                                    images,
-                                    primaryImageId: makePrimary ? retryVideo.id : item.metadata?.primaryImageId,
-                                    errorDetails: undefined,
-                                },
-                            };
-                        }),
-                    );
-                    if (videoResult.extraImages?.length) {
-                        void spawnExtraImageNodes(node.id, videoResult.extraImages, { prompt, model: generationConfig.model });
+                    if (isNativeComfyVideoConfig(generationConfig)) {
+                        await enqueueNativeComfyVideoJob(runRetryVideoJob);
+                    } else {
+                        await runRetryVideoJob();
                     }
                     return;
                 }
@@ -5244,7 +5274,7 @@ function AtelierCanvasPage() {
                 setRunningNodeId(null);
             }
         },
-        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest, t],
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNativeComfyVideoConfig, message, openConfigDialog, startGenerationRequest, t],
     );
 
     const deleteBatchImage = useCallback((nodeId: string, imageId: string | string[]) => {
