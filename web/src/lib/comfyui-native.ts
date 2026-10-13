@@ -1441,11 +1441,13 @@ function nextComfyNodeId(workflow: ComfyWorkflow, prefix: string) {
  * DualClock U24/V927 authors `audio_mode=native` with no `ref_audios.*` slots. When the canvas
  * supplies audio we still inject; UI/family default is `lock_source` (keep source track /
  * final_audio). Optional `audioMode=reference_only` uses the clip as timbre/rhythm only so the
- * model can synthesize speech.
+ * model can synthesize speech from the prompt.
  *
- * Across DualClock + Path A: `final_audio` is only set for `lock_source`. Under `reference_only`,
- * muxing the canvas clip as final_audio can wipe synthesized dialogue (no 台词). DualClock also
- * keeps `prompt_primary_audio_ordinal=0` under reference_only so lines stay prompt-driven.
+ * DualClock `reference_only` must:
+ *   - wire `drive_audio` only (do not invent `ref_audios.*` on graphs that never authored them)
+ *   - delete `final_audio` (muxing the canvas clip wipes synthesized 台词)
+ *   - force `prompt_primary_audio_ordinal=0` (台词 stay prompt-driven)
+ * DualClock always honors the canvas `audioMode` — even when the export already has ref slots.
  */
 export function applyComfyMiniMaxDriveAudio(
     workflow: ComfyWorkflow,
@@ -1466,10 +1468,10 @@ export function applyComfyMiniMaxDriveAudio(
     const hasRefAudioSlots = targets.some((node) =>
         Object.keys(node.inputs || {}).some((key) => key.startsWith("ref_audios.")),
     );
-    // DualClock authored without ref slots: family default is lock_source when mode unset.
-    const dualClockNative = isComfyH3TwoPassReferenceWorkflow(next) && !hasRefAudioSlots;
+    const isDualClock = isComfyH3TwoPassReferenceWorkflow(next);
+    // DualClock family default is lock_source when the canvas mode is unset.
     const requestedMode = normalizeComfyH3AudioMode(
-        dualClockNative ? options?.audioMode ?? "lock_source" : options?.audioMode,
+        isDualClock ? options?.audioMode ?? "lock_source" : options?.audioMode,
     );
 
     const existingLoaders = Object.entries(next)
@@ -1499,12 +1501,10 @@ export function applyComfyMiniMaxDriveAudio(
     for (const node of targets) {
         if (!node.inputs || typeof node.inputs !== "object") node.inputs = {};
         node.inputs.drive_audio = [primary, 0];
-        loaderIds.forEach((id, index) => {
-            node.inputs![`ref_audios.ref_audio_${index}`] = [id, 0];
-        });
 
         const mode = String(node.inputs.audio_mode || "");
-        if (dualClockNative) {
+        if (isDualClock) {
+            // Always honor the canvas DualClock mode (reference_only vs lock_source).
             node.inputs.audio_mode = requestedMode;
         } else if (!mode || /^native$/i.test(mode)) {
             // Non-DualClock graphs that already expose the contract: lock when canvas audio exists.
@@ -1513,8 +1513,16 @@ export function applyComfyMiniMaxDriveAudio(
 
         const effectiveMode = String(node.inputs.audio_mode || "");
         const isLockSource = /^lock_source$/i.test(effectiveMode);
+
+        // DualClock reference_only: only drive_audio — inventing ref_audios on a native DualClock
+        // export can pull ASR/台词 off the prompt. Only fill authored ref slots (or lock_source).
+        if (!isDualClock || isLockSource || hasRefAudioSlots) {
+            loaderIds.forEach((id, index) => {
+                node.inputs![`ref_audios.ref_audio_${index}`] = [id, 0];
+            });
+        }
+
         // final_audio is the mux track — only lock_source should wire the canvas clip here.
-        // reference_only: leave synthesized dialogue alone (DualClock + Path A).
         if (isLockSource) {
             node.inputs.final_audio = [primary, 0];
         } else {
@@ -1522,17 +1530,19 @@ export function applyComfyMiniMaxDriveAudio(
         }
 
         node.inputs.add_source_as_reference = true;
-        if (isLockSource) {
+        if (isDualClock && !isLockSource) {
+            // DualClock reference_only: force ordinal 0 so 台词 stay prompt-driven.
+            node.inputs.prompt_primary_audio_ordinal = 0;
+        } else if (isLockSource) {
             if (!node.inputs.prompt_primary_audio_ordinal || node.inputs.prompt_primary_audio_ordinal === 0) {
                 node.inputs.prompt_primary_audio_ordinal = 1;
             }
-        } else if (!dualClockNative) {
+        } else {
             // Path A reference_only: keep/bump ordinal for authored ref_audios slots.
             if (!node.inputs.prompt_primary_audio_ordinal || node.inputs.prompt_primary_audio_ordinal === 0) {
                 node.inputs.prompt_primary_audio_ordinal = 1;
             }
         }
-        // dualClockNative + reference_only: leave prompt_primary_audio_ordinal as authored (0)
     }
     return next;
 }
