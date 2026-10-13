@@ -9,7 +9,7 @@ import { chatSkillsSystemHint, executeChatSkillTool, resolveChatSkillIds, resolv
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
 import { defaultConfig, modelOptionLabel, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
-import { parseComfyApiWorkflow, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
+import { parseComfyApiWorkflow, resolveNativeH3VideoSettingDefaults, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import { enqueueNativeComfyVideoJob } from "@/lib/canvas/native-video-job-queue";
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
 import { uploadMediaFile } from "@/services/file-storage";
@@ -3108,9 +3108,46 @@ function AtelierCanvasPage() {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt } } : node)));
     }, []);
 
-    const handleConfigNodeChange = useCallback((nodeId: string, patch: Partial<CanvasNodeData["metadata"]>) => {
-        setNodes((prev) => prev.map((node) => (node.id === nodeId ? applyNodeConfigPatch(node, patch) : node)));
-    }, []);
+    const handleConfigNodeChange = useCallback(
+        (nodeId: string, patch: Partial<CanvasNodeData["metadata"]>) => {
+            setNodes((prev) =>
+                prev.map((node) => {
+                    if (node.id !== nodeId) return node;
+                    const basePatch = patch || {};
+                    let nextPatch = basePatch;
+                    // Switching video model → snap to that family's default resolution/audio mode.
+                    // Manual vquality / audioMode edits after that stay until the next model switch
+                    // (explicit values in the same patch win over the family default).
+                    if (typeof basePatch.model === "string" && basePatch.model) {
+                        const mode =
+                            node.metadata?.generationMode ||
+                            (node.type === CanvasNodeType.Video
+                                ? "video"
+                                : node.type === CanvasNodeType.Audio
+                                  ? "audio"
+                                  : node.type === CanvasNodeType.Text
+                                    ? "text"
+                                    : "image");
+                        if (mode === "video" || node.type === CanvasNodeType.Video) {
+                            const defaults = resolveNativeH3VideoSettingDefaults(
+                                basePatch.model,
+                                resolveModelScript(effectiveConfig, basePatch.model),
+                            );
+                            nextPatch = {
+                                ...basePatch,
+                                ...(defaults.vquality && basePatch.vquality === undefined ? { vquality: defaults.vquality } : {}),
+                                ...(defaults.videoAudioMode && basePatch.audioMode === undefined
+                                    ? { audioMode: defaults.videoAudioMode }
+                                    : {}),
+                            };
+                        }
+                    }
+                    return applyNodeConfigPatch(node, nextPatch);
+                }),
+            );
+        },
+        [effectiveConfig],
+    );
 
     const downloadNodeImage = useCallback(
         async (node: CanvasNodeData, options?: { textFormat?: TextExportFormat }) => {
