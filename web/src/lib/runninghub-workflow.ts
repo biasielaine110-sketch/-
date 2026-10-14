@@ -2148,14 +2148,11 @@ export function isKrea2PastoralMjWorkflowId(workflowId?: string | null) {
 // (runninghub.cn 2109993221349793794 / runninghub.ai 2109995692252229633).
 // Export: 1-Aiden-KREA2模型提示词优化lora加持工作流 _api.json
 //
-// Why the generic writers break this graph:
-//   - writeRunningHubPrompt scores every easy positive titled "Positive" at 40, so it overwrites
-//     the llama expander templates (89 / 136 / 139) together with the user caption (18) — llama
-//     then expands garbage / empty instructions and the run fails or ignores the canvas prompt;
-//   - EmptyLatentImage width/height are *links* into ResolutionSelector (23); writeRunningHubSize
-//     never produces that node's aspect_ratio label enum, and writeRunningHubTier would also clobber
-//     ImageScaleToTotalPixels (150) megapixels=0.3 (the intentional SeedVR downscale);
-//   - KSampler / llama_cpp_instruct / SeedVR2 bake fixed seeds → identical images.
+// Why the generic writers / published graph break canvas use:
+//   - writeRunningHubPrompt clobbers every easy positive (18/89/136/139);
+//   - EmptyLatentImage size is a link into ResolutionSelector (23);
+//   - the published author stack (llama GGUF + SeedVR2) often stays RUNNING until the canvas
+//     looks stuck; lean Export delivery writes prompt→CLIP, keeps LoRAs, skips llama/SeedVR.
 // Scoped to these two ids only.
 const KREA2_AIDEN_LORA_WORKFLOW_IDS = new Set(["2109993221349793794", "2109995692252229633"]);
 
@@ -2179,13 +2176,16 @@ export function isKrea2AidenLoraWorkflowId(workflowId?: string | null) {
 }
 
 /**
- * Harden the Export graph for RunningHub comfy/run (ACL escape path only).
+ * Canvas delivery graph for Aiden on RunningHub.
  *
- * Published create+nodeInfoList keeps the author's SeedVR polish; the full-graph path must not —
- * SeedVR2 + flash_attn_2 / PreviewImage slot 1 / rgthree comparer / 忽略多组孤海 commonly fail
- * validation or OOM on API workers. Deliver VAEDecode → SaveImage instead, and drop dead nodes.
+ * The published author graph runs llama (Qwen 9B GGUF) + SeedVR2 7B after Krea2 — that stack often
+ * stays RUNNING for a long time (or never surfaces SaveImage files), so the canvas spins with no
+ * image. For these two workflow ids we ship a lean graph instead:
+ *   - user prompt → CLIPTextEncode (#7) directly (skip llama expander);
+ *   - keep UNET + LoRAs + ResolutionSelector + KSampler;
+ *   - SaveImage ← VAEDecode (skip SeedVR / Preview / rgthree / 忽略多组孤海).
  */
-function pruneKrea2AidenLoraGraph(workflow: ComfyWorkflow) {
+function pruneKrea2AidenLoraGraph(workflow: ComfyWorkflow, prompt: string) {
     const decode =
         workflow["123"] || findComfyNode(workflow, (node) => /^VAEDecode$/i.test(String(node.class_type || "")) && "samples" in (node.inputs || {}));
     const decodeId =
@@ -2194,6 +2194,12 @@ function pruneKrea2AidenLoraGraph(workflow: ComfyWorkflow) {
         workflow["118"] || findComfyNode(workflow, (node) => /^SaveImage$/i.test(String(node.class_type || "")) && "images" in (node.inputs || {}));
     if (save?.inputs && decodeId) save.inputs.images = [decodeId, 0];
 
+    // Bypass llama → showAnything → CLIP: write the canvas caption straight onto CLIPTextEncode.
+    const clip =
+        workflow["7"] ||
+        findComfyNode(workflow, (node) => /^CLIPTextEncode$/i.test(String(node.class_type || "")) && "text" in (node.inputs || {}));
+    if (clip?.inputs && prompt.trim()) clip.inputs.text = prompt.trim();
+
     for (const [id, node] of Object.entries(workflow)) {
         const type = String(node?.class_type || "");
         if (/忽略多组|孤海/.test(type)) delete workflow[id];
@@ -2201,23 +2207,9 @@ function pruneKrea2AidenLoraGraph(workflow: ComfyWorkflow) {
         else if (/SeedVR2/i.test(type)) delete workflow[id];
         else if (/ImageScaleToTotalPixels/i.test(type)) delete workflow[id];
         else if (/^PreviewImage$/i.test(type)) delete workflow[id];
-    }
-
-    // Dead expander drafts (#89 / #136) — keep live #18 (user) and #139 (active template).
-    const consumedBefore = comfyConsumedIds(workflow);
-    for (const [id, node] of Object.entries(workflow)) {
-        if (id === "18" || id === "139") continue;
-        if (!/easy\s*positive/i.test(String(node?.class_type || ""))) continue;
-        if (typeof node.inputs?.positive !== "string") continue;
-        if (!/You are an expert prompt/i.test(String(node.inputs.positive))) continue;
-        if (consumedBefore.has(id)) continue;
-        delete workflow[id];
-    }
-
-    // llama on API workers: prefer force_offload so Qwen GGUF does not wedge VRAM before KSampler.
-    for (const node of Object.values(workflow)) {
-        if (!/llama_cpp_instruct/i.test(String(node?.class_type || "")) || !node.inputs) continue;
-        if ("force_offload" in node.inputs) node.inputs.force_offload = true;
+        else if (/llama_cpp/i.test(type)) delete workflow[id];
+        else if (/easy\s*showAnything/i.test(type)) delete workflow[id];
+        else if (/easy\s*positive/i.test(type)) delete workflow[id];
     }
 }
 
@@ -2231,24 +2223,8 @@ function applyKrea2AidenLoraSettings(
 ): { workflow: ComfyWorkflow } {
     const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
 
-    // User caption → easy positive (18) only — wired as llama_cpp_instruct_adv.system_prompt.
-    // Never touch 89 / 136 / 139 (expander instruction templates) or CLIPTextEncode (7) (linked
-    // from llama output via showAnything 11).
-    if (prompt.trim()) {
-        const promptNode =
-            next["18"] ||
-            findComfyNode(
-                next,
-                (node) =>
-                    /easy\s*positive/i.test(String(node.class_type || "")) &&
-                    typeof node.inputs?.positive === "string" &&
-                    !/You are an expert prompt/i.test(String(node.inputs.positive)),
-            );
-        if (promptNode?.inputs && typeof promptNode.inputs.positive === "string") promptNode.inputs.positive = prompt;
-    }
-
-    // Canvas size → ResolutionSelector (23). Leave ImageScaleToTotalPixels (150) at 0.3 MP —
-    // that node only downscales before SeedVR2 and is not the canvas resolution knob.
+    // Canvas size → ResolutionSelector (23). pruneKrea2AidenLoraGraph drops SeedVR; this selector
+    // is the only size knob that remains on the lean delivery graph.
     const selector =
         next["23"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
     if (selector?.inputs) {
@@ -2269,15 +2245,13 @@ function applyKrea2AidenLoraSettings(
         }
     }
 
-    // Fixed seeds → identical images; randomize KSampler / llama / SeedVR2 per run.
+    // Randomize KSampler seed before prune removes the llama / SeedVR nodes.
     for (const node of Object.values(next)) {
         const type = String(node.class_type || "");
         if (/KSampler/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
-        else if (/llama_cpp_instruct/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
-        else if (/SeedVR2VideoUpscaler/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
     }
 
-    pruneKrea2AidenLoraGraph(next);
+    pruneKrea2AidenLoraGraph(next, prompt);
     return { workflow: next };
 }
 
@@ -3088,7 +3062,9 @@ async function pollTaskOutputs(args: { origin: string; apiKey: string; taskId: s
                 // Task finished server-side but outputs has not surfaced the files yet —
                 // grace-limit the remaining wait instead of burning the full timeout.
                 completedRounds += 1;
-                if (completedRounds > 10) break;
+                if (completedRounds > 10) {
+                    throw new Error(`${apiText("runningHubNoImage")} (taskId: ${args.taskId})`);
+                }
             }
             await sleep(POLL_INTERVAL_MS, args.signal);
             continue;
@@ -3100,6 +3076,14 @@ async function pollTaskOutputs(args: { origin: string; apiKey: string; taskId: s
             const media = collectResultMedia(Array.isArray(record?.data) ? record.data : asRecord(record?.data)?.results);
             if (media.images.length || media.videos.length) {
                 return { taskId: args.taskId, status: "SUCCESS", images: media.images, videos: media.videos, errorMessage: "" };
+            }
+            // SUCCESS / code 0 with an empty file list used to spin until the 20-minute timeout.
+            const statusInfo = await fetchTaskStatus({ origin: args.origin, token, taskId: args.taskId, apiKey: args.apiKey, signal: args.signal }).catch(() => null);
+            if (statusInfo && statusInfo.status && isDoneStatus(statusInfo.status)) {
+                completedRounds += 1;
+                if (completedRounds > 6) {
+                    throw new Error(`${apiText("runningHubNoImage")} (taskId: ${args.taskId})`);
+                }
             }
         }
         if (code !== null && code !== 0) {
@@ -3285,27 +3269,23 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     let task: RunningHubTaskView;
     try {
-        // Aiden KREA2: prefer published workflowId + nodeInfoList so RH uses its staged models /
-        // SeedVR / llama. Full-graph comfy/run is only the ACL escape (pruned, no SeedVR).
+        // Aiden KREA2: always submit the lean Export graph (CLIP+LoRA, no llama/SeedVR). The
+        // published create+nodeInfoList path keeps the author's heavy stack and leaves the canvas
+        // spinning for a long time with no image — do not prefer it.
         if (isKrea2AidenLoraWorkflow(workflowId) && repairedGraph) {
             try {
-                task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, undefined, request.signal);
-            } catch (publishError: unknown) {
-                if (axios.isCancel(publishError) || (publishError instanceof DOMException && publishError.name === "AbortError")) throw publishError;
-                const publishMessage = errorText(publishError);
-                if (isAuthMessage(publishMessage)) throw explainRunningHubError(publishError, workflowId);
-                if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(publishMessage)) {
-                    throw publishError;
+                task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal);
+            } catch (runError: unknown) {
+                if (axios.isCancel(runError) || (runError instanceof DOMException && runError.name === "AbortError")) throw runError;
+                const runMessage = errorText(runError);
+                if (isAuthMessage(runMessage)) throw explainRunningHubError(runError, workflowId);
+                if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(runMessage)) {
+                    throw runError;
                 }
                 console.warn(
-                    `[runninghub] ${workflowId}: Aiden create+nodeInfo failed (${publishMessage.slice(0, 160)}), trying pruned Export via comfy/run`,
+                    `[runninghub] ${workflowId}: Aiden comfy/run failed (${runMessage.slice(0, 160)}), retrying lean graph via create+workflow`,
                 );
-                task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal).catch(async (runError: unknown) => {
-                    console.warn(
-                        `[runninghub] ${workflowId}: Aiden comfy/run failed (${errorText(runError).slice(0, 160)}), retrying create+workflow`,
-                    );
-                    return submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
-                });
+                task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
             }
         } else if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             // SelfLift / Qwen+Klein / pastoral: shared workflowId often denies create/getJsonApiFormat.
