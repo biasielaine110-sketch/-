@@ -3269,24 +3269,11 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     let task: RunningHubTaskView;
     try {
-        // Aiden KREA2: always submit the lean Export graph (CLIP+LoRA, no llama/SeedVR). The
-        // published create+nodeInfoList path keeps the author's heavy stack and leaves the canvas
-        // spinning for a long time with no image — do not prefer it.
+        // Aiden KREA2: submit the lean Export graph via `/task/openapi/create` + `workflow`
+        // (docs: workflow overrides workflowId). Do NOT call `/task/openapi/comfy/run` — on
+        // runninghub.cn that route returns NOT_FOUND and only wastes a round-trip before fallback.
         if (isKrea2AidenLoraWorkflow(workflowId) && repairedGraph) {
-            try {
-                task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal);
-            } catch (runError: unknown) {
-                if (axios.isCancel(runError) || (runError instanceof DOMException && runError.name === "AbortError")) throw runError;
-                const runMessage = errorText(runError);
-                if (isAuthMessage(runMessage)) throw explainRunningHubError(runError, workflowId);
-                if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(runMessage)) {
-                    throw runError;
-                }
-                console.warn(
-                    `[runninghub] ${workflowId}: Aiden comfy/run failed (${runMessage.slice(0, 160)}), retrying lean graph via create+workflow`,
-                );
-                task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
-            }
+            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
         } else if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             // SelfLift / Qwen+Klein / pastoral: shared workflowId often denies create/getJsonApiFormat.
             // Submit the patched API graph through `/task/openapi/comfy/run`.
@@ -3306,7 +3293,7 @@ async function runRunningHubWorkflowWithKey(args: {
         if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message)) {
             throw error;
         }
-        // Aiden already exhausted publish → comfy/run → create+workflow above; never fall into webapp.
+        // Aiden already submitted lean create+workflow above; never fall into webapp writers.
         if (isKrea2AidenLoraWorkflow(workflowId)) {
             throw explainRunningHubError(error, workflowId);
         }
