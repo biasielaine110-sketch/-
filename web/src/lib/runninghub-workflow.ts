@@ -3113,24 +3113,69 @@ function writeRunningHubSeconds(workflow: ComfyWorkflow, seconds: string) {
 // already within budget stay byte-identical; oversized ones are downscaled/re-encoded.
 const RUNNINGHUB_UPLOAD_BYTE_BUDGET = 2_400_000;
 const RUNNINGHUB_UPLOAD_MAX_EDGE = 1536;
+/** Singularity multi-ref: tighter per-image budget so Pages proxy fallback (if any) stays under CF limits. */
+const SINGULARITY_UPLOAD_BYTE_BUDGET = 650_000;
+const SINGULARITY_UPLOAD_MAX_EDGE = 1280;
 
-async function shrinkOversizedReferenceDataUrl(dataUrl: string) {
-    if (getDataUrlByteSize(dataUrl) <= RUNNINGHUB_UPLOAD_BYTE_BUDGET) return dataUrl;
+async function shrinkOversizedReferenceDataUrl(dataUrl: string, maxBytes = RUNNINGHUB_UPLOAD_BYTE_BUDGET, maxEdge = RUNNINGHUB_UPLOAD_MAX_EDGE) {
+    if (getDataUrlByteSize(dataUrl) <= maxBytes) return dataUrl;
     try {
-        const compressed = await compressReferenceDataUrl(dataUrl, 1, {
-            maxEdge: RUNNINGHUB_UPLOAD_MAX_EDGE,
-            maxBytes: RUNNINGHUB_UPLOAD_BYTE_BUDGET,
-        });
+        const compressed = await compressReferenceDataUrl(dataUrl, 1, { maxEdge, maxBytes });
         return compressed.startsWith("data:") && getDataUrlByteSize(compressed) < getDataUrlByteSize(dataUrl) ? compressed : dataUrl;
     } catch {
         return dataUrl;
     }
 }
 
-async function uploadImage(origin: string, apiKey: string, source: string, fileName: string, signal?: AbortSignal) {
+/**
+ * Singularity (and optionally others): prefer browser-direct to RunningHub.
+ * Cloudflare Pages `/api/proxy` often closes large multipart / full-graph POSTs to
+ * `www.runninghub.ai` with `net::ERR_CONNECTION_CLOSED`; `.cn` already bypasses the proxy via
+ * DIRECT_CORS_HOSTS. Direct-first, then one proxy fallback on transport failures only.
+ */
+async function postRunningHubWithFallback(
+    origin: string,
+    path: string,
+    data: unknown,
+    options: { headers?: Record<string, string>; signal?: AbortSignal; timeout?: number; preferDirect?: boolean },
+) {
+    const direct = `${String(origin || "").replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+    const proxied = proxyApiUrl(direct);
+    const urls = options.preferDirect ? Array.from(new Set([direct, proxied])) : [proxied];
+    let lastError: unknown;
+    for (let index = 0; index < urls.length; index += 1) {
+        const url = urls[index];
+        try {
+            return await axios.post(url, data, {
+                headers: options.headers,
+                signal: options.signal,
+                timeout: options.timeout,
+            });
+        } catch (error) {
+            lastError = error;
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+            // Auth / validation from RH — do not hop transports.
+            if (axios.isAxiosError(error) && error.response && error.response.status >= 400 && error.response.status < 500) throw error;
+            if (index >= urls.length - 1) break;
+            console.warn(
+                `[runninghub] ${path} via ${url.includes("/api/proxy") || url.includes("/api-proxy") ? "proxy" : "direct"} failed; retrying alternate transport`,
+            );
+        }
+    }
+    throw lastError;
+}
+
+async function uploadImage(
+    origin: string,
+    apiKey: string,
+    source: string,
+    fileName: string,
+    signal?: AbortSignal,
+    options?: { preferDirect?: boolean; maxBytes?: number; maxEdge?: number },
+) {
     let file: File;
     if (source.startsWith("data:")) {
-        const shrunk = await shrinkOversizedReferenceDataUrl(source);
+        const shrunk = await shrinkOversizedReferenceDataUrl(source, options?.maxBytes, options?.maxEdge);
         file = dataUrlToFile({ id: fileName, name: fileName, dataUrl: shrunk, type: "image/png" });
     } else if (/^https?:\/\//i.test(source)) {
         return source;
@@ -3141,9 +3186,10 @@ async function uploadImage(origin: string, apiKey: string, source: string, fileN
     body.append("apiKey", apiKey.replace(/^Bearer\s+/i, "").trim());
     body.append("fileType", "input");
     body.append("file", file);
-    const response = await axios.post(proxyApiUrl(`${origin}/task/openapi/upload`), body, {
+    const response = await postRunningHubWithFallback(origin, "/task/openapi/upload", body, {
         signal,
         timeout: 120_000,
+        preferDirect: options?.preferDirect,
     });
     assertOk(response.data, apiText("requestFailed"));
     const data = asRecord(asRecord(response.data)?.data) || asRecord(response.data);
@@ -3152,7 +3198,15 @@ async function uploadImage(origin: string, apiKey: string, source: string, fileN
     return name;
 }
 
-async function submitWorkflowTask(origin: string, apiKey: string, workflowId: string, nodeInfoList: RunningHubNodeInfo[], graph?: ComfyWorkflow, signal?: AbortSignal) {
+async function submitWorkflowTask(
+    origin: string,
+    apiKey: string,
+    workflowId: string,
+    nodeInfoList: RunningHubNodeInfo[],
+    graph?: ComfyWorkflow,
+    signal?: AbortSignal,
+    preferDirect = false,
+) {
     const token = apiKey.replace(/^Bearer\s+/i, "").trim();
     const body: Record<string, unknown> = { apiKey: token, workflowId, addMetadata: true };
     if (nodeInfoList.length) body.nodeInfoList = nodeInfoList;
@@ -3161,10 +3215,11 @@ async function submitWorkflowTask(origin: string, apiKey: string, workflowId: st
     // needs in order to reach the sampler. workflowId stays in the body, so a backend that ignores
     // the field simply falls back to the previous behaviour rather than failing.
     if (graph) body.workflow = JSON.stringify(graph);
-    const response = await axios.post(proxyApiUrl(`${origin}/task/openapi/create`), body, {
+    const response = await postRunningHubWithFallback(origin, "/task/openapi/create", body, {
         headers: bearer(apiKey),
         signal,
         timeout: 60_000,
+        preferDirect,
     });
     assertOk(response.data, apiText("runningHubNoTaskId"));
     const problem = readPromptProblems(response.data);
@@ -3485,10 +3540,19 @@ async function runRunningHubWorkflowWithKey(args: {
     if (!workflow && isMinimaxH3SingularityWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubH3SingularityScriptRequired", { id: workflowId }));
     }
+    const singularity = isMinimaxH3SingularityWorkflow(workflowId);
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     const uploaded: string[] = [];
+    const singularityUpload =
+        singularity && refs.length
+            ? {
+                  preferDirect: true,
+                  maxBytes: Math.min(SINGULARITY_UPLOAD_BYTE_BUDGET, Math.floor(2_000_000 / Math.max(1, refs.length))),
+                  maxEdge: SINGULARITY_UPLOAD_MAX_EDGE,
+              }
+            : undefined;
     for (let index = 0; index < refs.length; index += 1) {
-        uploaded.push(await uploadImage(origin, apiKey, refs[index], `ref-${index + 1}.png`, request.signal));
+        uploaded.push(await uploadImage(origin, apiKey, refs[index], `ref-${index + 1}.png`, request.signal, singularityUpload));
     }
     const pixels = resolveCanvasPixels(request.size || "", request.media || "image");
     const aspect = canvasAspect(request.size || "");
@@ -3512,8 +3576,10 @@ async function runRunningHubWorkflowWithKey(args: {
         // Aiden KREA2 / Singularity: submit the Export graph via `/task/openapi/create` + `workflow`
         // (docs: workflow overrides workflowId). Do NOT call `/task/openapi/comfy/run` — on
         // runninghub.cn that route returns NOT_FOUND and only wastes a round-trip before fallback.
-        if ((isKrea2AidenLoraWorkflow(workflowId) || isMinimaxH3SingularityWorkflow(workflowId)) && repairedGraph) {
-            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
+        // Singularity also prefers browser-direct create: full-graph JSON through Pages proxy often
+        // hits the same ERR_CONNECTION_CLOSED as the multi-ref upload.
+        if ((isKrea2AidenLoraWorkflow(workflowId) || singularity) && repairedGraph) {
+            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, singularity);
         } else if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             // SelfLift / Qwen+Klein / pastoral: shared workflowId often denies create/getJsonApiFormat.
             // Submit the patched API graph through `/task/openapi/comfy/run`.
