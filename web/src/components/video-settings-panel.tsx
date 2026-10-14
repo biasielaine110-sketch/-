@@ -15,6 +15,7 @@ import {
 } from "@/lib/autodl-h3-comfy";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { isRelayMiniMaxH3Video } from "@/services/api/video";
 import {
     COMFY_H3_STABLE_SEED,
     COMFY_H3_STABLE_SEED_B,
@@ -31,6 +32,13 @@ import {
 const resolutionOptions = [
     { value: "720", label: "720p" },
     { value: "480", label: "480p" },
+];
+
+/** MiniMax-H3 OpenAI relays (wb2api / miora-minimax-h3…): 768P vs 2K delivery tiers. */
+const relayH3ResolutionOptions = [
+    { value: "720", label: "720p" },
+    { value: "1080", label: "1080p" },
+    { value: "2k", label: "2K" },
 ];
 
 /** U24 / H3-video two-pass: 900p mid tier between 720 and full 1080 (VRAM-friendly). */
@@ -183,10 +191,16 @@ type VideoSettingsPanelProps = {
 export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
     const model = config.model || config.videoModel || "";
-    const h3Comfy = isAutodlH3ComfyVideoModel(model, resolveModelRequestConfig(config, model).baseUrl);
-    const nativeComfy = shouldUseNativeComfyUi(resolveModelRequestConfig(config, model).baseUrl, model, resolveModelScript(config, model));
+    const requestConfig = resolveModelRequestConfig(config, model);
+    const h3Comfy = isAutodlH3ComfyVideoModel(model, requestConfig.baseUrl);
+    const relayH3 = !h3Comfy && isRelayMiniMaxH3Video(requestConfig, model);
+    const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
-    const qualityChoices = useMemo(() => (nativeComfy && !h3Comfy ? resolutionOptionsForFamily(nativeFamily) : resolutionOptions), [nativeComfy, h3Comfy, nativeFamily]);
+    const qualityChoices = useMemo(() => {
+        if (nativeComfy && !h3Comfy) return resolutionOptionsForFamily(nativeFamily);
+        if (relayH3) return relayH3ResolutionOptions;
+        return resolutionOptions;
+    }, [nativeComfy, h3Comfy, nativeFamily, relayH3]);
     const aspectChoices = useMemo(() => (nativeComfy && !h3Comfy ? sizeOptionsForFamily(nativeFamily) : sizeOptions), [nativeComfy, h3Comfy, nativeFamily]);
     const showSeedControls = useMemo(
         () => nativeComfy && !h3Comfy && supportsVideoSeedControls(config, nativeFamily),

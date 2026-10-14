@@ -999,10 +999,14 @@ function isMetasoH3Video(config: AiConfig, _model: string) {
     return /metaso\.cn/i.test(config.baseUrl.trim());
 }
 
-function isRelayMiniMaxH3Video(config: AiConfig, model: string) {
+/**
+ * Non-Metaso / non-AutoDL MiniMax-H3 OpenAI relays (e.g. wb2api…/v1 + cn:miora-minimax-h3).
+ * Exported so the video settings panel can offer 720 / 1080 / 2K for these models.
+ */
+export function isRelayMiniMaxH3Video(config: AiConfig, model: string) {
     if (/autodl\.art|metaso\.cn/i.test(config.baseUrl.trim())) return false;
     const name = modelOptionName(model).toLowerCase();
-    return /minimax[-_]?h3|(?:^|[-_])h3(?:$|[-_])|1ren[-_]?minimax/i.test(name);
+    return /minimax[-_]?h3|(?:^|[-_])h3(?:$|[-_])|1ren[-_]?minimax|miora[-_]?minimax/i.test(name);
 }
 
 /** Metaso examples use 4 / 8 / 12 seconds. */
