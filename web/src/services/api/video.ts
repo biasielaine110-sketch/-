@@ -18,7 +18,7 @@ import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveM
 import { resolveApiTransport, proxyApiUrl } from "@/lib/api-proxy";
 import { uploadTemporaryPublicImage } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
-import { pickRunningHubWorkflowId, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
+import { isMinimaxH3SingularityWorkflowId, pickRunningHubWorkflowId, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio } from "@/types/media";
@@ -49,6 +49,14 @@ function aiHeaders(config: AiConfig, contentType?: string) {
 
 /** Vercel serverless functions reject request bodies over ~4.5MB with HTTP 413. */
 const PROXY_BODY_SAFE_BYTES = 3_400_000;
+
+/**
+ * 视频任务轮询上限。原先为 120 次 × 2500ms（≈6 分钟），但长时长任务会超过它：
+ * 实测 10s 片约 4 分 40 秒（能过），15s 片约 8 分 20 秒（会被误判超时）。
+ * 360 次 × 2500ms ≈ 15 分钟（含轮询开销约 19 分钟），给长时长留足余量。
+ */
+const VIDEO_POLL_MAX_ATTEMPTS = 360;
+const VIDEO_POLL_INTERVAL_MS = 2500;
 
 function estimateBodyBytes(body: unknown): number {
     if (typeof body === "string") return body.length;
@@ -84,13 +92,13 @@ function mapOversizeUploadError(error: unknown, bypassed: boolean): unknown {
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
     const task = await createVideoGenerationTask(config, prompt, references, options);
-    for (let attempt = 0; attempt < 120; attempt += 1) {
+    for (let attempt = 0; attempt < VIDEO_POLL_MAX_ATTEMPTS; attempt += 1) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const state = await pollVideoGenerationTask(config, task, options);
         if (state.status === "completed") return state.result;
         if (state.status === "failed") throw new Error(state.error);
-        if (attempt === 119) throw new Error(apiText("videoTimeout", { provider: "" }));
-        await delay(2500, options?.signal);
+        if (attempt === VIDEO_POLL_MAX_ATTEMPTS - 1) throw new Error(apiText("videoTimeout", { provider: "" }));
+        await delay(VIDEO_POLL_INTERVAL_MS, options?.signal);
     }
     throw new Error(apiText("videoTimeout", { provider: "" }));
 }
@@ -230,8 +238,8 @@ async function createPluginVideoTask(config: AiConfig, model: string, script: st
 
 /**
  * RunningHub official workflow API. Model name = workflowId.
- * SelfLift 双采(简易版) (`2108476378258038785`) is the exception: paste Export Workflow (API) JSON
- * into the model script when the shared workflow denies API access.
+ * SelfLift / Singularity and similar shared graphs: paste Export Workflow (API) JSON into the model
+ * script when the shared workflow denies API access.
  */
 async function createRunningHubVideoTask(
     config: AiConfig,
@@ -261,6 +269,8 @@ async function createRunningHubVideoTask(
         prompt,
         size: config.size,
         seconds: config.videoSeconds,
+        // Singularity only: canvas vquality → draft ResolutionSelector via delivered/scale² math.
+        ...(isMinimaxH3SingularityWorkflowId(model) ? { resolution: config.vquality } : {}),
         media: "video",
         referenceDataUrls: refs.filter(Boolean),
         signal: options?.signal,

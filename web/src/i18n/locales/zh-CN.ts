@@ -323,6 +323,7 @@ export default {
         runningHubH3RefTopScriptRequired: "RunningHub 工作流 {{id}}（MiniMax H3 Ref 顶级多参）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（如 Minimax H3 Ref 顶级多参，不偏色，不油光）粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
         runningHubKrea2PastoralMjScriptRequired: "RunningHub 工作流 {{id}}（Krea2 田园风格 MJ 感）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（如 krea2田园风格MJ感工作流）粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
         runningHubKrea2AidenLoraScriptRequired: "RunningHub 工作流 {{id}}（Aiden KREA2 提示词优化+LoRA）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（如 1-Aiden-KREA2模型提示词优化lora加持工作流）粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
+        runningHubH3SingularityScriptRequired: "RunningHub 工作流 {{id}}（AIGC特异点 Singularity 双采放大）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（如 AIGC特异点-Minimax-H3多参考双采放大生成视频（Singularity））粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
         runningHubWorkflowNotRun: "这个工作流还不能用接口调用。请先在 RunningHub 网站上打开它，保存并成功运行一次。",
         runningHubNoTaskId: "RunningHub 未返回 taskId",
         runningHubTaskFailed: "RunningHub 任务失败",

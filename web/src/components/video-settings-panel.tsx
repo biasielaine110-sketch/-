@@ -15,6 +15,7 @@ import {
 } from "@/lib/autodl-h3-comfy";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { isMinimaxH3SingularityWorkflowId } from "@/lib/runninghub-workflow";
 import { isRelayMiniMaxH3Video } from "@/services/api/video";
 import {
     COMFY_H3_STABLE_SEED,
@@ -194,13 +195,15 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const requestConfig = resolveModelRequestConfig(config, model);
     const h3Comfy = isAutodlH3ComfyVideoModel(model, requestConfig.baseUrl);
     const relayH3 = !h3Comfy && isRelayMiniMaxH3Video(requestConfig, model);
+    const singularityRh = !h3Comfy && isMinimaxH3SingularityWorkflowId(model);
     const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
     const qualityChoices = useMemo(() => {
         if (nativeComfy && !h3Comfy) return resolutionOptionsForFamily(nativeFamily);
+        if (singularityRh) return twoPassResolutionOptions;
         if (relayH3) return relayH3ResolutionOptions;
         return resolutionOptions;
-    }, [nativeComfy, h3Comfy, nativeFamily, relayH3]);
+    }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, relayH3]);
     const aspectChoices = useMemo(() => (nativeComfy && !h3Comfy ? sizeOptionsForFamily(nativeFamily) : sizeOptions), [nativeComfy, h3Comfy, nativeFamily]);
     const showSeedControls = useMemo(
         () => nativeComfy && !h3Comfy && supportsVideoSeedControls(config, nativeFamily),

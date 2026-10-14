@@ -8,7 +8,13 @@ import axios from "axios";
 
 import i18n from "@/i18n";
 import { proxyApiUrl } from "@/lib/api-proxy";
-import { applyComfyPrompt, parseComfyApiWorkflow, type ComfyNode, type ComfyWorkflow } from "@/lib/comfyui-native";
+import {
+    applyComfyPrompt,
+    parseComfyApiWorkflow,
+    repairSingularityLatentUpscaler,
+    type ComfyNode,
+    type ComfyWorkflow,
+} from "@/lib/comfyui-native";
 import { compressReferenceDataUrl, dataUrlToFile, getDataUrlByteSize } from "@/lib/image-utils";
 
 type RequestOptions = { signal?: AbortSignal };
@@ -260,6 +266,9 @@ function explainRunningHubError(error: unknown, workflowId: string): Error {
     }
     if (isWorkflowPermissionMessage(message) && isKrea2AidenLoraWorkflow(workflowId)) {
         return new Error(i18n.t("apiErrors.runningHubKrea2AidenLoraScriptRequired", { id: workflowId }));
+    }
+    if (isWorkflowPermissionMessage(message) && isMinimaxH3SingularityWorkflow(workflowId)) {
+        return new Error(i18n.t("apiErrors.runningHubH3SingularityScriptRequired", { id: workflowId }));
     }
     if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) return new Error(apiText("runningHubNoBalance"));
     if (isUnknownServerError(message)) return new Error(apiText("runningHubUnknownError"));
@@ -2087,6 +2096,224 @@ function applyMinimaxH3RefTopSettings(
     return { workflow: next, structuralRepair: true };
 }
 
+// AIGC特异点 MiniMax-H3 多参考双采放大（Singularity）
+// runninghub.ai 2110419404622643201 / runninghub.cn 2110419416746909698.
+// Export: AIGC特异点-Minimax-H3多参考双采放大生成视频（Singularity）_api.json
+//
+// Shape: MiniMaxH3ReferenceToVideo (265) + ResolutionSelector (252, DRAFT) × LatentUpscaler3D (140)
+// scale 1.5 + PrimitiveFloat 时长 (259) → ComfyMathExpression (250) + Text prompt (263) +
+// dual SamplerCustomAdvanced. Generic writers break this graph:
+//   - prompt lives on a `Text` node (`text`), not PrimitiveStringMultiline (`value`);
+//   - size/tier writers miss ResolutionSelector labels and would treat draft MP as delivered;
+//   - seconds writer cannot reach the Float behind the 17n+5 math link;
+//   - baked pasted/ hash LoadImages + empty VHS_LoadVideo / LoadAudio("None") fail on RH machines.
+// Scoped to these two ids only.
+const MINIMAX_H3_SINGULARITY_WORKFLOW_IDS = new Set(["2110419404622643201", "2110419416746909698"]);
+const MINIMAX_H3_SINGULARITY_SECONDS = { min: 2, max: 30 };
+const MINIMAX_H3_SINGULARITY_MAX_DELIVERED_MP = 4;
+
+function isMinimaxH3SingularityWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return MINIMAX_H3_SINGULARITY_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate for the Singularity 双采放大 clip graph on RunningHub. */
+export function isMinimaxH3SingularityWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3SingularityWorkflow(workflowId);
+}
+
+/** Canvas quality / megapixels string → delivered MP budget for Singularity draft math. */
+function singularityDeliveredMegapixels(quality: string) {
+    const raw = String(quality || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return 0;
+    if (/2k|1440|2560|high/.test(raw)) return 3.69;
+    if (/1080|hd/.test(raw)) return 2.07;
+    if (/900|准高清|mid/.test(raw)) return 1.44;
+    if (/720|sd|medium|auto/.test(raw)) return 0.92;
+    if (/480|low/.test(raw)) return 0.41;
+    const numeric = Number(raw.replace(/p$/i, ""));
+    if (!Number.isFinite(numeric) || numeric <= 0) return 0;
+    // Already a megapixel budget (story-style) vs a long-edge pixel label.
+    if (numeric <= 16) return numeric;
+    if (numeric >= 2000) return 3.69;
+    if (numeric >= 1080) return 2.07;
+    if (numeric >= 720) return 0.92;
+    return 0;
+}
+
+/** LatentUpscaler3D scale multiplier (author bake: easy float 1.5), or null. */
+function singularityUpscaleFactor(workflow: ComfyWorkflow): number | null {
+    for (const node of Object.values(workflow)) {
+        if (!/MinimaxH3LatentUpscaler3D/i.test(String(node?.class_type || ""))) continue;
+        const raw = node.inputs?.["mode.scale"] ?? node.inputs?.scale_by;
+        if (typeof raw === "number" && raw > 0) return raw;
+        if (Array.isArray(raw) && raw[0] != null) {
+            const source = workflow[String(raw[0])]?.inputs;
+            for (const key of ["value", "float", "number", "Number", "int"]) {
+                const value = Number(source?.[key]);
+                if (Number.isFinite(value) && value > 0) return value;
+            }
+        }
+    }
+    return null;
+}
+
+function applyMinimaxH3SingularitySettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    seconds?: string,
+    aspect = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow; structuralRepair: boolean } {
+    let next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    let structuralRepair = false;
+
+    // Drop author-only junk nodes that never feed the sampler chain.
+    for (const [id, node] of Object.entries(next)) {
+        if (/忽略多组|孤海/.test(String(node?.class_type || ""))) {
+            delete next[id];
+            structuralRepair = true;
+        }
+    }
+
+    // Reference images → ref_image_N slot order. Unfilled slots (incl. author pasted/ hashes) are
+    // disconnected so RH cannot load missing filenames; empty video/audio slots are dropped too.
+    let writtenReferences = 0;
+    const disconnected: string[] = [];
+    const slotInfo = minimaxH3ReferenceVideoSlots(next);
+    if (!imageValues.length) throw new Error(apiText("runningHubReferenceNotApplied"));
+    if (slotInfo) {
+        const { consumer, slots } = slotInfo;
+        slots.forEach((slot, position) => {
+            const loader = next[slot.sourceId];
+            const field = loader ? imageFieldName(loader) : "";
+            const value = imageValues[position];
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+                return;
+            }
+            if (consumer.inputs && slot.key in consumer.inputs) {
+                delete consumer.inputs[slot.key];
+                disconnected.push(slot.sourceId);
+                structuralRepair = true;
+            }
+        });
+        // Empty VHS video / LoadAudio("None") fail validation on RunningHub — disconnect them.
+        for (const key of Object.keys(consumer.inputs || {})) {
+            if (!/^ref_(videos|audios)\./.test(key)) continue;
+            const link = consumer.inputs?.[key];
+            const sourceId = Array.isArray(link) ? String(link[0]) : "";
+            const media = sourceId ? next[sourceId] : undefined;
+            if (!media?.inputs) {
+                delete consumer.inputs![key];
+                structuralRepair = true;
+                continue;
+            }
+            const type = String(media.class_type || "");
+            const video = String(media.inputs.video || "").trim();
+            const audio = String(media.inputs.audio || "").trim();
+            const emptyVideo = /VHS_LoadVideo|LoadVideo/i.test(type) && !video;
+            const emptyAudio = /LoadAudio/i.test(type) && (!audio || /^none$/i.test(audio));
+            if (emptyVideo || emptyAudio) {
+                delete consumer.inputs![key];
+                disconnected.push(sourceId);
+                structuralRepair = true;
+            }
+        }
+    } else {
+        const loaders = Object.entries(next).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")) && imageFieldName(node));
+        imageValues.forEach((value, index) => {
+            const loader = loaders[index]?.[1];
+            const field = loader ? imageFieldName(loader) : "";
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+            }
+        });
+    }
+    if (disconnected.length) {
+        for (const id of disconnected) {
+            if (next[id] && /LoadAudio|VHS_LoadVideo|LoadVideo/i.test(String(next[id]?.class_type || ""))) {
+                delete next[id];
+                structuralRepair = true;
+            }
+        }
+        if (pruneOrphanedReferenceChain(next, disconnected)) structuralRepair = true;
+    }
+    if (!writtenReferences) throw new Error(apiText("runningHubReferenceNotApplied"));
+
+    // Duration → PrimitiveFloat「视频时长（秒）」(259) feeding the 17n+5 math link.
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_SINGULARITY_SECONDS.max, Math.max(MINIMAX_H3_SINGULARITY_SECONDS.min, duration));
+        const durationNode =
+            next["259"] ||
+            findComfyNode(next, (node) => /Primitive(Float|Int)/i.test(String(node.class_type || "")) && /时长|duration|长度/i.test(String(node._meta?.title || "")));
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
+    }
+
+    // Draft ResolutionSelector (252): aspect from canvas; megapixels = delivered / scale² so the
+    // LatentUpscaler3D pass lands on the requested tier (author bake 0.5 × 1.5² ≈ 1.1 MP).
+    const selector = next["252"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        if (aspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+        }
+        const delivered = singularityDeliveredMegapixels(megapixels);
+        if (delivered > 0 && typeof selector.inputs.megapixels === "number") {
+            const scale = singularityUpscaleFactor(next) || 1.5;
+            const authored = Number(selector.inputs.megapixels) || 0.5;
+            const budget = Math.min(delivered, MINIMAX_H3_SINGULARITY_MAX_DELIVERED_MP);
+            const draft = Math.max(0.1, Math.round((budget / (scale * scale)) * 100) / 100);
+            selector.inputs.megapixels = Math.max(authored, draft);
+        }
+    }
+
+    // Prompt → Text (263) linked from H3 `prompt` (field is `text`, not `value`).
+    if (prompt.trim()) {
+        const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;
+        const link = consumer?.inputs?.prompt;
+        const sourceId = Array.isArray(link) ? String(link[0]) : "";
+        const promptNode =
+            (sourceId ? next[sourceId] : undefined) ||
+            next["263"] ||
+            findComfyNode(next, (node) => /^Text$/i.test(String(node.class_type || "")) && typeof node.inputs?.text === "string");
+        if (promptNode?.inputs) {
+            if (typeof promptNode.inputs.text === "string") promptNode.inputs.text = prompt;
+            else if (typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+        }
+    }
+
+    // Latent upscaler: normalize mis-mapped widgets + prefer chunking on RH VRAM.
+    next = repairSingularityLatentUpscaler(next);
+    for (const node of Object.values(next)) {
+        if (!/MinimaxH3LatentUpscaler3D/i.test(String(node?.class_type || "")) || !node.inputs) continue;
+        if (typeof node.inputs.enable_chunking === "boolean") node.inputs.enable_chunking = true;
+    }
+
+    // Fixed RandomNoise seed would replay the same clip.
+    for (const node of Object.values(next)) {
+        if (/RandomNoise/i.test(String(node.class_type || "")) && typeof node.inputs?.noise_seed === "number") {
+            node.inputs.noise_seed = randomComfySeed();
+        }
+    }
+
+    return { workflow: next, structuralRepair: true };
+}
+
 // Qwen Image 2.1 + Flux2 Klein 皮肤肌理 T2I (runninghub.ai U2108554415855054850 /
 // runninghub.cn 2108554405246226433). Two-stage graph: KSampler (161) drafts from CLIPTextEncode
 // (5)/(7), then SamplerCustomAdvanced + RandomNoise (50) refines with a fixed Klein enhance prompt
@@ -2309,6 +2536,7 @@ function usesRunningHubLocalExportGraph(workflowId?: string | null) {
         isMinimaxH3SelfLiftWorkflow(workflowId) ||
         isQwenKleinSkinWorkflow(workflowId) ||
         isMinimaxH3RefTopWorkflow(workflowId) ||
+        isMinimaxH3SingularityWorkflow(workflowId) ||
         isKrea2PastoralMjWorkflow(workflowId) ||
         isKrea2AidenLoraWorkflow(workflowId)
     );
@@ -2532,6 +2760,14 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const refTop = applyMinimaxH3RefTopSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
         const list = workflowNodeInfoList(workflow, refTop.workflow);
         return { nodeInfoList: list, graph: refTop.workflow };
+    }
+    // Singularity 双采放大 opts out (see applyMinimaxH3SingularitySettings): prompt is a Text node,
+    // draft ResolutionSelector must be divided by LatentUpscaler3D scale², and empty media slots
+    // must be pruned. Always ship `graph` for the local Export (API) JSON path.
+    if (isMinimaxH3SingularityWorkflow(workflowId)) {
+        const singularity = applyMinimaxH3SingularitySettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
+        const list = workflowNodeInfoList(workflow, singularity.workflow);
+        return { nodeInfoList: list, graph: singularity.workflow };
     }
     // Qwen+Klein 皮肤肌理 T2I opts out for the same class of reasons (see applyQwenKleinSkinSettings):
     // the generic prompt scorer would overwrite the negative and Klein enhance CLIP slots, the size
@@ -3245,6 +3481,10 @@ async function runRunningHubWorkflowWithKey(args: {
     if (!workflow && isKrea2AidenLoraWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubKrea2AidenLoraScriptRequired", { id: workflowId }));
     }
+    // Singularity: same contract — local Export JSON is required when remote ACL denies the shared id.
+    if (!workflow && isMinimaxH3SingularityWorkflow(workflowId)) {
+        throw new Error(i18n.t("apiErrors.runningHubH3SingularityScriptRequired", { id: workflowId }));
+    }
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     const uploaded: string[] = [];
     for (let index = 0; index < refs.length; index += 1) {
@@ -3269,10 +3509,10 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     let task: RunningHubTaskView;
     try {
-        // Aiden KREA2: submit the lean Export graph via `/task/openapi/create` + `workflow`
+        // Aiden KREA2 / Singularity: submit the Export graph via `/task/openapi/create` + `workflow`
         // (docs: workflow overrides workflowId). Do NOT call `/task/openapi/comfy/run` — on
         // runninghub.cn that route returns NOT_FOUND and only wastes a round-trip before fallback.
-        if (isKrea2AidenLoraWorkflow(workflowId) && repairedGraph) {
+        if ((isKrea2AidenLoraWorkflow(workflowId) || isMinimaxH3SingularityWorkflow(workflowId)) && repairedGraph) {
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
         } else if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             // SelfLift / Qwen+Klein / pastoral: shared workflowId often denies create/getJsonApiFormat.
@@ -3293,8 +3533,8 @@ async function runRunningHubWorkflowWithKey(args: {
         if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message)) {
             throw error;
         }
-        // Aiden already submitted lean create+workflow above; never fall into webapp writers.
-        if (isKrea2AidenLoraWorkflow(workflowId)) {
+        // Aiden / Singularity already submitted create+workflow above; never fall into webapp writers.
+        if (isKrea2AidenLoraWorkflow(workflowId) || isMinimaxH3SingularityWorkflow(workflowId)) {
             throw explainRunningHubError(error, workflowId);
         }
         // Local-export graphs already preferred comfy/run above. If that endpoint is unavailable on
