@@ -2179,30 +2179,28 @@ export function isKrea2AidenLoraWorkflowId(workflowId?: string | null) {
 }
 
 /**
- * Drop authoring leftovers that break RunningHub comfy/run validation on this graph:
- * - `忽略多组孤海` (#142): Chinese class_type with empty inputs; RH workers reject unknown types;
- * - Image Comparer (rgthree) (#149): ships Rh-Comfy-Auth preview URLs that fail off-author machines;
- * - unused easy positive templates (#89 / #136) that nothing references.
- * Also rewires ImageScaleToTotalPixels (#150) off PreviewImage output slot 1 (PreviewImage often
- * has no slot 1 on RH) onto VAEDecode (#123) output 0 — SeedVR still sees the same pixels.
+ * Harden the Export graph for RunningHub comfy/run (ACL escape path only).
+ *
+ * Published create+nodeInfoList keeps the author's SeedVR polish; the full-graph path must not —
+ * SeedVR2 + flash_attn_2 / PreviewImage slot 1 / rgthree comparer / 忽略多组孤海 commonly fail
+ * validation or OOM on API workers. Deliver VAEDecode → SaveImage instead, and drop dead nodes.
  */
 function pruneKrea2AidenLoraGraph(workflow: ComfyWorkflow) {
-    const scale =
-        workflow["150"] ||
-        findComfyNode(workflow, (node) => /ImageScaleToTotalPixels/i.test(String(node.class_type || "")) && "megapixels" in (node.inputs || {}));
     const decode =
         workflow["123"] || findComfyNode(workflow, (node) => /^VAEDecode$/i.test(String(node.class_type || "")) && "samples" in (node.inputs || {}));
-    if (scale?.inputs && decode) {
-        const decodeId =
-            Object.entries(workflow).find(([, node]) => node === decode)?.[0] ||
-            (workflow["123"] === decode ? "123" : "");
-        if (decodeId) scale.inputs.image = [decodeId, 0];
-    }
+    const decodeId =
+        (decode && Object.entries(workflow).find(([, node]) => node === decode)?.[0]) || (workflow["123"] === decode ? "123" : "");
+    const save =
+        workflow["118"] || findComfyNode(workflow, (node) => /^SaveImage$/i.test(String(node.class_type || "")) && "images" in (node.inputs || {}));
+    if (save?.inputs && decodeId) save.inputs.images = [decodeId, 0];
 
     for (const [id, node] of Object.entries(workflow)) {
         const type = String(node?.class_type || "");
         if (/忽略多组|孤海/.test(type)) delete workflow[id];
         else if (/Image\s*Comparer/i.test(type)) delete workflow[id];
+        else if (/SeedVR2/i.test(type)) delete workflow[id];
+        else if (/ImageScaleToTotalPixels/i.test(type)) delete workflow[id];
+        else if (/^PreviewImage$/i.test(type)) delete workflow[id];
     }
 
     // Dead expander drafts (#89 / #136) — keep live #18 (user) and #139 (active template).
@@ -2216,10 +2214,10 @@ function pruneKrea2AidenLoraGraph(workflow: ComfyWorkflow) {
         delete workflow[id];
     }
 
-    // PreviewImage is only needed when Scale still linked into it; after the rewire it is orphan.
-    const consumed = comfyConsumedIds(workflow);
-    for (const [id, node] of Object.entries(workflow)) {
-        if (/^PreviewImage$/i.test(String(node?.class_type || "")) && !consumed.has(id)) delete workflow[id];
+    // llama on API workers: prefer force_offload so Qwen GGUF does not wedge VRAM before KSampler.
+    for (const node of Object.values(workflow)) {
+        if (!/llama_cpp_instruct/i.test(String(node?.class_type || "")) || !node.inputs) continue;
+        if ("force_offload" in node.inputs) node.inputs.force_offload = true;
     }
 }
 
@@ -3287,11 +3285,31 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     let task: RunningHubTaskView;
     try {
-        // SelfLift / Qwen+Klein: the shared workflowId commonly denies create/getJsonApiFormat.
-        // When we already hold the patched API graph (from model script or a permitted fetch),
-        // submit it through `/task/openapi/comfy/run` so the run does not depend on author ACL.
-        // Every other workflow keeps the create + nodeInfoList path below.
-        if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
+        // Aiden KREA2: prefer published workflowId + nodeInfoList so RH uses its staged models /
+        // SeedVR / llama. Full-graph comfy/run is only the ACL escape (pruned, no SeedVR).
+        if (isKrea2AidenLoraWorkflow(workflowId) && repairedGraph) {
+            try {
+                task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, undefined, request.signal);
+            } catch (publishError: unknown) {
+                if (axios.isCancel(publishError) || (publishError instanceof DOMException && publishError.name === "AbortError")) throw publishError;
+                const publishMessage = errorText(publishError);
+                if (isAuthMessage(publishMessage)) throw explainRunningHubError(publishError, workflowId);
+                if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(publishMessage)) {
+                    throw publishError;
+                }
+                console.warn(
+                    `[runninghub] ${workflowId}: Aiden create+nodeInfo failed (${publishMessage.slice(0, 160)}), trying pruned Export via comfy/run`,
+                );
+                task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal).catch(async (runError: unknown) => {
+                    console.warn(
+                        `[runninghub] ${workflowId}: Aiden comfy/run failed (${errorText(runError).slice(0, 160)}), retrying create+workflow`,
+                    );
+                    return submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
+                });
+            }
+        } else if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
+            // SelfLift / Qwen+Klein / pastoral: shared workflowId often denies create/getJsonApiFormat.
+            // Submit the patched API graph through `/task/openapi/comfy/run`.
             task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal);
         } else if (workflow) {
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
@@ -3308,16 +3326,17 @@ async function runRunningHubWorkflowWithKey(args: {
         if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message)) {
             throw error;
         }
+        // Aiden already exhausted publish → comfy/run → create+workflow above; never fall into webapp.
+        if (isKrea2AidenLoraWorkflow(workflowId)) {
+            throw explainRunningHubError(error, workflowId);
+        }
         // Local-export graphs already preferred comfy/run above. If that endpoint is unavailable on
         // this origin, fall back once to create-with-workflow (docs: `workflow` overrides workflowId).
-        // Aiden must not degrade further into webapp/nodeInfo (generic writers smash llama templates).
         if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             console.warn(`[runninghub] ${workflowId}: comfy/run failed (${message.slice(0, 160)}), retrying local-export graph via create+workflow`);
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal).catch((retryError: unknown) => {
                 throw explainRunningHubError(retryError, workflowId);
             });
-        } else if (isKrea2AidenLoraWorkflow(workflowId)) {
-            throw explainRunningHubError(error, workflowId);
         } else {
             // A repaired-graph submission is always retried without it, so an unrecognized `workflow`
             // field or a rejected link degrades to the previous nodeInfoList-only behaviour.
