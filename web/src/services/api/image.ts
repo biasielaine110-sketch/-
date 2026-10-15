@@ -411,6 +411,20 @@ function resolveVolcengineImageParams(config: AiConfig, count: number) {
     } as Record<string, unknown>;
 }
 
+/**
+ * wb2api `cn:miora-image` / `cn:miora-image-edit`. Upstream finishes with a COS signedUrl; when the
+ * canvas asks for `response_format=b64_json`, workbuddy2api re-downloads that URL server-side and
+ * often returns 502 `image_fetch_failed` after the job already succeeded — canvas looks empty.
+ * Prefer `url` so the browser fetches the signed COS link directly.
+ */
+function isMioraRemoteImageModel(model?: string) {
+    const bare = String(model || "")
+        .trim()
+        .toLowerCase()
+        .replace(/^(cn|rh|u):/, "");
+    return bare === "miora-image" || bare.startsWith("miora-image-") || bare === "miora-image-edit";
+}
+
 function resolveOpenAiImageParams(config: AiConfig, count: number) {
     // APIMart expects size as aspect ratio + optional resolution tier (not arbitrary WxH / response_format).
     if (isApimartBaseUrl(config.baseUrl)) {
@@ -428,8 +442,9 @@ function resolveOpenAiImageParams(config: AiConfig, count: number) {
     const quality = normalizeQuality(config.quality);
     const requestSize = isGptImageModel(config.model) ? resolveGptImageRequestSize(config.model, quality, config.size) : resolveRequestSize(quality, config.size);
     const background = normalizeBackground(config.background);
+    // miora 上游一次只出一张；n>1 会被网关 400。
     const params: Record<string, string | number | boolean | Record<string, unknown>> = {
-        n: isGptImageModel(config.model) ? Math.min(count, 10) : count,
+        n: isMioraRemoteImageModel(config.model) ? 1 : isGptImageModel(config.model) ? Math.min(count, 10) : count,
         ...(quality ? { quality } : {}),
         ...(requestSize ? { size: requestSize } : {}),
         ...(background ? { background } : {}),
@@ -438,6 +453,8 @@ function resolveOpenAiImageParams(config: AiConfig, count: number) {
     if (isGptImageModel(config.model)) {
         // GPT Image models return base64 by default and reject response_format.
         params.output_format = IMAGE_OUTPUT_FORMAT;
+    } else if (isMioraRemoteImageModel(config.model)) {
+        params.response_format = "url";
     } else if (isDalleModel(config.model)) {
         params.response_format = IMAGE_RESPONSE_FORMAT;
     } else {
