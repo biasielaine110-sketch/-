@@ -82,9 +82,11 @@ type ImageApiResponse = {
     progress?: number;
     url?: string;
     result?: { type?: string; url?: string; data?: Array<Record<string, unknown>>; images?: Array<Record<string, unknown>> };
-    data?: Array<Record<string, unknown>> | Record<string, unknown>;
-    images?: Array<Record<string, unknown>>;
-    results?: Array<Record<string, unknown>>;
+    data?: Array<Record<string, unknown>> | Record<string, unknown> | string;
+    images?: Array<Record<string, unknown> | string>;
+    results?: Array<Record<string, unknown> | string>;
+    output?: unknown;
+    files?: unknown;
     error?: { message?: string; code?: string | number };
     code?: number;
     msg?: string;
@@ -1223,46 +1225,120 @@ function supportsGeminiImageSize(model: string) {
     return value.includes("gemini-3") || value.includes("3.1") || value.includes("3-pro");
 }
 
-function resolveImageDataUrl(item: Record<string, unknown>) {
+const IMAGE_TASK_SUCCESS = new Set(["completed", "succeeded", "success", "done", "finished", "complete", "ok"]);
+const IMAGE_TASK_FAILURE = new Set(["failed", "cancelled", "canceled", "expired", "failure"]);
+
+function isImageTaskSuccessStatus(status?: string | null) {
+    return IMAGE_TASK_SUCCESS.has(String(status || "").trim().toLowerCase());
+}
+
+function isImageTaskFailureStatus(status?: string | null) {
+    return IMAGE_TASK_FAILURE.has(String(status || "").trim().toLowerCase());
+}
+
+function coerceRawBase64DataUrl(value: string) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    if (/^data:image\//i.test(raw) || /^https?:\/\//i.test(raw) || raw.startsWith("/")) return raw;
+    // Bare base64 without data: prefix (common on some relays).
+    if (/^[A-Za-z0-9+/=\s]{80,}$/.test(raw) && !/\s{2,}/.test(raw.trim())) {
+        return `data:image/png;base64,${raw.replace(/\s+/g, "")}`;
+    }
+    return raw;
+}
+
+function resolveImageDataUrl(item: Record<string, unknown> | string) {
+    if (typeof item === "string") return coerceRawBase64DataUrl(item) || null;
     if (typeof item.b64_json === "string" && item.b64_json) {
-        return `data:image/png;base64,${item.b64_json}`;
+        return coerceRawBase64DataUrl(item.b64_json.startsWith("data:") ? item.b64_json : `data:image/png;base64,${item.b64_json}`);
     }
-    if (typeof item.url === "string" && item.url) {
-        return item.url;
+    for (const key of ["b64", "base64", "image_base64"] as const) {
+        const value = item[key];
+        if (typeof value === "string" && value) {
+            const coerced = coerceRawBase64DataUrl(value.startsWith("data:") ? value : `data:image/png;base64,${value}`);
+            if (coerced) return coerced;
+        }
     }
+    if (typeof item.url === "string" && item.url) return coerceRawBase64DataUrl(item.url);
     if (Array.isArray(item.url)) {
         const first = item.url.find((value): value is string => typeof value === "string" && Boolean(value));
-        if (first) return first;
+        if (first) return coerceRawBase64DataUrl(first);
     }
-    if (typeof item.dataUrl === "string" && item.dataUrl) {
-        return item.dataUrl;
+    if (typeof item.dataUrl === "string" && item.dataUrl) return coerceRawBase64DataUrl(item.dataUrl);
+    if (typeof item.fileUrl === "string" && item.fileUrl) return coerceRawBase64DataUrl(item.fileUrl);
+    if (typeof item.file_url === "string" && item.file_url) return coerceRawBase64DataUrl(item.file_url);
+    if (typeof item.image === "string" && item.image) return coerceRawBase64DataUrl(item.image);
+    if (typeof item.image_url === "string" && item.image_url) return coerceRawBase64DataUrl(item.image_url);
+    if (item.image_url && typeof item.image_url === "object") {
+        const nested = (item.image_url as { url?: unknown }).url;
+        if (typeof nested === "string" && nested) return coerceRawBase64DataUrl(nested);
     }
-    if (typeof item.fileUrl === "string" && item.fileUrl) return item.fileUrl;
-    if (typeof item.file_url === "string" && item.file_url) return item.file_url;
+    if (typeof item.imageUrl === "string" && item.imageUrl) return coerceRawBase64DataUrl(item.imageUrl);
+    return null;
+}
+
+function asImageRecordList(value: unknown): Array<Record<string, unknown> | string> | null {
+    if (!Array.isArray(value) || !value.length) return null;
+    if (value.every((item) => typeof item === "string" || (item && typeof item === "object"))) {
+        return value as Array<Record<string, unknown> | string>;
+    }
     return null;
 }
 
 function collectImageList(payload: ImageApiResponse) {
     const nestedResult = payload.result;
     const dataObject = payload.data && !Array.isArray(payload.data) ? (payload.data as Record<string, unknown>) : null;
-    const dataResult = dataObject && typeof dataObject.result === "object" && dataObject.result ? (dataObject.result as { images?: Array<Record<string, unknown>>; data?: Array<Record<string, unknown>>; url?: string }) : null;
+    const dataResult =
+        dataObject && typeof dataObject.result === "object" && dataObject.result
+            ? (dataObject.result as { images?: unknown; data?: unknown; url?: string; output?: unknown; files?: unknown })
+            : null;
     const lists = [
-        Array.isArray(payload.data) ? payload.data : null,
-        payload.images,
-        payload.results,
-        nestedResult?.data,
-        nestedResult?.images,
-        dataResult?.images,
-        dataResult?.data,
-        Array.isArray(dataObject?.images) ? (dataObject.images as Array<Record<string, unknown>>) : null,
-    ].filter((list): list is Array<Record<string, unknown>> => Array.isArray(list));
+        asImageRecordList(payload.data),
+        asImageRecordList(payload.images),
+        asImageRecordList(payload.results),
+        asImageRecordList(nestedResult?.data),
+        asImageRecordList(nestedResult?.images),
+        asImageRecordList(dataResult?.images),
+        asImageRecordList(dataResult?.data),
+        asImageRecordList(dataObject?.images),
+        asImageRecordList(dataObject?.output),
+        asImageRecordList(dataObject?.files),
+        asImageRecordList((payload as { output?: unknown }).output),
+        asImageRecordList((payload as { files?: unknown }).files),
+    ].filter((list): list is Array<Record<string, unknown> | string> => Array.isArray(list));
     const fromLists = lists.flatMap((list) => list.map(resolveImageDataUrl).filter((value): value is string => Boolean(value)));
     const resultUrl = typeof (payload as { result_url?: unknown }).result_url === "string" ? (payload as { result_url: string }).result_url : undefined;
     const dataResultUrl = typeof dataObject?.result_url === "string" ? dataObject.result_url : undefined;
-    const singles = [payload.url, nestedResult?.url, typeof dataResult?.url === "string" ? dataResult.url : undefined, resultUrl, dataResultUrl].filter(
-        (value): value is string => typeof value === "string" && Boolean(value),
-    );
-    return [...singles, ...fromLists];
+    const dataUrl = typeof dataObject?.url === "string" ? dataObject.url : undefined;
+    const dataOutput = typeof dataObject?.output === "string" ? dataObject.output : undefined;
+    const topOutput = typeof (payload as { output?: unknown }).output === "string" ? ((payload as { output: string }).output) : undefined;
+    const singles = [
+        payload.url,
+        nestedResult?.url,
+        typeof dataResult?.url === "string" ? dataResult.url : undefined,
+        resultUrl,
+        dataResultUrl,
+        dataUrl,
+        dataOutput,
+        topOutput,
+        typeof dataObject?.result === "string" ? dataObject.result : undefined,
+    ].filter((value): value is string => typeof value === "string" && Boolean(value));
+    return [...singles, ...fromLists].map((value) => coerceRawBase64DataUrl(value)).filter(Boolean);
+}
+
+/** Make relative result paths (`/files/x.png`) absolute against the channel Base URL origin. */
+function absoluteizeImageUrl(url: string, baseUrl?: string) {
+    const value = String(url || "").trim();
+    if (!value || value.startsWith("data:") || value.startsWith("blob:") || /^https?:\/\//i.test(value)) return value;
+    const base = String(baseUrl || "").trim();
+    if (!base) return value;
+    try {
+        const root = new URL(base);
+        if (value.startsWith("/")) return new URL(value, root.origin).toString();
+        return new URL(value, root.href.endsWith("/") ? root.href : `${root.href}/`).toString();
+    } catch {
+        return value;
+    }
 }
 
 /** Normalize APIMart / Seedance / relay envelopes into a flat OpenAI-like task or image payload. */
@@ -1292,14 +1368,24 @@ function normalizeImageApiPayload(payload: ImageApiResponse): ImageApiResponse {
         }
     }
 
-    // Poll: { code:200, data:{ id, status, result / image_urls / result_url } }
+    // Sync/string envelope: { code:0, data:"https://..." } or bare base64
+    if (typeof payload.data === "string" && payload.data.trim()) {
+        const url = coerceRawBase64DataUrl(payload.data);
+        return { ...payload, url, images: [{ url }] };
+    }
+
+    // Poll: { code:200, data:{ id, status, result / image_urls / result_url / url } }
     if (payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)) {
         const data = payload.data as Record<string, unknown>;
         const nestedResult =
             data.result && typeof data.result === "object"
                 ? (data.result as ImageApiResponse["result"])
                 : payload.result;
-        const imageUrls = collectStringUrls(data.image_urls) || collectStringUrls((nestedResult as { image_urls?: unknown } | undefined)?.image_urls);
+        const imageUrls =
+            collectStringUrls(data.image_urls) ||
+            collectStringUrls((nestedResult as { image_urls?: unknown } | undefined)?.image_urls) ||
+            collectStringUrls(data.output) ||
+            collectStringUrls(data.files);
         const gridUrl =
             typeof data.grid_image_url === "string"
                 ? data.grid_image_url
@@ -1307,7 +1393,19 @@ function normalizeImageApiPayload(payload: ImageApiResponse): ImageApiResponse {
                   ? (nestedResult as { grid_image_url: string }).grid_image_url
                   : typeof data.result_url === "string"
                     ? data.result_url
-                    : undefined;
+                    : typeof data.url === "string"
+                      ? data.url
+                      : typeof data.output === "string"
+                        ? data.output
+                        : typeof data.result === "string"
+                          ? data.result
+                          : undefined;
+        const normalizedImages = imageUrls.length
+            ? imageUrls.map((url) => ({ url }))
+            : asImageRecordList(data.images)?.map((item) => (typeof item === "string" ? { url: item } : item)) ||
+              asImageRecordList(data.output)?.map((item) => (typeof item === "string" ? { url: item } : item)) ||
+              asImageRecordList(data.files)?.map((item) => (typeof item === "string" ? { url: item } : item)) ||
+              payload.images;
         return {
             ...payload,
             id: typeof data.id === "string" ? data.id : typeof data.task_id === "string" ? data.task_id : payload.id,
@@ -1315,11 +1413,7 @@ function normalizeImageApiPayload(payload: ImageApiResponse): ImageApiResponse {
             progress: typeof data.progress === "number" ? data.progress : payload.progress,
             result: nestedResult,
             url: gridUrl || payload.url,
-            images: imageUrls.length
-                ? imageUrls.map((url) => ({ url }))
-                : Array.isArray(data.images)
-                  ? (data.images as Array<Record<string, unknown>>)
-                  : payload.images,
+            images: normalizedImages,
         };
     }
 
@@ -1358,7 +1452,25 @@ function isAsyncImageTask(payload: ImageApiResponse) {
     // Sync OpenAI-style payloads already contain image data; do not treat them as tasks.
     if (collectImageList(payload).length > 0) return false;
     const status = payload.status.trim().toLowerCase();
-    return ["queued", "submitted", "pending", "in_progress", "processing", "running", "completed", "succeeded", "success", "failed", "failure", "cancelled", "canceled"].includes(status)
+    return [
+        "queued",
+        "submitted",
+        "pending",
+        "in_progress",
+        "processing",
+        "running",
+        "completed",
+        "succeeded",
+        "success",
+        "done",
+        "finished",
+        "complete",
+        "ok",
+        "failed",
+        "failure",
+        "cancelled",
+        "canceled",
+    ].includes(status)
         || payload.object === "generation.task"
         || typeof payload.progress === "number"
         || typeof (payload as { progress?: unknown }).progress === "string";
@@ -1377,7 +1489,8 @@ function resolveImagePollPaths(config: AiConfig, taskId: string) {
     if (isApimartBaseUrl(config.baseUrl)) {
         return [`/tasks/${id}`, `/images/generations/${id}`];
     }
-    return [`/images/generations/${id}`, `/tasks/${id}`];
+    // wb2api / OpenAI relays: edits tasks may only exist under /images/edits/{id}.
+    return [`/images/generations/${id}`, `/images/edits/${id}`, `/tasks/${id}`];
 }
 
 function sleep(ms: number, signal?: AbortSignal) {
@@ -1415,10 +1528,11 @@ async function pollAsyncImageTaskPayload(config: AiConfig, taskId: string, optio
                 throw new Error(payload.msg || readApiErrorMessage(payload) || apiText("requestFailed"));
             }
             const status = String(payload.status || "").trim().toLowerCase();
-            if (status === "completed" || status === "succeeded" || status === "success") {
+            // Some relays mark success as done/finished and already embed the image URL.
+            if (isImageTaskSuccessStatus(status) || collectImageList(payload).length > 0) {
                 return payload;
             }
-            if (status === "failed" || status === "cancelled" || status === "canceled" || status === "expired" || status === "failure") {
+            if (isImageTaskFailureStatus(status)) {
                 throw new Error(readApiErrorMessage(payload.error) || readApiErrorMessage(payload) || apiText("imageTaskFailed"));
             }
         } catch (error) {
@@ -1435,7 +1549,7 @@ async function pollAsyncImageTaskPayload(config: AiConfig, taskId: string, optio
 }
 
 async function pollAsyncImageTask(config: AiConfig, taskId: string, options?: RequestOptions) {
-    return parseImagePayload(await pollAsyncImageTaskPayload(config, taskId, options));
+    return parseImagePayload(await pollAsyncImageTaskPayload(config, taskId, options), { baseUrl: config.baseUrl });
 }
 
 async function resolveRunningHubImageTask(config: AiConfig, payload: ImageApiResponse, options?: RequestOptions) {
@@ -1474,10 +1588,10 @@ async function resolveImageTaskPayload(config: AiConfig, payload: ImageApiRespon
     const normalized = normalizeImageApiPayload(payload);
     if (isAsyncImageTask(normalized)) {
         const status = String(normalized.status || "").trim().toLowerCase();
-        if (status === "failed" || status === "cancelled" || status === "canceled" || status === "expired" || status === "failure") {
+        if (isImageTaskFailureStatus(status)) {
             throw new Error(readApiErrorMessage(normalized.error) || readApiErrorMessage(normalized) || apiText("imageTaskFailed"));
         }
-        if (status === "completed" || status === "succeeded" || status === "success") {
+        if (isImageTaskSuccessStatus(status) || collectImageList(normalized).length > 0) {
             return normalized;
         }
         if (!normalized.id) throw new Error(apiText("imageTaskFailed"));
@@ -1487,14 +1601,17 @@ async function resolveImageTaskPayload(config: AiConfig, payload: ImageApiRespon
 }
 
 async function resolveImageApiResponse(config: AiConfig, payload: ImageApiResponse, options?: RequestOptions) {
-    return parseImagePayload(await resolveImageTaskPayload(config, payload, options));
+    return parseImagePayload(await resolveImageTaskPayload(config, payload, options), { baseUrl: config.baseUrl });
 }
 
-function parseImagePayload(payload: ImageApiResponse, options?: { allowEmpty?: boolean }) {
+function parseImagePayload(payload: ImageApiResponse, options?: { allowEmpty?: boolean; baseUrl?: string }) {
     if (typeof payload.code === "number" && !isApiSuccessCode(payload.code)) {
         throw new Error(payload.msg || apiText("requestFailed"));
     }
-    const images = collectImageList(payload).map((dataUrl) => ({ id: nanoid(), dataUrl }));
+    const images = collectImageList(payload).map((dataUrl) => ({
+        id: nanoid(),
+        dataUrl: absoluteizeImageUrl(dataUrl, options?.baseUrl),
+    }));
 
     if (images.length === 0) {
         if (options?.allowEmpty) return images;

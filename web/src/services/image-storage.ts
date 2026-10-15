@@ -3,7 +3,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import { readImageMeta } from "@/lib/image-utils";
-import { proxyMediaUrl } from "@/lib/api-proxy";
+import { forceProxyMediaUrl, proxyMediaUrl } from "@/lib/api-proxy";
 import { deleteLocalMediaBlob, getLocalMediaLibraryDirectory, isLocalMediaLibraryReady, readLocalMediaBlob, requestLocalMediaLibraryAccess, writeLocalMediaBlob } from "@/services/local-media-library";
 
 export type UploadedImage = {
@@ -77,22 +77,28 @@ async function fetchImageBlob(url: string) {
     // Data URLs must be decoded locally — routing them through `fetch` always fails.
     const fromDataUrl = dataUrlToBlob(url);
     if (fromDataUrl?.size) return fromDataUrl;
-    const target = proxyRemoteMediaUrl(url);
+    const primary = proxyRemoteMediaUrl(url);
+    // Known-CORS API hosts (e.g. *.ts.net) skip the proxy for POSTs, but media GETs may still
+    // omit ACAO. Mirror save-blob: retry once via forceProxyMediaUrl before giving up.
+    const forced = forceProxyMediaUrl(url);
+    const targets = [...new Set([primary, url, forced].filter(Boolean))];
     // Retries absorb transient proxy/CDN hiccups (e.g. intermittent 502s from flaky image hosts).
     // Per-attempt timeout keeps dead hosts that hang (no RST, no response) from stalling for minutes.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-            const response = await fetch(target, { signal: AbortSignal.timeout(45_000) });
-            if (response.ok) {
-                const blob = await response.blob();
-                const contentType = blob.type || response.headers.get("content-type");
-                // An HTML "image" is an error page — reject it instead of storing junk.
-                if (blob.size && isImageLikeContentType(contentType)) return blob;
+    for (const target of targets) {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+                const response = await fetch(target, { signal: AbortSignal.timeout(45_000) });
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const contentType = blob.type || response.headers.get("content-type");
+                    // An HTML "image" is an error page — reject it instead of storing junk.
+                    if (blob.size && isImageLikeContentType(contentType)) return blob;
+                }
+            } catch {
+                // Fall through to the next attempt / alternate transport.
             }
-        } catch {
-            // Fall through to the retry; the final throw keeps the user-facing message stable.
+            if (attempt < 1) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
         }
-        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
     }
     throw new Error(i18n.t("common.imageReadFailed"));
 }
