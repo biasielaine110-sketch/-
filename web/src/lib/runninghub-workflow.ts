@@ -2416,7 +2416,8 @@ function applyMinimaxH3HdDynamicSettings(
         if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
     }
 
-    // Delivered ResolutionSelector (115) — no latent upscale factor on this graph.
+    // ResolutionSelector (115) is the sampler latent (no LatentUpscaler3D). Do not write
+    // Singularity "delivered" budgets above the Export bake — that OOMs SamplerCustomAdvanced.
     const selector = next["115"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
     if (selector?.inputs) {
         if (aspect && typeof selector.inputs.aspect_ratio === "string") {
@@ -2424,7 +2425,9 @@ function applyMinimaxH3HdDynamicSettings(
         }
         const delivered = singularityDeliveredMegapixels(megapixels);
         if (delivered > 0 && typeof selector.inputs.megapixels === "number") {
-            selector.inputs.megapixels = Math.min(4, delivered);
+            const authored = Number(selector.inputs.megapixels);
+            const ceiling = Number.isFinite(authored) && authored > 0 ? authored : delivered;
+            selector.inputs.megapixels = Math.min(delivered, ceiling);
         }
     }
 
