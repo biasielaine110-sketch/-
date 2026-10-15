@@ -3489,7 +3489,14 @@ async function postRunningHubWithFallback(
     origin: string,
     path: string,
     data: unknown,
-    options: { headers?: Record<string, string>; signal?: AbortSignal; timeout?: number; preferDirect?: boolean },
+    options: {
+        headers?: Record<string, string>;
+        signal?: AbortSignal;
+        timeout?: number;
+        preferDirect?: boolean;
+        /** Fired once when direct transport fails and the proxy attempt is about to start. */
+        onDirectTransportFallback?: () => void;
+    },
 ) {
     const direct = `${String(origin || "").replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
     const proxied = proxyApiUrl(direct);
@@ -3509,8 +3516,10 @@ async function postRunningHubWithFallback(
             // Auth / validation from RH — do not hop transports.
             if (axios.isAxiosError(error) && error.response && error.response.status >= 400 && error.response.status < 500) throw error;
             if (index >= urls.length - 1) break;
+            const viaProxy = url.includes("/api/proxy") || url.includes("/api-proxy");
+            if (!viaProxy) options.onDirectTransportFallback?.();
             console.warn(
-                `[runninghub] ${path} via ${url.includes("/api/proxy") || url.includes("/api-proxy") ? "proxy" : "direct"} failed; retrying alternate transport`,
+                `[runninghub] ${path} via ${viaProxy ? "proxy" : "direct"} failed; retrying alternate transport`,
             );
         }
     }
@@ -3523,7 +3532,12 @@ async function uploadImage(
     source: string,
     fileName: string,
     signal?: AbortSignal,
-    options?: { preferDirect?: boolean; maxBytes?: number; maxEdge?: number },
+    options?: {
+        preferDirect?: boolean;
+        maxBytes?: number;
+        maxEdge?: number;
+        onDirectTransportFallback?: () => void;
+    },
 ) {
     let file: File;
     if (source.startsWith("data:")) {
@@ -3542,6 +3556,7 @@ async function uploadImage(
         signal,
         timeout: 120_000,
         preferDirect: options?.preferDirect,
+        onDirectTransportFallback: options?.onDirectTransportFallback,
     });
     assertOk(response.data, apiText("requestFailed"));
     const data = asRecord(asRecord(response.data)?.data) || asRecord(response.data);
@@ -3918,16 +3933,25 @@ async function runRunningHubWorkflowWithKey(args: {
     const preferDirectSubmit = prefersRunningHubDirectSubmit(workflowId);
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     const uploaded: string[] = [];
-    const directMultiRefUpload =
-        preferDirectSubmit && refs.length
-            ? {
-                  preferDirect: true,
-                  maxBytes: Math.min(SINGULARITY_UPLOAD_BYTE_BUDGET, Math.floor(2_000_000 / Math.max(1, refs.length))),
-                  maxEdge: SINGULARITY_UPLOAD_MAX_EDGE,
-              }
-            : undefined;
+    // Sticky transport: after the first .ai direct upload hits HTTP2/connection errors, keep the
+    // remaining refs on the Pages proxy so we do not repeat the same failed hop 3–7 more times.
+    let preferDirectUpload = preferDirectSubmit && refs.length > 0;
+    const multiRefUploadLimits = preferDirectSubmit && refs.length
+        ? {
+              maxBytes: Math.min(SINGULARITY_UPLOAD_BYTE_BUDGET, Math.floor(2_000_000 / Math.max(1, refs.length))),
+              maxEdge: SINGULARITY_UPLOAD_MAX_EDGE,
+          }
+        : undefined;
     for (let index = 0; index < refs.length; index += 1) {
-        uploaded.push(await uploadImage(origin, apiKey, refs[index], `ref-${index + 1}.png`, request.signal, directMultiRefUpload));
+        uploaded.push(
+            await uploadImage(origin, apiKey, refs[index], `ref-${index + 1}.png`, request.signal, {
+                ...multiRefUploadLimits,
+                preferDirect: preferDirectUpload,
+                onDirectTransportFallback: () => {
+                    preferDirectUpload = false;
+                },
+            }),
+        );
     }
     const pixels = resolveCanvasPixels(request.size || "", request.media || "image");
     const aspect = canvasAspect(request.size || "");
