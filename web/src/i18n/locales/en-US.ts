@@ -94,6 +94,7 @@ export default {
             selfLiftOrientationHint: "SelfLift: tap Landscape 16:9 or Portrait 9:16 to switch orientation (avoid Auto if you need a fixed orientation).",
             fisherMode: "Pipeline mode",
             fisherModeHint: "Work-Fisher: the pasted script defaults to multi-ref video. Character / scene / multiview need Export JSON under character / scene / multiview keys in the model script.",
+            fisherQualityHint: "Work-Fisher is single-pass (no latent upscale): resolution is capped at the Export bake (~0.8 MP), so 1080p will not inflate the sampler latent (avoids SamplerCustomAdvanced VRAM OOM). Prefer duration ≤10s.",
             fisherModes: {
                 video: "Multi-ref video",
                 character: "Character assets",

@@ -2454,6 +2454,9 @@ function applyMinimaxH3HdDynamicSettings(
 //
 // Shape: MiniMaxH3ReferenceToVideo (136) + 6×LoadImage refs + ResolutionSelector (115) +
 // Float Duration (132) → math (131) + PrimitiveStringMultiline (138) + VHS_VideoCombine.
+// Single-pass — no LatentUpscaler3D. Export bakes ResolutionSelector megapixels ≈ 0.8.
+// Writing Singularity "delivered" budgets (720→0.92 / 1080→2.07) straight onto (115) inflates
+// the SamplerCustomAdvanced latent and triggers RH 【VRAM OOM Alert】.
 // The published RH app advertises 4 pipeline modes (多参生视频 / 角色资产 / 场景资产 / 多视角);
 // this Export is the video graph only. Mode switching:
 //   - plain Export JSON → always「多参生视频」;
@@ -2462,6 +2465,8 @@ function applyMinimaxH3HdDynamicSettings(
 // Scoped to these two ids only.
 const MINIMAX_H3_FISHER_WORKFLOW_IDS = new Set(["2110621324220567554", "2110621014144147458"]);
 const MINIMAX_H3_FISHER_SECONDS = { min: 2, max: 30 };
+/** Export bake ceiling — selector MP is the sampler latent on this single-pass graph. */
+const MINIMAX_H3_FISHER_MAX_MEGAPIXELS = 0.8;
 
 export type FisherPipelineMode = "video" | "character" | "scene" | "multiview";
 
@@ -2598,16 +2603,25 @@ function applyMinimaxH3FisherSettings(
         if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
     }
 
+    // ResolutionSelector (115) is the final latent size (no upscale pass). Cap to Export bake.
     const selector = next["115"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
     if (selector?.inputs) {
         if (aspect && typeof selector.inputs.aspect_ratio === "string") {
             selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
         }
-        const delivered = singularityDeliveredMegapixels(megapixels);
-        if (delivered > 0 && typeof selector.inputs.megapixels === "number") {
-            selector.inputs.megapixels = Math.min(4, delivered);
+        if (typeof selector.inputs.megapixels === "number") {
+            const authored =
+                Number.isFinite(selector.inputs.megapixels) && selector.inputs.megapixels > 0
+                    ? selector.inputs.megapixels
+                    : MINIMAX_H3_FISHER_MAX_MEGAPIXELS;
+            const ceiling = Math.min(authored, MINIMAX_H3_FISHER_MAX_MEGAPIXELS);
+            const requested = singularityDeliveredMegapixels(megapixels);
+            // Canvas 480 can go below bake; 720/900/1080 must not inflate past Export 0.8.
+            selector.inputs.megapixels = requested > 0 ? Math.min(requested, ceiling) : ceiling;
         }
     }
+
+    // Keep ref_image_size on the authored "match" contract from Export (node 136).
 
     if (prompt.trim()) {
         const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;

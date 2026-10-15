@@ -354,6 +354,11 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             {nativeFamily === "twoPass" ? t("settingsPanels.video.twoPassQualityHint") : t("settingsPanels.video.u35QualityHint")}
                         </div>
                     )}
+                    {fisherRh ? (
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.fisherQualityHint")}
+                        </div>
+                    ) : null}
                     <div className={`grid gap-2.5 ${qualityChoices.length >= 3 ? "grid-cols-4" : "grid-cols-3"}`}>
                         {qualityChoices.map((item) => (
                             <OptionPill key={item.value} selected={resolution === item.value} theme={theme} onClick={() => onConfigChange("vquality", item.value)}>
