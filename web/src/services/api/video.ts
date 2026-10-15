@@ -18,7 +18,14 @@ import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveM
 import { resolveApiTransport, proxyApiUrl } from "@/lib/api-proxy";
 import { uploadTemporaryPublicImage } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
-import { isMinimaxH3SingularityWorkflowId, pickRunningHubWorkflowId, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
+import {
+    isMinimaxH3FisherWorkflowId,
+    isMinimaxH3HdDynamicWorkflowId,
+    isMinimaxH3SingularityWorkflowId,
+    pickRunningHubWorkflowId,
+    runningHubOrigin,
+    runRunningHubWorkflow,
+} from "@/lib/runninghub-workflow";
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
@@ -301,8 +308,11 @@ async function createRunningHubVideoTask(
         prompt,
         size: config.size,
         seconds: config.videoSeconds,
-        // Singularity only: canvas vquality → draft ResolutionSelector via delivered/scale² math.
-        ...(isMinimaxH3SingularityWorkflowId(model) ? { resolution: config.vquality } : {}),
+        // Singularity / HD Dynamic / Fisher: canvas vquality → ResolutionSelector megapixels mapping.
+        ...(isMinimaxH3SingularityWorkflowId(model) || isMinimaxH3HdDynamicWorkflowId(model) || isMinimaxH3FisherWorkflowId(model)
+            ? { resolution: config.vquality }
+            : {}),
+        ...(isMinimaxH3FisherWorkflowId(model) ? { fisherMode: config.videoFisherMode } : {}),
         media: "video",
         referenceDataUrls: refs.filter(Boolean),
         signal: options?.signal,

@@ -102,6 +102,11 @@ export type AiConfig = {
      * DualClock: `lock_source` (default) or `reference_only`.
      */
     videoAudioMode: string;
+    /**
+     * Work-Fisher RH pipeline mode: `video` | `character` | `scene` | `multiview`.
+     * Only honored for the Fisher workflow id pair.
+     */
+    videoFisherMode: string;
     systemPrompt: string;
     reasoningEffort: ReasoningEffort;
     /** direct = browser→API (no Vercel 60s cap); proxy = via /api/proxy for CORS. */
@@ -196,6 +201,7 @@ export const defaultConfig: AiConfig = {
     videoSeedMode: "fixed",
     videoSeed: "19960422",
     videoAudioMode: "lock_source",
+    videoFisherMode: "video",
     systemPrompt: "",
     reasoningEffort: "auto",
     // Default via same-origin proxy — most relay APIs block browser CORS.
@@ -494,6 +500,9 @@ export const useConfigStore = create<ConfigStore>()(
                         videoAudioMode: /^(reference_only|reference|timbre)$/i.test(String(config.videoAudioMode || ""))
                             ? "reference_only"
                             : "lock_source",
+                        videoFisherMode: /^(character|scene|multiview|video)$/i.test(String(config.videoFisherMode || ""))
+                            ? String(config.videoFisherMode).toLowerCase()
+                            : "video",
                         canvasImageCount: config.canvasImageCount || "1",
                         mjVersion: config.mjVersion || defaultConfig.mjVersion,
                         quality: config.quality || "medium",

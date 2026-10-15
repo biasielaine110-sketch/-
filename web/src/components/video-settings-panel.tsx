@@ -15,7 +15,13 @@ import {
 } from "@/lib/autodl-h3-comfy";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { isMinimaxH3SingularityWorkflowId } from "@/lib/runninghub-workflow";
+import {
+    isMinimaxH3FisherWorkflowId,
+    isMinimaxH3HdDynamicWorkflowId,
+    isMinimaxH3SingularityWorkflowId,
+    normalizeFisherPipelineMode,
+    type FisherPipelineMode,
+} from "@/lib/runninghub-workflow";
 import { isRelayMiniMaxH3Video } from "@/services/api/video";
 import {
     COMFY_H3_STABLE_SEED,
@@ -183,7 +189,23 @@ export const videoSecondOptions = secondOptions.map((value) => String(value));
 
 type VideoSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark" | "videoSteps" | "videoRefImageSize" | "videoSamplerName" | "videoScheduler" | "videoSeedMode" | "videoSeed" | "videoAudioMode", value: string) => void;
+    onConfigChange: (
+        key:
+            | "vquality"
+            | "size"
+            | "videoSeconds"
+            | "videoGenerateAudio"
+            | "videoWatermark"
+            | "videoSteps"
+            | "videoRefImageSize"
+            | "videoSamplerName"
+            | "videoScheduler"
+            | "videoSeedMode"
+            | "videoSeed"
+            | "videoAudioMode"
+            | "videoFisherMode",
+        value: string,
+    ) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
@@ -196,14 +218,23 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const h3Comfy = isAutodlH3ComfyVideoModel(model, requestConfig.baseUrl);
     const relayH3 = !h3Comfy && isRelayMiniMaxH3Video(requestConfig, model);
     const singularityRh = !h3Comfy && isMinimaxH3SingularityWorkflowId(model);
+    const hdDynamicRh = !h3Comfy && isMinimaxH3HdDynamicWorkflowId(model);
+    const fisherRh = !h3Comfy && isMinimaxH3FisherWorkflowId(model);
+    const fisherMode = normalizeFisherPipelineMode(config.videoFisherMode);
     const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
     const qualityChoices = useMemo(() => {
         if (nativeComfy && !h3Comfy) return resolutionOptionsForFamily(nativeFamily);
-        if (singularityRh) return twoPassResolutionOptions;
+        if (singularityRh || hdDynamicRh || fisherRh) return twoPassResolutionOptions;
         if (relayH3) return relayH3ResolutionOptions;
         return resolutionOptions;
-    }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, relayH3]);
+    }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, hdDynamicRh, fisherRh, relayH3]);
+    const fisherModeChoices: Array<{ value: FisherPipelineMode; labelKey: string }> = [
+        { value: "video", labelKey: "video" },
+        { value: "character", labelKey: "character" },
+        { value: "scene", labelKey: "scene" },
+        { value: "multiview", labelKey: "multiview" },
+    ];
     const aspectChoices = useMemo(() => (nativeComfy && !h3Comfy ? sizeOptionsForFamily(nativeFamily) : sizeOptions), [nativeComfy, h3Comfy, nativeFamily]);
     const showSeedControls = useMemo(
         () => nativeComfy && !h3Comfy && supportsVideoSeedControls(config, nativeFamily),
@@ -293,6 +324,25 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
         <ImageSettingsTheme theme={theme}>
             <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.video.title")}</div> : null}
+                {fisherRh ? (
+                    <SettingGroup title={t("settingsPanels.video.fisherMode")} color={theme.node.muted}>
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.fisherModeHint")}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2.5">
+                            {fisherModeChoices.map((item) => (
+                                <OptionPill
+                                    key={item.value}
+                                    selected={fisherMode === item.value}
+                                    theme={theme}
+                                    onClick={() => onConfigChange("videoFisherMode", item.value)}
+                                >
+                                    {t(`settingsPanels.video.fisherModes.${item.labelKey}`)}
+                                </OptionPill>
+                            ))}
+                        </div>
+                    </SettingGroup>
+                ) : null}
                 <SettingGroup title={t("settingsPanels.video.quality")} color={theme.node.muted}>
                     {nativeFamily === "u06" ? (
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>

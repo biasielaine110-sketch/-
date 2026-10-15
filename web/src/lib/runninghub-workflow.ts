@@ -270,6 +270,12 @@ function explainRunningHubError(error: unknown, workflowId: string): Error {
     if (isWorkflowPermissionMessage(message) && isMinimaxH3SingularityWorkflow(workflowId)) {
         return new Error(i18n.t("apiErrors.runningHubH3SingularityScriptRequired", { id: workflowId }));
     }
+    if (isWorkflowPermissionMessage(message) && isMinimaxH3HdDynamicWorkflow(workflowId)) {
+        return new Error(i18n.t("apiErrors.runningHubH3HdDynamicScriptRequired", { id: workflowId }));
+    }
+    if (isWorkflowPermissionMessage(message) && isMinimaxH3FisherWorkflow(workflowId)) {
+        return new Error(i18n.t("apiErrors.runningHubH3FisherScriptRequired", { id: workflowId }));
+    }
     if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) return new Error(apiText("runningHubNoBalance"));
     if (isUnknownServerError(message)) return new Error(apiText("runningHubUnknownError"));
     if (error instanceof Error && error.message && !isUnknownServerError(error.message)) return error;
@@ -2314,6 +2320,314 @@ function applyMinimaxH3SingularitySettings(
     return { workflow: next, structuralRepair: true };
 }
 
+// MiniMax-H3 高速大动态 / 无劣化抗形变模糊（工作版）
+// runninghub.ai 2110627951858757634 / runninghub.cn 2110628673236852738.
+// Export: MiniMax-H3 高速大动态 _ 无劣化抗形变模糊工作流  （工作版）_api.json
+//
+// Shape: MiniMaxH3ReferenceToVideo (136) + ResolutionSelector (115, DELIVERED) +
+// PrimitiveFloat (132) → ComfyMathExpression (131) + PrimitiveStringMultiline prompt (138) +
+// dual SamplerCustomAdvanced (ManualSigmas split) + Semantic Bridge T8. No LatentUpscaler3D.
+// Generic writers break this graph the same way as vibe-short / SelfLift:
+//   - size/tier miss ResolutionSelector labels and would force megapixels ∈ {1,2,4};
+//   - seconds cannot reach the Float behind the 17n+5 math link;
+//   - baked hash LoadImages fail on RH machines.
+// Do NOT prune `布尔孤海` — it drives the VRAM ifElse chain. Scoped to these two ids only.
+const MINIMAX_H3_HD_DYNAMIC_WORKFLOW_IDS = new Set(["2110627951858757634", "2110628673236852738"]);
+const MINIMAX_H3_HD_DYNAMIC_SECONDS = { min: 2, max: 30 };
+
+function isMinimaxH3HdDynamicWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return MINIMAX_H3_HD_DYNAMIC_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate for the H3 高速大动态 / 无劣化 clip graph on RunningHub. */
+export function isMinimaxH3HdDynamicWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3HdDynamicWorkflow(workflowId);
+}
+
+function applyMinimaxH3HdDynamicSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    seconds?: string,
+    aspect = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow; structuralRepair: boolean } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    let structuralRepair = false;
+
+    let writtenReferences = 0;
+    const disconnected: string[] = [];
+    const slotInfo = minimaxH3ReferenceVideoSlots(next);
+    if (!imageValues.length) throw new Error(apiText("runningHubReferenceNotApplied"));
+    if (slotInfo) {
+        const { consumer, slots } = slotInfo;
+        slots.forEach((slot, position) => {
+            const loader = next[slot.sourceId];
+            const field = loader ? imageFieldName(loader) : "";
+            const value = imageValues[position];
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+                return;
+            }
+            if (consumer.inputs && slot.key in consumer.inputs) {
+                delete consumer.inputs[slot.key];
+                disconnected.push(slot.sourceId);
+                structuralRepair = true;
+            }
+        });
+    } else {
+        const loaders = Object.entries(next).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")) && imageFieldName(node));
+        imageValues.forEach((value, index) => {
+            const loader = loaders[index]?.[1];
+            const field = loader ? imageFieldName(loader) : "";
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+            }
+        });
+    }
+    if (disconnected.length && pruneOrphanedReferenceChain(next, disconnected)) structuralRepair = true;
+    if (!writtenReferences) throw new Error(apiText("runningHubReferenceNotApplied"));
+
+    // Duration → PrimitiveFloat (132) feeding the 17n+5 math link (title is plain "Float").
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_HD_DYNAMIC_SECONDS.max, Math.max(MINIMAX_H3_HD_DYNAMIC_SECONDS.min, duration));
+        const durationNode =
+            next["132"] ||
+            findComfyNode(
+                next,
+                (node) =>
+                    /PrimitiveFloat/i.test(String(node.class_type || "")) &&
+                    typeof node.inputs?.value === "number" &&
+                    !Array.isArray(node.inputs.value),
+            );
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
+    }
+
+    // Delivered ResolutionSelector (115) — no latent upscale factor on this graph.
+    const selector = next["115"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        if (aspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+        }
+        const delivered = singularityDeliveredMegapixels(megapixels);
+        if (delivered > 0 && typeof selector.inputs.megapixels === "number") {
+            selector.inputs.megapixels = Math.min(4, delivered);
+        }
+    }
+
+    // Prompt → PrimitiveStringMultiline (138) linked from H3 `prompt`.
+    if (prompt.trim()) {
+        const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;
+        const sourceId = consumer ? minimaxH3FourViewPromptSource(next, consumer) : "";
+        const promptNode =
+            (sourceId ? next[sourceId] : undefined) ||
+            next["138"] ||
+            findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
+        if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+    }
+
+    for (const node of Object.values(next)) {
+        if (/RandomNoise/i.test(String(node.class_type || "")) && typeof node.inputs?.noise_seed === "number") {
+            node.inputs.noise_seed = randomComfySeed();
+        }
+    }
+
+    return { workflow: next, structuralRepair: true };
+}
+
+// 【Work-Fisher】AI短剧制作全流程
+// runninghub.ai 2110621324220567554 / runninghub.cn 2110621014144147458.
+// Export: 【Work-Fisher】AI短剧制作全流程_api.json (multi-ref video graph).
+//
+// Shape: MiniMaxH3ReferenceToVideo (136) + 6×LoadImage refs + ResolutionSelector (115) +
+// Float Duration (132) → math (131) + PrimitiveStringMultiline (138) + VHS_VideoCombine.
+// The published RH app advertises 4 pipeline modes (多参生视频 / 角色资产 / 场景资产 / 多视角);
+// this Export is the video graph only. Mode switching:
+//   - plain Export JSON → always「多参生视频」;
+//   - optional script bag `{ "video": {...}, "character": {...}, "scene": {...}, "multiview": {...} }`
+//     selects the subgraph for the canvas mode pill.
+// Scoped to these two ids only.
+const MINIMAX_H3_FISHER_WORKFLOW_IDS = new Set(["2110621324220567554", "2110621014144147458"]);
+const MINIMAX_H3_FISHER_SECONDS = { min: 2, max: 30 };
+
+export type FisherPipelineMode = "video" | "character" | "scene" | "multiview";
+
+const FISHER_MODE_SCRIPT_KEYS: Record<FisherPipelineMode, string[]> = {
+    video: ["video", "多参生视频", "多参", "ref2v", "ref_video"],
+    character: ["character", "角色", "角色资产", "角色资产图", "char"],
+    scene: ["scene", "场景", "场景资产", "场景资产图"],
+    multiview: ["multiview", "多视角", "多视角视图", "四视图", "four_view", "fourview"],
+};
+
+function isMinimaxH3FisherWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return MINIMAX_H3_FISHER_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate for the Work-Fisher short-drama pipeline on RunningHub. */
+export function isMinimaxH3FisherWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3FisherWorkflow(workflowId);
+}
+
+export function normalizeFisherPipelineMode(value?: string | null): FisherPipelineMode {
+    const raw = String(value || "")
+        .trim()
+        .toLowerCase();
+    if (/character|角色/.test(raw)) return "character";
+    if (/scene|场景/.test(raw)) return "scene";
+    if (/multiview|多视角|四视|four/.test(raw)) return "multiview";
+    return "video";
+}
+
+function looksLikeComfyApiWorkflow(value: unknown): value is ComfyWorkflow {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const record = value as Record<string, unknown>;
+    if (record.prompt && typeof record.prompt === "object" && !Array.isArray(record.prompt)) {
+        return looksLikeComfyApiWorkflow(record.prompt);
+    }
+    return Object.values(record).some((node) => node && typeof node === "object" && "class_type" in (node as object));
+}
+
+/**
+ * Resolve the Fisher Export graph for the selected pipeline mode.
+ * Plain API JSON = video mode. A mode bag supplies per-mode Export objects.
+ */
+export function resolveFisherWorkflowFromScript(script: string | undefined | null, mode: FisherPipelineMode): ComfyWorkflow | null {
+    const trimmed = String(script || "").trim();
+    if (!trimmed.startsWith("{")) return null;
+    let parsed: Record<string, unknown>;
+    try {
+        parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+        return null;
+    }
+    if (looksLikeComfyApiWorkflow(parsed)) {
+        if (mode !== "video") return null;
+        return parseComfyApiWorkflow(trimmed);
+    }
+    for (const key of FISHER_MODE_SCRIPT_KEYS[mode]) {
+        const entry = parsed[key];
+        if (looksLikeComfyApiWorkflow(entry)) {
+            return parseComfyApiWorkflow(JSON.stringify(entry));
+        }
+    }
+    return null;
+}
+
+function applyMinimaxH3FisherSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    seconds?: string,
+    aspect = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow; structuralRepair: boolean } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    let structuralRepair = false;
+
+    for (const [id, node] of Object.entries(next)) {
+        if (/忽略多组|孤海/.test(String(node?.class_type || ""))) {
+            delete next[id];
+            structuralRepair = true;
+        }
+    }
+
+    let writtenReferences = 0;
+    const disconnected: string[] = [];
+    const slotInfo = minimaxH3ReferenceVideoSlots(next);
+    if (!imageValues.length) throw new Error(apiText("runningHubReferenceNotApplied"));
+    if (slotInfo) {
+        const { consumer, slots } = slotInfo;
+        slots.forEach((slot, position) => {
+            const loader = next[slot.sourceId];
+            const field = loader ? imageFieldName(loader) : "";
+            const value = imageValues[position];
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+                return;
+            }
+            if (consumer.inputs && slot.key in consumer.inputs) {
+                delete consumer.inputs[slot.key];
+                disconnected.push(slot.sourceId);
+                structuralRepair = true;
+            }
+        });
+    } else {
+        const loaders = Object.entries(next).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")) && imageFieldName(node));
+        imageValues.forEach((value, index) => {
+            const loader = loaders[index]?.[1];
+            const field = loader ? imageFieldName(loader) : "";
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+            }
+        });
+    }
+    if (disconnected.length && pruneOrphanedReferenceChain(next, disconnected)) structuralRepair = true;
+    if (!writtenReferences) throw new Error(apiText("runningHubReferenceNotApplied"));
+
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_FISHER_SECONDS.max, Math.max(MINIMAX_H3_FISHER_SECONDS.min, duration));
+        const durationNode =
+            next["132"] ||
+            findComfyNode(next, (node) => /Primitive(Float|Int)/i.test(String(node.class_type || "")) && /时长|duration|长度/i.test(String(node._meta?.title || "")));
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
+    }
+
+    const selector = next["115"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        if (aspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+        }
+        const delivered = singularityDeliveredMegapixels(megapixels);
+        if (delivered > 0 && typeof selector.inputs.megapixels === "number") {
+            selector.inputs.megapixels = Math.min(4, delivered);
+        }
+    }
+
+    if (prompt.trim()) {
+        const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;
+        const sourceId = consumer ? minimaxH3FourViewPromptSource(next, consumer) : "";
+        const promptNode =
+            (sourceId ? next[sourceId] : undefined) ||
+            next["138"] ||
+            findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
+        if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+    }
+
+    for (const node of Object.values(next)) {
+        if (/RandomNoise/i.test(String(node.class_type || "")) && typeof node.inputs?.noise_seed === "number") {
+            node.inputs.noise_seed = randomComfySeed();
+        }
+    }
+
+    return { workflow: next, structuralRepair: true };
+}
+
 // Qwen Image 2.1 + Flux2 Klein 皮肤肌理 T2I (runninghub.ai U2108554415855054850 /
 // runninghub.cn 2108554405246226433). Two-stage graph: KSampler (161) drafts from CLIPTextEncode
 // (5)/(7), then SamplerCustomAdvanced + RandomNoise (50) refines with a fixed Klein enhance prompt
@@ -2537,9 +2851,16 @@ function usesRunningHubLocalExportGraph(workflowId?: string | null) {
         isQwenKleinSkinWorkflow(workflowId) ||
         isMinimaxH3RefTopWorkflow(workflowId) ||
         isMinimaxH3SingularityWorkflow(workflowId) ||
+        isMinimaxH3HdDynamicWorkflow(workflowId) ||
+        isMinimaxH3FisherWorkflow(workflowId) ||
         isKrea2PastoralMjWorkflow(workflowId) ||
         isKrea2AidenLoraWorkflow(workflowId)
     );
+}
+
+/** Multi-ref Export graphs that prefer browser-direct upload/create (Pages proxy ERR_CONNECTION_CLOSED). */
+function prefersRunningHubDirectSubmit(workflowId?: string | null) {
+    return isMinimaxH3SingularityWorkflow(workflowId) || isMinimaxH3HdDynamicWorkflow(workflowId) || isMinimaxH3FisherWorkflow(workflowId);
 }
 
 function applyQwenKleinSkinSettings(
@@ -2768,6 +3089,20 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const singularity = applyMinimaxH3SingularitySettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
         const list = workflowNodeInfoList(workflow, singularity.workflow);
         return { nodeInfoList: list, graph: singularity.workflow };
+    }
+    // H3 高速大动态 / 无劣化 opts out (see applyMinimaxH3HdDynamicSettings): delivered
+    // ResolutionSelector + Float duration behind math, baked hash refs. Always ship `graph`.
+    if (isMinimaxH3HdDynamicWorkflow(workflowId)) {
+        const hd = applyMinimaxH3HdDynamicSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
+        const list = workflowNodeInfoList(workflow, hd.workflow);
+        return { nodeInfoList: list, graph: hd.workflow };
+    }
+    // Work-Fisher 全流程 opts out (see applyMinimaxH3FisherSettings): multi-ref H3 + Duration
+    // Float + ResolutionSelector; baked hash refs. Always ship `graph`.
+    if (isMinimaxH3FisherWorkflow(workflowId)) {
+        const fisher = applyMinimaxH3FisherSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
+        const list = workflowNodeInfoList(workflow, fisher.workflow);
+        return { nodeInfoList: list, graph: fisher.workflow };
     }
     // Qwen+Klein 皮肤肌理 T2I opts out for the same class of reasons (see applyQwenKleinSkinSettings):
     // the generic prompt scorer would overwrite the negative and Klein enhance CLIP slots, the size
@@ -3428,6 +3763,8 @@ export async function runRunningHubWorkflow(args: {
     seconds?: string;
     /** Megapixels override for workflows exposing a ResolutionSelector (MiniMax H3 story). */
     resolution?: string;
+    /** Work-Fisher pipeline mode (video / character / scene / multiview). */
+    fisherMode?: string;
     media?: "image" | "video";
     referenceDataUrls?: string[];
     signal?: AbortSignal;
@@ -3493,6 +3830,7 @@ async function runRunningHubWorkflowWithKey(args: {
         size?: string;
         seconds?: string;
         resolution?: string;
+        fisherMode?: string;
         media?: "image" | "video";
         referenceDataUrls?: string[];
         signal?: AbortSignal;
@@ -3500,14 +3838,24 @@ async function runRunningHubWorkflowWithKey(args: {
 }): Promise<RunningHubMedia> {
     const { origin, workflowId, apiKey, isLastKey } = args;
     const request = args.args;
+    const fisherMode = normalizeFisherPipelineMode(request.fisherMode);
     // SelfLift 双采(简易版) / Qwen+Klein 皮肤肌理: the shared workflowId often returns
     // "您暂时无权限访问该工作流". Prefer the Export (API) JSON pasted into the model script so
     // create can run via `workflow` / comfy/run without opening the author's copy. Every other
     // workflow keeps the remote getJsonApiFormat path unchanged.
-    const localExportGraph = usesRunningHubLocalExportGraph(workflowId) ? parseComfyApiWorkflow(request.script) : null;
+    const localExportGraph = !usesRunningHubLocalExportGraph(workflowId)
+        ? null
+        : isMinimaxH3FisherWorkflow(workflowId)
+          ? resolveFisherWorkflowFromScript(request.script, fisherMode)
+          : parseComfyApiWorkflow(request.script);
     let workflow = localExportGraph;
     let fetchPermissionDenied = false;
     if (!workflow) {
+        // Fisher non-video modes need a mode bag in the script — do not silently fall back to the
+        // remote video template and render the wrong pipeline.
+        if (isMinimaxH3FisherWorkflow(workflowId) && fisherMode !== "video" && String(request.script || "").trim()) {
+            throw new Error(i18n.t("apiErrors.runningHubH3FisherModeScriptRequired", { id: workflowId, mode: fisherMode }));
+        }
         workflow = await fetchWorkflow(origin, apiKey, workflowId, request.signal).catch((error: unknown) => {
             if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
             const message = errorText(error);
@@ -3536,15 +3884,25 @@ async function runRunningHubWorkflowWithKey(args: {
     if (!workflow && isKrea2AidenLoraWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubKrea2AidenLoraScriptRequired", { id: workflowId }));
     }
-    // Singularity: same contract — local Export JSON is required when remote ACL denies the shared id.
+    // Singularity / HD Dynamic / Fisher: local Export JSON required when remote ACL denies.
     if (!workflow && isMinimaxH3SingularityWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubH3SingularityScriptRequired", { id: workflowId }));
     }
-    const singularity = isMinimaxH3SingularityWorkflow(workflowId);
+    if (!workflow && isMinimaxH3HdDynamicWorkflow(workflowId)) {
+        throw new Error(i18n.t("apiErrors.runningHubH3HdDynamicScriptRequired", { id: workflowId }));
+    }
+    if (!workflow && isMinimaxH3FisherWorkflow(workflowId)) {
+        throw new Error(
+            fisherMode === "video"
+                ? i18n.t("apiErrors.runningHubH3FisherScriptRequired", { id: workflowId })
+                : i18n.t("apiErrors.runningHubH3FisherModeScriptRequired", { id: workflowId, mode: fisherMode }),
+        );
+    }
+    const preferDirectSubmit = prefersRunningHubDirectSubmit(workflowId);
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);
     const uploaded: string[] = [];
-    const singularityUpload =
-        singularity && refs.length
+    const directMultiRefUpload =
+        preferDirectSubmit && refs.length
             ? {
                   preferDirect: true,
                   maxBytes: Math.min(SINGULARITY_UPLOAD_BYTE_BUDGET, Math.floor(2_000_000 / Math.max(1, refs.length))),
@@ -3552,7 +3910,7 @@ async function runRunningHubWorkflowWithKey(args: {
               }
             : undefined;
     for (let index = 0; index < refs.length; index += 1) {
-        uploaded.push(await uploadImage(origin, apiKey, refs[index], `ref-${index + 1}.png`, request.signal, singularityUpload));
+        uploaded.push(await uploadImage(origin, apiKey, refs[index], `ref-${index + 1}.png`, request.signal, directMultiRefUpload));
     }
     const pixels = resolveCanvasPixels(request.size || "", request.media || "image");
     const aspect = canvasAspect(request.size || "");
@@ -3573,13 +3931,11 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     let task: RunningHubTaskView;
     try {
-        // Aiden KREA2 / Singularity: submit the Export graph via `/task/openapi/create` + `workflow`
-        // (docs: workflow overrides workflowId). Do NOT call `/task/openapi/comfy/run` — on
-        // runninghub.cn that route returns NOT_FOUND and only wastes a round-trip before fallback.
-        // Singularity also prefers browser-direct create: full-graph JSON through Pages proxy often
-        // hits the same ERR_CONNECTION_CLOSED as the multi-ref upload.
-        if ((isKrea2AidenLoraWorkflow(workflowId) || singularity) && repairedGraph) {
-            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, singularity);
+        // Aiden KREA2 / Singularity / HD Dynamic: submit Export via create+workflow (not comfy/run —
+        // cn returns NOT_FOUND). Prefer browser-direct create for multi-ref full graphs (Pages proxy
+        // ERR_CONNECTION_CLOSED).
+        if ((isKrea2AidenLoraWorkflow(workflowId) || preferDirectSubmit) && repairedGraph) {
+            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, preferDirectSubmit);
         } else if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             // SelfLift / Qwen+Klein / pastoral: shared workflowId often denies create/getJsonApiFormat.
             // Submit the patched API graph through `/task/openapi/comfy/run`.
@@ -3599,8 +3955,8 @@ async function runRunningHubWorkflowWithKey(args: {
         if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message)) {
             throw error;
         }
-        // Aiden / Singularity already submitted create+workflow above; never fall into webapp writers.
-        if (isKrea2AidenLoraWorkflow(workflowId) || isMinimaxH3SingularityWorkflow(workflowId)) {
+        // Aiden / Singularity / HD Dynamic already submitted create+workflow; never fall into webapp.
+        if (isKrea2AidenLoraWorkflow(workflowId) || preferDirectSubmit) {
             throw explainRunningHubError(error, workflowId);
         }
         // Local-export graphs already preferred comfy/run above. If that endpoint is unavailable on

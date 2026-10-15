@@ -149,6 +149,8 @@ export type CanvasNodeMetadata = {
     seed?: string;
     /** DualClock audio strategy: `reference_only` | `lock_source`. */
     audioMode?: string;
+    /** Work-Fisher RH pipeline mode: `video` | `character` | `scene` | `multiview`. */
+    fisherMode?: string;
     /** Native H3 client FIFO: 1-based queue position while waiting/running. */
     nativeVideoQueuePosition?: number;
     /** Native H3 client FIFO: total jobs in the canvas queue. */
