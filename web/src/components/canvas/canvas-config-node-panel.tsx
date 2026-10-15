@@ -4,9 +4,11 @@ import { Button, Segmented } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
+import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { defaultConfig, resolveModelForCapability, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { resolveNativeH3VideoSettingDefaults } from "@/lib/comfyui-native";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { formatDuration } from "@/lib/image-utils";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
@@ -37,6 +39,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const canGenerate = hasComposerContent || (mode === "audio" ? inputSummary.textCount > 0 : hasAnyInput);
     const [localRunning, setLocalRunning] = useState(false);
     const running = isRunning || localRunning;
+    const elapsed = useElapsedSeconds(running);
 
     useEffect(() => {
         if (isRunning) {
@@ -162,7 +165,10 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                         <span className="inline-flex items-center gap-1.5">
                             <LoaderCircle className="size-4 animate-spin" />
                             <Square className="size-3.5 fill-current" />
-                            <span>{t("canvas.configNode.stop")}</span>
+                            <span>
+                                {t("canvas.configNode.stop")}
+                                <span className="ml-1 opacity-80">{formatDuration(elapsed * 1000)}</span>
+                            </span>
                         </span>
                     </Button>
                 </div>
@@ -180,7 +186,10 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                             <>
                                 <LoaderCircle className="size-4 animate-spin" />
                                 <Square className="size-3.5 fill-current" />
-                                <span>{t("canvas.configNode.stop")}</span>
+                                <span>
+                                    {t("canvas.configNode.stop")}
+                                    <span className="ml-1 opacity-80">{formatDuration(elapsed * 1000)}</span>
+                                </span>
                             </>
                         ) : (
                             <>

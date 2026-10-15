@@ -7,7 +7,8 @@ import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas
 import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
 import type { TextExportFormat } from "@/lib/canvas/document-text";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { formatBytes } from "@/lib/image-utils";
+import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
+import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { videoExtension } from "@/lib/canvas/canvas-generation-helpers";
 import {
@@ -819,10 +820,14 @@ function LoadingContent({
 }) {
     const { t } = useTranslation();
     const queueLabel = useNativeVideoQueueLabel(nodeId || "", metadata);
+    const elapsed = useElapsedSeconds(true);
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.activeStroke }}>
             <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
-            <span className="text-xs font-semibold tracking-wide">{queueLabel || t("canvas.node.generating")}</span>
+            <span className="text-xs font-semibold tracking-wide">
+                {queueLabel || t("canvas.node.generating")}
+                <span className="ml-1.5 font-medium opacity-70">{formatDuration(elapsed * 1000)}</span>
+            </span>
             {onCancel ? (
                 <button
                     type="button"
@@ -1835,6 +1840,7 @@ function ImageContent({
     const isGenerating = node.metadata?.status === "loading" || images.some((image) => image.status === "loading");
     const canCancel = Boolean(onCancelGeneration) && isGenerating;
     const queueLabel = useNativeVideoQueueLabel(node.id, node.metadata);
+    const elapsed = useElapsedSeconds(isGenerating);
 
     useEffect(() => {
         if (!batchExpanded) setSelectedIds(new Set());
@@ -1956,6 +1962,7 @@ function ImageContent({
                     style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
                 >
                     {queueLabel || t("canvas.node.generating")}
+                    <span className="ml-1.5 font-medium opacity-70">{formatDuration(elapsed * 1000)}</span>
                 </div>
             ) : null}
             {canCancel && displaySrc ? (
@@ -2201,6 +2208,7 @@ function ImageSlotStatus({
     const { t } = useTranslation();
     const queueLabel = useNativeVideoQueueLabel(nodeId || "", metadata);
     const isLoading = image?.status === "loading";
+    const elapsed = useElapsedSeconds(isLoading);
     const failed = image?.status === "error" || (!isLoading && !image?.content && !image?.thumbnailContent);
     const message = failed
         ? image?.errorDetails || (image?.status === "error" ? t("canvas.node.failed") : t("canvas.generation.mediaMissing"))
@@ -2212,7 +2220,12 @@ function ImageSlotStatus({
             ) : (
                 <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
             )}
-            {!failed ? <span className="text-xs font-semibold tracking-wide">{message}</span> : null}
+            {!failed ? (
+                <span className="text-xs font-semibold tracking-wide">
+                    {message}
+                    <span className="ml-1.5 font-medium opacity-70">{formatDuration(elapsed * 1000)}</span>
+                </span>
+            ) : null}
             {isLoading && onCancel ? (
                 <button
                     type="button"

@@ -5,10 +5,12 @@ import dayjs from "dayjs";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
+import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { defaultConfig, resolveModelForCapability, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { resolveH3PromptOptimizerEntry } from "@/constant/text-prompt-library";
 import { resolveNativeH3VideoSettingDefaults } from "@/lib/comfyui-native";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { formatDuration } from "@/lib/image-utils";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { requestImageQuestion, type AiTextMessage } from "@/services/api/image";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
@@ -62,6 +64,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const [scheduleOpen, setScheduleOpen] = useState(false);
     const optimizeControllerRef = useRef<AbortController | null>(null);
     const running = isRunning || localRunning;
+    const elapsed = useElapsedSeconds(running);
     const promptPlaceholder = t(`canvas.promptPanel.${mode === "text" && hasTextContent ? "editText" : mode}`);
 
     // Restore prompts when switching nodes, or when chat skills / external writers bump promptSyncAt.
@@ -431,7 +434,10 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                         <span className="flex items-center gap-1.5">
                                             <LoaderCircle className="size-4 animate-spin" />
                                             <Square className="size-3.5 fill-current" />
-                                            <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
+                                            <span className="text-xs font-medium">
+                                                {t("canvas.promptPanel.stop")}
+                                                <span className="ml-1 opacity-80">{formatDuration(elapsed * 1000)}</span>
+                                            </span>
                                         </span>
                                     </Button>
                                 </>
@@ -449,7 +455,10 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                             <>
                                                 <LoaderCircle className="size-4 animate-spin" />
                                                 <Square className="size-3.5 fill-current" />
-                                                <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
+                                                <span className="text-xs font-medium">
+                                                    {t("canvas.promptPanel.stop")}
+                                                    <span className="ml-1 opacity-80">{formatDuration(elapsed * 1000)}</span>
+                                                </span>
                                             </>
                                         ) : (
                                             <ArrowUp className="size-4" />
