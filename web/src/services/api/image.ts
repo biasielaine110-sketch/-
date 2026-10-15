@@ -1550,13 +1550,21 @@ function readAxiosError(error: unknown, fallback: string) {
     if (axios.isCancel(error)) return apiText("requestCanceled");
     if (axios.isAxiosError(error)) {
         if (!error.response) {
-            // No server response at all: the request never reached the API (CORS block, unreachable address, DNS).
-            // Chrome reports these as ERR_FAILED rather than ERR_NETWORK, so treat any response-less failure as a network/cors issue.
+            // No readable response: true CORS, DNS, or — historically — a Pages proxy 502 that omitted
+            // Access-Control-Allow-Origin (browser then masks it as a cross-origin failure). Prefer
+            // proxy-oriented copy when the URL is our /api/proxy hop so users do not chase CORS first.
             const url = typeof error.config?.url === "string" ? error.config.url : "";
             const hint = url ? `\n${url}` : "";
+            if (/\/api(?:-)?proxy\?target=/i.test(url)) {
+                return `${apiText("proxyUnreachable")}${hint}`;
+            }
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
         }
         const responseData = error.response?.data;
+        // Pages proxy catch body: "proxy error: upstream timed out after …" (status 504).
+        if (typeof responseData === "string" && /upstream timed out|proxy error:.*timed out/i.test(responseData)) {
+            return apiText("proxyTimedOut");
+        }
         // Prefer the API error from the response body.
         const apiMsg = clarifyAuthError(clarifyEdgeError(readApiErrorMessage(responseData)));
         const requestUrl = readRequestTargetUrl(typeof error.config?.url === "string" ? error.config.url : "");
@@ -1600,6 +1608,7 @@ function readStatusError(status: number | undefined, fallback: string, requestUr
     if (status === 404) return /\/models(\/|\?|$)/i.test(requestUrl) ? apiText("notFoundModels") : apiText("notFound");
     if (status === 502) return apiText("badGateway");
     if (status === 503) return apiText("serviceBusy");
+    if (status === 504) return apiText("proxyTimedOut");
     // Cloudflare edge errors: the request reached the provider but their origin failed.
     if (status && status >= 520 && status <= 524) return apiText("originOverloaded", { status });
     return status ? apiText("httpFailed", { status }) : fallback;

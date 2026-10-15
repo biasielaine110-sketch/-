@@ -1,7 +1,35 @@
 /** Edge-compatible CORS proxy for Cloudflare Pages Functions. */
 
-const PROXY_TIMEOUT_MS = 110_000;
+// HTTP-triggered Workers/Functions have NO wall-clock duration limit and waiting on a
+// subrequest does not count toward CPU time, so we can afford the same ~5 min budget as the
+// Vercel handler (web/api/proxy.js). Keep it just under the canvas's documented
+// "线上代理最长约 5 分钟" expectation (apiErrors.proxyTimedOut).
+const PROXY_TIMEOUT_MS = 290_000;
 const UPLOAD_BUFFER_MAX = 8_000_000;
+
+// Error responses MUST carry CORS headers too. Without them the browser classifies the
+// response as a cross-origin failure, the canvas maps it to apiErrors.networkFailed and the
+// user is told to "check the Base URL / CORS" — hiding the real cause (proxy → upstream).
+const CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
+};
+
+/**
+ * @param {string} body
+ * @param {number} status
+ * @param {Request} request
+ */
+function corsErrorResponse(body, status, request) {
+    return new Response(body, {
+        status,
+        headers: {
+            ...CORS_HEADERS,
+            "Access-Control-Allow-Headers": request.headers.get("Access-Control-Request-Headers") || "*",
+            "Content-Type": "text/plain; charset=utf-8",
+        },
+    });
+}
 
 // Keep content-length for multipart uploads to ComfyUI/nginx.
 const SKIP_HEADERS = new Set([
@@ -70,8 +98,7 @@ export async function handleProxy(request) {
         return new Response(null, {
             status: 204,
             headers: {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
+                ...CORS_HEADERS,
                 "Access-Control-Allow-Headers": request.headers.get("Access-Control-Request-Headers") || "*",
             },
         });
@@ -80,17 +107,17 @@ export async function handleProxy(request) {
     try {
         const requestUrl = new URL(request.url);
         const target = requestUrl.searchParams.get("target");
-        if (!target) return new Response("missing target", { status: 400 });
+        if (!target) return corsErrorResponse("missing target", 400, request);
 
         let targetUrl;
         try {
             targetUrl = new URL(target);
         } catch {
-            return new Response("invalid target", { status: 400 });
+            return corsErrorResponse("invalid target", 400, request);
         }
 
         if (targetUrl.protocol !== "http:" && targetUrl.protocol !== "https:") {
-            return new Response("unsupported protocol", { status: 400 });
+            return corsErrorResponse("unsupported protocol", 400, request);
         }
 
         const headers = new Headers();
@@ -145,12 +172,17 @@ export async function handleProxy(request) {
         });
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const timedOut = /aborted due to timeout|TimeoutError|timed out|network|connect/i.test(message);
-        return new Response(
-            timedOut
-                ? `proxy error: upstream unreachable (${message}). For seetacloud :8443, enable ComfyUI CORS (--enable-cors-header) and switch the app to 浏览器直连, or retry when the pod is idle.`
-                : `proxy error: ${message}`,
-            { status: 502 },
+        const timedOut = /aborted due to timeout|TimeoutError|timed out/i.test(message);
+        const detail = timedOut
+            ? `upstream timed out after ${Math.round(PROXY_TIMEOUT_MS / 1000)}s`
+            : `upstream unreachable (${message})`;
+        // Must use corsErrorResponse — a bare 502 without ACAO is masked as CORS in the canvas.
+        return corsErrorResponse(
+            `proxy error: ${detail}。站点代理没能连上接口服务器：请稍后重试；` +
+                `也可到「配置 → 偏好设置」把「API 请求方式」改为「浏览器直连」。` +
+                `（seetacloud / ComfyUI :8443 需给 ComfyUI 开 CORS，或等 pod 空闲再试）`,
+            timedOut ? 504 : 502,
+            request,
         );
     }
 }

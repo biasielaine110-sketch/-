@@ -1320,6 +1320,8 @@ function readAxiosError(error: unknown, fallback: string) {
         if (!error.response) {
             const url = typeof error.config?.url === "string" ? error.config.url : "";
             const hint = url ? `\n${url}` : "";
+            // Pages proxy 502 without ACAO used to surface here as a fake CORS/network failure.
+            if (/\/api(?:-)?proxy\?target=/i.test(url)) return `${apiText("proxyUnreachable")}${hint}`;
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
         }
         const responseData = error.response?.data;
@@ -1330,6 +1332,9 @@ function readAxiosError(error: unknown, fallback: string) {
 }
 
 function readNetworkMessage(message: string) {
+    if (/upstream timed out|aborted due to timeout|TimeoutError|proxy error:.*timed out/i.test(message)) {
+        return apiText("proxyTimedOut");
+    }
     return /failed to fetch|network error|load failed|net::err_/i.test(message) ? apiText("networkFailed") : null;
 }
 
@@ -1338,6 +1343,8 @@ function statusMessage(status: number | undefined, fallback: string) {
     if (status === 401 || status === 403) return apiText("authenticationFailed");
     if (status === 413) return apiText("payloadTooLarge");
     if (status === 429) return apiText("rateLimited");
+    if (status === 502) return apiText("badGateway");
+    if (status === 504) return apiText("proxyTimedOut");
     return status ? `${fallback}（${status}）` : fallback;
 }
 
