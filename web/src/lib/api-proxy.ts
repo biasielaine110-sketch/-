@@ -22,6 +22,11 @@ const DIRECT_CORS_HOSTS = [
     // plain media GET passes CORS straight from the browser, while the Vercel edge (overseas)
     // cannot reach this CN-only host and /api/proxy just 502s on it.
     "xiaoyaoyou.com",
+    // Tailscale Funnel / Serve public HTTPS (e.g. wb2api.*.ts.net). Verified OPTIONS→204 with
+    // ACAO for https://infinite-atelier.pages.dev + Allow-Headers authorization,content-type.
+    // Cloudflare Pages /api/proxy often cannot reach Funnel (or gets reset), which surfaces as
+    // networkFailed with `/api/proxy?target=…/images/edits` for cn:miora-image-edit etc.
+    "ts.net",
     // Do NOT list seetacloud / cpolar / ngrok here: those ComfyUI gateways omit CORS for the
     // canvas origin, so browser-direct fails. They must stay on /api/proxy (+ allow_custom_ports).
 ];
