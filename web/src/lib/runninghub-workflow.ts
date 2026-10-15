@@ -2467,7 +2467,8 @@ function applyMinimaxH3HdDynamicSettings(
 //     selects the subgraph for the canvas mode pill.
 // Scoped to these two ids only.
 const MINIMAX_H3_FISHER_WORKFLOW_IDS = new Set(["2110621324220567554", "2110621014144147458"]);
-const MINIMAX_H3_FISHER_SECONDS = { min: 2, max: 30 };
+/** Export author bake is 10s; longer multi-ref clips OOM SamplerCustomAdvanced on RH. */
+const MINIMAX_H3_FISHER_SECONDS = { min: 2, max: 12 };
 /** Export bake ceiling — selector MP is the sampler latent on this single-pass graph. */
 const MINIMAX_H3_FISHER_MAX_MEGAPIXELS = 0.8;
 

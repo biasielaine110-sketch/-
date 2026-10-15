@@ -174,6 +174,8 @@ function supportsTimbreAudioHint(config: AiConfig, family: NativeVideoFamily) {
 }
 
 const secondOptions = [6, 10, 12, 16, 20];
+/** Work-Fisher single-pass multi-ref: keep duration near Export bake (10s) to avoid RH VRAM OOM. */
+const fisherSecondOptions = [6, 8, 10, 12];
 
 const stepOptions = [20, 25, 30, 40, 50];
 
@@ -402,12 +404,18 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.seconds")} color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {secondOptions.map((value) => (
+                        {(fisherRh ? fisherSecondOptions : secondOptions).map((value) => (
                             <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                 {value}s
                             </OptionPill>
                         ))}
-                        <NumberInput value={seconds} min={1} max={20} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
+                        <NumberInput
+                            value={seconds}
+                            min={1}
+                            max={fisherRh ? 12 : 20}
+                            theme={theme}
+                            onChange={(value) => onConfigChange("videoSeconds", fisherRh ? String(Math.min(12, Math.max(2, Number(value) || 2))) : value)}
+                        />
                     </div>
                 </SettingGroup>
                 {nativeComfy && !h3Comfy ? (
