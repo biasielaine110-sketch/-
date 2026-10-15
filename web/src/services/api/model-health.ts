@@ -5,6 +5,7 @@ import { isSeedAudioModel, isSunoAudioModel } from "@/lib/audio-generation";
 import { isAutodlComfyAudioModel } from "@/lib/autodl-comfy-audio";
 import { isAutodlH3ComfyVideoModel } from "@/lib/autodl-h3-comfy";
 import { isNativeComfyUiBaseUrl, parseComfyApiWorkflow, probeNativeComfyUi } from "@/lib/comfyui-native";
+import { isMioraQueueBaseUrl, probeMioraQueueHealth } from "@/lib/miora-queue";
 import { probeRunningHubWorkflow, shouldUseRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import { buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
@@ -178,6 +179,10 @@ export async function probeModelHealth(config: AiConfig, encodedModel: string, c
     if (!request.baseUrl.trim()) return { ok: false, message: apiText("baseUrlRequired") };
     if (!request.model.trim()) return { ok: false, message: apiText("requestFailed") };
     const script = resolveModelScript(config, encodedModel);
+    if (isMioraQueueBaseUrl(request.baseUrl)) {
+        if (capability !== "image" && capability !== "video") return { ok: false, message: "WorkBuddy 仅支持生图/生视频" };
+        return probeMioraQueue(signal);
+    }
     if (shouldUseRunningHubWorkflow(request.baseUrl, request.model, script) && (capability === "image" || capability === "video")) {
         return probeRunningHubWorkflow(request.baseUrl, request.apiKey, request.model, script, signal);
     }
@@ -463,6 +468,16 @@ async function probeAutodlComfyVideo(config: ReturnType<typeof resolveModelReque
         // Empty prompt / validation errors still mean the route + token are accepted.
         if (response.status >= 200 && response.status < 500) return { ok: true as const, message };
         return { ok: false as const, message };
+    } catch (error) {
+        return failFromError(error);
+    }
+}
+
+async function probeMioraQueue(signal?: AbortSignal) {
+    try {
+        const result = await probeMioraQueueHealth(signal);
+        if (result.ok) return { ok: true as const, message: result.pending ? `队列待处理 ${result.pending}` : undefined };
+        return { ok: false as const, message: result.message || "WorkBuddy 本地队列不可用（请用 npm run dev 启动）" };
     } catch (error) {
         return failFromError(error);
     }

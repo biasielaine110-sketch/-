@@ -7,6 +7,7 @@ import i18n from "@/i18n";
 import { defaultTextPrompts, h3PromptOptimizerEntry, normalizeTextPrompts, type TextPromptEntry } from "@/constant/text-prompt-library";
 import { normalizeSunoVersionValue } from "@/lib/audio-generation";
 import { isNativeComfyUiBaseUrl, parseComfyApiWorkflow } from "@/lib/comfyui-native";
+import { isMioraQueueBaseUrl } from "@/lib/miora-queue";
 
 export type { TextPromptEntry };
 
@@ -129,6 +130,24 @@ const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 
+/** Local WorkBuddy ImageGen / VideoGen via Vite /api/miora file queue (no API key). */
+export const WORKBUDDY_CHANNEL_ID = "workbuddy";
+
+export function createWorkbuddyChannel(): ModelChannel {
+    return {
+        id: WORKBUDDY_CHANNEL_ID,
+        name: "WorkBuddy",
+        baseUrl: "/api/miora",
+        apiKey: "",
+        apiFormat: "openai",
+        apiTransport: "direct",
+        models: [
+            { name: "ImageGen", canvasName: "WorkBuddy 生图", capability: "image" },
+            { name: "VideoGen", canvasName: "WorkBuddy 生视频", capability: "video" },
+        ],
+    };
+}
+
 export const defaultConfig: AiConfig = {
     channelMode: "local",
     baseUrl: OPENAI_BASE_URL,
@@ -148,6 +167,7 @@ export const defaultConfig: AiConfig = {
                 { name: "gpt-4o-mini-tts", capability: "audio" },
             ],
         },
+        createWorkbuddyChannel(),
     ],
     model: "default::gpt-image-2",
     imageModel: "default::gpt-image-2",
@@ -352,6 +372,8 @@ function isAiConfigReady(config: AiConfig, model: string) {
     // Native ComfyUI often has no auth token (or key embedded in RunningHub proxy URL).
     const script = channel.models.find((item) => item.name === modelOptionName(model))?.script || "";
     if (isNativeComfyUiBaseUrl(channel.baseUrl) || parseComfyApiWorkflow(script)) return true;
+    // WorkBuddy local queue uses built-in ImageGen / VideoGen — no API key.
+    if (isMioraQueueBaseUrl(channel.baseUrl)) return true;
     return Boolean(channel.apiKey.trim());
 }
 
@@ -376,7 +398,7 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
-            version: 7,
+            version: 8,
             partialize: (state) => ({ config: state.config }),
             migrate: (persisted, version) => {
                 const state = (persisted || {}) as Partial<ConfigStore> & { config?: Partial<AiConfig> };
@@ -408,6 +430,17 @@ export const useConfigStore = create<ConfigStore>()(
                 // v7: seed the H3 prompt-optimizer entry into an existing text-node prompt library.
                 if (version < 7 && state.config && Array.isArray(state.config.textPrompts) && !state.config.textPrompts.some((item) => item?.id === h3PromptOptimizerEntry.id || item?.title?.trim() === h3PromptOptimizerEntry.title)) {
                     state.config = { ...state.config, textPrompts: [...state.config.textPrompts, { ...h3PromptOptimizerEntry }] };
+                }
+                // v8: inject WorkBuddy local ImageGen / VideoGen channel when missing.
+                if (version < 8 && state.config) {
+                    const channels = Array.isArray(state.config.channels) ? [...state.config.channels] : [];
+                    const hasWorkbuddy = channels.some(
+                        (channel) =>
+                            channel?.id === WORKBUDDY_CHANNEL_ID ||
+                            isMioraQueueBaseUrl(String(channel?.baseUrl || "")),
+                    );
+                    if (!hasWorkbuddy) channels.push(createWorkbuddyChannel());
+                    state.config = { ...state.config, channels };
                 }
                 return state as ConfigStore;
             },

@@ -9,6 +9,7 @@ import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { compressBodyImagesForProxy, compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
+import { isMioraQueueBaseUrl, mediaUrlToDataUrl, runMioraGeneration } from "@/lib/miora-queue";
 import { uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
 import { fetchRemoteImageBlob, imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
@@ -2718,10 +2719,47 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
     return images;
 }
 
+/** WorkBuddy local file-queue ImageGen — no API key; requires Vite + WorkBuddy worker on this machine. */
+async function requestMioraImages(
+    config: AiConfig,
+    prompt: string,
+    references: ReferenceImage[],
+    options?: RequestOptions,
+): Promise<GeneratedImageResult[]> {
+    const { files } = await runMioraGeneration({
+        type: "image",
+        prompt,
+        references,
+        size: config.size,
+        vquality: config.vquality || config.quality,
+        signal: options?.signal,
+    });
+    const images: GeneratedImageResult[] = [];
+    for (const url of files) {
+        if (!/\.(png|jpe?g|webp|gif)(\?|$)/i.test(url) && !url.includes("/api/miora/media")) continue;
+        const dataUrl = await mediaUrlToDataUrl(url, options?.signal);
+        if (dataUrl.startsWith("data:image/")) images.push({ id: nanoid(), dataUrl });
+    }
+    if (!images.length) {
+        // Fallback: treat first file as image even without extension hint.
+        const dataUrl = await mediaUrlToDataUrl(files[0], options?.signal);
+        if (dataUrl.startsWith("data:image/")) images.push({ id: nanoid(), dataUrl });
+    }
+    if (!images.length) throw new Error("WorkBuddy 未返回可用图片");
+    return images;
+}
+
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<GeneratedImageResult[]> {
     const requestConfig = resolveImageRequestConfig(config);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
+    if (isMioraQueueBaseUrl(requestConfig.baseUrl)) {
+        try {
+            return await requestMioraImages(requestConfig, withSystemPrompt(requestConfig, prompt), [], options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
     if (runningHubOrigin(requestConfig.baseUrl)) {
         const workflowId = runningHubWorkflowId(config, config.model || config.imageModel, requestConfig, script);
         if (!workflowId) throw new Error(apiText("runningHubWorkflowFetchFailed", { model: requestConfig.model || "空" }));
@@ -2840,6 +2878,13 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     const script = resolveModelScript(config, config.model || config.imageModel);
+    if (isMioraQueueBaseUrl(requestConfig.baseUrl)) {
+        try {
+            return await requestMioraImages(requestConfig, withSystemPrompt(requestConfig, requestPrompt), references, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
     if (runningHubOrigin(requestConfig.baseUrl)) {
         const workflowId = runningHubWorkflowId(config, config.model || config.imageModel, requestConfig, script);
         if (!workflowId) throw new Error(apiText("runningHubWorkflowFetchFailed", { model: requestConfig.model || "空" }));

@@ -19,6 +19,7 @@ import { resolveApiTransport, proxyApiUrl } from "@/lib/api-proxy";
 import { uploadTemporaryPublicImage } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import { isMinimaxH3SingularityWorkflowId, pickRunningHubWorkflowId, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
+import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio } from "@/types/media";
@@ -110,6 +111,10 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     // Pre-compress oversized local references before dispatch so no path sends a body
     // that trips the Vercel ~4.5MB serverless cap (HTTP 413 "请求实体过大").
     const safeReferences = await compressVideoReferences(references);
+    // WorkBuddy local file-queue VideoGen — no API key; runs on this machine only.
+    if (isMioraQueueBaseUrl(requestConfig.baseUrl)) {
+        return createMioraVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
+    }
     // Metaso MiniMax-H3 must use OpenAI /videos before any AutoDL ComfyUI heuristic.
     if (isMetasoH3Video(requestConfig, selectedModel)) {
         assertVideoConfig(requestConfig, requestConfig.model);
@@ -186,6 +191,33 @@ async function compressVideoReferences(references: ReferenceImage[]): Promise<Re
         }
     }
     return out;
+}
+
+async function createMioraVideoTask(
+    config: AiConfig,
+    model: string,
+    prompt: string,
+    references: ReferenceImage[],
+    options?: RequestOptions,
+): Promise<VideoGenerationTask> {
+    if (!config.baseUrl.trim()) throw new Error(apiText("baseUrlRequired"));
+    const { files } = await runMioraGeneration({
+        type: "video",
+        prompt,
+        references,
+        size: config.size,
+        vquality: config.vquality,
+        signal: options?.signal,
+    });
+    const videoUrl =
+        files.find((url) => /\.(mp4|webm|mov)(\?|$)/i.test(url)) ||
+        files.find((url) => url.includes("/api/miora/media")) ||
+        files[0];
+    if (!videoUrl) throw new Error("WorkBuddy 未返回可用视频");
+    const blob = await mediaUrlToBlob(videoUrl, options?.signal);
+    const id = nanoid();
+    pluginVideoResults.set(id, { blob, mimeType: blob.type || "video/mp4" });
+    return { id, provider: "plugin", model };
 }
 
 async function createPluginVideoTask(config: AiConfig, model: string, script: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {

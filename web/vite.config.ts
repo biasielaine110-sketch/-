@@ -8,6 +8,7 @@ import { defineConfig, type Plugin } from "vite";
 
 import { outboundFetch } from "./api/outbound-fetch.js";
 import { handleCanvasBridge } from "./api/canvas-bridge.js";
+import { handleMioraQueue } from "./api/miora-queue.js";
 
 const webDir = dirname(fileURLToPath(import.meta.url));
 
@@ -148,6 +149,31 @@ function canvasBridgePlugin(): Plugin {
     };
 }
 
+/** Local file-queue API for WorkBuddy ImageGen / VideoGen (canvas → WorkBuddy → canvas). */
+function mioraQueuePlugin(): Plugin {
+    const handler = (req: IncomingMessage, res: import("node:http").ServerResponse, next: () => void) => {
+        const pathname = (req.url || "").split("?")[0];
+        if (!pathname.startsWith("/api/miora")) {
+            next();
+            return;
+        }
+        void handleMioraQueue(req, res).catch((error: unknown) => {
+            if (res.headersSent) return;
+            res.statusCode = 500;
+            res.end(error instanceof Error ? error.message : String(error));
+        });
+    };
+    return {
+        name: "miora-queue",
+        configureServer(server) {
+            server.middlewares.stack.unshift({ route: "", handle: handler });
+        },
+        configurePreviewServer(server) {
+            server.middlewares.stack.unshift({ route: "", handle: handler });
+        },
+    };
+}
+
 function readRequestBody(req: IncomingMessage): Promise<Buffer | undefined> {
     return new Promise((resolveBody) => {
         const chunks: Buffer[] = [];
@@ -159,7 +185,7 @@ function readRequestBody(req: IncomingMessage): Promise<Buffer | undefined> {
 
 export default defineConfig({
     base: process.env.VITE_BASE || "/",
-    plugins: [react(), apiProxyPlugin(), canvasBridgePlugin()],
+    plugins: [react(), apiProxyPlugin(), canvasBridgePlugin(), mioraQueuePlugin()],
     resolve: {
         alias: {
             "@": resolve(webDir, "src"),
