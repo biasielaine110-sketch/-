@@ -19,6 +19,28 @@ export const config = {
 // Abort a few seconds before the platform kills the function.
 const PROXY_TIMEOUT_MS = 290_000;
 
+// Error responses MUST carry CORS headers too. Without them the browser classifies the
+// response as a cross-origin failure and the canvas shows "cannot reach the API server",
+// hiding the real cause (proxy → upstream). Mirrors web/functions/_lib/proxy.js.
+const CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS",
+};
+
+/**
+ * @param {import('http').ServerResponse} res
+ * @param {string} body
+ * @param {number} status
+ * @param {import('http').IncomingMessage} req
+ */
+function sendCorsError(res, body, status, req) {
+    res.statusCode = status;
+    for (const [key, value] of Object.entries(CORS_HEADERS)) res.setHeader(key, value);
+    res.setHeader("Access-Control-Allow-Headers", req.headers["access-control-request-headers"] || "*");
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.end(body);
+}
+
 /**
  * @param {import('http').IncomingMessage} req
  * @param {import('http').ServerResponse} res
@@ -26,8 +48,7 @@ const PROXY_TIMEOUT_MS = 290_000;
 export default async function handler(req, res) {
     if (req.method === "OPTIONS") {
         res.statusCode = 204;
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
+        for (const [key, value] of Object.entries(CORS_HEADERS)) res.setHeader(key, value);
         res.setHeader("Access-Control-Allow-Headers", req.headers["access-control-request-headers"] || "*");
         res.end();
         return;
@@ -37,8 +58,7 @@ export default async function handler(req, res) {
         const requestUrl = new URL(req.url || "", "http://localhost");
         const target = requestUrl.searchParams.get("target");
         if (!target) {
-            res.statusCode = 400;
-            res.end("missing target");
+            sendCorsError(res, "missing target", 400, req);
             return;
         }
 
@@ -46,14 +66,12 @@ export default async function handler(req, res) {
         try {
             targetUrl = new URL(target);
         } catch {
-            res.statusCode = 400;
-            res.end("invalid target");
+            sendCorsError(res, "invalid target", 400, req);
             return;
         }
 
         if (targetUrl.protocol !== "http:" && targetUrl.protocol !== "https:") {
-            res.statusCode = 400;
-            res.end("unsupported protocol");
+            sendCorsError(res, "unsupported protocol", 400, req);
             return;
         }
 
@@ -115,8 +133,16 @@ export default async function handler(req, res) {
         const message = error instanceof Error ? error.message : String(error);
         const timedOut = /aborted due to timeout|TimeoutError|timed out/i.test(message);
         if (!res.headersSent) {
-            res.statusCode = 502;
-            res.end(timedOut ? `proxy error: upstream timed out after ${Math.round(PROXY_TIMEOUT_MS / 1000)}s` : `proxy error: ${message}`);
+            const detail = timedOut
+                ? `upstream timed out after ${Math.round(PROXY_TIMEOUT_MS / 1000)}s`
+                : `upstream unreachable (${message})`;
+            sendCorsError(
+                res,
+                `proxy error: ${detail}。站点代理没能连上接口服务器：请稍后重试；` +
+                    `也可到「配置 → 偏好设置」把「API 请求方式」改为「浏览器直连」。`,
+                timedOut ? 504 : 502,
+                req,
+            );
             return;
         }
         res.destroy(error instanceof Error ? error : undefined);
