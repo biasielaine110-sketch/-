@@ -142,6 +142,11 @@ export type CanvasNodeMetadata = {
     scriptPreset?: import("@/constant/story-script").StoryScriptPresetId;
     /** 脚本生成器：上游资产分类（节点 id → 角色/场景/道具/站位图），决定铺链路时素材连到哪些镜。 */
     scriptAssetRoles?: Record<string, import("@/constant/story-script").ScriptAssetRole>;
+    /**
+     * 脚本生成器：**逐镜图片**关联（镜号 → 画布图片节点 id 列表）。在分镜表「镜头图」列里直接
+     * 导入 / 链接 / 生成，铺链路时只连到这一镜的图片节点，并随该分组合并进视频节点。
+     */
+    scriptRowAssets?: import("@/constant/story-script").StoryScriptRowAssetMap;
     /** 脚本生成器：每段目标时长（none / 10 / 15），同时用于生成时的分段要求与铺链路的自动合并。 */
     scriptSegmentSeconds?: import("@/constant/story-script").StoryScriptSegmentSeconds;
     /** 脚本生成器：铺链路时每个视频节点合并几镜（shot / 2 / 3 / duration）。 */

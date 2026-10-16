@@ -708,6 +708,77 @@ export function matchStoryScriptRowAssets(
 }
 
 /**
+ * **逐镜图片**：镜号 → 画布上图片节点 id 的列表。存在脚本节点的 `metadata.scriptRowAssets`。
+ *
+ * 与 `metadata.scriptAssetRoles`（脚本节点级：这张素材属于哪一类，供铺链路时按类分派）刻意分开：
+ *  - 「资产」是**整表共享**的参考图（角色卡 / 场景 / 道具 / 站位图），铺链路时对每一镜都成立；
+ *  - 「镜头图」是**按镜指定**的成片关键帧 —— 用户在分镜表某一行的「镜头图」列里直接导入 / 链接 /
+ *    生成，铺链路时只连到**这一镜**的图片节点（并随该分组合并进视频节点）。
+ *
+ * 用镜号（而不是数组下标）做键：镜号是表里对用户可见、且能跨会话稳定复现的标识。删行会让镜号
+ * 整体前移，所以另配 `shiftStoryScriptRowAssetsAfterDelete` 在删行时把键一起挪。
+ */
+export type StoryScriptRowAssetMap = Record<string, string[]>;
+
+/** 镜号归一化成 map 的键；非法值返回空串（调用方按「没有关联」处理）。 */
+function rowAssetMapKey(shotNo: unknown): string {
+    const no = Number(shotNo);
+    return Number.isFinite(no) && no > 0 ? String(Math.round(no)) : "";
+}
+
+/** 读某一镜关联的图片节点 id（容错：值不是数组、或夹了非字符串项，都就地过滤掉）。 */
+export function scriptRowAssetIds(map: unknown, shotNo: unknown): string[] {
+    const key = rowAssetMapKey(shotNo);
+    if (!key) return [];
+    const value = map && typeof map === "object" ? (map as Record<string, unknown>)[key] : undefined;
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is string => typeof item === "string" && Boolean(item));
+}
+
+/**
+ * 写某一镜关联的图片节点 id，返回**新的 map**（纯函数，便于探针直接校验）。
+ * 传空数组等价于删掉这一镜的键 —— 免得 metadata 里堆一堆空数组，也便于「全部取消关联」后归一化。
+ */
+export function setStoryScriptRowAssetIds(map: unknown, shotNo: unknown, ids: readonly unknown[]): StoryScriptRowAssetMap {
+    const next: StoryScriptRowAssetMap = { ...(map && typeof map === "object" ? (map as StoryScriptRowAssetMap) : {}) };
+    const key = rowAssetMapKey(shotNo);
+    if (!key) return next;
+    const cleaned = Array.from(new Set(ids.filter((item): item is string => typeof item === "string" && Boolean(item))));
+    if (cleaned.length) next[key] = cleaned;
+    else delete next[key];
+    return next;
+}
+
+/** 统一把 map 收成「键是正整数字符串、值是去重后的非空 id 数组」，顺带丢掉空条目与非法键。 */
+export function normalizeStoryScriptRowAssetMap(map: unknown): StoryScriptRowAssetMap {
+    const source = map && typeof map === "object" ? (map as Record<string, unknown>) : {};
+    const next: StoryScriptRowAssetMap = {};
+    for (const [key, value] of Object.entries(source)) {
+        if (!rowAssetMapKey(key) || !Array.isArray(value)) continue;
+        const cleaned = Array.from(new Set(value.filter((item): item is string => typeof item === "string" && Boolean(item))));
+        if (cleaned.length) next[String(Math.round(Number(key)))] = cleaned;
+    }
+    return next;
+}
+
+/**
+ * 删掉第 `deletedShotNo` 镜（表里会被重排镜号）之后，把关联整体前移一位，
+ * 否则「第 5 镜」的图会留在键 5 上、而键 5 现在已经变成了原来的第 6 镜。
+ */
+export function shiftStoryScriptRowAssetsAfterDelete(map: unknown, deletedShotNo: unknown): StoryScriptRowAssetMap {
+    const normalized = normalizeStoryScriptRowAssetMap(map);
+    const deleted = Number(deletedShotNo);
+    if (!Number.isFinite(deleted) || deleted <= 0) return normalized;
+    const next: StoryScriptRowAssetMap = {};
+    for (const [key, ids] of Object.entries(normalized)) {
+        const no = Number(key);
+        if (no === deleted) continue;
+        next[String(no > deleted ? no - 1 : no)] = ids;
+    }
+    return next;
+}
+
+/**
  * 资产对话框「按描述生图」的候选：`title` 同时作为建出来的图片节点标题
  * （铺链路时角色类素材靠标题做名字匹配，所以角色候选的 title 必须就是角色名），
  * `prompt` 是喂给生图的提示词。

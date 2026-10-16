@@ -32,7 +32,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { buildMergedVideoNodePrompt, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, storyScriptGroupDuration, storyScriptToMarkdown, type ScriptAssetRole } from "@/constant/story-script";
+import { buildMergedVideoNodePrompt, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, scriptRowAssetIds, setStoryScriptRowAssetIds, storyScriptGroupDuration, storyScriptToMarkdown, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -6389,8 +6389,24 @@ function AtelierCanvasPage() {
         [connections, nodes],
     );
 
+    // 画布上**全部**图片节点（含已经连成脚本节点上游的那些）：逐镜「镜头图」用它做勾选列表与
+    // 缩略图查表——镜头图与整表资产不同，它不需要「排除已连线」，所以不能复用上面那个按节点过滤的缓存。
+    // 同样按 nodes 懒缓存，保证同一批 nodes 下数组引用稳定（逐镜弹窗靠引用判重，否则会渲染循环）。
+    const scriptImageCacheRef = useRef<{ nodes: CanvasNodeData[]; list: ScriptAssetCandidate[] } | null>(null);
+    const getScriptImageCandidates = useCallback(() => {
+        const cache = scriptImageCacheRef.current;
+        if (cache && cache.nodes === nodes) return cache.list;
+        const list = nodes
+            .filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content))
+            .map((node): ScriptAssetCandidate => ({ id: node.id, title: node.title, kind: "image", previewUrl: node.metadata?.thumbnailContent || node.metadata?.content }));
+        scriptImageCacheRef.current = { nodes, list };
+        return list;
+    }, [nodes]);
+
     // 把新素材摆在脚本节点左侧竖排，并连成它的上游素材（图片会因此成为后续生图的参考图）。
-    const attachScriptAssets = useCallback((source: CanvasNodeData, items: Array<{ node: CanvasNodeData; width: number; height: number }>) => {
+    // `connect = false` 给「逐镜镜头图」用：那些图只按镜关联、不做脚本节点的上游连线——否则会被
+    // 当成整表共享的资产，铺链路时被每一镜都连一遍。
+    const attachScriptAssets = useCallback((source: CanvasNodeData, items: Array<{ node: CanvasNodeData; width: number; height: number }>, connect = true) => {
         if (!items.length) return [] as CanvasNodeData[];
         const gap = 24;
         const totalHeight = items.reduce((sum, item) => sum + item.height, 0) + gap * (items.length - 1);
@@ -6401,21 +6417,20 @@ function AtelierCanvasPage() {
             return next;
         });
         setNodes((prev) => [...prev, ...placed]);
-        setConnections((prev) => [...prev, ...placed.map((node) => ({ id: nanoid(), fromNodeId: node.id, toNodeId: source.id }))]);
+        if (connect) setConnections((prev) => [...prev, ...placed.map((node) => ({ id: nanoid(), fromNodeId: node.id, toNodeId: source.id }))]);
         setSelectedNodeIds(new Set(placed.map((node) => node.id)));
         setSelectedConnectionId(null);
         return placed;
     }, []);
 
-    // 导入本地图片 / 视频 / 音频到脚本节点：上传后建节点并自动连成上游素材，并按弹窗里选的分类落库。
-    const handleImportScriptAssets = useCallback(
-        async (nodeId: string, files: File[], role: ScriptAssetRole = "character") => {
-            const source = nodesRef.current.find((item) => item.id === nodeId);
-            if (!source || !files.length) return;
+    // 本地文件 → 画布节点（图片 / 视频 / 音频）。抽出来给「脚本节点资产」与「逐镜镜头图」两条路复用，
+    // 两者的差别只在「摆哪儿、连不连、记到哪」。返回项已带好宽高。
+    const buildAssetItems = useCallback(
+        async (files: File[]): Promise<Array<{ node: CanvasNodeData; width: number; height: number }>> => {
             const media = files.filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || isAudioFile(file));
             if (!media.length) {
                 message.warning(t("canvas.scriptNode.assetUnsupported"));
-                return;
+                return [];
             }
             const items: Array<{ node: CanvasNodeData; width: number; height: number }> = [];
             for (const file of media) {
@@ -6441,6 +6456,17 @@ function AtelierCanvasPage() {
                     message.error(error instanceof Error ? error.message : t("canvas.scriptNode.assetImportFailed"));
                 }
             }
+            return items;
+        },
+        [message, t],
+    );
+
+    // 导入本地图片 / 视频 / 音频到脚本节点：上传后建节点并自动连成上游素材，并按弹窗里选的分类落库。
+    const handleImportScriptAssets = useCallback(
+        async (nodeId: string, files: File[], role: ScriptAssetRole = "character") => {
+            const source = nodesRef.current.find((item) => item.id === nodeId);
+            if (!source || !files.length) return;
+            const items = await buildAssetItems(files);
             const placed = attachScriptAssets(source, items);
             if (placed.length) {
                 // 音频节点一律归「音频」（它只连视频节点），其余按弹窗里选的分类（默认「角色」）。
@@ -6451,7 +6477,7 @@ function AtelierCanvasPage() {
                 message.success(t("canvas.scriptNode.assetImported", { count: placed.length }));
             }
         },
-        [attachScriptAssets, message, t],
+        [attachScriptAssets, buildAssetItems, message, t],
     );
 
     // 把「节点 id → 分类」写进 metadata.scriptAssetRoles：铺链路时据此决定素材连到哪些镜
@@ -6545,6 +6571,94 @@ function AtelierCanvasPage() {
         [attachScriptAssets, message, revealNodes, t],
     );
 
+    // ---- 逐镜「镜头图」（metadata.scriptRowAssets）----
+    // 与上面那套「整表资产」并列、但语义不同：资产是整表共享的参考图（按分类逐镜分派），镜头图是
+    // **按镜指定**的成片关键帧，铺链路时只连到这一镜的图片节点、并随该分组合并进视频节点。
+    // 三条路（导入 / 链接 / 生成）都写回同一张 map；这些图**不连**脚本节点，否则会被当成整表资产。
+
+    /** 逐镜关联整体替换（弹窗确认、或缩略图上的 × 解绑）。 */
+    const handleRowAssetsChange = useCallback((nodeId: string, shotNo: number, ids: string[]) => {
+        setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptRowAssets: setStoryScriptRowAssetIds(item.metadata?.scriptRowAssets, shotNo, ids) } } : item)));
+    }, []);
+
+    /** 把新节点追加关联到某一镜（保留这一镜已有的图）。 */
+    const appendRowAssets = useCallback((nodeId: string, shotNo: number, ids: string[]) => {
+        if (!ids.length) return;
+        setNodes((prev) =>
+            prev.map((item) =>
+                item.id === nodeId
+                    ? { ...item, metadata: { ...item.metadata, scriptRowAssets: setStoryScriptRowAssetIds(item.metadata?.scriptRowAssets, shotNo, [...scriptRowAssetIds(item.metadata?.scriptRowAssets, shotNo), ...ids]) } }
+                    : item,
+            ),
+        );
+    }, []);
+
+    /**
+     * 把逐镜图片摆在脚本节点**下方**横向排开（不连线）。
+     * 刻意不复用 `attachScriptAssets`：它的落点是节点左侧，正好是「整表资产」的地盘，两类图会叠在一起。
+     * 起始 x 按「这张表已经关联过多少张镜头图」右移，连着导入几批也不会原地重叠。
+     */
+    const placeRowAssetNodes = useCallback((source: CanvasNodeData, items: Array<{ node: CanvasNodeData; width: number; height: number }>) => {
+        if (!items.length) return [] as CanvasNodeData[];
+        const gap = 24;
+        const laid = Object.values(source.metadata?.scriptRowAssets || {}).reduce((sum, ids) => sum + (Array.isArray(ids) ? ids.length : 0), 0);
+        let cursorX = source.position.x + laid * (NODE_DEFAULT_SIZE[CanvasNodeType.Image].width + gap);
+        const baseY = source.position.y + source.height + 48;
+        const placed = items.map((item) => {
+            const next: CanvasNodeData = { ...item.node, width: item.width, height: item.height, position: { x: cursorX, y: baseY } };
+            cursorX += item.width + gap;
+            return next;
+        });
+        setNodes((prev) => [...prev, ...placed]);
+        setSelectedNodeIds(new Set(placed.map((node) => node.id)));
+        setSelectedConnectionId(null);
+        return placed;
+    }, []);
+
+    /** 逐镜导入本地图片：建节点并立刻关联到这一镜（只收图片，视频 / 音频会被挡下并提示）。 */
+    const handleRowAssetImport = useCallback(
+        async (nodeId: string, shotNo: number, files: File[]) => {
+            const source = nodesRef.current.find((item) => item.id === nodeId);
+            if (!source || !files.length) return;
+            const items = await buildAssetItems(files);
+            const images = items.filter((item) => item.node.type === CanvasNodeType.Image);
+            if (!images.length) {
+                if (items.length) message.warning(t("canvas.scriptNode.rowImageOnlyImages"));
+                return;
+            }
+            const placed = placeRowAssetNodes(source, images);
+            if (!placed.length) return;
+            appendRowAssets(nodeId, shotNo, placed.map((node) => node.id));
+            revealNodes(placed, "center");
+            message.success(t("canvas.scriptNode.rowImageImported", { count: placed.length, no: shotNo }));
+        },
+        [appendRowAssets, buildAssetItems, message, placeRowAssetNodes, revealNodes, t],
+    );
+
+    /** 逐镜 AI 生成图片：建图片节点、关联到这一镜并立刻触发生图。 */
+    const handleRowAssetGenerate = useCallback(
+        (nodeId: string, shotNo: number, prompt: string, title: string) => {
+            const source = nodesRef.current.find((item) => item.id === nodeId);
+            const scene = prompt.trim();
+            if (!source || !scene) return;
+            const assetTitle = title.trim() || scene.slice(0, 24);
+            const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE });
+            const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: spec.width, height: spec.height }]);
+            const created = placed[0];
+            if (!created) return;
+            // 立刻同步 nodesRef：紧接着的触发生成会读 nodesRef 判断「这是不是一个图片节点（结果写回自身）」。
+            nodesRef.current = [...nodesRef.current, created];
+            appendRowAssets(nodeId, shotNo, [created.id]);
+            revealNodes([created], "center");
+            message.success(t("canvas.scriptNode.rowImageGenerating", { no: shotNo }));
+            void Promise.resolve(generateNodeRef.current?.(created.id, "image", scene)).finally(() => {
+                setNodes((prev) => prev.map((item) => (item.id === created.id && item.title !== assetTitle ? { ...item, title: assetTitle } : item)));
+            });
+        },
+        [appendRowAssets, message, placeRowAssetNodes, revealNodes, t],
+    );
+
     const handleBuildScriptPipeline = useCallback(
         (nodeId: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
@@ -6554,6 +6668,8 @@ function AtelierCanvasPage() {
             const presetId = resolveStoryScriptPresetId(source.metadata?.scriptPreset);
             const preset = getStoryScriptPreset(presetId);
             const segmentSeconds = source.metadata?.scriptSegmentSeconds;
+            // 现存节点 id：过滤掉已被删、但还留在 metadata.scriptRowAssets 里的镜头图，免得连出悬空线。
+            const existingNodeIds = new Set(nodesRef.current.map((node) => node.id));
             // 上游图片节点 = 角色 / 场景 / 道具 / 站位图素材。分类决定它连到哪些镜：
             //   角色 → 按分镜里的角色名逐镜匹配；场景 / 道具 / 站位图 → 每一镜都连。
             // 音频素材单独拎出来：它不能参与生图，只连到视频节点（每段视频都连）。
@@ -6642,6 +6758,14 @@ function AtelierCanvasPage() {
                     for (const asset of [...matchStoryScriptRowAssets(presetId, member.row, characterRefs), ...globalRefs]) {
                         createdConnections.push({ id: nanoid(), fromNodeId: asset.id, toNodeId: imageNode.id });
                         groupAssetIds.add(asset.id);
+                        assetLinkCount += 1;
+                    }
+                    // 这一镜自己的「镜头图」：只连到**这一镜**的图片节点；同时进 groupAssetIds，
+                    // 于是下面会把它们一并连到该段的视频节点——即「按镜头把图片连到图片节点和视频节点」。
+                    for (const rowAssetId of scriptRowAssetIds(source.metadata?.scriptRowAssets, shotNo)) {
+                        if (!existingNodeIds.has(rowAssetId)) continue;
+                        createdConnections.push({ id: nanoid(), fromNodeId: rowAssetId, toNodeId: imageNode.id });
+                        groupAssetIds.add(rowAssetId);
                         assetLinkCount += 1;
                     }
                 }
@@ -6744,7 +6868,10 @@ function AtelierCanvasPage() {
             ];
             // 音频素材只连视频节点（不参与生图），与整条铺链路一致。
             const audioRefs = upstreamNodes.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey));
-            const links = [...assets, ...audioRefs].map((asset) => ({ id: nanoid(), fromNodeId: asset.id, toNodeId: videoNode.id }));
+            // 这一镜自己的「镜头图」也直连视频节点；已删掉的图片节点直接跳过。
+            const rowAssetRefs = scriptRowAssetIds(source.metadata?.scriptRowAssets, shotNo).filter((id) => nodesRef.current.some((node) => node.id === id));
+            const linkIds = [...assets.map((asset) => asset.id), ...audioRefs.map((asset) => asset.id), ...rowAssetRefs];
+            const links = linkIds.map((id) => ({ id: nanoid(), fromNodeId: id, toNodeId: videoNode.id }));
             nodesRef.current = [...nodesRef.current, videoNode];
             setNodes((prev) => [...prev, videoNode]);
             if (links.length) setConnections((prev) => [...prev, ...links]);
@@ -6837,6 +6964,11 @@ function AtelierCanvasPage() {
                         onLinkAssets={handleLinkScriptAssets}
                         assetRoles={contentNode.metadata?.scriptAssetRoles}
                         onAssetRoleChange={handleAssetRoleChange}
+                        rowAssets={contentNode.metadata?.scriptRowAssets}
+                        imageCandidates={getScriptImageCandidates()}
+                        onRowAssetsChange={handleRowAssetsChange}
+                        onRowAssetImport={(nodeId, shotNo, files) => void handleRowAssetImport(nodeId, shotNo, files)}
+                        onRowAssetGenerate={handleRowAssetGenerate}
                         onBuildPipeline={handleBuildScriptPipeline}
                         onBuildShotVideo={handleBuildShotVideo}
                         onRegenerateShot={(nodeId, rowIndex) => void runScriptShotGeneration(nodeId, rowIndex)}
@@ -6892,7 +7024,7 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleRegenerateScriptAll, handleScriptAction, handleStopScriptGeneration, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme],
+        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;

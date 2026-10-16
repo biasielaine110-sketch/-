@@ -32,6 +32,24 @@ export type ScriptAssetCandidate = {
 /** 一次链接：素材节点 id + 它被分到的类别。 */
 export type ScriptAssetLinkSelection = { nodeId: string; role: ScriptAssetRole };
 
+/**
+ * 「逐镜模式」：只给分镜表的**某一行**关联图片（镜头图），不做资产分类。
+ * 三条路都收敛到「把这些图片节点作为这一镜的关键帧」，铺链路时连到该镜的图片节点与视频节点。
+ */
+export type ScriptRowAssetMode = {
+    /** 这一镜的镜号（标题与文案用）。 */
+    no: number | string;
+    /** 打开时预勾选：已经关联到这一镜的图片节点 id。 */
+    selectedIds: string[];
+    /** 「AI 生成」tab 的预填提示词 / 标题（一般是这一镜的分镜提示词）。 */
+    prompt?: string;
+    title?: string;
+    /** 确认：用整组 id 替换这一镜的关联（取消勾选即解绑）。 */
+    onLink: (nodeIds: string[]) => void;
+    onImport: (files: File[]) => void;
+    onGenerate?: (prompt: string, title: string) => void;
+};
+
 type CanvasScriptAssetDialogProps = {
     open: boolean;
     theme: CanvasTheme;
@@ -43,15 +61,17 @@ type CanvasScriptAssetDialogProps = {
     onImport: (files: File[], role: ScriptAssetRole) => void;
     /** 用描述直接生成一张资产图：上层负责建节点、连线、写分类并触发生成。 */
     onGenerate?: (role: ScriptAssetRole, prompt: string, title: string) => void;
+    /** 传了就走「逐镜模式」：只为某一镜关联图片，隐藏分类、勾选即关联。 */
+    rowMode?: ScriptRowAssetMode;
 };
 
 /** 图片 / 视频 / 音频素材可以参与分类；文本节点（剧本）没有「角色 / 场景 / 道具 / 音频」的概念。 */
 const isClassifiable = (kind: ScriptAssetCandidate["kind"]) => kind === "image" || kind === "video" || kind === "audio";
 
-/** 上传 / 拖拽 / 粘贴时只认图片、视频、音频文件。 */
-const isAssetFile = (file: File) => file.type.startsWith("image/") || file.type.startsWith("video/") || file.type.startsWith("audio/");
+/** 上传 / 拖拽 / 粘贴时只认图片、视频、音频文件。导出给节点本体复用（直接往节点上拖文件）。 */
+export const isAssetFile = (file: File) => file.type.startsWith("image/") || file.type.startsWith("video/") || file.type.startsWith("audio/");
 
-export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose, onLink, onImport, onGenerate }: CanvasScriptAssetDialogProps) {
+export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose, onLink, onImport, onGenerate, rowMode }: CanvasScriptAssetDialogProps) {
     const { t } = useTranslation();
     const [selected, setSelected] = useState<string[]>([]);
     const [roleById, setRoleById] = useState<Record<string, ScriptAssetRole>>({});
@@ -62,23 +82,42 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
     const [genTitle, setGenTitle] = useState("");
     const [dragging, setDragging] = useState(false);
     const fileRef = useRef<HTMLInputElement>(null);
+    // 已为「当前打开目标」初始化过草稿的签名：rowMode 每次渲染都是新对象，靠它区分「换了目标」与「重新渲染」。
+    const initKeyRef = useRef("");
 
-    // 关掉就清空：下次打开不该继承上一次的勾选、分类与草稿。
+    // 打开时按模式初始化草稿；关掉就清空，下次打开不继承上一次的勾选与分类。
     useEffect(() => {
-        if (open) return;
-        setSelected([]);
+        if (!open) {
+            initKeyRef.current = "";
+            setSelected([]);
+            setRoleById({});
+            setUploadRole("character");
+            setGenRole("character");
+            setGenPrompt("");
+            setGenTitle("");
+            setDragging(false);
+            return;
+        }
+        const key = rowMode ? `row:${rowMode.no}:${rowMode.selectedIds.join(",")}` : "asset";
+        if (initKeyRef.current === key) return;
+        initKeyRef.current = key;
+        setSelected(rowMode ? rowMode.selectedIds : []);
         setRoleById({});
         setUploadRole("character");
         setGenRole("character");
-        setGenPrompt("");
-        setGenTitle("");
+        setGenPrompt(rowMode?.prompt || "");
+        setGenTitle(rowMode?.title || "");
         setDragging(false);
-    }, [open]);
+    }, [open, rowMode]);
 
     // 候选集变了（别的节点被删/被连走）时，把已经不存在的勾选摘掉。
+    // 内容没变时返回原数组，避免「候选数组每次都是新引用」引发渲染循环。
     useEffect(() => {
         const valid = new Set(candidates.map((item) => item.id));
-        setSelected((prev) => prev.filter((id) => valid.has(id)));
+        setSelected((prev) => {
+            const next = prev.filter((id) => valid.has(id));
+            return next.length === prev.length ? prev : next;
+        });
     }, [candidates]);
 
     /**
@@ -92,15 +131,18 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
             const media = Array.from(event.clipboardData?.files || []).filter(isAssetFile);
             if (!media.length) return;
             event.preventDefault();
-            onImport(media, uploadRole);
+            if (rowMode) rowMode.onImport(media);
+            else onImport(media, uploadRole);
             onClose();
         };
         window.addEventListener("paste", handlePaste, true);
         return () => window.removeEventListener("paste", handlePaste, true);
-    }, [open, uploadRole, onImport, onClose]);
+    }, [open, uploadRole, onImport, onClose, rowMode]);
 
     /** 分镜表里该类资产的描述候选（角色 = 角色卡；场景 = 场景名 + 场景描述；道具 = 道具名 + 道具描述；站位图 = 人物站位）。 */
     const descriptionCandidates = useMemo(() => collectScriptAssetPromptCandidates(genRole, rows), [genRole, rows]);
+    /** 逐镜模式：只为分镜表的某一行关联图片，不做分类、也不按描述生图。 */
+    const isRowMode = Boolean(rowMode);
 
     const allSelected = candidates.length > 0 && selected.length === candidates.length;
     const toggle = (id: string) => setSelected((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
@@ -171,15 +213,16 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
             setDragging(false);
             const files = Array.from(event.dataTransfer?.files || []).filter(isAssetFile);
             if (!files.length) return;
-            onImport(files, uploadRole);
+            if (rowMode) rowMode.onImport(files);
+            else onImport(files, uploadRole);
             onClose();
         },
     };
 
     const canvasTab = (
         <div className="flex flex-col gap-2">
-            <div className="text-[12px] opacity-65">{t("canvas.scriptNode.assetPickHint")}</div>
-            <div className="text-[11px] opacity-55">{t("canvas.scriptNode.assetRolePickHint")}</div>
+            <div className="text-[12px] opacity-65">{isRowMode ? t("canvas.scriptNode.rowImagePickHint", { no: rowMode?.no ?? "" }) : t("canvas.scriptNode.assetPickHint")}</div>
+            {isRowMode ? null : <div className="text-[11px] opacity-55">{t("canvas.scriptNode.assetRolePickHint")}</div>}
             <div className="thin-scrollbar flex max-h-[320px] flex-col gap-1.5 overflow-auto pr-0.5">
                 {candidates.length ? (
                     candidates.map((item) => {
@@ -202,13 +245,13 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                                     </span>
                                     <span className="min-w-0 flex-1 truncate text-[13px]">{item.title}</span>
                                 </div>
-                                {active && isClassifiable(item.kind) ? roleChips(roleOf(item.id), (role) => setRoleById((prev) => ({ ...prev, [item.id]: role }))) : null}
+                                {active && !isRowMode && isClassifiable(item.kind) ? roleChips(roleOf(item.id), (role) => setRoleById((prev) => ({ ...prev, [item.id]: role }))) : null}
                             </div>
                         );
                     })
                 ) : (
                     <div className="rounded-lg border border-dashed px-3 py-6 text-center text-[12px] opacity-55" style={{ borderColor: theme.node.stroke }}>
-                        {t("canvas.scriptNode.assetEmpty")}
+                        {isRowMode ? t("canvas.scriptNode.rowImageEmpty") : t("canvas.scriptNode.assetEmpty")}
                     </div>
                 )}
             </div>
@@ -226,14 +269,15 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                     type="button"
                     className="inline-flex items-center gap-1 rounded-full px-3 py-1 text-[12px] font-medium text-white transition disabled:opacity-35"
                     style={{ background: theme.toolbar.activeBg }}
-                    disabled={!selected.length}
+                    disabled={!selected.length && !isRowMode}
                     onClick={() => {
-                        onLink(selected.map((nodeId) => ({ nodeId, role: roleOf(nodeId) })));
+                        if (rowMode) rowMode.onLink(selected);
+                        else onLink(selected.map((nodeId) => ({ nodeId, role: roleOf(nodeId) })));
                         onClose();
                     }}
                 >
                     <Link2 className="size-3.5" />
-                    {t("canvas.scriptNode.assetLinkSelected", { count: selected.length })}
+                    {isRowMode ? t("canvas.scriptNode.rowImageLinkSelected", { count: selected.length }) : t("canvas.scriptNode.assetLinkSelected", { count: selected.length })}
                 </button>
             </div>
         </div>
@@ -276,43 +320,47 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
 
     const generateTab = (
         <div className="flex flex-col gap-2.5">
-            <div className="text-[12px] opacity-65">{t("canvas.scriptNode.assetGenHint")}</div>
-            <div className="flex flex-wrap items-center gap-2 text-[12px]" style={{ color: theme.node.text }}>
-                <span className="opacity-60">{t("canvas.scriptNode.assetRoleLabel")}</span>
-                {roleChips(genRole, setGenRole, SCRIPT_ASSET_GENERATABLE_ROLE_IDS)}
-            </div>
-            {descriptionCandidates.length ? (
-                <div className="flex flex-col gap-1.5">
-                    <div className="text-[11px] opacity-60">{t("canvas.scriptNode.assetGenFromTable")}</div>
-                    <div className="thin-scrollbar flex max-h-[132px] flex-wrap gap-1.5 overflow-auto pr-0.5">
-                        {descriptionCandidates.map((item, index) => {
-                            const active = genTitle === item.title && genPrompt === item.prompt;
-                            return (
-                                <span
-                                    key={`${index}-${item.title}`}
-                                    role="button"
-                                    tabIndex={0}
-                                    className="max-w-[220px] cursor-pointer truncate rounded-full border px-2.5 py-1 text-[11px] transition"
-                                    title={item.prompt}
-                                    style={{
-                                        borderColor: active ? theme.toolbar.activeBg : theme.node.stroke,
-                                        background: active ? `${theme.toolbar.activeBg}26` : "transparent",
-                                        color: active ? theme.toolbar.activeBg : theme.node.text,
-                                        opacity: active ? 1 : 0.75,
-                                    }}
-                                    onClick={() => {
-                                        setGenPrompt(item.prompt);
-                                        setGenTitle(item.title);
-                                    }}
-                                >
-                                    {item.title}
-                                </span>
-                            );
-                        })}
+            <div className="text-[12px] opacity-65">{isRowMode ? t("canvas.scriptNode.rowImageGenHint", { no: rowMode?.no ?? "" }) : t("canvas.scriptNode.assetGenHint")}</div>
+            {isRowMode ? null : (
+                <>
+                    <div className="flex flex-wrap items-center gap-2 text-[12px]" style={{ color: theme.node.text }}>
+                        <span className="opacity-60">{t("canvas.scriptNode.assetRoleLabel")}</span>
+                        {roleChips(genRole, setGenRole, SCRIPT_ASSET_GENERATABLE_ROLE_IDS)}
                     </div>
-                </div>
-            ) : (
-                <div className="text-[11px] opacity-50">{t("canvas.scriptNode.assetGenNoCandidate")}</div>
+                    {descriptionCandidates.length ? (
+                        <div className="flex flex-col gap-1.5">
+                            <div className="text-[11px] opacity-60">{t("canvas.scriptNode.assetGenFromTable")}</div>
+                            <div className="thin-scrollbar flex max-h-[132px] flex-wrap gap-1.5 overflow-auto pr-0.5">
+                                {descriptionCandidates.map((item, index) => {
+                                    const active = genTitle === item.title && genPrompt === item.prompt;
+                                    return (
+                                        <span
+                                            key={`${index}-${item.title}`}
+                                            role="button"
+                                            tabIndex={0}
+                                            className="max-w-[220px] cursor-pointer truncate rounded-full border px-2.5 py-1 text-[11px] transition"
+                                            title={item.prompt}
+                                            style={{
+                                                borderColor: active ? theme.toolbar.activeBg : theme.node.stroke,
+                                                background: active ? `${theme.toolbar.activeBg}26` : "transparent",
+                                                color: active ? theme.toolbar.activeBg : theme.node.text,
+                                                opacity: active ? 1 : 0.75,
+                                            }}
+                                            onClick={() => {
+                                                setGenPrompt(item.prompt);
+                                                setGenTitle(item.title);
+                                            }}
+                                        >
+                                            {item.title}
+                                        </span>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="text-[11px] opacity-50">{t("canvas.scriptNode.assetGenNoCandidate")}</div>
+                    )}
+                </>
             )}
             <div className="flex flex-col gap-1">
                 <span className="text-[11px] opacity-60" style={{ color: theme.node.text }}>
@@ -340,7 +388,9 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                     onClick={() => {
                         const prompt = genPrompt.trim();
                         if (!prompt) return;
-                        onGenerate?.(genRole, prompt, genTitle.trim() || prompt.slice(0, 24));
+                        const title = genTitle.trim() || prompt.slice(0, 24);
+                        if (rowMode) rowMode.onGenerate?.(prompt, title);
+                        else onGenerate?.(genRole, prompt, title);
                         onClose();
                     }}
                 >
@@ -355,23 +405,36 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
         { key: "canvas", label: t("canvas.scriptNode.assetTabCanvas"), children: canvasTab },
         { key: "upload", label: t("canvas.scriptNode.assetTabUpload"), children: uploadTab },
     ];
-    if (onGenerate) tabs.push({ key: "generate", label: t("canvas.scriptNode.assetTabGenerate"), children: generateTab });
+    const showGenerateTab = isRowMode ? Boolean(rowMode?.onGenerate) : Boolean(onGenerate);
+    if (showGenerateTab) tabs.push({ key: "generate", label: t("canvas.scriptNode.assetTabGenerate"), children: generateTab });
 
     return (
-        <Modal open={open} onCancel={onClose} title={t("canvas.scriptNode.addAsset")} footer={null} width={560}>
+        <Modal
+            open={open}
+            onCancel={onClose}
+            title={isRowMode ? t("canvas.scriptNode.rowImageDialogTitle", { no: rowMode?.no ?? "" }) : t("canvas.scriptNode.addAsset")}
+            footer={null}
+            width={560}
+        >
             <div {...dropZone} className="relative">
-                <div className="mb-2 flex flex-wrap items-center gap-2 text-[12px]" style={{ color: theme.node.text }}>
-                    <span className="opacity-60">{t("canvas.scriptNode.assetRoleLabel")}</span>
-                    {roleChips(uploadRole, setUploadRole)}
-                    <span className="text-[11px] opacity-50">{t("canvas.scriptNode.assetRolePickHint")}</span>
-                </div>
+                {isRowMode ? (
+                    <div className="mb-2 text-[12px] opacity-65" style={{ color: theme.node.text }}>
+                        {t("canvas.scriptNode.rowImageHint")}
+                    </div>
+                ) : (
+                    <div className="mb-2 flex flex-wrap items-center gap-2 text-[12px]" style={{ color: theme.node.text }}>
+                        <span className="opacity-60">{t("canvas.scriptNode.assetRoleLabel")}</span>
+                        {roleChips(uploadRole, setUploadRole)}
+                        <span className="text-[11px] opacity-50">{t("canvas.scriptNode.assetRolePickHint")}</span>
+                    </div>
+                )}
                 <Tabs items={tabs} />
                 {dragging ? (
                     <div
                         className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg border-2 border-dashed text-[13px]"
                         style={{ borderColor: theme.toolbar.activeBg, background: `${theme.node.fill}f2`, color: theme.toolbar.activeBg }}
                     >
-                        {t("canvas.scriptNode.assetDropActive", { role: t(`canvas.scriptNode.assetRole_${uploadRole}`) })}
+                        {isRowMode ? t("canvas.scriptNode.rowImageDropActive", { no: rowMode?.no ?? "" }) : t("canvas.scriptNode.assetDropActive", { role: t(`canvas.scriptNode.assetRole_${uploadRole}`) })}
                     </div>
                 ) : null}
             </div>

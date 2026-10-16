@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowUpRight, AlignJustify, Copy, FileText, Loader2, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Square, Table2, Trash2, User, Video, Wand2 } from "lucide-react";
+import { ArrowUpRight, AlignJustify, Copy, FileText, Image as ImageIcon, Loader2, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Square, Table2, Trash2, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
-import { CanvasScriptAssetDialog, type ScriptAssetCandidate, type ScriptAssetLinkSelection } from "@/components/canvas/canvas-script-asset-dialog";
+import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import {
     getStoryScriptColumns,
@@ -19,6 +19,8 @@ import {
     resolveStoryScriptMergeMode,
     resolveStoryScriptPresetId,
     resolveStoryScriptSegmentSeconds,
+    scriptRowAssetIds,
+    shiftStoryScriptRowAssetsAfterDelete,
     stepStoryScriptFontSize,
     storyScriptToMarkdown,
     storyScriptToTsv,
@@ -57,6 +59,11 @@ export type { ScriptAssetCandidate, ScriptAssetLinkSelection };
 /** 顶部工具条字号相对正文基准的倍数（改造前 15px / 13px），跟着基准字号一起缩放。 */
 const HEADER_FONT_SCALE = 1.154;
 const TABLE_ACTION_WIDTH = 104;
+/**
+ * 「镜头图」列宽（逐镜图片）。它是**不参与解析 / 导出**的自绘列（预设列定义里没有它），
+ * 所以单独声明、并计入 `tableWidth`，让自动适配窗口宽度时把它一起算上。
+ */
+const ROW_IMAGE_COLUMN_WIDTH = 148;
 
 /**
  * 生成后按「内容多少」自动适配节点窗口尺寸的边界。
@@ -120,6 +127,16 @@ type CanvasScriptNodeContentProps = {
     onRegenerateShot?: (nodeId: string, rowIndex: number) => void;
     /** 重新生成整表：整张分镜表推倒重来（用于追回缺失的资产 / 列）。 */
     onRegenerateAll?: (nodeId: string) => void;
+    /** 逐镜图片：镜号 → 已关联的图片节点 id（存在 metadata.scriptRowAssets，见 constant/story-script.ts）。 */
+    rowAssets?: Record<string, string[]>;
+    /** 画布上全部图片节点的候选：供「镜头图」列解析缩略图、以及逐镜弹窗里勾选。 */
+    imageCandidates?: ScriptAssetCandidate[];
+    /** 逐镜关联变更：整组替换这一镜的图片节点 id（传空数组即解绑）。 */
+    onRowAssetsChange?: (nodeId: string, shotNo: number, ids: string[]) => void;
+    /** 逐镜导入本地图片：建节点并立刻关联到这一镜。 */
+    onRowAssetImport?: (nodeId: string, shotNo: number, files: File[]) => void;
+    /** 逐镜 AI 生成图片：建节点、关联到这一镜并立刻触发生图。 */
+    onRowAssetGenerate?: (nodeId: string, shotNo: number, prompt: string, title: string) => void;
     /** 生成后按内容多少自动适配节点窗口尺寸（高贴合行数、宽贴合表格宽并封顶）。 */
     onNodeSizeChange?: (nodeId: string, width: number, height: number) => void;
 };
@@ -146,6 +163,11 @@ export function CanvasScriptNodeContent({
     onBuildShotVideo,
     onRegenerateShot,
     onRegenerateAll,
+    rowAssets,
+    imageCandidates,
+    onRowAssetsChange,
+    onRowAssetImport,
+    onRowAssetGenerate,
     onNodeSizeChange,
 }: CanvasScriptNodeContentProps) {
     const { t } = useTranslation();
@@ -173,7 +195,8 @@ export function CanvasScriptNodeContent({
     const presetId = resolveStoryScriptPresetId(node.metadata?.scriptPreset);
     const preset = useMemo(() => getStoryScriptPreset(presetId), [presetId]);
     const columns = preset.columns;
-    const tableWidth = useMemo(() => columns.reduce((sum, column) => sum + column.width, 0) + TABLE_ACTION_WIDTH, [columns]);
+    // 「镜头图」列挂在 preset 列之前，所以表格实际宽度要把它一起算上（否则自动适配会窄一列）。
+    const tableWidth = useMemo(() => columns.reduce((sum, column) => sum + column.width, 0) + TABLE_ACTION_WIDTH + ROW_IMAGE_COLUMN_WIDTH, [columns]);
 
     const [view, setView] = useState<"source" | "table">(rows.length ? "table" : "source");
     const [editing, setEditing] = useState<{ rowIndex: number; key: string } | null>(null);
@@ -192,6 +215,10 @@ export function CanvasScriptNodeContent({
     // 全屏查看：内容区改走 portal 铺满视口（z 值卡在画布 chrome 之上、antd Modal 之下）。
     const [fullscreen, setFullscreen] = useState(false);
     const [assetDialogOpen, setAssetDialogOpen] = useState(false);
+    /** 逐镜「镜头图」弹窗当前瞄准的那一镜（null = 未打开）。 */
+    const [rowAssetTarget, setRowAssetTarget] = useState<{ shotNo: number; ids: string[] } | null>(null);
+    /** 正把文件从系统拖到节点上（显示落区提示）。 */
+    const [fileDragging, setFileDragging] = useState(false);
     // 「自定义提示词」弹窗：用一段自己的系统提示词整段替换预设自带的那段（列结构不变）。
     const [systemPromptOpen, setSystemPromptOpen] = useState(false);
     // 是否已自定义：决定 chip 的高亮态与是否显示「恢复预设提示词」。
@@ -211,6 +238,14 @@ export function CanvasScriptNodeContent({
     const showTryActions = !rows.length && activeReferences.length === 0 && !sourceDraft.trim();
     // 「添加资产」入口：导入 / 链接 / 生成三条里有一条能用就显示。
     const showAssetEntry = Boolean(onImportAssets || onLinkAssets || onGenerateAsset);
+    // 「镜头图」列：逐镜关联图片。导入 / 关联 / 生成三条路有一条能用就显示这一列。
+    const showRowImage = Boolean(onRowAssetsChange || onRowAssetImport || onRowAssetGenerate);
+    // 缩略图 / 标题查表（按节点 id）。节点被删后取不到，渲染时会退化成占位图标。
+    const imageLookup = useMemo(() => {
+        const map = new Map<string, ScriptAssetCandidate>();
+        for (const item of imageCandidates || []) map.set(item.id, item);
+        return map;
+    }, [imageCandidates]);
 
     // 无结果时回到输入态；首次生成出结果时自动切到分镜表——否则用户停在「剧本原文」，
     // 既看不到表格，也看不到表格底部的「铺链路」入口。
@@ -286,7 +321,9 @@ export function CanvasScriptNodeContent({
         const next = rows
             .filter((_, index) => index !== rowIndex)
             .map((row, index) => ({ ...row, shot_no: index + 1 }));
-        patchMetadata({ scriptRows: next });
+        // 镜号会整体前移，逐镜图片的关联键必须跟着挪，否则「第 5 镜的图」会落到新的第 5 镜上。
+        const deletedShotNo = rows[rowIndex]?.shot_no ?? rowIndex + 1;
+        patchMetadata({ scriptRows: next, scriptRowAssets: shiftStoryScriptRowAssetsAfterDelete(node.metadata?.scriptRowAssets, deletedShotNo) });
         message.success(t("canvas.scriptNode.rowDeleted"));
     };
 
@@ -612,6 +649,43 @@ export function CanvasScriptNodeContent({
         </div>
     ) : null;
 
+    // 「+ 添加资产」按钮：编辑视图与表格视图**都要有**。
+    // 表格视图才是用户平时看的地方 —— 之前入口只放在编辑视图里，用户在表格上根本找不到
+    // 「导入图片 / 链接图片」，看起来就像「这个表不能加图」。
+    const assetEntryRow = showAssetEntry ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            <button
+                type="button"
+                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] transition"
+                style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    setAssetDialogOpen(true);
+                }}
+                title={t("canvas.scriptNode.addAssetHint")}
+            >
+                <Plus className="size-3.5" />
+                {t("canvas.scriptNode.addAsset")}
+            </button>
+            {assetCandidates?.length ? (
+                <span className="text-[0.846em] opacity-55" style={{ color: theme.node.text }}>
+                    {t("canvas.scriptNode.assetCandidateHint", { count: assetCandidates.length })}
+                </span>
+            ) : null}
+        </div>
+    ) : null;
+
+    // 表格视图顶部的「引用条 + 资产入口」：已链接的素材缩略图在这里也能看到、也能点分类胶囊轮转。
+    const assetToolbar =
+        activeReferences.length || assetEntryRow ? (
+            <div className="flex shrink-0 flex-col gap-1 pb-1.5">
+                {referencesRow}
+                {assetEntryRow}
+            </div>
+        ) : null;
+
     const tryActions =
         showTryActions && onScriptAction ? (
             <div className="shrink-0">
@@ -755,30 +829,7 @@ export function CanvasScriptNodeContent({
                 {connectedTextCount ? <span>· {t("canvas.scriptNode.connectedHint", { count: connectedTextCount })}</span> : null}
             </div>
             {referencesRow}
-            {showAssetEntry ? (
-                <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-                    <button
-                        type="button"
-                        className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] transition"
-                        style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            setAssetDialogOpen(true);
-                        }}
-                        title={t("canvas.scriptNode.addAssetHint")}
-                    >
-                        <Plus className="size-3.5" />
-                        {t("canvas.scriptNode.addAsset")}
-                    </button>
-                    {assetCandidates?.length ? (
-                        <span className="text-[0.846em] opacity-55" style={{ color: theme.node.text }}>
-                            {t("canvas.scriptNode.assetCandidateHint", { count: assetCandidates.length })}
-                        </span>
-                    ) : null}
-                </div>
-            ) : null}
+            {assetEntryRow}
             <textarea
                 data-canvas-text-input
                 data-canvas-no-zoom
@@ -856,9 +907,11 @@ export function CanvasScriptNodeContent({
 
     const tablePanel = (
         <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
+            {assetToolbar}
             <div ref={bodyRef} data-canvas-no-zoom className="thin-scrollbar min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
                 <table ref={tableRef} className="border-separate border-spacing-0 leading-snug" style={tableStyle}>
                     <colgroup>
+                        {showRowImage ? <col style={{ width: ROW_IMAGE_COLUMN_WIDTH }} /> : null}
                         {columns.map((column) => (
                             <col key={column.key} style={{ width: column.width }} />
                         ))}
@@ -866,6 +919,15 @@ export function CanvasScriptNodeContent({
                     </colgroup>
                     <thead>
                         <tr>
+                            {showRowImage ? (
+                                <th
+                                    className="sticky top-0 z-10 border-b px-2 py-1.5 text-left font-semibold whitespace-nowrap"
+                                    style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}
+                                    title={t("canvas.scriptNode.rowImageColumnHint")}
+                                >
+                                    {t("canvas.scriptNode.rowImageColumn")}
+                                </th>
+                            ) : null}
                             {columns.map((column) => (
                                 <th
                                     key={column.key}
@@ -883,6 +945,60 @@ export function CanvasScriptNodeContent({
                     <tbody>
                         {rows.map((row, rowIndex) => (
                             <tr key={`${row.shot_no}-${rowIndex}`} className="align-top">
+                                {showRowImage ? (
+                                    // 「镜头图」：这一镜关联的图片缩略图（点 × 解绑，点 + 打开逐镜弹窗）。
+                                    // 它不参与解析 / 导出，只是把「这一镜用哪张图」这条关系画在表里。
+                                    <td className="border-b px-1.5 py-1" style={{ borderColor: theme.node.stroke }}>
+                                        <div className="flex flex-wrap items-center gap-1">
+                                            {scriptRowAssetIds(rowAssets, row.shot_no || rowIndex + 1).map((imageId) => {
+                                                const meta = imageLookup.get(imageId);
+                                                return (
+                                                    <span
+                                                        key={imageId}
+                                                        className="group relative flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-md border"
+                                                        style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
+                                                        title={meta?.title || imageId}
+                                                    >
+                                                        {meta?.previewUrl ? <img src={meta.previewUrl} alt={meta.title} className="size-full object-cover" /> : <ImageIcon className="size-4" />}
+                                                        {onRowAssetsChange ? (
+                                                            <button
+                                                                type="button"
+                                                                className="absolute right-0 top-0 hidden size-4 items-center justify-center rounded-bl-md bg-black/60 text-white group-hover:flex"
+                                                                onMouseDown={(event) => event.stopPropagation()}
+                                                                onPointerDown={(event) => event.stopPropagation()}
+                                                                onClick={(event) => {
+                                                                    event.stopPropagation();
+                                                                    onRowAssetsChange(
+                                                                        node.id,
+                                                                        row.shot_no || rowIndex + 1,
+                                                                        scriptRowAssetIds(rowAssets, row.shot_no || rowIndex + 1).filter((id) => id !== imageId),
+                                                                    );
+                                                                }}
+                                                                title={t("canvas.scriptNode.rowImageRemove")}
+                                                            >
+                                                                <X className="size-2.5" />
+                                                            </button>
+                                                        ) : null}
+                                                    </span>
+                                                );
+                                            })}
+                                            <button
+                                                type="button"
+                                                className="inline-flex size-6 shrink-0 items-center justify-center rounded-md border transition hover:opacity-100"
+                                                style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
+                                                onMouseDown={(event) => event.stopPropagation()}
+                                                onPointerDown={(event) => event.stopPropagation()}
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    setRowAssetTarget({ shotNo: row.shot_no || rowIndex + 1, ids: scriptRowAssetIds(rowAssets, row.shot_no || rowIndex + 1) });
+                                                }}
+                                                title={scriptRowAssetIds(rowAssets, row.shot_no || rowIndex + 1).length ? t("canvas.scriptNode.rowImageEdit") : t("canvas.scriptNode.rowImageAdd")}
+                                            >
+                                                <Plus className="size-3" />
+                                            </button>
+                                        </div>
+                                    </td>
+                                ) : null}
                                 {columns.map((column) => {
                                     const value = String(row[column.key] ?? "");
                                     return (
@@ -1042,17 +1158,53 @@ export function CanvasScriptNodeContent({
     const editingColumn = editing ? columns.find((column) => column.key === editing.key) : undefined;
     const editingValue = editing ? String(rows[editing.rowIndex]?.[editing.key] ?? "") : "";
 
+    // 直接把文件从系统拖到脚本节点上就能导入素材（省掉「添加资产 → 上传文件 → 选文件」三步）。
+    // 只认 OS 拖进来的文件（`dataTransfer.types` 含 "Files"），不会跟节点拖动打架（那是 pointer 事件）。
+    // 默认归到「角色」，落进来后用引用条上的胶囊一格格改成场景 / 道具 / 站位图 / 音频。
+    const dropZone = onImportAssets
+        ? {
+              onDragOver: (event: ReactDragEvent<HTMLElement>) => {
+                  if (!event.dataTransfer?.types?.includes("Files")) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (!fileDragging) setFileDragging(true);
+              },
+              onDragLeave: (event: ReactDragEvent<HTMLElement>) => {
+                  if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+                  setFileDragging(false);
+              },
+              onDrop: (event: ReactDragEvent<HTMLElement>) => {
+                  if (!event.dataTransfer?.types?.includes("Files")) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setFileDragging(false);
+                  const files = Array.from(event.dataTransfer.files || []).filter(isAssetFile);
+                  if (!files.length) return;
+                  onImportAssets(node.id, files, "character");
+              },
+          }
+        : {};
+
     const shell = (
         <div
             ref={shellRef}
-            className={`flex h-full w-full flex-col overflow-hidden ${fullscreen ? "" : "cursor-move"}`}
+            className={`relative flex h-full w-full flex-col overflow-hidden ${fullscreen ? "" : "cursor-move"}`}
             style={{ color: theme.node.text, fontSize: `${baseFontSize}px` }}
             onMouseDown={stopIfInteractive}
             onPointerDown={stopIfInteractive}
+            {...dropZone}
         >
             {header}
             {errorBanner}
             {isRunning ? runningPanel : view === "table" && rows.length ? tablePanel : sourcePanel}
+            {fileDragging ? (
+                <div
+                    className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-xl border-2 border-dashed px-3 text-center text-[0.923em]"
+                    style={{ borderColor: theme.toolbar.activeBg, background: `${theme.node.fill}f2`, color: theme.toolbar.activeBg }}
+                >
+                    {t("canvas.scriptNode.assetDropNode", { role: t("canvas.scriptNode.assetRole_character") })}
+                </div>
+            ) : null}
         </div>
     );
 
@@ -1066,6 +1218,29 @@ export function CanvasScriptNodeContent({
             onLink={(links) => onLinkAssets?.(node.id, links)}
             onImport={(files, role) => onImportAssets?.(node.id, files, role)}
             onGenerate={onGenerateAsset ? (role, prompt, title) => onGenerateAsset(node.id, role, prompt, title) : undefined}
+        />
+    ) : null;
+
+    // 逐镜「镜头图」弹窗：只给这一镜关联图片。分类 / 按描述生图都不适用，所以走 rowMode。
+    // 三条路的回调都直接交给上层（project.tsx 负责建节点并把 id 写回 metadata.scriptRowAssets）。
+    const rowAssetDialog = rowAssetTarget ? (
+        <CanvasScriptAssetDialog
+            open
+            theme={theme}
+            candidates={imageCandidates || []}
+            rows={rows}
+            onClose={() => setRowAssetTarget(null)}
+            onLink={() => undefined}
+            onImport={() => undefined}
+            rowMode={{
+                no: rowAssetTarget.shotNo,
+                selectedIds: rowAssetTarget.ids,
+                prompt: preset.buildShotPrompts(rows.find((row) => (row.shot_no || 0) === rowAssetTarget.shotNo) || { shot_no: rowAssetTarget.shotNo, duration: 0 }).imagePrompt,
+                title: t("canvas.scriptNode.pipelineImage", { no: rowAssetTarget.shotNo }),
+                onLink: (nodeIds) => onRowAssetsChange?.(node.id, rowAssetTarget.shotNo, nodeIds),
+                onImport: (files) => onRowAssetImport?.(node.id, rowAssetTarget.shotNo, files),
+                onGenerate: onRowAssetGenerate ? (prompt, title) => onRowAssetGenerate(node.id, rowAssetTarget.shotNo, prompt, title) : undefined,
+            }}
         />
     ) : null;
 
@@ -1113,6 +1288,7 @@ export function CanvasScriptNodeContent({
                 }}
             />
             {assetDialog}
+            {rowAssetDialog}
         </>
     );
 }
