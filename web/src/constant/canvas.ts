@@ -27,6 +27,7 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Chat]: { width: 840, height: 1387, get title() { return i18n.t("canvas.nodeTypes.chat"); } },
     [CanvasNodeType.Annotate]: { width: 420, height: 320, get title() { return i18n.t("canvas.nodeTypes.annotate"); } },
     [CanvasNodeType.Merge]: { width: 480, height: 420, get title() { return i18n.t("canvas.nodeTypes.merge"); } },
+    [CanvasNodeType.Script]: { width: 760, height: 520, get title() { return i18n.t("canvas.nodeTypes.script"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
 
 export const NODE_SPECS = {
@@ -69,6 +70,10 @@ export const NODE_SPECS = {
     [CanvasNodeType.Merge]: {
         width: 480, height: 420, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Merge].title; },
         metadata: { status: "idle", mergeOrientation: "grid", mergeRows: 2, mergeColumns: 2, mergeAspectRatio: null, mergeSlotIds: [null, null, null, null], mergeOffsets: {} },
+    },
+    [CanvasNodeType.Script]: {
+        width: 760, height: 520, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Script].title; },
+        metadata: { status: "idle", scriptSource: "", scriptPrompt: "", scriptRows: [] },
     },
 } satisfies Record<CanvasNodeType, CanvasNodeSpec>;
 

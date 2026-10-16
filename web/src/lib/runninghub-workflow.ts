@@ -3973,13 +3973,13 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     let task: RunningHubTaskView;
     try {
-        // Aiden KREA2 / Singularity / HD Dynamic: submit Export via create+workflow (not comfy/run —
-        // cn returns NOT_FOUND). Prefer browser-direct create for multi-ref full graphs (Pages proxy
-        // ERR_CONNECTION_CLOSED).
-        if ((isKrea2AidenLoraWorkflow(workflowId) || preferDirectSubmit) && repairedGraph) {
+        // Aiden / Pastoral MJ / Singularity / HD Dynamic / Fisher: submit Export via create+workflow
+        // (not comfy/run — RH often returns NOT_FOUND). Prefer browser-direct create for multi-ref
+        // full graphs (Pages proxy ERR_CONNECTION_CLOSED).
+        if ((isKrea2AidenLoraWorkflow(workflowId) || isKrea2PastoralMjWorkflow(workflowId) || preferDirectSubmit) && repairedGraph) {
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, preferDirectSubmit);
         } else if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
-            // SelfLift / Qwen+Klein / pastoral: shared workflowId often denies create/getJsonApiFormat.
+            // SelfLift / Qwen+Klein: shared workflowId often denies create/getJsonApiFormat.
             // Submit the patched API graph through `/task/openapi/comfy/run`.
             task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal);
         } else if (workflow) {
@@ -3997,8 +3997,8 @@ async function runRunningHubWorkflowWithKey(args: {
         if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message)) {
             throw error;
         }
-        // Aiden / Singularity / HD Dynamic already submitted create+workflow; never fall into webapp.
-        if (isKrea2AidenLoraWorkflow(workflowId) || preferDirectSubmit) {
+        // Aiden / Pastoral / Singularity / HD Dynamic already submitted create+workflow; never fall into webapp.
+        if (isKrea2AidenLoraWorkflow(workflowId) || isKrea2PastoralMjWorkflow(workflowId) || preferDirectSubmit) {
             throw explainRunningHubError(error, workflowId);
         }
         // Local-export graphs already preferred comfy/run above. If that endpoint is unavailable on

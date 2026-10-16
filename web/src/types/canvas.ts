@@ -20,6 +20,7 @@ export enum CanvasNodeType {
     Chat = "chat",
     Annotate = "annotate",
     Merge = "merge",
+    Script = "script",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -121,6 +122,35 @@ export type CanvasNodeMetadata = {
     fontSize?: number;
     generationMode?: CanvasGenerationMode;
     generationType?: CanvasImageGenerationType;
+    /** 生图风格模板 id（见 constant/style-templates.ts）；文本会追加进生图提示词。 */
+    styleTemplateId?: string;
+    /** 生图摄像机参数（见 constant/camera-options.ts）；设定后会覆盖风格模板里自带的相机描述。 */
+    cameraSelection?: import("@/constant/camera-options").CanvasCameraSelection;
+    /** 脚本生成器：源剧本内容。 */
+    scriptSource?: string;
+    /** 脚本生成器：用户补充要求。 */
+    scriptPrompt?: string;
+    /** 脚本生成器：结构化分镜表（见 constant/story-script.ts）。 */
+    scriptRows?: import("@/constant/story-script").StoryScriptRow[];
+    /** 脚本生成器：输出预设（classic / storyboard），决定系统提示词与输出列。 */
+    scriptPreset?: import("@/constant/story-script").StoryScriptPresetId;
+    /** 脚本生成器：上游资产分类（节点 id → 角色/场景/道具/站位图），决定铺链路时素材连到哪些镜。 */
+    scriptAssetRoles?: Record<string, import("@/constant/story-script").ScriptAssetRole>;
+    /** 脚本生成器：每段目标时长（none / 10 / 15），同时用于生成时的分段要求与铺链路的自动合并。 */
+    scriptSegmentSeconds?: import("@/constant/story-script").StoryScriptSegmentSeconds;
+    /** 脚本生成器：铺链路时每个视频节点合并几镜（shot / 2 / 3 / duration）。 */
+    scriptMergeMode?: import("@/constant/story-script").StoryScriptMergeMode;
+    /**
+     * 脚本生成器：已经按这份内容自动适配过窗口尺寸的「内容签名」。
+     * 节点滚出视口会卸载、回来时重新自动适配会覆盖用户手动拉伸的尺寸，故把它存进 metadata。
+     */
+    scriptAutoSizeKey?: string;
+    /** 脚本生成器：生成的脚本标题。 */
+    scriptTitle?: string;
+    /** 脚本生成器：解析失败时保留的原始返回，供用户查看/复制。 */
+    scriptRaw?: string;
+    /** 脚本生成器：生成状态（独立于 status，避免与画布的 loading/error 语义打架）。 */
+    scriptStatus?: "idle" | "loading" | "success" | "error";
     model?: string;
     reasoningEffort?: "auto" | "low" | "medium" | "high" | "xhigh";
     size?: string;

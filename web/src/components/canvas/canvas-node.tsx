@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { App, Dropdown } from "antd";
-import { ChevronDown, ChevronRight, Clapperboard, Clock, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, Square, Star, Trash2, Video } from "lucide-react";
+import { ChevronDown, ChevronRight, Clapperboard, Clock, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, ScrollText, Square, Star, Trash2, Video } from "lucide-react";
 
 import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas-display-image";
 import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
@@ -625,6 +625,7 @@ export const CanvasNode = React.memo(function CanvasNode({
 function NodeContent(props: NodeContentRendererProps) {
     if (props.node.type === CanvasNodeType.Config && props.renderNodeContent) return props.renderNodeContent(props.node);
     if (props.node.type === CanvasNodeType.Merge && props.renderNodeContent) return props.renderNodeContent(props.node);
+    if (props.node.type === CanvasNodeType.Script && props.renderNodeContent) return props.renderNodeContent(props.node);
     if (props.node.type === CanvasNodeType.Chat) return <ChatNodeContent {...props} />;
     if (props.isBatchRoot || ((props.node.type === CanvasNodeType.Image || props.node.type === CanvasNodeType.Video) && (props.node.metadata?.images?.length || 0) > 0)) {
         return props.node.type === CanvasNodeType.Video ? <VideoBatchContent {...props} /> : <ImageNodeContent {...props} />;
@@ -658,7 +659,18 @@ const nodeContentRenderers = {
     [CanvasNodeType.Director]: DirectorNodeContent,
     [CanvasNodeType.Chat]: ChatNodeContent,
     [CanvasNodeType.Merge]: EmptyMergeContent,
+    [CanvasNodeType.Script]: EmptyScriptContent,
 } satisfies Record<CanvasNodeType, (props: NodeContentRendererProps) => ReactNode>;
+
+function EmptyScriptContent({ theme }: NodeContentRendererProps) {
+    const { t } = useTranslation();
+    return (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 text-center" style={{ color: theme.node.placeholder }}>
+            <ScrollText className="size-7 opacity-35" />
+            <span className="text-sm">{t("canvas.scriptNode.empty")}</span>
+        </div>
+    );
+}
 
 function EmptyMergeContent({ theme }: NodeContentRendererProps) {
     const { t } = useTranslation();

@@ -14,6 +14,8 @@ import { formatDuration } from "@/lib/image-utils";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { requestImageQuestion, type AiTextMessage } from "@/services/api/image";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
+import { CanvasStylePicker } from "./canvas-style-picker";
+import { CanvasCameraPicker } from "./canvas-camera-picker";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasPromptChipInput } from "./canvas-prompt-chip-input";
 import { useCanvasTextEditDialog } from "./use-canvas-text-edit-dialog";
@@ -314,7 +316,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             />
 
             <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
-                <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
                     <Tooltip title={t("canvas.promptPanel.expandEditor")}>
                         <Button type="text" className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0" style={{ color: theme.node.text }} icon={<Maximize2 className="size-3.5" />} onClick={textEdit.openEditor} aria-label={t("canvas.promptPanel.expandEditor")} />
                     </Tooltip>
@@ -328,6 +330,18 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                 onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : key === "videoSeconds" ? { seconds: value } : { [key]: value })}
                                 onMissingConfig={() => openConfigDialog(true)}
                                 onOpenChange={onImageSettingsOpenChange}
+                            />
+                            <CanvasStylePicker
+                                value={node.metadata?.styleTemplateId}
+                                onChange={(styleTemplateId) => onConfigChange(node.id, { styleTemplateId })}
+                                buttonClassName="!h-10 !max-w-[140px] !shrink-0 !justify-start !rounded-full !px-3"
+                                placement="topLeft"
+                            />
+                            <CanvasCameraPicker
+                                value={node.metadata?.cameraSelection}
+                                onChange={(cameraSelection) => onConfigChange(node.id, { cameraSelection })}
+                                buttonClassName="!h-10 !max-w-[170px] !shrink-0 !justify-start !rounded-full !px-3"
+                                placement="topLeft"
                             />
                         </>
                     ) : mode === "video" ? (
