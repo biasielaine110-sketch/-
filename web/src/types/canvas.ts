@@ -130,6 +130,12 @@ export type CanvasNodeMetadata = {
     scriptSource?: string;
     /** 脚本生成器：用户补充要求。 */
     scriptPrompt?: string;
+    /**
+     * 脚本生成器：节点级自定义系统提示词。非空时**整段替换**预设自带的 systemPrompt
+     * （见 constant/story-script.ts 的 resolveScriptSystemPrompt），这样不改代码就能换一个
+     * 「生成器」；列定义仍跟预设走。
+     */
+    scriptSystemPrompt?: string;
     /** 脚本生成器：结构化分镜表（见 constant/story-script.ts）。 */
     scriptRows?: import("@/constant/story-script").StoryScriptRow[];
     /** 脚本生成器：输出预设（classic / storyboard），决定系统提示词与输出列。 */
@@ -145,6 +151,11 @@ export type CanvasNodeMetadata = {
      * 节点滚出视口会卸载、回来时重新自动适配会覆盖用户手动拉伸的尺寸，故把它存进 metadata。
      */
     scriptAutoSizeKey?: string;
+    /**
+     * 脚本生成器：内容基准字号（px，档位见 STORY_SCRIPT_FONT_SIZES，默认 13）。
+     * 组件里除外壳挂的这个 px 值外一律用 em，所以只改它就能整体缩放分镜表与各类文字。
+     */
+    scriptFontSize?: number;
     /** 脚本生成器：生成的脚本标题。 */
     scriptTitle?: string;
     /** 脚本生成器：解析失败时保留的原始返回，供用户查看/复制。 */

@@ -2,15 +2,16 @@
  * 脚本生成器（分镜脚本表）常量层。**预设驱动**：同一套解析 / 导出 / 表格渲染，
  * 换预设即换「系统提示词 + 输出列 + 行操作」。
  *
- * - `classic`（经典·16 列）：移植自剧集画布（dramaclaw）`src/novelvideo/freezone/text_node.py`
+ * - `classic`（经典分镜表）：移植自剧集画布（dramaclaw）`src/novelvideo/freezone/text_node.py`
  *   的 `FREEZONE_STORY_SCRIPT_SYSTEM_PROMPT` 与 `build_freezone_story_script_task`。
  *   剧集画布那张表有 19 列，其中 `character_image_1` / `character_image_2` / `reference`
  *   三个素材 URL 槽位由后端按角色名回填、`keyframe_index` 只在「视频参考」模式使用。开源
- *   画布没有这套后端回填机制、也没有视频抽帧入口，因此只保留 16 个真正由模型产出、且对
- *   本仓生图 / 生视频链路有用的列。
+ *   画布没有这套后端回填机制、也没有视频抽帧入口，因此只保留真正由模型产出、且对本仓生图 /
+ *   生视频链路有用的列；**并在其上补齐「资产组」**——场景 / 场景描述、道具 / 道具描述、
+ *   人物站位（见 `STORY_SCRIPT_CLASSIC_COLUMNS` 注释）。
  *
- * - `storyboard`（视频分镜脚本·11 列）：移植自剧集画布 `agent_catalog/builtins/recipes/
- *   video-storyboard-script.json` 的 `system_prompt`（原文照搬）。
+ * - `storyboard`（视频分镜脚本）：移植自剧集画布 `agent_catalog/builtins/recipes/
+ *   video-storyboard-script.json` 的 `system_prompt`（原文照搬），同样补了资产组列。
  *
  * ⚠️ **只搬了「卡面」**：该 recipe 的 `planning_prompt` / `must_have_items` /
  * `requires_source_media` / `allowed_recipe_ids`，以及剧集画布那套 planner 运行时
@@ -63,6 +64,19 @@ export type StoryScriptShotPrompts = {
     videoPrompt: string;
 };
 
+/** 单镜重生成（「重生成本镜」）的输入：这一镜 + 它的上一镜 / 下一镜上下文。 */
+export type StoryScriptRowTaskInput = {
+    sourceText: string;
+    prompt?: string;
+    row: StoryScriptRow;
+    /** 上一镜：用来保持人物站位 / 场景的连续性 */
+    prev?: StoryScriptRow;
+    /** 下一镜：避免重写后的这一镜与后一镜接不上 */
+    next?: StoryScriptRow;
+    characterRefs?: string;
+    segmentSeconds?: unknown;
+};
+
 export type StoryScriptPreset = {
     id: StoryScriptPresetId;
     columns: StoryScriptColumn[];
@@ -73,6 +87,11 @@ export type StoryScriptPreset = {
     insertKey: string;
     /** 任务书构建器 */
     buildTask: (input: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown }) => string;
+    /**
+     * 单镜重生成任务书（「重生成本镜」用）：带上上一镜 / 下一镜上下文，要求模型只重写这一镜，
+     * 进而保住「人物站位 / 场景 / 道具与上一镜一致」的连续性。
+     */
+    buildRowTask: (input: StoryScriptRowTaskInput) => string;
     /**
      * 「一键铺链路」用来从一行分镜里抽出图片/视频提示词。不同预设的列语义不同，所以下沉到预设。
      * 缺列时允许兜底拼接，但**不允许返回空串**（调用方靠空串判断这一行铺不出来）。
@@ -85,7 +104,14 @@ export type StoryScriptPreset = {
     assetKeys?: string[];
 };
 
-/** 经典 16 列（与剧集画布 text_node.py 同源）。 */
+/**
+ * 经典预设列（与剧集画布 text_node.py 同源，**并在其上补齐资产组**）。
+ *
+ * 剧集画布那张表只有角色卡两列（角色1 / 角色描述1、角色2 / 角色描述2）。本仓按同一「名 + 描述」
+ * 两列一组的写法补出 **场景组**（场景 / 场景描述）与 **道具组**（道具 / 道具描述），再加一列
+ * **人物站位**（`blocking`），让「场景图 / 道具图 / 站位图」也像角色图一样有据可依、可以按描述生成。
+ * 顺序上把 角色组 → 场景组 → 道具组 排在一起（都是「资产组」），人物站位紧跟在角色动作之后。
+ */
 export const STORY_SCRIPT_CLASSIC_COLUMNS: StoryScriptColumn[] = [
     { key: "shot_no", label: "镜号", width: 56, numeric: true },
     { key: "duration", label: "时长", width: 60, numeric: true },
@@ -94,8 +120,13 @@ export const STORY_SCRIPT_CLASSIC_COLUMNS: StoryScriptColumn[] = [
     { key: "character_description_1", label: "角色描述1", width: 260 },
     { key: "character_2", label: "角色2", width: 100 },
     { key: "character_description_2", label: "角色描述2", width: 260 },
+    { key: "scene", label: "场景", width: 110 },
+    { key: "scene_description", label: "场景描述", width: 220 },
+    { key: "prop", label: "道具", width: 110 },
+    { key: "prop_description", label: "道具描述", width: 200 },
     { key: "shot", label: "景别", width: 120 },
     { key: "character_action", label: "角色动作", width: 190 },
+    { key: "blocking", label: "人物站位", width: 200 },
     { key: "emotion", label: "情绪", width: 150 },
     { key: "scene_tags", label: "场景标签", width: 150 },
     { key: "lighting_mood", label: "光影氛围", width: 170 },
@@ -110,14 +141,22 @@ export const STORY_SCRIPT_COLUMNS = STORY_SCRIPT_CLASSIC_COLUMNS;
 
 export const STORY_SCRIPT_ROW_KEYS = STORY_SCRIPT_CLASSIC_COLUMNS.map((column) => column.key);
 
-/** 「视频分镜脚本」11 列（列名与顺序严格照 recipe 的【输出格式要求】）。 */
+/**
+ * 「视频分镜脚本」列（列名与顺序在 recipe 的【输出格式要求】基础上，按本仓需要补了资产组：
+ * 场景 / 场景描述、道具 / 道具描述、人物站位——这三处是本仓有意偏离 recipe 的地方，见文件头）。
+ */
 export const STORY_SCRIPT_STORYBOARD_COLUMNS: StoryScriptColumn[] = [
     { key: "shot_no", label: "镜号", width: 56, numeric: true },
     { key: "duration", label: "时长", width: 60, numeric: true },
     { key: "shot", label: "景别", width: 110 },
     { key: "visual_description", label: "画面描述", width: 300 },
     { key: "key_visual", label: "关键视觉", width: 220 },
+    { key: "scene", label: "场景", width: 110 },
+    { key: "scene_description", label: "场景描述", width: 220 },
+    { key: "prop", label: "道具", width: 110 },
+    { key: "prop_description", label: "道具描述", width: 200 },
     { key: "character_action", label: "主体动作", width: 200 },
+    { key: "blocking", label: "人物站位", width: 180 },
     { key: "camera_movement", label: "镜头运动", width: 260 },
     { key: "dialogue", label: "台词/旁白", width: 180 },
     { key: "sound", label: "音效/配乐", width: 170 },
@@ -144,7 +183,10 @@ You generate a structured story-script table from an uploaded script excerpt.
 4. Dialogue should be short and only present when appropriate. If no dialogue is needed, output \`无\`.
 5. If a field has no meaningful content, prefer \`无\` instead of vague placeholders.
 6. Keep all fields in Simplified Chinese except technical tokens when naturally needed.
-7. Output only structured data matching the schema. Do not wrap with markdown.
+7. Fill \`scene\` (场景) / \`scene_description\` (场景描述) / \`prop\` (道具) / \`prop_description\` (道具描述) / \`blocking\` (人物站位) with concrete, filmable content; use \`无\` only when the shot genuinely has no such object.
+8. Reuse the exact same \`scene\` name across rows filmed in the same location, and the same \`prop\` name for the same object, so downstream assets can be matched by name.
+9. \`blocking\` must describe where each character is in frame and their relation to each other, the environment and the props; keep it consistent with the previous row.
+10. Output only structured data matching the schema. Do not wrap with markdown.
 
 ## Table style target
 - The result should resemble a production storyboard table, not a prose summary.
@@ -154,6 +196,10 @@ You generate a structured story-script table from an uploaded script excerpt.
 - \`scene_tags\`, \`lighting_mood\`, \`sound\` should all be concrete and film-facing.
 - \`character_1\` should prefer a stable role identifier if inferable, such as \`沈昭昭_现代\` or \`沈昭昭_古装\`.
 - \`character_description_1\` should prefer bracketed character-card format, e.g. \`[沈昭昭_现代: 28岁女性，面色苍白，神情疲惫，身穿现代简约职业装……]\`.
+- \`scene\` should be a short, stable location name (e.g. \`深夜办公室\`, \`盛唐宫殿·内\`), reused verbatim wherever the same place appears.
+- \`scene_description\` should describe the location concretely enough to be used directly as an image-generation prompt.
+- \`prop\` should name the key object(s) this shot depends on; \`prop_description\` describes their look, material and state.
+- \`blocking\` should read like a floor plan in words: left / right / centre, foreground / midground / background, facing direction, and how far apart the characters are.
 
 ## Duration guidance
 - Default to short cinematic shots.
@@ -198,7 +244,16 @@ Example style for \`video_motion_prompt\`:
 - When two distinct characters appear in one shot, fill \`character_2\` /
   \`character_description_2\` the same way as \`character_1\` / \`character_description_1\`.
 - Reuse the exact same character identifier across rows so the same person keeps one name.
-- The same character must never switch names or appearance between consecutive shots.`;
+- The same character must never switch names or appearance between consecutive shots.
+
+## Scene & prop consistency
+- Reuse the exact same \`scene\` name and \`prop\` name across rows whenever the location or the object is the same.
+- \`scene_description\` / \`prop_description\` should stay stable across rows for the same place or object; only change the parts this shot actually changes (light, wear, damage).
+
+## Blocking continuity (人物站位)
+- Keep the previous row's \`blocking\` (人物站位) unless this shot's action explicitly moves a character.
+- When a character moves, describe the change from the previous position, e.g. \`从右侧沙发起身，走向画面左侧窗边\`.
+- Never silently teleport a character to a new position between two consecutive shots of the same scene.`;
 
 /** JSON 输出契约（本仓无 pydantic 结构化输出，改用显式 JSON 约定 + 客户端解析）。 */
 export const STORY_SCRIPT_JSON_CONTRACT = `## Output format (strict)
@@ -214,8 +269,13 @@ Output one JSON object and nothing else — no markdown fence, no explanation:
       "character_description_1": "…",
       "character_2": "…",
       "character_description_2": "…",
+      "scene": "…",
+      "scene_description": "…",
+      "prop": "…",
+      "prop_description": "…",
       "shot": "…",
       "character_action": "…",
+      "blocking": "…",
       "emotion": "…",
       "scene_tags": "…",
       "lighting_mood": "…",
@@ -229,7 +289,7 @@ Output one JSON object and nothing else — no markdown fence, no explanation:
 \`shot_no\` 和 \`duration\` 必须是整数（不要写 "2-5"、"3秒"）；其余字段一律字符串，缺失时写 \`无\`。`;
 
 const STORY_SCRIPT_COMMON_RULES = [
-    "输出字段必须覆盖：镜号、时长、画面描述、角色1、角色描述1、角色2、角色描述2、景别、角色动作、情绪、场景标签、光影氛围、音效、对白、分镜提示词、视频运动提示词。",
+    "输出字段必须覆盖：镜号、时长、画面描述、角色1、角色描述1、角色2、角色描述2、场景、场景描述、道具、道具描述、景别、角色动作、人物站位、情绪、场景标签、光影氛围、音效、对白、分镜提示词、视频运动提示词。",
     "如果用户给了额外要求，也必须一起遵守。",
     "请严格按照影视制片表格思路输出，不要输出散文摘要。",
     "请让分镜提示词和视频运动提示词都采用括号分段 + 号连接的格式。",
@@ -250,6 +310,9 @@ const STORY_SCRIPT_STYLE_HINT = [
     "- 分镜提示词中的技术参数段尽量保留，不要省略",
     "- 视频运动提示词最好严格按 6 段写：运镜轨迹、主体动作、环境动态、音效氛围、对白语气、时长",
     "- 视频运动提示词里的主体动作必须是可见物理动作，不要只写情绪变化",
+    "- 每一镜都要填「场景 / 场景描述 / 道具 / 道具描述 / 人物站位」，同一场景或同一道具在多镜里必须复用完全一致的名字",
+    "- 人物站位要写清谁在画面左侧 / 右侧 / 前景 / 后景、朝向、彼此的远近；除非这一镜人物确实移动，否则保持与上一镜一致",
+    "- 人物移动时写清从上一位置到新位置的移动过程，不要让角色在两镜之间凭空换位",
 ].join("\n");
 
 /**
@@ -268,18 +331,20 @@ export const STORY_SCRIPT_STORYBOARD_SYSTEM_PROMPT = `你是一名资深分镜�
 -【质量标准】画面描述必须精确具体，包含主体/背景/道具/光线方向/色调氛围，禁止模糊笼统；完整参照创意大纲的核心信息和情绪弧线
 
 ## 本仓输出约定（必须遵守）
-- 表头必须使用下列中文列名，且顺序一致：镜号、时长、景别、画面描述、关键视觉、主体动作、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词
-- 输出 Markdown 表格；也可以改输出一个 JSON 对象：{"title":"标题","rows":[{…}]}，键名用上表列名对应的英文（shot_no / duration / shot / visual_description / key_visual / character_action / camera_movement / dialogue / sound / transition / emotion）
+- 表头必须使用下列中文列名，且顺序一致：镜号、时长、景别、画面描述、关键视觉、场景、场景描述、道具、道具描述、主体动作、人物站位、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词
+- 输出 Markdown 表格；也可以改输出一个 JSON 对象：{"title":"标题","rows":[{…}]}，键名用上表列名对应的英文（shot_no / duration / shot / visual_description / key_visual / scene / scene_description / prop / prop_description / character_action / blocking / camera_movement / dialogue / sound / transition / emotion）
 - 镜号用 1、2、3 这样的整数（不要写 S01）；时长用整数秒（不要写 3.5秒）
+- 同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位（blocking）写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）
 - 某一格没有内容时写 \`无\``;
 
 const STORY_SCRIPT_STORYBOARD_COMMON_RULES = [
-    "输出必须是一张表格，一镜一行，列名与顺序严格按：镜号、时长、景别、画面描述、关键视觉、主体动作、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词。",
+    "输出必须是一张表格，一镜一行，列名与顺序严格按：镜号、时长、景别、画面描述、关键视觉、场景、场景描述、道具、道具描述、主体动作、人物站位、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词。",
     "如果用户给了额外要求，也必须一起遵守。",
     "总时长须与创意大纲一致；景别遵循「远→近→远」呼吸节奏，避免连续 3 个以上相同景别。",
     "镜头运动要静动交替，并写清推/拉/摇/移/跟/升/降/固定/手持以及速度。",
     "画面连贯衔接，无割裂感。",
     "画面描述必须精确具体，包含主体/背景/道具/光线方向/色调氛围，且要精确到可直接作为图片生成 prompt。",
+    "同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位要写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）。",
     "缺失内容写 `无`。",
 ];
 
@@ -328,6 +393,57 @@ function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds
 }
 
 /**
+ * 把一镜压成「中文列名：值」的多行文本，作为单镜重生成时的上下文。
+ * 只取文字列、空值写「无」，避免把整张表原样塞回任务书。
+ */
+function describeRowForContext(row: StoryScriptRow | undefined, columns: StoryScriptColumn[]): string {
+    if (!row) return "";
+    return columns
+        .filter((column) => !column.numeric)
+        .map((column) => `${column.label}：${storyScriptCellText(row[column.key]) || "无"}`)
+        .join("\n");
+}
+
+/**
+ * 「只重写某一镜」的任务书（经典预设）。带上上一镜 / 下一镜上下文，重点要求：
+ * 人物站位、场景、道具与前后镜保持一致——这正是「重生成本镜」追回资产描述的关键。
+ */
+function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRefs }: StoryScriptRowTaskInput): string {
+    const columns = STORY_SCRIPT_CLASSIC_COLUMNS;
+    const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请**只重新生成这一镜**（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...STORY_SCRIPT_COMMON_RULES];
+    if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
+    const prevText = describeRowForContext(prev, columns);
+    if (prevText) parts.push(`上一镜（第 ${prev?.shot_no} 镜，人物站位 / 场景 / 道具必须与它衔接）：\n${prevText}`);
+    const nextText = describeRowForContext(next, columns);
+    if (nextText) parts.push(`下一镜（第 ${next?.shot_no} 镜，这一镜不要和它冲突）：\n${nextText}`);
+    const currentText = describeRowForContext(row, columns);
+    if (currentText) parts.push(`这一镜当前的内容（可以全部重写，也可以只修掉不合理或缺失的字段）：\n${currentText}`);
+    if (characterRefs && characterRefs.trim()) parts.push(`已提供的角色参考（请在角色1 / 角色2 字段里使用完全一致的角色名）：\n${characterRefs.trim()}`);
+    parts.push(STORY_SCRIPT_STYLE_HINT);
+    parts.push(STORY_SCRIPT_JSON_CONTRACT);
+    parts.push(`只输出这一镜：JSON 的 rows 数组里只放 1 个元素，\`shot_no\` 必须是 ${row.shot_no}。`);
+    if (sourceText.trim()) parts.push(`源剧本内容：\n${sourceText.trim()}`);
+    return parts.join("\n\n");
+}
+
+/** 「只重写某一镜」的任务书（视频分镜脚本预设）。 */
+function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, characterRefs }: StoryScriptRowTaskInput): string {
+    const columns = STORY_SCRIPT_STORYBOARD_COLUMNS;
+    const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请只重新生成这一镜（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...STORY_SCRIPT_STORYBOARD_COMMON_RULES];
+    if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
+    const prevText = describeRowForContext(prev, columns);
+    if (prevText) parts.push(`上一镜（第 ${prev?.shot_no} 镜，场景 / 道具 / 人物站位必须与它衔接）：\n${prevText}`);
+    const nextText = describeRowForContext(next, columns);
+    if (nextText) parts.push(`下一镜（第 ${next?.shot_no} 镜，这一镜不要和它冲突）：\n${nextText}`);
+    const currentText = describeRowForContext(row, columns);
+    if (currentText) parts.push(`这一镜当前的内容（可以全部重写，也可以只修掉不合理或缺失的字段）：\n${currentText}`);
+    if (characterRefs && characterRefs.trim()) parts.push(`已提供的角色参考（请在画面描述 / 关键视觉 / 主体动作里使用完全一致的角色名）：\n${characterRefs.trim()}`);
+    parts.push(`只输出这一镜：Markdown 表格只保留表头 + 这 1 行；若用 JSON，rows 里只放 1 个元素，\`shot_no\` 必须是 ${row.shot_no}。`);
+    if (sourceText.trim()) parts.push(`创意大纲 / 源内容：\n${sourceText.trim()}`);
+    return parts.join("\n\n");
+}
+
+/**
  * 经典预设：`shot_prompt` / `video_motion_prompt` 本身已是成段的完整提示词（8 段 / 6 段），
  * 有就直接用；模型偶尔漏列，此时用可见描述兜底拼一条，避免这一行铺不出链路。
  */
@@ -361,6 +477,7 @@ export const STORY_SCRIPT_PRESETS: Record<StoryScriptPresetId, StoryScriptPreset
         ],
         insertKey: "shot_prompt",
         buildTask: buildClassicStoryScriptTask,
+        buildRowTask: buildClassicRowTask,
         buildShotPrompts: buildClassicShotPrompts,
         assetKeys: ["character_1", "character_2"],
     },
@@ -374,6 +491,7 @@ export const STORY_SCRIPT_PRESETS: Record<StoryScriptPresetId, StoryScriptPreset
         ],
         insertKey: "visual_description",
         buildTask: buildStoryboardTask,
+        buildRowTask: buildStoryboardRowTask,
         buildShotPrompts: buildStoryboardShotPrompts,
         // storyboard 没有角色列（recipe 把它放在「主体动作」里），所以不做名字匹配 → 全部素材图都连。
     },
@@ -398,30 +516,59 @@ export function getStoryScriptSystemPrompt(preset?: StoryScriptPresetId | string
     return getStoryScriptPreset(preset).systemPrompt;
 }
 
+/**
+ * 实际发给模型的系统提示词：**节点级自定义覆盖优先**，为空（或纯空白）时回落到预设自带的那段。
+ *
+ * 这就是「换一个生成器」的挂点——用户在脚本节点的「自定义提示词」里粘一段别的提示词，
+ * 不改代码就能换掉生成策略；列定义 / 解析 / 导出仍按预设走，所以覆盖不会破坏表格结构。
+ * 返回值一定是非空字符串（预设本身保证非空），调用方无需再判空。
+ */
+export function resolveScriptSystemPrompt(preset?: StoryScriptPresetId | string | null, override?: unknown): string {
+    const custom = typeof override === "string" ? override.trim() : "";
+    return custom || getStoryScriptSystemPrompt(preset);
+}
+
+/** 该节点是否用的是自定义系统提示词（供 UI 打「已自定义」角标）。 */
+export function hasScriptSystemPromptOverride(override?: unknown): boolean {
+    return typeof override === "string" && override.trim().length > 0;
+}
+
 /** 铺链路时可挂到某一镜上的素材（只需要 id + 标题）。 */
 export type StoryScriptAssetRef = { id: string; title: string };
 
 /**
- * 脚本节点上游「资产」的分类。分类决定铺链路时这张图会连到哪些镜头上：
- *  - character 角色：按分镜里的角色名逐镜匹配（沿用 `matchStoryScriptRowAssets`）；
- *  - scene / prop / blocking 场景 / 道具 / 站位图：与具体某个人物无关，对每一镜都成立，逐镜全连。
+ * 脚本节点上游「资产」的分类。分类决定铺链路时这张素材会连到哪些节点：
+ *  - character 角色：按分镜里的角色名逐镜匹配（沿用 `matchStoryScriptRowAssets`），连到图片节点；
+ *  - scene / prop / blocking 场景 / 道具 / 站位图：与具体某个人物无关，对每一镜都成立，逐镜全连（图片节点）；
+ *  - audio 音频：不是画面素材，铺链路时**只直连视频节点**（音频是成片的一部分，塞给图片节点没意义）。
  */
-export type ScriptAssetRole = "character" | "scene" | "prop" | "blocking";
+export type ScriptAssetRole = "character" | "scene" | "prop" | "blocking" | "audio";
 
-export const SCRIPT_ASSET_ROLE_IDS: ScriptAssetRole[] = ["character", "scene", "prop", "blocking"];
+export const SCRIPT_ASSET_ROLE_IDS: ScriptAssetRole[] = ["character", "scene", "prop", "blocking", "audio"];
+
+/**
+ * 「AI 生成」tab 能生成的分类：那个 tab 走的是**生图**链路（`handleGenerateScriptAsset` → 图片节点），
+ * 生成不了音频，所以把 audio 排除——音频只能走「从画布链接」或「上传文件」。
+ */
+export const SCRIPT_ASSET_GENERATABLE_ROLE_IDS: ScriptAssetRole[] = ["character", "scene", "prop", "blocking"];
+
+/** 音频素材铺链路时只直连视频节点（画面素材才连图片节点）。 */
+export function isAudioScriptAssetRole(role: unknown): boolean {
+    return resolveScriptAssetRole(role) === "audio";
+}
 
 /** 分类 id 归一化：未知值一律回落到 character（等同旧行为——没分类的素材按角色处理）。 */
 export function resolveScriptAssetRole(value: unknown): ScriptAssetRole {
     return SCRIPT_ASSET_ROLE_IDS.includes(value as ScriptAssetRole) ? (value as ScriptAssetRole) : "character";
 }
 
-/** 点击分类胶囊时的轮转顺序：角色 → 场景 → 道具 → 站位图 → 角色。 */
+/** 点击分类胶囊时的轮转顺序：角色 → 场景 → 道具 → 站位图 → 音频 → 角色。 */
 export function nextScriptAssetRole(current: unknown): ScriptAssetRole {
     const index = SCRIPT_ASSET_ROLE_IDS.indexOf(resolveScriptAssetRole(current));
     return SCRIPT_ASSET_ROLE_IDS[(index + 1) % SCRIPT_ASSET_ROLE_IDS.length];
 }
 
-/** 角色分类之外的素材（场景 / 道具 / 站位图）铺链路时连到每一镜。 */
+/** 角色分类之外的素材（场景 / 道具 / 站位图 / 音频）铺链路时对每一镜都成立（音频只连视频节点）。 */
 export function isGlobalScriptAssetRole(role: ScriptAssetRole): boolean {
     return role !== "character";
 }
@@ -446,6 +593,32 @@ export const STORY_SCRIPT_MERGE_MODES: StoryScriptMergeMode[] = ["shot", "2", "3
 
 export function resolveStoryScriptMergeMode(value: unknown): StoryScriptMergeMode {
     return STORY_SCRIPT_MERGE_MODES.includes(value as StoryScriptMergeMode) ? (value as StoryScriptMergeMode) : "shot";
+}
+
+/**
+ * 脚本节点内容的基准字号（px）：分镜表是十几列的宽表，小屏/大屏、远看/近看的诉求差很多，
+ * 所以给一个可调档位（步进式，避免出现 13.5px 这种糊字）。
+ *
+ * 组件里除基准字号外**全部用 `em`**，所以改这一个值即可整体缩放；
+ * 默认 13px 时各 `em` 值还原成改造前的像素值（12px → 0.923em 等），视觉零变化。
+ */
+export const STORY_SCRIPT_FONT_SIZES: number[] = [11, 12, 13, 14, 16, 18, 20];
+export const DEFAULT_STORY_SCRIPT_FONT_SIZE = 13;
+
+export function resolveStoryScriptFontSize(value: unknown): number {
+    const size = Math.round(Number(value));
+    if (!Number.isFinite(size) || size <= 0) return DEFAULT_STORY_SCRIPT_FONT_SIZE;
+    // 落到最近的档位：手写 15 之类的值时也能收敛到合法档，避免 em 基准漂移。
+    return STORY_SCRIPT_FONT_SIZES.reduce((best, current) => (Math.abs(current - size) < Math.abs(best - size) ? current : best), DEFAULT_STORY_SCRIPT_FONT_SIZE);
+}
+
+/** 上一档 / 下一档（到头返回 null，调用方据此置灰按钮）。 */
+export function stepStoryScriptFontSize(value: unknown, delta: number): number | null {
+    const current = resolveStoryScriptFontSize(value);
+    const index = STORY_SCRIPT_FONT_SIZES.indexOf(current);
+    const next = index + (delta > 0 ? 1 : -1);
+    if (next < 0 || next >= STORY_SCRIPT_FONT_SIZES.length) return null;
+    return STORY_SCRIPT_FONT_SIZES[next];
 }
 
 /** 一段连续镜头 = 铺链路时的一个视频节点。 */
@@ -534,6 +707,61 @@ export function matchStoryScriptRowAssets(
     return matched.length ? matched : assets;
 }
 
+/**
+ * 资产对话框「按描述生图」的候选：`title` 同时作为建出来的图片节点标题
+ * （铺链路时角色类素材靠标题做名字匹配，所以角色候选的 title 必须就是角色名），
+ * `prompt` 是喂给生图的提示词。
+ */
+export type ScriptAssetPromptCandidate = {
+    title: string;
+    prompt: string;
+};
+
+/**
+ * 每个分类能从分镜表里取到的「描述」列。
+ * - `character`：两张角色卡（角色1/角色描述1、角色2/角色描述2）；
+ * - `scene`：场景（名字，充当标题）+ 场景描述（提示词）；老分镜表没有这两列时退回「场景标签 + 光影氛围」；
+ * - `prop`：道具（名字）+ 道具描述；
+ * - `blocking`：人物站位（只有描述，没有单独的名字列）；
+ * - `audio`：不参与「按描述生成」（生成 tab 走的是生图链路），故为空数组。
+ *   （storyboard 预设没有角色列时，取值自然为空串，无需按预设分支。）
+ */
+const SCRIPT_ASSET_DESCRIPTION_COLUMNS: Record<ScriptAssetRole, Array<{ nameKey?: string; textKeys: string[] }>> = {
+    character: [
+        { nameKey: "character_1", textKeys: ["character_description_1"] },
+        { nameKey: "character_2", textKeys: ["character_description_2"] },
+    ],
+    scene: [{ nameKey: "scene", textKeys: ["scene_description", "scene_tags", "lighting_mood"] }],
+    prop: [{ nameKey: "prop", textKeys: ["prop_description"] }],
+    blocking: [{ textKeys: ["blocking"] }],
+    audio: [],
+};
+
+/**
+ * 从分镜表里抽某一类资产的描述候选，供资产对话框一键填入生图提示词。
+ * 按「标题 + 描述」去重并保留首次出现顺序（同一角色在多镜里重复出现只留一条）。
+ */
+export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonly StoryScriptRow[] | null): ScriptAssetPromptCandidate[] {
+    const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
+    if (!specs.length || !rows?.length) return [];
+    const out: ScriptAssetPromptCandidate[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+        for (const spec of specs) {
+            const name = spec.nameKey ? storyScriptCellText(row[spec.nameKey]) : "";
+            const text = joinStoryScriptPromptParts(spec.textKeys.map((key) => storyScriptCellText(row[key])));
+            const title = name || text.slice(0, 24);
+            const prompt = text || name;
+            if (!title || !prompt) continue;
+            const dedupe = `${title}\u0000${prompt}`;
+            if (seen.has(dedupe)) continue;
+            seen.add(dedupe);
+            out.push({ title, prompt });
+        }
+    }
+    return out;
+}
+
 /** 构建分镜脚本生成任务；不传 preset 时保持旧行为（classic）。 */
 export function buildStoryScriptTask({
     sourceText,
@@ -549,6 +777,11 @@ export function buildStoryScriptTask({
     segmentSeconds?: unknown;
 }): string {
     return getStoryScriptPreset(preset).buildTask({ sourceText, prompt, characterRefs, segmentSeconds });
+}
+
+/** 构建「只重写某一镜」的任务书；不传 preset 时保持 classic。 */
+export function buildStoryScriptRowTask({ preset, ...input }: StoryScriptRowTaskInput & { preset?: StoryScriptPresetId | string | null }): string {
+    return getStoryScriptPreset(preset).buildRowTask(input);
 }
 
 function stripCodeFence(text: string): string {
@@ -639,6 +872,108 @@ export function normalizeStoryScriptRow(raw: unknown, index: number, columns: St
 
 export type StoryScriptParseResult = { ok: true; title: string; rows: StoryScriptRow[] } | { ok: false; error: string };
 
+/**
+ * 从上往下扫一遍，取出所有「顶层完整 JSON 值」（对象 / 数组）。
+ * 字符串里的括号不计入深度 —— 于是 JSONL（多个顶层对象顺序拼接）能逐个被抠出来，
+ * 而 `{ "rows": [...] }` 只会被当成一个整体（里面的行仍是它的子节点，不会被重复切出来）。
+ */
+function extractTopLevelJsonValues(text: string): unknown[] {
+    const values: unknown[] = [];
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (char === "\\") escaped = true;
+            else if (char === '"') inString = false;
+            continue;
+        }
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+        if (char === "{" || char === "[") {
+            if (depth === 0) start = index;
+            depth += 1;
+            continue;
+        }
+        if (char === "}" || char === "]") {
+            if (depth === 0) continue;
+            depth -= 1;
+            if (depth === 0 && start >= 0) {
+                const slice = text.slice(start, index + 1);
+                start = -1;
+                try {
+                    values.push(JSON.parse(slice));
+                } catch {
+                    // 片段本身不合法（夹了注释 / 被截断）就丢掉，继续往后扫
+                }
+            }
+        }
+    }
+    return values;
+}
+
+/**
+ * 把抠出来的顶层 JSON 值摊平成行。模型不爱守契约，这里容忍四种常见形态：
+ *  - 契约对象 `{ title, rows: [...] }`（也可能把数组塞进 shots / storyboard / data 等任意字段）；
+ *  - 裸对象序列（JSONL / 逐行 JSON / 前后裹说明文字）；
+ *  - 单个裸对象 —— 单镜重生成时最常见；
+ *  - 镜号做键的字典 `{ "1": {...}, "2": {...} }`。
+ * 只有「整段 JSON.parse 失败」时才会走到这里，正常契约不走这条路。
+ */
+function collectStoryScriptRows(values: unknown[], columns: StoryScriptColumn[]): { title: string; rows: StoryScriptRow[] } {
+    const rows: StoryScriptRow[] = [];
+    const isRowLike = (record: Record<string, unknown>) => columns.some((column) => record[column.key] !== undefined || record[column.label] !== undefined);
+    const addRow = (record: Record<string, unknown>) => {
+        rows.push(normalizeStoryScriptRow(record, rows.length, columns));
+    };
+    const consume = (item: unknown) => {
+        if (Array.isArray(item)) {
+            item.forEach(consume);
+            return;
+        }
+        if (!item || typeof item !== "object") return;
+        const record = item as Record<string, unknown>;
+        if (Array.isArray(record.rows)) {
+            record.rows.forEach(consume);
+            return;
+        }
+        if (isRowLike(record)) {
+            addRow(record);
+            return;
+        }
+        // 不是一行、也没有 rows：整表可能被塞在某个数组字段里（shots / storyboard / data …）
+        const arrayValues = Object.values(record).filter((value) => Array.isArray(value)) as unknown[][];
+        if (arrayValues.length) {
+            arrayValues.forEach((list) => list.forEach(consume));
+            return;
+        }
+        // 剩下的对象值：镜号字典，或再包一层的容器
+        const objectValues = Object.values(record).filter((value) => value && typeof value === "object" && !Array.isArray(value)) as Record<string, unknown>[];
+        if (objectValues.length) {
+            objectValues.forEach(consume);
+            return;
+        }
+        // 真正兜底：整段只有标量属性，就当它是一行
+        if (Object.values(record).some((value) => value === null || typeof value !== "object")) addRow(record);
+    };
+
+    let title = "";
+    for (const value of values) {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+            const record = value as Record<string, unknown>;
+            // 标题只从「非行」的容器上取，免得某一行恰好有 title 列时被误当成表名
+            if (!title && !isRowLike(record) && typeof record.title === "string") title = record.title.trim();
+        }
+        consume(value);
+    }
+    return { title, rows };
+}
+
 /** 从模型输出里解析分镜表：JSON 优先，失败时退回 markdown 表格。列定义由 preset 决定。 */
 export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetId | string | null): StoryScriptParseResult {
     const columns = getStoryScriptColumns(preset);
@@ -662,6 +997,14 @@ export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetI
         } catch {
             // 试下一个候选；都失败就落到下面的表格兜底
         }
+    }
+
+    // 结构性兜底：模型常按「一行一个 JSON 对象」逐行输出，或干脆只吐一个裸对象（单镜重生成）。
+    // 这类文本整体不是合法 JSON，严格解析会整段崩掉 —— 于是把顶层 JSON 值逐个抠出来再摊平成行。
+    const topLevelValues = extractTopLevelJsonValues(raw);
+    if (topLevelValues.length) {
+        const collected = collectStoryScriptRows(topLevelValues, columns);
+        if (collected.rows.length) return { ok: true, title: collected.title, rows: collected.rows };
     }
 
     const tableRows = parseMarkdownTable(raw, columns);

@@ -32,7 +32,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { buildMergedVideoNodePrompt, buildStoryScriptTask, buildVideoNodePrompt, getStoryScriptPreset, getStoryScriptSystemPrompt, groupStoryScriptRows, matchStoryScriptRowAssets, parseStoryScriptOutput, resolveScriptAssetRole, resolveStoryScriptPresetId, storyScriptGroupDuration, type ScriptAssetRole } from "@/constant/story-script";
+import { buildMergedVideoNodePrompt, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, storyScriptGroupDuration, storyScriptToMarkdown, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -2774,6 +2774,13 @@ function AtelierCanvasPage() {
             if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "t") {
                 event.preventDefault();
                 createNode(CanvasNodeType.Audio);
+                return;
+            }
+
+            // Z = 脚本生成器（分镜脚本节点）。Ctrl/Cmd+Z 是撤销，上面已提前 return，不会冲突。
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "z") {
+                event.preventDefault();
+                createNode(CanvasNodeType.Script);
                 return;
             }
 
@@ -6179,7 +6186,7 @@ function AtelierCanvasPage() {
                 const answer = await requestImageQuestion(
                     textConfig,
                     [
-                        { role: "system", content: getStoryScriptSystemPrompt(presetId) },
+                        { role: "system", content: resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt) },
                         { role: "user", content: userContent },
                     ],
                     (streamed) => setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptRaw: streamed } } : node))),
@@ -6224,6 +6231,92 @@ function AtelierCanvasPage() {
         [stopGenerationForNode],
     );
 
+    // 按镜重生成（「重生成本镜」）：只重写这一行的全部列（保留镜号与行位置），并把「上一镜 / 下一镜」
+    // 作为上下文喂进去——尽量保持场景、道具与人物站位的连续性。文本渠道与整表生成完全一致，
+    // 只是任务书换成「只输出这一镜」（buildStoryScriptRowTask）。
+    const runScriptShotGeneration = useCallback(
+        async (nodeId: string, rowIndex: number) => {
+            const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
+            if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return;
+            if (isNodeGenerating(nodeId)) return;
+            const rows = sourceNode.metadata?.scriptRows || [];
+            const row = rows[rowIndex];
+            if (!row) return;
+            const presetId = resolveStoryScriptPresetId(sourceNode.metadata?.scriptPreset);
+            const segmentSeconds = sourceNode.metadata?.scriptSegmentSeconds;
+            const context = buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, "");
+            const sourceText = (sourceNode.metadata?.scriptSource || "").trim() || context.prompt.trim();
+            const assetRoleOf = (assetNodeId: string) => resolveScriptAssetRole(sourceNode.metadata?.scriptAssetRoles?.[assetNodeId]);
+            const characterRefs = buildNodeGenerationInputs(nodeId, nodesRef.current, connectionsRef.current)
+                .filter((input) => input.type === "image" && assetRoleOf(input.nodeId) === "character")
+                .map((input) => input.title.trim())
+                .filter(Boolean)
+                .join("、");
+            const task = buildStoryScriptRowTask({
+                preset: presetId,
+                sourceText,
+                prompt: sourceNode.metadata?.scriptPrompt,
+                row,
+                prev: rowIndex > 0 ? rows[rowIndex - 1] : undefined,
+                next: rowIndex < rows.length - 1 ? rows[rowIndex + 1] : undefined,
+                characterRefs,
+                segmentSeconds,
+            });
+            const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
+            const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
+            if (!isAiConfigReady(textConfig, textConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+            const controller = new AbortController();
+            startGenerationRequest(nodeId, nodeId, nodeId, controller);
+            setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "loading", errorDetails: undefined } } : node)));
+            try {
+                const hydrated = context.referenceImages.length ? await hydrateNodeGenerationContext(context) : context;
+                const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
+                    ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
+                    : task;
+                const answer = await requestImageQuestion(
+                    textConfig,
+                    [
+                        { role: "system", content: resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt) },
+                        { role: "user", content: userContent },
+                    ],
+                    () => {},
+                    { signal: controller.signal },
+                );
+                if (controller.signal.aborted) return;
+                const parsed = parseStoryScriptOutput(answer, presetId);
+                if (!parsed.ok || !parsed.rows.length) {
+                    setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: parsed.ok ? "模型未返回这一镜" : parsed.error } } : node)));
+                    message.error(t("canvas.scriptNode.parseFailed"));
+                    return;
+                }
+                // 行位置与镜号以原表为准；重写结果只覆盖这一行的各列内容。
+                const nextRows = rows.map((item, index) => (index === rowIndex ? { ...parsed.rows[0], shot_no: item.shot_no || index + 1 } : item));
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === nodeId
+                            ? { ...node, metadata: { ...node.metadata, scriptStatus: "success", scriptRows: nextRows, scriptRaw: storyScriptToMarkdown(nextRows, node.metadata?.scriptTitle, presetId), errorDetails: undefined } }
+                            : node,
+                    ),
+                );
+                message.success(t("canvas.scriptNode.regenShotDone", { no: row.shot_no || rowIndex + 1 }));
+            } catch (error) {
+                if (controller.signal.aborted) return;
+                const detail = error instanceof Error ? error.message : String(error);
+                setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: detail } } : node)));
+                message.error(detail);
+            } finally {
+                finishGenerationRequest(nodeId, controller);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNodeGenerating, message, openConfigDialog, startGenerationRequest, t],
+    );
+
+    // 整表重生成（「重新生成整表」）：等价于再点一次生成，用于追回缺失的资产 / 列。UI 已先做过确认。
+    const handleRegenerateScriptAll = useCallback((nodeId: string) => void runScriptGeneration(nodeId), [runScriptGeneration]);
+
     // 把某一镜的分镜提示词落成画布上的文本节点，方便直接接进生图链路。
     const handleInsertShotPrompt = useCallback((nodeId: string, text: string, title: string) => {
         if (!text.trim()) return;
@@ -6266,7 +6359,7 @@ function AtelierCanvasPage() {
         [t],
     );
 
-    // 脚本节点「添加资产」的候选：画布上能当参考用的节点（图片 / 视频 / 文本），排除自己与已经连上去的上游。
+    // 脚本节点「添加资产」的候选：画布上能当参考用的节点（图片 / 视频 / 音频 / 文本），排除自己与已经连上去的上游。
     // 与 getConfigInputs / getMentionReferences 同理做按节点懒缓存，避免每次节点变动都全量重算一遍。
     const scriptAssetCacheRef = useRef<{ nodes: CanvasNodeData[]; connections: CanvasConnection[]; map: Map<string, ScriptAssetCandidate[]> } | null>(null);
     const getScriptAssetCandidates = useCallback(
@@ -6286,6 +6379,7 @@ function AtelierCanvasPage() {
                         return [{ id: node.id, title: node.title, kind: "image", previewUrl: node.metadata.thumbnailContent || node.metadata.content }];
                     }
                     if (node.type === CanvasNodeType.Video && node.metadata?.content) return [{ id: node.id, title: node.title, kind: "video" }];
+                    if (node.type === CanvasNodeType.Audio && (node.metadata?.content || node.metadata?.storageKey)) return [{ id: node.id, title: node.title, kind: "audio" }];
                     if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) return [{ id: node.id, title: node.title, kind: "text" }];
                     return [];
                 });
@@ -6313,12 +6407,12 @@ function AtelierCanvasPage() {
         return placed;
     }, []);
 
-    // 导入本地图片 / 视频到脚本节点：上传后建节点并自动连成上游素材，并按弹窗里选的分类落库。
+    // 导入本地图片 / 视频 / 音频到脚本节点：上传后建节点并自动连成上游素材，并按弹窗里选的分类落库。
     const handleImportScriptAssets = useCallback(
         async (nodeId: string, files: File[], role: ScriptAssetRole = "character") => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || !files.length) return;
-            const media = files.filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/"));
+            const media = files.filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || isAudioFile(file));
             if (!media.length) {
                 message.warning(t("canvas.scriptNode.assetUnsupported"));
                 return;
@@ -6326,7 +6420,12 @@ function AtelierCanvasPage() {
             const items: Array<{ node: CanvasNodeData; width: number; height: number }> = [];
             for (const file of media) {
                 try {
-                    if (file.type.startsWith("video/")) {
+                    if (isAudioFile(file)) {
+                        const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
+                        const audio = await uploadMediaFile(file, "audio");
+                        const node = createCanvasNode(CanvasNodeType.Audio, { x: 0, y: 0 }, { ...audioMetadata(audio), prompt: file.name });
+                        items.push({ node: { ...node, title: file.name || t("canvas.scriptNode.assetAudioTitle") }, width: spec.width, height: spec.height });
+                    } else if (file.type.startsWith("video/")) {
                         const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
                         const video = await uploadMediaFile(file, "video");
                         const node = createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { ...videoMetadata(video), prompt: file.name });
@@ -6344,10 +6443,10 @@ function AtelierCanvasPage() {
             }
             const placed = attachScriptAssets(source, items);
             if (placed.length) {
-                // 整批文件按弹窗里选的分类写进 metadata.scriptAssetRoles（默认「角色」）。
+                // 音频节点一律归「音频」（它只连视频节点），其余按弹窗里选的分类（默认「角色」）。
                 // 这里直接内联（而不是调 mergeScriptAssetRoles）——那个 helper 声明在本回调之后，
                 // 放进依赖数组会在渲染期触发 TDZ。
-                const roles = Object.fromEntries(placed.map((node) => [node.id, role]));
+                const roles: Record<string, ScriptAssetRole> = Object.fromEntries(placed.map((node) => [node.id, node.type === CanvasNodeType.Audio ? "audio" : role]));
                 setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptAssetRoles: { ...(node.metadata?.scriptAssetRoles || {}), ...roles } } } : node)));
                 message.success(t("canvas.scriptNode.assetImported", { count: placed.length }));
             }
@@ -6415,6 +6514,37 @@ function AtelierCanvasPage() {
         [cancelFocusAnimation, size.height, size.width],
     );
 
+    // AI 生成资产：手上没有图（或干脆想让 AI 出）时，用分镜表里的资产描述当提示词直接生成一张图。
+    // 与「上传素材」走同一条路径——建图片节点 → 连成脚本节点上游 → 写上分类 → 立刻触发生成；
+    // 图片节点会把结果写回自身，所以用户看到的就是「这张资产正在生成」。
+    const handleGenerateScriptAsset = useCallback(
+        (nodeId: string, role: ScriptAssetRole, prompt: string, title: string) => {
+            const source = nodesRef.current.find((item) => item.id === nodeId);
+            const scene = prompt.trim();
+            if (!source || !scene) return;
+            const assetTitle = title.trim() || scene.slice(0, 24);
+            const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE });
+            const placed = attachScriptAssets(source, [{ node: { ...node, title: assetTitle }, width: spec.width, height: spec.height }]);
+            const created = placed[0];
+            if (!created) return;
+            // 分类写进脚本节点（内联：mergeScriptAssetRoles 声明在本回调之后，进依赖数组会 TDZ）。
+            const withRole = (item: CanvasNodeData) =>
+                item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), [created.id]: role } } } : item;
+            // 必须立刻同步 nodesRef：attachScriptAssets 只改 state，而紧接着的触发生成会读 nodesRef
+            // 判断「这是不是一个图片节点（结果写回自身）」——不同步就会在旁边多长出一个空节点。
+            nodesRef.current = [...nodesRef.current, created].map(withRole);
+            setNodes((prev) => prev.map(withRole));
+            revealNodes([created], "center");
+            message.success(t("canvas.scriptNode.assetGenerating", { title: assetTitle }));
+            // 生图会把图片节点标题改写成「提示词前 32 字」，资产节点要留住用户给的名字，生成结束后改回来。
+            void Promise.resolve(generateNodeRef.current?.(created.id, "image", scene)).finally(() => {
+                setNodes((prev) => prev.map((item) => (item.id === created.id && item.title !== assetTitle ? { ...item, title: assetTitle } : item)));
+            });
+        },
+        [attachScriptAssets, message, revealNodes, t],
+    );
+
     const handleBuildScriptPipeline = useCallback(
         (nodeId: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
@@ -6426,14 +6556,19 @@ function AtelierCanvasPage() {
             const segmentSeconds = source.metadata?.scriptSegmentSeconds;
             // 上游图片节点 = 角色 / 场景 / 道具 / 站位图素材。分类决定它连到哪些镜：
             //   角色 → 按分镜里的角色名逐镜匹配；场景 / 道具 / 站位图 → 每一镜都连。
+            // 音频素材单独拎出来：它不能参与生图，只连到视频节点（每段视频都连）。
             const assetRoleOf = (assetNodeId: string) => resolveScriptAssetRole(source.metadata?.scriptAssetRoles?.[assetNodeId]);
-            const upstreamAssets = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
+            const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
                 .map((id) => nodesRef.current.find((node) => node.id === id))
-                .filter((node): node is CanvasNodeData => Boolean(node))
+                .filter((node): node is CanvasNodeData => Boolean(node));
+            const upstreamAssets = upstreamNodes
                 .filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content))
                 .map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
             const characterRefs = upstreamAssets.filter((asset) => asset.role === "character");
             const globalRefs = upstreamAssets.filter((asset) => asset.role !== "character");
+            const audioRefs = upstreamNodes
+                .filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey))
+                .map((node) => ({ id: node.id, title: node.title }));
 
             const textWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Text].width;
             // 文本节点默认 480 高，铺链路时压到 240：否则每一镜的横向三件套会占掉整屏。
@@ -6541,6 +6676,11 @@ function AtelierCanvasPage() {
                     createdConnections.push({ id: nanoid(), fromNodeId: assetId, toNodeId: videoNode.id });
                     assetLinkCount += 1;
                 }
+                // 音频素材（背景音乐 / 配音）只连视频节点，每段视频都连上，用户可在视频窗口里换成该段要用的音轨。
+                for (const audio of audioRefs) {
+                    createdConnections.push({ id: nanoid(), fromNodeId: audio.id, toNodeId: videoNode.id });
+                    assetLinkCount += 1;
+                }
             }
 
             const shotCount = renderable.length;
@@ -6591,9 +6731,10 @@ function AtelierCanvasPage() {
                 position: { x: source.position.x + source.width + 64, y: source.position.y + (source.height - videoHeight) / 2 },
             };
             const assetRoleOf = (assetNodeId: string) => resolveScriptAssetRole(source.metadata?.scriptAssetRoles?.[assetNodeId]);
-            const upstreamAssets = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
+            const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
                 .map((id) => nodesRef.current.find((node) => node.id === id))
-                .filter((node): node is CanvasNodeData => Boolean(node))
+                .filter((node): node is CanvasNodeData => Boolean(node));
+            const upstreamAssets = upstreamNodes
                 .filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content))
                 .map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
             // 角色按这一镜的角色名匹配，场景 / 道具 / 站位图无条件连上（与整条铺链路的规则一致）。
@@ -6601,7 +6742,9 @@ function AtelierCanvasPage() {
                 ...matchStoryScriptRowAssets(presetId, row, upstreamAssets.filter((asset) => asset.role === "character")),
                 ...upstreamAssets.filter((asset) => asset.role !== "character"),
             ];
-            const links = assets.map((asset) => ({ id: nanoid(), fromNodeId: asset.id, toNodeId: videoNode.id }));
+            // 音频素材只连视频节点（不参与生图），与整条铺链路一致。
+            const audioRefs = upstreamNodes.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey));
+            const links = [...assets, ...audioRefs].map((asset) => ({ id: nanoid(), fromNodeId: asset.id, toNodeId: videoNode.id }));
             nodesRef.current = [...nodesRef.current, videoNode];
             setNodes((prev) => [...prev, videoNode]);
             if (links.length) setConnections((prev) => [...prev, ...links]);
@@ -6690,11 +6833,14 @@ function AtelierCanvasPage() {
                         onScriptAction={handleScriptAction}
                         assetCandidates={getScriptAssetCandidates(contentNode.id)}
                         onImportAssets={(nodeId, files, role) => void handleImportScriptAssets(nodeId, files, role)}
+                        onGenerateAsset={handleGenerateScriptAsset}
                         onLinkAssets={handleLinkScriptAssets}
                         assetRoles={contentNode.metadata?.scriptAssetRoles}
                         onAssetRoleChange={handleAssetRoleChange}
                         onBuildPipeline={handleBuildScriptPipeline}
                         onBuildShotVideo={handleBuildShotVideo}
+                        onRegenerateShot={(nodeId, rowIndex) => void runScriptShotGeneration(nodeId, rowIndex)}
+                        onRegenerateAll={handleRegenerateScriptAll}
                         onNodeSizeChange={(nodeId, width, height) => {
                             // 脚本节点按内容自动适配时从左上角扩张：内容变多就向右下长，
                             // 不会因为「居中缩放」把自己挪到左侧素材节点上面去。
@@ -6746,7 +6892,7 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleConfigNodeChange, handleGenerateNode, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleScriptAction, handleStopScriptGeneration, isNodeGenerating, runMergeNode, runScriptGeneration, stopGenerationForNode, theme],
+        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleRegenerateScriptAll, handleScriptAction, handleStopScriptGeneration, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;

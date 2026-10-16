@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEven
 import { createPortal } from "react-dom";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowUpRight, AlignJustify, Copy, FileText, Loader2, Maximize2, Minimize2, PencilLine, Play, Plus, ScrollText, Square, Table2, Trash2, User, Video, Wand2 } from "lucide-react";
+import { ArrowUpRight, AlignJustify, Copy, FileText, Loader2, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Square, Table2, Trash2, User, Video, Wand2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -11,11 +11,15 @@ import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialo
 import {
     getStoryScriptColumns,
     getStoryScriptPreset,
+    getStoryScriptSystemPrompt,
+    hasScriptSystemPromptOverride,
     nextScriptAssetRole,
     resolveScriptAssetRole,
+    resolveStoryScriptFontSize,
     resolveStoryScriptMergeMode,
     resolveStoryScriptPresetId,
     resolveStoryScriptSegmentSeconds,
+    stepStoryScriptFontSize,
     storyScriptToMarkdown,
     storyScriptToTsv,
     STORY_SCRIPT_MERGE_MODES,
@@ -40,16 +44,18 @@ export type { ScriptAssetCandidate, ScriptAssetLinkSelection };
  *  1) 外壳 `cursor-move`，内部真实控件用 pointer/mouse 捕获把事件挡在节点拖拽之外；
  *  2) 滚动容器挂原生 wheel stopPropagation + `data-canvas-no-zoom`，否则画布会把滚轮吃掉当缩放。
  *
- * 字号：表格是十几列的宽表（经典预设约 2.6k px），若按 chat 的 20px 会彻底读不了，所以表体
- * 固定 13px、外壳 15px，由画布缩放进退。
+ * 字号：表格是十几列的宽表（经典预设约 2.6k px），若按 chat 的 20px 会彻底读不了，所以默认基准
+ * 13px、工具条 15px（1.154 倍），再由画布缩放进退。基准字号可由顶部「A− / A+」调档
+ * （`metadata.scriptFontSize`）：外壳挂基准 px，**其余字号一律写成 em**，所以只改一个值就整体缩放；
+ * 默认 13px 时各 em 值恰好还原原先的像素值，视觉零变化。
  *
  * 输出格式由 `metadata.scriptPreset` 决定（见 constant/story-script.ts）：列定义、系统提示词、
  * 行操作按钮全部按预设分派。切换预设会清空已生成的分镜表（原文与补充要求保留），因为两套预设
  * 的列完全不同，旧行在新表里会全空。**生成链路不变**：`runScriptGeneration` 只是多读一个 preset。
  */
 
-const SCRIPT_FONT_SIZE = 13;
-const CHROME_FONT_SIZE = 15;
+/** 顶部工具条字号相对正文基准的倍数（改造前 15px / 13px），跟着基准字号一起缩放。 */
+const HEADER_FONT_SCALE = 1.154;
 const TABLE_ACTION_WIDTH = 104;
 
 /**
@@ -97,6 +103,11 @@ type CanvasScriptNodeContentProps = {
     onImportAssets?: (nodeId: string, files: File[], role: ScriptAssetRole) => void;
     /** 链接画布上已有的节点为上游素材（带分类）。 */
     onLinkAssets?: (nodeId: string, links: ScriptAssetLinkSelection[]) => void;
+    /**
+     * 没有现成素材时，直接用一段描述生成一张资产图：上层会建图片节点、连成上游素材、
+     * 写入分类并立刻触发生图。`title` 是建出来的节点标题（角色类靠它做名字匹配）。
+     */
+    onGenerateAsset?: (nodeId: string, role: ScriptAssetRole, prompt: string, title: string) => void;
     /** 已链接素材的分类（节点 id → 分类），用于在引用条上回显 / 切换。 */
     assetRoles?: Record<string, string>;
     /** 切换某张已链接素材的分类（角色 / 场景 / 道具 / 站位图）。 */
@@ -105,6 +116,10 @@ type CanvasScriptNodeContentProps = {
     onBuildPipeline?: (nodeId: string) => void;
     /** 只给某一行分镜建一个视频节点（预填该镜的视频提示词与时长）。 */
     onBuildShotVideo?: (nodeId: string, rowIndex: number) => void;
+    /** 按镜重生成：只重写这一行的全部列（保留 shot_no），并带上一镜 / 下一镜作为上下文。 */
+    onRegenerateShot?: (nodeId: string, rowIndex: number) => void;
+    /** 重新生成整表：整张分镜表推倒重来（用于追回缺失的资产 / 列）。 */
+    onRegenerateAll?: (nodeId: string) => void;
     /** 生成后按内容多少自动适配节点窗口尺寸（高贴合行数、宽贴合表格宽并封顶）。 */
     onNodeSizeChange?: (nodeId: string, width: number, height: number) => void;
 };
@@ -124,10 +139,13 @@ export function CanvasScriptNodeContent({
     assetCandidates,
     onImportAssets,
     onLinkAssets,
+    onGenerateAsset,
     assetRoles,
     onAssetRoleChange,
     onBuildPipeline,
     onBuildShotVideo,
+    onRegenerateShot,
+    onRegenerateAll,
     onNodeSizeChange,
 }: CanvasScriptNodeContentProps) {
     const { t } = useTranslation();
@@ -143,6 +161,13 @@ export function CanvasScriptNodeContent({
     const extraPrompt = node.metadata?.scriptPrompt || "";
     const connectedTextValue = connectedText.trim();
     const textModel = resolveModelForCapability(globalConfig, node.metadata?.model, "text");
+
+    // 内容基准字号（px）。组件内所有字号都写成 em，所以只改这一个值就能整体缩放
+    // （档位见 story-script.ts 的 STORY_SCRIPT_FONT_SIZES，避开 13.5px 这种糊字）。
+    // 默认 13px 时各 em 值恰好还原改造前的像素值，视觉零变化。
+    const baseFontSize = resolveStoryScriptFontSize(node.metadata?.scriptFontSize);
+    const smallerFontSize = stepStoryScriptFontSize(baseFontSize, -1);
+    const largerFontSize = stepStoryScriptFontSize(baseFontSize, 1);
 
     // 输出格式预设：列定义、行操作都从这里来。
     const presetId = resolveStoryScriptPresetId(node.metadata?.scriptPreset);
@@ -167,6 +192,10 @@ export function CanvasScriptNodeContent({
     // 全屏查看：内容区改走 portal 铺满视口（z 值卡在画布 chrome 之上、antd Modal 之下）。
     const [fullscreen, setFullscreen] = useState(false);
     const [assetDialogOpen, setAssetDialogOpen] = useState(false);
+    // 「自定义提示词」弹窗：用一段自己的系统提示词整段替换预设自带的那段（列结构不变）。
+    const [systemPromptOpen, setSystemPromptOpen] = useState(false);
+    // 是否已自定义：决定 chip 的高亮态与是否显示「恢复预设提示词」。
+    const hasCustomSystemPrompt = hasScriptSystemPromptOverride(node.metadata?.scriptSystemPrompt);
 
     useEffect(() => {
         setSourceDraft(source);
@@ -180,8 +209,8 @@ export function CanvasScriptNodeContent({
     const activeReferences = useMemo(() => (references || []).filter((item) => item.active), [references]);
     // 「试一试」只在真·空场景出现（没结果、没连线、没手填），否则会挤占输入区。
     const showTryActions = !rows.length && activeReferences.length === 0 && !sourceDraft.trim();
-    // 「添加资产」入口：只要有导入或链接能力就显示（两条都来自上层，缺一个也还有用）。
-    const showAssetEntry = Boolean(onImportAssets || onLinkAssets);
+    // 「添加资产」入口：导入 / 链接 / 生成三条里有一条能用就显示。
+    const showAssetEntry = Boolean(onImportAssets || onLinkAssets || onGenerateAsset);
 
     // 无结果时回到输入态；首次生成出结果时自动切到分镜表——否则用户停在「剧本原文」，
     // 既看不到表格，也看不到表格底部的「铺链路」入口。
@@ -213,8 +242,8 @@ export function CanvasScriptNodeContent({
         if (!table || !body || !shell) return;
         const contentHeight = table.offsetHeight;
         if (!contentHeight) return;
-        // 签名带行数与单元格总字数：增删行、改字都会变，纯切换视图不会。
-        const signature = `${presetId}:${columns.length}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
+        // 签名带行数、单元格总字数与基准字号：增删行、改字、调字号都会变，纯切换视图不会。
+        const signature = `${presetId}:${baseFontSize}:${columns.length}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
         if (signature === lastAutoSizeKeyRef.current) return;
         const chromeHeight = Math.max(0, shell.clientHeight - body.clientHeight);
         const width = Math.round(Math.min(AUTO_SIZE_MAX_WIDTH, Math.max(AUTO_SIZE_MIN_WIDTH, tableWidth + AUTO_SIZE_PADDING_X)));
@@ -223,7 +252,7 @@ export function CanvasScriptNodeContent({
         onConfigChange(node.id, { scriptAutoSizeKey: signature });
         if (Math.abs(width - node.width) < 8 && Math.abs(height - node.height) < 8) return;
         onNodeSizeChange(node.id, width, height);
-    }, [columns, fullscreen, isRunning, node.height, node.id, node.width, onConfigChange, onNodeSizeChange, presetId, rows, tableWidth, view]);
+    }, [baseFontSize, columns, fullscreen, isRunning, node.height, node.id, node.width, onConfigChange, onNodeSizeChange, presetId, rows, tableWidth, view]);
 
     // 全屏时 Esc 退出；单元格编辑弹窗开着时让 Esc 先归它（否则会连带把全屏也关掉）。
     useEffect(() => {
@@ -316,10 +345,57 @@ export function CanvasScriptNodeContent({
 
     const chromeButtonClass = "inline-flex h-8 shrink-0 items-center gap-1 rounded-full border px-2.5 font-medium transition disabled:opacity-35";
 
+    /**
+     * 字号档位开关。分镜表是十几列的宽表，小屏读不动、大屏又太挤，所以给个「A− / 13 / A+」。
+     * 用自绘按钮而不是 antd 组件：画布浮层会被自身 pointerdown 吞掉（见项目备忘）。
+     * 档位写进 `metadata.scriptFontSize`，外壳的基准 font-size 与全表的 em 字号都跟着走。
+     */
+    const fontSizeStepper = (
+        <span
+            className="inline-flex shrink-0 items-center gap-0.5 rounded-full border px-1 py-0.5"
+            style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
+            title={t("canvas.scriptNode.fontSizeHint")}
+        >
+            <button
+                type="button"
+                className="grid size-6 shrink-0 place-items-center rounded-full transition hover:opacity-100 disabled:opacity-30"
+                style={{ opacity: 0.8 }}
+                disabled={smallerFontSize === null}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    if (smallerFontSize !== null) patchMetadata({ scriptFontSize: smallerFontSize });
+                }}
+                title={t("canvas.nodeToolbar.decreaseFont")}
+                aria-label={t("canvas.nodeToolbar.decreaseFont")}
+            >
+                <Minus className="size-3.5" />
+            </button>
+            <span className="min-w-5 text-center text-[0.8em] font-medium tabular-nums opacity-75">{baseFontSize}</span>
+            <button
+                type="button"
+                className="grid size-6 shrink-0 place-items-center rounded-full transition hover:opacity-100 disabled:opacity-30"
+                style={{ opacity: 0.8 }}
+                disabled={largerFontSize === null}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    if (largerFontSize !== null) patchMetadata({ scriptFontSize: largerFontSize });
+                }}
+                title={t("canvas.nodeToolbar.increaseFont")}
+                aria-label={t("canvas.nodeToolbar.increaseFont")}
+            >
+                <Plus className="size-3.5" />
+            </button>
+        </span>
+    );
+
     const header = (
         <div
             className="flex flex-wrap items-center gap-1.5 px-2 pb-1.5 pt-2"
-            style={{ fontSize: `${CHROME_FONT_SIZE}px` }}
+            style={{ fontSize: `${HEADER_FONT_SCALE}em` }}
             onMouseDown={stopIfInteractive}
             onPointerDown={stopIfInteractive}
         >
@@ -327,7 +403,7 @@ export function CanvasScriptNodeContent({
                 <ScrollText className="size-4" />
                 {t("canvas.scriptNode.title")}
             </span>
-            <span className="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[12px] opacity-80" style={{ borderColor: theme.node.stroke }} title={t(`canvas.scriptNode.preset_${presetId}_hint`)}>
+            <span className="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[0.8em] opacity-80" style={{ borderColor: theme.node.stroke }} title={t(`canvas.scriptNode.preset_${presetId}_hint`)}>
                 {t(`canvas.scriptNode.preset_${presetId}`)}
             </span>
             <div className="min-w-0 flex-1">
@@ -396,6 +472,8 @@ export function CanvasScriptNodeContent({
                 </>
             ) : null}
 
+            {fontSizeStepper}
+
             <button
                 type="button"
                 className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border transition"
@@ -438,13 +516,15 @@ export function CanvasScriptNodeContent({
         </div>
     );
 
+    // 字号写在各文本节点上、不写在容器上：里面的「复制原文」按钮是更小的一档（0.846em），
+    // 容器若也带 font-size，em 会连乘，按钮会比预期小一圈。
     const errorBanner =
         scriptStatus === "error" && !isRunning && node.metadata?.errorDetails ? (
-            <div className="mx-2 mb-1.5 shrink-0 rounded-lg border px-2 py-1.5 text-[12px] leading-snug" style={{ borderColor: "#dc2626", background: "#dc26261a", color: theme.node.text }}>
-                <div className="font-medium">{t("canvas.scriptNode.errorTitle")}</div>
-                <div className="mt-0.5 opacity-80">{node.metadata.errorDetails}</div>
+            <div className="mx-2 mb-1.5 shrink-0 rounded-lg border px-2 py-1.5 leading-snug" style={{ borderColor: "#dc2626", background: "#dc26261a", color: theme.node.text }}>
+                <div className="text-[0.923em] font-medium">{t("canvas.scriptNode.errorTitle")}</div>
+                <div className="mt-0.5 text-[0.923em] opacity-80">{node.metadata.errorDetails}</div>
                 {scriptRaw ? (
-                    <button type="button" className="mt-1 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px]" style={{ borderColor: theme.node.stroke }} onClick={() => copyValue(scriptRaw)}>
+                    <button type="button" className="mt-1 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[0.846em]" style={{ borderColor: theme.node.stroke }} onClick={() => copyValue(scriptRaw)}>
                         <Copy className="size-3" />
                         {t("canvas.scriptNode.copyRaw")}
                     </button>
@@ -454,33 +534,34 @@ export function CanvasScriptNodeContent({
 
     const runningPanel = (
         <div className="flex min-h-0 flex-1 flex-col gap-2 px-2 pb-2">
-            <div className="flex shrink-0 items-center gap-2 text-[13px] opacity-75" style={{ color: theme.node.text }}>
+            <div className="flex shrink-0 items-center gap-2 text-[1em] opacity-75" style={{ color: theme.node.text }}>
                 <Loader2 className="size-4 animate-spin" />
                 {t("canvas.scriptNode.generating")}
             </div>
-            <pre className="thin-scrollbar min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-xl border p-2 text-[12px] leading-relaxed opacity-70" style={{ borderColor: theme.node.stroke, background: theme.node.panel, color: theme.node.text }}>
+            <pre className="thin-scrollbar min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-xl border p-2 text-[0.923em] leading-relaxed opacity-70" style={{ borderColor: theme.node.stroke, background: theme.node.panel, color: theme.node.text }}>
                 {scriptRaw || "…"}
             </pre>
         </div>
     );
 
     // 引用条：编号缩略图 + 资产分类（对应剧集画布 ScriptReferencesRow）。
-    //  - 图片 / 视频：胶囊可点，点一下就在「角色 → 场景 → 道具 → 站位图」之间轮转（铺链路时决定这张图连到哪些镜）；
+    //  - 图片 / 视频 / 音频：胶囊可点，点一下就在「角色 → 场景 → 道具 → 站位图 → 音频」之间轮转（铺链路时决定这条素材连到哪些镜）；
     //  - 文本：只作为剧本原文来源，不参与分类。
     // 用自绘胶囊而不是 antd Select：画布浮层会被自身 pointerdown 吞掉（见项目备忘）。
-    const classifiableReferences = activeReferences.filter((reference) => reference.kind === "image" || reference.kind === "video");
+    const classifiableReferences = activeReferences.filter((reference) => reference.kind === "image" || reference.kind === "video" || reference.kind === "audio");
     const referencesRow = activeReferences.length ? (
         <div className="flex shrink-0 flex-col gap-0.5">
             {classifiableReferences.length ? (
-                <div className="flex flex-wrap items-center gap-1.5 text-[12px] opacity-60" style={{ color: theme.node.text }}>
-                    <span>{t("canvas.scriptNode.assetRoleLabel")}</span>
-                    {onAssetRoleChange ? <span className="text-[11px] opacity-90">· {t("canvas.scriptNode.assetRoleHint")}</span> : null}
+                // 同理：容器不挂 font-size，两段文字各挂各的档，避免 em 连乘。
+                <div className="flex flex-wrap items-center gap-1.5 opacity-60" style={{ color: theme.node.text }}>
+                    <span className="text-[0.923em]">{t("canvas.scriptNode.assetRoleLabel")}</span>
+                    {onAssetRoleChange ? <span className="text-[0.846em] opacity-90">· {t("canvas.scriptNode.assetRoleHint")}</span> : null}
                 </div>
             ) : null}
             <div className="flex flex-wrap items-center gap-1.5">
                 {activeReferences.map((reference, index) => {
-                    const preview = reference.kind === "video" ? undefined : reference.previewUrl;
-                    const classifiable = reference.kind === "image" || reference.kind === "video";
+                    const preview = reference.kind === "video" || reference.kind === "audio" ? undefined : reference.previewUrl;
+                    const classifiable = reference.kind === "image" || reference.kind === "video" || reference.kind === "audio";
                     const role = resolveScriptAssetRole(assetRoles?.[reference.nodeId]);
                     const thumb = (
                         <span
@@ -491,12 +572,14 @@ export function CanvasScriptNodeContent({
                                 <img src={preview} alt={reference.title} className="size-full object-cover" />
                             ) : reference.kind === "video" ? (
                                 <Video className="size-4" />
+                            ) : reference.kind === "audio" ? (
+                                <Music2 className="size-4" />
                             ) : reference.kind === "text" ? (
-                                <span className="text-[11px] font-semibold">T</span>
+                                <span className="text-[0.846em] font-semibold">T</span>
                             ) : (
                                 <FileText className="size-4" />
                             )}
-                            <span className="absolute right-0.5 top-0.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-black/45 px-0.5 text-[9px] leading-none text-white">{index + 1}</span>
+                            <span className="absolute right-0.5 top-0.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-black/45 px-0.5 text-[0.692em] leading-none text-white">{index + 1}</span>
                         </span>
                     );
                     if (!classifiable || !onAssetRoleChange) {
@@ -521,7 +604,7 @@ export function CanvasScriptNodeContent({
                             }}
                         >
                             {thumb}
-                            <span className="text-[10px] leading-none opacity-75">{t(`canvas.scriptNode.assetRole_${role}`)}</span>
+                            <span className="text-[0.769em] leading-none opacity-75">{t(`canvas.scriptNode.assetRole_${role}`)}</span>
                         </button>
                     );
                 })}
@@ -532,7 +615,7 @@ export function CanvasScriptNodeContent({
     const tryActions =
         showTryActions && onScriptAction ? (
             <div className="shrink-0">
-                <div className="text-[12px] opacity-60" style={{ color: theme.node.text }}>
+                <div className="text-[0.923em] opacity-60" style={{ color: theme.node.text }}>
                     {t("canvas.scriptNode.tryLabel")}
                 </div>
                 <div className="mt-1 flex flex-col">
@@ -542,7 +625,7 @@ export function CanvasScriptNodeContent({
                             <button
                                 key={action.key}
                                 type="button"
-                                className="inline-flex items-center gap-2 self-start rounded-lg px-1.5 py-1.5 text-left text-[13px] transition hover:opacity-100"
+                                className="inline-flex items-center gap-2 self-start rounded-lg px-1.5 py-1.5 text-left text-[1em] transition hover:opacity-100"
                                 style={{ color: theme.node.text, opacity: 0.85 }}
                                 onPointerDown={(event) => event.stopPropagation()}
                                 onClick={(event) => {
@@ -561,7 +644,7 @@ export function CanvasScriptNodeContent({
 
     // 输出格式预设切换：放在输入区（它只影响「生成什么」，且切换会清空结果回到输入态）。
     const presetSwitcher = (
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[12px]" style={{ color: theme.node.text }}>
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
             <span className="opacity-60">{t("canvas.scriptNode.presetLabel")}</span>
             {STORY_SCRIPT_PRESET_IDS.map((id) => {
                 const active = id === presetId;
@@ -588,6 +671,44 @@ export function CanvasScriptNodeContent({
                     </button>
                 );
             })}
+            <span className="mx-0.5 h-4 w-px shrink-0" style={{ background: theme.node.stroke, opacity: 0.6 }} />
+            <button
+                type="button"
+                className="inline-flex h-6 items-center gap-1 rounded-full border px-2.5 transition"
+                style={{
+                    borderColor: theme.node.stroke,
+                    background: hasCustomSystemPrompt ? theme.toolbar.activeBg : `${theme.toolbar.panel}aa`,
+                    color: hasCustomSystemPrompt ? theme.toolbar.activeText : theme.node.text,
+                    opacity: hasCustomSystemPrompt ? 1 : 0.7,
+                }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    setSystemPromptOpen(true);
+                }}
+                title={t("canvas.scriptNode.customPromptHint")}
+            >
+                <ScrollText className="size-3.5" />
+                {hasCustomSystemPrompt ? t("canvas.scriptNode.customPromptActive") : t("canvas.scriptNode.customPrompt")}
+            </button>
+            {hasCustomSystemPrompt ? (
+                <button
+                    type="button"
+                    className="inline-flex h-6 items-center rounded-full border px-2.5 transition"
+                    style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text, opacity: 0.7 }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        patchMetadata({ scriptSystemPrompt: undefined });
+                        message.success(t("canvas.scriptNode.customPromptResetDone"));
+                    }}
+                    title={t("canvas.scriptNode.customPromptReset")}
+                >
+                    {t("canvas.scriptNode.customPromptReset")}
+                </button>
+            ) : null}
         </div>
     );
 
@@ -595,7 +716,7 @@ export function CanvasScriptNodeContent({
     // 连续镜头，铺链路时还可以选「按每段时长」把它们自动合并成一个视频节点。
     const segmentSeconds = resolveStoryScriptSegmentSeconds(node.metadata?.scriptSegmentSeconds);
     const segmentSelector = (
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[12px]" style={{ color: theme.node.text }}>
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
             <span className="opacity-60">{t("canvas.scriptNode.segmentLabel")}</span>
             {STORY_SCRIPT_SEGMENT_SECONDS.map((id) => {
                 const active = id === segmentSeconds;
@@ -629,7 +750,7 @@ export function CanvasScriptNodeContent({
         <div className="flex min-h-0 flex-1 flex-col gap-1.5 px-2 pb-2">
             {presetSwitcher}
             {segmentSelector}
-            <div className="flex shrink-0 items-center gap-2 text-[12px] opacity-60" style={{ color: theme.node.text }}>
+            <div className="flex shrink-0 items-center gap-2 text-[0.923em] opacity-60" style={{ color: theme.node.text }}>
                 <span>{t("canvas.scriptNode.sourceLabel")}</span>
                 {connectedTextCount ? <span>· {t("canvas.scriptNode.connectedHint", { count: connectedTextCount })}</span> : null}
             </div>
@@ -638,7 +759,7 @@ export function CanvasScriptNodeContent({
                 <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                     <button
                         type="button"
-                        className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[12px] transition"
+                        className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] transition"
                         style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
                         onMouseDown={(event) => event.stopPropagation()}
                         onPointerDown={(event) => event.stopPropagation()}
@@ -652,7 +773,7 @@ export function CanvasScriptNodeContent({
                         {t("canvas.scriptNode.addAsset")}
                     </button>
                     {assetCandidates?.length ? (
-                        <span className="text-[11px] opacity-55" style={{ color: theme.node.text }}>
+                        <span className="text-[0.846em] opacity-55" style={{ color: theme.node.text }}>
                             {t("canvas.scriptNode.assetCandidateHint", { count: assetCandidates.length })}
                         </span>
                     ) : null}
@@ -661,7 +782,7 @@ export function CanvasScriptNodeContent({
             <textarea
                 data-canvas-text-input
                 data-canvas-no-zoom
-                className="thin-scrollbar min-h-0 flex-1 resize-none rounded-xl border px-2 py-1.5 text-[13px] leading-relaxed outline-none"
+                className="thin-scrollbar min-h-0 flex-1 resize-none rounded-xl border px-2 py-1.5 text-[1em] leading-relaxed outline-none"
                 style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
                 value={sourceDraft}
                 onChange={(event) => setSourceDraft(event.target.value)}
@@ -672,7 +793,7 @@ export function CanvasScriptNodeContent({
             />
             <input
                 data-canvas-text-input
-                className="shrink-0 rounded-xl border px-2 py-1.5 text-[13px] outline-none"
+                className="shrink-0 rounded-xl border px-2 py-1.5 text-[1em] outline-none"
                 style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
                 value={promptDraft}
                 onChange={(event) => setPromptDraft(event.target.value)}
@@ -683,7 +804,7 @@ export function CanvasScriptNodeContent({
             />
             {tryActions}
             {rows.length ? (
-                <button type="button" className="shrink-0 self-start rounded-full border px-2.5 py-1 text-[12px]" style={{ borderColor: theme.node.stroke }} onClick={() => setView("table")}>
+                <button type="button" className="shrink-0 self-start rounded-full border px-2.5 py-1 text-[0.923em]" style={{ borderColor: theme.node.stroke }} onClick={() => setView("table")}>
                     <Table2 className="mr-1 inline size-3" />
                     {t("canvas.scriptNode.viewTable")}
                 </button>
@@ -693,8 +814,8 @@ export function CanvasScriptNodeContent({
 
     // 全屏时表体放宽 + 字号上调：经典预设 16 列约 2.6k px，节点里只能横向滚着看。
     const tableStyle = fullscreen
-        ? { width: "100%", minWidth: tableWidth, tableLayout: "fixed" as const, fontSize: "15px", color: theme.node.text }
-        : { width: tableWidth, tableLayout: "fixed" as const, fontSize: `${SCRIPT_FONT_SIZE}px`, color: theme.node.text };
+        ? { width: "100%", minWidth: tableWidth, tableLayout: "fixed" as const, fontSize: `${HEADER_FONT_SCALE}em`, color: theme.node.text }
+        : { width: tableWidth, tableLayout: "fixed" as const, fontSize: "1em", color: theme.node.text };
 
     // 「视频分段」：铺链路时把连续镜头合并进同一个视频节点（多个分镜提示词 → 一条视频提示词）。
     // 「按每段时长」需要先在输入区选好 10 秒 / 15 秒，没选就置灰。
@@ -790,7 +911,7 @@ export function CanvasScriptNodeContent({
                                             <button
                                                 key={action.key}
                                                 type="button"
-                                                className="inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-[11px] transition hover:opacity-100"
+                                                className="inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-[0.846em] transition hover:opacity-100"
                                                 style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                                 onPointerDown={(event) => event.stopPropagation()}
@@ -833,6 +954,19 @@ export function CanvasScriptNodeContent({
                                                 <Video className="size-3" />
                                             </button>
                                         ) : null}
+                                        {onRegenerateShot ? (
+                                            <button
+                                                type="button"
+                                                className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
+                                                style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
+                                                onMouseDown={(event) => event.stopPropagation()}
+                                                onPointerDown={(event) => event.stopPropagation()}
+                                                onClick={() => onRegenerateShot(node.id, rowIndex)}
+                                                title={t("canvas.scriptNode.regenShot")}
+                                            >
+                                                <RotateCcw className="size-3" />
+                                            </button>
+                                        ) : null}
                                         <button
                                             type="button"
                                             className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
@@ -851,7 +985,7 @@ export function CanvasScriptNodeContent({
                     </tbody>
                 </table>
             </div>
-            <div className="mt-1 flex shrink-0 flex-wrap items-center gap-1.5 text-[12px]" style={{ color: theme.node.text }}>
+            <div className="mt-1 flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
                 <span className="rounded border px-1.5 opacity-90" style={{ borderColor: theme.node.stroke }}>
                     {t(`canvas.scriptNode.preset_${presetId}`)}
                 </span>
@@ -860,23 +994,47 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.shotCount", { count: rows.length })} · {t("canvas.scriptNode.totalDuration", { seconds: totalDuration })}
                 </span>
                 {mergeSelector}
-                {onBuildPipeline ? (
-                    <button
-                        type="button"
-                        className="ml-auto inline-flex h-7 items-center gap-1 rounded-full px-2.5 font-medium text-white transition"
-                        style={{ background: theme.toolbar.activeBg }}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            onBuildPipeline(node.id);
-                        }}
-                        title={t("canvas.scriptNode.pipelineHint")}
-                    >
-                        <Wand2 className="size-3.5" />
-                        {t("canvas.scriptNode.pipelineBuild")}
-                    </button>
-                ) : null}
+                <div className="ml-auto flex items-center gap-1.5">
+                    {onRegenerateAll ? (
+                        <button
+                            type="button"
+                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                            style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                modal.confirm({
+                                    title: t("canvas.scriptNode.regenAllConfirm"),
+                                    okText: t("canvas.scriptNode.regenAll"),
+                                    cancelText: t("common.cancel"),
+                                    onOk: () => onRegenerateAll(node.id),
+                                });
+                            }}
+                            title={t("canvas.scriptNode.regenAllHint")}
+                        >
+                            <RotateCcw className="size-3.5" />
+                            {t("canvas.scriptNode.regenAll")}
+                        </button>
+                    ) : null}
+                    {onBuildPipeline ? (
+                        <button
+                            type="button"
+                            className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 font-medium text-white transition"
+                            style={{ background: theme.toolbar.activeBg }}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                onBuildPipeline(node.id);
+                            }}
+                            title={t("canvas.scriptNode.pipelineHint")}
+                        >
+                            <Wand2 className="size-3.5" />
+                            {t("canvas.scriptNode.pipelineBuild")}
+                        </button>
+                    ) : null}
+                </div>
             </div>
         </div>
     );
@@ -888,7 +1046,7 @@ export function CanvasScriptNodeContent({
         <div
             ref={shellRef}
             className={`flex h-full w-full flex-col overflow-hidden ${fullscreen ? "" : "cursor-move"}`}
-            style={{ color: theme.node.text }}
+            style={{ color: theme.node.text, fontSize: `${baseFontSize}px` }}
             onMouseDown={stopIfInteractive}
             onPointerDown={stopIfInteractive}
         >
@@ -903,9 +1061,11 @@ export function CanvasScriptNodeContent({
             open={assetDialogOpen}
             theme={theme}
             candidates={assetCandidates || []}
+            rows={rows}
             onClose={() => setAssetDialogOpen(false)}
             onLink={(links) => onLinkAssets?.(node.id, links)}
             onImport={(files, role) => onImportAssets?.(node.id, files, role)}
+            onGenerate={onGenerateAsset ? (role, prompt, title) => onGenerateAsset(node.id, role, prompt, title) : undefined}
         />
     ) : null;
 
@@ -931,11 +1091,25 @@ export function CanvasScriptNodeContent({
                 open={Boolean(editing)}
                 value={editingValue}
                 title={editing ? `${t("canvas.scriptNode.shotLabel", { no: rows[editing.rowIndex]?.shot_no ?? editing.rowIndex + 1 })} · ${editingColumn?.label ?? ""}` : ""}
-                fontSize={fullscreen ? 16 : 14}
+                fontSize={Math.round(baseFontSize * (fullscreen ? 1.23 : 1.08))}
                 onClose={() => setEditing(null)}
                 onSave={(value) => {
                     if (editing) updateRow(editing.rowIndex, editing.key, value);
                     setEditing(null);
+                }}
+            />
+            {/* 自定义系统提示词：沿用文本编辑弹窗（textarea + 字号 + 提示词库），保存留空即恢复预设默认。 */}
+            <CanvasTextEditDialog
+                open={systemPromptOpen}
+                value={node.metadata?.scriptSystemPrompt || getStoryScriptSystemPrompt(presetId)}
+                title={t("canvas.scriptNode.customPromptTitle", { preset: t(`canvas.scriptNode.preset_${presetId}`) })}
+                placeholder={t("canvas.scriptNode.customPromptPlaceholder", { count: columns.length })}
+                onClose={() => setSystemPromptOpen(false)}
+                onSave={(value) => {
+                    const trimmed = value.trim();
+                    patchMetadata({ scriptSystemPrompt: trimmed ? value : undefined });
+                    setSystemPromptOpen(false);
+                    if (trimmed) message.success(t("canvas.scriptNode.customPromptSaved", { count: trimmed.length }));
                 }}
             />
             {assetDialog}

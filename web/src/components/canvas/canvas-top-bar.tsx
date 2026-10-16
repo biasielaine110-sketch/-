@@ -151,6 +151,7 @@ export function CanvasTopBar({
                     <Shortcut keys={["W"]} value={t("canvas.shortcut.createImage")} />
                     <Shortcut keys={["R"]} value={t("canvas.shortcut.createVideo")} />
                     <Shortcut keys={["T"]} value={t("canvas.shortcut.createAudio")} />
+                    <Shortcut keys={["Z"]} value={t("canvas.shortcut.createScript")} />
                     <Shortcut keys={["F"]} value={t("canvas.shortcut.focusNode")} />
                     <Shortcut keys={["G"]} value={t("canvas.shortcut.resetNodeSize")} />
                     <Shortcut keys={["`"]} value={t("canvas.shortcut.resetNodeWindow")} />

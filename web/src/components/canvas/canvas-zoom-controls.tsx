@@ -74,6 +74,7 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, isMiniMapOpe
                     <Shortcut label="W" value={t("canvas.shortcut.createImage")} />
                     <Shortcut label="R" value={t("canvas.shortcut.createVideo")} />
                     <Shortcut label="T" value={t("canvas.shortcut.createAudio")} />
+                    <Shortcut label="Z" value={t("canvas.shortcut.createScript")} />
                     <Shortcut label="F" value={t("canvas.shortcut.focusNode")} />
                     <Shortcut label="G" value={t("canvas.shortcut.resetNodeSize")} />
                     <Shortcut label="`" value={t("canvas.shortcut.resetNodeWindow")} />
