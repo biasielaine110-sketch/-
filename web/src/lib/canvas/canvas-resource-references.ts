@@ -26,6 +26,22 @@ export function buildCanvasResourceReferences(nodes: CanvasNodeData[]) {
     return labelResourceNodes(nodes, true);
 }
 
+/**
+ * 给一组**按连线到达顺序排好的节点 id** 就地编号（与渲染时用的 `labelResourceNodes` 同实现、同口径：
+ * 同类型各自计数，图片 → `图片1` / `图片2`…）。
+ *
+ * 为什么需要它：一键铺链时节点与连线都还在内存里、没落库，走不了 `buildNodeMentionReferences`；
+ * 但写进「图片 / 视频节点提示词」的资产绑定文字必须与提示词输入框里渲染出的 chip 标签**逐字一致**
+ * —— 标签对不上，那段文字就只会退化成纯文本、不会被识别成参考图引用。所以复用同一个计数器。
+ *
+ * 注意：判定「是不是资源」用的是同一个 `resourceKind` —— 还没有生成结果的图片节点（`metadata.content`
+ * 为空）不算资源、不占编号；这正是「刚铺完链时资产图从 `图片1` 起编号」的原因。
+ */
+export function labelResourceNodeIds(nodeIds: ReadonlyArray<string | undefined | null>, nodes: CanvasNodeData[]) {
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    return labelResourceNodes(nodeIds.map((id) => (id ? byId.get(id) : undefined)).filter((node): node is CanvasNodeData => Boolean(node)), true);
+}
+
 export async function resolveCanvasReferenceImages(references: CanvasResourceReference[], nodes: CanvasNodeData[]) {
     const nodesById = new Map(nodes.map((node) => [node.id, node]));
     return Promise.all(references.filter((reference) => reference.kind === "image").map(async (reference) => {

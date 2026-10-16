@@ -1021,6 +1021,55 @@ export function syncStoryScriptNameLocks(map: unknown, cells: unknown, rows?: re
 }
 
 /**
+ * 一条「这张参考图 = 什么资产」的绑定：一键铺链时写进**图片 / 视频节点提示词**（用户要求「链接的图片
+ * 资产要在图片和视频的文本输入框里锁定，即张三锁定@图片1」）。
+ *
+ * 只负责「这一镜的参考图各自是什么资产」这件事本身（去重 + 名字回落），文案与编号留给调用方 ——
+ * 编号必须由 `lib/canvas/canvas-resource-references.ts` 的 `labelResourceNodeIds` 按连线顺序算，
+ * 才能和提示词输入框里渲染出的 chip 标签逐字对上。
+ */
+export type ScriptAssetBindingEntry = {
+    /** 画布图片节点 id。 */
+    nodeId: string;
+    /** 表里的资产名（「张三」「客厅」）；拿不到时回落 `title`。 */
+    name?: unknown;
+    /** 图片节点的标题（用户建资产时填的，通常就是资产名）。 */
+    title?: unknown;
+    /** 资产分类（`scriptAssetRoles` / 资产列）；镜头图没有分类 → 传 undefined。 */
+    role?: unknown;
+};
+
+export type ScriptAssetBinding = {
+    nodeId: string;
+    name: string;
+    role: ScriptAssetRole | null;
+};
+
+/**
+ * 把「这一镜用到的参考图」收成一份**去重 + 有名字**的绑定清单。
+ *
+ * - **去重保先**：同一张图可能既是「格子图 / 名字锁的图」、又是「资产条按名匹配」、还是「镜头图」，
+ *   先出现的（更具体的来源）赢；调用方按「精准 → 资产条 → 镜头图」的顺序喂进来即可。
+ * - **名字回落**：表里的资产名优先（「张三」），否则用图片节点标题；**两者都为空就整条丢掉** ——
+ *   写「图片1=」这种空绑定只会污染提示词。
+ * - `role` 只认合法分类值，其它（含 undefined）→ `null`（例如镜头图）。
+ */
+export function collectScriptAssetBindings(entries: ReadonlyArray<ScriptAssetBindingEntry>): ScriptAssetBinding[] {
+    const out: ScriptAssetBinding[] = [];
+    const seen = new Set<string>();
+    for (const entry of entries) {
+        const nodeId = typeof entry.nodeId === "string" ? entry.nodeId.trim() : "";
+        if (!nodeId || seen.has(nodeId)) continue;
+        const name = scriptNameLockName(entry.name) || scriptNameLockName(entry.title);
+        if (!name) continue;
+        seen.add(nodeId);
+        const role = typeof entry.role === "string" && (SCRIPT_ASSET_ROLE_IDS as readonly string[]).includes(entry.role) ? (entry.role as ScriptAssetRole) : null;
+        out.push({ nodeId, name, role });
+    }
+    return out;
+}
+
+/**
  * 从分镜表的三张「键 → 图片节点 id[]」表里**摘掉**某一个画布素材 —— 资产池缩略图上的「解除链接」用。
  *
  * `scriptCellAssets` / `scriptRowAssets` / `scriptNameLocks` 结构完全一致（键 → id 数组），所以一个

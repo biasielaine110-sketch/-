@@ -624,6 +624,7 @@ export default {
             pipelineImage: "第 {{no}} 镜 · 图片",
             pipelineVideo: "第 {{no}} 镜 · 视频",
             pipelineVideoRange: "第 {{from}}–{{to}} 镜 · 视频（{{count}} 镜合并）",
+            assetBindingLine: "资产绑定：{{items}}",
             buildShotVideoHint: "为这一镜单独建一个视频节点，预填该镜的视频提示词与时长",
             buildShotVideoDone: "已为第 {{no}} 镜建好视频节点",
             regenShot: "按原剧本重写这一镜（保留镜号，参考上一镜 / 下一镜的站位与场景）",

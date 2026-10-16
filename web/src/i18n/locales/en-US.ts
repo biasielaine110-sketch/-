@@ -624,6 +624,7 @@ export default {
             pipelineImage: "Shot {{no}} · Image",
             pipelineVideo: "Shot {{no}} · Video",
             pipelineVideoRange: "Shots {{from}}–{{to}} · Video ({{count}} merged)",
+            assetBindingLine: "Asset bindings: {{items}}",
             buildShotVideoHint: "Create a single video node for this shot, pre-filled with that shot's video prompt and duration",
             buildShotVideoDone: "Video node created for shot {{no}}",
             regenShot: "Rewrite this shot from the screenplay (keeps the shot number, uses the previous / next shot for blocking and scene continuity)",

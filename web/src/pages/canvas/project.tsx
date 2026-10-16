@@ -88,6 +88,7 @@ import { DirectorPanel } from "@/components/canvas/director-panel";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores/canvas/use-generation-history-store";
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { appendScriptAssetBinding, buildScriptAssetBindingPrompt } from "@/lib/canvas/script-asset-binding";
 import type { ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
@@ -6870,6 +6871,14 @@ function AtelierCanvasPage() {
             // （「张三」→ @图片1、「客厅」→ @图片2），再按这张锁表逐镜分派：表里凡是出现同名的地方
             // 都用同一张图。已有锁保留（并集），不会因为没有格子链接就被抹掉。
             const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows);
+            // 「资产名」查表：表里的资产名优先（名字锁就是按资产名记的），查不到就交给绑定拼装回落图片节点标题。
+            const assetNameOf = (assetNodeId: string) => {
+                const locks = source.metadata?.scriptNameLocks;
+                for (const [name, ids] of Object.entries(locks || {})) {
+                    if (Array.isArray(ids) && ids.includes(assetNodeId)) return name;
+                }
+                return undefined;
+            };
             // 现存节点 id：过滤掉已被删、但还留在 metadata.scriptRowAssets 里的镜头图，免得连出悬空线。
             const existingNodeIds = new Set(nodesRef.current.map((node) => node.id));
             // 上游图片节点 = 角色 / 场景 / 道具 / 站位图素材。分类决定它连到哪些镜：
@@ -6996,6 +7005,11 @@ function AtelierCanvasPage() {
                         groupAssetIds.add(rowAssetId);
                         assetLinkCount += 1;
                     }
+                    // 资产绑定：把这一镜连进图片节点的图片资产写成「资产名@图片N」追加进提示词 ——
+                    // 文本输入框里就能看到每张参考图分别是什么资产，且 @图片N 会渲染成缩略图 chip。
+                    // `linkedIntoImage` 是 Set、保序，正好就是刚才写连线的顺序（= 编号顺序），对得上输入框里的 chip。
+                    const imageBinding = buildScriptAssetBindingPrompt(Array.from(linkedIntoImage), nodesRef.current, assetNameOf, assetRoleOf);
+                    imageNode.metadata = { ...imageNode.metadata, prompt: appendScriptAssetBinding(imageNode.metadata?.prompt, imageBinding) };
                 }
 
                 const merged = members.length > 1;
@@ -7006,9 +7020,13 @@ function AtelierCanvasPage() {
                     imagePrompt: member.prompts.imagePrompt,
                     videoPrompt: member.prompts.videoPrompt,
                 }));
-                const videoPrompt = merged
+                // 视频节点的「资产绑定」：本段所有资产图都是直连视频节点的，顺序与写连线时一致 ——
+                // groupAssetIds（Set 保序）→ 音频（音频只连视频、但不进「图片资产」绑定，拼装时按 kind 过滤掉）。
+                const videoBinding = buildScriptAssetBindingPrompt([...groupAssetIds, ...audioRefs.map((asset) => asset.id)], nodesRef.current, assetNameOf, assetRoleOf);
+                const baseVideoPrompt = merged
                     ? buildMergedVideoNodePrompt(shots)
                     : buildVideoNodePrompt(shots[0].imagePrompt, shots[0].videoPrompt) || shots[0].imagePrompt;
+                const videoPrompt = appendScriptAssetBinding(baseVideoPrompt, videoBinding);
                 const seconds = Math.min(20, storyScriptGroupDuration({ rows: members.map((member) => member.row) }));
                 const videoNode: CanvasNodeData = {
                     ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { prompt: videoPrompt, status: NODE_STATUS_IDLE, ...(seconds ? { seconds: String(seconds) } : {}) }),
@@ -7095,6 +7113,14 @@ function AtelierCanvasPage() {
             // 「按镜按资产」图位 + **资产锁定**：这一镜每一格该用哪张图（格子图优先、按资产名的锁兜底）；
             // 它们精准指定过的那几个分类，让资产条不再对同一镜重复分派。
             const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows);
+            // 「资产名」查表：与整条铺链路同口径 —— 表里的资产名优先，查不到回落到图片节点标题。
+            const assetNameOf = (assetNodeId: string) => {
+                const locks = source.metadata?.scriptNameLocks;
+                for (const [name, ids] of Object.entries(locks || {})) {
+                    if (Array.isArray(ids) && ids.includes(assetNodeId)) return name;
+                }
+                return undefined;
+            };
             const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId);
             const coveredRoles = new Set(preciseRefs.map((ref) => ref.role));
             const cellAssetRefs = preciseRefs.flatMap((ref) => ref.ids).filter((id) => nodesRef.current.some((node) => node.id === id));
@@ -7111,6 +7137,10 @@ function AtelierCanvasPage() {
             // 去重：同一张图可能同时是「图位 / 锁的图」和「镜头图」，别连出两条并行线。
             const linkIds = Array.from(new Set([...assets.map((asset) => asset.id), ...audioRefs.map((asset) => asset.id), ...rowAssetRefs, ...cellAssetRefs]));
             const links = linkIds.map((id) => ({ id: nanoid(), fromNodeId: id, toNodeId: videoNode.id }));
+            // 资产绑定：本镜连进视频节点的图片资产 → 「资产名@图片N」追加进提示词
+            //（编号顺序 = linkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
+            const videoBinding = buildScriptAssetBindingPrompt(linkIds, nodesRef.current, assetNameOf, assetRoleOf);
+            videoNode.metadata = { ...videoNode.metadata, prompt: appendScriptAssetBinding(videoNode.metadata?.prompt, videoBinding) };
             nodesRef.current = [...nodesRef.current, videoNode];
             setNodes((prev) => [...prev, videoNode]);
             if (links.length) setConnections((prev) => [...prev, ...links]);
