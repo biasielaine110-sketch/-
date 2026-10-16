@@ -32,7 +32,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, storyScriptGroupDuration, storyScriptToMarkdown, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -6731,6 +6731,60 @@ function AtelierCanvasPage() {
         setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: undefined } } : item)));
     }, []);
 
+    // ---- 资产池缩略图：拖拽换位 + 解除链接 ----
+
+    /**
+     * 资产池缩略图拖拽换位：把连到本节点的上游素材**连线顺序**按新顺序重排。
+     *
+     * 与 chat 节点那条 `handleReorderLinkedMedia` 的区别：这里**不做「条数必须相等」的校验** ——
+     * 分镜表的引用条里可能有被停用的素材 / 走 Config 汇流进来的素材，严格校验会导致一拖就静默失效。
+     * 认得的按新顺序落位，认不得的原封不动。
+     */
+    const handleReorderScriptAssets = useCallback((nodeId: string, orderedNodeIds: string[]) => {
+        const order = new Map(orderedNodeIds.map((id, index) => [id, index]));
+        if (order.size < 2) return;
+        setConnections((prev) => {
+            const incoming = prev.filter((conn) => conn.toNodeId === nodeId && order.has(conn.fromNodeId));
+            if (incoming.length < 2) return prev;
+            incoming.sort((a, b) => order.get(a.fromNodeId)! - order.get(b.fromNodeId)!);
+            const incomingIds = new Set(incoming.map((conn) => conn.id));
+            let pointer = 0;
+            return prev.map((conn) => (conn.toNodeId === nodeId && incomingIds.has(conn.id) ? incoming[pointer++] : conn));
+        });
+    }, []);
+
+    /**
+     * 资产池缩略图上的「解除链接」：断掉上游连线，并把这张素材从**本表的所有引用**里摘干净
+     * （按格 `scriptCellAssets` / 逐镜 `scriptRowAssets` / 按名 `scriptNameLocks` / 分类 `scriptAssetRoles`）。
+     *
+     * 只断线不清引用的话，表里还会继续显示一张「已经不属于这张表」的图，跟用户点「删除链接」的预期对不上。
+     */
+    const handleScriptAssetRemove = useCallback(
+        (nodeId: string, assetNodeId: string) => {
+            handleRemoveLinkedMedia(nodeId, assetNodeId);
+            setNodes((prev) =>
+                prev.map((item) => {
+                    if (item.id !== nodeId) return item;
+                    const roles = item.metadata?.scriptAssetRoles;
+                    // 只在真要删时才复制，否则原引用透传（避免无意义的对象变更加热画布重渲）。
+                    const nextRoles = roles && roles[assetNodeId] ? { ...roles } : roles;
+                    if (nextRoles && nextRoles !== roles) delete nextRoles[assetNodeId];
+                    return {
+                        ...item,
+                        metadata: {
+                            ...item.metadata,
+                            scriptCellAssets: stripStoryScriptAssetId(item.metadata?.scriptCellAssets, assetNodeId),
+                            scriptRowAssets: stripStoryScriptAssetId(item.metadata?.scriptRowAssets, assetNodeId),
+                            scriptNameLocks: stripStoryScriptAssetId(item.metadata?.scriptNameLocks, assetNodeId),
+                            scriptAssetRoles: nextRoles,
+                        },
+                    };
+                }),
+            );
+        },
+        [handleRemoveLinkedMedia],
+    );
+
     /** 按镜按资产导入本地图片：建节点并立刻关联到这一格（只收图片，视频 / 音频会被挡下并提示）。 */
     const handleCellAssetImport = useCallback(
         async (nodeId: string, shotNo: number, columnKey: string, files: File[]) => {
@@ -7176,6 +7230,8 @@ function AtelierCanvasPage() {
                         nameLocks={contentNode.metadata?.scriptNameLocks}
                         onNameLockChange={handleNameLockChange}
                         onClearNameLocks={handleClearNameLocks}
+                        onReorderScriptAssets={handleReorderScriptAssets}
+                        onRemoveScriptAsset={handleScriptAssetRemove}
                         onBuildPipeline={handleBuildScriptPipeline}
                         onBuildShotVideo={handleBuildShotVideo}
                         onRegenerateShot={(nodeId, rowIndex) => void runScriptShotGeneration(nodeId, rowIndex)}

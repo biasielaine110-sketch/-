@@ -1021,6 +1021,28 @@ export function syncStoryScriptNameLocks(map: unknown, cells: unknown, rows?: re
 }
 
 /**
+ * 从分镜表的三张「键 → 图片节点 id[]」表里**摘掉**某一个画布素材 —— 资产池缩略图上的「解除链接」用。
+ *
+ * `scriptCellAssets` / `scriptRowAssets` / `scriptNameLocks` 结构完全一致（键 → id 数组），所以一个
+ * 函数通吃：值数组里删掉这个 id，删空的键连键一起丢掉。**没有任何改动时原样返回入参**（含
+ * `undefined` / `null`），上层据此判断 no-op，也不会因为无意义的 metadata 变更把整张画布重渲。
+ */
+export function stripStoryScriptAssetId<T extends Record<string, string[]>>(map: T | undefined | null, assetNodeId: unknown): T | undefined {
+    const id = typeof assetNodeId === "string" ? assetNodeId.trim() : "";
+    if (!id) return map ?? undefined;
+    const source = (map && typeof map === "object" && !Array.isArray(map) ? map : {}) as Record<string, unknown>;
+    let changed = false;
+    const next: Record<string, string[]> = {};
+    for (const [key, value] of Object.entries(source)) {
+        if (!Array.isArray(value)) continue;
+        const ids = value.filter((item): item is string => typeof item === "string" && item !== id);
+        if (ids.length !== value.length) changed = true;
+        if (ids.length) next[key] = ids;
+    }
+    return (changed ? next : map) as T | undefined;
+}
+
+/**
  * 这一镜「已经被精准指定过」的资产格 —— **格子图优先、资产锁兜底**。铺链路的「精准优先、资产条兜底」
  * 就建立在这上面：
  *  1. 这一镜这一格自己挂了图（`scriptCellAssets`）→ 用这一格的图（`source: "cell"`）；

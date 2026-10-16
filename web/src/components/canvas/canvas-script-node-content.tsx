@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent,
 import { createPortal } from "react-dom";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowUpRight, AlignJustify, Copy, FileText, Image as ImageIcon, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
+import { ArrowUpRight, AlignJustify, Copy, FileText, GripVertical, Image as ImageIcon, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -172,6 +172,16 @@ type CanvasScriptNodeContentProps = {
     onNameLockChange?: (nodeId: string, name: string, ids: string[]) => void;
     /** 解除本表全部资产锁定。 */
     onClearNameLocks?: (nodeId: string) => void;
+    /**
+     * **资产池缩略图拖拽换位**：把本节点上游素材的连线按新顺序重排。
+     * 顺序会跟随「铺链路」时把资产条素材接到图片 / 视频节点的先后，所以想让某张参考图排在前面就拖它。
+     */
+    onReorderScriptAssets?: (nodeId: string, orderedNodeIds: string[]) => void;
+    /**
+     * 资产池缩略图上的「解除链接」：断开这条上游连线，并把这张素材从本表的按格 / 逐镜 / 按名引用里摘干净。
+     * 只断线不清引用的话，表里仍会显示一张已经不属于这张表的图，和「删除链接」对不上。
+     */
+    onRemoveScriptAsset?: (nodeId: string, assetNodeId: string) => void;
     /** 生成后按内容多少自动适配节点窗口尺寸（高贴合行数、宽贴合表格宽并封顶）。 */
     onNodeSizeChange?: (nodeId: string, width: number, height: number) => void;
 };
@@ -213,6 +223,8 @@ export function CanvasScriptNodeContent({
     nameLocks,
     onNameLockChange,
     onClearNameLocks,
+    onReorderScriptAssets,
+    onRemoveScriptAsset,
     onNodeSizeChange,
 }: CanvasScriptNodeContentProps) {
     const { t } = useTranslation();
@@ -295,6 +307,55 @@ export function CanvasScriptNodeContent({
         for (const item of imageCandidates || []) map.set(item.id, item);
         return map;
     }, [imageCandidates]);
+
+    // ---- 资产池缩略图：拖拽换位 + 解除链接 ----
+    // 拖拽只认「从缩略图本体发起」的 HTML5 drag，且用私有 MIME 类型（不是 text/plain）——
+    // 否则画布的落区会把它当成从系统拖进来的文字，凭空建一个文本节点。
+    // 缩略图上的 click 仍是「轮转资产分类」：浏览器在真实拖拽结束后不会补发 click，两者不打架。
+    const [dragAssetIndex, setDragAssetIndex] = useState<number | null>(null);
+    const [dropAssetIndex, setDropAssetIndex] = useState<number | null>(null);
+    const dragAssetIndexRef = useRef<number | null>(null);
+
+    const handleAssetDragStart = (event: ReactDragEvent, index: number) => {
+        event.stopPropagation();
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("application/x-canvas-script-asset-reorder", String(index));
+        dragAssetIndexRef.current = index;
+        setDragAssetIndex(index);
+        setDropAssetIndex(null);
+    };
+
+    const handleAssetDragOver = (event: ReactDragEvent, index: number) => {
+        if (dragAssetIndexRef.current === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+        if (dropAssetIndex !== index) setDropAssetIndex(index);
+    };
+
+    const handleAssetDrop = (event: ReactDragEvent, targetIndex: number) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const rawFrom = dragAssetIndexRef.current ?? Number(event.dataTransfer.getData("application/x-canvas-script-asset-reorder"));
+        dragAssetIndexRef.current = null;
+        setDragAssetIndex(null);
+        setDropAssetIndex(null);
+        if (!onReorderScriptAssets) return;
+        if (!Number.isFinite(rawFrom) || rawFrom < 0 || rawFrom >= activeReferences.length || rawFrom === targetIndex) return;
+        const next = [...activeReferences];
+        const [moved] = next.splice(rawFrom, 1);
+        next.splice(targetIndex, 0, moved);
+        onReorderScriptAssets(
+            node.id,
+            next.map((reference) => reference.nodeId),
+        );
+    };
+
+    const handleAssetDragEnd = () => {
+        dragAssetIndexRef.current = null;
+        setDragAssetIndex(null);
+        setDropAssetIndex(null);
+    };
 
     // 无结果时回到输入态；首次生成出结果时自动切到分镜表——否则用户停在「剧本原文」，
     // 既看不到表格，也看不到表格底部的「铺链路」入口。
@@ -654,49 +715,88 @@ export function CanvasScriptNodeContent({
                     const preview = reference.kind === "video" || reference.kind === "audio" ? undefined : reference.previewUrl;
                     const classifiable = reference.kind === "image" || reference.kind === "video" || reference.kind === "audio";
                     const role = resolveScriptAssetRole(assetRoles?.[reference.nodeId]);
+                    // 拖拽换位 / 解除链接只在有上层回调时启用（别的节点复用这个内容区时可能没有）。
+                    const reorderable = Boolean(onReorderScriptAssets);
+                    const isDropTarget = dropAssetIndex === index && dragAssetIndex !== null && dragAssetIndex !== index;
+                    const dragProps = reorderable
+                        ? {
+                              draggable: true,
+                              onDragStart: (event: ReactDragEvent) => handleAssetDragStart(event, index),
+                              onDragEnd: handleAssetDragEnd,
+                          }
+                        : {};
                     const thumb = (
                         <span
-                            className="relative flex size-8 items-center justify-center overflow-hidden rounded-md border"
-                            style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
+                            className={`relative flex size-12 items-center justify-center overflow-hidden rounded-md border ${reorderable ? "cursor-grab active:cursor-grabbing" : ""}`}
+                            style={{ borderColor: isDropTarget ? "#0ea5e9" : theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
+                            {...dragProps}
                         >
                             {preview ? (
-                                <img src={preview} alt={reference.title} className="size-full object-cover" />
+                                // 图片自带 native drag（拖出来是半透明快照），必须关掉，否则抢走缩略图的拖拽换位。
+                                <img src={preview} alt={reference.title} draggable={false} className="size-full object-cover" />
                             ) : reference.kind === "video" ? (
-                                <Video className="size-4" />
+                                <Video className="size-5" />
                             ) : reference.kind === "audio" ? (
-                                <Music2 className="size-4" />
+                                <Music2 className="size-5" />
                             ) : reference.kind === "text" ? (
-                                <span className="text-[0.846em] font-semibold">T</span>
+                                <span className="text-[0.923em] font-semibold">T</span>
                             ) : (
-                                <FileText className="size-4" />
+                                <FileText className="size-5" />
                             )}
-                            <span className="absolute right-0.5 top-0.5 flex h-3 min-w-3 items-center justify-center rounded-full bg-black/45 px-0.5 text-[0.692em] leading-none text-white">{index + 1}</span>
+                            <span className="absolute right-0.5 top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-black/45 px-0.5 text-[0.692em] leading-none text-white">{index + 1}</span>
+                            {reorderable ? (
+                                // 抓手提示：底部一条细横条，一眼看出「这个能拖」。
+                                <span className="pointer-events-none absolute inset-x-0 bottom-0 flex h-3 items-center justify-center bg-black/35 text-white opacity-0 transition group-hover/asset:opacity-100">
+                                    <GripVertical className="size-2.5" />
+                                </span>
+                            ) : null}
                         </span>
                     );
-                    if (!classifiable || !onAssetRoleChange) {
-                        return (
-                            <span key={reference.nodeId} className="flex flex-col items-center gap-0.5" title={reference.title}>
-                                {thumb}
-                            </span>
-                        );
-                    }
                     return (
-                        <button
+                        <span
                             key={reference.nodeId}
-                            type="button"
-                            className="flex cursor-pointer flex-col items-center gap-0.5 rounded-md transition"
-                            style={{ opacity: 0.9 }}
-                            title={`${reference.title} · ${t("canvas.scriptNode.assetRoleHint")}`}
-                            onMouseDown={(event) => event.stopPropagation()}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                onAssetRoleChange(node.id, reference.nodeId, nextScriptAssetRole(role));
-                            }}
+                            className={`group/asset relative flex flex-col items-center gap-0.5 rounded-md ${isDropTarget ? "ring-2 ring-sky-500" : ""}`}
+                            title={reorderable ? `${reference.title} · ${t("canvas.scriptNode.poolAssetReorderHint")}` : reference.title}
+                            onDragOver={reorderable ? (event: ReactDragEvent) => handleAssetDragOver(event, index) : undefined}
+                            onDrop={reorderable ? (event: ReactDragEvent) => handleAssetDrop(event, index) : undefined}
                         >
-                            {thumb}
-                            <span className="text-[0.769em] leading-none opacity-75">{t(`canvas.scriptNode.assetRole_${role}`)}</span>
-                        </button>
+                            {classifiable && onAssetRoleChange ? (
+                                <button
+                                    type="button"
+                                    className="flex cursor-pointer flex-col items-center gap-0.5 rounded-md transition"
+                                    style={{ opacity: 0.9 }}
+                                    title={`${reference.title} · ${t("canvas.scriptNode.assetRoleHint")}`}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                        event.stopPropagation();
+                                        onAssetRoleChange(node.id, reference.nodeId, nextScriptAssetRole(role));
+                                    }}
+                                >
+                                    {thumb}
+                                    <span className="text-[0.769em] leading-none opacity-75">{t(`canvas.scriptNode.assetRole_${role}`)}</span>
+                                </button>
+                            ) : (
+                                <span className="flex flex-col items-center gap-0.5">{thumb}</span>
+                            )}
+                            {onRemoveScriptAsset ? (
+                                <button
+                                    type="button"
+                                    className="absolute -right-1 -top-1 z-10 flex size-4 cursor-pointer items-center justify-center rounded-full border opacity-70 shadow-sm transition hover:scale-110 hover:opacity-100"
+                                    style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        onRemoveScriptAsset(node.id, reference.nodeId);
+                                    }}
+                                    title={t("canvas.scriptNode.poolAssetRemove")}
+                                >
+                                    <X className="size-2.5" />
+                                </button>
+                            ) : null}
+                        </span>
                     );
                 })}
             </div>
@@ -1033,18 +1133,19 @@ export function CanvasScriptNodeContent({
                                         <div className="flex flex-wrap items-center gap-1">
                                             {scriptRowAssetIds(rowAssets, row.shot_no || rowIndex + 1).map((imageId) => {
                                                 const meta = imageLookup.get(imageId);
+                                                // 缩略图放大 3×（原 size-9 = 36px → size-27 = 108px）：表里的图太小看不清。
                                                 return (
                                                     <span
                                                         key={imageId}
-                                                        className="group relative flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-md border"
+                                                        className="group relative flex size-27 shrink-0 items-center justify-center overflow-hidden rounded-md border"
                                                         style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
                                                         title={meta?.title || imageId}
                                                     >
-                                                        {meta?.previewUrl ? <img src={meta.previewUrl} alt={meta.title} className="size-full object-cover" /> : <ImageIcon className="size-4" />}
+                                                        {meta?.previewUrl ? <img src={meta.previewUrl} alt={meta.title} className="size-full object-cover" /> : <ImageIcon className="size-6" />}
                                                         {onRowAssetsChange ? (
                                                             <button
                                                                 type="button"
-                                                                className="absolute right-0 top-0 hidden size-4 items-center justify-center rounded-bl-md bg-black/60 text-white group-hover:flex"
+                                                                className="absolute right-0 top-0 hidden size-6 items-center justify-center rounded-bl-md bg-black/60 text-white group-hover:flex"
                                                                 onMouseDown={(event) => event.stopPropagation()}
                                                                 onPointerDown={(event) => event.stopPropagation()}
                                                                 onClick={(event) => {
@@ -1057,7 +1158,7 @@ export function CanvasScriptNodeContent({
                                                                 }}
                                                                 title={t("canvas.scriptNode.rowImageRemove")}
                                                             >
-                                                                <X className="size-2.5" />
+                                                                <X className="size-3" />
                                                             </button>
                                                         ) : null}
                                                     </span>
@@ -1085,11 +1186,18 @@ export function CanvasScriptNodeContent({
                                     // 「按镜按资产」图位：只挂在资产列（角色1 / 角色2 / 场景 / 道具 / 人物站位）上。
                                     // 这一格的图**只属于这一镜的这一列**，铺链路时也只连到这一镜的图片 / 视频节点。
                                     const cellShotNo = row.shot_no || rowIndex + 1;
+                                    // 这一格**自己**挂的图：精准指定，只属于这一镜的这一列。
                                     const cellIds = scriptCellAssetIds(cellAssets, cellShotNo, column.key);
                                     const showCellSlot = showCellAssets && isScriptAssetColumn(column.key);
-                                    // 资产锁定：这一格的**资产名**（「张三」「客厅」）是否已被锁到某张图上。
+                                    // 资产锁定：这一格的**资产名**（「张三」「客厅」）一旦被锁到某张图上，
+                                    // 表里**别的镜**再出现同一个名字就直接显示同一张图 —— 也就是「同样的资产名
+                                    // 只链接一次，就落到所有小格子里」。口径与铺链路的 `scriptShotPreciseAssetRefs`
+                                    // 完全一致：**格子图优先、名字锁兜底**（格子自己挂了图就听格子的）。
                                     const cellName = scriptNameLockName(row[column.key]);
-                                    const cellLocked = Boolean(cellName) && scriptNameLockIds(nameLocks, cellName).length > 0;
+                                    const cellLockIds = cellName ? scriptNameLockIds(nameLocks, cellName) : [];
+                                    const cellLocked = cellLockIds.length > 0;
+                                    const cellFromLock = cellIds.length === 0 && cellLockIds.length > 0;
+                                    const cellDisplayIds = cellIds.length ? cellIds : cellLockIds;
                                     return (
                                         <td
                                             key={column.key}
@@ -1109,12 +1217,13 @@ export function CanvasScriptNodeContent({
                                             )}
                                             {showCellSlot ? (
                                                 <div className="mt-1 flex flex-wrap items-center gap-1" onDoubleClick={(event) => event.stopPropagation()}>
-                                                    {cellIds.map((imageId) => {
+                                                    {cellDisplayIds.map((imageId) => {
                                                         const meta = imageLookup.get(imageId);
+                                                        // 缩略图放大 3×（原 size-7 = 28px → size-21 = 84px）：表里的图太小看不清。
                                                         return (
                                                             <span
                                                                 key={imageId}
-                                                                className="group relative flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-md border"
+                                                                className="group relative flex size-21 shrink-0 items-center justify-center overflow-hidden rounded-md border"
                                                                 style={{
                                                                     borderColor: cellLocked ? theme.toolbar.activeBg : theme.node.stroke,
                                                                     background: theme.node.fill,
@@ -1122,13 +1231,42 @@ export function CanvasScriptNodeContent({
                                                                     // 这个资产名已上锁 → 缩略图描一圈高亮边，一眼看出「已经锁定」。
                                                                     boxShadow: cellLocked ? `0 0 0 1px ${theme.toolbar.activeBg}` : undefined,
                                                                 }}
-                                                                title={cellLocked ? t("canvas.scriptNode.nameLockTag", { name: cellName }) : meta?.title || imageId}
+                                                                title={
+                                                                    cellFromLock
+                                                                        ? t("canvas.scriptNode.cellAssetFromNameLock", { name: cellName })
+                                                                        : cellLocked
+                                                                          ? t("canvas.scriptNode.nameLockTag", { name: cellName })
+                                                                          : meta?.title || imageId
+                                                                }
                                                             >
-                                                                {meta?.previewUrl ? <img src={meta.previewUrl} alt={meta.title} className="size-full object-cover" /> : <ImageIcon className="size-3" />}
-                                                                {onCellAssetsChange ? (
+                                                                {meta?.previewUrl ? <img src={meta.previewUrl} alt={meta.title} className="size-full object-cover" /> : <ImageIcon className="size-6" />}
+                                                                {cellFromLock ? (
+                                                                    // 这一格的图不是「格子自己的链接」，而是同名的资产锁落下来的 —— 挂个小锁标。
+                                                                    <span className="absolute left-0 top-0 flex size-5 items-center justify-center rounded-br-md bg-black/55 text-white">
+                                                                        <Lock className="size-3" />
+                                                                    </span>
+                                                                ) : null}
+                                                                {cellFromLock ? (
+                                                                    // 锁来的图：点 × 是「解开这个资产名的锁」（格子自己没有链接可删）。
+                                                                    onNameLockChange ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            className="absolute right-0 top-0 hidden size-6 items-center justify-center rounded-bl-md bg-black/60 text-white group-hover:flex"
+                                                                            onMouseDown={(event) => event.stopPropagation()}
+                                                                            onPointerDown={(event) => event.stopPropagation()}
+                                                                            onClick={(event) => {
+                                                                                event.stopPropagation();
+                                                                                onNameLockChange(node.id, cellName, []);
+                                                                            }}
+                                                                            title={t("canvas.scriptNode.nameLockToggleOff", { name: cellName })}
+                                                                        >
+                                                                            <X className="size-3" />
+                                                                        </button>
+                                                                    ) : null
+                                                                ) : onCellAssetsChange ? (
                                                                     <button
                                                                         type="button"
-                                                                        className="absolute right-0 top-0 hidden size-4 items-center justify-center rounded-bl-md bg-black/60 text-white group-hover:flex"
+                                                                        className="absolute right-0 top-0 hidden size-6 items-center justify-center rounded-bl-md bg-black/60 text-white group-hover:flex"
                                                                         onMouseDown={(event) => event.stopPropagation()}
                                                                         onPointerDown={(event) => event.stopPropagation()}
                                                                         onClick={(event) => {
@@ -1137,7 +1275,7 @@ export function CanvasScriptNodeContent({
                                                                         }}
                                                                         title={t("canvas.scriptNode.cellAssetRemove")}
                                                                     >
-                                                                        <X className="size-2.5" />
+                                                                        <X className="size-3" />
                                                                     </button>
                                                                 ) : null}
                                                             </span>
@@ -1151,9 +1289,9 @@ export function CanvasScriptNodeContent({
                                                         onPointerDown={(event) => event.stopPropagation()}
                                                         onClick={(event) => {
                                                             event.stopPropagation();
-                                                            setCellAssetTarget({ shotNo: cellShotNo, columnKey: column.key, label: column.label, ids: cellIds });
+                                                            setCellAssetTarget({ shotNo: cellShotNo, columnKey: column.key, label: column.label, ids: cellDisplayIds });
                                                         }}
-                                                        title={cellIds.length ? t("canvas.scriptNode.cellAssetEdit", { label: column.label }) : t("canvas.scriptNode.cellAssetAdd", { label: column.label })}
+                                                        title={cellDisplayIds.length ? t("canvas.scriptNode.cellAssetEdit", { label: column.label }) : t("canvas.scriptNode.cellAssetAdd", { label: column.label })}
                                                     >
                                                         <Plus className="size-3" />
                                                     </button>
@@ -1176,11 +1314,11 @@ export function CanvasScriptNodeContent({
                                                                     onNameLockChange(node.id, cellName, []);
                                                                     return;
                                                                 }
-                                                                if (!cellIds.length) {
+                                                                if (!cellDisplayIds.length) {
                                                                     message.warning(t("canvas.scriptNode.nameLockNeedImage", { name: cellName }));
                                                                     return;
                                                                 }
-                                                                onNameLockChange(node.id, cellName, cellIds);
+                                                                onNameLockChange(node.id, cellName, cellDisplayIds);
                                                             }}
                                                             title={cellLocked ? t("canvas.scriptNode.nameLockToggleOff", { name: cellName }) : t("canvas.scriptNode.nameLockToggleOn", { name: cellName })}
                                                         >
