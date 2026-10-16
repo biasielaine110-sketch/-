@@ -118,9 +118,10 @@ type CanvasScriptNodeContentProps = {
     onLinkAssets?: (nodeId: string, links: ScriptAssetLinkSelection[]) => void;
     /**
      * 没有现成素材时，直接用一段描述生成一张资产图：上层会建图片节点、连成上游素材、
-     * 写入分类并立刻触发生图。`title` 是建出来的节点标题（角色类靠它做名字匹配）。
+     * 写入分类并立刻触发生图。`title` 是建出来的节点标题（角色类靠它做名字匹配），
+     * `styleTemplateId` 是本次挑的风格模板（落成新节点的风格）。
      */
-    onGenerateAsset?: (nodeId: string, role: ScriptAssetRole, prompt: string, title: string) => void;
+    onGenerateAsset?: (nodeId: string, role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string) => void;
     /** 已链接素材的分类（节点 id → 分类），用于在引用条上回显 / 切换。 */
     assetRoles?: Record<string, string>;
     /** 切换某张已链接素材的分类（角色 / 场景 / 道具 / 站位图）。 */
@@ -141,8 +142,8 @@ type CanvasScriptNodeContentProps = {
     onRowAssetsChange?: (nodeId: string, shotNo: number, ids: string[]) => void;
     /** 逐镜导入本地图片：建节点并立刻关联到这一镜。 */
     onRowAssetImport?: (nodeId: string, shotNo: number, files: File[]) => void;
-    /** 逐镜 AI 生成图片：建节点、关联到这一镜并立刻触发生图。 */
-    onRowAssetGenerate?: (nodeId: string, shotNo: number, prompt: string, title: string) => void;
+    /** 逐镜 AI 生成图片：建节点、关联到这一镜并立刻触发生图（`styleTemplateId` 是本次挑的风格模板）。 */
+    onRowAssetGenerate?: (nodeId: string, shotNo: number, prompt: string, title: string, styleTemplateId?: string) => void;
     /**
      * **按镜按资产**挂图：`"镜号:资产列key"`（如 `"3:scene"`）→ 图片节点 id 列表
      * （存在 metadata.scriptCellAssets）。在资产列格子里导入 / 链接 / 生成，铺链路时只连到这一镜的那一个资产。
@@ -152,8 +153,8 @@ type CanvasScriptNodeContentProps = {
     onCellAssetsChange?: (nodeId: string, shotNo: number, columnKey: string, ids: string[]) => void;
     /** 按镜按资产导入本地图片：建节点并立刻关联到这一格。 */
     onCellAssetImport?: (nodeId: string, shotNo: number, columnKey: string, files: File[]) => void;
-    /** 按镜按资产 AI 生成图片：建节点、关联到这一格并立刻触发生图（`model` 是这一格单独挑的生图模型）。 */
-    onCellAssetGenerate?: (nodeId: string, shotNo: number, columnKey: string, prompt: string, title: string, model?: string) => void;
+    /** 按镜按资产 AI 生成图片：建节点、关联到这一格并立刻触发生图（`model` 是这一格单独挑的生图模型，`styleTemplateId` 是本次挑的风格模板）。 */
+    onCellAssetGenerate?: (nodeId: string, shotNo: number, columnKey: string, prompt: string, title: string, model?: string, styleTemplateId?: string) => void;
     /**
      * **资产池**：已经连到本脚本节点的素材（带分类）。「按镜按资产」弹窗据此多出一个「@ 资产池」tab ——
      * 池里的图点一下就能挂进某一格，不用重新上传，也不用重新连一次上游。
@@ -1526,7 +1527,7 @@ export function CanvasScriptNodeContent({
             onClose={() => setAssetDialogOpen(false)}
             onLink={(links) => onLinkAssets?.(node.id, links)}
             onImport={(files, role) => onImportAssets?.(node.id, files, role)}
-            onGenerate={onGenerateAsset ? (role, prompt, title) => onGenerateAsset(node.id, role, prompt, title) : undefined}
+            onGenerate={onGenerateAsset ? (role, prompt, title, styleTemplateId) => onGenerateAsset(node.id, role, prompt, title, styleTemplateId) : undefined}
         />
     ) : null;
 
@@ -1548,7 +1549,7 @@ export function CanvasScriptNodeContent({
                 title: t("canvas.scriptNode.pipelineImage", { no: rowAssetTarget.shotNo }),
                 onLink: (nodeIds) => onRowAssetsChange?.(node.id, rowAssetTarget.shotNo, nodeIds),
                 onImport: (files) => onRowAssetImport?.(node.id, rowAssetTarget.shotNo, files),
-                onGenerate: onRowAssetGenerate ? (prompt, title) => onRowAssetGenerate(node.id, rowAssetTarget.shotNo, prompt, title) : undefined,
+                onGenerate: onRowAssetGenerate ? (prompt, title, _model, styleTemplateId) => onRowAssetGenerate(node.id, rowAssetTarget.shotNo, prompt, title, styleTemplateId) : undefined,
             }}
         />
     ) : null;
@@ -1578,7 +1579,7 @@ export function CanvasScriptNodeContent({
                 onLink: (nodeIds) => onCellAssetsChange?.(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, nodeIds),
                 onImport: (files) => onCellAssetImport?.(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, files),
                 onGenerate: onCellAssetGenerate
-                    ? (prompt, title, model) => onCellAssetGenerate(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, prompt, title, model)
+                    ? (prompt, title, model, styleTemplateId) => onCellAssetGenerate(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, prompt, title, model, styleTemplateId)
                     : undefined,
             }}
         />

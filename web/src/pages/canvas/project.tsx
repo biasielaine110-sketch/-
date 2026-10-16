@@ -185,6 +185,21 @@ const NODE_STATUS_ERROR = "error" as const;
 /** Soft cap so same-panel re-generations do not grow without bound. */
 const MAX_IMAGE_NODE_HISTORY = 24;
 
+/**
+ * 浮层（弹窗 / 下拉 / 选择器）里的 mousedown 是否应该放行给浮层自己处理。
+ *
+ * React 19 的 portal 事件沿**组件树**冒泡，而不是 DOM 树：节点内部渲染的 antd Modal 会被 portal 到
+ * `document.body`，DOM 上早已脱离节点，但 React 事件仍然从弹窗内容一路冒到节点外壳的
+ * `onMouseDownCapture` / `onMouseDown`。后果是「在弹窗里点一下 / 拖一下」被当成在拖画布节点——
+ * 表现为「弹窗里只能移动窗口、输入框点不了」。这里按目标是否落在浮层容器内统一拦掉。
+ */
+function isOverlayEventTarget(target: EventTarget | null): boolean {
+    return (
+        target instanceof Element &&
+        Boolean(target.closest(".ant-modal, .ant-drawer, .ant-popover, .ant-dropdown, .ant-select-dropdown, .ant-picker-dropdown, .ant-tooltip, .canvas-style-picker"))
+    );
+}
+
 /** Remap edges for copied nodes, keeping links to uncopied neighbors (AâB becomes A'âB). */
 function cloneConnectionsForCopiedNodes(connections: CanvasConnection[], idMap: Map<string, string>, stamp = Date.now()): CanvasConnection[] {
     if (!idMap.size) return [];
@@ -2051,6 +2066,8 @@ function AtelierCanvasPage() {
     const handleNodeSelectCapture = useCallback(
         (event: ReactMouseEvent, nodeId: string) => {
             if (event.button !== 0) return;
+            // 弹窗 / 浮层内的按下不参与画布选中，也不该抢走浮层里输入框的焦点。
+            if (isOverlayEventTarget(event.target)) return;
             // Audio-merge "pick" mode: clicking an audio node toggles it in/out of the merge list,
             // instead of performing normal canvas selection.
             if (audioMergePickingRef.current) {
@@ -2100,6 +2117,8 @@ function AtelierCanvasPage() {
 
     const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
         event.stopPropagation();
+        // 弹窗 / 浮层内的按下不能开始拖节点：portal 事件沿组件树冒泡，弹窗挂在节点子树里时会误触。
+        if (isOverlayEventTarget(event.target)) return;
         // Audio-merge "pick" mode: a click on an audio node only toggles it in the merge list and
         // must never start a node drag.
         if (audioMergePickingRef.current) {
@@ -6548,13 +6567,15 @@ function AtelierCanvasPage() {
     // 与「上传素材」走同一条路径——建图片节点 → 连成脚本节点上游 → 写上分类 → 立刻触发生成；
     // 图片节点会把结果写回自身，所以用户看到的就是「这张资产正在生成」。
     const handleGenerateScriptAsset = useCallback(
-        (nodeId: string, role: ScriptAssetRole, prompt: string, title: string) => {
+        (nodeId: string, role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             const scene = prompt.trim();
             if (!source || !scene) return;
             const assetTitle = title.trim() || scene.slice(0, 24);
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE });
+            // 弹窗里挑的风格直接落到新图片节点上：生图链路读的是节点自己的 metadata.styleTemplateId，
+            // 之后在节点上的风格选择器里还能改。
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(styleTemplateId ? { styleTemplateId } : {}) });
             const placed = attachScriptAssets(source, [{ node: { ...node, title: assetTitle }, width: spec.width, height: spec.height }]);
             const created = placed[0];
             if (!created) return;
@@ -6642,13 +6663,13 @@ function AtelierCanvasPage() {
 
     /** 逐镜 AI 生成图片：建图片节点、关联到这一镜并立刻触发生图。 */
     const handleRowAssetGenerate = useCallback(
-        (nodeId: string, shotNo: number, prompt: string, title: string) => {
+        (nodeId: string, shotNo: number, prompt: string, title: string, styleTemplateId?: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             const scene = prompt.trim();
             if (!source || !scene) return;
             const assetTitle = title.trim() || scene.slice(0, 24);
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE });
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(styleTemplateId ? { styleTemplateId } : {}) });
             const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: spec.width, height: spec.height }]);
             const created = placed[0];
             if (!created) return;
@@ -6817,13 +6838,13 @@ function AtelierCanvasPage() {
      * 同时落库成脚本节点的 `scriptCellImageModel`，下次打开这一格还是这个模型。
      */
     const handleCellAssetGenerate = useCallback(
-        (nodeId: string, shotNo: number, columnKey: string, prompt: string, title: string, model?: string) => {
+        (nodeId: string, shotNo: number, columnKey: string, prompt: string, title: string, model?: string, styleTemplateId?: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             const scene = prompt.trim();
             if (!source || !scene) return;
             const assetTitle = title.trim() || scene.slice(0, 24);
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(model ? { model } : {}) });
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(model ? { model } : {}), ...(styleTemplateId ? { styleTemplateId } : {}) });
             const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: spec.width, height: spec.height }]);
             const created = placed[0];
             if (!created) return;

@@ -5,6 +5,7 @@ import { FileText, Image as ImageIcon, Link2, Music2, Sparkles, Upload, Video } 
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
+import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
 import { collectScriptAssetPromptCandidates, scriptAssetColumnRole, SCRIPT_ASSET_GENERATABLE_ROLE_IDS, SCRIPT_ASSET_ROLE_IDS, type ScriptAssetPromptCandidate, type ScriptAssetRole, type StoryScriptRow } from "@/constant/story-script";
 import { resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasTheme } from "@/lib/canvas-theme";
@@ -14,7 +15,8 @@ import type { CanvasTheme } from "@/lib/canvas-theme";
  *  - 从画布链接：勾选画布上已有的图片 / 视频 / 音频 / 文本节点，确认后补连线；
  *  - 上传文件：选本地图片 / 视频 / 音频，**也可以直接把文件拖进弹窗或粘贴进来**，上传后建节点 + 连线；
  *  - AI 生成：手上没有图时，用分镜表里的资产描述（角色卡 / 场景 / 道具 / 人物站位）当提示词直接生成一张图，
- *    生成完自动建节点、连线，并归到所选分类。**音频不能在这里生成**（这条路走的是生图链路）。
+ *    生成完自动建节点、连线，并归到所选分类。**还可以挑一个风格提示词**（落成新节点的风格模板，生图时生效）。
+ *    **音频不能在这里生成**（这条路走的是生图链路）。
  *
  * 顺带负责**资产分类**（角色 / 场景 / 道具 / 站位图 / 音频）：分类在勾选时就地选，随连线一起写进
  * `metadata.scriptAssetRoles`，铺链路时决定这张素材连到哪些节点（角色按名字逐镜匹配到图片节点，
@@ -68,8 +70,8 @@ export type ScriptRowAssetMode = {
     /** 确认：用整组 id 替换这一镜的关联（取消勾选即解绑）。 */
     onLink: (nodeIds: string[]) => void;
     onImport: (files: File[]) => void;
-    /** `model` 是本次生成要用的生图模型（不传就跟随节点默认的图片模型）。 */
-    onGenerate?: (prompt: string, title: string, model?: string) => void;
+    /** `model` 是本次生成要用的生图模型（不传就跟随节点默认的图片模型）；`styleTemplateId` 是本次生成挑的风格模板。 */
+    onGenerate?: (prompt: string, title: string, model?: string, styleTemplateId?: string) => void;
 };
 
 type CanvasScriptAssetDialogProps = {
@@ -81,8 +83,8 @@ type CanvasScriptAssetDialogProps = {
     onClose: () => void;
     onLink: (links: ScriptAssetLinkSelection[]) => void;
     onImport: (files: File[], role: ScriptAssetRole) => void;
-    /** 用描述直接生成一张资产图：上层负责建节点、连线、写分类并触发生成。 */
-    onGenerate?: (role: ScriptAssetRole, prompt: string, title: string) => void;
+    /** 用描述直接生成一张资产图：上层负责建节点、连线、写分类并触发生成。`styleTemplateId` 会落到新节点的风格上。 */
+    onGenerate?: (role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string) => void;
     /** **资产池**：已连到脚本节点的素材（带分类）。「按镜按资产」模式下多出一个「@ 资产池」tab。 */
     poolAssets?: ScriptAssetPoolAsset[];
     /** 传了就走「逐镜模式」：只为某一镜关联图片，隐藏分类、勾选即关联。 */
@@ -105,6 +107,10 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
     const [genRole, setGenRole] = useState<ScriptAssetRole>("character");
     const [genPrompt, setGenPrompt] = useState("");
     const [genTitle, setGenTitle] = useState("");
+    /** 「AI 生成」本次挑的风格模板 id（空 = 不加风格修饰）。落到生成出来的图片节点上，可随时在节点上改。 */
+    const [genStyleId, setGenStyleId] = useState("");
+    /** 风格选择面板是否展开：展开时先让 Esc 关面板而不是关整个弹窗。 */
+    const [genStyleOpen, setGenStyleOpen] = useState(false);
     /** 「按镜按资产」生成时这一格单独挑的生图模型（空 = 跟随节点默认的图片模型）。 */
     const [genModel, setGenModel] = useState("");
     const [dragging, setDragging] = useState(false);
@@ -122,6 +128,8 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
             setGenRole("character");
             setGenPrompt("");
             setGenTitle("");
+            setGenStyleId("");
+            setGenStyleOpen(false);
             setGenModel("");
             setDragging(false);
             return;
@@ -136,6 +144,7 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
         // 「按镜按资产」模式优先用这一格自己的候选（第 N 镜的场景描述），没有才回落到整行提示词。
         setGenPrompt(rowMode?.candidate?.prompt || rowMode?.prompt || "");
         setGenTitle(rowMode?.candidate?.title || rowMode?.title || "");
+        setGenStyleId("");
         setGenModel(rowMode?.model || "");
         setDragging(false);
     }, [open, rowMode]);
@@ -426,6 +435,11 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                 </span>
                 <Input value={genTitle} onChange={(event) => setGenTitle(event.target.value)} placeholder={t("canvas.scriptNode.assetGenTitlePlaceholder")} />
             </div>
+            {/* 风格提示词：选一个风格模板，生成时作为该图的风格修饰，并落到新节点的风格上（节点上还能再改）。 */}
+            <div className="flex flex-wrap items-center gap-2 text-[12px]" style={{ color: theme.node.text }}>
+                <span className="text-[11px] opacity-60">{t("canvas.scriptNode.assetGenStyleLabel")}</span>
+                <CanvasStylePicker value={genStyleId || undefined} onChange={(next) => setGenStyleId(next || "")} onOpenChange={setGenStyleOpen} placement="topLeft" />
+            </div>
             {/* 「按镜按资产」模式：这一格可以单独挑生图模型（同一张表里不同资产用不同模型出图）。 */}
             {isCellMode ? (
                 <div className="flex flex-col gap-1">
@@ -458,9 +472,9 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                         const title = genTitle.trim() || prompt.slice(0, 24);
                         if (rowMode) {
                             const model = resolveModelForCapability(globalConfig, genModel || rowMode.model, "image");
-                            rowMode.onGenerate?.(prompt, title, model || undefined);
+                            rowMode.onGenerate?.(prompt, title, model || undefined, genStyleId || undefined);
                         } else {
-                            onGenerate?.(genRole, prompt, title);
+                            onGenerate?.(genRole, prompt, title, genStyleId || undefined);
                         }
                         onClose();
                     }}
@@ -574,6 +588,8 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
             }
             footer={null}
             width={560}
+            // 风格面板展开时先让 Esc 收起面板：否则一次 Esc 会把整个弹窗关掉，草稿全丢。
+            keyboard={!genStyleOpen}
         >
             <div {...dropZone} className="relative">
                 {isRowMode ? (

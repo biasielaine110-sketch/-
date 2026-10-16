@@ -611,6 +611,7 @@ export default {
             assetGenPromptPlaceholder: "Describe the look, style and shot of this character / scene / prop",
             assetGenTitleLabel: "Node title",
             assetGenTitlePlaceholder: "Left blank, the first 24 characters of the prompt are used",
+            assetGenStyleLabel: "Style prompt",
             assetGenRun: "Generate & connect",
             assetGenerating: "Generating asset “{{title}}”",
             fontSizeHint: "Adjust the script node font size: the storyboard table, screenplay text and button labels all scale together, and the node window grows to fit",

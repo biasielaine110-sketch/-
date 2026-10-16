@@ -611,6 +611,7 @@ export default {
             assetGenPromptPlaceholder: "描述这个角色 / 场景 / 道具的外形、风格与镜头",
             assetGenTitleLabel: "节点标题",
             assetGenTitlePlaceholder: "留空则截取提示词前 24 字",
+            assetGenStyleLabel: "风格提示词",
             assetGenRun: "生成并连上",
             assetGenerating: "正在生成资产「{{title}}」",
             fontSizeHint: "调节脚本节点的字号：分镜表 / 剧本原文 / 按钮文字会一起缩放，节点窗口高度也会跟着适配",
