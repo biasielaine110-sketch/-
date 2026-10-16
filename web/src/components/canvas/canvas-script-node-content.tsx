@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent,
 import { createPortal } from "react-dom";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowUpRight, AlignJustify, Copy, FileText, Image as ImageIcon, Loader2, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Square, Table2, Trash2, User, Video, Wand2, X } from "lucide-react";
+import { ArrowUpRight, AlignJustify, Copy, FileText, Image as ImageIcon, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -22,6 +22,8 @@ import {
     resolveStoryScriptPresetId,
     resolveStoryScriptSegmentSeconds,
     scriptCellAssetIds,
+    scriptNameLockIds,
+    scriptNameLockName,
     scriptRowAssetIds,
     shiftStoryScriptCellAssetsAfterDelete,
     shiftStoryScriptRowAssetsAfterDelete,
@@ -161,10 +163,15 @@ type CanvasScriptNodeContentProps = {
     cellModel?: string;
     /** 资产格子里换了生图模型：落库成节点的默认值。 */
     onCellModelChange?: (nodeId: string, model: string) => void;
-    /** 画布快捷键 X：请求打开本节点的「资产池」（整表添加资产）弹窗。 */
-    assetPoolRequest?: boolean;
-    /** 上一条请求已处理，外层可以把标记清掉。 */
-    onAssetPoolRequestHandled?: () => void;
+    /**
+     * **资产锁定**：资产名 → 画布图片节点 id（`metadata.scriptNameLocks`）。
+     * 表里凡是出现这个名字的镜头，铺链路时都用这几张图（「张三」→ @图片1、「客厅」→ @图片2）。
+     */
+    nameLocks?: Record<string, string[]>;
+    /** 给某个资产名上锁（`ids` = 这一格当前的图）/ 解锁（`ids` 为空）。 */
+    onNameLockChange?: (nodeId: string, name: string, ids: string[]) => void;
+    /** 解除本表全部资产锁定。 */
+    onClearNameLocks?: (nodeId: string) => void;
     /** 生成后按内容多少自动适配节点窗口尺寸（高贴合行数、宽贴合表格宽并封顶）。 */
     onNodeSizeChange?: (nodeId: string, width: number, height: number) => void;
 };
@@ -203,8 +210,9 @@ export function CanvasScriptNodeContent({
     poolAssets,
     cellModel,
     onCellModelChange,
-    assetPoolRequest,
-    onAssetPoolRequestHandled,
+    nameLocks,
+    onNameLockChange,
+    onClearNameLocks,
     onNodeSizeChange,
 }: CanvasScriptNodeContentProps) {
     const { t } = useTranslation();
@@ -270,14 +278,6 @@ export function CanvasScriptNodeContent({
     useEffect(() => {
         setPromptDraft(extraPrompt);
     }, [extraPrompt]);
-
-    // 画布快捷键 X（选中单个脚本节点时）：直接打开这个节点的「资产池」——先把参考图挂到整表，
-    // 再用资产列格子里的「@ 资产池」把它们分派到具体的镜头 / 资产上。
-    useEffect(() => {
-        if (!assetPoolRequest) return;
-        setAssetDialogOpen(true);
-        onAssetPoolRequestHandled?.();
-    }, [assetPoolRequest, onAssetPoolRequestHandled]);
 
     const canGenerate = Boolean(sourceDraft.trim() || connectedTextValue) && !isRunning;
     const activeReferences = useMemo(() => (references || []).filter((item) => item.active), [references]);
@@ -728,6 +728,33 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.assetCandidateHint", { count: assetCandidates.length })}
                 </span>
             ) : null}
+            {/* 资产锁定：一旦有「资产名 → 图片」的锁，就在入口旁边挂一个总开关（点它可一键全解）。 */}
+            {Object.keys(nameLocks || {}).length && onClearNameLocks ? (
+                <button
+                    type="button"
+                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] transition"
+                    style={{ borderColor: theme.toolbar.activeBg, color: theme.toolbar.activeBg, background: `${theme.toolbar.activeBg}14` }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        modal.confirm({
+                            title: t("canvas.scriptNode.nameLockClearConfirmTitle"),
+                            content: t("canvas.scriptNode.nameLockClearConfirmBody"),
+                            okText: t("canvas.scriptNode.nameLockClear"),
+                            cancelText: t("common.cancel"),
+                            onOk: () => {
+                                onClearNameLocks(node.id);
+                                message.success(t("canvas.scriptNode.nameLockCleared"));
+                            },
+                        });
+                    }}
+                    title={t("canvas.scriptNode.nameLockClear")}
+                >
+                    <Lock className="size-3.5" />
+                    {t("canvas.scriptNode.nameLockCount", { count: Object.keys(nameLocks || {}).length })}
+                </button>
+            ) : null}
         </div>
     ) : null;
 
@@ -1060,6 +1087,9 @@ export function CanvasScriptNodeContent({
                                     const cellShotNo = row.shot_no || rowIndex + 1;
                                     const cellIds = scriptCellAssetIds(cellAssets, cellShotNo, column.key);
                                     const showCellSlot = showCellAssets && isScriptAssetColumn(column.key);
+                                    // 资产锁定：这一格的**资产名**（「张三」「客厅」）是否已被锁到某张图上。
+                                    const cellName = scriptNameLockName(row[column.key]);
+                                    const cellLocked = Boolean(cellName) && scriptNameLockIds(nameLocks, cellName).length > 0;
                                     return (
                                         <td
                                             key={column.key}
@@ -1085,8 +1115,14 @@ export function CanvasScriptNodeContent({
                                                             <span
                                                                 key={imageId}
                                                                 className="group relative flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-md border"
-                                                                style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
-                                                                title={meta?.title || imageId}
+                                                                style={{
+                                                                    borderColor: cellLocked ? theme.toolbar.activeBg : theme.node.stroke,
+                                                                    background: theme.node.fill,
+                                                                    color: theme.node.text,
+                                                                    // 这个资产名已上锁 → 缩略图描一圈高亮边，一眼看出「已经锁定」。
+                                                                    boxShadow: cellLocked ? `0 0 0 1px ${theme.toolbar.activeBg}` : undefined,
+                                                                }}
+                                                                title={cellLocked ? t("canvas.scriptNode.nameLockTag", { name: cellName }) : meta?.title || imageId}
                                                             >
                                                                 {meta?.previewUrl ? <img src={meta.previewUrl} alt={meta.title} className="size-full object-cover" /> : <ImageIcon className="size-3" />}
                                                                 {onCellAssetsChange ? (
@@ -1121,6 +1157,36 @@ export function CanvasScriptNodeContent({
                                                     >
                                                         <Plus className="size-3" />
                                                     </button>
+                                                    {onNameLockChange && cellName ? (
+                                                        <button
+                                                            type="button"
+                                                            className="inline-flex size-6 shrink-0 items-center justify-center rounded-md border transition"
+                                                            style={{
+                                                                borderColor: cellLocked ? theme.toolbar.activeBg : theme.node.stroke,
+                                                                background: cellLocked ? `${theme.toolbar.activeBg}1f` : "transparent",
+                                                                color: cellLocked ? theme.toolbar.activeBg : theme.node.text,
+                                                                opacity: cellLocked ? 1 : 0.75,
+                                                            }}
+                                                            onMouseDown={(event) => event.stopPropagation()}
+                                                            onPointerDown={(event) => event.stopPropagation()}
+                                                            onClick={(event) => {
+                                                                event.stopPropagation();
+                                                                // 已锁 → 解锁；未锁 → 把这一格当前的图锁成「这个资产名 → 这几张图」。
+                                                                if (cellLocked) {
+                                                                    onNameLockChange(node.id, cellName, []);
+                                                                    return;
+                                                                }
+                                                                if (!cellIds.length) {
+                                                                    message.warning(t("canvas.scriptNode.nameLockNeedImage", { name: cellName }));
+                                                                    return;
+                                                                }
+                                                                onNameLockChange(node.id, cellName, cellIds);
+                                                            }}
+                                                            title={cellLocked ? t("canvas.scriptNode.nameLockToggleOff", { name: cellName }) : t("canvas.scriptNode.nameLockToggleOn", { name: cellName })}
+                                                        >
+                                                            {cellLocked ? <Lock className="size-3" /> : <Unlock className="size-3" />}
+                                                        </button>
+                                                    ) : null}
                                                 </div>
                                             ) : null}
                                         </td>

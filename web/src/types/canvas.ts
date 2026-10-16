@@ -154,6 +154,12 @@ export type CanvasNodeMetadata = {
      */
     scriptCellAssets?: import("@/constant/story-script").StoryScriptCellAssetMap;
     /**
+     * 脚本生成器：**资产锁定**（资产名 → 画布图片节点 id 列表）。把「分镜表里已经链接好的图片」
+     * 按**资产名**锁死（例：`张三` → @图片1、`客厅` → @图片2），铺链路时表里凡是出现这个名字的
+     * 地方都用同一张图。来源：格子链接时自动并入 + 一键铺链时按全表链接重建。
+     */
+    scriptNameLocks?: import("@/constant/story-script").StoryScriptNameLockMap;
+    /**
      * 脚本生成器：在资产格子里**单独挑的生图模型**（不填就跟随节点的默认图片模型）。
      * 只作为「格子生图弹窗」的默认值：每次生成都会把选中的模型写到新建的那张图片节点上。
      */

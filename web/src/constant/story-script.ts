@@ -910,6 +910,157 @@ export function blankFilledAssetColumns(map: unknown, shotNo: unknown, row: Stor
 }
 
 /**
+ * **资产锁定**：资产名 → 画布图片节点 id 列表。存在脚本节点的 `metadata.scriptNameLocks`。
+ *
+ * 为什么要有它：`metadata.scriptCellAssets`（按镜按资产挂图）是「**第 3 镜**的场景用这张图」，
+ * 只对那一镜成立；可分镜表里同一个资产名（「张三」「客厅」）会在很多镜里反复出现。
+ * 用户手动把图片挂进某一格之后，这个「名字 ↔ 图片」的对应关系应该被**锁定**下来：
+ *   - 表里凡是出现「张三」的地方，铺链路时都连同一张 @图片1；
+ *   - 出现「客厅」的地方都连 @图片2。
+ *
+ * 锁按**资产名**索引（不按镜号、也不按分类），所以换一镜、换一列、换一个同名的角色格都照样命中。
+ * 归一化后的空串 / 「无」/「-」这类占位不算资产名，不会建锁。
+ */
+export type StoryScriptNameLockMap = Record<string, string[]>;
+
+/** 资产名归一化：去首尾空白 + 折叠内部空白 + 去全角空格；空 / 占位符 / 非字符串 → 空串（不建锁）。 */
+export function scriptNameLockName(value: unknown): string {
+    // 只认字符串：数字（镜号 1/2/3、时长 3）和 null / undefined 都算不上资产名，别让它们建出 `{ "3": [...] }` 这种脏锁。
+    if (typeof value !== "string") return "";
+    const text = storyScriptCellText(value).replace(/[\s\u3000]+/g, " ").trim();
+    if (!text) return "";
+    const lower = text.toLowerCase();
+    if (["无", "-", "—", "/", "\\", "n/a", "na", "none", "null", "空"].includes(lower)) return "";
+    return text;
+}
+
+/** 读某个资产名锁定的图片 id（没有 / 非法 → 空数组）。名字大小写不敏感（兼容手写数据）。 */
+export function scriptNameLockIds(map: unknown, name: unknown): string[] {
+    const label = scriptNameLockName(name);
+    if (!label || !map || typeof map !== "object" || Array.isArray(map)) return [];
+    const record = map as Record<string, unknown>;
+    const lower = label.toLowerCase();
+    for (const [rawKey, value] of Object.entries(record)) {
+        const key = scriptNameLockName(rawKey);
+        if (key !== label && key.toLowerCase() !== lower) continue;
+        if (!Array.isArray(value)) return [];
+        return Array.from(new Set(value.filter((id): id is string => typeof id === "string" && Boolean(id))));
+    }
+    return [];
+}
+
+/** 归一化整张锁表：丢非法键 / 非数组值并去重；同名（归一化后一致）的键合并。 */
+export function normalizeStoryScriptNameLockMap(map: unknown): StoryScriptNameLockMap {
+    if (!map || typeof map !== "object" || Array.isArray(map)) return {};
+    const out: StoryScriptNameLockMap = {};
+    for (const [rawKey, value] of Object.entries(map as Record<string, unknown>)) {
+        const name = scriptNameLockName(rawKey);
+        if (!name || !Array.isArray(value)) continue;
+        const ids = value.filter((id): id is string => typeof id === "string" && Boolean(id));
+        if (!ids.length) continue;
+        const merged = [...(out[name] || []), ...ids];
+        out[name] = Array.from(new Set(merged));
+    }
+    return out;
+}
+
+/** 写锁：`ids` 为空 = 解锁（删键）；纯函数。同名（忽略大小写）的旧键会先被清掉，不会留下隐形锁。 */
+export function setStoryScriptNameLock(map: unknown, name: unknown, ids: readonly unknown[]): StoryScriptNameLockMap {
+    const label = scriptNameLockName(name);
+    const normalized = normalizeStoryScriptNameLockMap(map);
+    if (!label) return normalized;
+    const lower = label.toLowerCase();
+    const next: StoryScriptNameLockMap = {};
+    for (const [key, value] of Object.entries(normalized)) {
+        if (key === label || key.toLowerCase() === lower) continue;
+        next[key] = value;
+    }
+    const clean = Array.from(new Set(ids.filter((id): id is string => typeof id === "string" && Boolean(id))));
+    if (clean.length) next[label] = clean;
+    return next;
+}
+
+/**
+ * 把某一格（这一镜这一资产列）刚链接好的图**并进**它的资产名锁里。
+ * 同名多镜取并集（不丢图）；这一列的名字是空 / 「无」→ 原样返回（没有可锁的名字）。
+ */
+export function addScriptNameLockForCell(
+    map: unknown,
+    row: StoryScriptRow | undefined | null,
+    columnKey: unknown,
+    ids: readonly unknown[],
+): StoryScriptNameLockMap {
+    const normalized = normalizeStoryScriptNameLockMap(map);
+    // 只有资产列才配锁（镜号 / 时长这类列的值不是资产名）。口径与 `parseScriptCellAssetKey` / `cellAssetMapKey` 一致。
+    if (typeof columnKey !== "string" || !isScriptAssetColumn(columnKey)) return normalized;
+    const label = scriptNameLockName(row ? row[columnKey] : "");
+    if (!label || !ids.length) return normalized;
+    return setStoryScriptNameLock(normalized, label, [...scriptNameLockIds(normalized, label), ...ids]);
+}
+
+/**
+ * **一键铺链入口**：拿整张表**当前所有格子链接**重建锁表 ——
+ * 「将分镜表已经链接好的图片锁成：资产名 → 图片」。已有锁保留（并集），不会因为没有格子链接而被抹掉。
+ */
+export function syncStoryScriptNameLocks(map: unknown, cells: unknown, rows?: readonly StoryScriptRow[] | null): StoryScriptNameLockMap {
+    let next = normalizeStoryScriptNameLockMap(map);
+    if (!rows?.length || !cells || typeof cells !== "object" || Array.isArray(cells)) return next;
+    const byShot = new Map<number, StoryScriptRow>();
+    rows.forEach((row, index) => {
+        const shotNo = Math.round(Number(row.shot_no)) || index + 1;
+        if (!byShot.has(shotNo)) byShot.set(shotNo, row);
+    });
+    for (const [key, value] of Object.entries(cells as Record<string, unknown>)) {
+        const parsed = parseScriptCellAssetKey(key);
+        if (!parsed || !Array.isArray(value)) continue;
+        const row = byShot.get(parsed.shotNo);
+        if (!row) continue;
+        next = addScriptNameLockForCell(next, row, parsed.columnKey, value);
+    }
+    return next;
+}
+
+/**
+ * 这一镜「已经被精准指定过」的资产格 —— **格子图优先、资产锁兜底**。铺链路的「精准优先、资产条兜底」
+ * 就建立在这上面：
+ *  1. 这一镜这一格自己挂了图（`scriptCellAssets`）→ 用这一格的图（`source: "cell"`）；
+ *  2. 没挂，但这一格的名字在资产锁里（「张三」锁了 @图片1）→ 用锁定的图，**跨镜生效**（`source: "lock"`）；
+ *  3. 都没有 → 这一格不参与，交给资产条按分类兜底（`coveredRoles` 里不会有它的分类）。
+ *
+ * 输出顺序 = 预设列序（连线先后与表格从左到右一致）。
+ */
+export function scriptShotPreciseAssetRefs(
+    cells: unknown,
+    locks: unknown,
+    shotNo: unknown,
+    row: StoryScriptRow | undefined | null,
+    preset?: StoryScriptPresetId | string | null,
+): Array<{ columnKey: string; role: ScriptAssetRole; name: string; ids: string[]; source: "cell" | "lock" }> {
+    if (!row) return [];
+    const out: Array<{ columnKey: string; role: ScriptAssetRole; name: string; ids: string[]; source: "cell" | "lock" }> = [];
+    for (const column of getStoryScriptAssetColumns(preset)) {
+        const role = scriptAssetColumnRole(column.key) || "character";
+        const name = scriptNameLockName(row[column.key]);
+        const cellIds = scriptCellAssetIds(cells, shotNo, column.key);
+        if (cellIds.length) {
+            out.push({ columnKey: column.key, role, name, ids: cellIds, source: "cell" });
+            continue;
+        }
+        const lockedIds = name ? scriptNameLockIds(locks, name) : [];
+        if (lockedIds.length) out.push({ columnKey: column.key, role, name, ids: lockedIds, source: "lock" });
+    }
+    return out;
+}
+
+/** 把「已被精准指定过」的资产列名清空，喂给 `matchStoryScriptRowAssets`（角色条不再对同类重复分派）。 */
+export function blankPreciseAssetColumns(row: StoryScriptRow, refs: ReadonlyArray<{ columnKey: string }>): StoryScriptRow {
+    if (!refs.length) return row;
+    const next: StoryScriptRow = { ...row };
+    for (const ref of refs) if (ref.columnKey in next) next[ref.columnKey] = "";
+    return next;
+}
+
+/**
  * 资产对话框「按描述生图」的候选：`title` 同时作为建出来的图片节点标题
  * （铺链路时角色类素材靠标题做名字匹配，所以角色候选的 title 必须就是角色名），
  * `prompt` 是喂给生图的提示词。

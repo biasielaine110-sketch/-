@@ -32,7 +32,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { blankFilledAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptShotCellAssetSlots, setStoryScriptCellAssetIds, setStoryScriptRowAssetIds, storyScriptGroupDuration, storyScriptToMarkdown, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, storyScriptGroupDuration, storyScriptToMarkdown, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -2662,10 +2662,6 @@ function AtelierCanvasPage() {
         message.success(t("canvas.shortcut.resetWindowDone", { count: eligible.length }));
     }, [message, t]);
 
-    // 画布快捷键 X 落在脚本节点上时，不进入「点连模式」，而是打开这个节点的「资产池」（整表添加资产）。
-    // 用一个「请求节点 id」把意图传进节点内容区（弹窗状态在那边），节点处理完回调把标记清掉。
-    const [scriptAssetPoolNodeId, setScriptAssetPoolNodeId] = useState<string | null>(null);
-
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
@@ -2822,19 +2818,10 @@ function AtelierCanvasPage() {
                     message.warning(t("canvas.shortcut.selectNodeToConnect"));
                     return;
                 }
-                // 脚本节点：X = 打开这个节点的「资产池」（整表添加资产），比进入点连模式更贴合分镜表的用法
-                // ——「先把参考图挂到整表，再用资产列格子里的 @ 资产池把它们分派到具体镜头 / 资产」。
-                if (outputNode.type === CanvasNodeType.Script) {
-                    setSelectedNodeIds(new Set([outputNodeId]));
-                    setSelectedConnectionId(null);
-                    setContextMenu(null);
-                    setSelectionBox(null);
-                    // 先把节点滚进视野：节点内容区是「移出视口即卸载」的，请求要等它挂载后才能变成弹窗。
-                    focusNode(outputNodeId);
-                    setScriptAssetPoolNodeId(outputNodeId);
-                    return;
-                }
                 // Sticky X: selected node stays the receiver; click many providers until X/Esc.
+                // 脚本节点**不走特例**：X 选中脚本节点后逐个点其他节点，即可把它们连进脚本节点 ——
+                // 连进来的素材就成了「整表资产池」，这正是「按 X 拾取节点加入资产池」。
+                // 想用弹窗添加资产，请点节点里的「+ 添加资产」按钮（节点内容区的 assetEntryRow）。
                 setMouseWorld({ x: outputNode.position.x, y: outputNode.position.y + outputNode.height / 2 });
                 setConnecting({ nodeId: outputNodeId, handleType: "target", sticky: true });
                 setSelectedNodeIds(new Set([outputNodeId]));
@@ -6691,21 +6678,57 @@ function AtelierCanvasPage() {
         setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptCellImageModel: model || undefined } } : item)));
     }, []);
 
-    /** 按镜按资产整体替换（弹窗确认、或缩略图上的 × 解绑）。 */
+    /**
+     * 按镜按资产整体替换（弹窗确认、或缩略图上的 × 解绑）。
+     *
+     * 顺带做**资产锁定**：把这一格刚链接好的图按**资产名**记进 `scriptNameLocks`
+     * （「张三」→ @图片1、「客厅」→ @图片2），于是分镜表里别的镜再出现这个名字时也认同一张图。
+     * 解绑（`ids` 为空）**不动锁** —— 锁只能靠格子上的 🔒 显式解除，免得一次误删就把锁定丢掉。
+     */
     const handleCellAssetsChange = useCallback((nodeId: string, shotNo: number, columnKey: string, ids: string[]) => {
-        setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, ids) } } : item)));
+        setNodes((prev) =>
+            prev.map((item) => {
+                if (item.id !== nodeId) return item;
+                const row = (item.metadata?.scriptRows || []).find((candidate, index) => (Number(candidate.shot_no) || index + 1) === shotNo);
+                return {
+                    ...item,
+                    metadata: {
+                        ...item.metadata,
+                        scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, ids),
+                        scriptNameLocks: ids.length ? setStoryScriptNameLock(item.metadata?.scriptNameLocks, row?.[columnKey], ids) : item.metadata?.scriptNameLocks,
+                    },
+                };
+            }),
+        );
     }, []);
 
-    /** 把新节点追加关联到某一格（保留这一格已有的图）。 */
+    /** 把新节点追加关联到某一格（保留这一格已有的图），并把新图**并进**同名资产锁。 */
     const appendCellAssets = useCallback((nodeId: string, shotNo: number, columnKey: string, ids: string[]) => {
         if (!ids.length) return;
         setNodes((prev) =>
-            prev.map((item) =>
-                item.id === nodeId
-                    ? { ...item, metadata: { ...item.metadata, scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, [...scriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey), ...ids]) } }
-                    : item,
-            ),
+            prev.map((item) => {
+                if (item.id !== nodeId) return item;
+                const row = (item.metadata?.scriptRows || []).find((candidate, index) => (Number(candidate.shot_no) || index + 1) === shotNo);
+                return {
+                    ...item,
+                    metadata: {
+                        ...item.metadata,
+                        scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, [...scriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey), ...ids]),
+                        scriptNameLocks: addScriptNameLockForCell(item.metadata?.scriptNameLocks, row, columnKey, ids),
+                    },
+                };
+            }),
         );
+    }, []);
+
+    /** 表里给某个资产名「上锁 / 解锁」：锁上就记下这一格当前的图，解开（`ids` 为空）就删掉这条锁。 */
+    const handleNameLockChange = useCallback((nodeId: string, name: string, ids: string[]) => {
+        setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: setStoryScriptNameLock(item.metadata?.scriptNameLocks, name, ids) } } : item)));
+    }, []);
+
+    /** 解除这个分镜表的全部资产锁定（格子里的图片链接本身保留）。 */
+    const handleClearNameLocks = useCallback((nodeId: string) => {
+        setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: undefined } } : item)));
     }, []);
 
     /** 按镜按资产导入本地图片：建节点并立刻关联到这一格（只收图片，视频 / 音频会被挡下并提示）。 */
@@ -6789,6 +6812,10 @@ function AtelierCanvasPage() {
             const presetId = resolveStoryScriptPresetId(source.metadata?.scriptPreset);
             const preset = getStoryScriptPreset(presetId);
             const segmentSeconds = source.metadata?.scriptSegmentSeconds;
+            // **资产锁定**：一键铺链先把「分镜表里已经链接好的图片」按资产名锁成 名字 → 图片
+            // （「张三」→ @图片1、「客厅」→ @图片2），再按这张锁表逐镜分派：表里凡是出现同名的地方
+            // 都用同一张图。已有锁保留（并集），不会因为没有格子链接就被抹掉。
+            const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows);
             // 现存节点 id：过滤掉已被删、但还留在 metadata.scriptRowAssets 里的镜头图，免得连出悬空线。
             const existingNodeIds = new Set(nodesRef.current.map((node) => node.id));
             // 上游图片节点 = 角色 / 场景 / 道具 / 站位图素材。分类决定它连到哪些镜：
@@ -6875,27 +6902,33 @@ function AtelierCanvasPage() {
                     created.push(textNode, imageNode);
                     createdConnections.push({ id: nanoid(), fromNodeId: textNode.id, toNodeId: imageNode.id });
                     imageNodes.push(imageNode);
-                    // 「按镜按资产」图位（第 3 镜的「场景」格挂的图 ……）：精准指定了「这一镜这一分类用哪张图」，
-                    // 先连上，并把分类记进 coveredRoles，让下面的资产条不再对同一镜同一分类重复分派。
-                    const cellSlots = scriptShotCellAssetSlots(source.metadata?.scriptCellAssets, shotNo, presetId);
-                    const coveredRoles = new Set(cellSlots.map((slot) => slot.role));
-                    for (const slot of cellSlots) {
-                        for (const cellAssetId of slot.ids) {
-                            if (!existingNodeIds.has(cellAssetId)) continue;
-                            createdConnections.push({ id: nanoid(), fromNodeId: cellAssetId, toNodeId: imageNode.id });
-                            groupAssetIds.add(cellAssetId);
+                    // 「按镜按资产」图位 + **资产锁定**：这一镜每一格该用哪张图 —— 格子图优先、资产锁兜底。
+                    // 锁是按**资产名**记的，所以别的镜里出现同名（还是「张三」）时也认同一张 @图片。
+                    const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, member.row, presetId);
+                    const coveredRoles = new Set(preciseRefs.map((ref) => ref.role));
+                    // 同一张图可能同时被「图位」「资产锁」「资产条」「镜头图」命中，连线去重，
+                    // 免得画布上出现两条并行同源线（以前靠 coveredRoles 间接避开，现在直接去重更稳）。
+                    const linkedIntoImage = new Set<string>();
+                    for (const ref of preciseRefs) {
+                        for (const preciseId of ref.ids) {
+                            if (!existingNodeIds.has(preciseId) || linkedIntoImage.has(preciseId)) continue;
+                            linkedIntoImage.add(preciseId);
+                            createdConnections.push({ id: nanoid(), fromNodeId: preciseId, toNodeId: imageNode.id });
+                            groupAssetIds.add(preciseId);
                             assetLinkCount += 1;
                         }
                     }
                     // 角色素材按名字匹配到这一镜；场景 / 道具 / 站位图对每一镜都成立，直接一起连上。
-                    // 但「已经被单元格图位精准指定过」的那一路让位：角色列留空的不再参与名字匹配
-                    // （`blankFilledAssetColumns`），场景 / 道具 / 站位按 coveredRoles 跳过——精准优先、资产条兜底。
-                    const barRow = blankFilledAssetColumns(source.metadata?.scriptCellAssets, shotNo, member.row, presetId);
+                    // 但「已经被图位 / 资产锁精准指定过」的那一路让位：角色列留空的不再参与名字匹配
+                    // （`blankPreciseAssetColumns`），场景 / 道具 / 站位按 coveredRoles 跳过——精准优先、资产条兜底。
+                    const barRow = blankPreciseAssetColumns(member.row, preciseRefs);
                     const barAssets = [
                         ...matchStoryScriptRowAssets(presetId, barRow, characterRefs),
                         ...globalRefs.filter((asset) => !coveredRoles.has(asset.role)),
                     ];
                     for (const asset of barAssets) {
+                        if (linkedIntoImage.has(asset.id)) continue;
+                        linkedIntoImage.add(asset.id);
                         createdConnections.push({ id: nanoid(), fromNodeId: asset.id, toNodeId: imageNode.id });
                         groupAssetIds.add(asset.id);
                         assetLinkCount += 1;
@@ -6903,7 +6936,8 @@ function AtelierCanvasPage() {
                     // 这一镜自己的「镜头图」：只连到**这一镜**的图片节点；同时进 groupAssetIds，
                     // 于是下面会把它们一并连到该段的视频节点——即「按镜头把图片连到图片节点和视频节点」。
                     for (const rowAssetId of scriptRowAssetIds(source.metadata?.scriptRowAssets, shotNo)) {
-                        if (!existingNodeIds.has(rowAssetId)) continue;
+                        if (!existingNodeIds.has(rowAssetId) || linkedIntoImage.has(rowAssetId)) continue;
+                        linkedIntoImage.add(rowAssetId);
                         createdConnections.push({ id: nanoid(), fromNodeId: rowAssetId, toNodeId: imageNode.id });
                         groupAssetIds.add(rowAssetId);
                         assetLinkCount += 1;
@@ -6955,8 +6989,11 @@ function AtelierCanvasPage() {
                 okText: t("canvas.scriptNode.pipelineBuild"),
                 cancelText: t("common.cancel"),
                 onOk: () => {
-                    nodesRef.current = [...nodesRef.current, ...created];
-                    setNodes((prev) => [...prev, ...created]);
+                    // 铺链的同时把「资产名 → 图片」锁表落库，表上就能看到这些名字已经锁定。
+                    const nextLocks = Object.keys(nameLocks).length ? nameLocks : undefined;
+                    const patchLocks = (item: CanvasNodeData) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: nextLocks } } : item);
+                    nodesRef.current = [...nodesRef.current.map(patchLocks), ...created];
+                    setNodes((prev) => [...prev.map(patchLocks), ...created]);
                     setConnections((prev) => [...prev, ...createdConnections]);
                     setSelectedNodeIds(new Set(created.map((node) => node.id)));
                     setSelectedConnectionId(null);
@@ -7001,13 +7038,14 @@ function AtelierCanvasPage() {
             const upstreamAssets = upstreamNodes
                 .filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content))
                 .map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
-            // 「按镜按资产」图位：这一镜每一格挂的图（第 3 镜的场景图 ……）也直连视频节点；
+            // 「按镜按资产」图位 + **资产锁定**：这一镜每一格该用哪张图（格子图优先、按资产名的锁兜底）；
             // 它们精准指定过的那几个分类，让资产条不再对同一镜重复分派。
-            const cellSlots = scriptShotCellAssetSlots(source.metadata?.scriptCellAssets, shotNo, presetId);
-            const coveredRoles = new Set(cellSlots.map((slot) => slot.role));
-            const cellAssetRefs = cellSlots.flatMap((slot) => slot.ids).filter((id) => nodesRef.current.some((node) => node.id === id));
-            // 角色按这一镜的角色名匹配（已被图位指定过的角色列不再参与），场景 / 道具 / 站位图无条件连上。
-            const barRow = blankFilledAssetColumns(source.metadata?.scriptCellAssets, shotNo, row, presetId);
+            const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows);
+            const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId);
+            const coveredRoles = new Set(preciseRefs.map((ref) => ref.role));
+            const cellAssetRefs = preciseRefs.flatMap((ref) => ref.ids).filter((id) => nodesRef.current.some((node) => node.id === id));
+            // 角色按这一镜的角色名匹配（已被图位 / 锁定过的角色列不再参与），场景 / 道具 / 站位图无条件连上。
+            const barRow = blankPreciseAssetColumns(row, preciseRefs);
             const assets = [
                 ...matchStoryScriptRowAssets(presetId, barRow, upstreamAssets.filter((asset) => asset.role === "character")),
                 ...upstreamAssets.filter((asset) => asset.role !== "character" && !coveredRoles.has(asset.role)),
@@ -7016,7 +7054,8 @@ function AtelierCanvasPage() {
             const audioRefs = upstreamNodes.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey));
             // 这一镜自己的「镜头图」也直连视频节点；已删掉的图片节点直接跳过。
             const rowAssetRefs = scriptRowAssetIds(source.metadata?.scriptRowAssets, shotNo).filter((id) => nodesRef.current.some((node) => node.id === id));
-            const linkIds = [...assets.map((asset) => asset.id), ...audioRefs.map((asset) => asset.id), ...rowAssetRefs, ...cellAssetRefs];
+            // 去重：同一张图可能同时是「图位 / 锁的图」和「镜头图」，别连出两条并行线。
+            const linkIds = Array.from(new Set([...assets.map((asset) => asset.id), ...audioRefs.map((asset) => asset.id), ...rowAssetRefs, ...cellAssetRefs]));
             const links = linkIds.map((id) => ({ id: nanoid(), fromNodeId: id, toNodeId: videoNode.id }));
             nodesRef.current = [...nodesRef.current, videoNode];
             setNodes((prev) => [...prev, videoNode]);
@@ -7134,8 +7173,9 @@ function AtelierCanvasPage() {
                         poolAssets={scriptPoolAssets}
                         cellModel={contentNode.metadata?.scriptCellImageModel}
                         onCellModelChange={handleCellModelChange}
-                        assetPoolRequest={scriptAssetPoolNodeId === contentNode.id}
-                        onAssetPoolRequestHandled={() => setScriptAssetPoolNodeId(null)}
+                        nameLocks={contentNode.metadata?.scriptNameLocks}
+                        onNameLockChange={handleNameLockChange}
+                        onClearNameLocks={handleClearNameLocks}
                         onBuildPipeline={handleBuildScriptPipeline}
                         onBuildShotVideo={handleBuildShotVideo}
                         onRegenerateShot={(nodeId, rowIndex) => void runScriptShotGeneration(nodeId, rowIndex)}
@@ -7191,7 +7231,7 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, scriptAssetPoolNodeId, stopGenerationForNode, theme],
+        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;
