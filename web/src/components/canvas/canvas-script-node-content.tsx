@@ -6,20 +6,24 @@ import { ArrowUpRight, AlignJustify, Copy, FileText, Image as ImageIcon, Loader2
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
-import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
+import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import {
+    collectScriptCellPromptCandidate,
     getStoryScriptColumns,
     getStoryScriptPreset,
     getStoryScriptSystemPrompt,
     hasScriptSystemPromptOverride,
+    isScriptAssetColumn,
     nextScriptAssetRole,
     resolveScriptAssetRole,
     resolveStoryScriptFontSize,
     resolveStoryScriptMergeMode,
     resolveStoryScriptPresetId,
     resolveStoryScriptSegmentSeconds,
+    scriptCellAssetIds,
     scriptRowAssetIds,
+    shiftStoryScriptCellAssetsAfterDelete,
     shiftStoryScriptRowAssetsAfterDelete,
     stepStoryScriptFontSize,
     storyScriptToMarkdown,
@@ -137,6 +141,30 @@ type CanvasScriptNodeContentProps = {
     onRowAssetImport?: (nodeId: string, shotNo: number, files: File[]) => void;
     /** 逐镜 AI 生成图片：建节点、关联到这一镜并立刻触发生图。 */
     onRowAssetGenerate?: (nodeId: string, shotNo: number, prompt: string, title: string) => void;
+    /**
+     * **按镜按资产**挂图：`"镜号:资产列key"`（如 `"3:scene"`）→ 图片节点 id 列表
+     * （存在 metadata.scriptCellAssets）。在资产列格子里导入 / 链接 / 生成，铺链路时只连到这一镜的那一个资产。
+     */
+    cellAssets?: Record<string, string[]>;
+    /** 按镜按资产关联变更：整组替换这一格的图片节点 id（传空数组即解绑）。 */
+    onCellAssetsChange?: (nodeId: string, shotNo: number, columnKey: string, ids: string[]) => void;
+    /** 按镜按资产导入本地图片：建节点并立刻关联到这一格。 */
+    onCellAssetImport?: (nodeId: string, shotNo: number, columnKey: string, files: File[]) => void;
+    /** 按镜按资产 AI 生成图片：建节点、关联到这一格并立刻触发生图（`model` 是这一格单独挑的生图模型）。 */
+    onCellAssetGenerate?: (nodeId: string, shotNo: number, columnKey: string, prompt: string, title: string, model?: string) => void;
+    /**
+     * **资产池**：已经连到本脚本节点的素材（带分类）。「按镜按资产」弹窗据此多出一个「@ 资产池」tab ——
+     * 池里的图点一下就能挂进某一格，不用重新上传，也不用重新连一次上游。
+     */
+    poolAssets?: ScriptAssetPoolAsset[];
+    /** 「按镜按资产」弹窗里默认的生图模型（存 metadata.scriptCellImageModel）。 */
+    cellModel?: string;
+    /** 资产格子里换了生图模型：落库成节点的默认值。 */
+    onCellModelChange?: (nodeId: string, model: string) => void;
+    /** 画布快捷键 X：请求打开本节点的「资产池」（整表添加资产）弹窗。 */
+    assetPoolRequest?: boolean;
+    /** 上一条请求已处理，外层可以把标记清掉。 */
+    onAssetPoolRequestHandled?: () => void;
     /** 生成后按内容多少自动适配节点窗口尺寸（高贴合行数、宽贴合表格宽并封顶）。 */
     onNodeSizeChange?: (nodeId: string, width: number, height: number) => void;
 };
@@ -168,6 +196,15 @@ export function CanvasScriptNodeContent({
     onRowAssetsChange,
     onRowAssetImport,
     onRowAssetGenerate,
+    cellAssets,
+    onCellAssetsChange,
+    onCellAssetImport,
+    onCellAssetGenerate,
+    poolAssets,
+    cellModel,
+    onCellModelChange,
+    assetPoolRequest,
+    onAssetPoolRequestHandled,
     onNodeSizeChange,
 }: CanvasScriptNodeContentProps) {
     const { t } = useTranslation();
@@ -217,6 +254,8 @@ export function CanvasScriptNodeContent({
     const [assetDialogOpen, setAssetDialogOpen] = useState(false);
     /** 逐镜「镜头图」弹窗当前瞄准的那一镜（null = 未打开）。 */
     const [rowAssetTarget, setRowAssetTarget] = useState<{ shotNo: number; ids: string[] } | null>(null);
+    /** 「按镜按资产」弹窗当前瞄准的那一格（null = 未打开）。 */
+    const [cellAssetTarget, setCellAssetTarget] = useState<{ shotNo: number; columnKey: string; label: string; ids: string[] } | null>(null);
     /** 正把文件从系统拖到节点上（显示落区提示）。 */
     const [fileDragging, setFileDragging] = useState(false);
     // 「自定义提示词」弹窗：用一段自己的系统提示词整段替换预设自带的那段（列结构不变）。
@@ -232,6 +271,14 @@ export function CanvasScriptNodeContent({
         setPromptDraft(extraPrompt);
     }, [extraPrompt]);
 
+    // 画布快捷键 X（选中单个脚本节点时）：直接打开这个节点的「资产池」——先把参考图挂到整表，
+    // 再用资产列格子里的「@ 资产池」把它们分派到具体的镜头 / 资产上。
+    useEffect(() => {
+        if (!assetPoolRequest) return;
+        setAssetDialogOpen(true);
+        onAssetPoolRequestHandled?.();
+    }, [assetPoolRequest, onAssetPoolRequestHandled]);
+
     const canGenerate = Boolean(sourceDraft.trim() || connectedTextValue) && !isRunning;
     const activeReferences = useMemo(() => (references || []).filter((item) => item.active), [references]);
     // 「试一试」只在真·空场景出现（没结果、没连线、没手填），否则会挤占输入区。
@@ -240,6 +287,8 @@ export function CanvasScriptNodeContent({
     const showAssetEntry = Boolean(onImportAssets || onLinkAssets || onGenerateAsset);
     // 「镜头图」列：逐镜关联图片。导入 / 关联 / 生成三条路有一条能用就显示这一列。
     const showRowImage = Boolean(onRowAssetsChange || onRowAssetImport || onRowAssetGenerate);
+    // 「按镜按资产」图位：资产列（角色1 / 场景 / 道具 / 人物站位）格子里的缩略图 + 「+」。
+    const showCellAssets = Boolean(onCellAssetsChange || onCellAssetImport || onCellAssetGenerate);
     // 缩略图 / 标题查表（按节点 id）。节点被删后取不到，渲染时会退化成占位图标。
     const imageLookup = useMemo(() => {
         const map = new Map<string, ScriptAssetCandidate>();
@@ -323,7 +372,12 @@ export function CanvasScriptNodeContent({
             .map((row, index) => ({ ...row, shot_no: index + 1 }));
         // 镜号会整体前移，逐镜图片的关联键必须跟着挪，否则「第 5 镜的图」会落到新的第 5 镜上。
         const deletedShotNo = rows[rowIndex]?.shot_no ?? rowIndex + 1;
-        patchMetadata({ scriptRows: next, scriptRowAssets: shiftStoryScriptRowAssetsAfterDelete(node.metadata?.scriptRowAssets, deletedShotNo) });
+        patchMetadata({
+            scriptRows: next,
+            scriptRowAssets: shiftStoryScriptRowAssetsAfterDelete(node.metadata?.scriptRowAssets, deletedShotNo),
+            // 「按镜按资产」的键里也有镜号，同样要跟着前移。
+            scriptCellAssets: shiftStoryScriptCellAssetsAfterDelete(node.metadata?.scriptCellAssets, deletedShotNo),
+        });
         message.success(t("canvas.scriptNode.rowDeleted"));
     };
 
@@ -1001,6 +1055,11 @@ export function CanvasScriptNodeContent({
                                 ) : null}
                                 {columns.map((column) => {
                                     const value = String(row[column.key] ?? "");
+                                    // 「按镜按资产」图位：只挂在资产列（角色1 / 角色2 / 场景 / 道具 / 人物站位）上。
+                                    // 这一格的图**只属于这一镜的这一列**，铺链路时也只连到这一镜的图片 / 视频节点。
+                                    const cellShotNo = row.shot_no || rowIndex + 1;
+                                    const cellIds = scriptCellAssetIds(cellAssets, cellShotNo, column.key);
+                                    const showCellSlot = showCellAssets && isScriptAssetColumn(column.key);
                                     return (
                                         <td
                                             key={column.key}
@@ -1018,6 +1077,52 @@ export function CanvasScriptNodeContent({
                                             ) : (
                                                 <div className="opacity-35">{t("canvas.scriptNode.noContent")}</div>
                                             )}
+                                            {showCellSlot ? (
+                                                <div className="mt-1 flex flex-wrap items-center gap-1" onDoubleClick={(event) => event.stopPropagation()}>
+                                                    {cellIds.map((imageId) => {
+                                                        const meta = imageLookup.get(imageId);
+                                                        return (
+                                                            <span
+                                                                key={imageId}
+                                                                className="group relative flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-md border"
+                                                                style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
+                                                                title={meta?.title || imageId}
+                                                            >
+                                                                {meta?.previewUrl ? <img src={meta.previewUrl} alt={meta.title} className="size-full object-cover" /> : <ImageIcon className="size-3" />}
+                                                                {onCellAssetsChange ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        className="absolute right-0 top-0 hidden size-4 items-center justify-center rounded-bl-md bg-black/60 text-white group-hover:flex"
+                                                                        onMouseDown={(event) => event.stopPropagation()}
+                                                                        onPointerDown={(event) => event.stopPropagation()}
+                                                                        onClick={(event) => {
+                                                                            event.stopPropagation();
+                                                                            onCellAssetsChange(node.id, cellShotNo, column.key, cellIds.filter((id) => id !== imageId));
+                                                                        }}
+                                                                        title={t("canvas.scriptNode.cellAssetRemove")}
+                                                                    >
+                                                                        <X className="size-2.5" />
+                                                                    </button>
+                                                                ) : null}
+                                                            </span>
+                                                        );
+                                                    })}
+                                                    <button
+                                                        type="button"
+                                                        className="inline-flex size-6 shrink-0 items-center justify-center rounded-md border transition hover:opacity-100"
+                                                        style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
+                                                        onMouseDown={(event) => event.stopPropagation()}
+                                                        onPointerDown={(event) => event.stopPropagation()}
+                                                        onClick={(event) => {
+                                                            event.stopPropagation();
+                                                            setCellAssetTarget({ shotNo: cellShotNo, columnKey: column.key, label: column.label, ids: cellIds });
+                                                        }}
+                                                        title={cellIds.length ? t("canvas.scriptNode.cellAssetEdit", { label: column.label }) : t("canvas.scriptNode.cellAssetAdd", { label: column.label })}
+                                                    >
+                                                        <Plus className="size-3" />
+                                                    </button>
+                                                </div>
+                                            ) : null}
                                         </td>
                                     );
                                 })}
@@ -1244,6 +1349,37 @@ export function CanvasScriptNodeContent({
         />
     ) : null;
 
+    // 「按镜按资产」弹窗：给某一镜的某一个资产列（角色1 / 角色2 / 场景 / 道具 / 人物站位）挂图。
+    // 与「镜头图」共用同一个弹窗组件，只是多带了 columnKey / label / candidate —— 生成 tab 的默认
+    // 提示词因此收敛到「这一镜这一列」的描述，而不是整表汇总出来的候选。
+    const cellAssetDialog = cellAssetTarget ? (
+        <CanvasScriptAssetDialog
+            open
+            theme={theme}
+            candidates={imageCandidates || []}
+            rows={rows}
+            poolAssets={poolAssets}
+            onClose={() => setCellAssetTarget(null)}
+            onLink={() => undefined}
+            onImport={() => undefined}
+            rowMode={{
+                no: cellAssetTarget.shotNo,
+                columnKey: cellAssetTarget.columnKey,
+                label: cellAssetTarget.label,
+                selectedIds: cellAssetTarget.ids,
+                candidate: collectScriptCellPromptCandidate(cellAssetTarget.columnKey, rows.find((row) => (row.shot_no || 0) === cellAssetTarget.shotNo) || null),
+                title: t("canvas.scriptNode.cellAssetDialogTitle", { no: cellAssetTarget.shotNo, label: cellAssetTarget.label }),
+                model: cellModel,
+                onModelChange: (model) => onCellModelChange?.(node.id, model),
+                onLink: (nodeIds) => onCellAssetsChange?.(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, nodeIds),
+                onImport: (files) => onCellAssetImport?.(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, files),
+                onGenerate: onCellAssetGenerate
+                    ? (prompt, title, model) => onCellAssetGenerate(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, prompt, title, model)
+                    : undefined,
+            }}
+        />
+    ) : null;
+
     return (
         <>
             {fullscreen
@@ -1289,6 +1425,7 @@ export function CanvasScriptNodeContent({
             />
             {assetDialog}
             {rowAssetDialog}
+            {cellAssetDialog}
         </>
     );
 }

@@ -147,6 +147,17 @@ export type CanvasNodeMetadata = {
      * 导入 / 链接 / 生成，铺链路时只连到这一镜的图片节点，并随该分组合并进视频节点。
      */
     scriptRowAssets?: import("@/constant/story-script").StoryScriptRowAssetMap;
+    /**
+     * 脚本生成器：**按镜按资产**挂图（`"镜号:资产列key"` → 画布图片节点 id 列表）。在分镜表的
+     * 「角色1 / 角色2 / 场景 / 道具 / 人物站位」格子里直接导入 / 链接 / 生成，铺链路时只连到
+     * **这一镜的那一个资产**（并顶掉资产条对同一镜同一分类的分派）。
+     */
+    scriptCellAssets?: import("@/constant/story-script").StoryScriptCellAssetMap;
+    /**
+     * 脚本生成器：在资产格子里**单独挑的生图模型**（不填就跟随节点的默认图片模型）。
+     * 只作为「格子生图弹窗」的默认值：每次生成都会把选中的模型写到新建的那张图片节点上。
+     */
+    scriptCellImageModel?: string;
     /** 脚本生成器：每段目标时长（none / 10 / 15），同时用于生成时的分段要求与铺链路的自动合并。 */
     scriptSegmentSeconds?: import("@/constant/story-script").StoryScriptSegmentSeconds;
     /** 脚本生成器：铺链路时每个视频节点合并几镜（shot / 2 / 3 / duration）。 */

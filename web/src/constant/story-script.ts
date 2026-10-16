@@ -116,17 +116,18 @@ export const STORY_SCRIPT_CLASSIC_COLUMNS: StoryScriptColumn[] = [
     { key: "shot_no", label: "镜号", width: 56, numeric: true },
     { key: "duration", label: "时长", width: 60, numeric: true },
     { key: "visual_description", label: "画面描述", width: 210 },
-    { key: "character_1", label: "角色1", width: 100 },
+    // 资产列（角色1 / 角色2 / 场景 / 道具）留宽一点：格子里除了文字还要放「按镜按资产」的图片缩略图 + 「+」。
+    { key: "character_1", label: "角色1", width: 140 },
     { key: "character_description_1", label: "角色描述1", width: 260 },
-    { key: "character_2", label: "角色2", width: 100 },
+    { key: "character_2", label: "角色2", width: 140 },
     { key: "character_description_2", label: "角色描述2", width: 260 },
-    { key: "scene", label: "场景", width: 110 },
+    { key: "scene", label: "场景", width: 150 },
     { key: "scene_description", label: "场景描述", width: 220 },
-    { key: "prop", label: "道具", width: 110 },
+    { key: "prop", label: "道具", width: 150 },
     { key: "prop_description", label: "道具描述", width: 200 },
     { key: "shot", label: "景别", width: 120 },
     { key: "character_action", label: "角色动作", width: 190 },
-    { key: "blocking", label: "人物站位", width: 200 },
+    { key: "blocking", label: "人物站位", width: 230 },
     { key: "emotion", label: "情绪", width: 150 },
     { key: "scene_tags", label: "场景标签", width: 150 },
     { key: "lighting_mood", label: "光影氛围", width: 170 },
@@ -151,12 +152,13 @@ export const STORY_SCRIPT_STORYBOARD_COLUMNS: StoryScriptColumn[] = [
     { key: "shot", label: "景别", width: 110 },
     { key: "visual_description", label: "画面描述", width: 300 },
     { key: "key_visual", label: "关键视觉", width: 220 },
-    { key: "scene", label: "场景", width: 110 },
+    // 资产列同样留宽，理由见 classic 列表（要装下缩略图 + 「+」）。
+    { key: "scene", label: "场景", width: 150 },
     { key: "scene_description", label: "场景描述", width: 220 },
-    { key: "prop", label: "道具", width: 110 },
+    { key: "prop", label: "道具", width: 150 },
     { key: "prop_description", label: "道具描述", width: 200 },
     { key: "character_action", label: "主体动作", width: 200 },
-    { key: "blocking", label: "人物站位", width: 180 },
+    { key: "blocking", label: "人物站位", width: 210 },
     { key: "camera_movement", label: "镜头运动", width: 260 },
     { key: "dialogue", label: "台词/旁白", width: 180 },
     { key: "sound", label: "音效/配乐", width: 170 },
@@ -779,6 +781,135 @@ export function shiftStoryScriptRowAssetsAfterDelete(map: unknown, deletedShotNo
 }
 
 /**
+ * **按镜按资产挂图**：`"镜号:资产列key"`（如 `"3:scene"`）→ 画布上图片节点 id 的列表。
+ * 存在脚本节点的 `metadata.scriptCellAssets`。
+ *
+ * 与另外两张表的分工（三者互不覆盖，各管一段）：
+ *  - `metadata.scriptAssetRoles`：**整表共享**的素材（角色卡 / 场景 / 道具 / 站位图 / 音频），铺链路时按分类逐镜分派；
+ *  - `metadata.scriptRowAssets`：**这一镜**的成片关键帧（「镜头图」列），不区分资产；
+ *  - `metadata.scriptCellAssets`：**这一镜 + 这一个资产列**的图 —— 用户在「第 3 镜的场景格」里加的图，
+ *    就只连到第 3 镜的图片 / 视频节点，并且**顶掉**资产条对「第 3 镜的场景」的分派（精准优先）。
+ *
+ * 键里带列名（而不是只带镜号），所以「同一镜的角色图和场景图」能各归各位；镜号同理用可见、可复现的数字。
+ * 删行会把镜号整体前移，配 `shiftStoryScriptCellAssetsAfterDelete` 把键一起挪。
+ */
+export type StoryScriptCellAssetMap = Record<string, string[]>;
+
+/** `"镜号:列key"` 解回两部分；键非法（镜号不合法 / 列不是资产列）返回 `null`。 */
+export function parseScriptCellAssetKey(key: unknown): { shotNo: number; columnKey: string } | null {
+    if (typeof key !== "string") return null;
+    const index = key.indexOf(":");
+    if (index <= 0) return null;
+    const no = Number(key.slice(0, index));
+    const columnKey = key.slice(index + 1);
+    if (!Number.isFinite(no) || no <= 0 || !isScriptAssetColumn(columnKey)) return null;
+    return { shotNo: Math.round(no), columnKey };
+}
+
+/** 归一化成 map 的键；非法值返回空串（调用方按「没有关联」处理）。 */
+function cellAssetMapKey(shotNo: unknown, columnKey: unknown): string {
+    const no = Number(shotNo);
+    if (!Number.isFinite(no) || no <= 0) return "";
+    if (!isScriptAssetColumn(columnKey)) return "";
+    return `${Math.round(no)}:${String(columnKey)}`;
+}
+
+/** 读某镜某资产列绑定的图片节点 id（容错：值不是数组、或夹了非字符串项，都就地过滤掉）。 */
+export function scriptCellAssetIds(map: unknown, shotNo: unknown, columnKey: unknown): string[] {
+    const key = cellAssetMapKey(shotNo, columnKey);
+    if (!key) return [];
+    const value = map && typeof map === "object" ? (map as Record<string, unknown>)[key] : undefined;
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is string => typeof item === "string" && Boolean(item));
+}
+
+/**
+ * 写某镜某资产列绑定的图片节点 id，返回**新的 map**（纯函数，便于探针直接校验）。
+ * 传空数组等价于删掉这个键——免得 metadata 里堆一堆空数组。
+ */
+export function setStoryScriptCellAssetIds(map: unknown, shotNo: unknown, columnKey: unknown, ids: readonly unknown[]): StoryScriptCellAssetMap {
+    const next: StoryScriptCellAssetMap = { ...(map && typeof map === "object" ? (map as StoryScriptCellAssetMap) : {}) };
+    const key = cellAssetMapKey(shotNo, columnKey);
+    if (!key) return next;
+    const cleaned = Array.from(new Set(ids.filter((item): item is string => typeof item === "string" && Boolean(item))));
+    if (cleaned.length) next[key] = cleaned;
+    else delete next[key];
+    return next;
+}
+
+/** 统一把 map 收成「键是 `镜号:资产列`、值是去重后的非空 id 数组」，顺带丢掉空条目与非法键。 */
+export function normalizeStoryScriptCellAssetMap(map: unknown): StoryScriptCellAssetMap {
+    const source = map && typeof map === "object" ? (map as Record<string, unknown>) : {};
+    const next: StoryScriptCellAssetMap = {};
+    for (const [key, value] of Object.entries(source)) {
+        const parsed = parseScriptCellAssetKey(key);
+        if (!parsed || !Array.isArray(value)) continue;
+        const cleaned = Array.from(new Set(value.filter((item): item is string => typeof item === "string" && Boolean(item))));
+        if (cleaned.length) next[`${parsed.shotNo}:${parsed.columnKey}`] = cleaned;
+    }
+    return next;
+}
+
+/** 删掉第 `deletedShotNo` 镜之后把键里的镜号整体前移一位（理由同 `shiftStoryScriptRowAssetsAfterDelete`）。 */
+export function shiftStoryScriptCellAssetsAfterDelete(map: unknown, deletedShotNo: unknown): StoryScriptCellAssetMap {
+    const normalized = normalizeStoryScriptCellAssetMap(map);
+    const deleted = Number(deletedShotNo);
+    if (!Number.isFinite(deleted) || deleted <= 0) return normalized;
+    const next: StoryScriptCellAssetMap = {};
+    for (const [key, ids] of Object.entries(normalized)) {
+        const parsed = parseScriptCellAssetKey(key);
+        if (!parsed || parsed.shotNo === deleted) continue;
+        next[`${parsed.shotNo > deleted ? parsed.shotNo - 1 : parsed.shotNo}:${parsed.columnKey}`] = ids;
+    }
+    return next;
+}
+
+/**
+ * 某一镜在哪些资产列上挂了图（按预设列序，只返回非空项）。
+ *
+ * 铺链路用它做两件事：① 把这些图直连到该镜的图片 / 视频节点；② 收集 `role` 作为
+ * 「这一镜已经精准指定过的分类」，让资产条不再对同类素材重复分派（精准优先、资产条兜底）。
+ *
+ * `preset` 传了才校验「这一列在当前预设里存在」；不传则只校验它是不是资产列。
+ */
+export function scriptShotCellAssetSlots(
+    map: unknown,
+    shotNo: unknown,
+    preset?: StoryScriptPresetId | string | null,
+): Array<{ columnKey: string; role: ScriptAssetRole; ids: string[] }> {
+    const ordered = preset ? getStoryScriptAssetColumns(preset).map((column) => column.key) : Object.keys(SCRIPT_ASSET_COLUMN_SPECS);
+    const allowed = new Set(ordered);
+    const target = Math.round(Number(shotNo));
+    const out: Array<{ columnKey: string; role: ScriptAssetRole; ids: string[] }> = [];
+    // 按列序输出（而不是 map 的插入序），这样铺链路连线的先后与表格里从左到右一致。
+    for (const columnKey of ordered) {
+        if (!allowed.has(columnKey)) continue;
+        const ids = scriptCellAssetIds(map, target, columnKey);
+        if (!ids.length) continue;
+        out.push({ columnKey, role: scriptAssetColumnRole(columnKey) || "character", ids });
+    }
+    return out;
+}
+
+/**
+ * 把某一镜「已用单元格图位精准指定过」的资产列的**名字值清空**，返回一行副本。
+ *
+ * 铺链路时拿它去喂 `matchStoryScriptRowAssets`：例如第 3 镜的「场景」格已经挂了图，
+ * 这一镜就只剩「还没指定的角色列」参与资产条匹配，资产条里的场景素材不会再糊到这一镜上。
+ */
+export function blankFilledAssetColumns(map: unknown, shotNo: unknown, row: StoryScriptRow, preset?: StoryScriptPresetId | string | null): StoryScriptRow {
+    const slots = scriptShotCellAssetSlots(map, shotNo, preset);
+    if (!slots.length) return row;
+    const next: StoryScriptRow = { ...row };
+    for (const slot of slots) {
+        // 角色卡的名字列就是它自己；场景 / 道具同理。站位（blocking）本身既当名字又当描述，一并清掉。
+        if (!(slot.columnKey in next)) continue;
+        next[slot.columnKey] = "";
+    }
+    return next;
+}
+
+/**
  * 资产对话框「按描述生图」的候选：`title` 同时作为建出来的图片节点标题
  * （铺链路时角色类素材靠标题做名字匹配，所以角色候选的 title 必须就是角色名），
  * `prompt` 是喂给生图的提示词。
@@ -789,24 +920,56 @@ export type ScriptAssetPromptCandidate = {
 };
 
 /**
- * 每个分类能从分镜表里取到的「描述」列。
+ * **资产列**：分镜表里哪几列是「资产槽位」，以及每一列对应哪一类资产。
+ *
+ * 这是「按镜按资产挂图」（`metadata.scriptCellAssets`）的唯一口径——表格里那一列的图位、「AI 生成」
+ * 默认填的候选提示词、铺链路时这张图算哪一类，全部由它决定。
+ *
+ * - `character_1` / `character_2` → 角色卡（名字列 + 角色描述列）；
+ * - `scene` → 场景（名字列 + 场景描述；老分镜表没有这两列时退回「场景标签 + 光影氛围」）；
+ * - `prop` → 道具（名字列 + 道具描述）；
+ * - `blocking` → 人物站位（只有描述，没有单独的名字列）；
+ * - **音频没有对应的表列**（它不是一个字段），所以不在这张表里，也不会有图位。
+ *
+ * 预设没有的列自然不会出现图位：storyboard 没有角色列，就只有场景 / 道具 / 站位三个图位。
+ */
+const SCRIPT_ASSET_COLUMN_SPECS: Record<string, { role: ScriptAssetRole; nameKey?: string; textKeys: string[] }> = {
+    character_1: { role: "character", nameKey: "character_1", textKeys: ["character_description_1"] },
+    character_2: { role: "character", nameKey: "character_2", textKeys: ["character_description_2"] },
+    scene: { role: "scene", nameKey: "scene", textKeys: ["scene_description", "scene_tags", "lighting_mood"] },
+    prop: { role: "prop", nameKey: "prop", textKeys: ["prop_description"] },
+    blocking: { role: "blocking", textKeys: ["blocking"] },
+};
+
+/** 某一列是不是资产列（角色1 / 角色2 / 场景 / 道具 / 人物站位）。 */
+export function isScriptAssetColumn(key: unknown): boolean {
+    return typeof key === "string" && Boolean(SCRIPT_ASSET_COLUMN_SPECS[key]);
+}
+
+/** 资产列对应的资产分类；不是资产列（或非字符串）返回 `null`。 */
+export function scriptAssetColumnRole(key: unknown): ScriptAssetRole | null {
+    return (typeof key === "string" ? SCRIPT_ASSET_COLUMN_SPECS[key]?.role : undefined) ?? null;
+}
+
+/** 当前预设下真正存在的资产列（按预设列顺序），供表格渲染图位用。 */
+export function getStoryScriptAssetColumns(preset?: StoryScriptPresetId | string | null): StoryScriptColumn[] {
+    return getStoryScriptColumns(preset).filter((column) => isScriptAssetColumn(column.key));
+}
+
+/**
+ * 每个分类能从分镜表里取到的「描述」列（由 `SCRIPT_ASSET_COLUMN_SPECS` 派生，改列只改上面一处）。
  * - `character`：两张角色卡（角色1/角色描述1、角色2/角色描述2）；
- * - `scene`：场景（名字，充当标题）+ 场景描述（提示词）；老分镜表没有这两列时退回「场景标签 + 光影氛围」；
+ * - `scene`：场景（名字，充当标题）+ 场景描述（提示词）；
  * - `prop`：道具（名字）+ 道具描述；
  * - `blocking`：人物站位（只有描述，没有单独的名字列）；
  * - `audio`：不参与「按描述生成」（生成 tab 走的是生图链路），故为空数组。
  *   （storyboard 预设没有角色列时，取值自然为空串，无需按预设分支。）
  */
-const SCRIPT_ASSET_DESCRIPTION_COLUMNS: Record<ScriptAssetRole, Array<{ nameKey?: string; textKeys: string[] }>> = {
-    character: [
-        { nameKey: "character_1", textKeys: ["character_description_1"] },
-        { nameKey: "character_2", textKeys: ["character_description_2"] },
-    ],
-    scene: [{ nameKey: "scene", textKeys: ["scene_description", "scene_tags", "lighting_mood"] }],
-    prop: [{ nameKey: "prop", textKeys: ["prop_description"] }],
-    blocking: [{ textKeys: ["blocking"] }],
-    audio: [],
-};
+const SCRIPT_ASSET_DESCRIPTION_COLUMNS: Record<ScriptAssetRole, Array<{ nameKey?: string; textKeys: string[] }>> = (() => {
+    const out: Record<ScriptAssetRole, Array<{ nameKey?: string; textKeys: string[] }>> = { character: [], scene: [], prop: [], blocking: [], audio: [] };
+    for (const spec of Object.values(SCRIPT_ASSET_COLUMN_SPECS)) out[spec.role].push({ nameKey: spec.nameKey, textKeys: spec.textKeys });
+    return out;
+})();
 
 /**
  * 从分镜表里抽某一类资产的描述候选，供资产对话框一键填入生图提示词。
@@ -831,6 +994,24 @@ export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonl
         }
     }
     return out;
+}
+
+/**
+ * 某一镜某一资产列的生成候选：拿**这一行**的这一列（名字）+ 配对描述列当提示词。
+ *
+ * 与 `collectScriptAssetPromptCandidates`（按分类跨全表汇总、去重）的差别：这里只取一镜一列，
+ * 所以「第 3 镜的场景」生成出来的提示词就是第 3 镜那一条，不会串到别的镜头去。
+ * 该列在预设里不存在、或这一行这一列本来就是 `无` → 返回 `null`（调用方按「没有可填的候选」处理）。
+ */
+export function collectScriptCellPromptCandidate(columnKey: unknown, row?: StoryScriptRow | null): ScriptAssetPromptCandidate | null {
+    const spec = typeof columnKey === "string" ? SCRIPT_ASSET_COLUMN_SPECS[columnKey] : undefined;
+    if (!spec || !row) return null;
+    const name = spec.nameKey ? storyScriptCellText(row[spec.nameKey]) : "";
+    const text = joinStoryScriptPromptParts(spec.textKeys.map((key) => storyScriptCellText(row[key])));
+    const title = name || text.slice(0, 24);
+    const prompt = text || name;
+    if (!title || !prompt) return null;
+    return { title, prompt };
 }
 
 /** 构建分镜脚本生成任务；不传 preset 时保持旧行为（classic）。 */
