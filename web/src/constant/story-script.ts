@@ -631,11 +631,11 @@ export function resolveStoryScriptMergeMode(value: unknown): StoryScriptMergeMod
  * 组件里除基准字号外**全部用 `em`**，所以改这一个值即可整体缩放；
  * 各 `em` 值是按 13px 那套像素值定的比例（12px → 0.923em 等），所以任何档位都只是等比缩放。
  *
- * 默认档 **20px**（用户要求：默认就要看得清）。觉得太挤可以点顶部 `A−` 往下调，档位会存进
- * `metadata.scriptFontSize`，只影响这一个脚本节点。
+ * 默认档 **15px**（用户两轮要求：先「默认可读」定 20，再「整体太占地方」降到 15）。
+ * 觉得小可以点顶部 `A+`，档位会存进 `metadata.scriptFontSize`，只影响这一个脚本节点。
  */
-export const STORY_SCRIPT_FONT_SIZES: number[] = [11, 12, 13, 14, 16, 18, 20];
-export const DEFAULT_STORY_SCRIPT_FONT_SIZE = 20;
+export const STORY_SCRIPT_FONT_SIZES: number[] = [11, 12, 13, 14, 15, 16, 18, 20];
+export const DEFAULT_STORY_SCRIPT_FONT_SIZE = 15;
 
 export function resolveStoryScriptFontSize(value: unknown): number {
     const size = Math.round(Number(value));
@@ -825,28 +825,41 @@ export function shiftStoryScriptRowAssetsAfterDelete(map: unknown, deletedShotNo
  */
 export type StoryScriptCellAssetMap = Record<string, string[]>;
 
-/** `"镜号:列key"` 解回两部分；键非法（镜号不合法 / 列不是资产列）返回 `null`。 */
-export function parseScriptCellAssetKey(key: unknown): { shotNo: number; columnKey: string } | null {
+/**
+ * `"镜号:列key"` 解回两部分；键非法（镜号不合法 / 列不是资产列）返回 `null`。
+ *
+ * ⚠️ `extras` **必须由调用方一路传下来**：自建资产列（`extra_1`…）只有在「这张表确实声明了这一列」
+ * 时才算合法列。少传一处，这一列的图位就会被当成野键丢掉 —— 表现为「格子里的图看着在、铺链路却拿不到」。
+ */
+export function parseScriptCellAssetKey(
+    key: unknown,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): { shotNo: number; columnKey: string } | null {
     if (typeof key !== "string") return null;
     const index = key.indexOf(":");
     if (index <= 0) return null;
     const no = Number(key.slice(0, index));
     const columnKey = key.slice(index + 1);
-    if (!Number.isFinite(no) || no <= 0 || !isScriptAssetColumn(columnKey)) return null;
+    if (!Number.isFinite(no) || no <= 0 || !isScriptAssetColumn(columnKey, extras)) return null;
     return { shotNo: Math.round(no), columnKey };
 }
 
 /** 归一化成 map 的键；非法值返回空串（调用方按「没有关联」处理）。 */
-function cellAssetMapKey(shotNo: unknown, columnKey: unknown): string {
+function cellAssetMapKey(shotNo: unknown, columnKey: unknown, extras?: readonly StoryScriptExtraColumn[] | null): string {
     const no = Number(shotNo);
     if (!Number.isFinite(no) || no <= 0) return "";
-    if (!isScriptAssetColumn(columnKey)) return "";
+    if (!isScriptAssetColumn(columnKey, extras)) return "";
     return `${Math.round(no)}:${String(columnKey)}`;
 }
 
 /** 读某镜某资产列绑定的图片节点 id（容错：值不是数组、或夹了非字符串项，都就地过滤掉）。 */
-export function scriptCellAssetIds(map: unknown, shotNo: unknown, columnKey: unknown): string[] {
-    const key = cellAssetMapKey(shotNo, columnKey);
+export function scriptCellAssetIds(
+    map: unknown,
+    shotNo: unknown,
+    columnKey: unknown,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): string[] {
+    const key = cellAssetMapKey(shotNo, columnKey, extras);
     if (!key) return [];
     const value = map && typeof map === "object" ? (map as Record<string, unknown>)[key] : undefined;
     if (!Array.isArray(value)) return [];
@@ -857,9 +870,15 @@ export function scriptCellAssetIds(map: unknown, shotNo: unknown, columnKey: unk
  * 写某镜某资产列绑定的图片节点 id，返回**新的 map**（纯函数，便于探针直接校验）。
  * 传空数组等价于删掉这个键——免得 metadata 里堆一堆空数组。
  */
-export function setStoryScriptCellAssetIds(map: unknown, shotNo: unknown, columnKey: unknown, ids: readonly unknown[]): StoryScriptCellAssetMap {
+export function setStoryScriptCellAssetIds(
+    map: unknown,
+    shotNo: unknown,
+    columnKey: unknown,
+    ids: readonly unknown[],
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptCellAssetMap {
     const next: StoryScriptCellAssetMap = { ...(map && typeof map === "object" ? (map as StoryScriptCellAssetMap) : {}) };
-    const key = cellAssetMapKey(shotNo, columnKey);
+    const key = cellAssetMapKey(shotNo, columnKey, extras);
     if (!key) return next;
     const cleaned = Array.from(new Set(ids.filter((item): item is string => typeof item === "string" && Boolean(item))));
     if (cleaned.length) next[key] = cleaned;
@@ -868,11 +887,14 @@ export function setStoryScriptCellAssetIds(map: unknown, shotNo: unknown, column
 }
 
 /** 统一把 map 收成「键是 `镜号:资产列`、值是去重后的非空 id 数组」，顺带丢掉空条目与非法键。 */
-export function normalizeStoryScriptCellAssetMap(map: unknown): StoryScriptCellAssetMap {
+export function normalizeStoryScriptCellAssetMap(
+    map: unknown,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptCellAssetMap {
     const source = map && typeof map === "object" ? (map as Record<string, unknown>) : {};
     const next: StoryScriptCellAssetMap = {};
     for (const [key, value] of Object.entries(source)) {
-        const parsed = parseScriptCellAssetKey(key);
+        const parsed = parseScriptCellAssetKey(key, extras);
         if (!parsed || !Array.isArray(value)) continue;
         const cleaned = Array.from(new Set(value.filter((item): item is string => typeof item === "string" && Boolean(item))));
         if (cleaned.length) next[`${parsed.shotNo}:${parsed.columnKey}`] = cleaned;
@@ -881,17 +903,54 @@ export function normalizeStoryScriptCellAssetMap(map: unknown): StoryScriptCellA
 }
 
 /** 删掉第 `deletedShotNo` 镜之后把键里的镜号整体前移一位（理由同 `shiftStoryScriptRowAssetsAfterDelete`）。 */
-export function shiftStoryScriptCellAssetsAfterDelete(map: unknown, deletedShotNo: unknown): StoryScriptCellAssetMap {
-    const normalized = normalizeStoryScriptCellAssetMap(map);
+export function shiftStoryScriptCellAssetsAfterDelete(
+    map: unknown,
+    deletedShotNo: unknown,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptCellAssetMap {
+    const normalized = normalizeStoryScriptCellAssetMap(map, extras);
     const deleted = Number(deletedShotNo);
     if (!Number.isFinite(deleted) || deleted <= 0) return normalized;
     const next: StoryScriptCellAssetMap = {};
     for (const [key, ids] of Object.entries(normalized)) {
-        const parsed = parseScriptCellAssetKey(key);
+        const parsed = parseScriptCellAssetKey(key, extras);
         if (!parsed || parsed.shotNo === deleted) continue;
         next[`${parsed.shotNo > deleted ? parsed.shotNo - 1 : parsed.shotNo}:${parsed.columnKey}`] = ids;
     }
     return next;
+}
+
+/**
+ * 删掉某一列之后：把图位表里 `镜号:该列` 的条目全部丢弃（**自建资产列被移除时用**）。
+ * 不清理的话，这一列的图位会以野键形式永久留在 metadata 里，以后新建同号列还会「继承」旧图。
+ */
+export function dropStoryScriptCellAssetColumn(
+    map: unknown,
+    columnKey: unknown,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptCellAssetMap {
+    const normalized = normalizeStoryScriptCellAssetMap(map, extras);
+    const key = typeof columnKey === "string" ? columnKey : "";
+    if (!key) return normalized;
+    const next: StoryScriptCellAssetMap = {};
+    for (const [entryKey, ids] of Object.entries(normalized)) {
+        const parsed = parseScriptCellAssetKey(entryKey, extras);
+        if (!parsed || parsed.columnKey === key) continue;
+        next[entryKey] = ids;
+    }
+    return next;
+}
+
+/** 删掉某一列之后：把每一行里这一列的文本一并清掉（与 `dropStoryScriptCellAssetColumn` 配套）。 */
+export function dropStoryScriptRowColumn(rows: readonly StoryScriptRow[] | null | undefined, columnKey: unknown): StoryScriptRow[] {
+    const key = typeof columnKey === "string" ? columnKey : "";
+    if (!key) return [...(rows || [])];
+    return (rows || []).map((row) => {
+        if (!(key in row)) return row;
+        const next: StoryScriptRow = { ...row };
+        delete next[key];
+        return next;
+    });
 }
 
 /**
@@ -906,17 +965,20 @@ export function scriptShotCellAssetSlots(
     map: unknown,
     shotNo: unknown,
     preset?: StoryScriptPresetId | string | null,
+    extras?: readonly StoryScriptExtraColumn[] | null,
 ): Array<{ columnKey: string; role: ScriptAssetRole; ids: string[] }> {
-    const ordered = preset ? getStoryScriptAssetColumns(preset).map((column) => column.key) : Object.keys(SCRIPT_ASSET_COLUMN_SPECS);
+    const ordered = preset
+        ? getStoryScriptAssetColumns(preset, extras).map((column) => column.key)
+        : [...Object.keys(SCRIPT_ASSET_COLUMN_SPECS), ...(extras || []).map((item) => item.key)];
     const allowed = new Set(ordered);
     const target = Math.round(Number(shotNo));
     const out: Array<{ columnKey: string; role: ScriptAssetRole; ids: string[] }> = [];
     // 按列序输出（而不是 map 的插入序），这样铺链路连线的先后与表格里从左到右一致。
     for (const columnKey of ordered) {
         if (!allowed.has(columnKey)) continue;
-        const ids = scriptCellAssetIds(map, target, columnKey);
+        const ids = scriptCellAssetIds(map, target, columnKey, extras);
         if (!ids.length) continue;
-        out.push({ columnKey, role: scriptAssetColumnRole(columnKey) || "character", ids });
+        out.push({ columnKey, role: scriptAssetColumnRole(columnKey, extras) || "character", ids });
     }
     return out;
 }
@@ -927,8 +989,14 @@ export function scriptShotCellAssetSlots(
  * 铺链路时拿它去喂 `matchStoryScriptRowAssets`：例如第 3 镜的「场景」格已经挂了图，
  * 这一镜就只剩「还没指定的角色列」参与资产条匹配，资产条里的场景素材不会再糊到这一镜上。
  */
-export function blankFilledAssetColumns(map: unknown, shotNo: unknown, row: StoryScriptRow, preset?: StoryScriptPresetId | string | null): StoryScriptRow {
-    const slots = scriptShotCellAssetSlots(map, shotNo, preset);
+export function blankFilledAssetColumns(
+    map: unknown,
+    shotNo: unknown,
+    row: StoryScriptRow,
+    preset?: StoryScriptPresetId | string | null,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptRow {
+    const slots = scriptShotCellAssetSlots(map, shotNo, preset, extras);
     if (!slots.length) return row;
     const next: StoryScriptRow = { ...row };
     for (const slot of slots) {
@@ -1032,7 +1100,12 @@ export function addScriptNameLockForCell(
  * **一键铺链入口**：拿整张表**当前所有格子链接**重建锁表 ——
  * 「将分镜表已经链接好的图片锁成：资产名 → 图片」。已有锁保留（并集），不会因为没有格子链接而被抹掉。
  */
-export function syncStoryScriptNameLocks(map: unknown, cells: unknown, rows?: readonly StoryScriptRow[] | null): StoryScriptNameLockMap {
+export function syncStoryScriptNameLocks(
+    map: unknown,
+    cells: unknown,
+    rows?: readonly StoryScriptRow[] | null,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptNameLockMap {
     let next = normalizeStoryScriptNameLockMap(map);
     if (!rows?.length || !cells || typeof cells !== "object" || Array.isArray(cells)) return next;
     const byShot = new Map<number, StoryScriptRow>();
@@ -1041,7 +1114,7 @@ export function syncStoryScriptNameLocks(map: unknown, cells: unknown, rows?: re
         if (!byShot.has(shotNo)) byShot.set(shotNo, row);
     });
     for (const [key, value] of Object.entries(cells as Record<string, unknown>)) {
-        const parsed = parseScriptCellAssetKey(key);
+        const parsed = parseScriptCellAssetKey(key, extras);
         if (!parsed || !Array.isArray(value)) continue;
         const row = byShot.get(parsed.shotNo);
         if (!row) continue;
@@ -1136,13 +1209,14 @@ export function scriptShotPreciseAssetRefs(
     shotNo: unknown,
     row: StoryScriptRow | undefined | null,
     preset?: StoryScriptPresetId | string | null,
+    extras?: readonly StoryScriptExtraColumn[] | null,
 ): Array<{ columnKey: string; role: ScriptAssetRole; name: string; ids: string[]; source: "cell" | "lock" }> {
     if (!row) return [];
     const out: Array<{ columnKey: string; role: ScriptAssetRole; name: string; ids: string[]; source: "cell" | "lock" }> = [];
-    for (const column of getStoryScriptAssetColumns(preset)) {
-        const role = scriptAssetColumnRole(column.key) || "character";
+    for (const column of getStoryScriptAssetColumns(preset, extras)) {
+        const role = scriptAssetColumnRole(column.key, extras) || "character";
         const name = scriptNameLockName(row[column.key]);
-        const cellIds = scriptCellAssetIds(cells, shotNo, column.key);
+        const cellIds = scriptCellAssetIds(cells, shotNo, column.key, extras);
         if (cellIds.length) {
             out.push({ columnKey: column.key, role, name, ids: cellIds, source: "cell" });
             continue;
@@ -1193,19 +1267,102 @@ const SCRIPT_ASSET_COLUMN_SPECS: Record<string, { role: ScriptAssetRole; nameKey
     blocking: { role: "blocking", textKeys: ["blocking"] },
 };
 
-/** 某一列是不是资产列（角色1 / 角色2 / 场景 / 道具 / 人物站位）。 */
-export function isScriptAssetColumn(key: unknown): boolean {
-    return typeof key === "string" && Boolean(SCRIPT_ASSET_COLUMN_SPECS[key]);
+/**
+ * **手动追加的资产列**（用户要求：「需要能够手动添加资产列，并连接进图片」）。
+ *
+ * 预设的列是固定的（角色1 / 角色2 / 场景 / 道具 / 人物站位），但一个片子可能还要「宠物」「车辆」
+ * 「产品」这类资产。做法是让用户自建一列，**行为与内置资产列完全一致**：
+ *   - 格子里能放文字（资产名 / 描述二合一）→ 能挂图位（导入 / 链接 / 生成 / 资产锁）；
+ *   - 铺链路时按 `role` 分类把图连进该镜的图片节点（`scriptShotPreciseAssetRefs` 认它）。
+ *
+ * key 固定 `extra_<数字>`（不跟随列名，改列名不会丢图位）；真正的列名在 `label`。
+ */
+export type StoryScriptExtraColumn = {
+    /** 列 key（`extra_1`…），与行数据 / 图位表（`shot:key`）同键，**一旦建好不再变**。 */
+    key: string;
+    /** 列名（用户填的，例：「宠物」）。 */
+    label: string;
+    /** 铺链路时按哪个分类连图（角色会被名字匹配，其余对每一镜都成立）。 */
+    role: ScriptAssetRole;
+};
+
+/** 自建资产列 key 前缀（`isScriptAssetColumn` 靠它 + extras 双重确认，避免野键被当成资产列）。 */
+const EXTRA_COLUMN_KEY_PATTERN = /^extra_[a-z0-9_]{1,24}$/;
+/** 自建资产列允许的分类：音频没有表列（它不是字段），所以不给选。 */
+export const SCRIPT_EXTRA_COLUMN_ROLE_IDS: ScriptAssetRole[] = ["character", "scene", "prop", "blocking"];
+/** 一张表最多几列自建资产列（再多表就宽到没法看了）。 */
+export const STORY_SCRIPT_MAX_EXTRA_COLUMNS = 8;
+/** 自建资产列默认宽度：和内置资产列（140~150）齐平，够放 56px 缩略图 + 「+」。 */
+const EXTRA_COLUMN_WIDTH = 150;
+
+/** 归一化自建资产列：丢非法项、去重 key、分类收敛到允许集合，超过上限截断。 */
+export function normalizeStoryScriptExtraColumns(value: unknown): StoryScriptExtraColumn[] {
+    if (!Array.isArray(value)) return [];
+    const out: StoryScriptExtraColumn[] = [];
+    const seen = new Set<string>();
+    for (const item of value) {
+        if (!item || typeof item !== "object") continue;
+        const record = item as Record<string, unknown>;
+        const key = typeof record.key === "string" ? record.key.trim() : "";
+        if (!EXTRA_COLUMN_KEY_PATTERN.test(key) || seen.has(key)) continue;
+        const label = typeof record.label === "string" ? record.label.trim() : "";
+        if (!label) continue;
+        const role = SCRIPT_EXTRA_COLUMN_ROLE_IDS.includes(record.role as ScriptAssetRole) ? (record.role as ScriptAssetRole) : "scene";
+        seen.add(key);
+        out.push({ key, label, role });
+        if (out.length >= STORY_SCRIPT_MAX_EXTRA_COLUMNS) break;
+    }
+    return out;
 }
 
-/** 资产列对应的资产分类；不是资产列（或非字符串）返回 `null`。 */
-export function scriptAssetColumnRole(key: unknown): ScriptAssetRole | null {
-    return (typeof key === "string" ? SCRIPT_ASSET_COLUMN_SPECS[key]?.role : undefined) ?? null;
+/** 下一个可用的自建资产列 key（`extra_1`、`extra_2`…；删过列也不会复用旧号，避免图位串到新列）。 */
+export function nextStoryScriptExtraColumnKey(extras: readonly StoryScriptExtraColumn[] | null | undefined): string {
+    let max = 0;
+    for (const item of extras || []) {
+        const matched = /^extra_(\d+)$/.exec(item.key);
+        if (matched) max = Math.max(max, Number(matched[1]));
+    }
+    return `extra_${max + 1}`;
 }
 
-/** 当前预设下真正存在的资产列（按预设列顺序），供表格渲染图位用。 */
-export function getStoryScriptAssetColumns(preset?: StoryScriptPresetId | string | null): StoryScriptColumn[] {
-    return getStoryScriptColumns(preset).filter((column) => isScriptAssetColumn(column.key));
+/** 自建资产列 → 表格列定义（追加在预设列之后）。 */
+export function storyScriptExtraColumnsToColumns(extras: readonly StoryScriptExtraColumn[] | null | undefined): StoryScriptColumn[] {
+    return (extras || []).map((item) => ({ key: item.key, label: item.label, width: EXTRA_COLUMN_WIDTH }));
+}
+
+/** 预设列 + 自建资产列 = 表格实际渲染的列（导出 / 解析仍只按预设列走，自建列是用户手填的）。 */
+export function getStoryScriptColumnsWithExtras(
+    preset?: StoryScriptPresetId | string | null,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptColumn[] {
+    const base = getStoryScriptColumns(preset);
+    const extraColumns = storyScriptExtraColumnsToColumns(extras);
+    return extraColumns.length ? [...base, ...extraColumns] : base;
+}
+
+/** 某一列是不是资产列（角色1 / 角色2 / 场景 / 道具 / 人物站位 + 用户自建列）。 */
+export function isScriptAssetColumn(key: unknown, extras?: readonly StoryScriptExtraColumn[] | null): boolean {
+    if (typeof key !== "string") return false;
+    if (SCRIPT_ASSET_COLUMN_SPECS[key]) return true;
+    return Boolean(extras?.some((item) => item.key === key));
+}
+
+/** 资产列对应的资产分类；不是资产列（或非字符串）返回 `null`。自建列读它自己的 `role`。 */
+export function scriptAssetColumnRole(key: unknown, extras?: readonly StoryScriptExtraColumn[] | null): ScriptAssetRole | null {
+    if (typeof key !== "string") return null;
+    const spec = SCRIPT_ASSET_COLUMN_SPECS[key];
+    if (spec) return spec.role;
+    return extras?.find((item) => item.key === key)?.role ?? null;
+}
+
+/** 当前预设下真正存在的资产列（按预设列顺序 + 自建列），供表格渲染图位、铺链路按列序连线用。 */
+export function getStoryScriptAssetColumns(
+    preset?: StoryScriptPresetId | string | null,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptColumn[] {
+    const presetColumns = getStoryScriptColumns(preset).filter((column) => isScriptAssetColumn(column.key));
+    const extraColumns = storyScriptExtraColumnsToColumns(extras).filter((column) => isScriptAssetColumn(column.key, extras));
+    return [...presetColumns, ...extraColumns];
 }
 
 /**
@@ -1255,9 +1412,16 @@ export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonl
  * 所以「第 3 镜的场景」生成出来的提示词就是第 3 镜那一条，不会串到别的镜头去。
  * 该列在预设里不存在、或这一行这一列本来就是 `无` → 返回 `null`（调用方按「没有可填的候选」处理）。
  */
-export function collectScriptCellPromptCandidate(columnKey: unknown, row?: StoryScriptRow | null): ScriptAssetPromptCandidate | null {
-    const spec = typeof columnKey === "string" ? SCRIPT_ASSET_COLUMN_SPECS[columnKey] : undefined;
-    if (!spec || !row) return null;
+export function collectScriptCellPromptCandidate(
+    columnKey: unknown,
+    row?: StoryScriptRow | null,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): ScriptAssetPromptCandidate | null {
+    if (typeof columnKey !== "string" || !row) return null;
+    // 自建资产列：这一格本身就是「名字 + 描述」二合一，所以名字和提示词都取同一个格子的文字。
+    const extra = extras?.find((item) => item.key === columnKey);
+    const spec = extra ? { role: extra.role, nameKey: columnKey, textKeys: [columnKey] } : SCRIPT_ASSET_COLUMN_SPECS[columnKey];
+    if (!spec) return null;
     const name = spec.nameKey ? storyScriptCellText(row[spec.nameKey]) : "";
     const text = joinStoryScriptPromptParts(spec.textKeys.map((key) => storyScriptCellText(row[key])));
     const title = name || text.slice(0, 24);
@@ -1346,13 +1510,17 @@ export function remapStoryScriptRowAssets(map: unknown, mapping: Map<number, num
 }
 
 /** 按镜按资产（`metadata.scriptCellAssets`）跟着镜号一起挪，列 key 不动。 */
-export function remapStoryScriptCellAssets(map: unknown, mapping: Map<number, number>): StoryScriptCellAssetMap {
-    const normalized = normalizeStoryScriptCellAssetMap(map);
+export function remapStoryScriptCellAssets(
+    map: unknown,
+    mapping: Map<number, number>,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptCellAssetMap {
+    const normalized = normalizeStoryScriptCellAssetMap(map, extras);
     return remapShotNumberKeys<StoryScriptCellAssetMap[string]>(
         normalized,
         mapping,
         (key) => {
-            const parsed = parseScriptCellAssetKey(key);
+            const parsed = parseScriptCellAssetKey(key, extras);
             return parsed ? { shotNo: parsed.shotNo, rest: parsed.columnKey } : null;
         },
         (shotNo, rest) => `${shotNo}:${rest}`,
@@ -1423,9 +1591,13 @@ export type StoryScriptAssetFillTarget = {
  *
  * 表里写成 `无` 的值按空处理（`storyScriptCellText` 口径），所以模型偷懒写「无」的格子也会被认成缺失。
  */
-export function collectStoryScriptAssetFillTargets(preset: StoryScriptPresetId | string | null | undefined, row: StoryScriptRow | null | undefined): StoryScriptAssetFillTarget[] {
+export function collectStoryScriptAssetFillTargets(
+    preset: StoryScriptPresetId | string | null | undefined,
+    row: StoryScriptRow | null | undefined,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptAssetFillTarget[] {
     if (!row) return [];
-    const columns = getStoryScriptColumns(preset);
+    const columns = getStoryScriptColumnsWithExtras(preset, extras);
     const byKey = new Map(columns.map((column) => [column.key, column]));
     const targets: StoryScriptAssetFillTarget[] = [];
     for (const [key, spec] of Object.entries(SCRIPT_ASSET_COLUMN_SPECS)) {
@@ -1434,6 +1606,12 @@ export function collectStoryScriptAssetFillTargets(preset: StoryScriptPresetId |
         const groupKeys = [key, ...textKeys];
         if (groupKeys.some((groupKey) => storyScriptCellText(row[groupKey]))) continue;
         targets.push({ key, label: byKey.get(key)?.label || key, role: spec.role, textKeys });
+    }
+    // 自建资产列：只占一列（名字 + 描述二合一），空着就算缺失。
+    for (const extra of extras || []) {
+        if (!byKey.has(extra.key)) continue;
+        if (storyScriptCellText(row[extra.key])) continue;
+        targets.push({ key: extra.key, label: byKey.get(extra.key)?.label || extra.key, role: extra.role, textKeys: [] });
     }
     return targets;
 }
@@ -1449,13 +1627,15 @@ export function buildStoryScriptAssetFillTask({
     sourceText,
     row,
     targets,
+    extras,
 }: {
     preset?: StoryScriptPresetId | string | null;
     sourceText: string;
     row: StoryScriptRow;
     targets: StoryScriptAssetFillTarget[];
+    extras?: readonly StoryScriptExtraColumn[] | null;
 }): string {
-    const columns = getStoryScriptColumns(preset);
+    const columns = getStoryScriptColumnsWithExtras(preset, extras);
     const keySet = new Set(columns.map((column) => column.key));
     const wanted = targets.flatMap((target) => [target.key, ...target.textKeys].filter((key) => keySet.has(key)));
     const wantedLabels = targets

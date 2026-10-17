@@ -11,12 +11,17 @@ import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialo
 import {
     collectScriptCellPromptCandidate,
     collectStoryScriptAssetFillTargets,
+    dropStoryScriptCellAssetColumn,
+    dropStoryScriptRowColumn,
     getStoryScriptColumns,
+    getStoryScriptColumnsWithExtras,
     getStoryScriptPreset,
     getStoryScriptSystemPrompt,
     hasScriptSystemPromptOverride,
     isScriptAssetColumn,
     nextScriptAssetRole,
+    nextStoryScriptExtraColumnKey,
+    normalizeStoryScriptExtraColumns,
     remapStoryScriptCellAssets,
     remapStoryScriptRowAssets,
     remapStoryScriptRowNotes,
@@ -30,9 +35,12 @@ import {
     scriptNameLockIds,
     scriptNameLockName,
     scriptRowAssetIds,
+    SCRIPT_EXTRA_COLUMN_ROLE_IDS,
     shiftStoryScriptCellAssetsAfterDelete,
     shiftStoryScriptRowAssetsAfterDelete,
     stepStoryScriptFontSize,
+    STORY_SCRIPT_MAX_EXTRA_COLUMNS,
+    storyScriptExtraColumnsToColumns,
     storyScriptRowNote,
     storyScriptToMarkdown,
     storyScriptToTsv,
@@ -40,6 +48,7 @@ import {
     STORY_SCRIPT_PRESET_IDS,
     STORY_SCRIPT_SEGMENT_SECONDS,
     type ScriptAssetRole,
+    type StoryScriptExtraColumn,
     type StoryScriptPresetId,
 } from "@/constant/story-script";
 import type { CanvasTheme } from "@/lib/canvas-theme";
@@ -58,8 +67,8 @@ export type { ScriptAssetCandidate, ScriptAssetLinkSelection };
  *  1) 外壳 `cursor-move`，内部真实控件用 pointer/mouse 捕获把事件挡在节点拖拽之外；
  *  2) 滚动容器挂原生 wheel stopPropagation + `data-canvas-no-zoom`，否则画布会把滚轮吃掉当缩放。
  *
- * 字号：表格是十几列的宽表（经典预设约 2.9k px），所以**默认基准 20px**（用户要求：默认可读），
- * 工具条 23px（1.154 倍），再由画布缩放进退。基准字号可由顶部「A− / A+」调档
+ * 字号：表格是十几列的宽表（经典预设约 2.9k px），基准字号**默认 15px**（20px 时整表太占地方，
+ * 用户 2026-10-17 要求降到 15），工具条 23px（1.154 倍），再由画布缩放进退。基准字号可由顶部「A− / A+」调档
  * （`metadata.scriptFontSize`）：外壳挂基准 px，**其余字号一律写成 em**，所以只改一个值就整体缩放。
  *
  * 表格内容默认**完整显示**（不再 line-clamp 截断，见 `showFullText`）：分镜提示词动辄几百字，
@@ -77,23 +86,23 @@ const TABLE_ACTION_WIDTH = 132;
 /** 勾选列（批量重生成 / 批量铺视频）的宽度：只有一个圆形勾选按钮。 */
 const TABLE_SELECT_WIDTH = 34;
 /**
- * 「镜头图」列宽（逐镜图片）。它是**不参与解析 / 导出**的自绘列（预设列定义里没有它），
- * 所以单独声明、并计入 `tableWidth`，让自动适配窗口宽度时把它一起算上。
+ * 「镜头图」列已于 2026-10-17 按用户要求从表里移除（`ROW_IMAGE_COLUMN_WIDTH` 同时删除）。
+ * `metadata.scriptRowAssets`（逐镜图片）与铺链路对它的处理**都还在**——只是表里不再有这一列入口；
+ * 以后要恢复，把 colgroup / thead / tbody 三段各补回来即可（旧的弹窗与回调也还留在本文件里）。
  */
-const ROW_IMAGE_COLUMN_WIDTH = 148;
 
 /**
  * 生成后按「内容多少」自动适配节点窗口尺寸的边界。
  * 高度贴合全部行（不再只露三四行）；宽度贴合表格实际宽度，但封顶——经典预设 16 列约 2.9k px，
  * 若真按宽度撑开节点会宽到没法用，所以超出部分仍靠表体横向滚动（配「全屏」看整表）。
  *
- * 因为默认字号提到 20px、单元格默认完整显示，行会明显变高，所以高度上限也给得比以前宽
- * （1600 → 2400）：一张十镜的表大致能一次看全，而不是又被窗口高度截住。
+ * 高度上限 1600：字号回落到 15px、行高按用户要求压掉约 1/3、且「镜头图」列移除之后，
+ * 一张十镜的表基本能一次看全；再高窗口就成了纯背景。
  */
 const AUTO_SIZE_MIN_WIDTH = 760;
 const AUTO_SIZE_MAX_WIDTH = 2200;
 const AUTO_SIZE_MIN_HEIGHT = 460;
-const AUTO_SIZE_MAX_HEIGHT = 2400;
+const AUTO_SIZE_MAX_HEIGHT = 1600;
 const AUTO_SIZE_PADDING_X = 24;
 
 /** 三个「试一试」快捷动作（对应剧集画布 ScriptNode 的 SCRIPT_ACTIONS）：在脚本节点左侧建好对应上游节点并连边。 */
@@ -155,6 +164,11 @@ type CanvasScriptNodeContentProps = {
     onRegenerateRows?: (nodeId: string, rowIndexes: number[], options?: { extraPlot?: string; keepBlocking?: boolean }) => void;
     /** 二次识别补缺失资产：只补这一镜**空着**的资产列，已有内容一个字都不改（append-only）。 */
     onFillShotAssets?: (nodeId: string, rowIndex: number) => void;
+    /**
+     * 整表补齐资产：把**所有还有缺列**的镜头逐条串行补一遍（跳过不缺的行，一条汇总提示）。
+     * 漏资产往往不是单镜的问题，逐镜点太累，所以给一个整表入口。
+     */
+    onFillAllShotAssets?: (nodeId: string) => void;
     /** 逐镜备注（`metadata.scriptRowNotes`：镜号 → 用户给这一镜追加的剧情 / 修改要求）。 */
     rowNotes?: Record<string, string>;
     /** 重新生成整表：整张分镜表推倒重来（用于追回缺失的资产 / 列）。 */
@@ -236,6 +250,7 @@ export function CanvasScriptNodeContent({
     onRegenerateShot,
     onRegenerateRows,
     onFillShotAssets,
+    onFillAllShotAssets,
     rowNotes,
     onRegenerateAll,
     rowAssets,
@@ -281,12 +296,18 @@ export function CanvasScriptNodeContent({
     // 输出格式预设：列定义、行操作都从这里来。
     const presetId = resolveStoryScriptPresetId(node.metadata?.scriptPreset);
     const preset = useMemo(() => getStoryScriptPreset(presetId), [presetId]);
-    const columns = preset.columns;
+    /**
+     * 手动追加的资产列（用户自建：「宠物」「车辆」…）。行为与内置资产列一致 ——
+     * 格子里能挂图、能上锁，铺链路时按 `role` 连进这一镜的图片节点。
+     */
+    const extraColumns = useMemo(() => normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns), [node.metadata?.scriptExtraColumns]);
+    // 表格实际渲染的列 = 预设列 + 自建资产列（解析 / 导出仍只按预设列走，自建列是用户手填的）。
+    const columns = useMemo(() => getStoryScriptColumnsWithExtras(presetId, extraColumns), [presetId, extraColumns]);
     // 勾选列只在「支持批量操作」时出现（没接线就完全不占宽度）。
     const showRowSelect = Boolean(onRegenerateRows || onBuildShotVideos);
-    // 「镜头图」列 / 勾选列挂在 preset 列之前，所以表格实际宽度要把它们一起算上（否则自动适配会窄）。
+    // 勾选列挂在 preset 列之前，所以表格实际宽度要把它一起算上（否则自动适配会窄）。
     const tableWidth = useMemo(
-        () => columns.reduce((sum, column) => sum + column.width, 0) + TABLE_ACTION_WIDTH + ROW_IMAGE_COLUMN_WIDTH + (showRowSelect ? TABLE_SELECT_WIDTH : 0),
+        () => columns.reduce((sum, column) => sum + column.width, 0) + TABLE_ACTION_WIDTH + (showRowSelect ? TABLE_SELECT_WIDTH : 0),
         [columns, showRowSelect],
     );
 
@@ -333,6 +354,10 @@ export function CanvasScriptNodeContent({
      * 切到 `false` 时退回「4 行 + 悬停看全文」，用来把很长的提示词列压扁。
      */
     const [showFullText, setShowFullText] = useState(true);
+    /** 「添加资产列」弹窗：列名草稿 + 分类（默认场景 = 对每一镜都成立，最不容易「只连到一镜」）。 */
+    const [addColumnOpen, setAddColumnOpen] = useState(false);
+    const [addColumnLabel, setAddColumnLabel] = useState("");
+    const [addColumnRole, setAddColumnRole] = useState<ScriptAssetRole>("scene");
 
     useEffect(() => {
         setSourceDraft(source);
@@ -348,10 +373,20 @@ export function CanvasScriptNodeContent({
     const showTryActions = !rows.length && activeReferences.length === 0 && !sourceDraft.trim();
     // 「添加资产」入口：导入 / 链接 / 生成三条里有一条能用就显示。
     const showAssetEntry = Boolean(onImportAssets || onLinkAssets || onGenerateAsset);
-    // 「镜头图」列：逐镜关联图片。导入 / 关联 / 生成三条路有一条能用就显示这一列。
-    const showRowImage = Boolean(onRowAssetsChange || onRowAssetImport || onRowAssetGenerate);
-    // 「按镜按资产」图位：资产列（角色1 / 场景 / 道具 / 人物站位）格子里的缩略图 + 「+」。
+    // 「镜头图」列已从表里移除（见文件头常量处的说明），所以这里不再判断是否显示它。
+    // 「按镜按资产」图位：资产列（角色1 / 场景 / 道具 / 人物站位 + 自建资产列）格子里的缩略图 + 「+」。
     const showCellAssets = Boolean(onCellAssetsChange || onCellAssetImport || onCellAssetGenerate);
+    /**
+     * 每一镜「缺哪些资产」（整组都空才算缺）。三处共用这一份：
+     *  - 行内「补资产」按钮（这一镜真有缺列才出现）；
+     *  - 底部「补齐全部资产」按钮（计数 + 可点性）；
+     *  - 批量补齐时决定跳过哪些行（空数组的行不发请求）。
+     */
+    const rowAssetFillTargets = useMemo(
+        () => rows.map((row) => collectStoryScriptAssetFillTargets(presetId, row, extraColumns)),
+        [rows, presetId, extraColumns],
+    );
+    const missingAssetRowCount = useMemo(() => rowAssetFillTargets.filter((targets) => targets.length).length, [rowAssetFillTargets]);
     // 缩略图 / 标题查表（按节点 id）。节点被删后取不到，渲染时会退化成占位图标。
     const imageLookup = useMemo(() => {
         const map = new Map<string, ScriptAssetCandidate>();
@@ -439,7 +474,8 @@ export function CanvasScriptNodeContent({
         const contentHeight = table.offsetHeight;
         if (!contentHeight) return;
         // 签名带行数、单元格总字数、基准字号与「完整/精简」：增删行、改字、调字号、切显示都会变，纯切换视图不会。
-        const signature = `${presetId}:${baseFontSize}:${showFullText ? "full" : "compact"}:${columns.length}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
+        // 前缀 `v2` 是「版式版本」：行高压缩 / 移除镜头图列之后，老节点存下的签名不再命中，会重新适配一次。
+        const signature = `v2:${presetId}:${baseFontSize}:${showFullText ? "full" : "compact"}:${columns.length}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
         if (signature === lastAutoSizeKeyRef.current) return;
         const chromeHeight = Math.max(0, shell.clientHeight - body.clientHeight);
         const width = Math.round(Math.min(AUTO_SIZE_MAX_WIDTH, Math.max(AUTO_SIZE_MIN_WIDTH, tableWidth + AUTO_SIZE_PADDING_X)));
@@ -488,7 +524,7 @@ export function CanvasScriptNodeContent({
             scriptRows: next,
             scriptRowAssets: shiftStoryScriptRowAssetsAfterDelete(node.metadata?.scriptRowAssets, deletedShotNo),
             // 「按镜按资产」的键里也有镜号，同样要跟着前移。
-            scriptCellAssets: shiftStoryScriptCellAssetsAfterDelete(node.metadata?.scriptCellAssets, deletedShotNo),
+            scriptCellAssets: shiftStoryScriptCellAssetsAfterDelete(node.metadata?.scriptCellAssets, deletedShotNo, extraColumns),
         });
         setSelectedRows(new Set());
         message.success(t("canvas.scriptNode.rowDeleted"));
@@ -507,7 +543,7 @@ export function CanvasScriptNodeContent({
         patchMetadata({
             scriptRows: nextRows,
             scriptRowAssets: remapStoryScriptRowAssets(node.metadata?.scriptRowAssets, mapping),
-            scriptCellAssets: remapStoryScriptCellAssets(node.metadata?.scriptCellAssets, mapping),
+            scriptCellAssets: remapStoryScriptCellAssets(node.metadata?.scriptCellAssets, mapping, extraColumns),
             scriptRowNotes: remapStoryScriptRowNotes(node.metadata?.scriptRowNotes, mapping),
         });
         // 勾选按 rowIndex 存，顺序一变就指到别人身上了 —— 清空。
@@ -543,6 +579,50 @@ export function CanvasScriptNodeContent({
         onRegenerateRows?.(node.id, rowEditTarget, { extraPlot: rowPlotDraft.trim() || undefined, keepBlocking: rowKeepBlocking });
         setRowEditTarget(null);
         setSelectedRows(new Set());
+    };
+
+    /**
+     * 「添加资产列」：自建一列（例「宠物」），行为与内置资产列一致 ——
+     * 格子里能挂图位、能上资产锁，铺链路时按 `role` 连进这一镜的图片节点。
+     *
+     * key 用 `extra_<n>` 且**永久不变**（改列名只改 `label`），这样列名改了图位不会丢。
+     */
+    const submitAddColumn = () => {
+        const label = addColumnLabel.trim();
+        if (!label) {
+            message.warning(t("canvas.scriptNode.extraColumnNeedName"));
+            return;
+        }
+        if (extraColumns.length >= STORY_SCRIPT_MAX_EXTRA_COLUMNS) {
+            message.warning(t("canvas.scriptNode.extraColumnLimit", { count: STORY_SCRIPT_MAX_EXTRA_COLUMNS }));
+            return;
+        }
+        if (extraColumns.some((item) => item.label === label)) {
+            message.warning(t("canvas.scriptNode.extraColumnExists", { label }));
+            return;
+        }
+        const next: StoryScriptExtraColumn[] = [...extraColumns, { key: nextStoryScriptExtraColumnKey(extraColumns), label, role: addColumnRole }];
+        patchMetadata({ scriptExtraColumns: next });
+        setAddColumnOpen(false);
+        setAddColumnLabel("");
+        setAddColumnRole("scene");
+    };
+
+    /** 删除自建资产列：连这一列的行文本 + 图位一起清掉（只删表头会留下野数据）。 */
+    const removeExtraColumn = (column: { key: string; label: string }) => {
+        modal.confirm({
+            title: t("canvas.scriptNode.extraColumnRemoveConfirm", { label: column.label }),
+            okText: t("canvas.scriptNode.extraColumnRemove"),
+            cancelText: t("common.cancel"),
+            onOk: () => {
+                patchMetadata({
+                    scriptExtraColumns: extraColumns.filter((item) => item.key !== column.key),
+                    scriptRows: dropStoryScriptRowColumn(rows, column.key),
+                    // 传「删之前的 extraColumns」：要删的这一列此刻还必须算合法列，否则它的图位早被当归一化野键丢掉了。
+                    scriptCellAssets: dropStoryScriptCellAssetColumn(node.metadata?.scriptCellAssets, column.key, extraColumns),
+                });
+            },
+        });
     };
 
     const toastCopied = () => message.success(t("common.copied"));
@@ -1194,10 +1274,9 @@ export function CanvasScriptNodeContent({
         <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
             {assetToolbar}
             <div ref={bodyRef} data-canvas-no-zoom className="thin-scrollbar min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
-                <table ref={tableRef} className="border-separate border-spacing-0 leading-snug" style={tableStyle}>
+                <table ref={tableRef} className="border-separate border-spacing-0 leading-tight" style={tableStyle}>
                     <colgroup>
                         {showRowSelect ? <col style={{ width: TABLE_SELECT_WIDTH }} /> : null}
-                        {showRowImage ? <col style={{ width: ROW_IMAGE_COLUMN_WIDTH }} /> : null}
                         {columns.map((column) => (
                             <col key={column.key} style={{ width: column.width }} />
                         ))}
@@ -1206,7 +1285,7 @@ export function CanvasScriptNodeContent({
                     <thead>
                         <tr>
                             {showRowSelect ? (
-                                <th className="sticky top-0 z-10 border-b px-1 py-1.5" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel }}>
+                                <th className="sticky top-0 z-10 border-b px-1 py-1" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel }}>
                                     <button
                                         type="button"
                                         className="inline-flex size-5 items-center justify-center rounded-md border text-[0.7em] transition"
@@ -1227,25 +1306,39 @@ export function CanvasScriptNodeContent({
                                     </button>
                                 </th>
                             ) : null}
-                            {showRowImage ? (
-                                <th
-                                    className="sticky top-0 z-10 border-b px-2 py-1.5 text-left font-semibold whitespace-nowrap"
-                                    style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}
-                                    title={t("canvas.scriptNode.rowImageColumnHint")}
-                                >
-                                    {t("canvas.scriptNode.rowImageColumn")}
-                                </th>
-                            ) : null}
-                            {columns.map((column) => (
-                                <th
-                                    key={column.key}
-                                    className={`sticky top-0 z-10 border-b px-2 py-1.5 text-left font-semibold whitespace-nowrap ${column.numeric ? "text-right" : ""}`}
-                                    style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}
-                                >
-                                    {column.label}
-                                </th>
-                            ))}
-                            <th className="sticky top-0 z-10 border-b px-2 py-1.5 text-left font-semibold whitespace-nowrap" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}>
+                            {columns.map((column) => {
+                                // 自建资产列的表头多一个「×」：删列（连带清掉行文本与图位，先确认）。
+                                const extra = extraColumns.find((item) => item.key === column.key);
+                                return (
+                                    <th
+                                        key={column.key}
+                                        className={`sticky top-0 z-10 border-b px-2 py-1 text-left font-semibold whitespace-nowrap ${column.numeric ? "text-right" : ""}`}
+                                        style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}
+                                        title={extra ? t("canvas.scriptNode.extraColumnHint", { role: t(`canvas.scriptNode.assetRole_${extra.role}`) }) : undefined}
+                                    >
+                                        <span className="inline-flex items-center gap-1">
+                                            {column.label}
+                                            {extra ? (
+                                                <button
+                                                    type="button"
+                                                    className="inline-flex size-4 items-center justify-center rounded border opacity-60 transition hover:opacity-100"
+                                                    style={{ borderColor: theme.node.stroke }}
+                                                    onMouseDown={(event) => event.stopPropagation()}
+                                                    onPointerDown={(event) => event.stopPropagation()}
+                                                    onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        removeExtraColumn(extra);
+                                                    }}
+                                                    title={t("canvas.scriptNode.extraColumnRemove")}
+                                                >
+                                                    <X className="size-2.5" />
+                                                </button>
+                                            ) : null}
+                                        </span>
+                                    </th>
+                                );
+                            })}
+                            <th className="sticky top-0 z-10 border-b px-2 py-1 text-left font-semibold whitespace-nowrap" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}>
                                 {t("canvas.scriptNode.columnActions")}
                             </th>
                         </tr>
@@ -1276,69 +1369,14 @@ export function CanvasScriptNodeContent({
                                         </button>
                                     </td>
                                 ) : null}
-                                {showRowImage ? (
-                                    // 「镜头图」：这一镜关联的图片缩略图（点 × 解绑，点 + 打开逐镜弹窗）。
-                                    // 它不参与解析 / 导出，只是把「这一镜用哪张图」这条关系画在表里。
-                                    <td className="border-b px-1.5 py-1" style={{ borderColor: theme.node.stroke }}>
-                                        <div className="flex flex-wrap items-center gap-1">
-                                            {scriptRowAssetIds(rowAssets, row.shot_no || rowIndex + 1).map((imageId) => {
-                                                const meta = imageLookup.get(imageId);
-                                                // 缩略图放大 3×（原 size-9 = 36px → size-27 = 108px）：表里的图太小看不清。
-                                                return (
-                                                    <span
-                                                        key={imageId}
-                                                        className="group relative flex size-27 shrink-0 items-center justify-center overflow-hidden rounded-md border"
-                                                        style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
-                                                        title={meta?.title || imageId}
-                                                    >
-                                                        {meta?.previewUrl ? <img src={meta.previewUrl} alt={meta.title} className="size-full object-cover" /> : <ImageIcon className="size-6" />}
-                                                        {onRowAssetsChange ? (
-                                                            <button
-                                                                type="button"
-                                                                className="absolute right-0 top-0 hidden size-6 items-center justify-center rounded-bl-md bg-black/60 text-white group-hover:flex"
-                                                                onMouseDown={(event) => event.stopPropagation()}
-                                                                onPointerDown={(event) => event.stopPropagation()}
-                                                                onClick={(event) => {
-                                                                    event.stopPropagation();
-                                                                    onRowAssetsChange(
-                                                                        node.id,
-                                                                        row.shot_no || rowIndex + 1,
-                                                                        scriptRowAssetIds(rowAssets, row.shot_no || rowIndex + 1).filter((id) => id !== imageId),
-                                                                    );
-                                                                }}
-                                                                title={t("canvas.scriptNode.rowImageRemove")}
-                                                            >
-                                                                <X className="size-3" />
-                                                            </button>
-                                                        ) : null}
-                                                    </span>
-                                                );
-                                            })}
-                                            <button
-                                                type="button"
-                                                className="inline-flex size-6 shrink-0 items-center justify-center rounded-md border transition hover:opacity-100"
-                                                style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
-                                                onMouseDown={(event) => event.stopPropagation()}
-                                                onPointerDown={(event) => event.stopPropagation()}
-                                                onClick={(event) => {
-                                                    event.stopPropagation();
-                                                    setRowAssetTarget({ shotNo: row.shot_no || rowIndex + 1, ids: scriptRowAssetIds(rowAssets, row.shot_no || rowIndex + 1) });
-                                                }}
-                                                title={scriptRowAssetIds(rowAssets, row.shot_no || rowIndex + 1).length ? t("canvas.scriptNode.rowImageEdit") : t("canvas.scriptNode.rowImageAdd")}
-                                            >
-                                                <Plus className="size-3" />
-                                            </button>
-                                        </div>
-                                    </td>
-                                ) : null}
                                 {columns.map((column) => {
                                     const value = String(row[column.key] ?? "");
-                                    // 「按镜按资产」图位：只挂在资产列（角色1 / 角色2 / 场景 / 道具 / 人物站位）上。
+                                    // 「按镜按资产」图位：挂在资产列（角色1 / 角色2 / 场景 / 道具 / 人物站位 **+ 自建资产列**）上。
                                     // 这一格的图**只属于这一镜的这一列**，铺链路时也只连到这一镜的图片 / 视频节点。
                                     const cellShotNo = row.shot_no || rowIndex + 1;
                                     // 这一格**自己**挂的图：精准指定，只属于这一镜的这一列。
-                                    const cellIds = scriptCellAssetIds(cellAssets, cellShotNo, column.key);
-                                    const showCellSlot = showCellAssets && isScriptAssetColumn(column.key);
+                                    const cellIds = scriptCellAssetIds(cellAssets, cellShotNo, column.key, extraColumns);
+                                    const showCellSlot = showCellAssets && isScriptAssetColumn(column.key, extraColumns);
                                     // 资产锁定：这一格的**资产名**（「张三」「客厅」）一旦被锁到某张图上，
                                     // 表里**别的镜**再出现同一个名字就直接显示同一张图 —— 也就是「同样的资产名
                                     // 只链接一次，就落到所有小格子里」。口径与铺链路的 `scriptShotPreciseAssetRefs`
@@ -1352,7 +1390,7 @@ export function CanvasScriptNodeContent({
                                         <td
                                             key={column.key}
                                             data-canvas-selectable-text
-                                            className={`cursor-text border-b px-2 py-1.5 ${column.numeric ? "text-right tabular-nums" : ""}`}
+                                            className={`cursor-text border-b px-2 py-1 ${column.numeric ? "text-right tabular-nums" : ""}`}
                                             style={{ borderColor: theme.node.stroke }}
                                             title={value || t("canvas.scriptNode.noContent")}
                                             onDoubleClick={(event) => {
@@ -1368,14 +1406,15 @@ export function CanvasScriptNodeContent({
                                                 <div className="opacity-35">{t("canvas.scriptNode.noContent")}</div>
                                             )}
                                             {showCellSlot ? (
-                                                <div className="mt-1 flex flex-wrap items-center gap-1" onDoubleClick={(event) => event.stopPropagation()}>
+                                                <div className="mt-0.5 flex flex-wrap items-center gap-1" onDoubleClick={(event) => event.stopPropagation()}>
                                                     {cellDisplayIds.map((imageId) => {
                                                         const meta = imageLookup.get(imageId);
-                                                        // 缩略图放大 3×（原 size-7 = 28px → size-21 = 84px）：表里的图太小看不清。
+                                                        // 缩略图 56px（原 84px）：行高按用户要求压掉约 1/3，图也一起收一号，
+                                                        // 否则资产列会把整行撑到 84px 起。表里仍能看清是谁。
                                                         return (
                                                             <span
                                                                 key={imageId}
-                                                                className="group relative flex size-21 shrink-0 items-center justify-center overflow-hidden rounded-md border"
+                                                                className="group relative flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-md border"
                                                                 style={{
                                                                     borderColor: cellLocked ? theme.toolbar.activeBg : theme.node.stroke,
                                                                     background: theme.node.fill,
@@ -1566,7 +1605,7 @@ export function CanvasScriptNodeContent({
                                             </button>
                                         ) : null}
                                         {/* 二次识别补缺失资产：只有这一镜真的缺资产列时才出现（本身就是「缺什么」的提示）。 */}
-                                        {onFillShotAssets && collectStoryScriptAssetFillTargets(presetId, row).length ? (
+                                        {onFillShotAssets && rowAssetFillTargets[rowIndex]?.length ? (
                                             <button
                                                 type="button"
                                                 className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
@@ -1578,9 +1617,7 @@ export function CanvasScriptNodeContent({
                                                     onFillShotAssets(node.id, rowIndex);
                                                 }}
                                                 title={t("canvas.scriptNode.assetFillHint", {
-                                                    labels: collectStoryScriptAssetFillTargets(presetId, row)
-                                                        .map((target) => target.label)
-                                                        .join(" / "),
+                                                    labels: rowAssetFillTargets[rowIndex].map((target) => target.label).join(" / "),
                                                 })}
                                             >
                                                 <Sparkles className="size-3" />
@@ -1647,6 +1684,44 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.shotCount", { count: rows.length })} · {t("canvas.scriptNode.totalDuration", { seconds: totalDuration })}
                 </span>
                 {mergeSelector}
+                {/* 手动添加资产列（「宠物」「车辆」…）：自建列的行为与内置资产列一致，铺链路会按分类把图连进图片节点。 */}
+                {extraColumns.length < STORY_SCRIPT_MAX_EXTRA_COLUMNS ? (
+                    <button
+                        type="button"
+                        className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition hover:opacity-100"
+                        style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            setAddColumnLabel("");
+                            setAddColumnRole("scene");
+                            setAddColumnOpen(true);
+                        }}
+                        title={t("canvas.scriptNode.extraColumnAddHint")}
+                    >
+                        <Plus className="size-3" />
+                        {t("canvas.scriptNode.extraColumnAdd")}
+                    </button>
+                ) : null}
+                {/* 整表补齐资产：还有缺列时才出现（数量就是「还有几镜缺资产」）。 */}
+                {onFillAllShotAssets && missingAssetRowCount ? (
+                    <button
+                        type="button"
+                        className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition hover:opacity-100"
+                        style={{ borderColor: theme.node.stroke, opacity: 0.9 }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            onFillAllShotAssets(node.id);
+                        }}
+                        title={t("canvas.scriptNode.assetFillAllHint", { count: missingAssetRowCount })}
+                    >
+                        <Sparkles className="size-3" />
+                        {t("canvas.scriptNode.assetFillAll", { count: missingAssetRowCount })}
+                    </button>
+                ) : null}
                 {/* 完整显示 / 精简：默认完整（不用拖滑条就能看全每格内容），太长时再切精简。 */}
                 <button
                     type="button"
@@ -1877,7 +1952,7 @@ export function CanvasScriptNodeContent({
                 columnKey: cellAssetTarget.columnKey,
                 label: cellAssetTarget.label,
                 selectedIds: cellAssetTarget.ids,
-                candidate: collectScriptCellPromptCandidate(cellAssetTarget.columnKey, rows.find((row) => (row.shot_no || 0) === cellAssetTarget.shotNo) || null),
+                candidate: collectScriptCellPromptCandidate(cellAssetTarget.columnKey, rows.find((row) => (row.shot_no || 0) === cellAssetTarget.shotNo) || null, extraColumns),
                 title: t("canvas.scriptNode.cellAssetDialogTitle", { no: cellAssetTarget.shotNo, label: cellAssetTarget.label }),
                 model: cellModel,
                 onModelChange: (model) => onCellModelChange?.(node.id, model),
@@ -1937,6 +2012,57 @@ export function CanvasScriptNodeContent({
         </Modal>
     ) : null;
 
+    // 「添加资产列」弹窗：列名 + 分类。自建列和内置资产列一样，铺链路时按分类把图连进图片节点。
+    const addColumnDialog = (
+        <Modal
+            open={addColumnOpen}
+            title={t("canvas.scriptNode.extraColumnTitle")}
+            okText={t("canvas.scriptNode.extraColumnAdd")}
+            cancelText={t("common.cancel")}
+            width={480}
+            onOk={submitAddColumn}
+            onCancel={() => setAddColumnOpen(false)}
+        >
+            <div className="flex flex-col gap-3 text-[14px]">
+                <div className="opacity-70">{t("canvas.scriptNode.extraColumnHint2")}</div>
+                <input
+                    className="h-9 w-full rounded-lg border px-2 outline-none"
+                    style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
+                    value={addColumnLabel}
+                    placeholder={t("canvas.scriptNode.extraColumnPlaceholder")}
+                    onChange={(event) => setAddColumnLabel(event.target.value)}
+                    onKeyDown={(event) => {
+                        if (event.key === "Enter") submitAddColumn();
+                    }}
+                />
+                <div className="flex flex-col gap-1.5">
+                    <span className="opacity-70">{t("canvas.scriptNode.extraColumnRole")}</span>
+                    <div className="flex flex-wrap gap-1.5">
+                        {SCRIPT_EXTRA_COLUMN_ROLE_IDS.map((role) => {
+                            const active = role === addColumnRole;
+                            return (
+                                <button
+                                    key={role}
+                                    type="button"
+                                    className="inline-flex h-7 items-center rounded-full border px-2.5 transition"
+                                    style={{
+                                        borderColor: active ? theme.toolbar.activeBg : theme.node.stroke,
+                                        background: active ? `${theme.toolbar.activeBg}1f` : "transparent",
+                                        color: active ? theme.toolbar.activeBg : theme.node.text,
+                                    }}
+                                    onClick={() => setAddColumnRole(role)}
+                                    title={t("canvas.scriptNode.extraColumnRoleHint")}
+                                >
+                                    {t(`canvas.scriptNode.assetRole_${role}`)}
+                                </button>
+                            );
+                        })}
+                    </div>
+                </div>
+            </div>
+        </Modal>
+    );
+
     return (
         <>
             {fullscreen
@@ -1984,6 +2110,7 @@ export function CanvasScriptNodeContent({
             {rowAssetDialog}
             {cellAssetDialog}
             {rowEditDialog}
+            {addColumnDialog}
         </>
     );
 }

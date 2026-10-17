@@ -167,6 +167,12 @@ export type CanvasNodeMetadata = {
      */
     scriptNameLocks?: import("@/constant/story-script").StoryScriptNameLockMap;
     /**
+     * 脚本生成器：**手动追加的资产列**（例：「宠物」「车辆」）。自建列的行为与内置资产列一致 ——
+     * 格子里能放文字、能挂图位、能上资产锁，铺链路时按 `role` 把图连进该镜的图片节点。
+     * key 固定 `extra_<n>`（改列名不丢图位），见 constant/story-script.ts 的 `StoryScriptExtraColumn`。
+     */
+    scriptExtraColumns?: import("@/constant/story-script").StoryScriptExtraColumn[];
+    /**
      * 脚本生成器：在资产格子里**单独挑的生图模型**（不填就跟随节点的默认图片模型）。
      * 只作为「格子生图弹窗」的默认值：每次生成都会把选中的模型写到新建的那张图片节点上。
      */

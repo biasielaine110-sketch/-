@@ -32,7 +32,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, getStoryScriptColumns, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -6223,15 +6223,30 @@ function AtelierCanvasPage() {
                     return;
                 }
                 setNodes((prev) =>
-                    prev.map((node) =>
-                        node.id === nodeId
-                            ? {
-                                  ...node,
-                                  title: parsed.title || node.title,
-                                  metadata: { ...node.metadata, scriptStatus: "success", scriptRows: parsed.rows, scriptTitle: parsed.title, scriptRaw: answer, errorDetails: undefined },
-                              }
-                            : node,
-                    ),
+                    prev.map((node) => {
+                        if (node.id !== nodeId) return node;
+                        // 整表重生成会把行整体换掉，但**自建资产列是用户手填的**（模型不知道这几列）：
+                        // 按镜号把旧值回填回来，别让一次「重新生成整表」把「宠物 / 车辆」全抹掉。
+                        const extraKeys = normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns).map((item) => item.key);
+                        const previousRows = node.metadata?.scriptRows || [];
+                        const rowsWithExtras = extraKeys.length
+                            ? parsed.rows.map((row, index) => {
+                                  const previous = previousRows.find((item, position) => (Number(item.shot_no) || position + 1) === (Number(row.shot_no) || index + 1));
+                                  if (!previous) return row;
+                                  const next = { ...row };
+                                  for (const key of extraKeys) {
+                                      const kept = previous[key];
+                                      if (kept !== undefined) next[key] = kept;
+                                  }
+                                  return next;
+                              })
+                            : parsed.rows;
+                        return {
+                            ...node,
+                            title: parsed.title || node.title,
+                            metadata: { ...node.metadata, scriptStatus: "success", scriptRows: rowsWithExtras, scriptTitle: parsed.title, scriptRaw: answer, errorDetails: undefined },
+                        };
+                    }),
                 );
                 message.success(t("canvas.scriptNode.generated", { count: parsed.rows.length }));
             } catch (error) {
@@ -6274,6 +6289,11 @@ function AtelierCanvasPage() {
                 .sort((left, right) => left - right);
             if (!indexes.length) return;
             const presetId = resolveStoryScriptPresetId(sourceNode.metadata?.scriptPreset);
+            /**
+             * 手动追加的资产列（「宠物」「车辆」…）：模型不知道这几列，重写这一镜时**按原值回填**，
+             * 否则一次重生成就会把用户手填的资产名抹掉（自建列的图位还在，但格子空了）。
+             */
+            const scriptExtraKeys = normalizeStoryScriptExtraColumns(sourceNode.metadata?.scriptExtraColumns).map((item) => item.key);
             const segmentSeconds = sourceNode.metadata?.scriptSegmentSeconds;
             const context = buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, "");
             const sourceText = (sourceNode.metadata?.scriptSource || "").trim() || context.prompt.trim();
@@ -6340,7 +6360,13 @@ function AtelierCanvasPage() {
                     }
                     // 行位置与镜号以原表为准；重写结果只覆盖这一行的各列内容。
                     const shotNo = row.shot_no || rowIndex + 1;
-                    workingRows = workingRows.map((item, index) => (index === rowIndex ? { ...parsed.rows[0], shot_no: shotNo } : item));
+                    const rewritten: typeof row = { ...parsed.rows[0], shot_no: shotNo };
+                    // 自建资产列按原值回填（见上面 scriptExtraKeys 的说明）。
+                    for (const extraKey of scriptExtraKeys) {
+                        const kept = row[extraKey];
+                        if (kept !== undefined) rewritten[extraKey] = kept;
+                    }
+                    workingRows = workingRows.map((item, index) => (index === rowIndex ? rewritten : item));
                     done += 1;
                     setNodes((prev) =>
                         prev.map((node) =>
@@ -6393,26 +6419,35 @@ function AtelierCanvasPage() {
         [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNodeGenerating, message, openConfigDialog, startGenerationRequest, t],
     );
 
-    // 二次识别「补缺失资产」：只让模型补这一镜**空着的资产列**，已有内容一个字都不改
+    // 二次识别「补缺失资产」：只让模型补**空着的资产列**，已有内容一个字都不改
     //（见 buildStoryScriptAssetFillTask / mergeStoryScriptAssetFill）。用户已满意的画面 / 提示词不会被顺手重写。
+    //
+    // 单镜（行内 Sparkles）和整表（底部「补齐资产」）走**同一个入口**：传数组就逐镜串行补，
+    // 每补完一镜立刻写回（中途失败已完成的不会丢），单镜失败不中断整批，最后只弹一条汇总提示。
     const runScriptAssetFill = useCallback(
-        async (nodeId: string, rowIndex: number) => {
+        async (nodeId: string, rowIndexes: number | number[]) => {
             const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
             if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return;
             if (isNodeGenerating(nodeId)) return;
             const rows = sourceNode.metadata?.scriptRows || [];
-            const row = rows[rowIndex];
-            if (!row) return;
+            const indexes = (Array.isArray(rowIndexes) ? rowIndexes : [rowIndexes])
+                .filter((index) => Number.isInteger(index) && index >= 0 && index < rows.length)
+                .filter((index, position, list) => list.indexOf(index) === position)
+                .sort((left, right) => left - right);
+            if (!indexes.length) return;
             const presetId = resolveStoryScriptPresetId(sourceNode.metadata?.scriptPreset);
-            const columns = getStoryScriptColumns(presetId);
-            const targets = collectStoryScriptAssetFillTargets(presetId, row);
-            if (!targets.length) {
+            // 自建资产列也参与「补资产」（任务书里按列名让模型补这一格）。
+            const extras = normalizeStoryScriptExtraColumns(sourceNode.metadata?.scriptExtraColumns);
+            const columns = getStoryScriptColumnsWithExtras(presetId, extras);
+            const batch = indexes.length > 1;
+            // 整表补齐时大部分镜可能是完整的 —— 只对真缺列的镜发请求（省时间也省额度）。
+            const pending = indexes.filter((index) => collectStoryScriptAssetFillTargets(presetId, rows[index], extras).length);
+            if (!pending.length) {
                 message.info(t("canvas.scriptNode.assetFillNothing"));
                 return;
             }
             const context = buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, "");
             const sourceText = (sourceNode.metadata?.scriptSource || "").trim() || context.prompt.trim();
-            const task = buildStoryScriptAssetFillTask({ preset: presetId, sourceText, row, targets });
             const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
             const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
             if (!isAiConfigReady(textConfig, textConfig.model)) {
@@ -6421,36 +6456,70 @@ function AtelierCanvasPage() {
             }
             const controller = new AbortController();
             startGenerationRequest(nodeId, nodeId, nodeId, controller);
+            let workingRows = [...rows];
+            let filledRowCount = 0;
+            let filledColumnCount = 0;
+            let lastError = "";
             try {
                 const hydrated = context.referenceImages.length ? await hydrateNodeGenerationContext(context) : context;
-                const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
-                    ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
-                    : task;
-                const answer = await requestImageQuestion(textConfig, [
-                    { role: "system", content: resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt) },
-                    { role: "user", content: userContent },
-                ], () => {}, { signal: controller.signal });
-                if (controller.signal.aborted) return;
-                const parsed = parseStoryScriptOutput(answer, presetId);
-                // 补资产的回答是「单个对象 / 单行 JSON」——解析器照样能认（裸对象也算一行）。
-                const patch = parsed.ok ? parsed.rows[0] : undefined;
-                const merged = mergeStoryScriptAssetFill(row, patch, columns);
-                const filledKeys = Object.keys(merged).filter(
-                    (key) => columns.some((column) => column.key === key) && String(merged[key] ?? "") !== String(row[key] ?? ""),
-                );
-                if (!filledKeys.length) {
-                    message.warning(t("canvas.scriptNode.assetFillNothing"));
+                const writeRows = (nextRows: typeof workingRows) => {
+                    setNodes((prev) =>
+                        prev.map((node) =>
+                            node.id === nodeId
+                                ? {
+                                      ...node,
+                                      metadata: {
+                                          ...node.metadata,
+                                          scriptRows: nextRows,
+                                          scriptRaw: storyScriptToMarkdown(nextRows, node.metadata?.scriptTitle, presetId),
+                                          errorDetails: undefined,
+                                      },
+                                  }
+                                : node,
+                        ),
+                    );
+                };
+                for (const rowIndex of pending) {
+                    if (controller.signal.aborted) return;
+                    const row = workingRows[rowIndex];
+                    if (!row) continue;
+                    // 每镜都重新算一次 targets：上一镜的补写不会影响这一镜，但这样可以跳过被并发改空的情况。
+                    const targets = collectStoryScriptAssetFillTargets(presetId, row, extras);
+                    if (!targets.length) continue;
+                    try {
+                        const task = buildStoryScriptAssetFillTask({ preset: presetId, sourceText, row, targets, extras });
+                        const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
+                            ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
+                            : task;
+                        const answer = await requestImageQuestion(textConfig, [
+                            { role: "system", content: resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt) },
+                            { role: "user", content: userContent },
+                        ], () => {}, { signal: controller.signal });
+                        if (controller.signal.aborted) return;
+                        const parsed = parseStoryScriptOutput(answer, presetId);
+                        // 补资产的回答是「单个对象 / 单行 JSON」——解析器照样能认（裸对象也算一行）。
+                        const patch = parsed.ok ? parsed.rows[0] : undefined;
+                        const merged = mergeStoryScriptAssetFill(row, patch, columns);
+                        const filledKeys = Object.keys(merged).filter(
+                            (key) => columns.some((column) => column.key === key) && String(merged[key] ?? "") !== String(row[key] ?? ""),
+                        );
+                        if (!filledKeys.length) continue;
+                        workingRows = workingRows.map((item, index) => (index === rowIndex ? merged : item));
+                        filledRowCount += 1;
+                        filledColumnCount += filledKeys.length;
+                        writeRows(workingRows);
+                    } catch (error) {
+                        if (controller.signal.aborted) return;
+                        lastError = error instanceof Error ? error.message : String(error);
+                    }
+                }
+                if (!filledRowCount) {
+                    message.warning(lastError || t("canvas.scriptNode.assetFillNothing"));
                     return;
                 }
-                const nextRows = rows.map((item, index) => (index === rowIndex ? merged : item));
-                setNodes((prev) =>
-                    prev.map((node) =>
-                        node.id === nodeId
-                            ? { ...node, metadata: { ...node.metadata, scriptRows: nextRows, scriptRaw: storyScriptToMarkdown(nextRows, node.metadata?.scriptTitle, presetId), errorDetails: undefined } }
-                            : node,
-                    ),
-                );
-                message.success(t("canvas.scriptNode.assetFillDone", { count: filledKeys.length }));
+                if (batch) message.success(t("canvas.scriptNode.assetFillAllDone", { rows: filledRowCount, count: filledColumnCount }));
+                else message.success(t("canvas.scriptNode.assetFillDone", { count: filledColumnCount }));
+                if (lastError) message.warning(t("canvas.scriptNode.assetFillPartialNote"));
             } catch (error) {
                 if (controller.signal.aborted) return;
                 const detail = error instanceof Error ? error.message : String(error);
@@ -6460,6 +6529,26 @@ function AtelierCanvasPage() {
             }
         },
         [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNodeGenerating, message, openConfigDialog, startGenerationRequest, t],
+    );
+
+    /** 整表补齐资产：把还有缺列的镜头一次补完（逐镜串行，跳过不缺的）。 */
+    const runScriptAssetFillAll = useCallback(
+        (nodeId: string) => {
+            const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
+            if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return;
+            const rows = sourceNode.metadata?.scriptRows || [];
+            const presetId = resolveStoryScriptPresetId(sourceNode.metadata?.scriptPreset);
+            const extras = normalizeStoryScriptExtraColumns(sourceNode.metadata?.scriptExtraColumns);
+            const indexes = rows
+                .map((row, index) => (collectStoryScriptAssetFillTargets(presetId, row, extras).length ? index : -1))
+                .filter((index) => index >= 0);
+            if (!indexes.length) {
+                message.info(t("canvas.scriptNode.assetFillNothing"));
+                return;
+            }
+            void runScriptAssetFill(nodeId, indexes);
+        },
+        [message, runScriptAssetFill, t],
     );
 
     // 整表重生成（「重新生成整表」）：等价于再点一次生成，用于追回缺失的资产 / 列。UI 已先做过确认。
@@ -6814,10 +6903,12 @@ function AtelierCanvasPage() {
     // 与「镜头图」共用落位与生成链路，差别只在键多带一个资产列：「第 3 镜 · 场景」格里加的图只属于
     // 第 3 镜的场景，铺链路时也只连到第 3 镜的图片 / 视频节点，并顶掉资产条对同一镜同一分类的分派。
 
-    /** 资产列的显示名（「场景」「角色1」），只给提示文案用；取不到就回落列 key。 */
+    /** 资产列的显示名（「场景」「角色1」/ 自建列的列名），只给提示文案用；取不到就回落列 key。 */
     const cellAssetColumnLabel = useCallback((source: CanvasNodeData, columnKey: string) => {
-        const preset = getStoryScriptPreset(resolveStoryScriptPresetId(source.metadata?.scriptPreset));
-        return preset.columns.find((column) => column.key === columnKey)?.label || columnKey;
+        const presetId = resolveStoryScriptPresetId(source.metadata?.scriptPreset);
+        // 自建资产列不在预设列里，所以要把两张列表拼起来查（否则提示里会显示 `extra_1`）。
+        const extras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
+        return getStoryScriptColumnsWithExtras(presetId, extras).find((column) => column.key === columnKey)?.label || columnKey;
     }, []);
 
     /** 资产格子里换的生图模型：落库成节点的默认值（下次打开这一格还是它）。 */
@@ -6837,11 +6928,13 @@ function AtelierCanvasPage() {
             prev.map((item) => {
                 if (item.id !== nodeId) return item;
                 const row = (item.metadata?.scriptRows || []).find((candidate, index) => (Number(candidate.shot_no) || index + 1) === shotNo);
+                // 自建资产列的图位也要能写进去（`extra_*` 只有在 extras 里声明过才算合法列）。
+                const extras = normalizeStoryScriptExtraColumns(item.metadata?.scriptExtraColumns);
                 return {
                     ...item,
                     metadata: {
                         ...item.metadata,
-                        scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, ids),
+                        scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, ids, extras),
                         scriptNameLocks: ids.length ? setStoryScriptNameLock(item.metadata?.scriptNameLocks, row?.[columnKey], ids) : item.metadata?.scriptNameLocks,
                     },
                 };
@@ -6856,11 +6949,12 @@ function AtelierCanvasPage() {
             prev.map((item) => {
                 if (item.id !== nodeId) return item;
                 const row = (item.metadata?.scriptRows || []).find((candidate, index) => (Number(candidate.shot_no) || index + 1) === shotNo);
+                const extras = normalizeStoryScriptExtraColumns(item.metadata?.scriptExtraColumns);
                 return {
                     ...item,
                     metadata: {
                         ...item.metadata,
-                        scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, [...scriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey), ...ids]),
+                        scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, [...scriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, extras), ...ids], extras),
                         scriptNameLocks: addScriptNameLockForCell(item.metadata?.scriptNameLocks, row, columnKey, ids),
                     },
                 };
@@ -6979,7 +7073,7 @@ function AtelierCanvasPage() {
             const connection: CanvasConnection = { id: nanoid(), fromNodeId: created.id, toNodeId: nodeId };
             connectionsRef.current = [...connectionsRef.current, connection];
             setConnections((prev) => [...prev, connection]);
-            const role = scriptAssetColumnRole(columnKey) || "character";
+            const role = scriptAssetColumnRole(columnKey, normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns)) || "character";
             setNodes((prev) =>
                 prev.map((item) =>
                     item.id === nodeId
@@ -7012,11 +7106,13 @@ function AtelierCanvasPage() {
             if (!rows.length) return;
             const presetId = resolveStoryScriptPresetId(source.metadata?.scriptPreset);
             const preset = getStoryScriptPreset(presetId);
+            // 手动追加的资产列（「宠物」「车辆」…）：它们的图位也要参与铺链路，所以一路带到 refs 里。
+            const scriptExtras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
             const segmentSeconds = source.metadata?.scriptSegmentSeconds;
             // **资产锁定**：一键铺链先把「分镜表里已经链接好的图片」按资产名锁成 名字 → 图片
             // （「张三」→ @图片1、「客厅」→ @图片2），再按这张锁表逐镜分派：表里凡是出现同名的地方
             // 都用同一张图。已有锁保留（并集），不会因为没有格子链接就被抹掉。
-            const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows);
+            const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows, scriptExtras);
             // 「资产名」查表：表里的资产名优先（名字锁就是按资产名记的），查不到就交给绑定拼装回落图片节点标题。
             const assetNameOf = (assetNodeId: string) => {
                 const locks = source.metadata?.scriptNameLocks;
@@ -7113,7 +7209,7 @@ function AtelierCanvasPage() {
                     imageNodes.push(imageNode);
                     // 「按镜按资产」图位 + **资产锁定**：这一镜每一格该用哪张图 —— 格子图优先、资产锁兜底。
                     // 锁是按**资产名**记的，所以别的镜里出现同名（还是「张三」）时也认同一张 @图片。
-                    const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, member.row, presetId);
+                    const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, member.row, presetId, scriptExtras);
                     const coveredRoles = new Set(preciseRefs.map((ref) => ref.role));
                     // 同一张图可能同时被「图位」「资产锁」「资产条」「镜头图」命中，连线去重，
                     // 免得画布上出现两条并行同源线（以前靠 coveredRoles 间接避开，现在直接去重更稳）。
@@ -7259,7 +7355,8 @@ function AtelierCanvasPage() {
                 .map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
             // 「按镜按资产」图位 + **资产锁定**：这一镜每一格该用哪张图（格子图优先、按资产名的锁兜底）；
             // 它们精准指定过的那几个分类，让资产条不再对同一镜重复分派。
-            const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows);
+            const shotExtras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
+            const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows, shotExtras);
             // 「资产名」查表：与整条铺链路同口径 —— 表里的资产名优先，查不到回落到图片节点标题。
             const assetNameOf = (assetNodeId: string) => {
                 const locks = source.metadata?.scriptNameLocks;
@@ -7268,7 +7365,7 @@ function AtelierCanvasPage() {
                 }
                 return undefined;
             };
-            const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId);
+            const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId, shotExtras);
             const coveredRoles = new Set(preciseRefs.map((ref) => ref.role));
             const cellAssetRefs = preciseRefs.flatMap((ref) => ref.ids).filter((id) => nodesRef.current.some((node) => node.id === id));
             // 角色按这一镜的角色名匹配（已被图位 / 锁定过的角色列不再参与），场景 / 道具 / 站位图无条件连上。
@@ -7429,6 +7526,7 @@ function AtelierCanvasPage() {
                         onRegenerateShot={(nodeId, rowIndex) => void runScriptShotGeneration(nodeId, rowIndex)}
                         onRegenerateRows={(nodeId, rowIndexes, options) => void runScriptShotGeneration(nodeId, rowIndexes, options)}
                         onFillShotAssets={(nodeId, rowIndex) => void runScriptAssetFill(nodeId, rowIndex)}
+                        onFillAllShotAssets={runScriptAssetFillAll}
                         rowNotes={contentNode.metadata?.scriptRowNotes}
                         onRegenerateAll={handleRegenerateScriptAll}
                         onNodeSizeChange={(nodeId, width, height) => {
