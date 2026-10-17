@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { Check, Copy, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Square, Trash2, Upload, Video, Wrench } from "lucide-react";
+import { Bot, Check, Copy, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Square, Trash2, Upload, Video, Wrench } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -11,7 +11,9 @@ import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { resolveChatSendOptions, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { getChatSkillDisplayDescription, getChatSkillDisplayName, listChatSkills, resolveChatSkillIds } from "@/lib/chat-skills";
+import { listCanvasAgents, resolveCanvasAgent } from "@/constant/canvas-agents";
 import { DEFAULT_CANVAS_FONT_SIZE, DEFAULT_CHAT_FONT_SIZE } from "@/constant/canvas";
+import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasAssistantImage, CanvasAssistantMessage, CanvasNodeData } from "@/types/canvas";
@@ -32,6 +34,8 @@ type CanvasChatContentProps = {
     onImageModelChange?: (nodeId: string, model: string) => void;
     onModesChange?: (nodeId: string, options: ChatSendOptions) => void;
     onSkillsChange?: (nodeId: string, skillIds: string[]) => void;
+    /** 绑定 / 解绑 agent（传 undefined = 回到普通对话）。 */
+    onAgentChange?: (nodeId: string, agentId: string | undefined) => void;
     onDeleteMessage?: (nodeId: string, messageId: string) => void;
     onInsertImage?: (image: CanvasAssistantImage) => void;
     onFontSizeChange?: (nodeId: string, fontSize: number) => void;
@@ -49,6 +53,7 @@ export function CanvasChatContent({
     onImageModelChange,
     onModesChange,
     onSkillsChange,
+    onAgentChange,
     onDeleteMessage,
     onInsertImage,
     onFontSizeChange,
@@ -82,6 +87,13 @@ export function CanvasChatContent({
     const enabledSkillIds = resolveChatSkillIds(node.metadata?.chatSkillIds);
     const skills = useMemo(() => listChatSkills(), [installedPacks]);
     const [skillsOpen, setSkillsOpen] = useState(false);
+    const customAgents = useCanvasAgentsStore((state) => state.agents);
+    const installAgent = useCanvasAgentsStore((state) => state.installFromJson);
+    const uninstallAgent = useCanvasAgentsStore((state) => state.uninstall);
+    const agentInputRef = useRef<HTMLInputElement>(null);
+    const [agentOpen, setAgentOpen] = useState(false);
+    const availableAgents = useMemo(() => listCanvasAgents(customAgents), [customAgents]);
+    const activeAgent = useMemo(() => resolveCanvasAgent(node.metadata?.agentId, customAgents), [node.metadata?.agentId, customAgents]);
     const connectedText = useMemo(
         () =>
             connectedTexts
@@ -380,6 +392,32 @@ export function CanvasChatContent({
         message.success(t("canvas.chat.skillsPackRemoved"));
     };
 
+    const bindAgent = (agentId: string | undefined) => {
+        onAgentChange?.(node.id, agentId);
+        if (agentId) setAgentOpen(false);
+    };
+
+    const importAgent = async (file: File | null) => {
+        if (!file) return;
+        try {
+            const raw = await file.text();
+            const agent = installAgent(raw);
+            onAgentChange?.(node.id, agent.id);
+            setAgentOpen(false);
+            message.success(t("canvas.chat.agentInstalled", { name: agent.name }));
+        } catch (error) {
+            message.error(t("canvas.chat.agentInstallFailed", { error: error instanceof Error ? error.message : String(error) }));
+        } finally {
+            if (agentInputRef.current) agentInputRef.current.value = "";
+        }
+    };
+
+    const removeAgent = (agentId: string) => {
+        uninstallAgent(agentId);
+        if (node.metadata?.agentId === agentId) onAgentChange?.(node.id, undefined);
+        message.success(t("canvas.chat.agentRemoved"));
+    };
+
     const stopIfInteractive = (event: ReactMouseEvent | ReactPointerEvent) => {
         const target = event.target;
         if (!(target instanceof Element)) return;
@@ -646,6 +684,97 @@ export function CanvasChatContent({
                             ) : null}
                         </div>
                     ) : null}
+                    {textEnabled ? (
+                        <div className="relative">
+                            <ModeToggle
+                                active={Boolean(activeAgent) || agentOpen}
+                                label={activeAgent ? `${activeAgent.emoji} ${activeAgent.name}` : t("canvas.chat.agent")}
+                                icon={<Bot className="size-4" />}
+                                theme={theme}
+                                onClick={() => setAgentOpen((open) => !open)}
+                            />
+                            {agentOpen ? (
+                                <div
+                                    className="absolute bottom-full left-0 z-30 mb-1 w-80 rounded-xl border p-2.5 shadow-lg text-[20px]"
+                                    style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                >
+                                    <div className="mb-2 flex items-center justify-between gap-2">
+                                        <div className="text-[20px] font-semibold uppercase opacity-55">{t("canvas.chat.agentTitle")}</div>
+                                        <button
+                                            type="button"
+                                            className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[20px] opacity-80 transition hover:opacity-100"
+                                            style={{ borderColor: theme.node.stroke }}
+                                            onClick={() => agentInputRef.current?.click()}
+                                            title={t("canvas.chat.agentImportHint")}
+                                        >
+                                            <Upload className="size-3.5" />
+                                            {t("canvas.chat.agentImport")}
+                                        </button>
+                                        <input
+                                            ref={agentInputRef}
+                                            type="file"
+                                            accept="application/json,.json,.agent.json"
+                                            className="hidden"
+                                            onChange={(event) => void importAgent(event.target.files?.[0] || null)}
+                                        />
+                                    </div>
+                                    <div className="mb-2 text-[20px] leading-snug opacity-50">{t("canvas.chat.agentHint")}</div>
+                                    <div className="thin-scrollbar max-h-72 space-y-1 overflow-y-auto">
+                                        <button
+                                            type="button"
+                                            className="flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition"
+                                            style={{ borderColor: activeAgent ? theme.node.stroke : theme.toolbar.activeBg, background: activeAgent ? "transparent" : `${theme.toolbar.activeBg}22` }}
+                                            onClick={() => bindAgent(undefined)}
+                                        >
+                                            <span className="grid size-5 shrink-0 place-items-center rounded border text-[20px]" style={{ borderColor: activeAgent ? theme.node.stroke : theme.toolbar.activeBg, background: activeAgent ? "transparent" : theme.toolbar.activeBg, color: activeAgent ? theme.node.text : "#fff" }}>
+                                                {activeAgent ? null : <Check className="size-3" />}
+                                            </span>
+                                            <span className="min-w-0 flex-1 text-[20px]">{t("canvas.chat.agentNone")}</span>
+                                        </button>
+                                        {availableAgents.map((agent) => {
+                                            const active = activeAgent?.id === agent.id;
+                                            return (
+                                                <div
+                                                    key={agent.id}
+                                                    className="flex w-full items-start gap-2 rounded-lg border px-2.5 py-2"
+                                                    style={{ borderColor: active ? theme.toolbar.activeBg : theme.node.stroke, background: active ? `${theme.toolbar.activeBg}22` : "transparent" }}
+                                                >
+                                                    <button type="button" className="flex min-w-0 flex-1 items-start gap-2 text-left" onClick={() => bindAgent(agent.id)} title={agent.description || agent.name}>
+                                                        <span className="mt-0.5 text-[20px] leading-none">{agent.emoji}</span>
+                                                        <span className="min-w-0">
+                                                            <span className="block text-[20px] font-medium">
+                                                                {agent.name}
+                                                                {agent.builtin ? <span className="ml-1 text-[20px] font-normal opacity-50">{t("canvas.chat.agentBuiltin")}</span> : null}
+                                                                {active ? <Check className="ml-1 inline size-3" /> : null}
+                                                            </span>
+                                                            {agent.description ? <span className="block text-[20px] leading-snug opacity-60">{agent.description}</span> : null}
+                                                            <span className="block text-[20px] opacity-45">
+                                                                {[t("canvas.chat.agentSkills", { count: agent.skillIds.length }), t("canvas.chat.agentRounds", { count: agent.maxToolRounds })].join(" · ")}
+                                                            </span>
+                                                        </span>
+                                                    </button>
+                                                    {agent.builtin ? null : (
+                                                        <button
+                                                            type="button"
+                                                            className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
+                                                            style={{ color: theme.node.text }}
+                                                            title={t("canvas.chat.skillsUninstall")}
+                                                            aria-label={t("canvas.chat.skillsUninstall")}
+                                                            onClick={() => removeAgent(agent.id)}
+                                                        >
+                                                            <Trash2 className="size-3" />
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            ) : null}
+                        </div>
+                    ) : null}
                     {onFontSizeChange ? (
                         <div className="ml-auto inline-flex items-center gap-0.5 rounded-full border px-1.5 py-1" style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa` }}>
                             <button
@@ -676,6 +805,13 @@ export function CanvasChatContent({
                         </div>
                     ) : null}
                 </div>
+
+                {activeAgent ? (
+                    <div className="mb-1.5 flex items-center gap-1 text-[20px] opacity-55" style={{ color: theme.node.text }}>
+                        <Bot className="size-3.5 shrink-0" />
+                        <span className="truncate">{t("canvas.chat.agentActiveHint", { name: activeAgent.name })}</span>
+                    </div>
+                ) : null}
 
                 <div className="flex items-end gap-2 rounded-2xl border px-2 py-1.5" style={{ background: theme.node.fill, borderColor: theme.node.stroke }}>
                     <div

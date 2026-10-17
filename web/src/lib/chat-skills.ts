@@ -39,6 +39,13 @@ export type ChatSkillCanvasContext = {
     connections: CanvasConnection[];
     updateNodeMetadata?: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
     selectNode?: (nodeId: string) => void;
+    /**
+     * 建一个文本节点（agent 真正「动手」的入口之一）。返回新节点 id；
+     * 没有接线（例如别处复用了这套工具但没给画布原语）返回 null。
+     */
+    createTextNode?: (input: { title?: string; text: string }) => string | null;
+    /** 把 A 连到 B（A 的输出 → B 的输入）；返回 false 表示这对节点不允许连 / 节点不存在。 */
+    connectNodes?: (fromNodeId: string, toNodeId: string) => boolean;
 };
 
 const chatText = (key: string, options?: Record<string, unknown>) => i18n.t(`canvas.chat.${key}`, options);
@@ -133,6 +140,41 @@ const BUILTIN_CHAT_SKILLS: ChatSkillDefinition[] = [
                             },
                         },
                         required: ["node_id", "prompt"],
+                        additionalProperties: false,
+                    },
+                },
+            },
+            {
+                type: "function",
+                function: {
+                    name: "create_text_node",
+                    description:
+                        "Create a new text node on the canvas that holds reusable content (a shot prompt, an asset sheet, a checklist). Optionally connect it into another node so it becomes that node's upstream context. Agents use this to leave their work on the canvas instead of only replying.",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            title: { type: "string", description: "Node title, e.g. 第3镜·提示词" },
+                            text: { type: "string", description: "Full text body of the node" },
+                            connect_to_node_id: { type: "string", description: "Optional node id this text feeds into" },
+                        },
+                        required: ["text"],
+                        additionalProperties: false,
+                    },
+                },
+            },
+            {
+                type: "function",
+                function: {
+                    name: "connect_nodes",
+                    description:
+                        "Connect one node's output into another node's input (from → to). Use it after creating prompt / asset nodes so the target actually receives them.",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            from_node_id: { type: "string", description: "Upstream node id" },
+                            to_node_id: { type: "string", description: "Downstream node id" },
+                        },
+                        required: ["from_node_id", "to_node_id"],
                         additionalProperties: false,
                     },
                 },
@@ -251,6 +293,10 @@ async function executeBuiltinTool(name: string, args: Record<string, unknown>, c
             return jsonResult(getChatConnections(context));
         case "update_node_prompt":
             return jsonResult(updateNodePrompt(context, String(args.node_id || ""), String(args.prompt ?? ""), String(args.mode || "replace")));
+        case "create_text_node":
+            return jsonResult(createTextNode(context, args));
+        case "connect_nodes":
+            return jsonResult(connectNodes(context, String(args.from_node_id || ""), String(args.to_node_id || "")));
         case "get_current_time":
             return jsonResult({
                 iso: new Date().toISOString(),
@@ -389,6 +435,39 @@ function updateNodePrompt(context: ChatSkillCanvasContext, nodeId: string, promp
         promptLength: nextText.length,
         promptPreview: nextText.slice(0, 240),
     };
+}
+
+/**
+ * 建一个文本节点。这是 agent「把活干在画布上」的主要出口：
+ * 提示词、资产设定、分镜草稿都能先落成文本节点，再被图片 / 视频节点当作上游输入。
+ */
+function createTextNode(context: ChatSkillCanvasContext, args: Record<string, unknown>) {
+    if (!context.createTextNode) return { error: chatText("skillsWriteUnavailable") };
+    const text = String(args.text ?? "").trim();
+    if (!text) return { error: chatText("skillsEmptyText") };
+    const title = String(args.title ?? "").trim();
+    const nodeId = context.createTextNode({ title, text });
+    if (!nodeId) return { error: chatText("skillsWriteUnavailable") };
+    const target = String(args.connect_to_node_id ?? "").trim();
+    const connected = target && context.connectNodes ? context.connectNodes(nodeId, target) : null;
+    context.selectNode?.(nodeId);
+    return {
+        ok: true,
+        node_id: nodeId,
+        title: title || undefined,
+        textLength: text.length,
+        textPreview: text.slice(0, 200),
+        ...(target ? { connect_to: target, connected } : {}),
+    };
+}
+
+function connectNodes(context: ChatSkillCanvasContext, fromNodeId: string, toNodeId: string) {
+    if (!context.connectNodes) return { error: chatText("skillsWriteUnavailable") };
+    if (!fromNodeId || !toNodeId) return { error: chatText("skillsConnectFailed", { from: fromNodeId || "?", to: toNodeId || "?" }) };
+    const ok = context.connectNodes(fromNodeId, toNodeId);
+    return ok
+        ? { ok: true, from: fromNodeId, to: toNodeId }
+        : { error: chatText("skillsConnectFailed", { from: fromNodeId, to: toNodeId }) };
 }
 
 function summarizeNode(node: CanvasNodeData | undefined, includeContent: boolean) {

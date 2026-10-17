@@ -6,6 +6,8 @@ import { useTranslation } from "react-i18next";
 
 import { isMidjourneyModel, requestEdit, requestGeneration, requestImageQuestion, requestMidjourneyUpscale, type AiTextMessage, type GeneratedImageResult } from "@/services/api/image";
 import { chatSkillsSystemHint, executeChatSkillTool, resolveChatSkillIds, resolveChatSkillTools } from "@/lib/chat-skills";
+import { buildCanvasAgentSystemPrompt, resolveCanvasAgent } from "@/constant/canvas-agents";
+import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
 import { defaultConfig, modelOptionLabel, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
@@ -5798,18 +5800,32 @@ function AtelierCanvasPage() {
                     ...historyMessages,
                     { role: "user", content: userContent },
                 ];
-                const skillIds = resolveChatSkillIds(sourceNode.metadata?.chatSkillIds);
+                /**
+                 * Agent：绑定了 agent 的 Chat 节点不再只是「聊天」，而是一次发送就把整套技能跑完。
+                 *  - 提示词：agent 的人设（含自主执行纪律）+ 技能说明，都放在 system 里；
+                 *  - 技能：节点自己勾的 **∪** agent 自带的（并集，不会把用户勾的吞掉）；
+                 *  - 轮数：agent 自己的 maxToolRounds（普通对话仍是默认 6 轮），多步任务才跑得完。
+                 */
+                const agent = resolveCanvasAgent(sourceNode.metadata?.agentId, useCanvasAgentsStore.getState().agents);
+                const nodeSkillIds = resolveChatSkillIds(sourceNode.metadata?.chatSkillIds);
+                const skillIds = agent ? Array.from(new Set([...nodeSkillIds, ...agent.skillIds])) : nodeSkillIds;
                 const skillTools = resolveChatSkillTools(skillIds);
                 const skillsHint = chatSkillsSystemHint(skillIds);
-                const messagesWithSkills: AiTextMessage[] = skillsHint
-                    ? [{ role: "system", content: skillsHint }, ...requestMessages]
-                    : requestMessages;
+                const agentHint = agent ? buildCanvasAgentSystemPrompt(agent) : "";
+                const messagesWithSkills: AiTextMessage[] = [
+                    ...(agentHint ? [{ role: "system" as const, content: agentHint }] : []),
+                    ...(skillsHint ? [{ role: "system" as const, content: skillsHint }] : []),
+                    ...requestMessages,
+                ];
+                // agent 建的文本节点按顺序往下排，避免全叠在同一个点上。
+                let agentCreatedNodes = 0;
                 const answer = await requestImageQuestion(
                     textConfig!,
                     messagesWithSkills,
                     (streamed) => updateAssistantMessage({ text: streamed }),
                     {
                         signal: controller.signal,
+                        ...(agent ? { maxToolRounds: agent.maxToolRounds } : {}),
                         ...(skillTools.length
                             ? {
                                   tools: skillTools,
@@ -5828,6 +5844,37 @@ function AtelierCanvasPage() {
                                           selectNode: (targetId) => {
                                               setSelectedNodeIds(new Set([targetId]));
                                               setDialogNodeId(targetId);
+                                          },
+                                          /**
+                                           * 让 agent 真能在画布上留下东西（而不只是改提示词）。
+                                           * 这里**不能**用上面的 `createNode`：它只 setNodes 不同步 nodesRef，
+                                           * 同一轮里紧接着的 connect_nodes 会找不到刚建的节点。
+                                           */
+                                          createTextNode: ({ title, text }) => {
+                                              const anchor = nodesRef.current.find((item) => item.id === nodeId) || sourceNode;
+                                              const index = agentCreatedNodes++;
+                                              const created = createCanvasNode(
+                                                  CanvasNodeType.Text,
+                                                  { x: anchor.position.x + anchor.width + 200, y: anchor.position.y + 80 + index * 90 },
+                                                  { content: text, prompt: text, composerContent: text, promptSyncAt: Date.now() },
+                                              );
+                                              const next = [...nodesRef.current, title ? { ...created, title } : created];
+                                              nodesRef.current = next;
+                                              setNodes(next);
+                                              return created.id;
+                                          },
+                                          connectNodes: (fromNodeId, toNodeId) => {
+                                              const pairs = resolveConnectionPairs(fromNodeId, toNodeId, nodesRef.current, "source");
+                                              if (!pairs.length) return false;
+                                              const existing = new Set(connectionsRef.current.map((conn) => `${conn.fromNodeId}->${conn.toNodeId}`));
+                                              const additions = pairs
+                                                  .filter((pair) => !existing.has(`${pair.fromNodeId}->${pair.toNodeId}`))
+                                                  .map((pair) => ({ id: nanoid(), ...pair }));
+                                              if (!additions.length) return true;
+                                              const next = [...connectionsRef.current, ...additions];
+                                              connectionsRef.current = next;
+                                              setConnections(next);
+                                              return true;
                                           },
                                       }),
                                   onToolStart: (name) => updateAssistantMessage({ text: t("canvas.chat.skillsUsing", { name }) }),
@@ -6116,6 +6163,8 @@ function AtelierCanvasPage() {
         [handleConfigNodeChange],
     );
     const handleChatSkillsChange = useCallback((nodeId: string, skillIds: string[]) => handleConfigNodeChange(nodeId, { chatSkillIds: skillIds }), [handleConfigNodeChange]);
+    // 解绑时写 undefined 会被 patch 忽略，所以显式落成空串再在读取侧当「无 agent」处理。
+    const handleChatAgentChange = useCallback((nodeId: string, agentId: string | undefined) => handleConfigNodeChange(nodeId, { agentId: agentId || "" }), [handleConfigNodeChange]);
     const handleDeleteChatMessage = useCallback(
         (nodeId: string, messageId: string) => {
             const target = nodesRef.current.find((node) => node.id === nodeId);
@@ -7702,6 +7751,7 @@ function AtelierCanvasPage() {
                             onChatImageModelChange={handleChatImageModelChange}
                             onChatModesChange={handleChatModesChange}
                             onChatSkillsChange={handleChatSkillsChange}
+                            onChatAgentChange={handleChatAgentChange}
                             onDeleteChatMessage={handleDeleteChatMessage}
                             onInsertChatImage={handleInsertChatImage}
                             onFontSizeChange={handleFontSizeChange}

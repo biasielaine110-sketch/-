@@ -264,6 +264,11 @@ export type CanvasNodeMetadata = {
     chatImageEnabled?: boolean;
     /** Enabled tool-type skill ids for this chat node (e.g. canvas, utils). */
     chatSkillIds?: string[];
+    /**
+     * 绑定的 agent id（见 constant/canvas-agents.ts）。绑上之后这个 Chat 节点按 agent 的人设与技能跑：
+     * 一次发送就让 agent 自己拆步骤、连调工具、干完再汇报，不用一轮轮喂指令。
+     */
+    agentId?: string;
     imageModel?: string;
     annotations?: CanvasAnnotation[];
     grid?: CanvasGridMeta;

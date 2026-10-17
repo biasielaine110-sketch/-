@@ -3315,7 +3315,8 @@ export async function requestChatWithTools(
     }
 
     let turnMessages: ResponseInputMessage[] = withSystemMessage(requestConfig, messages);
-    const maxRounds = Math.max(1, Math.min(8, options.maxToolRounds ?? 6));
+    // 原来封顶 8 轮；agent 模式要「一次把整套技能跑完」，所以放宽到 24（单个 agent 自己再封 16）。
+    const maxRounds = Math.max(1, Math.min(24, options.maxToolRounds ?? 6));
     let lastText = "";
 
     for (let round = 0; round < maxRounds; round += 1) {
