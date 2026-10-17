@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { Bot, Check, Copy, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Square, Trash2, Upload, Video, Wrench, X } from "lucide-react";
+import { Bot, Check, Copy, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Sparkles, Square, Trash2, Upload, Video, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -33,6 +33,8 @@ type CanvasChatContentProps = {
     onModelChange: (nodeId: string, model: string) => void;
     onImageModelChange?: (nodeId: string, model: string) => void;
     onModesChange?: (nodeId: string, options: ChatSendOptions) => void;
+    /** 「Agent 写词 + 出图」开关（对话与生图都开时才显示）。 */
+    onImageUseAgentPromptChange?: (nodeId: string, enabled: boolean) => void;
     onSkillsChange?: (nodeId: string, skillIds: string[]) => void;
     /** 绑定 / 解绑 agent（传 undefined = 回到普通对话）。 */
     onAgentChange?: (nodeId: string, agentId: string | undefined) => void;
@@ -52,6 +54,7 @@ export function CanvasChatContent({
     onModelChange,
     onImageModelChange,
     onModesChange,
+    onImageUseAgentPromptChange,
     onSkillsChange,
     onAgentChange,
     onDeleteMessage,
@@ -84,6 +87,8 @@ export function CanvasChatContent({
     const sendOptions = resolveChatSendOptions(node.metadata);
     const textEnabled = sendOptions.text;
     const imageEnabled = sendOptions.image;
+    /** 先写词再出图：两路从并行改成串行，生图吃 agent 写好的提示词。 */
+    const imageUseAgentPrompt = Boolean(node.metadata?.chatImageUseAgentPrompt);
     const enabledSkillIds = resolveChatSkillIds(node.metadata?.chatSkillIds);
     const skills = useMemo(() => listChatSkills(), [installedPacks]);
     const [skillsOpen, setSkillsOpen] = useState(false);
@@ -626,6 +631,17 @@ export function CanvasChatContent({
                 <div className="mb-1.5 flex flex-wrap items-center gap-1">
                     <ModeToggle active={textEnabled} label={t("canvas.chat.modeText")} icon={<MessageSquareText className="size-4" />} theme={theme} onClick={toggleText} />
                     <ModeToggle active={imageEnabled} label={t("canvas.chat.modeImage")} icon={<ImageIcon className="size-4" />} theme={theme} onClick={toggleImage} />
+                    {/* 只有「对话 + 生图」同时开着才有意义：agent / 文本模型先写词，生图再用这段词。 */}
+                    {textEnabled && imageEnabled ? (
+                        <ModeToggle
+                            active={imageUseAgentPrompt}
+                            label={t("canvas.chat.imageUseAgentPrompt")}
+                            title={t("canvas.chat.imageUseAgentPromptHint")}
+                            icon={<Sparkles className="size-4" />}
+                            theme={theme}
+                            onClick={() => onImageUseAgentPromptChange?.(node.id, !imageUseAgentPrompt)}
+                        />
+                    ) : null}
                     {textEnabled ? (
                         <div className="relative" ref={skillsRootRef}>
                             <ModeToggle
@@ -944,7 +960,7 @@ export function CanvasChatContent({
     );
 }
 
-function ModeToggle({ active, label, icon, theme, onClick }: { active: boolean; label: string; icon: ReactNode; theme: CanvasTheme; onClick: () => void }) {
+function ModeToggle({ active, label, icon, theme, onClick, title }: { active: boolean; label: string; icon: ReactNode; theme: CanvasTheme; onClick: () => void; title?: string }) {
     return (
         <button
             type="button"
@@ -955,6 +971,7 @@ function ModeToggle({ active, label, icon, theme, onClick }: { active: boolean; 
                 borderColor: active ? "transparent" : theme.node.stroke,
                 opacity: active ? 1 : 0.75,
             }}
+            title={title}
             onClick={onClick}
         >
             {icon}

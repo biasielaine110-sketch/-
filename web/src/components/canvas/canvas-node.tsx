@@ -96,6 +96,7 @@ type CanvasNodeProps = {
     onChatModelChange?: (nodeId: string, model: string) => void;
     onChatImageModelChange?: (nodeId: string, model: string) => void;
     onChatModesChange?: (nodeId: string, options: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
+    onChatImageUseAgentPromptChange?: (nodeId: string, enabled: boolean) => void;
     onChatSkillsChange?: (nodeId: string, skillIds: string[]) => void;
     onChatAgentChange?: (nodeId: string, agentId: string | undefined) => void;
     onDeleteChatMessage?: (nodeId: string, messageId: string) => void;
@@ -129,6 +130,7 @@ type NodeContentRendererProps = {
     onChatModelChange?: (nodeId: string, model: string) => void;
     onChatImageModelChange?: (nodeId: string, model: string) => void;
     onChatModesChange?: (nodeId: string, options: import("@/lib/canvas/canvas-chat-helpers").ChatSendOptions) => void;
+    onChatImageUseAgentPromptChange?: (nodeId: string, enabled: boolean) => void;
     onChatSkillsChange?: (nodeId: string, skillIds: string[]) => void;
     onChatAgentChange?: (nodeId: string, agentId: string | undefined) => void;
     onDeleteChatMessage?: (nodeId: string, messageId: string) => void;
@@ -187,6 +189,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onChatModelChange,
     onChatImageModelChange,
     onChatModesChange,
+    onChatImageUseAgentPromptChange,
     onChatSkillsChange,
     onChatAgentChange,
     onDeleteChatMessage,
@@ -573,6 +576,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onChatModelChange={onChatModelChange}
                         onChatImageModelChange={onChatImageModelChange}
                         onChatModesChange={onChatModesChange}
+                        onChatImageUseAgentPromptChange={onChatImageUseAgentPromptChange}
                         onChatSkillsChange={onChatSkillsChange}
                         onChatAgentChange={onChatAgentChange}
                         onDeleteChatMessage={onDeleteChatMessage}
@@ -767,7 +771,7 @@ function AnnotateNodeContent({ node, theme, onAnnotate }: NodeContentRendererPro
     );
 }
 
-function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onChatSkillsChange, onChatAgentChange, onDeleteChatMessage, onInsertChatImage, onFontSizeChange, onCancelGeneration, onReorderLinkedMedia }: NodeContentRendererProps) {
+function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatModelChange, onChatImageModelChange, onChatModesChange, onChatImageUseAgentPromptChange, onChatSkillsChange, onChatAgentChange, onDeleteChatMessage, onInsertChatImage, onFontSizeChange, onCancelGeneration, onReorderLinkedMedia }: NodeContentRendererProps) {
     // Exclude this chat node itself: its resource text is the latest reply and must not fill the composer.
     const upstreamReferences = mentionReferences.filter((reference) => reference.nodeId !== node.id);
     const connectedTexts = upstreamReferences.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim()).map((reference) => reference.text!.trim());
@@ -782,6 +786,7 @@ function ChatNodeContent({ node, theme, mentionReferences, onSendChat, onChatMod
             onModelChange={(nodeId, model) => onChatModelChange?.(nodeId, model)}
             onImageModelChange={(nodeId, model) => onChatImageModelChange?.(nodeId, model)}
             onModesChange={(nodeId, options) => onChatModesChange?.(nodeId, options)}
+            onImageUseAgentPromptChange={(nodeId, enabled) => onChatImageUseAgentPromptChange?.(nodeId, enabled)}
             onSkillsChange={(nodeId, skillIds) => onChatSkillsChange?.(nodeId, skillIds)}
             onAgentChange={(nodeId, agentId) => onChatAgentChange?.(nodeId, agentId)}
             onDeleteMessage={onDeleteChatMessage}

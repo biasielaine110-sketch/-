@@ -262,6 +262,13 @@ export type CanvasNodeMetadata = {
     messages?: CanvasAssistantMessage[];
     chatTextEnabled?: boolean;
     chatImageEnabled?: boolean;
+    /**
+     * 「Agent 写词 + 出图」开关（只在 chatTextEnabled && chatImageEnabled 时生效）。
+     * 打开后先跑文字/agent 那一路，把它写到节点上的提示词（agent 用 update_node_prompt /
+     * create_text_node 落的正文，或它回复的正文）当作生图提示词，而不是拿用户原话去生图。
+     * 代价是两路从并行变串行；语义上「先想清楚再画」，所以默认关闭。
+     */
+    chatImageUseAgentPrompt?: boolean;
     /** Enabled tool-type skill ids for this chat node (e.g. canvas, utils). */
     chatSkillIds?: string[];
     /**

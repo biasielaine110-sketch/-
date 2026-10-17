@@ -91,7 +91,7 @@ import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores/canvas/use-generation-history-store";
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { buildScriptAssetBindingPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import type { ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
+import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, getGroupMemberNodes, normalizeConnection, resolveConnectionPairs, canConnectNodes, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
@@ -5725,6 +5725,17 @@ function AtelierCanvasPage() {
             setRunningNodeId(nodeId);
             startGenerationRequest(nodeId, nodeId, nodeId, controller);
 
+            /**
+             * 「Agent 写词 + 出图」：对话与生图都开、且节点上开了这个开关时，两路从并行改成串行 ——
+             * 先跑 agent / 文本模型，把它的产物当作生图提示词。默认关闭，行为与以前完全一致。
+             */
+            const imageUsesAgentPrompt = runText && runImage && Boolean(sourceNode.metadata?.chatImageUseAgentPrompt);
+            /**
+             * agent 在这次发送里真正写到画布上的提示词（update_node_prompt 的正文 / 新建文本节点的正文）。
+             * 它比 agent 回复的「汇报」更接近要出图的那段词，所以优先用它。
+             */
+            let agentWrittenPrompt = "";
+
             const updateAssistantMessage = (patch: Partial<CanvasAssistantMessage>) => {
                 setNodes((prev) =>
                     prev.map((node) => {
@@ -5835,6 +5846,9 @@ function AtelierCanvasPage() {
                                           nodes: nodesRef.current,
                                           connections: connectionsRef.current,
                                           updateNodeMetadata: (targetId, patch) => {
+                                              // 记住 agent 写过的提示词，「写词出图」开关用它当生图提示词。
+                                              const written = typeof patch.prompt === "string" ? patch.prompt.trim() : "";
+                                              if (written) agentWrittenPrompt = written;
                                               setNodes((prev) => {
                                                   const next = prev.map((node) => (node.id === targetId ? applyNodeConfigPatch(node, patch) : node));
                                                   nodesRef.current = next;
@@ -5851,6 +5865,9 @@ function AtelierCanvasPage() {
                                            * 同一轮里紧接着的 connect_nodes 会找不到刚建的节点。
                                            */
                                           createTextNode: ({ title, text }) => {
+                                              // 新建文本节点也是 agent 的产物：它就是「写好的词」，同样算进生图提示词候选。
+                                              const written = (text || "").trim();
+                                              if (written) agentWrittenPrompt = written;
                                               const anchor = nodesRef.current.find((item) => item.id === nodeId) || sourceNode;
                                               const index = agentCreatedNodes++;
                                               const created = createCanvasNode(
@@ -5886,8 +5903,10 @@ function AtelierCanvasPage() {
                 return answer;
             };
 
-            const runImageTask = async () => {
-                const imageContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, userText));
+            /** promptOverride：写词出图时传 agent 写好的提示词；不传就是原来的「用户原话 + 上游文本」。 */
+            const runImageTask = async (promptOverride?: string) => {
+                const imagePrompt = (promptOverride || "").trim() || userText;
+                const imageContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, imagePrompt));
                 const mentionRefs = buildNodeMentionReferences(sourceNode, nodesRef.current, connectionsRef.current).filter((reference) => reference.active);
                 const mentionedImages = mentionRefs.filter((reference) => reference.kind === "image" && userText.includes(reference.label));
                 const mentionedVideos = mentionRefs.filter((reference) => reference.kind === "video" && userText.includes(reference.label));
@@ -5918,15 +5937,16 @@ function AtelierCanvasPage() {
                             .map((image) => [image.id || image.dataUrl, image]),
                     ).values(),
                 );
+                const finalPrompt = imageContext.prompt || imagePrompt;
                 const results = referenceImages.length
-                    ? await requestEdit({ ...imageConfig!, count: "1" }, imageContext.prompt || userText, referenceImages, undefined, { signal: controller.signal })
-                    : await requestGeneration({ ...imageConfig!, count: "1" }, imageContext.prompt || userText, { signal: controller.signal });
+                    ? await requestEdit({ ...imageConfig!, count: "1" }, finalPrompt, referenceImages, undefined, { signal: controller.signal })
+                    : await requestGeneration({ ...imageConfig!, count: "1" }, finalPrompt, { signal: controller.signal });
                 const uploadedImages = await Promise.all(results.map(async (item) => uploadGeneratedImage(item)));
                 const chatImages = uploadedImages.map((uploaded, index) => ({
                     id: `${assistantId}-${index}`,
                     dataUrl: uploaded.url,
                     storageKey: uploaded.storageKey,
-                    prompt: userText,
+                    prompt: finalPrompt,
                 }));
                 updateAssistantMessage(
                     runText
@@ -5939,11 +5959,29 @@ function AtelierCanvasPage() {
                 return chatImages;
             };
 
+            /** 把单个任务包成 allSettled 的形状，串行模式复用下面同一段收尾逻辑（不重复写错误合并）。 */
+            const settleTask = <T,>(task: Promise<T>): Promise<PromiseSettledResult<T>> =>
+                task.then(
+                    (value) => ({ status: "fulfilled" as const, value }),
+                    (reason: unknown) => ({ status: "rejected" as const, reason }),
+                );
+
             try {
-                const [textResult, imageResult] = await Promise.allSettled([
-                    runText ? runTextTask() : Promise.resolve(null),
-                    runImage ? runImageTask() : Promise.resolve(null),
-                ]);
+                // 写词出图：必须等文字/agent 那一路跑完，才知道要拿哪段提示词去出图。
+                const settled = imageUsesAgentPrompt
+                    ? await (async () => {
+                          const textResult = await settleTask(runText ? runTextTask() : Promise.resolve(null));
+                          if (controller.signal.aborted) return null;
+                          // 优先用 agent 写进节点的词；它没写节点就退一步用回复正文（剥掉围栏/前缀）。
+                          // 两者都拿不到时 runImageTask 会回落到用户原话 —— 出图绝不能拿到空提示词。
+                          const promptForImage = agentWrittenPrompt.trim() || extractPromptFromReply(textResult.status === "fulfilled" ? textResult.value : "");
+                          // agent 那一路失败也不挡出图。
+                          const imageResult = await settleTask(runImage ? runImageTask(promptForImage) : Promise.resolve(null));
+                          return [textResult, imageResult] as const;
+                      })()
+                    : await Promise.allSettled([runText ? runTextTask() : Promise.resolve(null), runImage ? runImageTask() : Promise.resolve(null)]);
+                if (!settled) return;
+                const [textResult, imageResult] = settled;
 
                 if (controller.signal.aborted) return;
 
@@ -6160,6 +6198,11 @@ function AtelierCanvasPage() {
     const handleChatImageModelChange = useCallback((nodeId: string, model: string) => handleConfigNodeChange(nodeId, { imageModel: model }), [handleConfigNodeChange]);
     const handleChatModesChange = useCallback(
         (nodeId: string, options: { text: boolean; image: boolean }) => handleConfigNodeChange(nodeId, { chatTextEnabled: options.text, chatImageEnabled: options.image }),
+        [handleConfigNodeChange],
+    );
+    // 「Agent 写词 + 出图」：写 false 也要落盘（关掉是一种明确状态），所以不能用 undefined 省略。
+    const handleChatImageUseAgentPromptChange = useCallback(
+        (nodeId: string, enabled: boolean) => handleConfigNodeChange(nodeId, { chatImageUseAgentPrompt: enabled }),
         [handleConfigNodeChange],
     );
     const handleChatSkillsChange = useCallback((nodeId: string, skillIds: string[]) => handleConfigNodeChange(nodeId, { chatSkillIds: skillIds }), [handleConfigNodeChange]);
@@ -7750,6 +7793,7 @@ function AtelierCanvasPage() {
                             onChatModelChange={handleChatModelChange}
                             onChatImageModelChange={handleChatImageModelChange}
                             onChatModesChange={handleChatModesChange}
+                            onChatImageUseAgentPromptChange={handleChatImageUseAgentPromptChange}
                             onChatSkillsChange={handleChatSkillsChange}
                             onChatAgentChange={handleChatAgentChange}
                             onDeleteChatMessage={handleDeleteChatMessage}

@@ -3318,6 +3318,36 @@ export async function requestChatWithTools(
     // 原来封顶 8 轮；agent 模式要「一次把整套技能跑完」，所以放宽到 24（单个 agent 自己再封 16）。
     const maxRounds = Math.max(1, Math.min(24, options.maxToolRounds ?? 6));
     let lastText = "";
+    /** 本次请求里真正执行过的工具名（用于「活干完了但一句都不说」时兜底汇报）。 */
+    const executedTools: string[] = [];
+
+    /**
+     * 模型（尤其走中转时）经常用工具把活干完、末轮却回一个空 content。
+     * 此时直接抛「没有返回内容」等于把已经发生的画布改动藏起来，所以两级兜底：
+     * ① 不带工具再要一句汇报（很多模型这一步就有话说了）；② 还是空，就按执行过的工具自己写一句。
+     */
+    const reportAfterTools = async () => {
+        if (executedTools.length) {
+            try {
+                const nudge = await requestChatTurn(requestConfig, [...turnMessages, { role: "user", content: apiText("toolReportNudge") }], onDelta, {
+                    signal: options.signal,
+                });
+                const nudgeText = (nudge.content || "").trim();
+                if (nudgeText) return nudgeText;
+            } catch {
+                // 补一句汇报失败，不该把已经成功的工具执行整体变成报错
+            }
+            const summary = apiText("toolRunSummary", {
+                count: executedTools.length,
+                names: Array.from(new Set(executedTools)).join(", "),
+            });
+            onDelta(summary);
+            return summary;
+        }
+        const answer = apiText("noContent");
+        onDelta(answer);
+        return answer;
+    };
 
     for (let round = 0; round < maxRounds; round += 1) {
         const result = await requestChatTurn(requestConfig, turnMessages, onDelta, {
@@ -3327,12 +3357,12 @@ export async function requestChatWithTools(
         });
         lastText = result.content || lastText;
         if (!result.toolCalls.length) {
-            const answer = lastText || apiText("noContent");
-            if (answer === apiText("noContent")) onDelta(answer);
-            return answer;
+            if (lastText.trim()) return lastText;
+            return await reportAfterTools();
         }
 
         for (const call of result.toolCalls) {
+            executedTools.push(call.function.name);
             options.onToolStart?.(call.function.name, call.id);
             turnMessages = [
                 ...turnMessages,
@@ -3358,9 +3388,8 @@ export async function requestChatWithTools(
         onDelta(lastText ? `${lastText}\n\n` : "");
     }
 
-    const answer = lastText || apiText("noContent");
-    if (answer === apiText("noContent")) onDelta(answer);
-    return answer;
+    if (lastText.trim()) return lastText;
+    return await reportAfterTools();
 }
 
 /**
@@ -3476,21 +3505,31 @@ async function requestChatCompletionsTurn(
         const response = await fetch(aiApiUrl(config, "/chat/completions"), {
             method: "POST",
             headers: aiHeaders(config, "application/json"),
-            body: JSON.stringify({
-                model: config.model,
-                messages: toChatCompletionMessages(messages),
-                tools: chatTools,
-                tool_choice: toolChoice,
-                stream: false,
-            }),
+            // Same protection as the streaming path: agent runs with @image references carry several
+            // multi-MB data URLs. Uncompressed, relays answer with an empty `choices: []` (which we then
+            // surface as "没有返回内容") or reject the body outright.
+            body: JSON.stringify(
+                await compressBodyImagesForProxy({
+                    model: config.model,
+                    messages: toChatCompletionMessages(messages),
+                    tools: chatTools,
+                    tool_choice: toolChoice,
+                    stream: false,
+                }),
+            ),
             signal: options?.signal,
         });
         if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
         const payload = (await response.json()) as Record<string, unknown>;
         const message = readChatCompletionMessage(payload);
-        const content = typeof message?.content === "string" ? message.content : "";
+        const content = readContentText(message?.content);
         if (content) onDelta(content);
         const toolCalls = readChatCompletionToolCalls(message);
+        // A 200 with neither text nor tool calls is an upstream hiccup, not "the model said nothing".
+        // Log the raw payload so the next report of "没有返回内容" is diagnosable instead of a guess.
+        if (!content && !toolCalls.length) {
+            console.warn("[chat] empty completion from upstream", { model: config.model, payload });
+        }
         return { content, toolCalls };
     }
 
@@ -3612,14 +3651,34 @@ function toChatCompletionMessages(messages: ResponseInputMessage[]) {
 
 function readChatCompletionContent(payload: Record<string, unknown>) {
     const message = readChatCompletionMessage(payload);
-    return typeof message?.content === "string" ? message.content : "";
+    return readContentText(message?.content);
 }
 
 function readChatCompletionDelta(payload: Record<string, unknown>) {
     const choices = Array.isArray(payload.choices) ? payload.choices : [];
     const first = choices[0] && typeof choices[0] === "object" ? (choices[0] as Record<string, unknown>) : null;
     const delta = first && typeof first.delta === "object" && first.delta ? (first.delta as Record<string, unknown>) : null;
-    return typeof delta?.content === "string" ? delta.content : "";
+    return readContentText(delta?.content);
+}
+
+/**
+ * Chat Completions `content` is not always a string: OpenAI-compatible relays (and every
+ * multimodal proxy that echoes parts) may answer `[{type:"text",text:"…"}]`. Reading only
+ * `typeof content === "string"` throws that answer away and the UI reports "没有返回内容".
+ */
+function readContentText(value: unknown): string {
+    if (typeof value === "string") return value;
+    if (!Array.isArray(value)) return "";
+    return value
+        .map((part) => {
+            if (typeof part === "string") return part;
+            if (!part || typeof part !== "object") return "";
+            const record = part as Record<string, unknown>;
+            if (typeof record.text === "string") return record.text;
+            if (typeof record.content === "string") return record.content;
+            return "";
+        })
+        .join("");
 }
 
 export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat">) {
