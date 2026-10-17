@@ -15,7 +15,7 @@ import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/l
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { resolveApiTransport, proxyApiUrl } from "@/lib/api-proxy";
+import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl } from "@/lib/api-proxy";
 import { uploadTemporaryPublicImage } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import {
@@ -1162,14 +1162,24 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
 }
 
 async function videoResultFromUrl(url: string, options?: RequestOptions): Promise<VideoGenerationResult> {
-    try {
-        const response = await axios.get<Blob>(url, { responseType: "blob", signal: options?.signal });
-        await assertVideoBlob(response.data);
-        return { blob: response.data };
-    } catch (error) {
-        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
-        return { url, mimeType: "video/mp4" };
+    const direct = String(url || "").trim();
+    if (!/^https?:\/\//i.test(direct)) return { url: direct, mimeType: "video/mp4" };
+    // Result buckets often omit Access-Control-Allow-Origin (Tencent COS / ByteDance TOS), so the
+    // direct XHR is blocked by CORS even though the file itself is fine. A remote-URL fallback
+    // keeps playback working, but then nothing lands in IndexedDB: no thumbnail, no export, and
+    // the node breaks once the signed URL expires. Retry through the same-origin media proxy
+    // (which sets ACAO) so we still get a real blob — same ladder as image-storage/save-blob.
+    const targets = [...new Set([direct, proxyMediaUrl(direct), forceProxyMediaUrl(direct)].filter(Boolean))];
+    for (const target of targets) {
+        try {
+            const response = await axios.get<Blob>(target, { responseType: "blob", signal: options?.signal });
+            await assertVideoBlob(response.data);
+            return { blob: response.data };
+        } catch (error) {
+            if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        }
     }
+    return { url: direct, mimeType: "video/mp4" };
 }
 
 function assertVideoConfig(config: AiConfig, model: string) {
