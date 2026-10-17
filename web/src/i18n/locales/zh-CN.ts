@@ -881,7 +881,7 @@ export default {
             skillsConnectFailed: "这两个节点连不起来：{{from}} → {{to}}",
             agent: "Agent",
             agentTitle: "画布 Agent",
-            agentHint: "绑一个 agent：它自己拆步骤、连调技能，一次把活干完，不用一轮轮对话",
+            agentHint: "不用先装技能：agent 自带工具。绑上后直接给目标，它自己拆步骤、连调工具，一次把活干完",
             agentNone: "不绑定（普通对话）",
             agentSkills: "{{count}} 个技能",
             agentRounds: "最多 {{count}} 轮工具",

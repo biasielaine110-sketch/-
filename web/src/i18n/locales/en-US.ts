@@ -881,7 +881,7 @@ export default {
             skillsConnectFailed: "These two nodes cannot be connected: {{from}} → {{to}}",
             agent: "Agent",
             agentTitle: "Canvas agent",
-            agentHint: "Bind an agent: it plans the steps itself, runs the skills back to back, and finishes the job in one go",
+            agentHint: "No skill setup needed — agents bring their own tools. Bind one, give it a goal, and it plans, runs the tools, and finishes the job",
             agentNone: "No agent (plain chat)",
             agentSkills: "{{count}} skills",
             agentRounds: "up to {{count}} tool rounds",

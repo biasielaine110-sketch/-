@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { Bot, Check, Copy, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Square, Trash2, Upload, Video, Wrench } from "lucide-react";
+import { Bot, Check, Copy, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Square, Trash2, Upload, Video, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -91,9 +91,37 @@ export function CanvasChatContent({
     const installAgent = useCanvasAgentsStore((state) => state.installFromJson);
     const uninstallAgent = useCanvasAgentsStore((state) => state.uninstall);
     const agentInputRef = useRef<HTMLInputElement>(null);
+    const skillsRootRef = useRef<HTMLDivElement>(null);
+    const agentRootRef = useRef<HTMLDivElement>(null);
     const [agentOpen, setAgentOpen] = useState(false);
     const availableAgents = useMemo(() => listCanvasAgents(customAgents), [customAgents]);
     const activeAgent = useMemo(() => resolveCanvasAgent(node.metadata?.agentId, customAgents), [node.metadata?.agentId, customAgents]);
+    // 画布会吞掉冒泡的 pointerdown（平移/缩放），antd 那套「点外部关闭」在这些浮层上本来就不生效，
+    // 所以两个 pill 面板都在捕获阶段自己判：点到面板外 / 按 Esc 就收起。
+    useEffect(() => {
+        if (!skillsOpen && !agentOpen) return;
+        const close = (event: PointerEvent | KeyboardEvent) => {
+            if (event instanceof KeyboardEvent) {
+                if (event.key === "Escape") {
+                    setSkillsOpen(false);
+                    setAgentOpen(false);
+                }
+                return;
+            }
+            const target = event.target instanceof Element ? event.target : null;
+            const insideSkills = skillsOpen && Boolean(target && skillsRootRef.current?.contains(target));
+            const insideAgent = agentOpen && Boolean(target && agentRootRef.current?.contains(target));
+            if (insideSkills || insideAgent) return;
+            setSkillsOpen(false);
+            setAgentOpen(false);
+        };
+        window.addEventListener("pointerdown", close, true);
+        window.addEventListener("keydown", close);
+        return () => {
+            window.removeEventListener("pointerdown", close, true);
+            window.removeEventListener("keydown", close);
+        };
+    }, [skillsOpen, agentOpen]);
     const connectedText = useMemo(
         () =>
             connectedTexts
@@ -394,7 +422,7 @@ export function CanvasChatContent({
 
     const bindAgent = (agentId: string | undefined) => {
         onAgentChange?.(node.id, agentId);
-        if (agentId) setAgentOpen(false);
+        setAgentOpen(false);
     };
 
     const importAgent = async (file: File | null) => {
@@ -599,13 +627,16 @@ export function CanvasChatContent({
                     <ModeToggle active={textEnabled} label={t("canvas.chat.modeText")} icon={<MessageSquareText className="size-4" />} theme={theme} onClick={toggleText} />
                     <ModeToggle active={imageEnabled} label={t("canvas.chat.modeImage")} icon={<ImageIcon className="size-4" />} theme={theme} onClick={toggleImage} />
                     {textEnabled ? (
-                        <div className="relative">
+                        <div className="relative" ref={skillsRootRef}>
                             <ModeToggle
                                 active={enabledSkillIds.length > 0 || skillsOpen}
                                 label={enabledSkillIds.length ? `${t("canvas.chat.skills")} ${enabledSkillIds.length}` : t("canvas.chat.skills")}
                                 icon={<Wrench className="size-4" />}
                                 theme={theme}
-                                onClick={() => setSkillsOpen((open) => !open)}
+                                onClick={() => {
+                                    setSkillsOpen((open) => !open);
+                                    setAgentOpen(false);
+                                }}
                             />
                             {skillsOpen ? (
                                 <div
@@ -633,6 +664,16 @@ export function CanvasChatContent({
                                             className="hidden"
                                             onChange={(event) => void importSkillPack(event.target.files?.[0] || null)}
                                         />
+                                        <button
+                                            type="button"
+                                            className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
+                                            style={{ color: theme.node.text }}
+                                            title={t("common.close")}
+                                            aria-label={t("common.close")}
+                                            onClick={() => setSkillsOpen(false)}
+                                        >
+                                            <X className="size-3.5" />
+                                        </button>
                                     </div>
                                     <div className="mb-2 text-[20px] leading-snug opacity-50">{t("canvas.chat.skillsImportHint")}</div>
                                     <div className="max-h-64 space-y-1 overflow-y-auto">
@@ -685,13 +726,16 @@ export function CanvasChatContent({
                         </div>
                     ) : null}
                     {textEnabled ? (
-                        <div className="relative">
+                        <div className="relative" ref={agentRootRef}>
                             <ModeToggle
                                 active={Boolean(activeAgent) || agentOpen}
                                 label={activeAgent ? `${activeAgent.emoji} ${activeAgent.name}` : t("canvas.chat.agent")}
                                 icon={<Bot className="size-4" />}
                                 theme={theme}
-                                onClick={() => setAgentOpen((open) => !open)}
+                                onClick={() => {
+                                    setAgentOpen((open) => !open);
+                                    setSkillsOpen(false);
+                                }}
                             />
                             {agentOpen ? (
                                 <div
@@ -719,6 +763,16 @@ export function CanvasChatContent({
                                             className="hidden"
                                             onChange={(event) => void importAgent(event.target.files?.[0] || null)}
                                         />
+                                        <button
+                                            type="button"
+                                            className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
+                                            style={{ color: theme.node.text }}
+                                            title={t("common.close")}
+                                            aria-label={t("common.close")}
+                                            onClick={() => setAgentOpen(false)}
+                                        >
+                                            <X className="size-3.5" />
+                                        </button>
                                     </div>
                                     <div className="mb-2 text-[20px] leading-snug opacity-50">{t("canvas.chat.agentHint")}</div>
                                     <div className="thin-scrollbar max-h-72 space-y-1 overflow-y-auto">
