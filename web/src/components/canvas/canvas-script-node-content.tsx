@@ -71,8 +71,10 @@ export type { ScriptAssetCandidate, ScriptAssetLinkSelection };
  * 用户 2026-10-17 要求降到 15），工具条 23px（1.154 倍），再由画布缩放进退。基准字号可由顶部「A− / A+」调档
  * （`metadata.scriptFontSize`）：外壳挂基准 px，**其余字号一律写成 em**，所以只改一个值就整体缩放。
  *
- * 表格内容默认**完整显示**（不再 line-clamp 截断，见 `showFullText`）：分镜提示词动辄几百字，
- * 截成 4 行等于把内容藏起来。嫌占地方可以在底部切到「精简」（4 行 + 悬停看全文）。
+ * 表格内容默认**完整显示**（不做 line-clamp 截断，见 `showFullText`），但单格正文超过 6 行后
+ * 收进**格内滚动**（`TABLE_CELL_MAX_LINES`）：行高由这一行最高的格子决定，长提示词一旦整段铺开，
+ * 旁边短内容的格子就全变成留白 —— 这是用户第十五轮反馈「镜头之间间距太大」的根因。
+ * 嫌占地方仍可在底部切到「精简」（4 行 + 悬停看全文）。
  *
  * 输出格式由 `metadata.scriptPreset` 决定（见 constant/story-script.ts）：列定义、系统提示词、
  * 行操作按钮全部按预设分派。切换预设会清空已生成的分镜表（原文与补充要求保留），因为两套预设
@@ -81,8 +83,14 @@ export type { ScriptAssetCandidate, ScriptAssetLinkSelection };
 
 /** 顶部工具条字号相对正文基准的倍数（改造前 15px / 13px），跟着基准字号一起缩放。 */
 const HEADER_FONT_SCALE = 1.154;
-/** 操作列：复制 / 送画布 / 建视频 / 重生成 / 补资产 / 改剧情 / 上移下移 / 删除，所以留得比按钮宽一点、按钮自己换行。 */
-const TABLE_ACTION_WIDTH = 132;
+/**
+ * 操作列：复制 / 送画布 / 建视频 / 重生成 / 补资产 / 改剧情 / 上移下移 / 删除。
+ *
+ * 2026-10-17（第十五轮）：这一列改成**右侧吸附**（`sticky right-0`）——经典预设整表约 4.2k px，
+ * 操作列在最右边，不吸附就得一路横向拖到底才够得到「补资产 / 重生成」，用户因此只看得见底部的
+ * 「整表补齐」。列宽同时 132 → 160、按钮收到 20px，所有按钮两行内排完，不再把每行撑高。
+ */
+const TABLE_ACTION_WIDTH = 160;
 /** 勾选列（批量重生成 / 批量铺视频）的宽度：只有一个圆形勾选按钮。 */
 const TABLE_SELECT_WIDTH = 34;
 /**
@@ -96,14 +104,22 @@ const TABLE_SELECT_WIDTH = 34;
  * 高度贴合全部行（不再只露三四行）；宽度贴合表格实际宽度，但封顶——经典预设 16 列约 2.9k px，
  * 若真按宽度撑开节点会宽到没法用，所以超出部分仍靠表体横向滚动（配「全屏」看整表）。
  *
- * 高度上限 1600：字号回落到 15px、行高按用户要求压掉约 1/3、且「镜头图」列移除之后，
- * 一张十镜的表基本能一次看全；再高窗口就成了纯背景。
+ * 高度上限 3200（第十五轮按用户要求「分镜表的长度比现在长 1 倍」从 1600 翻上来）：
+ * 配合同轮的行高收紧（格内长文最多 6 行、超出格内滚动），同一窗口能看到的镜头数约翻倍，
+ * 二十镜以上的长表也能一次铺开。
  */
 const AUTO_SIZE_MIN_WIDTH = 760;
 const AUTO_SIZE_MAX_WIDTH = 2200;
 const AUTO_SIZE_MIN_HEIGHT = 460;
-const AUTO_SIZE_MAX_HEIGHT = 1600;
+const AUTO_SIZE_MAX_HEIGHT = 3200;
 const AUTO_SIZE_PADDING_X = 24;
+/**
+ * 单元格正文最多显示几行。行高由「这一行最高的那一格」决定：经典预设的「分镜提示词 /
+ * 视频运动提示词」有 440px 宽、动辄三四百字，完整显示会把整行撑到 300px 起 —— 旁边短内容的
+ * 格子就剩一大片留白，也就是用户说的「镜头与镜头之间间距太大」。超过这个行数后改成**格内滚动**：
+ * 内容一个字不少（悬停有全文 title、双击仍是完整的编辑弹窗），但行高不再被它绑架。
+ */
+const TABLE_CELL_MAX_LINES = 6;
 
 /** 三个「试一试」快捷动作（对应剧集画布 ScriptNode 的 SCRIPT_ACTIONS）：在脚本节点左侧建好对应上游节点并连边。 */
 export type ScriptGenAction = "fromScript" | "fromVideoRef" | "fromCharacter";
@@ -475,7 +491,8 @@ export function CanvasScriptNodeContent({
         if (!contentHeight) return;
         // 签名带行数、单元格总字数、基准字号与「完整/精简」：增删行、改字、调字号、切显示都会变，纯切换视图不会。
         // 前缀 `v2` 是「版式版本」：行高压缩 / 移除镜头图列之后，老节点存下的签名不再命中，会重新适配一次。
-        const signature = `v2:${presetId}:${baseFontSize}:${showFullText ? "full" : "compact"}:${columns.length}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
+        // `v3`（第十五轮）：格内长文封顶 8 行 + 操作列吸附，行高整体变了，同样强制重适配一次。
+        const signature = `v3:${presetId}:${baseFontSize}:${showFullText ? "full" : "compact"}:${columns.length}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
         if (signature === lastAutoSizeKeyRef.current) return;
         const chromeHeight = Math.max(0, shell.clientHeight - body.clientHeight);
         const width = Math.round(Math.min(AUTO_SIZE_MAX_WIDTH, Math.max(AUTO_SIZE_MIN_WIDTH, tableWidth + AUTO_SIZE_PADDING_X)));
@@ -1338,7 +1355,7 @@ export function CanvasScriptNodeContent({
                                     </th>
                                 );
                             })}
-                            <th className="sticky top-0 z-10 border-b px-2 py-1 text-left font-semibold whitespace-nowrap" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}>
+                            <th className="sticky right-0 top-0 z-30 border-b border-l px-2 py-1 text-left font-semibold whitespace-nowrap" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}>
                                 {t("canvas.scriptNode.columnActions")}
                             </th>
                         </tr>
@@ -1390,7 +1407,7 @@ export function CanvasScriptNodeContent({
                                         <td
                                             key={column.key}
                                             data-canvas-selectable-text
-                                            className={`cursor-text border-b px-2 py-1 ${column.numeric ? "text-right tabular-nums" : ""}`}
+                                            className={`cursor-text border-b px-2 py-0.5 ${column.numeric ? "text-right tabular-nums" : ""}`}
                                             style={{ borderColor: theme.node.stroke }}
                                             title={value || t("canvas.scriptNode.noContent")}
                                             onDoubleClick={(event) => {
@@ -1399,9 +1416,16 @@ export function CanvasScriptNodeContent({
                                             }}
                                         >
                                             {value ? (
-                                                // 默认**完整显示**：分镜提示词动辄几百字，截成 4 行等于把内容藏起来
-                                                // （以前的「要拖滑条才看全」就是这里）。切到「精简」才退回 4 行截断。
-                                                <div className={`whitespace-pre-wrap break-words ${showFullText ? "" : "line-clamp-4"}`}>{value}</div>
+                                                // 默认**完整显示**（不截断），但超过 6 行后收进格内滚动：行高由这一行
+                                                // 最高的格子决定，长提示词一完整展开就会把整行撑到 300px 起，
+                                                // 旁边短内容的格子全变成留白（用户反馈的「镜头之间间距太大」）。
+                                                // 内容一个字没少：悬停有全文 title，双击仍是完整的编辑弹窗。
+                                                <div
+                                                    className={`whitespace-pre-wrap break-words ${showFullText ? "thin-scrollbar overflow-y-auto" : "line-clamp-4"}`}
+                                                    style={showFullText ? { maxHeight: `${(TABLE_CELL_MAX_LINES * 1.25).toFixed(2)}em` } : undefined}
+                                                >
+                                                    {value}
+                                                </div>
                                             ) : (
                                                 <div className="opacity-35">{t("canvas.scriptNode.noContent")}</div>
                                             )}
@@ -1521,13 +1545,16 @@ export function CanvasScriptNodeContent({
                                         </td>
                                     );
                                 })}
-                                <td className="border-b px-1 py-1" style={{ borderColor: theme.node.stroke }}>
-                                    <div className="flex flex-wrap items-center gap-1">
+                                {/* 右侧吸附：整表 4.2k px 宽，操作列不吸附就得横向拖到底才够得到。 */}
+                                <td className="sticky right-0 z-10 border-b border-l px-1 py-1" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
+                                    <div className="flex flex-wrap items-center gap-0.5">
+                                        {/* 复制类动作改成纯图标：带文字的按钮一行只放得下一个，两行复制按钮
+                                            就够把每行撑高 50px（用户反馈的「镜头之间间距太大」有一半来自这里）。 */}
                                         {preset.rowActions.map((action) => (
                                             <button
                                                 key={action.key}
                                                 type="button"
-                                                className="inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-[0.846em] transition hover:opacity-100"
+                                                className="inline-flex size-5 items-center justify-center rounded-md border transition hover:opacity-100"
                                                 style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                                 onPointerDown={(event) => event.stopPropagation()}
@@ -1535,13 +1562,12 @@ export function CanvasScriptNodeContent({
                                                 title={t(`canvas.scriptNode.${action.labelKey}`)}
                                             >
                                                 <Copy className="size-3" />
-                                                {t(`canvas.scriptNode.${action.labelKey}`)}
                                             </button>
                                         ))}
                                         {onInsertPrompt ? (
                                             <button
                                                 type="button"
-                                                className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
+                                                className="inline-flex size-5 items-center justify-center rounded-md border transition hover:opacity-100"
                                                 style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                                 onPointerDown={(event) => event.stopPropagation()}
@@ -1560,7 +1586,7 @@ export function CanvasScriptNodeContent({
                                         {onBuildShotVideo ? (
                                             <button
                                                 type="button"
-                                                className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
+                                                className="inline-flex size-5 items-center justify-center rounded-md border transition hover:opacity-100"
                                                 style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                                 onPointerDown={(event) => event.stopPropagation()}
@@ -1573,7 +1599,7 @@ export function CanvasScriptNodeContent({
                                         {onRegenerateShot ? (
                                             <button
                                                 type="button"
-                                                className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
+                                                className="inline-flex size-5 items-center justify-center rounded-md border transition hover:opacity-100"
                                                 style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                                 onPointerDown={(event) => event.stopPropagation()}
@@ -1587,7 +1613,7 @@ export function CanvasScriptNodeContent({
                                         {onRegenerateRows ? (
                                             <button
                                                 type="button"
-                                                className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
+                                                className="inline-flex size-5 items-center justify-center rounded-md border transition hover:opacity-100"
                                                 style={{ borderColor: storyScriptRowNote(rowNotes, row.shot_no || rowIndex + 1) ? theme.toolbar.activeBg : theme.node.stroke, opacity: 0.86 }}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                                 onPointerDown={(event) => event.stopPropagation()}
@@ -1604,12 +1630,21 @@ export function CanvasScriptNodeContent({
                                                 <Wand2 className="size-3" />
                                             </button>
                                         ) : null}
-                                        {/* 二次识别补缺失资产：只有这一镜真的缺资产列时才出现（本身就是「缺什么」的提示）。 */}
+                                        {/*
+                                         * 单镜补齐资产：**只补这一镜**空着的资产列（不再只靠底部「整表补齐」）。
+                                         * 这一格必须带文字、并且用主色描边 —— 操作列按钮多，纯图标没人注意得到，
+                                         * 用户就一直以为只能整表补。
+                                         */}
                                         {onFillShotAssets && rowAssetFillTargets[rowIndex]?.length ? (
                                             <button
                                                 type="button"
-                                                className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
-                                                style={{ borderColor: theme.node.stroke, opacity: 0.86 }}
+                                                className="inline-flex h-5 items-center gap-0.5 rounded-md border px-1 text-[0.769em] font-medium transition hover:opacity-100"
+                                                style={{
+                                                    borderColor: theme.toolbar.activeBg,
+                                                    background: `${theme.toolbar.activeBg}1a`,
+                                                    color: theme.toolbar.activeBg,
+                                                    opacity: 0.95,
+                                                }}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                                 onPointerDown={(event) => event.stopPropagation()}
                                                 onClick={(event) => {
@@ -1621,13 +1656,14 @@ export function CanvasScriptNodeContent({
                                                 })}
                                             >
                                                 <Sparkles className="size-3" />
+                                                {t("canvas.scriptNode.assetFillShot")}
                                             </button>
                                         ) : null}
                                         {rows.length > 1 ? (
                                             <>
                                                 <button
                                                     type="button"
-                                                    className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100 disabled:opacity-30"
+                                                    className="inline-flex size-5 items-center justify-center rounded-md border transition hover:opacity-100 disabled:opacity-30"
                                                     style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
                                                     disabled={rowIndex === 0}
                                                     onMouseDown={(event) => event.stopPropagation()}
@@ -1642,7 +1678,7 @@ export function CanvasScriptNodeContent({
                                                 </button>
                                                 <button
                                                     type="button"
-                                                    className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100 disabled:opacity-30"
+                                                    className="inline-flex size-5 items-center justify-center rounded-md border transition hover:opacity-100 disabled:opacity-30"
                                                     style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
                                                     disabled={rowIndex === rows.length - 1}
                                                     onMouseDown={(event) => event.stopPropagation()}
@@ -1659,7 +1695,7 @@ export function CanvasScriptNodeContent({
                                         ) : null}
                                         <button
                                             type="button"
-                                            className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
+                                            className="inline-flex size-5 items-center justify-center rounded-md border transition hover:opacity-100"
                                             style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
                                             onMouseDown={(event) => event.stopPropagation()}
                                             onPointerDown={(event) => event.stopPropagation()}
