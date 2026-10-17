@@ -832,7 +832,7 @@ function LoadingContent({
 }) {
     const { t } = useTranslation();
     const queueLabel = useNativeVideoQueueLabel(nodeId || "", metadata);
-    const elapsed = useElapsedSeconds(true);
+    const elapsed = useElapsedSeconds(true, nodeId);
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.activeStroke }}>
             <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
@@ -1852,7 +1852,7 @@ function ImageContent({
     const isGenerating = node.metadata?.status === "loading" || images.some((image) => image.status === "loading");
     const canCancel = Boolean(onCancelGeneration) && isGenerating;
     const queueLabel = useNativeVideoQueueLabel(node.id, node.metadata);
-    const elapsed = useElapsedSeconds(isGenerating);
+    const elapsed = useElapsedSeconds(isGenerating, node.id);
 
     useEffect(() => {
         if (!batchExpanded) setSelectedIds(new Set());
@@ -2220,7 +2220,7 @@ function ImageSlotStatus({
     const { t } = useTranslation();
     const queueLabel = useNativeVideoQueueLabel(nodeId || "", metadata);
     const isLoading = image?.status === "loading";
-    const elapsed = useElapsedSeconds(isLoading);
+    const elapsed = useElapsedSeconds(isLoading, nodeId);
     const failed = image?.status === "error" || (!isLoading && !image?.content && !image?.thumbnailContent);
     const message = failed
         ? image?.errorDetails || (image?.status === "error" ? t("canvas.node.failed") : t("canvas.generation.mediaMissing"))

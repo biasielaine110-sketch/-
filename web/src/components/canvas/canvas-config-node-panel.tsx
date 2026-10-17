@@ -39,7 +39,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const canGenerate = hasComposerContent || (mode === "audio" ? inputSummary.textCount > 0 : hasAnyInput);
     const [localRunning, setLocalRunning] = useState(false);
     const running = isRunning || localRunning;
-    const elapsed = useElapsedSeconds(running);
+    const elapsed = useElapsedSeconds(running, node.id);
 
     useEffect(() => {
         if (isRunning) {

@@ -66,7 +66,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const [scheduleOpen, setScheduleOpen] = useState(false);
     const optimizeControllerRef = useRef<AbortController | null>(null);
     const running = isRunning || localRunning;
-    const elapsed = useElapsedSeconds(running);
+    const elapsed = useElapsedSeconds(running, node.id);
     const promptPlaceholder = t(`canvas.promptPanel.${mode === "text" && hasTextContent ? "editText" : mode}`);
 
     // Restore prompts when switching nodes, or when chat skills / external writers bump promptSyncAt.
