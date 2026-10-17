@@ -1631,29 +1631,38 @@ export function CanvasScriptNodeContent({
                                             </button>
                                         ) : null}
                                         {/*
-                                         * 单镜补齐资产：**只补这一镜**空着的资产列（不再只靠底部「整表补齐」）。
-                                         * 这一格必须带文字、并且用主色描边 —— 操作列按钮多，纯图标没人注意得到，
-                                         * 用户就一直以为只能整表补。
+                                         * 单镜补齐资产：**只补这一镜**空着的资产列（不再只靠「整表补齐」）。
+                                         *
+                                         * 两个刻意的相反做法（上一版是「没缺列就整颗按钮消失」+ 主色描边）：
+                                         * ① **常驻显示**：缺列才点亮，资产齐了变成禁用态并提示「没有缺失的资产列」。
+                                         *    之前整颗消失，用户只会觉得「按钮一直是灰的 / 坏的」，根本分不清能不能点。
+                                         * ② **点亮态用实心**：操作列十几个描边小图标，描边按钮在这张表里读不出「可点」；
+                                         *    实心（深底浅字）在两种主题下都是全表最显眼的一颗。
                                          */}
-                                        {onFillShotAssets && rowAssetFillTargets[rowIndex]?.length ? (
+                                        {onFillShotAssets ? (
                                             <button
                                                 type="button"
-                                                className="inline-flex h-5 items-center gap-0.5 rounded-md border px-1 text-[0.769em] font-medium transition hover:opacity-100"
-                                                style={{
-                                                    borderColor: theme.toolbar.activeBg,
-                                                    background: `${theme.toolbar.activeBg}1a`,
-                                                    color: theme.toolbar.activeBg,
-                                                    opacity: 0.95,
-                                                }}
+                                                className="inline-flex h-5 items-center gap-0.5 rounded-md border px-1 text-[0.769em] font-medium transition disabled:cursor-not-allowed disabled:opacity-30"
+                                                style={
+                                                    rowAssetFillTargets[rowIndex]?.length
+                                                        ? { borderColor: theme.toolbar.activeText, background: theme.toolbar.activeText, color: theme.node.panel }
+                                                        : { borderColor: theme.node.stroke, background: "transparent", color: theme.node.text }
+                                                }
+                                                disabled={!rowAssetFillTargets[rowIndex]?.length}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                                 onPointerDown={(event) => event.stopPropagation()}
                                                 onClick={(event) => {
                                                     event.stopPropagation();
+                                                    if (!rowAssetFillTargets[rowIndex]?.length) return;
                                                     onFillShotAssets(node.id, rowIndex);
                                                 }}
-                                                title={t("canvas.scriptNode.assetFillHint", {
-                                                    labels: rowAssetFillTargets[rowIndex].map((target) => target.label).join(" / "),
-                                                })}
+                                                title={
+                                                    rowAssetFillTargets[rowIndex]?.length
+                                                        ? t("canvas.scriptNode.assetFillHint", {
+                                                              labels: rowAssetFillTargets[rowIndex].map((target) => target.label).join(" / "),
+                                                          })
+                                                        : t("canvas.scriptNode.assetFillNothing")
+                                                }
                                             >
                                                 <Sparkles className="size-3" />
                                                 {t("canvas.scriptNode.assetFillShot")}
@@ -1711,7 +1720,14 @@ export function CanvasScriptNodeContent({
                     </tbody>
                 </table>
             </div>
-            <div className="mt-1 flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
+            {/*
+             * 分镜表操作条。
+             *
+             * DOM 上仍是表体的兄弟节点（放在最后），但用 `order-first` 排到最前面 => **视觉上就是表格右上角**。
+             * 以前这排按钮在表格左下角，翻到表尾才看得见，用户一直找不到「添加资产列 / 整表补齐」；
+             * 换位置比新加按钮更管用，所以内容一个字没改，只动了容器。
+             */}
+            <div className="order-first mb-1 flex shrink-0 flex-wrap items-center justify-end gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
                 <span className="rounded border px-1.5 opacity-90" style={{ borderColor: theme.node.stroke }}>
                     {t(`canvas.scriptNode.preset_${presetId}`)}
                 </span>
@@ -1720,26 +1736,31 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.shotCount", { count: rows.length })} · {t("canvas.scriptNode.totalDuration", { seconds: totalDuration })}
                 </span>
                 {mergeSelector}
-                {/* 手动添加资产列（「宠物」「车辆」…）：自建列的行为与内置资产列一致，铺链路会按分类把图连进图片节点。 */}
-                {extraColumns.length < STORY_SCRIPT_MAX_EXTRA_COLUMNS ? (
-                    <button
-                        type="button"
-                        className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition hover:opacity-100"
-                        style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            setAddColumnLabel("");
-                            setAddColumnRole("scene");
-                            setAddColumnOpen(true);
-                        }}
-                        title={t("canvas.scriptNode.extraColumnAddHint")}
-                    >
-                        <Plus className="size-3" />
-                        {t("canvas.scriptNode.extraColumnAdd")}
-                    </button>
-                ) : null}
+                {/* 手动添加资产列（「宠物」「车辆」…）：自建列的行为与内置资产列一致，铺链路会按分类把图连进图片节点。
+                    常驻显示、到上限才禁用 —— 之前到 8 列直接消失，看起来像「这个功能没了 / 加不上」。 */}
+                <button
+                    type="button"
+                    className="inline-flex h-6 items-center gap-1 rounded-full border px-2 font-medium transition disabled:cursor-not-allowed disabled:opacity-30"
+                    style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14` }}
+                    disabled={extraColumns.length >= STORY_SCRIPT_MAX_EXTRA_COLUMNS}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        if (extraColumns.length >= STORY_SCRIPT_MAX_EXTRA_COLUMNS) return;
+                        setAddColumnLabel("");
+                        setAddColumnRole("scene");
+                        setAddColumnOpen(true);
+                    }}
+                    title={
+                        extraColumns.length >= STORY_SCRIPT_MAX_EXTRA_COLUMNS
+                            ? t("canvas.scriptNode.extraColumnLimit", { count: STORY_SCRIPT_MAX_EXTRA_COLUMNS })
+                            : t("canvas.scriptNode.extraColumnAddHint")
+                    }
+                >
+                    <Plus className="size-3" />
+                    {t("canvas.scriptNode.extraColumnAdd")}
+                </button>
                 {/* 整表补齐资产：还有缺列时才出现（数量就是「还有几镜缺资产」）。 */}
                 {onFillAllShotAssets && missingAssetRowCount ? (
                     <button
