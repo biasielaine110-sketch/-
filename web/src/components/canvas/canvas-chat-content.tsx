@@ -640,10 +640,18 @@ export function CanvasChatContent({
                             />
                             {skillsOpen ? (
                                 <div
+                                    data-canvas-no-zoom
                                     className="absolute bottom-full left-0 z-30 mb-1 w-72 rounded-xl border p-2.5 shadow-lg text-[20px]"
                                     style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
                                     onMouseDown={(event) => event.stopPropagation()}
                                     onPointerDown={(event) => event.stopPropagation()}
+                                    /*
+                                     * 画布把滚轮当缩放（atelier-canvas 的 handleWheel 只放行 `data-canvas-no-zoom`）。
+                                     * 少了这两个，面板里滚动会缩放整个画布、列表一动不动 —— 用户反馈过的那个 bug。
+                                     * 两个都要：`data-canvas-no-zoom` 让画布的 React/native 两个监听都提前 return，
+                                     * `onWheel` 再兜一层，保证事件根本不上浮到画布容器。
+                                     */
+                                    onWheel={(event) => event.stopPropagation()}
                                 >
                                     <div className="mb-2 flex items-center justify-between gap-2">
                                         <div className="text-[20px] font-semibold uppercase opacity-55">{t("canvas.chat.skillsTitle")}</div>
@@ -676,7 +684,7 @@ export function CanvasChatContent({
                                         </button>
                                     </div>
                                     <div className="mb-2 text-[20px] leading-snug opacity-50">{t("canvas.chat.skillsImportHint")}</div>
-                                    <div className="max-h-64 space-y-1 overflow-y-auto">
+                                    <div className="thin-scrollbar max-h-64 space-y-1 overflow-y-auto overscroll-contain">
                                         {skills.map((skill) => {
                                             const active = enabledSkillIds.includes(skill.id);
                                             const skillName = getChatSkillDisplayName(skill);
@@ -739,10 +747,13 @@ export function CanvasChatContent({
                             />
                             {agentOpen ? (
                                 <div
+                                    data-canvas-no-zoom
                                     className="absolute bottom-full left-0 z-30 mb-1 w-80 rounded-xl border p-2.5 shadow-lg text-[20px]"
                                     style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
                                     onMouseDown={(event) => event.stopPropagation()}
                                     onPointerDown={(event) => event.stopPropagation()}
+                                    /* 同上：不带 data-canvas-no-zoom 的话滚轮会缩画布，面板列表滚不动。 */
+                                    onWheel={(event) => event.stopPropagation()}
                                 >
                                     <div className="mb-2 flex items-center justify-between gap-2">
                                         <div className="text-[20px] font-semibold uppercase opacity-55">{t("canvas.chat.agentTitle")}</div>
@@ -775,7 +786,7 @@ export function CanvasChatContent({
                                         </button>
                                     </div>
                                     <div className="mb-2 text-[20px] leading-snug opacity-50">{t("canvas.chat.agentHint")}</div>
-                                    <div className="thin-scrollbar max-h-72 space-y-1 overflow-y-auto">
+                                    <div className="thin-scrollbar max-h-72 space-y-1 overflow-y-auto overscroll-contain">
                                         <button
                                             type="button"
                                             className="flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition"
