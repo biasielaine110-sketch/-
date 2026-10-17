@@ -37,6 +37,23 @@ function isDirectCorsHost(origin: string): boolean {
 }
 
 /**
+ * True when `url` points at a host we deliberately keep browser-direct because it sends
+ * permissive CORS headers. A request to such a host that dies with no response is therefore
+ * NOT a cross-origin block — the host is down (dead tunnel, TLS failure, DNS). Callers use this
+ * to avoid telling users to "fix CORS" when the real cause is an unreachable endpoint.
+ */
+export function isKnownDirectCorsUrl(url: string): boolean {
+    try {
+        if (!url) return false;
+        const target = new URL(normalizeProxyTarget(url), typeof window !== "undefined" ? window.location.origin : "http://localhost");
+        if (target.protocol !== "http:" && target.protocol !== "https:") return false;
+        return isDirectCorsHost(target.host);
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Resolve API transport. Optional `override` comes from a channel's `apiTransport`
  * (via resolveModelRequestConfig); when omitted, fall back to global Preferences.
  */

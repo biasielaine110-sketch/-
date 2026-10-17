@@ -23,7 +23,7 @@ import {
 } from "@/lib/audio-generation";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { proxyApiUrl } from "@/lib/api-proxy";
+import { proxyApiUrl, isKnownDirectCorsUrl } from "@/lib/api-proxy";
 import type { ReferenceAudio } from "@/types/media";
 import { uploadProviderMediaFile } from "./video";
 import { runModelPlugin } from "./model-plugin";
@@ -992,6 +992,7 @@ function readAxiosError(error: unknown, fallback: string) {
             const hint = url ? `\n${url}` : "";
             // Pages proxy 502 without ACAO used to surface here as a fake CORS/network failure.
             if (/\/api(?:-)?proxy\?target=/i.test(url)) return `${apiText("proxyUnreachable")}${hint}`;
+            if (error.code === "ERR_NETWORK" && isKnownDirectCorsUrl(url)) return `${apiText("directHostUnreachable")}${hint}`;
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
         }
         const responseData = error.response?.data;

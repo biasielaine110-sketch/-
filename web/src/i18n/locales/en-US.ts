@@ -255,6 +255,7 @@ export default {
         requestCanceled: "Request canceled",
         corsRequired: "The browser blocked this cross-origin request. Route it through your own server",
         networkFailed: "Cannot reach the API server (unreachable address, network drop, or site proxy failure). Retry first; if the URL contains /api/proxy?target=, treat it as a proxy-side failure—do not chase CORS settings. Or switch API transport to Direct in Settings → Preferences.",
+        directHostUnreachable: "This API address resolves but never responds (dead tunnel, TLS failure, or network drop) — this is not a CORS problem. With a ts.net tunnel, check that Tailscale is signed in and Funnel is on (tailscale funnel status) on that host; locally you can also point Base URL at http://127.0.0.1:port instead.",
         proxyUnreachable: "The site proxy could not reach the upstream API (often a brief blip or upstream outage). Retry first; or set API transport to Direct in Settings → Preferences to skip the proxy hop.",
         proxyTimedOut: "Proxy timed out. Online proxy allows up to ~5 minutes; redeploy after the timeout fix. Or run npm run dev locally, or switch API transport to Direct.",
         payloadTooLarge: "Request body too large (HTTP 413). Reference media through the site proxy is size-limited (~4.5MB). Use fewer/smaller references, trim audio first, or set API transport to Direct in Settings → Preferences.",

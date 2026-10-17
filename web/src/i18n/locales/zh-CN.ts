@@ -255,6 +255,7 @@ export default {
         requestCanceled: "请求已取消",
         corsRequired: "请求被浏览器跨域策略拦截，请通过自己的服务转发请求",
         networkFailed: "无法连接接口服务器（地址不可达、网络中断或站点代理失败）。先重试；若 URL 含 /api/proxy?target=，优先当代理侧故障，不要先改跨域设置。也可到「配置 → 偏好设置」改「浏览器直连」。",
+        directHostUnreachable: "连不上这个接口地址：域名解析到了，但完全没有响应（隧道掉线 / 证书错误 / 网络中断），不是跨域问题。若用的是 ts.net 隧道，先确认那台机器上的 Tailscale 已登录、Funnel 在线（tailscale funnel status）；也可以在本地换成 http://127.0.0.1:端口 直连。",
         proxyUnreachable: "站点代理未能连上上游接口（常见于瞬断或上游宕机）。请直接重试；也可到「配置 → 偏好设置」把「API 请求方式」改为「浏览器直连」以少走一跳。",
         proxyTimedOut: "代理请求超时。线上代理最长约 5 分钟；若刚改过超时配置，请重新部署后再试。也可在本机 npm run dev 生图，或改「浏览器直连」。",
         payloadTooLarge: "请求体过大（HTTP 413）。经站点代理上传参考图/音频时受体积限制（约 4.5MB）。请减少参考数量、先裁短音频，或到「配置 → 偏好设置」将「API 请求方式」改为「浏览器直连」。",

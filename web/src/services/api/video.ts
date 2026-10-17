@@ -15,7 +15,7 @@ import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/l
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl } from "@/lib/api-proxy";
+import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, isKnownDirectCorsUrl } from "@/lib/api-proxy";
 import { uploadTemporaryPublicImage } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import {
@@ -1332,6 +1332,7 @@ function readAxiosError(error: unknown, fallback: string) {
             const hint = url ? `\n${url}` : "";
             // Pages proxy 502 without ACAO used to surface here as a fake CORS/network failure.
             if (/\/api(?:-)?proxy\?target=/i.test(url)) return `${apiText("proxyUnreachable")}${hint}`;
+            if (error.code === "ERR_NETWORK" && isKnownDirectCorsUrl(url)) return `${apiText("directHostUnreachable")}${hint}`;
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
         }
         const responseData = error.response?.data;
