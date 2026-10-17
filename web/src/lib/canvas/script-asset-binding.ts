@@ -56,9 +56,14 @@ export function buildScriptAssetBindingPrompt(
     return i18n.t("canvas.scriptNode.assetBindingLine", { items });
 }
 
-/** 把「资产绑定」那一行接到提示词末尾（原本没有提示词时就只留这一行）；空绑定 = 原样返回。 */
-export function appendScriptAssetBinding(prompt: string | undefined, bindingLine: string) {
-    const base = (prompt || "").trimEnd();
+/**
+ * 把「资产绑定」那一行放到提示词**最上面**（原本没有提示词时就只留这一行）；空绑定 = 原样返回。
+ *
+ * 位置是用户拍板的：生图 / 视频窗口打开时，第一眼要看到「哪张图是谁」——
+ * 放在末尾会被几百字的分镜提示词压到看不见，还得滚到底才找得到。
+ */
+export function withScriptAssetBinding(prompt: string | undefined, bindingLine: string) {
+    const base = (prompt || "").trim();
     if (!bindingLine) return base;
-    return base ? `${base}\n\n${bindingLine}` : bindingLine;
+    return base ? `${bindingLine}\n\n${base}` : bindingLine;
 }

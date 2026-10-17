@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { App } from "antd";
+import { App, Modal } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowUpRight, AlignJustify, Copy, FileText, GripVertical, Image as ImageIcon, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Copy, FileText, GripVertical, Image as ImageIcon, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -10,12 +10,17 @@ import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type S
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import {
     collectScriptCellPromptCandidate,
+    collectStoryScriptAssetFillTargets,
     getStoryScriptColumns,
     getStoryScriptPreset,
     getStoryScriptSystemPrompt,
     hasScriptSystemPromptOverride,
     isScriptAssetColumn,
     nextScriptAssetRole,
+    remapStoryScriptCellAssets,
+    remapStoryScriptRowAssets,
+    remapStoryScriptRowNotes,
+    reorderStoryScriptRows,
     resolveScriptAssetRole,
     resolveStoryScriptFontSize,
     resolveStoryScriptMergeMode,
@@ -28,6 +33,7 @@ import {
     shiftStoryScriptCellAssetsAfterDelete,
     shiftStoryScriptRowAssetsAfterDelete,
     stepStoryScriptFontSize,
+    storyScriptRowNote,
     storyScriptToMarkdown,
     storyScriptToTsv,
     STORY_SCRIPT_MERGE_MODES,
@@ -52,10 +58,12 @@ export type { ScriptAssetCandidate, ScriptAssetLinkSelection };
  *  1) 外壳 `cursor-move`，内部真实控件用 pointer/mouse 捕获把事件挡在节点拖拽之外；
  *  2) 滚动容器挂原生 wheel stopPropagation + `data-canvas-no-zoom`，否则画布会把滚轮吃掉当缩放。
  *
- * 字号：表格是十几列的宽表（经典预设约 2.6k px），若按 chat 的 20px 会彻底读不了，所以默认基准
- * 13px、工具条 15px（1.154 倍），再由画布缩放进退。基准字号可由顶部「A− / A+」调档
- * （`metadata.scriptFontSize`）：外壳挂基准 px，**其余字号一律写成 em**，所以只改一个值就整体缩放；
- * 默认 13px 时各 em 值恰好还原原先的像素值，视觉零变化。
+ * 字号：表格是十几列的宽表（经典预设约 2.9k px），所以**默认基准 20px**（用户要求：默认可读），
+ * 工具条 23px（1.154 倍），再由画布缩放进退。基准字号可由顶部「A− / A+」调档
+ * （`metadata.scriptFontSize`）：外壳挂基准 px，**其余字号一律写成 em**，所以只改一个值就整体缩放。
+ *
+ * 表格内容默认**完整显示**（不再 line-clamp 截断，见 `showFullText`）：分镜提示词动辄几百字，
+ * 截成 4 行等于把内容藏起来。嫌占地方可以在底部切到「精简」（4 行 + 悬停看全文）。
  *
  * 输出格式由 `metadata.scriptPreset` 决定（见 constant/story-script.ts）：列定义、系统提示词、
  * 行操作按钮全部按预设分派。切换预设会清空已生成的分镜表（原文与补充要求保留），因为两套预设
@@ -64,7 +72,10 @@ export type { ScriptAssetCandidate, ScriptAssetLinkSelection };
 
 /** 顶部工具条字号相对正文基准的倍数（改造前 15px / 13px），跟着基准字号一起缩放。 */
 const HEADER_FONT_SCALE = 1.154;
-const TABLE_ACTION_WIDTH = 104;
+/** 操作列：复制 / 送画布 / 建视频 / 重生成 / 补资产 / 改剧情 / 上移下移 / 删除，所以留得比按钮宽一点、按钮自己换行。 */
+const TABLE_ACTION_WIDTH = 132;
+/** 勾选列（批量重生成 / 批量铺视频）的宽度：只有一个圆形勾选按钮。 */
+const TABLE_SELECT_WIDTH = 34;
 /**
  * 「镜头图」列宽（逐镜图片）。它是**不参与解析 / 导出**的自绘列（预设列定义里没有它），
  * 所以单独声明、并计入 `tableWidth`，让自动适配窗口宽度时把它一起算上。
@@ -73,13 +84,16 @@ const ROW_IMAGE_COLUMN_WIDTH = 148;
 
 /**
  * 生成后按「内容多少」自动适配节点窗口尺寸的边界。
- * 高度贴合全部行（不再只露三四行）；宽度贴合表格实际宽度，但封顶——经典预设 16 列约 3.1k px，
+ * 高度贴合全部行（不再只露三四行）；宽度贴合表格实际宽度，但封顶——经典预设 16 列约 2.9k px，
  * 若真按宽度撑开节点会宽到没法用，所以超出部分仍靠表体横向滚动（配「全屏」看整表）。
+ *
+ * 因为默认字号提到 20px、单元格默认完整显示，行会明显变高，所以高度上限也给得比以前宽
+ * （1600 → 2400）：一张十镜的表大致能一次看全，而不是又被窗口高度截住。
  */
 const AUTO_SIZE_MIN_WIDTH = 760;
-const AUTO_SIZE_MAX_WIDTH = 2000;
+const AUTO_SIZE_MAX_WIDTH = 2200;
 const AUTO_SIZE_MIN_HEIGHT = 460;
-const AUTO_SIZE_MAX_HEIGHT = 1600;
+const AUTO_SIZE_MAX_HEIGHT = 2400;
 const AUTO_SIZE_PADDING_X = 24;
 
 /** 三个「试一试」快捷动作（对应剧集画布 ScriptNode 的 SCRIPT_ACTIONS）：在脚本节点左侧建好对应上游节点并连边。 */
@@ -130,8 +144,19 @@ type CanvasScriptNodeContentProps = {
     onBuildPipeline?: (nodeId: string) => void;
     /** 只给某一行分镜建一个视频节点（预填该镜的视频提示词与时长）。 */
     onBuildShotVideo?: (nodeId: string, rowIndex: number) => void;
+    /** 勾选多镜后批量建视频节点（每镜一个节点，自带该镜的提示词 / 时长 / 素材连线）。 */
+    onBuildShotVideos?: (nodeId: string, rowIndexes: number[]) => void;
     /** 按镜重生成：只重写这一行的全部列（保留 shot_no），并带上一镜 / 下一镜作为上下文。 */
     onRegenerateShot?: (nodeId: string, rowIndex: number) => void;
+    /**
+     * 批量 / 带要求地重生成：一次重写多镜（串行），`extraPlot` 只作用于这批镜，
+     * `keepBlocking === false` 表示这一批镜的人物站位可以重新安排（不必和上下镜一致）。
+     */
+    onRegenerateRows?: (nodeId: string, rowIndexes: number[], options?: { extraPlot?: string; keepBlocking?: boolean }) => void;
+    /** 二次识别补缺失资产：只补这一镜**空着**的资产列，已有内容一个字都不改（append-only）。 */
+    onFillShotAssets?: (nodeId: string, rowIndex: number) => void;
+    /** 逐镜备注（`metadata.scriptRowNotes`：镜号 → 用户给这一镜追加的剧情 / 修改要求）。 */
+    rowNotes?: Record<string, string>;
     /** 重新生成整表：整张分镜表推倒重来（用于追回缺失的资产 / 列）。 */
     onRegenerateAll?: (nodeId: string) => void;
     /** 逐镜图片：镜号 → 已关联的图片节点 id（存在 metadata.scriptRowAssets，见 constant/story-script.ts）。 */
@@ -207,7 +232,11 @@ export function CanvasScriptNodeContent({
     onAssetRoleChange,
     onBuildPipeline,
     onBuildShotVideo,
+    onBuildShotVideos,
     onRegenerateShot,
+    onRegenerateRows,
+    onFillShotAssets,
+    rowNotes,
     onRegenerateAll,
     rowAssets,
     imageCandidates,
@@ -244,7 +273,7 @@ export function CanvasScriptNodeContent({
 
     // 内容基准字号（px）。组件内所有字号都写成 em，所以只改这一个值就能整体缩放
     // （档位见 story-script.ts 的 STORY_SCRIPT_FONT_SIZES，避开 13.5px 这种糊字）。
-    // 默认 13px 时各 em 值恰好还原改造前的像素值，视觉零变化。
+    // 默认档是 20px（用户要求默认可读），要更密就点顶部 A−。
     const baseFontSize = resolveStoryScriptFontSize(node.metadata?.scriptFontSize);
     const smallerFontSize = stepStoryScriptFontSize(baseFontSize, -1);
     const largerFontSize = stepStoryScriptFontSize(baseFontSize, 1);
@@ -253,8 +282,13 @@ export function CanvasScriptNodeContent({
     const presetId = resolveStoryScriptPresetId(node.metadata?.scriptPreset);
     const preset = useMemo(() => getStoryScriptPreset(presetId), [presetId]);
     const columns = preset.columns;
-    // 「镜头图」列挂在 preset 列之前，所以表格实际宽度要把它一起算上（否则自动适配会窄一列）。
-    const tableWidth = useMemo(() => columns.reduce((sum, column) => sum + column.width, 0) + TABLE_ACTION_WIDTH + ROW_IMAGE_COLUMN_WIDTH, [columns]);
+    // 勾选列只在「支持批量操作」时出现（没接线就完全不占宽度）。
+    const showRowSelect = Boolean(onRegenerateRows || onBuildShotVideos);
+    // 「镜头图」列 / 勾选列挂在 preset 列之前，所以表格实际宽度要把它们一起算上（否则自动适配会窄）。
+    const tableWidth = useMemo(
+        () => columns.reduce((sum, column) => sum + column.width, 0) + TABLE_ACTION_WIDTH + ROW_IMAGE_COLUMN_WIDTH + (showRowSelect ? TABLE_SELECT_WIDTH : 0),
+        [columns, showRowSelect],
+    );
 
     const [view, setView] = useState<"source" | "table">(rows.length ? "table" : "source");
     const [editing, setEditing] = useState<{ rowIndex: number; key: string } | null>(null);
@@ -283,6 +317,22 @@ export function CanvasScriptNodeContent({
     const [systemPromptOpen, setSystemPromptOpen] = useState(false);
     // 是否已自定义：决定 chip 的高亮态与是否显示「恢复预设提示词」。
     const hasCustomSystemPrompt = hasScriptSystemPromptOverride(node.metadata?.scriptSystemPrompt);
+    /**
+     * 勾选的行（存 rowIndex，不是镜号）。只服务于「批量重生成 / 批量铺视频」。
+     * 任何会改变行顺序或行数的操作（调序 / 删行 / 重新生成整表）都会把它清空——
+     * 索引一变，勾选就指到别人身上了，清空比错位安全。
+     */
+    const [selectedRows, setSelectedRows] = useState<Set<number>>(() => new Set());
+    /** 「加剧情 / 批量重生成」弹窗：瞄准的行索引（空 = 未打开）。 */
+    const [rowEditTarget, setRowEditTarget] = useState<number[] | null>(null);
+    const [rowPlotDraft, setRowPlotDraft] = useState("");
+    /** 是否要求这批镜与上下镜保持人物站位一致（默认开 = 改造前的行为）。 */
+    const [rowKeepBlocking, setRowKeepBlocking] = useState(true);
+    /**
+     * 单元格是否完整显示。默认 `true`（用户要求：不用拖滑条也要看全内容），
+     * 切到 `false` 时退回「4 行 + 悬停看全文」，用来把很长的提示词列压扁。
+     */
+    const [showFullText, setShowFullText] = useState(true);
 
     useEffect(() => {
         setSourceDraft(source);
@@ -388,8 +438,8 @@ export function CanvasScriptNodeContent({
         if (!table || !body || !shell) return;
         const contentHeight = table.offsetHeight;
         if (!contentHeight) return;
-        // 签名带行数、单元格总字数与基准字号：增删行、改字、调字号都会变，纯切换视图不会。
-        const signature = `${presetId}:${baseFontSize}:${columns.length}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
+        // 签名带行数、单元格总字数、基准字号与「完整/精简」：增删行、改字、调字号、切显示都会变，纯切换视图不会。
+        const signature = `${presetId}:${baseFontSize}:${showFullText ? "full" : "compact"}:${columns.length}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
         if (signature === lastAutoSizeKeyRef.current) return;
         const chromeHeight = Math.max(0, shell.clientHeight - body.clientHeight);
         const width = Math.round(Math.min(AUTO_SIZE_MAX_WIDTH, Math.max(AUTO_SIZE_MIN_WIDTH, tableWidth + AUTO_SIZE_PADDING_X)));
@@ -398,7 +448,7 @@ export function CanvasScriptNodeContent({
         onConfigChange(node.id, { scriptAutoSizeKey: signature });
         if (Math.abs(width - node.width) < 8 && Math.abs(height - node.height) < 8) return;
         onNodeSizeChange(node.id, width, height);
-    }, [baseFontSize, columns, fullscreen, isRunning, node.height, node.id, node.width, onConfigChange, onNodeSizeChange, presetId, rows, tableWidth, view]);
+    }, [baseFontSize, columns, fullscreen, isRunning, node.height, node.id, node.width, onConfigChange, onNodeSizeChange, presetId, rows, showFullText, tableWidth, view]);
 
     // 全屏时 Esc 退出；单元格编辑弹窗开着时让 Esc 先归它（否则会连带把全屏也关掉）。
     useEffect(() => {
@@ -440,7 +490,59 @@ export function CanvasScriptNodeContent({
             // 「按镜按资产」的键里也有镜号，同样要跟着前移。
             scriptCellAssets: shiftStoryScriptCellAssetsAfterDelete(node.metadata?.scriptCellAssets, deletedShotNo),
         });
+        setSelectedRows(new Set());
         message.success(t("canvas.scriptNode.rowDeleted"));
+    };
+
+    /**
+     * 调序：把这一镜往上 / 往下挪一格，镜号跟着重排成 1..N。
+     *
+     * 三张按镜号存的表（逐镜图 / 按镜按资产 / 逐镜备注）**必须一起挪**，否则图会挂到隔壁镜头上；
+     * `reorderStoryScriptRows` 返回的 mapping 就是干这个的。
+     */
+    const moveRow = (rowIndex: number, delta: number) => {
+        const target = rowIndex + delta;
+        if (target < 0 || target >= rows.length) return;
+        const { rows: nextRows, mapping } = reorderStoryScriptRows(rows, rowIndex, target);
+        patchMetadata({
+            scriptRows: nextRows,
+            scriptRowAssets: remapStoryScriptRowAssets(node.metadata?.scriptRowAssets, mapping),
+            scriptCellAssets: remapStoryScriptCellAssets(node.metadata?.scriptCellAssets, mapping),
+            scriptRowNotes: remapStoryScriptRowNotes(node.metadata?.scriptRowNotes, mapping),
+        });
+        // 勾选按 rowIndex 存，顺序一变就指到别人身上了 —— 清空。
+        setSelectedRows(new Set());
+    };
+
+    const toggleRowSelected = (rowIndex: number) => {
+        setSelectedRows((current) => {
+            const next = new Set(current);
+            if (next.has(rowIndex)) next.delete(rowIndex);
+            else next.add(rowIndex);
+            return next;
+        });
+    };
+
+    const toggleAllRows = () => {
+        setSelectedRows((current) => (current.size === rows.length ? new Set() : new Set(rows.map((_, index) => index))));
+    };
+
+    /** 打开「加剧情 / 重生成」弹窗：单镜（行按钮）或整批（勾选后底部按钮）都走这里。 */
+    const openRowEdit = (indexes: number[]) => {
+        const valid = indexes.filter((index) => index >= 0 && index < rows.length);
+        if (!valid.length) return;
+        // 单镜时把上次给这一镜写的剧情带出来（改一行字重跑一遍，不用重打）。
+        const only = valid.length === 1 ? rows[valid[0]] : undefined;
+        setRowPlotDraft(only ? storyScriptRowNote(node.metadata?.scriptRowNotes, only.shot_no || valid[0] + 1) : "");
+        setRowKeepBlocking(true);
+        setRowEditTarget(valid);
+    };
+
+    const submitRowEdit = () => {
+        if (!rowEditTarget?.length) return;
+        onRegenerateRows?.(node.id, rowEditTarget, { extraPlot: rowPlotDraft.trim() || undefined, keepBlocking: rowKeepBlocking });
+        setRowEditTarget(null);
+        setSelectedRows(new Set());
     };
 
     const toastCopied = () => message.success(t("common.copied"));
@@ -464,6 +566,7 @@ export function CanvasScriptNodeContent({
             cancelText: t("common.cancel"),
             onOk: () => {
                 patchMetadata({ scriptRows: [], scriptTitle: "", scriptRaw: "", scriptStatus: "idle", errorDetails: undefined });
+                setSelectedRows(new Set());
                 setView("source");
             },
         });
@@ -1093,6 +1196,7 @@ export function CanvasScriptNodeContent({
             <div ref={bodyRef} data-canvas-no-zoom className="thin-scrollbar min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
                 <table ref={tableRef} className="border-separate border-spacing-0 leading-snug" style={tableStyle}>
                     <colgroup>
+                        {showRowSelect ? <col style={{ width: TABLE_SELECT_WIDTH }} /> : null}
                         {showRowImage ? <col style={{ width: ROW_IMAGE_COLUMN_WIDTH }} /> : null}
                         {columns.map((column) => (
                             <col key={column.key} style={{ width: column.width }} />
@@ -1101,6 +1205,28 @@ export function CanvasScriptNodeContent({
                     </colgroup>
                     <thead>
                         <tr>
+                            {showRowSelect ? (
+                                <th className="sticky top-0 z-10 border-b px-1 py-1.5" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel }}>
+                                    <button
+                                        type="button"
+                                        className="inline-flex size-5 items-center justify-center rounded-md border text-[0.7em] transition"
+                                        style={{
+                                            borderColor: selectedRows.size && selectedRows.size === rows.length ? theme.toolbar.activeBg : theme.node.stroke,
+                                            background: selectedRows.size && selectedRows.size === rows.length ? theme.toolbar.activeBg : "transparent",
+                                            color: selectedRows.size && selectedRows.size === rows.length ? theme.toolbar.activeText : theme.node.text,
+                                        }}
+                                        onMouseDown={(event) => event.stopPropagation()}
+                                        onPointerDown={(event) => event.stopPropagation()}
+                                        onClick={(event) => {
+                                            event.stopPropagation();
+                                            toggleAllRows();
+                                        }}
+                                        title={selectedRows.size === rows.length ? t("canvas.scriptNode.selectNone") : t("canvas.scriptNode.selectAll")}
+                                    >
+                                        {selectedRows.size && selectedRows.size === rows.length ? "✓" : ""}
+                                    </button>
+                                </th>
+                            ) : null}
                             {showRowImage ? (
                                 <th
                                     className="sticky top-0 z-10 border-b px-2 py-1.5 text-left font-semibold whitespace-nowrap"
@@ -1127,6 +1253,29 @@ export function CanvasScriptNodeContent({
                     <tbody>
                         {rows.map((row, rowIndex) => (
                             <tr key={`${row.shot_no}-${rowIndex}`} className="align-top">
+                                {showRowSelect ? (
+                                    <td className="border-b px-1 py-1.5" style={{ borderColor: theme.node.stroke }}>
+                                        <button
+                                            type="button"
+                                            className="inline-flex size-5 items-center justify-center rounded-md border text-[0.7em] transition"
+                                            style={{
+                                                borderColor: selectedRows.has(rowIndex) ? theme.toolbar.activeBg : theme.node.stroke,
+                                                background: selectedRows.has(rowIndex) ? theme.toolbar.activeBg : "transparent",
+                                                color: selectedRows.has(rowIndex) ? theme.toolbar.activeText : theme.node.text,
+                                                opacity: selectedRows.has(rowIndex) ? 1 : 0.6,
+                                            }}
+                                            onMouseDown={(event) => event.stopPropagation()}
+                                            onPointerDown={(event) => event.stopPropagation()}
+                                            onClick={(event) => {
+                                                event.stopPropagation();
+                                                toggleRowSelected(rowIndex);
+                                            }}
+                                            title={t("canvas.scriptNode.selectRow")}
+                                        >
+                                            {selectedRows.has(rowIndex) ? "✓" : ""}
+                                        </button>
+                                    </td>
+                                ) : null}
                                 {showRowImage ? (
                                     // 「镜头图」：这一镜关联的图片缩略图（点 × 解绑，点 + 打开逐镜弹窗）。
                                     // 它不参与解析 / 导出，只是把「这一镜用哪张图」这条关系画在表里。
@@ -1212,7 +1361,9 @@ export function CanvasScriptNodeContent({
                                             }}
                                         >
                                             {value ? (
-                                                <div className="line-clamp-4 whitespace-pre-wrap break-words">{value}</div>
+                                                // 默认**完整显示**：分镜提示词动辄几百字，截成 4 行等于把内容藏起来
+                                                // （以前的「要拖滑条才看全」就是这里）。切到「精简」才退回 4 行截断。
+                                                <div className={`whitespace-pre-wrap break-words ${showFullText ? "" : "line-clamp-4"}`}>{value}</div>
                                             ) : (
                                                 <div className="opacity-35">{t("canvas.scriptNode.noContent")}</div>
                                             )}
@@ -1332,7 +1483,7 @@ export function CanvasScriptNodeContent({
                                     );
                                 })}
                                 <td className="border-b px-1 py-1" style={{ borderColor: theme.node.stroke }}>
-                                    <div className="flex items-center gap-1">
+                                    <div className="flex flex-wrap items-center gap-1">
                                         {preset.rowActions.map((action) => (
                                             <button
                                                 key={action.key}
@@ -1393,6 +1544,82 @@ export function CanvasScriptNodeContent({
                                                 <RotateCcw className="size-3" />
                                             </button>
                                         ) : null}
+                                        {/* 加剧情 / 带要求重生成：只改这一镜，可关掉「与上下镜站位一致」。 */}
+                                        {onRegenerateRows ? (
+                                            <button
+                                                type="button"
+                                                className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
+                                                style={{ borderColor: storyScriptRowNote(rowNotes, row.shot_no || rowIndex + 1) ? theme.toolbar.activeBg : theme.node.stroke, opacity: 0.86 }}
+                                                onMouseDown={(event) => event.stopPropagation()}
+                                                onPointerDown={(event) => event.stopPropagation()}
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    openRowEdit([rowIndex]);
+                                                }}
+                                                title={
+                                                    storyScriptRowNote(rowNotes, row.shot_no || rowIndex + 1)
+                                                        ? `${t("canvas.scriptNode.rowEditNote", { note: storyScriptRowNote(rowNotes, row.shot_no || rowIndex + 1) })}`
+                                                        : t("canvas.scriptNode.rowEdit")
+                                                }
+                                            >
+                                                <Wand2 className="size-3" />
+                                            </button>
+                                        ) : null}
+                                        {/* 二次识别补缺失资产：只有这一镜真的缺资产列时才出现（本身就是「缺什么」的提示）。 */}
+                                        {onFillShotAssets && collectStoryScriptAssetFillTargets(presetId, row).length ? (
+                                            <button
+                                                type="button"
+                                                className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
+                                                style={{ borderColor: theme.node.stroke, opacity: 0.86 }}
+                                                onMouseDown={(event) => event.stopPropagation()}
+                                                onPointerDown={(event) => event.stopPropagation()}
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    onFillShotAssets(node.id, rowIndex);
+                                                }}
+                                                title={t("canvas.scriptNode.assetFillHint", {
+                                                    labels: collectStoryScriptAssetFillTargets(presetId, row)
+                                                        .map((target) => target.label)
+                                                        .join(" / "),
+                                                })}
+                                            >
+                                                <Sparkles className="size-3" />
+                                            </button>
+                                        ) : null}
+                                        {rows.length > 1 ? (
+                                            <>
+                                                <button
+                                                    type="button"
+                                                    className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100 disabled:opacity-30"
+                                                    style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
+                                                    disabled={rowIndex === 0}
+                                                    onMouseDown={(event) => event.stopPropagation()}
+                                                    onPointerDown={(event) => event.stopPropagation()}
+                                                    onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        moveRow(rowIndex, -1);
+                                                    }}
+                                                    title={t("canvas.scriptNode.moveRowUp")}
+                                                >
+                                                    <ArrowUp className="size-3" />
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100 disabled:opacity-30"
+                                                    style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
+                                                    disabled={rowIndex === rows.length - 1}
+                                                    onMouseDown={(event) => event.stopPropagation()}
+                                                    onPointerDown={(event) => event.stopPropagation()}
+                                                    onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        moveRow(rowIndex, 1);
+                                                    }}
+                                                    title={t("canvas.scriptNode.moveRowDown")}
+                                                >
+                                                    <ArrowDown className="size-3" />
+                                                </button>
+                                            </>
+                                        ) : null}
                                         <button
                                             type="button"
                                             className="inline-flex size-6 items-center justify-center rounded-md border transition hover:opacity-100"
@@ -1420,6 +1647,84 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.shotCount", { count: rows.length })} · {t("canvas.scriptNode.totalDuration", { seconds: totalDuration })}
                 </span>
                 {mergeSelector}
+                {/* 完整显示 / 精简：默认完整（不用拖滑条就能看全每格内容），太长时再切精简。 */}
+                <button
+                    type="button"
+                    className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition"
+                    style={{
+                        borderColor: theme.node.stroke,
+                        background: showFullText ? `${theme.toolbar.activeBg}1f` : "transparent",
+                        color: showFullText ? theme.toolbar.activeBg : theme.node.text,
+                        opacity: showFullText ? 1 : 0.75,
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        setShowFullText((current) => !current);
+                    }}
+                    title={showFullText ? t("canvas.scriptNode.cellFullOnHint") : t("canvas.scriptNode.cellFullOffHint")}
+                >
+                    {showFullText ? <Minimize2 className="size-3" /> : <Maximize2 className="size-3" />}
+                    {showFullText ? t("canvas.scriptNode.cellFull") : t("canvas.scriptNode.cellCompact")}
+                </button>
+                {/* 批量条：勾了行才出现，避免平时占地方。 */}
+                {showRowSelect && selectedRows.size ? (
+                    <span className="inline-flex items-center gap-1">
+                        <span className="rounded border px-1.5 opacity-90" style={{ borderColor: theme.toolbar.activeBg, color: theme.toolbar.activeBg }}>
+                            {t("canvas.scriptNode.selectedCount", { count: selectedRows.size })}
+                        </span>
+                        {onRegenerateRows ? (
+                            <button
+                                type="button"
+                                className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition"
+                                style={{ borderColor: theme.node.stroke }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    openRowEdit(Array.from(selectedRows));
+                                }}
+                                title={t("canvas.scriptNode.regenSelectedHint")}
+                            >
+                                <Wand2 className="size-3" />
+                                {t("canvas.scriptNode.regenSelected")}
+                            </button>
+                        ) : null}
+                        {onBuildShotVideos ? (
+                            <button
+                                type="button"
+                                className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition"
+                                style={{ borderColor: theme.node.stroke }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    onBuildShotVideos(node.id, Array.from(selectedRows));
+                                    setSelectedRows(new Set());
+                                }}
+                                title={t("canvas.scriptNode.buildSelectedVideosHint")}
+                            >
+                                <Video className="size-3" />
+                                {t("canvas.scriptNode.buildSelectedVideos")}
+                            </button>
+                        ) : null}
+                        <button
+                            type="button"
+                            className="inline-flex size-6 items-center justify-center rounded-full border transition"
+                            style={{ borderColor: theme.node.stroke, opacity: 0.8 }}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                setSelectedRows(new Set());
+                            }}
+                            title={t("canvas.scriptNode.selectNone")}
+                        >
+                            <X className="size-3" />
+                        </button>
+                    </span>
+                ) : null}
                 <div className="ml-auto flex items-center gap-1.5">
                     {onRegenerateAll ? (
                         <button
@@ -1585,6 +1890,53 @@ export function CanvasScriptNodeContent({
         />
     ) : null;
 
+    // 「加剧情 / 批量重生成」弹窗：一段只作用于这批镜的剧情 / 要求 + 一个「保持站位一致」开关。
+    // 用 antd Modal（portal 到 body，不受画布 pointerdown 吞事件影响）；里面只放 textarea 与自绘 chip，
+    // 不放 antd Select / Dropdown 这类自带浮层的控件（画布上容易被全局 pointerdown 判成「点外部」）。
+    const rowEditIndexes = rowEditTarget || [];
+    const rowEditShots = rowEditIndexes.map((index) => rows[index]?.shot_no || index + 1);
+    const rowEditDialog = onRegenerateRows ? (
+        <Modal
+            open={Boolean(rowEditIndexes.length)}
+            title={
+                rowEditIndexes.length > 1
+                    ? t("canvas.scriptNode.rowEditTitleBatch", { count: rowEditIndexes.length, shots: rowEditShots.join("、") })
+                    : t("canvas.scriptNode.rowEditTitle", { no: rowEditShots[0] ?? "" })
+            }
+            okText={t("canvas.scriptNode.rowEditRun")}
+            cancelText={t("common.cancel")}
+            width={580}
+            onOk={submitRowEdit}
+            onCancel={() => setRowEditTarget(null)}
+        >
+            <div className="flex flex-col gap-3 text-[14px]">
+                <div className="opacity-70">{t("canvas.scriptNode.rowEditHint")}</div>
+                <textarea
+                    className="thin-scrollbar min-h-32 w-full resize-y rounded-lg border p-2 leading-relaxed outline-none"
+                    style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
+                    value={rowPlotDraft}
+                    placeholder={t("canvas.scriptNode.rowEditPlaceholder")}
+                    onChange={(event) => setRowPlotDraft(event.target.value)}
+                />
+                {/* 站位一致性：默认「保持一致」（沿用老行为），关掉就允许这一镜重新安排人物站位。 */}
+                <button
+                    type="button"
+                    className="inline-flex w-fit items-center gap-1.5 rounded-full border px-2.5 py-1 text-[13px] transition"
+                    style={{
+                        borderColor: rowKeepBlocking ? theme.toolbar.activeBg : theme.node.stroke,
+                        background: rowKeepBlocking ? `${theme.toolbar.activeBg}1f` : "transparent",
+                        color: rowKeepBlocking ? theme.toolbar.activeBg : theme.node.text,
+                    }}
+                    onClick={() => setRowKeepBlocking((current) => !current)}
+                    title={t("canvas.scriptNode.rowEditBlockingHint")}
+                >
+                    {rowKeepBlocking ? "✓" : "○"} {t("canvas.scriptNode.rowEditBlocking")}
+                </button>
+                {rowEditIndexes.length > 1 ? <div className="text-[12px] opacity-60">{t("canvas.scriptNode.rowEditBatchNote")}</div> : null}
+            </div>
+        </Modal>
+    ) : null;
+
     return (
         <>
             {fullscreen
@@ -1631,6 +1983,7 @@ export function CanvasScriptNodeContent({
             {assetDialog}
             {rowAssetDialog}
             {cellAssetDialog}
+            {rowEditDialog}
         </>
     );
 }

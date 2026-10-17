@@ -148,6 +148,13 @@ export type CanvasNodeMetadata = {
      */
     scriptRowAssets?: import("@/constant/story-script").StoryScriptRowAssetMap;
     /**
+     * 脚本生成器：**逐镜备注**（镜号 → 用户给这一镜追加的剧情 / 修改要求）。
+     *
+     * 「给某一镜单独加剧情再重生成」时写进来：表里能看出这一镜是按什么要求改的，
+     * 下次再点重生成还能沿用 / 微调；调序与删行时镜号键会跟着一起挪。
+     */
+    scriptRowNotes?: Record<string, string>;
+    /**
      * 脚本生成器：**按镜按资产**挂图（`"镜号:资产列key"` → 画布图片节点 id 列表）。在分镜表的
      * 「角色1 / 角色2 / 场景 / 道具 / 人物站位」格子里直接导入 / 链接 / 生成，铺链路时只连到
      * **这一镜的那一个资产**（并顶掉资产条对同一镜同一分类的分派）。

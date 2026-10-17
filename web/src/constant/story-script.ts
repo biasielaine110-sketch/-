@@ -75,6 +75,19 @@ export type StoryScriptRowTaskInput = {
     next?: StoryScriptRow;
     characterRefs?: string;
     segmentSeconds?: unknown;
+    /**
+     * **这一镜单独追加的剧情 / 修改要求**（用户在行上「加剧情重生成」时写的）。
+     * 与 `prompt`（整表级别的补充要求）分开传，任务书里会写成独立一段，语义清楚得多。
+     * 留空 = 不加这段，输出与改造前逐字一致。
+     */
+    extraPlot?: string;
+    /**
+     * **是否保持与上下镜头的「人物站位」一致性**。
+     * 不传 / `true` = 沿用旧行为（要求 prev 的站位必须衔接）；传 `false` = 明确告诉模型
+     * 站位可以重新安排（只要求剧情别冲突），用于「这一镜就是要换个机位 / 换边站」的场景。
+     * 不传时输出与改造前逐字一致。
+     */
+    keepBlocking?: boolean | null;
 };
 
 export type StoryScriptPreset = {
@@ -410,12 +423,19 @@ function describeRowForContext(row: StoryScriptRow | undefined, columns: StorySc
  * 「只重写某一镜」的任务书（经典预设）。带上上一镜 / 下一镜上下文，重点要求：
  * 人物站位、场景、道具与前后镜保持一致——这正是「重生成本镜」追回资产描述的关键。
  */
-function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRefs }: StoryScriptRowTaskInput): string {
+function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking }: StoryScriptRowTaskInput): string {
     const columns = STORY_SCRIPT_CLASSIC_COLUMNS;
     const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请**只重新生成这一镜**（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...STORY_SCRIPT_COMMON_RULES];
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
+    if (extraPlot && extraPlot.trim()) parts.push(`这一镜要追加 / 修改的剧情（只改这一镜，其余镜头不要跟着改）：\n${extraPlot.trim()}`);
     const prevText = describeRowForContext(prev, columns);
-    if (prevText) parts.push(`上一镜（第 ${prev?.shot_no} 镜，人物站位 / 场景 / 道具必须与它衔接）：\n${prevText}`);
+    if (prevText) {
+        parts.push(
+            keepBlocking === false
+                ? `上一镜（第 ${prev?.shot_no} 镜，剧情要能接上，但**人物站位可以重新安排**，不必与它保持一致）：\n${prevText}`
+                : `上一镜（第 ${prev?.shot_no} 镜，人物站位 / 场景 / 道具必须与它衔接）：\n${prevText}`,
+        );
+    }
     const nextText = describeRowForContext(next, columns);
     if (nextText) parts.push(`下一镜（第 ${next?.shot_no} 镜，这一镜不要和它冲突）：\n${nextText}`);
     const currentText = describeRowForContext(row, columns);
@@ -429,12 +449,19 @@ function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRef
 }
 
 /** 「只重写某一镜」的任务书（视频分镜脚本预设）。 */
-function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, characterRefs }: StoryScriptRowTaskInput): string {
+function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking }: StoryScriptRowTaskInput): string {
     const columns = STORY_SCRIPT_STORYBOARD_COLUMNS;
     const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请只重新生成这一镜（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...STORY_SCRIPT_STORYBOARD_COMMON_RULES];
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
+    if (extraPlot && extraPlot.trim()) parts.push(`这一镜要追加 / 修改的剧情（只改这一镜，其余镜头不要跟着改）：\n${extraPlot.trim()}`);
     const prevText = describeRowForContext(prev, columns);
-    if (prevText) parts.push(`上一镜（第 ${prev?.shot_no} 镜，场景 / 道具 / 人物站位必须与它衔接）：\n${prevText}`);
+    if (prevText) {
+        parts.push(
+            keepBlocking === false
+                ? `上一镜（第 ${prev?.shot_no} 镜，剧情要能接上，但**人物站位可以重新安排**，不必与它保持一致）：\n${prevText}`
+                : `上一镜（第 ${prev?.shot_no} 镜，场景 / 道具 / 人物站位必须与它衔接）：\n${prevText}`,
+        );
+    }
     const nextText = describeRowForContext(next, columns);
     if (nextText) parts.push(`下一镜（第 ${next?.shot_no} 镜，这一镜不要和它冲突）：\n${nextText}`);
     const currentText = describeRowForContext(row, columns);
@@ -602,10 +629,13 @@ export function resolveStoryScriptMergeMode(value: unknown): StoryScriptMergeMod
  * 所以给一个可调档位（步进式，避免出现 13.5px 这种糊字）。
  *
  * 组件里除基准字号外**全部用 `em`**，所以改这一个值即可整体缩放；
- * 默认 13px 时各 `em` 值还原成改造前的像素值（12px → 0.923em 等），视觉零变化。
+ * 各 `em` 值是按 13px 那套像素值定的比例（12px → 0.923em 等），所以任何档位都只是等比缩放。
+ *
+ * 默认档 **20px**（用户要求：默认就要看得清）。觉得太挤可以点顶部 `A−` 往下调，档位会存进
+ * `metadata.scriptFontSize`，只影响这一个脚本节点。
  */
 export const STORY_SCRIPT_FONT_SIZES: number[] = [11, 12, 13, 14, 16, 18, 20];
-export const DEFAULT_STORY_SCRIPT_FONT_SIZE = 13;
+export const DEFAULT_STORY_SCRIPT_FONT_SIZE = 20;
 
 export function resolveStoryScriptFontSize(value: unknown): number {
     const size = Math.round(Number(value));
@@ -1256,6 +1286,217 @@ export function buildStoryScriptTask({
 /** 构建「只重写某一镜」的任务书；不传 preset 时保持 classic。 */
 export function buildStoryScriptRowTask({ preset, ...input }: StoryScriptRowTaskInput & { preset?: StoryScriptPresetId | string | null }): string {
     return getStoryScriptPreset(preset).buildRowTask(input);
+}
+
+// ---------------------------------------------------------------------------
+// 分镜表「改」相关的纯函数：调序、逐镜/批量重生成、二次识别补资产、逐镜备注
+// ---------------------------------------------------------------------------
+
+/**
+ * 调序：把第 `fromIndex` 行挪到 `toIndex`，并把 `shot_no` 重排成 1..N（顺序变了镜号也得跟着变）。
+ *
+ * 返回 `mapping`（**旧镜号 → 新镜号**）：逐镜图（`scriptRowAssets`）、按镜按资产（`scriptCellAssets`）、
+ * 逐镜备注（`scriptRowNotes`）都是按镜号存的，不跟着挪就会出现「第 3 镜的图挂到别人身上」。
+ */
+export function reorderStoryScriptRows(
+    rows: readonly StoryScriptRow[],
+    fromIndex: number,
+    toIndex: number,
+): { rows: StoryScriptRow[]; mapping: Map<number, number> } {
+    const list = rows.map((row, index) => ({ row, shotNo: Number(row.shot_no) || index + 1 }));
+    const mapping = new Map<number, number>();
+    if (fromIndex < 0 || fromIndex >= list.length || toIndex < 0 || toIndex >= list.length || fromIndex === toIndex) {
+        list.forEach((entry, index) => mapping.set(entry.shotNo, index + 1));
+        return { rows: rows.map((row) => ({ ...row })), mapping };
+    }
+    const [moved] = list.splice(fromIndex, 1);
+    list.splice(toIndex, 0, moved);
+    const next = list.map((entry, index) => {
+        mapping.set(entry.shotNo, index + 1);
+        return { ...entry.row, shot_no: index + 1 };
+    });
+    return { rows: next, mapping };
+}
+
+/** 把「镜号 → 数组」的键按 mapping 挪位置；没在 mapping 里的旧键原样保留（宁可留着也别丢数据）。 */
+function remapShotNumberKeys<T>(map: unknown, mapping: Map<number, number>, parse: (key: string) => { shotNo: number; rest: string } | null, build: (shotNo: number, rest: string) => string): Record<string, T> {
+    const out: Record<string, T> = {};
+    if (!map || typeof map !== "object" || Array.isArray(map)) return out;
+    for (const [key, value] of Object.entries(map as Record<string, T>)) {
+        const parsed = parse(key);
+        if (!parsed) continue;
+        const nextShotNo = mapping.get(parsed.shotNo) ?? parsed.shotNo;
+        out[build(nextShotNo, parsed.rest)] = value;
+    }
+    return out;
+}
+
+/** 逐镜图（`metadata.scriptRowAssets`）跟着镜号一起挪。 */
+export function remapStoryScriptRowAssets(map: unknown, mapping: Map<number, number>): StoryScriptRowAssetMap {
+    const normalized = normalizeStoryScriptRowAssetMap(map);
+    return remapShotNumberKeys<StoryScriptRowAssetMap[string]>(
+        normalized,
+        mapping,
+        (key) => {
+            const shotNo = Number(key);
+            return Number.isFinite(shotNo) && shotNo > 0 ? { shotNo, rest: "" } : null;
+        },
+        (shotNo) => String(shotNo),
+    );
+}
+
+/** 按镜按资产（`metadata.scriptCellAssets`）跟着镜号一起挪，列 key 不动。 */
+export function remapStoryScriptCellAssets(map: unknown, mapping: Map<number, number>): StoryScriptCellAssetMap {
+    const normalized = normalizeStoryScriptCellAssetMap(map);
+    return remapShotNumberKeys<StoryScriptCellAssetMap[string]>(
+        normalized,
+        mapping,
+        (key) => {
+            const parsed = parseScriptCellAssetKey(key);
+            return parsed ? { shotNo: parsed.shotNo, rest: parsed.columnKey } : null;
+        },
+        (shotNo, rest) => `${shotNo}:${rest}`,
+    );
+}
+
+/** 逐镜备注（`metadata.scriptRowNotes`）跟着镜号一起挪。 */
+export function remapStoryScriptRowNotes(map: unknown, mapping: Map<number, number>): Record<string, string> {
+    return remapShotNumberKeys<string>(
+        normalizeStoryScriptRowNoteMap(map),
+        mapping,
+        (key) => {
+            const shotNo = Number(key);
+            return Number.isFinite(shotNo) && shotNo > 0 ? { shotNo, rest: "" } : null;
+        },
+        (shotNo) => String(shotNo),
+    );
+}
+
+/** 统一收成「键是正整数字符串、值是非空字符串」，丢掉空备注。 */
+export function normalizeStoryScriptRowNoteMap(map: unknown): Record<string, string> {
+    const out: Record<string, string> = {};
+    if (!map || typeof map !== "object" || Array.isArray(map)) return out;
+    for (const [key, value] of Object.entries(map as Record<string, unknown>)) {
+        const shotNo = Number(key);
+        if (!Number.isFinite(shotNo) || shotNo <= 0) continue;
+        if (typeof value !== "string") continue;
+        const note = value.trim();
+        if (!note) continue;
+        out[String(shotNo)] = note;
+    }
+    return out;
+}
+
+/** 读某一镜的备注（没有 / 非法 → 空串）。 */
+export function storyScriptRowNote(map: unknown, shotNo: unknown): string {
+    const key = Number(shotNo);
+    if (!Number.isFinite(key) || key <= 0) return "";
+    const normalized = normalizeStoryScriptRowNoteMap(map);
+    return normalized[String(key)] || "";
+}
+
+/** 写某一镜的备注，返回**新的 map**；传空 = 删掉这一镜的备注。 */
+export function setStoryScriptRowNote(map: unknown, shotNo: unknown, note: string | null | undefined): Record<string, string> {
+    const next = normalizeStoryScriptRowNoteMap(map);
+    const key = Number(shotNo);
+    if (!Number.isFinite(key) || key <= 0) return next;
+    const text = typeof note === "string" ? note.trim() : "";
+    if (text) next[String(key)] = text;
+    else delete next[String(key)];
+    return next;
+}
+
+/** 二次识别「补资产」的一个目标：资产列 + 它在当前预设下的描述列。 */
+export type StoryScriptAssetFillTarget = {
+    /** 资产列 key（`character_1` / `scene` / `prop` / `blocking`…） */
+    key: string;
+    /** 列名（角色1 / 场景…），写进任务书用 */
+    label: string;
+    role: ScriptAssetRole;
+    /** 同组、且在当前预设里真实存在的描述列 key */
+    textKeys: string[];
+};
+
+/**
+ * 这一行**缺哪些资产**：以资产列为锚（角色1 / 角色2 / 场景 / 道具 / 人物站位），
+ * 「整组都空」才算缺失 —— 名字列或任意一条描述列有内容，就认为这一组已经统计过了。
+ *
+ * 表里写成 `无` 的值按空处理（`storyScriptCellText` 口径），所以模型偷懒写「无」的格子也会被认成缺失。
+ */
+export function collectStoryScriptAssetFillTargets(preset: StoryScriptPresetId | string | null | undefined, row: StoryScriptRow | null | undefined): StoryScriptAssetFillTarget[] {
+    if (!row) return [];
+    const columns = getStoryScriptColumns(preset);
+    const byKey = new Map(columns.map((column) => [column.key, column]));
+    const targets: StoryScriptAssetFillTarget[] = [];
+    for (const [key, spec] of Object.entries(SCRIPT_ASSET_COLUMN_SPECS)) {
+        if (!byKey.has(key)) continue;
+        const textKeys = spec.textKeys.filter((textKey) => byKey.has(textKey));
+        const groupKeys = [key, ...textKeys];
+        if (groupKeys.some((groupKey) => storyScriptCellText(row[groupKey]))) continue;
+        targets.push({ key, label: byKey.get(key)?.label || key, role: spec.role, textKeys });
+    }
+    return targets;
+}
+
+/**
+ * 「二次识别，只补缺失的资产」的任务书。
+ *
+ * 与整镜重生成（`buildRowTask`）的区别：**只允许补空**——已有内容的列一个字都不许动，
+ * 输出也只要那几个缺失字段。这样用户已经满意的画面描述 / 提示词不会被模型顺手改掉。
+ */
+export function buildStoryScriptAssetFillTask({
+    preset,
+    sourceText,
+    row,
+    targets,
+}: {
+    preset?: StoryScriptPresetId | string | null;
+    sourceText: string;
+    row: StoryScriptRow;
+    targets: StoryScriptAssetFillTarget[];
+}): string {
+    const columns = getStoryScriptColumns(preset);
+    const keySet = new Set(columns.map((column) => column.key));
+    const wanted = targets.flatMap((target) => [target.key, ...target.textKeys].filter((key) => keySet.has(key)));
+    const wantedLabels = targets
+        .map((target) => `${target.label}${target.textKeys.length ? `（${target.textKeys.map((textKey) => columns.find((column) => column.key === textKey)?.label || textKey).join(" / ")}）` : ""}`)
+        .join("、");
+    const parts = [
+        `下面是一张分镜表的第 ${row.shot_no} 镜。这一镜的**部分资产还没有统计出来**，请只补齐这些资产：${wantedLabels}。`,
+        "## 硬性要求\n1. 只输出下面列出的字段，其它字段一律不要输出；\n2. 这一镜已经写好的内容（画面 / 动作 / 提示词等）一个字都不要改，也不要重复输出；\n3. 确实没有的资产就写 `无`，不要编造无关内容；\n4. 资产名要与表里其它镜头已有的写法保持一致：同一个场景 / 道具用同一个名字，同一个角色用同一套名字；\n5. 输出单个 JSON 对象（不要 markdown 代码块、不要解释、不要前后缀）。",
+        `输出字段（只允许这些键）：\n${wanted.map((key) => `- \`${key}\`（${columns.find((column) => column.key === key)?.label || key}）`).join("\n")}`,
+        `JSON 形状示例：${JSON.stringify(Object.fromEntries(wanted.map((key) => [key, ""])))}`,
+        `这一镜当前的内容：\n${describeRowForContext(row, columns) || "（整行几乎都是空的）"}`,
+    ];
+    // 上一镜只作为「名字 / 站位要能接上」的参考，不要求重写。
+    if (sourceText.trim()) parts.push(`源剧本内容：\n${sourceText.trim()}`);
+    return parts.join("\n\n");
+}
+
+/**
+ * 把「补资产」结果并回原行：**只写空列**。
+ *
+ * 用户原话：「当镜的已出的其他内容不进行修改，只追加缺失的资产」——所以这里对已有内容的列
+ * 一律跳过（哪怕模型硬塞了新值），模型写 `无` 的也不落库（免得格子从空变成「无」看不出差别）。
+ */
+export function mergeStoryScriptAssetFill(
+    row: StoryScriptRow,
+    patch: unknown,
+    columns: StoryScriptColumn[] = STORY_SCRIPT_CLASSIC_COLUMNS,
+): StoryScriptRow {
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) return row;
+    const byKey = new Map(columns.map((column) => [column.key, column]));
+    const next: StoryScriptRow = { ...row };
+    for (const [rawKey, rawValue] of Object.entries(patch as Record<string, unknown>)) {
+        const column = byKey.get(rawKey);
+        // 只认当前预设里存在、且不是数字列（镜号 / 时长不许被补资产改掉）。
+        if (!column || column.numeric) continue;
+        if (storyScriptCellText(next[rawKey])) continue;
+        const value = toText(rawValue).trim();
+        if (!storyScriptCellText(value)) continue;
+        next[rawKey] = value;
+    }
+    return next;
 }
 
 function stripCodeFence(text: string): string {

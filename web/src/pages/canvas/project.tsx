@@ -32,7 +32,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, getStoryScriptColumns, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -88,7 +88,7 @@ import { DirectorPanel } from "@/components/canvas/director-panel";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores/canvas/use-generation-history-store";
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
-import { appendScriptAssetBinding, buildScriptAssetBindingPrompt } from "@/lib/canvas/script-asset-binding";
+import { buildScriptAssetBindingPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
 import type { ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
@@ -6257,14 +6257,22 @@ function AtelierCanvasPage() {
     // 按镜重生成（「重生成本镜」）：只重写这一行的全部列（保留镜号与行位置），并把「上一镜 / 下一镜」
     // 作为上下文喂进去——尽量保持场景、道具与人物站位的连续性。文本渠道与整表生成完全一致，
     // 只是任务书换成「只输出这一镜」（buildStoryScriptRowTask）。
+    //
+    // 支持三件事（用户诉求）：
+    //  1) **批量**：一次传多个行号，逐镜串行重写（串行才能让后一镜看到前一镜刚改完的站位）；
+    //  2) **单独加剧情**：`options.extraPlot` 只作用在这一批镜上，任务书里是独立一段；
+    //  3) **站位一致性开关**：`options.keepBlocking === false` 时明确允许人物站位重排。
     const runScriptShotGeneration = useCallback(
-        async (nodeId: string, rowIndex: number) => {
+        async (nodeId: string, rowIndexes: number | number[], options?: { extraPlot?: string; keepBlocking?: boolean }) => {
             const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
             if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return;
             if (isNodeGenerating(nodeId)) return;
-            const rows = sourceNode.metadata?.scriptRows || [];
-            const row = rows[rowIndex];
-            if (!row) return;
+            const sourceRows = sourceNode.metadata?.scriptRows || [];
+            const indexes = (Array.isArray(rowIndexes) ? rowIndexes : [rowIndexes])
+                .filter((index) => Number.isInteger(index) && index >= 0 && index < sourceRows.length)
+                .filter((index, position, list) => list.indexOf(index) === position)
+                .sort((left, right) => left - right);
+            if (!indexes.length) return;
             const presetId = resolveStoryScriptPresetId(sourceNode.metadata?.scriptPreset);
             const segmentSeconds = sourceNode.metadata?.scriptSegmentSeconds;
             const context = buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, "");
@@ -6275,16 +6283,9 @@ function AtelierCanvasPage() {
                 .map((input) => input.title.trim())
                 .filter(Boolean)
                 .join("、");
-            const task = buildStoryScriptRowTask({
-                preset: presetId,
-                sourceText,
-                prompt: sourceNode.metadata?.scriptPrompt,
-                row,
-                prev: rowIndex > 0 ? rows[rowIndex - 1] : undefined,
-                next: rowIndex < rows.length - 1 ? rows[rowIndex + 1] : undefined,
-                characterRefs,
-                segmentSeconds,
-            });
+            const extraPlot = (options?.extraPlot || "").trim();
+            // 默认保持站位一致（= 改造前的行为）；只有显式传 false 才放开。
+            const keepBlocking = options?.keepBlocking !== false;
             const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
             const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
             if (!isAiConfigReady(textConfig, textConfig.model)) {
@@ -6294,41 +6295,165 @@ function AtelierCanvasPage() {
             const controller = new AbortController();
             startGenerationRequest(nodeId, nodeId, nodeId, controller);
             setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "loading", errorDetails: undefined } } : node)));
+            const batch = indexes.length > 1;
+            try {
+                const hydrated = context.referenceImages.length ? await hydrateNodeGenerationContext(context) : context;
+                const systemPrompt = resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt);
+                // 逐镜串行：每改完一镜就写回，下一镜的 prev / next 读到的就是刚改完的版本。
+                let workingRows = [...sourceRows];
+                let done = 0;
+                let lastError = "";
+                for (const rowIndex of indexes) {
+                    if (controller.signal.aborted) return;
+                    const row = workingRows[rowIndex];
+                    if (!row) continue;
+                    const task = buildStoryScriptRowTask({
+                        preset: presetId,
+                        sourceText,
+                        prompt: sourceNode.metadata?.scriptPrompt,
+                        row,
+                        prev: rowIndex > 0 ? workingRows[rowIndex - 1] : undefined,
+                        next: rowIndex < workingRows.length - 1 ? workingRows[rowIndex + 1] : undefined,
+                        characterRefs,
+                        segmentSeconds,
+                        extraPlot: extraPlot || undefined,
+                        keepBlocking,
+                    });
+                    const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
+                        ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
+                        : task;
+                    const answer = await requestImageQuestion(textConfig, [
+                        { role: "system", content: systemPrompt },
+                        { role: "user", content: userContent },
+                    ], () => {}, { signal: controller.signal });
+                    if (controller.signal.aborted) return;
+                    const parsed = parseStoryScriptOutput(answer, presetId);
+                    if (!parsed.ok || !parsed.rows.length) {
+                        lastError = parsed.ok ? "模型未返回这一镜" : parsed.error;
+                        // 批量里某一镜失败不该把整批带崩 —— 记下错误，继续下一镜。
+                        if (!batch) {
+                            setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: lastError } } : node)));
+                            message.error(t("canvas.scriptNode.parseFailed"));
+                            return;
+                        }
+                        continue;
+                    }
+                    // 行位置与镜号以原表为准；重写结果只覆盖这一行的各列内容。
+                    const shotNo = row.shot_no || rowIndex + 1;
+                    workingRows = workingRows.map((item, index) => (index === rowIndex ? { ...parsed.rows[0], shot_no: shotNo } : item));
+                    done += 1;
+                    setNodes((prev) =>
+                        prev.map((node) =>
+                            node.id === nodeId
+                                ? { ...node, metadata: { ...node.metadata, scriptStatus: "loading", scriptRows: workingRows, scriptRaw: storyScriptToMarkdown(workingRows, node.metadata?.scriptTitle, presetId) } }
+                                : node,
+                        ),
+                    );
+                }
+                if (!done) {
+                    setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: lastError || t("canvas.scriptNode.regenFailed") } } : node)));
+                    message.error(lastError || t("canvas.scriptNode.regenFailed"));
+                    return;
+                }
+                // 「加剧情重生成」的剧情顺手记到这一镜上（`metadata.scriptRowNotes`）：表里能看到这一镜
+                // 是按什么要求改的，下次再点重生成还能沿用 / 微调，不用重新打一遍。
+                let nextNotes = sourceNode.metadata?.scriptRowNotes;
+                if (extraPlot) {
+                    for (const rowIndex of indexes) nextNotes = setStoryScriptRowNote(nextNotes, sourceRows[rowIndex]?.shot_no ?? rowIndex + 1, extraPlot);
+                }
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === nodeId
+                            ? {
+                                  ...node,
+                                  metadata: {
+                                      ...node.metadata,
+                                      scriptStatus: "success",
+                                      scriptRows: workingRows,
+                                      scriptRaw: storyScriptToMarkdown(workingRows, node.metadata?.scriptTitle, presetId),
+                                      ...(nextNotes ? { scriptRowNotes: nextNotes } : {}),
+                                      errorDetails: lastError || undefined,
+                                  },
+                              }
+                            : node,
+                    ),
+                );
+                if (batch) message.success(t("canvas.scriptNode.regenRowsDone", { count: done }));
+                else message.success(t("canvas.scriptNode.regenShotDone", { no: sourceRows[indexes[0]]?.shot_no || indexes[0] + 1 }));
+                if (batch && lastError) message.warning(t("canvas.scriptNode.regenRowsPartial", { count: done }));
+            } catch (error) {
+                if (controller.signal.aborted) return;
+                const detail = error instanceof Error ? error.message : String(error);
+                setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: detail } } : node)));
+                message.error(detail);
+            } finally {
+                finishGenerationRequest(nodeId, controller);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNodeGenerating, message, openConfigDialog, startGenerationRequest, t],
+    );
+
+    // 二次识别「补缺失资产」：只让模型补这一镜**空着的资产列**，已有内容一个字都不改
+    //（见 buildStoryScriptAssetFillTask / mergeStoryScriptAssetFill）。用户已满意的画面 / 提示词不会被顺手重写。
+    const runScriptAssetFill = useCallback(
+        async (nodeId: string, rowIndex: number) => {
+            const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
+            if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return;
+            if (isNodeGenerating(nodeId)) return;
+            const rows = sourceNode.metadata?.scriptRows || [];
+            const row = rows[rowIndex];
+            if (!row) return;
+            const presetId = resolveStoryScriptPresetId(sourceNode.metadata?.scriptPreset);
+            const columns = getStoryScriptColumns(presetId);
+            const targets = collectStoryScriptAssetFillTargets(presetId, row);
+            if (!targets.length) {
+                message.info(t("canvas.scriptNode.assetFillNothing"));
+                return;
+            }
+            const context = buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, "");
+            const sourceText = (sourceNode.metadata?.scriptSource || "").trim() || context.prompt.trim();
+            const task = buildStoryScriptAssetFillTask({ preset: presetId, sourceText, row, targets });
+            const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
+            const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
+            if (!isAiConfigReady(textConfig, textConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+            const controller = new AbortController();
+            startGenerationRequest(nodeId, nodeId, nodeId, controller);
             try {
                 const hydrated = context.referenceImages.length ? await hydrateNodeGenerationContext(context) : context;
                 const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
                     ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
                     : task;
-                const answer = await requestImageQuestion(
-                    textConfig,
-                    [
-                        { role: "system", content: resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt) },
-                        { role: "user", content: userContent },
-                    ],
-                    () => {},
-                    { signal: controller.signal },
-                );
+                const answer = await requestImageQuestion(textConfig, [
+                    { role: "system", content: resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt) },
+                    { role: "user", content: userContent },
+                ], () => {}, { signal: controller.signal });
                 if (controller.signal.aborted) return;
                 const parsed = parseStoryScriptOutput(answer, presetId);
-                if (!parsed.ok || !parsed.rows.length) {
-                    setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: parsed.ok ? "模型未返回这一镜" : parsed.error } } : node)));
-                    message.error(t("canvas.scriptNode.parseFailed"));
+                // 补资产的回答是「单个对象 / 单行 JSON」——解析器照样能认（裸对象也算一行）。
+                const patch = parsed.ok ? parsed.rows[0] : undefined;
+                const merged = mergeStoryScriptAssetFill(row, patch, columns);
+                const filledKeys = Object.keys(merged).filter(
+                    (key) => columns.some((column) => column.key === key) && String(merged[key] ?? "") !== String(row[key] ?? ""),
+                );
+                if (!filledKeys.length) {
+                    message.warning(t("canvas.scriptNode.assetFillNothing"));
                     return;
                 }
-                // 行位置与镜号以原表为准；重写结果只覆盖这一行的各列内容。
-                const nextRows = rows.map((item, index) => (index === rowIndex ? { ...parsed.rows[0], shot_no: item.shot_no || index + 1 } : item));
+                const nextRows = rows.map((item, index) => (index === rowIndex ? merged : item));
                 setNodes((prev) =>
                     prev.map((node) =>
                         node.id === nodeId
-                            ? { ...node, metadata: { ...node.metadata, scriptStatus: "success", scriptRows: nextRows, scriptRaw: storyScriptToMarkdown(nextRows, node.metadata?.scriptTitle, presetId), errorDetails: undefined } }
+                            ? { ...node, metadata: { ...node.metadata, scriptRows: nextRows, scriptRaw: storyScriptToMarkdown(nextRows, node.metadata?.scriptTitle, presetId), errorDetails: undefined } }
                             : node,
                     ),
                 );
-                message.success(t("canvas.scriptNode.regenShotDone", { no: row.shot_no || rowIndex + 1 }));
+                message.success(t("canvas.scriptNode.assetFillDone", { count: filledKeys.length }));
             } catch (error) {
                 if (controller.signal.aborted) return;
                 const detail = error instanceof Error ? error.message : String(error);
-                setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: detail } } : node)));
                 message.error(detail);
             } finally {
                 finishGenerationRequest(nodeId, controller);
@@ -7030,7 +7155,7 @@ function AtelierCanvasPage() {
                     // 文本输入框里就能看到每张参考图分别是什么资产，且 @图片N 会渲染成缩略图 chip。
                     // `linkedIntoImage` 是 Set、保序，正好就是刚才写连线的顺序（= 编号顺序），对得上输入框里的 chip。
                     const imageBinding = buildScriptAssetBindingPrompt(Array.from(linkedIntoImage), nodesRef.current, assetNameOf, assetRoleOf);
-                    imageNode.metadata = { ...imageNode.metadata, prompt: appendScriptAssetBinding(imageNode.metadata?.prompt, imageBinding) };
+                    imageNode.metadata = { ...imageNode.metadata, prompt: withScriptAssetBinding(imageNode.metadata?.prompt, imageBinding) };
                 }
 
                 const merged = members.length > 1;
@@ -7047,7 +7172,7 @@ function AtelierCanvasPage() {
                 const baseVideoPrompt = merged
                     ? buildMergedVideoNodePrompt(shots)
                     : buildVideoNodePrompt(shots[0].imagePrompt, shots[0].videoPrompt) || shots[0].imagePrompt;
-                const videoPrompt = appendScriptAssetBinding(baseVideoPrompt, videoBinding);
+                const videoPrompt = withScriptAssetBinding(baseVideoPrompt, videoBinding);
                 const seconds = Math.min(20, storyScriptGroupDuration({ rows: members.map((member) => member.row) }));
                 const videoNode: CanvasNodeData = {
                     ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { prompt: videoPrompt, status: NODE_STATUS_IDLE, ...(seconds ? { seconds: String(seconds) } : {}) }),
@@ -7100,7 +7225,7 @@ function AtelierCanvasPage() {
 
     /** 只给某一行分镜建一个视频节点（预填该镜视频提示词 / 时长，并把命中的角色素材 + 全局素材连上）。 */
     const handleBuildShotVideo = useCallback(
-        (nodeId: string, rowIndex: number) => {
+        (nodeId: string, rowIndex: number, options?: { stackIndex?: number; silent?: boolean }) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             const rows = source.metadata?.scriptRows || [];
@@ -7122,7 +7247,8 @@ function AtelierCanvasPage() {
                 title: t("canvas.scriptNode.pipelineVideo", { no: shotNo }),
                 width: videoWidth,
                 height: videoHeight,
-                position: { x: source.position.x + source.width + 64, y: source.position.y + (source.height - videoHeight) / 2 },
+                // 批量铺视频时按序往下错开，否则 N 个节点会精确叠在同一处。
+                position: { x: source.position.x + source.width + 64, y: source.position.y + (source.height - videoHeight) / 2 + (options?.stackIndex || 0) * (videoHeight + 40) },
             };
             const assetRoleOf = (assetNodeId: string) => resolveScriptAssetRole(source.metadata?.scriptAssetRoles?.[assetNodeId]);
             const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
@@ -7161,16 +7287,30 @@ function AtelierCanvasPage() {
             // 资产绑定：本镜连进视频节点的图片资产 → 「资产名@图片N」追加进提示词
             //（编号顺序 = linkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
             const videoBinding = buildScriptAssetBindingPrompt(linkIds, nodesRef.current, assetNameOf, assetRoleOf);
-            videoNode.metadata = { ...videoNode.metadata, prompt: appendScriptAssetBinding(videoNode.metadata?.prompt, videoBinding) };
+            videoNode.metadata = { ...videoNode.metadata, prompt: withScriptAssetBinding(videoNode.metadata?.prompt, videoBinding) };
             nodesRef.current = [...nodesRef.current, videoNode];
             setNodes((prev) => [...prev, videoNode]);
             if (links.length) setConnections((prev) => [...prev, ...links]);
             setSelectedNodeIds(new Set([videoNode.id]));
             setSelectedConnectionId(null);
             revealNodes([videoNode], "fit");
-            message.success(t("canvas.scriptNode.buildShotVideoDone", { no: shotNo }));
+            if (!options?.silent) message.success(t("canvas.scriptNode.buildShotVideoDone", { no: shotNo }));
         },
         [message, t, revealNodes],
+    );
+
+    /**
+     * 勾选多镜后「铺视频」：逐镜建视频节点（每个节点自带该镜的提示词、时长与素材连线）。
+     * 单镜的版本会自己 reveal，批量铺时不能每建一个就把视野拽一次，所以只 reveal 最后一个。
+     */
+    const handleBuildShotVideos = useCallback(
+        (nodeId: string, rowIndexes: number[]) => {
+            const unique = Array.from(new Set(rowIndexes)).filter((index) => Number.isInteger(index) && index >= 0);
+            if (!unique.length) return;
+            unique.forEach((rowIndex, order) => handleBuildShotVideo(nodeId, rowIndex, { stackIndex: order, silent: true }));
+            message.success(t("canvas.scriptNode.buildShotVideosDone", { count: unique.length }));
+        },
+        [handleBuildShotVideo, message, t],
     );
 
     const renderNodePanel = useCallback(
@@ -7285,7 +7425,11 @@ function AtelierCanvasPage() {
                         onRemoveScriptAsset={handleScriptAssetRemove}
                         onBuildPipeline={handleBuildScriptPipeline}
                         onBuildShotVideo={handleBuildShotVideo}
+                        onBuildShotVideos={handleBuildShotVideos}
                         onRegenerateShot={(nodeId, rowIndex) => void runScriptShotGeneration(nodeId, rowIndex)}
+                        onRegenerateRows={(nodeId, rowIndexes, options) => void runScriptShotGeneration(nodeId, rowIndexes, options)}
+                        onFillShotAssets={(nodeId, rowIndex) => void runScriptAssetFill(nodeId, rowIndex)}
+                        rowNotes={contentNode.metadata?.scriptRowNotes}
                         onRegenerateAll={handleRegenerateScriptAll}
                         onNodeSizeChange={(nodeId, width, height) => {
                             // 脚本节点按内容自动适配时从左上角扩张：内容变多就向右下长，
