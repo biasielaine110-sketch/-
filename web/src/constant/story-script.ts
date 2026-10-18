@@ -93,6 +93,16 @@ export type StoryScriptRowTaskInput = {
      * 不传时输出与改造前逐字一致。
      */
     keepBlocking?: boolean | null;
+    /**
+     * **资产列的自定义要求**（角色 / 场景 / 道具 / 人物站位怎么写）。
+     * 不传 / 空 = 只按预设说明写，任务书与改造前逐字一致。
+     */
+    assetPrompt?: unknown;
+    /**
+     * **分镜提示词的自定义要求**（分镜提示词 / 视频运动提示词 / 风格提示词怎么写）。
+     * 不传 / 空 = 只按预设说明写，任务书与改造前逐字一致。
+     */
+    shotPrompt?: unknown;
 };
 
 export type StoryScriptPreset = {
@@ -104,7 +114,7 @@ export type StoryScriptPreset = {
     /** 「发送到画布」优先取这一列的内容 */
     insertKey: string;
     /** 任务书构建器（`mergeMode` 决定「每段时长」按「每镜 N 秒」还是「多镜合计 N 秒」写） */
-    buildTask: (input: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null }) => string;
+    buildTask: (input: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown }) => string;
     /**
      * 单镜重生成任务书（「重生成本镜」用）：带上上一镜 / 下一镜上下文，要求模型只重写这一镜，
      * 进而保住「人物站位 / 场景 / 道具与上一镜一致」的连续性。
@@ -151,6 +161,9 @@ export const STORY_SCRIPT_CLASSIC_COLUMNS: StoryScriptColumn[] = [
     { key: "lighting_mood", label: "光影氛围", width: 170 },
     { key: "sound", label: "音效", width: 160 },
     { key: "dialogue", label: "对白", width: 170 },
+    // 风格提示词：这一镜的影像风格（影调 / 质感 / 参考片种）。铺链路时会拼在图片 / 视频提示词末尾。
+    // 位置放在两列提示词**之前**：它是「写提示词时要用到的东西」，跟在 440px 的长列后面没人找得到。
+    { key: "style_prompt", label: "风格提示词", width: 230 },
     { key: "shot_prompt", label: "分镜提示词", width: 440 },
     { key: "video_motion_prompt", label: "视频运动提示词", width: 440 },
 ];
@@ -170,6 +183,9 @@ export const STORY_SCRIPT_STORYBOARD_COLUMNS: StoryScriptColumn[] = [
     { key: "shot", label: "景别", width: 110 },
     { key: "visual_description", label: "画面描述", width: 300 },
     { key: "key_visual", label: "关键视觉", width: 220 },
+    // 与 classic 同义：这一镜的影像风格。storyboard 没有独立的分镜提示词列，风格直接落在画面描述上，
+    // 所以紧跟在「关键视觉」后面（画面 → 关键视觉 → 风格，读起来是一句话）。
+    { key: "style_prompt", label: "风格提示词", width: 230 },
     // 资产列同样留宽，理由见 classic 列表（要装下缩略图 + 「+」）。
     { key: "scene", label: "场景", width: 150 },
     { key: "scene_description", label: "场景描述", width: 220 },
@@ -220,6 +236,7 @@ You generate a structured story-script table from an uploaded script excerpt.
 - \`scene_description\` should describe the location concretely enough to be used directly as an image-generation prompt.
 - \`prop\` should name the key object(s) this shot depends on; \`prop_description\` describes their look, material and state.
 - \`blocking\` should read like a floor plan in words: left / right / centre, foreground / midground / background, facing direction, and how far apart the characters are.
+- \`style_prompt\` describes the image style for this shot — film stock / colour grade / texture / grain / reference genre or director. Keep it identical across shots in the same scene, and write \`无\` when no particular style is needed.
 
 ## Duration guidance
 - Default to short cinematic shots.
@@ -301,6 +318,7 @@ Output one JSON object and nothing else — no markdown fence, no explanation:
       "lighting_mood": "…",
       "sound": "…",
       "dialogue": "…",
+      "style_prompt": "…",
       "shot_prompt": "…",
       "video_motion_prompt": "…"
     }
@@ -309,7 +327,7 @@ Output one JSON object and nothing else — no markdown fence, no explanation:
 \`shot_no\` 和 \`duration\` 必须是整数（不要写 "2-5"、"3秒"）；其余字段一律字符串，缺失时写 \`无\`。`;
 
 const STORY_SCRIPT_COMMON_RULES = [
-    "输出字段必须覆盖：镜号、时长、画面描述、角色1、角色描述1、角色2、角色描述2、场景、场景描述、道具、道具描述、景别、角色动作、人物站位、情绪、场景标签、光影氛围、音效、对白、分镜提示词、视频运动提示词。",
+    "输出字段必须覆盖：镜号、时长、画面描述、角色1、角色描述1、角色2、角色描述2、场景、场景描述、道具、道具描述、景别、角色动作、人物站位、情绪、场景标签、光影氛围、音效、对白、风格提示词、分镜提示词、视频运动提示词。",
     "如果用户给了额外要求，也必须一起遵守。",
     "请严格按照影视制片表格思路输出，不要输出散文摘要。",
     "请让分镜提示词和视频运动提示词都采用括号分段 + 号连接的格式。",
@@ -317,23 +335,39 @@ const STORY_SCRIPT_COMMON_RULES = [
     "分镜提示词必须像高质量图像生成提示词，视频运动提示词必须像高质量视频运动提示词，而不是简单一句概括。",
 ];
 
-const STORY_SCRIPT_STYLE_HINT = [
-    "参考风格要点：",
+/**
+ * 「参考风格要点」分三段：公共 / 分镜提示词 / 资产。
+ *
+ * 分段不是为了排版，而是为了让「自定义提示词」能**整段替换**其中一路：
+ * 用户设了「分镜提示词」自定义要求 → 省掉 SHOT 段；设了「资产」→ 省掉 ASSET 段。
+ * ⚠️ 拼回去（`["参考风格要点：", ...COMMON, ...SHOT, ...ASSET].join("\n")`）必须与改造前**逐字一致**，
+ * 否则所有「不传自定义 = 与老版本相同」的探针都会红。
+ */
+const STORY_SCRIPT_STYLE_HINT_COMMON = [
     "- 镜号连续递增",
     "- 时长大多 2-5 秒",
     "- 景别写法类似 `近景 / 特写`、`中景 / 仰视`",
     "- 角色描述尽量写成 `[角色ID: ...]` 形式",
     "- 同一个人物在所有行里必须用完全一致的角色名",
     "- 一镜里出现两个角色时，第二个填进角色2 / 角色描述2",
+];
+
+const STORY_SCRIPT_STYLE_HINT_SHOT = [
     "- 分镜提示词最好严格按 8 段写：构图、角色卡/主体描述、空间关系、微表情/状态、环境与道具、光影几何、视觉风格、技术参数",
     "- 如果存在角色1，分镜提示词第二段尽量直接使用或轻改角色描述1，不要换成模糊代称",
     "- 分镜提示词中的技术参数段尽量保留，不要省略",
     "- 视频运动提示词最好严格按 6 段写：运镜轨迹、主体动作、环境动态、音效氛围、对白语气、时长",
     "- 视频运动提示词里的主体动作必须是可见物理动作，不要只写情绪变化",
+    "- 风格提示词写这一镜的影像风格（影调、质感、颗粒、参考片种/导演），同一场戏保持一致；不需要时写 `无`",
+];
+
+const STORY_SCRIPT_STYLE_HINT_ASSET = [
     "- 每一镜都要填「场景 / 场景描述 / 道具 / 道具描述 / 人物站位」，同一场景或同一道具在多镜里必须复用完全一致的名字",
     "- 人物站位要写清谁在画面左侧 / 右侧 / 前景 / 后景、朝向、彼此的远近；除非这一镜人物确实移动，否则保持与上一镜一致",
     "- 人物移动时写清从上一位置到新位置的移动过程，不要让角色在两镜之间凭空换位",
-].join("\n");
+];
+
+const STORY_SCRIPT_STYLE_HINT = ["参考风格要点：", ...STORY_SCRIPT_STYLE_HINT_COMMON, ...STORY_SCRIPT_STYLE_HINT_SHOT, ...STORY_SCRIPT_STYLE_HINT_ASSET].join("\n");
 
 /**
  * 「视频分镜脚本」system prompt。
@@ -346,25 +380,26 @@ export const STORY_SCRIPT_STORYBOARD_SYSTEM_PROMPT = `你是一名资深分镜�
 最终输出必须包含以下结构化要素：
 -【角色设定】你是一名资深分镜编剧兼导演，精通镜头语言、叙事节奏与视觉表达
 -【任务目标】基于以下创意大纲，生成结构化的分镜脚本表格：[从上游创意大纲中提取的核心内容摘要]
--【输出格式要求】最终输出包含 Markdown 表格，每个镜头一行，列包含：镜号（S01起）、时长（精确到秒）、景别（远景/全景/中景/近景/特写/大特写）、画面描述（精确到可直接作为图片生成 prompt）、关键视觉、主体动作、镜头运动（推/拉/摇/移/跟/升/降/固定/手持+速度）、台词/旁白、音效/配乐、转场方式、情绪关键词
+-【输出格式要求】最终输出包含 Markdown 表格，每个镜头一行，列包含：镜号（S01起）、时长（精确到秒）、景别（远景/全景/中景/近景/特写/大特写）、画面描述（精确到可直接作为图片生成 prompt）、关键视觉、风格提示词、主体动作、镜头运动（推/拉/摇/移/跟/升/降/固定/手持+速度）、台词/旁白、音效/配乐、转场方式、情绪关键词
 -【专业约束】总时长须与创意大纲一致；景别遵循"远→近→远"呼吸节奏，避免连续 3 个以上相同景别；镜头运动静动交替；画面连贯衔接无割裂感
 -【质量标准】画面描述必须精确具体，包含主体/背景/道具/光线方向/色调氛围，禁止模糊笼统；完整参照创意大纲的核心信息和情绪弧线
 
 ## 本仓输出约定（必须遵守）
-- 表头必须使用下列中文列名，且顺序一致：镜号、时长、景别、画面描述、关键视觉、场景、场景描述、道具、道具描述、主体动作、人物站位、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词
-- 输出 Markdown 表格；也可以改输出一个 JSON 对象：{"title":"标题","rows":[{…}]}，键名用上表列名对应的英文（shot_no / duration / shot / visual_description / key_visual / scene / scene_description / prop / prop_description / character_action / blocking / camera_movement / dialogue / sound / transition / emotion）
+- 表头必须使用下列中文列名，且顺序一致：镜号、时长、景别、画面描述、关键视觉、风格提示词、场景、场景描述、道具、道具描述、主体动作、人物站位、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词
+- 输出 Markdown 表格；也可以改输出一个 JSON 对象：{"title":"标题","rows":[{…}]}，键名用上表列名对应的英文（shot_no / duration / shot / visual_description / key_visual / style_prompt / scene / scene_description / prop / prop_description / character_action / blocking / camera_movement / dialogue / sound / transition / emotion）
 - 镜号用 1、2、3 这样的整数（不要写 S01）；时长用整数秒（不要写 3.5秒）
 - 同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位（blocking）写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）
 - 某一格没有内容时写 \`无\``;
 
 const STORY_SCRIPT_STORYBOARD_COMMON_RULES = [
-    "输出必须是一张表格，一镜一行，列名与顺序严格按：镜号、时长、景别、画面描述、关键视觉、场景、场景描述、道具、道具描述、主体动作、人物站位、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词。",
+    "输出必须是一张表格，一镜一行，列名与顺序严格按：镜号、时长、景别、画面描述、关键视觉、风格提示词、场景、场景描述、道具、道具描述、主体动作、人物站位、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词。",
     "如果用户给了额外要求，也必须一起遵守。",
     "总时长须与创意大纲一致；景别遵循「远→近→远」呼吸节奏，避免连续 3 个以上相同景别。",
     "镜头运动要静动交替，并写清推/拉/摇/移/跟/升/降/固定/手持以及速度。",
     "画面连贯衔接，无割裂感。",
     "画面描述必须精确具体，包含主体/背景/道具/光线方向/色调氛围，且要精确到可直接作为图片生成 prompt。",
     "同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位要写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）。",
+    "风格提示词写这一镜的影像风格（影调、质感、颗粒、参考片种/导演），同一场戏保持一致；不需要时写 `无`。",
     "缺失内容写 `无`。",
 ];
 
@@ -450,7 +485,7 @@ function buildRowDurationHint(segmentSeconds?: unknown, mergeMode?: StoryScriptM
 }
 
 /** 构建分镜脚本生成任务（classic 对应 dramaclaw 的 build_freezone_story_script_task）。 */
-function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null }): string {
+function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown }): string {
     const parts = ["根据以下上传剧本内容生成一个完整的故事脚本表。", ...STORY_SCRIPT_COMMON_RULES];
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
     if (characterRefs && characterRefs.trim()) {
@@ -458,14 +493,23 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
     }
     const segmentGuidance = buildSegmentDurationGuidance(segmentSeconds, mergeMode);
     if (segmentGuidance) parts.push(segmentGuidance);
-    parts.push(STORY_SCRIPT_STYLE_HINT);
+    // 设了专项自定义要求 → 把预设里对应的那几行**整段省掉**，免得两套说法互相打架。
+    // 没设时直接用常量，保证与改造前逐字节一致。
+    const hasAssetCustom = hasScriptGenerationPrompt(assetPrompt);
+    const hasShotCustom = hasScriptGenerationPrompt(shotPrompt);
+    parts.push(
+        hasAssetCustom || hasShotCustom
+            ? ["参考风格要点：", ...STORY_SCRIPT_STYLE_HINT_COMMON, ...(hasShotCustom ? [] : STORY_SCRIPT_STYLE_HINT_SHOT), ...(hasAssetCustom ? [] : STORY_SCRIPT_STYLE_HINT_ASSET)].join("\n")
+            : STORY_SCRIPT_STYLE_HINT,
+    );
+    parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     parts.push(STORY_SCRIPT_JSON_CONTRACT);
     parts.push(`源剧本内容：\n${sourceText.trim()}`);
     return parts.join("\n\n");
 }
 
 /** 构建「视频分镜脚本」任务。首句即 recipe 的 `planning_prompt` 原文（说明这一节点要产出什么）。 */
-function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null }): string {
+function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown }): string {
     const parts = ["根据创意大纲直接生成含镜号、画面、运镜和转场的分镜脚本表格。", ...STORY_SCRIPT_STORYBOARD_COMMON_RULES];
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
     if (characterRefs && characterRefs.trim()) {
@@ -473,6 +517,8 @@ function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds
     }
     const segmentGuidance = buildSegmentDurationGuidance(segmentSeconds, mergeMode);
     if (segmentGuidance) parts.push(segmentGuidance);
+    // storyboard 的规则全在 system prompt 里，没有可整段替换的「参考风格要点」，所以只追加专项要求。
+    parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     parts.push(`创意大纲 / 源内容：\n${sourceText.trim()}`);
     return parts.join("\n\n");
 }
@@ -493,7 +539,7 @@ function describeRowForContext(row: StoryScriptRow | undefined, columns: StorySc
  * 「只重写某一镜」的任务书（经典预设）。带上上一镜 / 下一镜上下文，重点要求：
  * 人物站位、场景、道具与前后镜保持一致——这正是「重生成本镜」追回资产描述的关键。
  */
-function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode }: StoryScriptRowTaskInput): string {
+function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: StoryScriptRowTaskInput): string {
     const columns = STORY_SCRIPT_CLASSIC_COLUMNS;
     const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请**只重新生成这一镜**（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...STORY_SCRIPT_COMMON_RULES];
     // 时长是硬约束，放前面：单镜模式下这一镜自己就是成片，模型最容易在这里写成 2~3 秒碎片。
@@ -514,6 +560,8 @@ function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRef
     const currentText = describeRowForContext(row, columns);
     if (currentText) parts.push(`这一镜当前的内容（可以全部重写，也可以只修掉不合理或缺失的字段）：\n${currentText}`);
     if (characterRefs && characterRefs.trim()) parts.push(`已提供的角色参考（请在角色1 / 角色2 字段里使用完全一致的角色名）：\n${characterRefs.trim()}`);
+    // 专项要求比「参考风格要点」更具体，放在它后面（越靠后越优先）。
+    parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     parts.push(STORY_SCRIPT_STYLE_HINT);
     parts.push(STORY_SCRIPT_JSON_CONTRACT);
     parts.push(`只输出这一镜：JSON 的 rows 数组里只放 1 个元素，\`shot_no\` 必须是 ${row.shot_no}。`);
@@ -522,7 +570,7 @@ function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRef
 }
 
 /** 「只重写某一镜」的任务书（视频分镜脚本预设）。 */
-function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode }: StoryScriptRowTaskInput): string {
+function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: StoryScriptRowTaskInput): string {
     const columns = STORY_SCRIPT_STORYBOARD_COLUMNS;
     const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请只重新生成这一镜（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...STORY_SCRIPT_STORYBOARD_COMMON_RULES];
     // 同 classic：单镜模式下「这一镜 = 一整段成片」，时长必须在重写时就锁死。
@@ -543,31 +591,53 @@ function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, character
     const currentText = describeRowForContext(row, columns);
     if (currentText) parts.push(`这一镜当前的内容（可以全部重写，也可以只修掉不合理或缺失的字段）：\n${currentText}`);
     if (characterRefs && characterRefs.trim()) parts.push(`已提供的角色参考（请在画面描述 / 关键视觉 / 主体动作里使用完全一致的角色名）：\n${characterRefs.trim()}`);
+    // 与整表生成同口径：两路专项要求各管一摊（资产 / 画面与提示词写法）。
+    parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     parts.push(`只输出这一镜：Markdown 表格只保留表头 + 这 1 行；若用 JSON，rows 里只放 1 个元素，\`shot_no\` 必须是 ${row.shot_no}。`);
     if (sourceText.trim()) parts.push(`创意大纲 / 源内容：\n${sourceText.trim()}`);
     return parts.join("\n\n");
 }
 
 /**
+ * 把这一镜的「风格提示词」拼进图片 / 视频提示词。
+ *
+ * 为什么是「追加在末尾」而不是塞进分镜提示词的第 7 段：分镜提示词由模型生成、用户可能手改，
+ * 去改它的内部结构风险太大；追加一行最直观，用户在图片节点的输入框里一眼能看到风格是什么。
+ * 三个不写的情况：风格为空 / 风格是 `无` / 提示词里本来就含这段文字（避免重复两遍）。
+ * 只认字符串：这一列是自由文本，数字 / 对象出现在这里只能是模型的脏数据，拼成「视觉风格：123」纯属污染。
+ */
+export function withStoryScriptStyle(prompt: string, style?: unknown): string {
+    const base = (prompt || "").trim();
+    const styleText = typeof style === "string" ? storyScriptCellText(style) : "";
+    if (!styleText) return base;
+    if (!base) return `视觉风格：${styleText}`;
+    if (base.includes(styleText)) return base;
+    return `${base}\n视觉风格：${styleText}`;
+}
+
+/**
  * 经典预设：`shot_prompt` / `video_motion_prompt` 本身已是成段的完整提示词（8 段 / 6 段），
  * 有就直接用；模型偶尔漏列，此时用可见描述兜底拼一条，避免这一行铺不出链路。
+ * 两条提示词最后都拼上「风格提示词」列（见 `withStoryScriptStyle`）。
  */
 function buildClassicShotPrompts(row: StoryScriptRow): StoryScriptShotPrompts {
+    const imagePrompt =
+        storyScriptCellText(row.shot_prompt) ||
+        joinStoryScriptPromptParts([row.visual_description, row.shot, row.emotion, row.scene_tags, row.lighting_mood]);
+    const videoPrompt =
+        storyScriptCellText(row.video_motion_prompt) ||
+        joinStoryScriptPromptParts([row.character_action, row.visual_description, row.shot, row.emotion]);
     return {
-        imagePrompt:
-            storyScriptCellText(row.shot_prompt) ||
-            joinStoryScriptPromptParts([row.visual_description, row.shot, row.emotion, row.scene_tags, row.lighting_mood]),
-        videoPrompt:
-            storyScriptCellText(row.video_motion_prompt) ||
-            joinStoryScriptPromptParts([row.character_action, row.visual_description, row.shot, row.emotion]),
+        imagePrompt: withStoryScriptStyle(imagePrompt, row.style_prompt),
+        videoPrompt: withStoryScriptStyle(videoPrompt, row.style_prompt),
     };
 }
 
 /** 视频分镜脚本预设：没有独立的「生成提示词」列，按 recipe 对该列的语义（可直接当 prompt）现拼。 */
 function buildStoryboardShotPrompts(row: StoryScriptRow): StoryScriptShotPrompts {
     return {
-        imagePrompt: joinStoryScriptPromptParts([row.visual_description, row.key_visual]),
-        videoPrompt: joinStoryScriptPromptParts([row.camera_movement, row.character_action, row.visual_description, row.emotion]),
+        imagePrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.visual_description, row.key_visual]), row.style_prompt),
+        videoPrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.camera_movement, row.character_action, row.visual_description, row.emotion]), row.style_prompt),
     };
 }
 
@@ -636,6 +706,51 @@ export function resolveScriptSystemPrompt(preset?: StoryScriptPresetId | string 
 /** 该节点是否用的是自定义系统提示词（供 UI 打「已自定义」角标）。 */
 export function hasScriptSystemPromptOverride(override?: unknown): boolean {
     return typeof override === "string" && override.trim().length > 0;
+}
+
+/**
+ * 「资产提示词」/「分镜提示词」两路节点级自定义要求。
+ *
+ * 用户原话：「需要能够将资产的生成和分镜提示词的生成使用不同的提示词来控制，进行分镜表中资产和
+ * 分镜提示词的生成」。与 `scriptSystemPrompt`（**整段替换** system prompt，换一个生成器）不同，
+ * 这两个是**任务书里的两段专项要求**，各自只作用于自己那一组列：
+ *   - 资产：角色1 / 角色描述1 / 角色2 / 角色描述2 / 场景 / 场景描述 / 道具 / 道具描述 / 人物站位；
+ *   - 分镜提示词：分镜提示词 / 视频运动提示词 / 风格提示词（storyboard 预设则是画面描述 / 关键视觉 /
+ *     主体动作 / 镜头运动这类可见描述）。
+ *
+ * 都为空时任务书与改造前**逐字一致**（探针守着）——所以老节点、老调用点零行为变化。
+ */
+export function hasScriptGenerationPrompt(value?: unknown): boolean {
+    return typeof value === "string" && value.trim().length > 0;
+}
+
+/** 「资产」专项要求块；空 → 空串（由调用方 filter 掉）。 */
+export function buildScriptAssetPromptSection(override?: unknown): string {
+    const text = typeof override === "string" ? override.trim() : "";
+    if (!text) return "";
+    return [
+        "## 资产部分自定义要求（角色 / 场景 / 道具 / 人物站位）",
+        "- 以下要求**优先于**上文所有与资产相关的说明（字段内容、命名、写法格式都算）；有冲突时以本段为准。",
+        "- 本段只影响资产类列（角色与角色描述、场景与场景描述、道具与道具描述、人物站位）；当前预设里没有的列直接忽略，其余列仍按上文要求输出。",
+        text,
+    ].join("\n");
+}
+
+/** 「分镜提示词」专项要求块；空 → 空串。 */
+export function buildScriptShotPromptSection(override?: unknown): string {
+    const text = typeof override === "string" ? override.trim() : "";
+    if (!text) return "";
+    return [
+        "## 分镜提示词自定义要求（分镜提示词 / 视频运动提示词 / 风格提示词）",
+        "- 以下要求**优先于**上文所有与提示词写法相关的说明（段落结构、括号分段、技术参数等）；有冲突时以本段为准。",
+        "- 本段只影响与画面 / 运镜 / 提示词写法相关的列（分镜提示词、视频运动提示词、风格提示词，以及画面描述、关键视觉、主体动作、镜头运动这类可见描述）；其余列仍按上文要求输出。",
+        text,
+    ].join("\n");
+}
+
+/** 两段专项要求按「资产 → 分镜提示词」顺序拼成数组（空的自动跳过），任务书直接 spread。 */
+export function buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }: { assetPrompt?: unknown; shotPrompt?: unknown }): string[] {
+    return [buildScriptAssetPromptSection(assetPrompt), buildScriptShotPromptSection(shotPrompt)].filter((section) => section.length > 0);
 }
 
 /** 铺链路时可挂到某一镜上的素材（只需要 id + 标题）。 */
@@ -1556,6 +1671,8 @@ export function buildStoryScriptTask({
     preset,
     segmentSeconds,
     mergeMode,
+    assetPrompt,
+    shotPrompt,
 }: {
     sourceText: string;
     prompt?: string;
@@ -1563,8 +1680,12 @@ export function buildStoryScriptTask({
     preset?: StoryScriptPresetId | string | null;
     segmentSeconds?: unknown;
     mergeMode?: StoryScriptMergeMode | string | null;
+    /** 资产列的自定义要求（不传 = 只用预设说明，输出与改造前逐字一致） */
+    assetPrompt?: unknown;
+    /** 分镜提示词 / 视频运动提示词的自定义要求（同上） */
+    shotPrompt?: unknown;
 }): string {
-    return getStoryScriptPreset(preset).buildTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode });
+    return getStoryScriptPreset(preset).buildTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt });
 }
 
 /** 构建「只重写某一镜」的任务书；不传 preset 时保持 classic。 */
@@ -1748,12 +1869,15 @@ export function buildStoryScriptAssetFillTask({
     row,
     targets,
     extras,
+    assetPrompt,
 }: {
     preset?: StoryScriptPresetId | string | null;
     sourceText: string;
     row: StoryScriptRow;
     targets: StoryScriptAssetFillTarget[];
     extras?: readonly StoryScriptExtraColumn[] | null;
+    /** 「资产提示词」：补资产也算资产生成，同样吃这套自定义要求（不传 = 老行为） */
+    assetPrompt?: unknown;
 }): string {
     const columns = getStoryScriptColumnsWithExtras(preset, extras);
     const keySet = new Set(columns.map((column) => column.key));
@@ -1766,8 +1890,9 @@ export function buildStoryScriptAssetFillTask({
         "## 硬性要求\n1. 只输出下面列出的字段，其它字段一律不要输出；\n2. 这一镜已经写好的内容（画面 / 动作 / 提示词等）一个字都不要改，也不要重复输出；\n3. 确实没有的资产就写 `无`，不要编造无关内容；\n4. 资产名要与表里其它镜头已有的写法保持一致：同一个场景 / 道具用同一个名字，同一个角色用同一套名字；\n5. 输出单个 JSON 对象（不要 markdown 代码块、不要解释、不要前后缀）。",
         `输出字段（只允许这些键）：\n${wanted.map((key) => `- \`${key}\`（${columns.find((column) => column.key === key)?.label || key}）`).join("\n")}`,
         `JSON 形状示例：${JSON.stringify(Object.fromEntries(wanted.map((key) => [key, ""])))}`,
+        buildScriptAssetPromptSection(assetPrompt),
         `这一镜当前的内容：\n${describeRowForContext(row, columns) || "（整行几乎都是空的）"}`,
-    ];
+    ].filter((part) => part.length > 0);
     // 上一镜只作为「名字 / 站位要能接上」的参考，不要求重写。
     if (sourceText.trim()) parts.push(`源剧本内容：\n${sourceText.trim()}`);
     return parts.join("\n\n");

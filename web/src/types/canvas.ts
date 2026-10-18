@@ -136,6 +136,17 @@ export type CanvasNodeMetadata = {
      * 「生成器」；列定义仍跟预设走。
      */
     scriptSystemPrompt?: string;
+    /**
+     * 脚本生成器：**资产部分的自定义要求**（角色 / 场景 / 道具 / 人物站位这些列怎么写）。
+     * 与 `scriptSystemPrompt`（整段换系统提示词）不同，它只往任务书里加一段「资产专项要求」，
+     * 且优先生效于预设里与之冲突的说明；空 = 只用预设（输出与改造前逐字一致）。
+     */
+    scriptAssetPrompt?: string;
+    /**
+     * 脚本生成器：**分镜提示词部分的自定义要求**（分镜提示词 / 视频运动提示词 / 风格提示词怎么写）。
+     * 与 `scriptAssetPrompt` 平行、互不影响 —— 用户要「资产的生成和分镜提示词的生成用不同的提示词控制」。
+     */
+    scriptShotPrompt?: string;
     /** 脚本生成器：结构化分镜表（见 constant/story-script.ts）。 */
     scriptRows?: import("@/constant/story-script").StoryScriptRow[];
     /** 脚本生成器：输出预设（classic / storyboard），决定系统提示词与输出列。 */

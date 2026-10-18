@@ -18,6 +18,7 @@ import {
     getStoryScriptPreset,
     getStoryScriptSystemPrompt,
     groupStoryScriptRows,
+    hasScriptGenerationPrompt,
     hasScriptSystemPromptOverride,
     isScriptAssetColumn,
     nextScriptAssetRole,
@@ -384,10 +385,16 @@ export function CanvasScriptNodeContent({
     const [rowAudioTarget, setRowAudioTarget] = useState<{ shotNo: number; ids: string[] } | null>(null);
     /** 正把文件从系统拖到节点上（显示落区提示）。 */
     const [fileDragging, setFileDragging] = useState(false);
-    // 「自定义提示词」弹窗：用一段自己的系统提示词整段替换预设自带的那段（列结构不变）。
-    const [systemPromptOpen, setSystemPromptOpen] = useState(false);
+    // 「自定义提示词」弹窗：三种用途共用一个文本编辑弹窗（见下方 dialog）：
+    //  - system：整段替换系统提示词（= 换一个生成器）；
+    //  - asset / shot：只往任务书里加一段专项要求，各管一组列（见 story-script.ts 的 *PromptSection）。
+    const [customPromptKind, setCustomPromptKind] = useState<"system" | "asset" | "shot" | null>(null);
     // 是否已自定义：决定 chip 的高亮态与是否显示「恢复预设提示词」。
     const hasCustomSystemPrompt = hasScriptSystemPromptOverride(node.metadata?.scriptSystemPrompt);
+    /** 「资产提示词」是否已设（角色 / 场景 / 道具 / 人物站位怎么写）。 */
+    const hasCustomAssetPrompt = hasScriptGenerationPrompt(node.metadata?.scriptAssetPrompt);
+    /** 「分镜提示词」是否已设（分镜提示词 / 视频运动提示词 / 风格提示词怎么写）。 */
+    const hasCustomShotPrompt = hasScriptGenerationPrompt(node.metadata?.scriptShotPrompt);
     /**
      * 勾选的行（存 rowIndex，不是镜号）。只服务于「批量重生成 / 批量铺视频」。
      * 任何会改变行顺序或行数的操作（调序 / 删行 / 重新生成整表）都会把它清空——
@@ -1211,7 +1218,7 @@ export function CanvasScriptNodeContent({
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
                     event.stopPropagation();
-                    setSystemPromptOpen(true);
+                    setCustomPromptKind("system");
                 }}
                 title={t("canvas.scriptNode.customPromptHint")}
             >
@@ -1235,6 +1242,36 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.customPromptReset")}
                 </button>
             ) : null}
+            <span className="mx-0.5 h-4 w-px shrink-0" style={{ background: theme.node.stroke, opacity: 0.6 }} />
+            {/* 「资产」/「分镜提示词」：两路互不干扰的专项要求（用户原话「资产的生成和分镜提示词的生成
+                使用不同的提示词来控制」）。已自定义时用实心底 + 深字 —— 浅色 activeBg 在一排描边胶囊里
+                读起来像禁用（这个坑在时长 pill 上踩过）。 */}
+            {[
+                { kind: "asset" as const, active: hasCustomAssetPrompt, label: t("canvas.scriptNode.assetPromptChip"), hint: t("canvas.scriptNode.assetPromptHint") },
+                { kind: "shot" as const, active: hasCustomShotPrompt, label: t("canvas.scriptNode.shotPromptChip"), hint: t("canvas.scriptNode.shotPromptHint") },
+            ].map((item) => (
+                <button
+                    key={item.kind}
+                    type="button"
+                    className="inline-flex h-6 items-center gap-1 rounded-full border px-2.5 transition"
+                    style={{
+                        borderColor: item.active ? theme.toolbar.activeText : theme.node.stroke,
+                        background: item.active ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                        color: item.active ? theme.node.panel : theme.node.text,
+                        opacity: item.active ? 1 : 0.7,
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        setCustomPromptKind(item.kind);
+                    }}
+                    title={item.hint}
+                >
+                    <Wand2 className="size-3.5" />
+                    {item.label}
+                </button>
+            ))}
         </div>
     );
 
@@ -1495,7 +1532,7 @@ export function CanvasScriptNodeContent({
     const tablePanel = (
         <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
             {assetToolbar}
-            <div ref={bodyRef} data-canvas-no-zoom className="thin-scrollbar min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
+            <div ref={bodyRef} data-canvas-no-zoom className="script-scrollbar min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
                 <table ref={tableRef} className="border-separate border-spacing-0 leading-tight" style={tableStyle}>
                     <colgroup>
                         {showRowSelect ? <col style={{ width: TABLE_SELECT_WIDTH }} /> : null}
@@ -2399,20 +2436,47 @@ export function CanvasScriptNodeContent({
                     setEditing(null);
                 }}
             />
-            {/* 自定义系统提示词：沿用文本编辑弹窗（textarea + 字号 + 提示词库），保存留空即恢复预设默认。 */}
+            {/* 自定义提示词：三种用途共用这个文本编辑弹窗（textarea + 字号 + 提示词库），保存留空即恢复预设。
+                - system：整段替换系统提示词（换生成器）；
+                - asset / shot：只加一段任务书专项要求（各管一组列，互不影响）。 */}
             <CanvasTextEditDialog
-                open={systemPromptOpen}
-                value={node.metadata?.scriptSystemPrompt || getStoryScriptSystemPrompt(presetId)}
-                title={t("canvas.scriptNode.customPromptTitle", { preset: t(`canvas.scriptNode.preset_${presetId}`) })}
-                placeholder={t("canvas.scriptNode.customPromptPlaceholder", { count: columns.length })}
-                onClose={() => setSystemPromptOpen(false)}
+                open={customPromptKind !== null}
+                value={
+                    customPromptKind === "asset"
+                        ? node.metadata?.scriptAssetPrompt || ""
+                        : customPromptKind === "shot"
+                          ? node.metadata?.scriptShotPrompt || ""
+                          : node.metadata?.scriptSystemPrompt || getStoryScriptSystemPrompt(presetId)
+                }
+                title={
+                    customPromptKind === "asset"
+                        ? t("canvas.scriptNode.assetPromptTitle")
+                        : customPromptKind === "shot"
+                          ? t("canvas.scriptNode.shotPromptTitle")
+                          : t("canvas.scriptNode.customPromptTitle", { preset: t(`canvas.scriptNode.preset_${presetId}`) })
+                }
+                placeholder={
+                    customPromptKind === "asset"
+                        ? t("canvas.scriptNode.assetPromptPlaceholder")
+                        : customPromptKind === "shot"
+                          ? t("canvas.scriptNode.shotPromptPlaceholder")
+                          : t("canvas.scriptNode.customPromptPlaceholder", { count: columns.length })
+                }
+                onClose={() => setCustomPromptKind(null)}
                 onSave={(value) => {
+                    const kind = customPromptKind;
+                    if (!kind) return;
                     const trimmed = value.trim();
-                    patchMetadata({ scriptSystemPrompt: trimmed ? value : undefined });
-                    setSystemPromptOpen(false);
-                    if (trimmed) message.success(t("canvas.scriptNode.customPromptSaved", { count: trimmed.length }));
+                    // 留空 = 恢复预设（与「自定义系统提示词」同一口径），不是存一个空字符串。
+                    if (kind === "system") patchMetadata({ scriptSystemPrompt: trimmed ? value : undefined });
+                    else if (kind === "asset") patchMetadata({ scriptAssetPrompt: trimmed ? value : undefined });
+                    else patchMetadata({ scriptShotPrompt: trimmed ? value : undefined });
+                    setCustomPromptKind(null);
+                    if (trimmed) message.success(t(kind === "system" ? "canvas.scriptNode.customPromptSaved" : "canvas.scriptNode.promptOverrideSaved", { count: trimmed.length }));
+                    else message.success(t("canvas.scriptNode.promptOverrideCleared"));
                 }}
             />
+            {/* 旧的自定义提示词弹窗已合并到上面这一个（按 customPromptKind 分三种）。 */}
             {assetDialog}
             {rowAssetDialog}
             {cellAssetDialog}

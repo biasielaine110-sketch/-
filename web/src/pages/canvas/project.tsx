@@ -6432,7 +6432,17 @@ function AtelierCanvasPage() {
                 message.warning(t("canvas.scriptNode.sourceRequired"));
                 return;
             }
-            const task = buildStoryScriptTask({ sourceText, prompt: overrides?.scriptPrompt ?? sourceNode.metadata?.scriptPrompt, characterRefs, preset: presetId, segmentSeconds, mergeMode });
+            const task = buildStoryScriptTask({
+                sourceText,
+                prompt: overrides?.scriptPrompt ?? sourceNode.metadata?.scriptPrompt,
+                characterRefs,
+                preset: presetId,
+                segmentSeconds,
+                mergeMode,
+                // 两路专项自定义要求：资产一套、分镜提示词一套（用户要求分开控制，互不影响）。
+                assetPrompt: sourceNode.metadata?.scriptAssetPrompt,
+                shotPrompt: sourceNode.metadata?.scriptShotPrompt,
+            });
             const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
             const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
             if (!isAiConfigReady(textConfig, textConfig.model)) {
@@ -6583,6 +6593,8 @@ function AtelierCanvasPage() {
                         mergeMode,
                         extraPlot: extraPlot || undefined,
                         keepBlocking,
+                        assetPrompt: sourceNode.metadata?.scriptAssetPrompt,
+                        shotPrompt: sourceNode.metadata?.scriptShotPrompt,
                     });
                     const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
                         ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
@@ -6732,7 +6744,7 @@ function AtelierCanvasPage() {
                     const targets = collectStoryScriptAssetFillTargets(presetId, row, extras);
                     if (!targets.length) continue;
                     try {
-                        const task = buildStoryScriptAssetFillTask({ preset: presetId, sourceText, row, targets, extras });
+                        const task = buildStoryScriptAssetFillTask({ preset: presetId, sourceText, row, targets, extras, assetPrompt: sourceNode.metadata?.scriptAssetPrompt });
                         const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
                             ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
                             : task;

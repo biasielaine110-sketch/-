@@ -241,6 +241,36 @@
         border-radius: 999px;
     }
 
+    /*
+     * 分镜表的滚动条：之前和其它地方共用 `.thin-scrollbar`（4px），而分镜表是三四千像素宽的长表，
+     * 横向拖动时那根 4px 的条根本抓不住（用户原话「太细长了，不好选择」）。
+     * 这里单独给它 8px（正好 2 倍）、带轨道底色、hover 加深。**不要改回 4px**，
+     * 也不要直接改 `.thin-scrollbar` —— 那个还有很多小控件在用。
+     */
+    .script-scrollbar {
+        scrollbar-color: rgba(120, 113, 108, 0.55) rgba(120, 113, 108, 0.1);
+        scrollbar-width: auto;
+    }
+
+    .script-scrollbar::-webkit-scrollbar {
+        height: 8px;
+        width: 8px;
+    }
+
+    .script-scrollbar::-webkit-scrollbar-track {
+        background: rgba(120, 113, 108, 0.1);
+        border-radius: 999px;
+    }
+
+    .script-scrollbar::-webkit-scrollbar-thumb {
+        background: rgba(120, 113, 108, 0.55);
+        border-radius: 999px;
+    }
+
+    .script-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: rgba(120, 113, 108, 0.8);
+    }
+
     .hover-scrollbar {
         scrollbar-color: transparent transparent;
         scrollbar-width: thin;
