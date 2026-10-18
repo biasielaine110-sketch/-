@@ -6,7 +6,32 @@
  *
  * Also exposes queue order for canvas UI (排队中 2/3 · 生成中 1/3).
  * Cancel/abort removes the entry immediately so totals shrink right away.
+ *
+ * Scope: only the one rented H3 pod below is serialized. The FIFO is a property of *that machine*
+ * (one job at a time or it OOMs), not of the model class — RunningHub / Metaso / other pods must
+ * submit immediately even when the model name is identical, and a queued job on this pod must not
+ * hold up anything else.
  */
+
+/** 公司h3 渠道的 AutoDL 机器：同一时刻只能跑一个 H3 任务。 */
+const SERIALIZED_VIDEO_HOSTS = new Set(["u1209428-7915ffc1db59.westd.seetacloud.com"]);
+
+/**
+ * True only for the host that has to be serialized.
+ *
+ * Keyed on the exact hostname rather than the channel label: the constraint belongs to the pod, so
+ * a renamed channel — or a second channel pointing at the same pod — is still serialized, while a
+ * different pod with the same models is not.
+ */
+export function isSerializedNativeVideoBaseUrl(baseUrl: string) {
+    const raw = String(baseUrl || "").trim().toLowerCase();
+    if (!raw) return false;
+    const withoutScheme = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
+    const authority = withoutScheme.split(/[/?#]/)[0];
+    const host = (authority.split("@").pop() || "").split(":")[0];
+    return SERIALIZED_VIDEO_HOSTS.has(host);
+}
+
 
 export type NativeVideoQueueEntry = {
     id: string;

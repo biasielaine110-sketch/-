@@ -16,6 +16,7 @@ import {
     cancelNativeVideoQueueJobsForNodes,
     enqueueNativeComfyVideoJob,
     getNativeVideoQueueSnapshot,
+    isSerializedNativeVideoBaseUrl,
     pickNativeVideoQueueEntryForNode,
     subscribeNativeVideoQueue,
 } from "@/lib/canvas/native-video-job-queue";
@@ -511,6 +512,19 @@ function AtelierCanvasPage() {
         const script = resolveModelScript(config, model);
         return shouldUseNativeComfyUi(request.baseUrl, model, script) || Boolean(parseComfyApiWorkflow(script));
     }, []);
+    /**
+     * True only when the job must wait in the FIFO. The queue belongs to the 公司h3 pod, not to the
+     * model: the same model on another channel (RunningHub / Metaso / a different pod) submits
+     * right away, and its own submits do not replace each other's target either.
+     */
+    const isQueuedVideoConfig = useCallback(
+        (config: AiConfig) => {
+            if (!isNativeComfyVideoConfig(config)) return false;
+            const model = config.model || config.videoModel || "";
+            return isSerializedNativeVideoBaseUrl(resolveModelRequestConfig(config, model).baseUrl);
+        },
+        [isNativeComfyVideoConfig],
+    );
     const mouseWorldRef = useRef<Position | null>(null);
     const draftMetaRef = useRef<CanvasDraftMeta | null>(null);
     const draftSavingRef = useRef(false);
@@ -4611,14 +4625,14 @@ function AtelierCanvasPage() {
             }
 
             setRunningNodeId(nodeId);
-            // Native H3 video FIFO: do not abort an in-flight job when another submit is queued.
-            const nativeVideoSerial = mode === "video" && isNativeComfyVideoConfig(generationConfig);
+            // 公司h3 pod FIFO: do not abort an in-flight job when another submit is queued.
+            const queuedVideoSerial = mode === "video" && isQueuedVideoConfig(generationConfig);
             const runController = startGenerationRequest(
                 nodeId,
                 nodeId,
                 nodeId,
                 new AbortController(),
-                nativeVideoSerial ? { replaceTarget: false } : undefined,
+                queuedVideoSerial ? { replaceTarget: false } : undefined,
             );
             const sourceTextContent = sourceNode?.type === CanvasNodeType.Text ? sourceNode.metadata?.content?.trim() || "" : "";
             const editingTextNode = mode === "text" && Boolean(sourceTextContent);
@@ -5070,7 +5084,7 @@ function AtelierCanvasPage() {
                                   nodeId,
                                   nodeId,
                                   new AbortController(),
-                                  nativeVideoSerial ? { replaceTarget: false } : undefined,
+                                  queuedVideoSerial ? { replaceTarget: false } : undefined,
                               );
                     const runNativeVideoJob = async () => {
                         if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -5128,7 +5142,7 @@ function AtelierCanvasPage() {
                         // Success and error both release the FIFO (tail always advances) so a failure
                         // cannot stall later queued generates. replaceTarget:false + no blind
                         // /interrupt keep the running job from being killed when more are queued.
-                        if (isNativeComfyVideoConfig(generationConfig)) {
+                        if (isQueuedVideoConfig(generationConfig)) {
                             await enqueueNativeComfyVideoJob(runNativeVideoJob, {
                                 targetNodeId: videoId,
                                 versionId,
@@ -5315,7 +5329,7 @@ function AtelierCanvasPage() {
                 setRunningNodeId(null);
             }
         },
-        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNativeComfyVideoConfig, message, openConfigDialog, startGenerationRequest, t],
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isQueuedVideoConfig, message, openConfigDialog, startGenerationRequest, t],
     );
     useEffect(() => {
         generateNodeRef.current = handleGenerateNode;
@@ -5414,13 +5428,13 @@ function AtelierCanvasPage() {
                         : item,
                 ),
             );
-            const nativeVideoSerial = node.type === CanvasNodeType.Video && isNativeComfyVideoConfig(generationConfig);
+            const queuedVideoSerial = node.type === CanvasNodeType.Video && isQueuedVideoConfig(generationConfig);
             const controller = startGenerationRequest(
                 node.id,
                 sourceNode.id,
                 node.id,
                 new AbortController(),
-                nativeVideoSerial ? { replaceTarget: false } : undefined,
+                queuedVideoSerial ? { replaceTarget: false } : undefined,
             );
 
             try {
@@ -5499,7 +5513,7 @@ function AtelierCanvasPage() {
                             void spawnExtraImageNodes(node.id, videoResult.extraImages, { prompt, model: generationConfig.model });
                         }
                     };
-                    if (isNativeComfyVideoConfig(generationConfig)) {
+                    if (isQueuedVideoConfig(generationConfig)) {
                         await enqueueNativeComfyVideoJob(runRetryVideoJob, {
                             targetNodeId: node.id,
                             versionId: imageId,
@@ -5652,7 +5666,7 @@ function AtelierCanvasPage() {
                 setRunningNodeId(null);
             }
         },
-        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNativeComfyVideoConfig, message, openConfigDialog, startGenerationRequest, t],
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isQueuedVideoConfig, message, openConfigDialog, startGenerationRequest, t],
     );
 
     const deleteBatchImage = useCallback((nodeId: string, imageId: string | string[]) => {
