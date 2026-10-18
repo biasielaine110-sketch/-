@@ -3028,6 +3028,121 @@ function imageFieldName(node: ComfyNode) {
     return "";
 }
 
+/** `ref_audios.ref_audio_N`: the MiniMax H3 reference-to-video audio slot. */
+const RH_REF_AUDIO_SLOT = /^ref_audios\.ref_audio_(\d+)$/;
+
+function isComfyAudioLoaderNode(node?: ComfyNode) {
+    if (!node?.inputs) return false;
+    return /LoadAudio|AudioLoader|VHS_LoadAudio|AudioLoad|LoadAudioUpload/i.test(String(node.class_type || ""));
+}
+
+/** Field an audio loader expects the uploaded filename in (`audioUI` is the upload widget, not data). */
+function audioFieldName(node: ComfyNode) {
+    const inputs = node.inputs || {};
+    for (const field of ["audio", "audio_file", "audio_path", "filename", "file"]) {
+        if (typeof inputs[field] === "string") return field;
+    }
+    return "audio";
+}
+
+export type RunningHubAudioPatch = {
+    workflow: ComfyWorkflow;
+    /** Filenames actually written into the graph (0 = the graph has no audio surface). */
+    applied: number;
+    /** `LoadAudio` nodes invented because the export shipped no audio slot at all. */
+    planted: number;
+};
+
+/**
+ * Write uploaded audio references into a RunningHub export graph.
+ *
+ * Two shapes have to be covered, both real:
+ *  - `MiniMaxH3ReferenceToVideo` **with** authored `ref_audios.ref_audio_*` (AIGC特异点 Singularity
+ *    2110419404622643201 / 2110419416746909698): the slots exist but their `LoadAudio` nodes still
+ *    hold `"None"`, so the model silently speaks with its own voice. Fill them in place.
+ *  - The same class **without** any audio key (Work-Fisher 2110621324220567554 /
+ *    2110621014144147458): the export never authored `ref_audios`, so a filename alone goes
+ *    nowhere — plant `LoadAudio` nodes and add the links. `nodeInfoList` cannot create links, which
+ *    is why the caller has to ship the graph whenever `planted > 0`.
+ *
+ * Both are *reference* audio: the node synthesises speech in that timbre, it does not mux the file.
+ */
+export function applyRunningHubReferenceAudios(workflow: ComfyWorkflow, fileNames: string[]): RunningHubAudioPatch {
+    const names = (fileNames || [])
+        .map((name) => String(name || "").trim())
+        .filter(Boolean)
+        .slice(0, 3);
+    if (!names.length) return { workflow, applied: 0, planted: 0 };
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+
+    // Conditioning consumers: authored audio slots, or the reference-to-video class paired with image
+    // slots (a text-to-video node has no `ref_images.*` and must not be touched).
+    const consumers = Object.entries(next).filter(([, node]) => {
+        const keys = Object.keys(node?.inputs || {});
+        if (!keys.length) return false;
+        if (keys.some((key) => RH_REF_AUDIO_SLOT.test(key))) return true;
+        return /MiniMaxH3ReferenceToVideo/i.test(String(node?.class_type || "")) && keys.some((key) => key.startsWith("ref_images."));
+    });
+
+    // Numeric ids: some backends reject non-numeric node keys, so plant above the current maximum.
+    const numericIds = Object.keys(next)
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0);
+    let nextId = (numericIds.length ? Math.max(...numericIds) : 0) + 1;
+    const takeId = () => {
+        while (next[String(nextId)]) nextId += 1;
+        const id = String(nextId);
+        nextId += 1;
+        return id;
+    };
+
+    let applied = 0;
+    let planted = 0;
+    for (const [, consumer] of consumers) {
+        const inputs = consumer.inputs!;
+        names.forEach((name, position) => {
+            const key = `ref_audios.ref_audio_${position}`;
+            const link = inputs[key];
+            const sourceId = Array.isArray(link) ? String(link[0]) : "";
+            const loader = sourceId ? next[sourceId] : undefined;
+            if (loader && isComfyAudioLoaderNode(loader)) {
+                loader.inputs![audioFieldName(loader)] = name;
+                applied += 1;
+                return;
+            }
+            const id = takeId();
+            next[id] = { class_type: "LoadAudio", inputs: { audio: name }, _meta: { title: `Canvas Ref Audio ${position + 1}` } };
+            inputs[key] = [id, 0];
+            applied += 1;
+            planted += 1;
+        });
+    }
+    if (applied) return { workflow: next, applied, planted };
+
+    // Fallback: graphs that consume audio through plain `LoadAudio` nodes (lip-sync / mux pipelines)
+    // get the filenames in document order, mirroring the native ComfyUI path.
+    const loaders = Object.entries(next)
+        .filter(([, node]) => isComfyAudioLoaderNode(node))
+        .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+    loaders.slice(0, names.length).forEach(([, node], position) => {
+        node.inputs![audioFieldName(node)] = names[position];
+        applied += 1;
+    });
+    return { workflow: applied ? next : workflow, applied, planted };
+}
+
+/** Container extension for the uploaded filename — RunningHub keys the file type off it. */
+function audioFileExtension(source: string) {
+    const mime = (/^data:([^;,]+)[;,]/.exec(source)?.[1] || "").toLowerCase();
+    if (/mpeg|mp3/.test(mime)) return ".mp3";
+    if (/wav/.test(mime)) return ".wav";
+    if (/mp4|m4a|aac/.test(mime)) return ".m4a";
+    if (/ogg|opus/.test(mime)) return ".ogg";
+    if (/flac/.test(mime)) return ".flac";
+    if (/webm/.test(mime)) return ".webm";
+    return ".mp3";
+}
+
 export type RunningHubNodeInfo = { nodeId: string; fieldName: string; fieldValue: string };
 
 export type RunningHubWorkflowPatch = {
@@ -3045,7 +3160,7 @@ export type RunningHubWorkflowPatch = {
  * Scalar overrides for everything the patch changed, in the `nodeInfoList` shape. Links and
  * non-scalars are skipped: the body field can only override a scalar input of an existing node.
  */
-function workflowNodeInfoList(before: ComfyWorkflow, after: ComfyWorkflow): RunningHubNodeInfo[] {
+export function workflowNodeInfoList(before: ComfyWorkflow, after: ComfyWorkflow): RunningHubNodeInfo[] {
     const list: RunningHubNodeInfo[] = [];
     for (const [nodeId, node] of Object.entries(after)) {
         const pristine = before[nodeId]?.inputs || {};
@@ -3540,14 +3655,41 @@ async function uploadImage(
         onDirectTransportFallback?: () => void;
     },
 ) {
+    return uploadBinary(origin, apiKey, source, fileName, signal, { ...options, shrink: true, fallbackType: "image/png" });
+}
+
+/**
+ * Audio references are uploaded byte-for-byte. `shrinkOversizedReferenceDataUrl` decodes the payload
+ * through an `<img>`, so running an mp3 through it yields a broken file (or a 0-byte blob) and
+ * RunningHub then loads nothing — the task still succeeds with the model's own voice.
+ */
+async function uploadAudioFile(origin: string, apiKey: string, source: string, fileName: string, signal?: AbortSignal) {
+    return uploadBinary(origin, apiKey, source, fileName, signal, { shrink: false, fallbackType: "audio/mpeg" });
+}
+
+async function uploadBinary(
+    origin: string,
+    apiKey: string,
+    source: string,
+    fileName: string,
+    signal?: AbortSignal,
+    options?: {
+        preferDirect?: boolean;
+        maxBytes?: number;
+        maxEdge?: number;
+        onDirectTransportFallback?: () => void;
+        shrink?: boolean;
+        fallbackType?: string;
+    },
+) {
     let file: File;
     if (source.startsWith("data:")) {
-        const shrunk = await shrinkOversizedReferenceDataUrl(source, options?.maxBytes, options?.maxEdge);
-        file = dataUrlToFile({ id: fileName, name: fileName, dataUrl: shrunk, type: "image/png" });
+        const payload = options?.shrink ? await shrinkOversizedReferenceDataUrl(source, options?.maxBytes, options?.maxEdge) : source;
+        file = dataUrlToFile({ id: fileName, name: fileName, dataUrl: payload, type: options?.fallbackType || "image/png" });
     } else if (/^https?:\/\//i.test(source)) {
         return source;
     } else {
-        throw new Error(apiText("referenceImageReadFailed"));
+        throw new Error(apiText(options?.shrink === false ? "referenceAudioReadFailed" : "referenceImageReadFailed"));
     }
     const body = new FormData();
     body.append("apiKey", apiKey.replace(/^Bearer\s+/i, "").trim());
@@ -3800,6 +3942,8 @@ export async function runRunningHubWorkflow(args: {
     fisherMode?: string;
     media?: "image" | "video";
     referenceDataUrls?: string[];
+    /** Audio references (data: URLs) → uploaded, then written into `ref_audios.ref_audio_*`. */
+    referenceAudioDataUrls?: string[];
     signal?: AbortSignal;
 }): Promise<RunningHubMedia> {
     const origin = runningHubOrigin(args.baseUrl);
@@ -3866,6 +4010,7 @@ async function runRunningHubWorkflowWithKey(args: {
         fisherMode?: string;
         media?: "image" | "video";
         referenceDataUrls?: string[];
+        referenceAudioDataUrls?: string[];
         signal?: AbortSignal;
     };
 }): Promise<RunningHubMedia> {
@@ -3956,19 +4101,36 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     const pixels = resolveCanvasPixels(request.size || "", request.media || "image");
     const aspect = canvasAspect(request.size || "");
-    const patch: RunningHubWorkflowPatch = workflow
-        ? buildWorkflowPatch(workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "")
-        : { nodeInfoList: [] };
-    const overrides = patch.nodeInfoList;
-    const repairedGraph = patch.graph;
-    const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|resolution|megapixel|aspect_ratio|switch/i.test(item.fieldName));
+    // Audio references: upload first, then write them into the graph *before* the per-workflow
+    // patch. Singularity's patch deletes `LoadAudio("None")` slots as invalid; filling them first is
+    // what keeps the slot, and the author's node ids, alive.
+    const audioSources = (request.referenceAudioDataUrls || []).filter(Boolean).slice(0, 3);
+    const uploadedAudios: string[] = [];
+    for (let index = 0; index < audioSources.length; index += 1) {
+        uploadedAudios.push(await uploadAudioFile(origin, apiKey, audioSources[index], `ref-audio-${index + 1}${audioFileExtension(audioSources[index])}`, request.signal));
+    }
+    const audioPatch = workflow && uploadedAudios.length ? applyRunningHubReferenceAudios(workflow, uploadedAudios) : null;
+    // Silence is the bug we are fixing: audio that cannot be placed must fail loudly instead of
+    // billing a render that ignores it (also covers the webapp/nodeInfo path, which has no graph).
+    if (audioSources.length && !audioPatch?.applied) throw new Error(apiText("runningHubAudioNotApplied"));
+    const audioOverrides = audioPatch?.applied ? workflowNodeInfoList(workflow!, audioPatch.workflow) : [];
+    const patch: RunningHubWorkflowPatch = audioPatch?.workflow
+        ? buildWorkflowPatch(audioPatch.workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "")
+        : workflow
+          ? buildWorkflowPatch(workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "")
+          : { nodeInfoList: [] };
+    const overrides = [...patch.nodeInfoList, ...audioOverrides];
+    // Planted `LoadAudio` nodes only exist in our copy, and `nodeInfoList` cannot create links —
+    // ship the graph whenever the audio had to invent nodes.
+    const repairedGraph = patch.graph || (audioPatch?.planted ? audioPatch.workflow : undefined);
+    const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|audio|resolution|megapixel|aspect_ratio|switch/i.test(item.fieldName));
     // Observability for the "finished but unrelated to my references" class of bug: one line that
     // shows whether the uploads and their overrides actually made it into the submission.
-    const referenceCount = (request.referenceDataUrls || []).filter(Boolean).length;
+    const referenceCount = (request.referenceDataUrls || []).filter(Boolean).length + audioSources.length;
     const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
     if (referenceCount) {
         console.info(
-            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
         );
     }
     let task: RunningHubTaskView;

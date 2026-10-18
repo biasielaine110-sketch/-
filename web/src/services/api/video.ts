@@ -299,6 +299,7 @@ async function createRunningHubVideoTask(
             }
         }),
     );
+    const audioSources = await resolveNativeComfyAudioSources(options?.referenceAudios || [], options?.signal);
     const result = await runRunningHubWorkflow({
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
@@ -315,6 +316,9 @@ async function createRunningHubVideoTask(
         ...(isMinimaxH3FisherWorkflowId(model) ? { fisherMode: config.videoFisherMode } : {}),
         media: "video",
         referenceDataUrls: refs.filter(Boolean),
+        // Timbre / voice reference: uploaded and written into `ref_audios.ref_audio_*` by the
+        // RunningHub adapter. Without this the audio node on the canvas did nothing at all.
+        referenceAudioDataUrls: audioSources,
         signal: options?.signal,
     });
     const videoUrl = result.videos[0];
