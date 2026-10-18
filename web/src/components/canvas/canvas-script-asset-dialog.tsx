@@ -67,6 +67,11 @@ export type ScriptRowAssetMode = {
     model?: string;
     /** 生图模型变更：上层落库成这一格的默认值，下次打开还是它。 */
     onModelChange?: (model: string) => void;
+    /**
+     * **声音模式**：这一镜只连音频，所以候选只列音频节点、上传只收音频文件、不显示「AI 生成」tab。
+     * 文案也整套换成 `rowAudio*`（「第 3 镜 · 声音」），避免出现「为这一镜挑图片」的错位提示。
+     */
+    audio?: boolean;
     /** 确认：用整组 id 替换这一镜的关联（取消勾选即解绑）。 */
     onLink: (nodeIds: string[]) => void;
     onImport: (files: File[]) => void;
@@ -96,6 +101,14 @@ const isClassifiable = (kind: ScriptAssetCandidate["kind"]) => kind === "image" 
 
 /** 上传 / 拖拽 / 粘贴时只认图片、视频、音频文件。导出给节点本体复用（直接往节点上拖文件）。 */
 export const isAssetFile = (file: File) => file.type.startsWith("image/") || file.type.startsWith("video/") || file.type.startsWith("audio/");
+
+/**
+ * 本弹窗这次接受哪些文件：声音模式（`rowMode.audio`）只收音频，其余模式与原来一致。
+ *
+ * 刻意写成**模块级函数**而不是组件里的 `const`：粘贴 effect 的依赖数组在组件体靠前求值，
+ * 引用在其后才声明的 `const` 会踩 TDZ（见项目备忘）。传 `audioOnly` 进来就没有这个先后问题。
+ */
+const acceptsFile = (file: File, audioOnly: boolean) => (audioOnly ? file.type.startsWith("audio/") : isAssetFile(file));
 
 export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose, onLink, onImport, onGenerate, poolAssets, rowMode }: CanvasScriptAssetDialogProps) {
     const { t } = useTranslation();
@@ -167,7 +180,8 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
     useEffect(() => {
         if (!open) return;
         const handlePaste = (event: ClipboardEvent) => {
-            const media = Array.from(event.clipboardData?.files || []).filter(isAssetFile);
+            const audioOnly = Boolean(rowMode?.audio);
+            const media = Array.from(event.clipboardData?.files || []).filter((file) => acceptsFile(file, audioOnly));
             if (!media.length) return;
             event.preventDefault();
             if (rowMode) rowMode.onImport(media);
@@ -182,6 +196,8 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
     const descriptionCandidates = useMemo(() => collectScriptAssetPromptCandidates(genRole, rows), [genRole, rows]);
     /** 逐镜模式：只为分镜表的某一行关联图片，不做分类、也不按描述生图。 */
     const isRowMode = Boolean(rowMode);
+    /** 声音模式（rowMode 的子形态）：文案与文件过滤都收敛到「音频」。 */
+    const isAudioMode = Boolean(rowMode?.audio);
     /** 「按镜按资产」模式：rowMode 带上了资产列，文案与生成候选都收敛到「这一镜的这一格」。 */
     const cellLabel = rowMode?.label || "";
     const isCellMode = Boolean(rowMode?.columnKey && cellLabel);
@@ -255,7 +271,7 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
             event.preventDefault();
             event.stopPropagation();
             setDragging(false);
-            const files = Array.from(event.dataTransfer?.files || []).filter(isAssetFile);
+            const files = Array.from(event.dataTransfer?.files || []).filter((file) => acceptsFile(file, isAudioMode));
             if (!files.length) return;
             if (rowMode) rowMode.onImport(files);
             else onImport(files, uploadRole);
@@ -266,11 +282,13 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
     const canvasTab = (
         <div className="flex flex-col gap-2">
             <div className="text-[12px] opacity-65">
-                {isCellMode
-                    ? t("canvas.scriptNode.cellAssetPickHint", targetVars)
-                    : isRowMode
-                      ? t("canvas.scriptNode.rowImagePickHint", { no: rowMode?.no ?? "" })
-                      : t("canvas.scriptNode.assetPickHint")}
+                {isAudioMode
+                    ? t("canvas.scriptNode.rowAudioPickHint", { no: rowMode?.no ?? "" })
+                    : isCellMode
+                      ? t("canvas.scriptNode.cellAssetPickHint", targetVars)
+                      : isRowMode
+                        ? t("canvas.scriptNode.rowImagePickHint", { no: rowMode?.no ?? "" })
+                        : t("canvas.scriptNode.assetPickHint")}
             </div>
             {isRowMode ? null : <div className="text-[11px] opacity-55">{t("canvas.scriptNode.assetRolePickHint")}</div>}
             <div className="thin-scrollbar flex max-h-[320px] flex-col gap-1.5 overflow-auto pr-0.5">
@@ -301,7 +319,11 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                     })
                 ) : (
                     <div className="rounded-lg border border-dashed px-3 py-6 text-center text-[12px] opacity-55" style={{ borderColor: theme.node.stroke }}>
-                        {isRowMode ? t("canvas.scriptNode.rowImageEmpty") : t("canvas.scriptNode.assetEmpty")}
+                        {isAudioMode
+                            ? t("canvas.scriptNode.rowAudioEmpty")
+                            : isRowMode
+                              ? t("canvas.scriptNode.rowImageEmpty")
+                              : t("canvas.scriptNode.assetEmpty")}
                     </div>
                 )}
             </div>
@@ -335,19 +357,23 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
 
     const uploadTab = (
         <div className="flex flex-col gap-2.5">
-            <div className="text-[12px] opacity-65">{t("canvas.scriptNode.assetUploadHint")}</div>
+            <div className="text-[12px] opacity-65">{isAudioMode ? t("canvas.scriptNode.rowAudioUploadHint") : t("canvas.scriptNode.assetUploadHint")}</div>
             <input
                 ref={fileRef}
                 type="file"
-                accept="image/*,video/*,audio/*"
+                // 声音模式只收音频：用户在系统选择器里看不到图片 / 视频，少一次错选。
+                accept={isAudioMode ? "audio/*" : "image/*,video/*,audio/*"}
                 multiple
                 className="hidden"
                 onChange={(event) => {
-                    const files = Array.from(event.target.files || []);
+                    const files = Array.from(event.target.files || []).filter((file) => acceptsFile(file, isAudioMode));
                     // 先清空 value，否则连续两次选同一个文件不会触发 change。
                     event.target.value = "";
                     if (!files.length) return;
-                    onImport(files, uploadRole);
+                    // ⚠️ 逐镜模式必须走 `rowMode.onImport`：走外层那个会把音频当成「整表资产」导入，
+                    // 结果是文件进来了、这一镜的声音列却还是空的。
+                    if (rowMode) rowMode.onImport(files);
+                    else onImport(files, uploadRole);
                     onClose();
                 }}
             />
@@ -580,11 +606,13 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
             open={open}
             onCancel={onClose}
             title={
-                isCellMode
-                    ? t("canvas.scriptNode.cellAssetDialogTitle", targetVars)
-                    : isRowMode
-                      ? t("canvas.scriptNode.rowImageDialogTitle", { no: rowMode?.no ?? "" })
-                      : t("canvas.scriptNode.addAsset")
+                isAudioMode
+                    ? t("canvas.scriptNode.rowAudioDialogTitle", { no: rowMode?.no ?? "" })
+                    : isCellMode
+                      ? t("canvas.scriptNode.cellAssetDialogTitle", targetVars)
+                      : isRowMode
+                        ? t("canvas.scriptNode.rowImageDialogTitle", { no: rowMode?.no ?? "" })
+                        : t("canvas.scriptNode.addAsset")
             }
             footer={null}
             width={560}
@@ -594,7 +622,11 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
             <div {...dropZone} className="relative">
                 {isRowMode ? (
                     <div className="mb-2 text-[12px] opacity-65" style={{ color: theme.node.text }}>
-                        {isCellMode ? t("canvas.scriptNode.cellAssetHint", targetVars) : t("canvas.scriptNode.rowImageHint")}
+                        {isAudioMode
+                            ? t("canvas.scriptNode.rowAudioHint")
+                            : isCellMode
+                              ? t("canvas.scriptNode.cellAssetHint", targetVars)
+                              : t("canvas.scriptNode.rowImageHint")}
                     </div>
                 ) : (
                     <div className="mb-2 flex flex-wrap items-center gap-2 text-[12px]" style={{ color: theme.node.text }}>

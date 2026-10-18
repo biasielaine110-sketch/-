@@ -148,6 +148,11 @@ export type CanvasNodeMetadata = {
      */
     scriptRowAssets?: import("@/constant/story-script").StoryScriptRowAssetMap;
     /**
+     * 脚本生成器：**逐镜声音**关联（镜号 → 画布音频节点 id 列表）。分镜表「声音」列里链接 / 导入，
+     * 铺链路时只直连到这一镜（或该分段）的视频节点 —— 只连视频，不参与生图。
+     */
+    scriptRowAudios?: import("@/constant/story-script").StoryScriptRowAudioMap;
+    /**
      * 脚本生成器：**逐镜备注**（镜号 → 用户给这一镜追加的剧情 / 修改要求）。
      *
      * 「给某一镜单独加剧情再重生成」时写进来：表里能看出这一镜是按什么要求改的，

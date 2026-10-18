@@ -34,7 +34,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptPresetId, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -299,6 +299,50 @@ async function ensureClipboardImageBlob(blob: Blob) {
     const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
     return png || new Blob([blob], { type: "image/png" });
 }
+
+/**
+ * 剪贴板 html 里内嵌的图片（`<img src="data:image/...">`）。
+ *
+ * 从 Word / 飞书 / 语雀 / 多数网页编辑器「复制图片」时，剪贴板里**只有 text/html**，
+ * 没有 `kind === "file"` 的项——只看 files 的话这类图片永远贴不进来。
+ */
+function extractClipboardDataImage(html: string): string {
+    if (!html) return "";
+    const match = html.match(/<img[^>]+src\s*=\s*["'](data:image\/[^"']+)["']/i);
+    return match?.[1] || "";
+}
+
+/** 富文本 → 纯文本（没有 `text/plain` 时兜底，别把 HTML 源码整段塞进文本节点）。 */
+function clipboardHtmlToText(html: string): string {
+    if (!html) return "";
+    try {
+        const parsed = new DOMParser().parseFromString(html, "text/html");
+        return parsed.body?.textContent?.trim() || "";
+    } catch {
+        return "";
+    }
+}
+
+/** `data:image/...` → File（图片节点要走 `createImageFileNode`，它只收 File）。 */
+function dataUrlToClipboardFile(dataUrl: string): File | null {
+    if (!/^data:image\//i.test(dataUrl)) return null;
+    try {
+        const [head, payload] = dataUrl.split(",");
+        if (!payload) return null;
+        const mime = head.match(/^data:([^;,]+)/i)?.[1] || "image/png";
+        const extension = mime.split("/")[1]?.split(";")[0]?.replace(/\+.*$/, "") || "png";
+        if (/;base64$/i.test(head)) {
+            const binary = atob(payload);
+            const bytes = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+            return new File([bytes], `clipboard-image.${extension}`, { type: mime });
+        }
+        return new File([decodeURIComponent(payload)], `clipboard-image.${extension}`, { type: mime });
+    } catch {
+        return null;
+    }
+}
+
 
 async function uploadGeneratedImage(image: Pick<GeneratedImageResult, "dataUrl" | "fallbackUrls">) {
     const candidates = [...new Set([image.dataUrl, ...(image.fallbackUrls || [])].filter(Boolean))];
@@ -944,6 +988,24 @@ function AtelierCanvasPage() {
     }, [screenToCanvas, size.height, size.width]);
 
     const getCreateNodePosition = useCallback(() => mouseWorldRef.current || getCanvasCenter(), [getCanvasCenter]);
+
+    /**
+     * 粘贴用的落点。
+     *
+     * `mouseWorldRef` 由**window 级** mousemove 更新，所以指针停在右侧面板 / 工具栏上时，
+     * 它记的是「侧栏那一列对应的世界坐标」——直接在粘贴时用它，节点会落在可视区外面，
+     * 用户看到的现象就是「粘贴了但什么都没有」。这里把落点夹回画布可视范围，超出就用视口中心。
+     */
+    const getPastePosition = useCallback(() => {
+        const rect = containerRef.current?.getBoundingClientRect();
+        const world = mouseWorldRef.current;
+        if (rect && world) {
+            const topLeft = screenToCanvas(rect.left, rect.top);
+            const bottomRight = screenToCanvas(rect.right, rect.bottom);
+            if (world.x >= topLeft.x && world.x <= bottomRight.x && world.y >= topLeft.y && world.y <= bottomRight.y) return world;
+        }
+        return getCanvasCenter();
+    }, [getCanvasCenter, screenToCanvas]);
 
     const setConnecting = useCallback((next: ConnectionHandle | null) => {
         connectingParamsRef.current = next;
@@ -2541,31 +2603,67 @@ function AtelierCanvasPage() {
     );
 
     const pasteClipboardImageFile = useCallback(
-        (file: File, position: Position = getCreateNodePosition()) => {
+        (file: File, position: Position = getPastePosition()) => {
             if (!file.type.startsWith("image/")) return false;
-            void createImageFileNode(file, position);
-            message.success(t("canvas.projectPage.clipboardImageAdded"));
+            // 以前是 `void createImageFileNode(...)` + 立刻弹「已添加」：解码 / 落库一失败，
+            // 用户只看到成功提示、画布上什么也没有 —— 这就是「粘贴不上」最迷惑的一种。
+            void (async () => {
+                try {
+                    await createImageFileNode(file, position);
+                    message.success(t("canvas.projectPage.clipboardImageAdded"));
+                } catch (error) {
+                    console.error("[canvas] clipboard image failed", error);
+                    message.error(t("canvas.projectPage.clipboardImageFailed"));
+                }
+            })();
             return true;
         },
-        [createImageFileNode, getCreateNodePosition, message, t],
+        [createImageFileNode, getPastePosition, message, t],
+    );
+
+    /**
+     * 一批文件 → 节点（按类型分流：文档 / 音频 / 视频 / 图片），拖拽与粘贴共用。
+     * 多个文件按 40px 阶梯错开，避免精确叠在同一处。
+     */
+    const createNodesFromFiles = useCallback(
+        (files: File[], basePosition: Position) => {
+            const STAGGER = 40;
+            files.forEach((file, index) => {
+                const position = { x: basePosition.x + index * STAGGER, y: basePosition.y + index * STAGGER };
+                if (isDocumentFile(file)) void createDocumentTextNode(file, position);
+                else if (isAudioFile(file)) void createAudioFileNode(file, position);
+                else if (file.type.startsWith("video/")) void createVideoFileNode(file, position);
+                else void createImageFileNode(file, position).catch((error) => {
+                    console.error("[canvas] file node failed", error);
+                    message.error(t("canvas.projectPage.clipboardImageFailed"));
+                });
+            });
+        },
+        [createAudioFileNode, createDocumentTextNode, createImageFileNode, createVideoFileNode, message, t],
     );
 
     const pasteSystemClipboard = useCallback(async () => {
-        if (!navigator.clipboard) return;
+        if (!navigator.clipboard?.read) return;
+        try {
+            const items = await navigator.clipboard.read();
+            const imageItem = items.find((item) => item.types.some((type) => type.startsWith("image/")));
+            if (imageItem) {
+                const imageType = imageItem.types.find((type) => type.startsWith("image/"));
+                if (!imageType) return;
+                const blob = await imageItem.getType(imageType);
+                const file = new File([blob], "clipboard-image.png", { type: imageType });
+                pasteClipboardImageFile(file);
+                return;
+            }
 
-        const items = await navigator.clipboard.read();
-        const imageItem = items.find((item) => item.types.some((type) => type.startsWith("image/")));
-        if (imageItem) {
-            const imageType = imageItem.types.find((type) => type.startsWith("image/"));
-            if (!imageType) return;
-            const blob = await imageItem.getType(imageType);
-            const file = new File([blob], "clipboard-image.png", { type: imageType });
-            pasteClipboardImageFile(file);
-            return;
+            const text = await navigator.clipboard.readText();
+            if (createTextNodeFromClipboard(text)) message.success(t("canvas.projectPage.clipboardTextAdded"));
+        } catch (error) {
+            // `clipboard.read()` 在 Firefox 没实现、在 iframe / 未授权时抛 NotAllowedError。
+            // 这里只当兜底，失败不该静默：至少让用户知道该用 Ctrl+V 或拖拽。
+            console.warn("[canvas] async clipboard read failed", error);
+            message.warning(t("canvas.projectPage.clipboardReadBlocked"));
         }
-
-        const text = await navigator.clipboard.readText();
-        if (createTextNodeFromClipboard(text)) message.success(t("canvas.projectPage.clipboardTextAdded"));
     }, [createTextNodeFromClipboard, message, pasteClipboardImageFile, t]);
 
     const resetSelectedNodesToOriginalSize = useCallback((explicitIds?: Iterable<string>) => {
@@ -2757,8 +2855,12 @@ function AtelierCanvasPage() {
             }
 
             if (isModifierShortcut && !event.altKey && key === "v") {
-                event.preventDefault();
-                if (!pasteCopiedNodes()) void pasteSystemClipboard();
+                // **只有画布内部复制过节点时才接管 Ctrl+V**。
+                // 以前这里无条件 `preventDefault()`：原生 paste 事件随之不再触发，只剩
+                // `navigator.clipboard.read()` 一条路，而它在 Firefox 没实现、在 iframe / 未授权时
+                // 直接抛 NotAllowedError —— 外部图片和文字就「总粘贴不上」。
+                // 现在外部内容一律交给浏览器原生的 paste 事件（见上面的 window paste 监听）。
+                if (pasteCopiedNodes()) event.preventDefault();
                 return;
             }
 
@@ -2917,6 +3019,15 @@ function AtelierCanvasPage() {
     }, []);
 
     useEffect(() => {
+        /**
+         * **外部内容进画布的唯一可靠通道**：原生 paste 事件 + `event.clipboardData`。
+         *
+         * 它是同步的、不弹权限、Firefox / Safari / iframe 里都能用；而 `navigator.clipboard.read()`
+         * 在 Firefox 根本没实现、在 iframe 或「拒绝了剪贴板权限」时抛 `NotAllowedError` ——
+         * 之前 Ctrl+V 被 `preventDefault()` 干掉后只剩那条路，于是图片和文字「总粘贴不上」。
+         *
+         * 这里按 图片文件 → 内嵌 data: 图片 → 纯文本 的顺序消费；都没命中才退回异步 API。
+         */
         const handlePaste = (event: ClipboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
             if (
@@ -2928,19 +3039,64 @@ function AtelierCanvasPage() {
                 return;
             }
 
-            const items = Array.from(event.clipboardData?.items || []);
-            const imageItem = items.find((item) => item.kind === "file" && item.type.startsWith("image/"));
-            const imageFile = imageItem?.getAsFile();
-            if (!imageFile) return;
+            const data = event.clipboardData;
+            if (!data) {
+                void pasteSystemClipboard();
+                return;
+            }
 
-            event.preventDefault();
-            const file = imageFile.name ? imageFile : new File([imageFile], "clipboard-image.png", { type: imageFile.type || "image/png" });
-            pasteClipboardImageFile(file);
+            const position = getPastePosition();
+
+            // 1) 文件类：截图 / 从资源管理器复制 / 网页右键「复制图片」都会走到这里（Word、飞书不一定，见第 2 步）。
+            const itemFiles = Array.from(data.items || [])
+                .filter((item) => item.kind === "file")
+                .map((item) => item.getAsFile())
+                .filter((file): file is File => Boolean(file));
+            const dropped = Array.from(data.files || []);
+            const candidates = dropped.length ? dropped : itemFiles;
+            const files = candidates.filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || isAudioFile(file) || isDocumentFile(file));
+            if (files.length) {
+                event.preventDefault();
+                // 剪贴板里的图常常没有文件名（`File.name === ""`），补一个，否则节点标题会是空白。
+                const named = files.map((file, index) => {
+                    if (file.name) return file;
+                    const extension = file.type.split("/")[1]?.split(";")[0] || "bin";
+                    return new File([file], `clipboard-${Date.now()}-${index + 1}.${extension}`, { type: file.type || "application/octet-stream" });
+                });
+                createNodesFromFiles(named, position);
+                return;
+            }
+
+            const html = data.getData("text/html");
+
+            // 2) 只有 html、图是内嵌 data: URL 的（Word / 飞书 / 语雀 / 网页编辑器）。
+            const embeddedImage = extractClipboardDataImage(html);
+            if (embeddedImage) {
+                const embeddedFile = dataUrlToClipboardFile(embeddedImage);
+                if (embeddedFile) {
+                    event.preventDefault();
+                    pasteClipboardImageFile(embeddedFile, position);
+                    return;
+                }
+            }
+
+            // 3) 文本 / 富文本。以前**没有这条分支**：外部文字粘贴直接落空（画布不是可编辑区），
+            //    用户看到的就是「粘不进来」。
+            const plain = data.getData("text/plain");
+            const text = plain.trim() ? plain : clipboardHtmlToText(html);
+            if (createTextNodeFromClipboard(text)) {
+                event.preventDefault();
+                message.success(t("canvas.projectPage.clipboardTextAdded"));
+                return;
+            }
+
+            // 4) clipboardData 里什么都没有（部分内嵌 WebView / 扩展）：退回异步 Clipboard API。
+            if (!plain && !html) void pasteSystemClipboard();
         };
 
         window.addEventListener("paste", handlePaste);
         return () => window.removeEventListener("paste", handlePaste);
-    }, [pasteClipboardImageFile]);
+    }, [createNodesFromFiles, createTextNodeFromClipboard, getPastePosition, message, pasteClipboardImageFile, pasteSystemClipboard, t]);
 
     const handleConnectStart = useCallback(
         (event: ReactMouseEvent, nodeId: string, handleType: "source" | "target") => {
@@ -4357,18 +4513,10 @@ function AtelierCanvasPage() {
                 return;
             }
 
-            const basePos = screenToCanvas(event.clientX, event.clientY);
-            const STAGGER = 40;
-            for (let i = 0; i < files.length; i++) {
-                const pos = { x: basePos.x + i * STAGGER, y: basePos.y + i * STAGGER };
-                const f = files[i];
-                if (isDocumentFile(f)) void createDocumentTextNode(f, pos);
-                else if (isAudioFile(f)) void createAudioFileNode(f, pos);
-                else if (f.type.startsWith("video/")) void createVideoFileNode(f, pos);
-                else void createImageFileNode(f, pos);
-            }
+            // 与粘贴共用同一套分流规则（文档 / 音频 / 视频 / 图片 + 40px 阶梯）。
+            createNodesFromFiles(files, screenToCanvas(event.clientX, event.clientY));
         },
-        [createAudioFileNode, createDocumentTextNode, createImageFileNode, createVideoFileNode, screenToCanvas, t],
+        [createNodesFromFiles, screenToCanvas, t],
     );
 
     const startTitleEditing = useCallback(() => {
@@ -6264,8 +6412,10 @@ function AtelierCanvasPage() {
             const manualSource = (overrides?.scriptSource ?? sourceNode.metadata?.scriptSource ?? "").trim();
             // 输出格式预设：决定系统提示词、任务书措辞与解析用的列定义（见 constant/story-script.ts）。
             const presetId = resolveStoryScriptPresetId(sourceNode.metadata?.scriptPreset);
-            // 每段时长（不指定 / 10s / 15s）：写进任务书，要求模型按这个长度规划连续镜头。
+            // 每镜时长（5 秒上限 / 10 / 15 秒锁定 / 不限制）：写进任务书，要求模型按这个长度规划镜头。
+            // 口径由「视频分段」决定：单镜 = 每镜自己就是 N 秒成片；合并 = 连续几镜合计 N 秒。
             const segmentSeconds = sourceNode.metadata?.scriptSegmentSeconds;
+            const mergeMode = resolveStoryScriptMergeMode(sourceNode.metadata?.scriptMergeMode);
             const context = buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, "");
             const sourceText = manualSource || context.prompt.trim();
             // 连线上游的「角色」图片（「角色生成分镜脚本」建出来的角色图）作为角色参考，名字取节点标题，
@@ -6282,7 +6432,7 @@ function AtelierCanvasPage() {
                 message.warning(t("canvas.scriptNode.sourceRequired"));
                 return;
             }
-            const task = buildStoryScriptTask({ sourceText, prompt: overrides?.scriptPrompt ?? sourceNode.metadata?.scriptPrompt, characterRefs, preset: presetId, segmentSeconds });
+            const task = buildStoryScriptTask({ sourceText, prompt: overrides?.scriptPrompt ?? sourceNode.metadata?.scriptPrompt, characterRefs, preset: presetId, segmentSeconds, mergeMode });
             const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
             const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
             if (!isAiConfigReady(textConfig, textConfig.model)) {
@@ -6387,6 +6537,8 @@ function AtelierCanvasPage() {
              */
             const scriptExtraKeys = normalizeStoryScriptExtraColumns(sourceNode.metadata?.scriptExtraColumns).map((item) => item.key);
             const segmentSeconds = sourceNode.metadata?.scriptSegmentSeconds;
+            // 与整表生成同一口径：单镜 = 这一镜就是 N 秒成片，重写时 duration 必须锁成 N。
+            const mergeMode = resolveStoryScriptMergeMode(sourceNode.metadata?.scriptMergeMode);
             const context = buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, "");
             const sourceText = (sourceNode.metadata?.scriptSource || "").trim() || context.prompt.trim();
             const assetRoleOf = (assetNodeId: string) => resolveScriptAssetRole(sourceNode.metadata?.scriptAssetRoles?.[assetNodeId]);
@@ -6428,6 +6580,7 @@ function AtelierCanvasPage() {
                         next: rowIndex < workingRows.length - 1 ? workingRows[rowIndex + 1] : undefined,
                         characterRefs,
                         segmentSeconds,
+                        mergeMode,
                         extraPlot: extraPlot || undefined,
                         keepBlocking,
                     });
@@ -6732,6 +6885,20 @@ function AtelierCanvasPage() {
         return list;
     }, [nodes]);
 
+    // 画布上**全部**音频节点：分镜表「声音」列用它显示文件名，弹窗里也用它做勾选列表。
+    // `previewUrl` 塞的是音频本身的可播放地址（表里的试听按钮直接用它，见内容组件的 `toggleAudioPreview`）。
+    // 不按「有没有 content」过滤：节点刚建好还没上传完时也要能在表里看到名字。
+    const scriptAudioCacheRef = useRef<{ nodes: CanvasNodeData[]; list: ScriptAssetCandidate[] } | null>(null);
+    const getScriptAudioCandidates = useCallback(() => {
+        const cache = scriptAudioCacheRef.current;
+        if (cache && cache.nodes === nodes) return cache.list;
+        const list = nodes
+            .filter((node) => node.type === CanvasNodeType.Audio)
+            .map((node): ScriptAssetCandidate => ({ id: node.id, title: node.title, kind: "audio", previewUrl: node.metadata?.content || undefined }));
+        scriptAudioCacheRef.current = { nodes, list };
+        return list;
+    }, [nodes]);
+
     // 把新素材摆在脚本节点左侧竖排，并连成它的上游素材（图片会因此成为后续生图的参考图）。
     // `connect = false` 给「逐镜镜头图」用：那些图只按镜关联、不做脚本节点的上游连线——否则会被
     // 当成整表共享的资产，铺链路时被每一镜都连一遍。
@@ -6933,7 +7100,7 @@ function AtelierCanvasPage() {
         if (!items.length) return [] as CanvasNodeData[];
         const gap = 24;
         const countMap = (map?: Record<string, string[]>) => Object.values(map || {}).reduce((sum, ids) => sum + (Array.isArray(ids) ? ids.length : 0), 0);
-        const laid = countMap(source.metadata?.scriptRowAssets) + countMap(source.metadata?.scriptCellAssets);
+        const laid = countMap(source.metadata?.scriptRowAssets) + countMap(source.metadata?.scriptCellAssets) + countMap(source.metadata?.scriptRowAudios);
         let cursorX = source.position.x + laid * (NODE_DEFAULT_SIZE[CanvasNodeType.Image].width + gap);
         const baseY = source.position.y + source.height + 48;
         const placed = items.map((item) => {
@@ -6989,6 +7156,48 @@ function AtelierCanvasPage() {
             });
         },
         [appendRowAssets, message, placeRowAssetNodes, revealNodes, t],
+    );
+
+    // ---- 逐镜声音（metadata.scriptRowAudios）----
+    // 与「逐镜图片」并列的一张关联表（同样以镜号为键），但语义完全不同：声音**只连视频节点**，
+    // 不参与生图，所以它既不进资产池、也不进图片绑定提示词。铺链路时只连「这一镜（或该分段）的视频节点」。
+    // 与「整表音频资产」的分工：整表音频 = 每段都连（BGM / 全局旁白）；逐镜声音 = 只连这一镜（台词配音 / 音效）。
+
+    /** 逐镜声音整体替换（弹窗确认、或胶囊上的 × 解绑）。 */
+    const handleRowAudiosChange = useCallback((nodeId: string, shotNo: number, ids: string[]) => {
+        setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptRowAudios: setStoryScriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo, ids) } } : item)));
+    }, []);
+
+    /** 把新导入的音频追加关联到某一镜（保留这一镜已有的声音）。 */
+    const appendRowAudios = useCallback((nodeId: string, shotNo: number, ids: string[]) => {
+        if (!ids.length) return;
+        setNodes((prev) =>
+            prev.map((item) =>
+                item.id === nodeId
+                    ? { ...item, metadata: { ...item.metadata, scriptRowAudios: setStoryScriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo, [...scriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo), ...ids]) } }
+                    : item,
+            ),
+        );
+    }, []);
+
+    /** 逐镜导入本地音频：建音频节点、落位并立刻关联到这一镜（只收音频，其余挡下并提示）。 */
+    const handleRowAudioImport = useCallback(
+        async (nodeId: string, shotNo: number, files: File[]) => {
+            const source = nodesRef.current.find((item) => item.id === nodeId);
+            if (!source || !files.length) return;
+            const items = await buildAssetItems(files);
+            const audios = items.filter((item) => item.node.type === CanvasNodeType.Audio);
+            if (!audios.length) {
+                if (items.length) message.warning(t("canvas.scriptNode.rowAudioOnlyAudio"));
+                return;
+            }
+            const placed = placeRowAssetNodes(source, audios);
+            if (!placed.length) return;
+            appendRowAudios(nodeId, shotNo, placed.map((node) => node.id));
+            revealNodes(placed, "center");
+            message.success(t("canvas.scriptNode.rowAudioImported", { count: placed.length, no: shotNo }));
+        },
+        [appendRowAudios, buildAssetItems, message, placeRowAssetNodes, revealNodes, t],
     );
 
     // ---- 按镜按资产图位（metadata.scriptCellAssets）----
@@ -7108,6 +7317,8 @@ function AtelierCanvasPage() {
                             ...item.metadata,
                             scriptCellAssets: stripStoryScriptAssetId(item.metadata?.scriptCellAssets, assetNodeId),
                             scriptRowAssets: stripStoryScriptAssetId(item.metadata?.scriptRowAssets, assetNodeId),
+                            // 逐镜声音也在这条链上：删掉音频链接后，表里「声音」列不该还留着它。
+                            scriptRowAudios: stripStoryScriptAssetId(item.metadata?.scriptRowAudios, assetNodeId),
                             scriptNameLocks: stripStoryScriptAssetId(item.metadata?.scriptNameLocks, assetNodeId),
                             scriptAssetRoles: nextRoles,
                         },
@@ -7201,6 +7412,7 @@ function AtelierCanvasPage() {
             // 手动追加的资产列（「宠物」「车辆」…）：它们的图位也要参与铺链路，所以一路带到 refs 里。
             const scriptExtras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
             const segmentSeconds = source.metadata?.scriptSegmentSeconds;
+            const mergeMode = resolveStoryScriptMergeMode(source.metadata?.scriptMergeMode);
             // **资产锁定**：一键铺链先把「分镜表里已经链接好的图片」按资产名锁成 名字 → 图片
             // （「张三」→ @图片1、「客厅」→ @图片2），再按这张锁表逐镜分派：表里凡是出现同名的地方
             // 都用同一张图。已有锁保留（并集），不会因为没有格子链接就被抹掉。
@@ -7257,7 +7469,7 @@ function AtelierCanvasPage() {
             // 分段方式（单镜 / 每 N 镜 / 按每段时长）决定「几个镜共用一个视频节点」。
             const groups = groupStoryScriptRows(
                 renderable.map((item) => item.row),
-                source.metadata?.scriptMergeMode,
+                mergeMode,
                 segmentSeconds,
             );
 
@@ -7279,6 +7491,9 @@ function AtelierCanvasPage() {
                 // 这一段视频用到的全部资产：角色按各镜角色名匹配，场景 / 道具 / 站位图每镜都算。
                 // 汇总后直接连到视频节点 —— 生成的「视频生成窗口」里就能看到并引用这些资产图。
                 const groupAssetIds = new Set<string>();
+                // 这一段里各镜自己的声音（表里「声音」列）：与 `groupAssetIds` 分开存 —— 音频只连视频节点，
+                // 既要跳过图片节点，也不能混进「资产绑定」提示词（那是给图片编号用的）。
+                const groupAudioIds = new Set<string>();
                 for (const member of members) {
                     const rowY = baseY + member.index * (rowHeight + gapY);
                     const shotNo = member.row.shot_no || member.index + 1;
@@ -7344,6 +7559,10 @@ function AtelierCanvasPage() {
                     // `linkedIntoImage` 是 Set、保序，正好就是刚才写连线的顺序（= 编号顺序），对得上输入框里的 chip。
                     const imageBinding = buildScriptAssetBindingPrompt(Array.from(linkedIntoImage), nodesRef.current, assetNameOf, assetRoleOf);
                     imageNode.metadata = { ...imageNode.metadata, prompt: withScriptAssetBinding(imageNode.metadata?.prompt, imageBinding) };
+                    // 这一镜在表里「声音」列挂的音频：只属于这一镜，等下直连本组的视频节点。
+                    for (const audioId of scriptRowAudioIds(source.metadata?.scriptRowAudios, shotNo)) {
+                        if (existingNodeIds.has(audioId)) groupAudioIds.add(audioId);
+                    }
                 }
 
                 const merged = members.length > 1;
@@ -7361,7 +7580,11 @@ function AtelierCanvasPage() {
                     ? buildMergedVideoNodePrompt(shots)
                     : buildVideoNodePrompt(shots[0].imagePrompt, shots[0].videoPrompt) || shots[0].imagePrompt;
                 const videoPrompt = withScriptAssetBinding(baseVideoPrompt, videoBinding);
-                const seconds = Math.min(20, storyScriptGroupDuration({ rows: members.map((member) => member.row) }));
+                // 单镜模式：10/15 秒 = 锁定成片秒数（不抄表里旧值，否则「选了 10 秒铺出来还是 3 秒」）；
+                // 5 秒 = 上限（表里更短就按表里）。合并模式仍按本段各镜 duration 累加。
+                const seconds = mergeMode === "shot"
+                    ? resolveStoryScriptShotSeconds(first.row.duration, segmentSeconds)
+                    : Math.min(20, storyScriptGroupDuration({ rows: members.map((member) => member.row) }));
                 const videoNode: CanvasNodeData = {
                     ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { prompt: videoPrompt, status: NODE_STATUS_IDLE, ...(seconds ? { seconds: String(seconds) } : {}) }),
                     title: merged
@@ -7383,6 +7606,14 @@ function AtelierCanvasPage() {
                 // 音频素材（背景音乐 / 配音）只连视频节点，每段视频都连上，用户可在视频窗口里换成该段要用的音轨。
                 for (const audio of audioRefs) {
                     createdConnections.push({ id: nanoid(), fromNodeId: audio.id, toNodeId: videoNode.id });
+                    assetLinkCount += 1;
+                }
+                // 表里「声音」列按镜挂的音频：同样只连视频节点，但**只连这一段**（合并模式时同段各镜的都会连上，
+                // 于是这一段视频能看到它们全部；用户可在视频窗口里挑一条）。
+                for (const audioId of groupAudioIds) {
+                    // 已经是整表音频的就别连第二条：同一条线连两次会让视频窗口里出现两个同名音轨。
+                    if (audioRefs.some((asset) => asset.id === audioId)) continue;
+                    createdConnections.push({ id: nanoid(), fromNodeId: audioId, toNodeId: videoNode.id });
                     assetLinkCount += 1;
                 }
             }
@@ -7423,7 +7654,8 @@ function AtelierCanvasPage() {
             const preset = getStoryScriptPreset(presetId);
             const prompts = preset.buildShotPrompts(row);
             const shotNo = row.shot_no || rowIndex + 1;
-            const seconds = Math.min(20, Math.max(1, Math.round(Number(row.duration) || 0)));
+            // 与「一键铺链」同口径：单镜时长档位（10/15 锁定、5 是上限、none 按表里）。
+            const seconds = resolveStoryScriptShotSeconds(row.duration, source.metadata?.scriptSegmentSeconds);
             const videoWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Video].width;
             const videoHeight = NODE_DEFAULT_SIZE[CanvasNodeType.Video].height;
             const videoNode: CanvasNodeData = {
@@ -7470,8 +7702,10 @@ function AtelierCanvasPage() {
             const audioRefs = upstreamNodes.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey));
             // 这一镜自己的「镜头图」也直连视频节点；已删掉的图片节点直接跳过。
             const rowAssetRefs = scriptRowAssetIds(source.metadata?.scriptRowAssets, shotNo).filter((id) => nodesRef.current.some((node) => node.id === id));
+            // 这一镜在表里「声音」列挂的音频：只连视频节点（同口径：已删的跳过）。
+            const rowAudioRefs = scriptRowAudioIds(source.metadata?.scriptRowAudios, shotNo).filter((id) => nodesRef.current.some((node) => node.id === id));
             // 去重：同一张图可能同时是「图位 / 锁的图」和「镜头图」，别连出两条并行线。
-            const linkIds = Array.from(new Set([...assets.map((asset) => asset.id), ...audioRefs.map((asset) => asset.id), ...rowAssetRefs, ...cellAssetRefs]));
+            const linkIds = Array.from(new Set([...assets.map((asset) => asset.id), ...audioRefs.map((asset) => asset.id), ...rowAudioRefs, ...rowAssetRefs, ...cellAssetRefs]));
             const links = linkIds.map((id) => ({ id: nanoid(), fromNodeId: id, toNodeId: videoNode.id }));
             // 资产绑定：本镜连进视频节点的图片资产 → 「资产名@图片N」追加进提示词
             //（编号顺序 = linkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
@@ -7600,6 +7834,10 @@ function AtelierCanvasPage() {
                         onRowAssetsChange={handleRowAssetsChange}
                         onRowAssetImport={(nodeId, shotNo, files) => void handleRowAssetImport(nodeId, shotNo, files)}
                         onRowAssetGenerate={handleRowAssetGenerate}
+                        rowAudios={contentNode.metadata?.scriptRowAudios}
+                        audioCandidates={getScriptAudioCandidates()}
+                        onRowAudiosChange={handleRowAudiosChange}
+                        onRowAudioImport={(nodeId, shotNo, files) => void handleRowAudioImport(nodeId, shotNo, files)}
                         cellAssets={contentNode.metadata?.scriptCellAssets}
                         onCellAssetsChange={handleCellAssetsChange}
                         onCellAssetImport={(nodeId, shotNo, columnKey, files) => void handleCellAssetImport(nodeId, shotNo, columnKey, files)}
@@ -7672,7 +7910,7 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme],
+        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptAudioCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAudioImport, handleRowAudiosChange, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;

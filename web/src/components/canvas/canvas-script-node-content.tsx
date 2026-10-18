@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { App, Modal } from "antd";
 import copy from "copy-to-clipboard";
@@ -17,6 +17,7 @@ import {
     getStoryScriptColumnsWithExtras,
     getStoryScriptPreset,
     getStoryScriptSystemPrompt,
+    groupStoryScriptRows,
     hasScriptSystemPromptOverride,
     isScriptAssetColumn,
     nextScriptAssetRole,
@@ -24,6 +25,7 @@ import {
     normalizeStoryScriptExtraColumns,
     remapStoryScriptCellAssets,
     remapStoryScriptRowAssets,
+    remapStoryScriptRowAudios,
     remapStoryScriptRowNotes,
     reorderStoryScriptRows,
     resolveScriptAssetRole,
@@ -35,12 +37,15 @@ import {
     scriptNameLockIds,
     scriptNameLockName,
     scriptRowAssetIds,
+    scriptRowAudioIds,
     SCRIPT_EXTRA_COLUMN_ROLE_IDS,
     shiftStoryScriptCellAssetsAfterDelete,
     shiftStoryScriptRowAssetsAfterDelete,
+    shiftStoryScriptRowAudiosAfterDelete,
     stepStoryScriptFontSize,
     STORY_SCRIPT_MAX_EXTRA_COLUMNS,
     storyScriptExtraColumnsToColumns,
+    storyScriptGroupDuration,
     storyScriptRowNote,
     storyScriptToMarkdown,
     storyScriptToTsv,
@@ -93,6 +98,12 @@ const HEADER_FONT_SCALE = 1.154;
 const TABLE_ACTION_WIDTH = 160;
 /** 勾选列（批量重生成 / 批量铺视频）的宽度：只有一个圆形勾选按钮。 */
 const TABLE_SELECT_WIDTH = 34;
+/**
+ * 「声音」列宽度。放在**镜号之后**（表宽 4.2k px，最左边只有前几列可见）：
+ * 声音是「这一镜配什么音」的最基本信息，跟镜号贴在一起才不用横向滚动就能看到 / 点开。
+ * 一格能横排两个音频胶囊（图标 + 截断的名字），再多就换行。
+ */
+const TABLE_AUDIO_WIDTH = 210;
 /**
  * 「镜头图」列已于 2026-10-17 按用户要求从表里移除（`ROW_IMAGE_COLUMN_WIDTH` 同时删除）。
  * `metadata.scriptRowAssets`（逐镜图片）与铺链路对它的处理**都还在**——只是表里不再有这一列入口；
@@ -200,6 +211,17 @@ type CanvasScriptNodeContentProps = {
     /** 逐镜 AI 生成图片：建节点、关联到这一镜并立刻触发生图（`styleTemplateId` 是本次挑的风格模板）。 */
     onRowAssetGenerate?: (nodeId: string, shotNo: number, prompt: string, title: string, styleTemplateId?: string) => void;
     /**
+     * **逐镜声音**：镜号 → 已关联的音频节点 id（存在 `metadata.scriptRowAudios`）。
+     * 表里「声音」列链接 / 导入的音频，铺链路时**只直连这一镜（或该分段）的视频节点** —— 只连视频，不参与生图。
+     */
+    rowAudios?: Record<string, string[]>;
+    /** 画布上全部音频节点的候选：供「声音」列解析名字、以及弹窗里勾选链接。 */
+    audioCandidates?: ScriptAssetCandidate[];
+    /** 逐镜声音关联变更：整组替换这一镜的音频节点 id（传空数组即解绑）。 */
+    onRowAudiosChange?: (nodeId: string, shotNo: number, ids: string[]) => void;
+    /** 逐镜导入本地音频：建音频节点并立刻关联到这一镜。 */
+    onRowAudioImport?: (nodeId: string, shotNo: number, files: File[]) => void;
+    /**
      * **按镜按资产**挂图：`"镜号:资产列key"`（如 `"3:scene"`）→ 图片节点 id 列表
      * （存在 metadata.scriptCellAssets）。在资产列格子里导入 / 链接 / 生成，铺链路时只连到这一镜的那一个资产。
      */
@@ -274,6 +296,10 @@ export function CanvasScriptNodeContent({
     onRowAssetsChange,
     onRowAssetImport,
     onRowAssetGenerate,
+    rowAudios,
+    audioCandidates,
+    onRowAudiosChange,
+    onRowAudioImport,
     cellAssets,
     onCellAssetsChange,
     onCellAssetImport,
@@ -321,10 +347,16 @@ export function CanvasScriptNodeContent({
     const columns = useMemo(() => getStoryScriptColumnsWithExtras(presetId, extraColumns), [presetId, extraColumns]);
     // 勾选列只在「支持批量操作」时出现（没接线就完全不占宽度）。
     const showRowSelect = Boolean(onRegenerateRows || onBuildShotVideos);
+    // 「声音」列：逐镜挂台词配音 / 音效。接线了才出现（旧调用点不受影响）。
+    const showRowAudios = Boolean(onRowAudiosChange || onRowAudioImport);
     // 勾选列挂在 preset 列之前，所以表格实际宽度要把它一起算上（否则自动适配会窄）。
     const tableWidth = useMemo(
-        () => columns.reduce((sum, column) => sum + column.width, 0) + TABLE_ACTION_WIDTH + (showRowSelect ? TABLE_SELECT_WIDTH : 0),
-        [columns, showRowSelect],
+        () =>
+            columns.reduce((sum, column) => sum + column.width, 0) +
+            TABLE_ACTION_WIDTH +
+            (showRowSelect ? TABLE_SELECT_WIDTH : 0) +
+            (showRowAudios ? TABLE_AUDIO_WIDTH : 0),
+        [columns, showRowSelect, showRowAudios],
     );
 
     const [view, setView] = useState<"source" | "table">(rows.length ? "table" : "source");
@@ -348,6 +380,8 @@ export function CanvasScriptNodeContent({
     const [rowAssetTarget, setRowAssetTarget] = useState<{ shotNo: number; ids: string[] } | null>(null);
     /** 「按镜按资产」弹窗当前瞄准的那一格（null = 未打开）。 */
     const [cellAssetTarget, setCellAssetTarget] = useState<{ shotNo: number; columnKey: string; label: string; ids: string[] } | null>(null);
+    /** 「声音」列弹窗当前瞄准的那一镜（null = 未打开）。 */
+    const [rowAudioTarget, setRowAudioTarget] = useState<{ shotNo: number; ids: string[] } | null>(null);
     /** 正把文件从系统拖到节点上（显示落区提示）。 */
     const [fileDragging, setFileDragging] = useState(false);
     // 「自定义提示词」弹窗：用一段自己的系统提示词整段替换预设自带的那段（列结构不变）。
@@ -409,6 +443,38 @@ export function CanvasScriptNodeContent({
         for (const item of imageCandidates || []) map.set(item.id, item);
         return map;
     }, [imageCandidates]);
+    /** 音频节点查表（声音列的胶囊要显示文件名；顺带过滤掉已经不在画布上的 id）。 */
+    const audioLookup = useMemo(() => {
+        const map = new Map<string, ScriptAssetCandidate>();
+        for (const item of audioCandidates || []) map.set(item.id, item);
+        return map;
+    }, [audioCandidates]);
+    /**
+     * 声音试听：整张表共用一个 `<audio>` 元素，同一时刻只播一条（点另一条会自动停掉上一条）。
+     * 音频节点的 `content` 就是可播放的 URL（本地 blob 或远端 CDN 地址）。
+     */
+    const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+    const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
+    const toggleAudioPreview = (audioId: string, url: string) => {
+        const current = audioPlayerRef.current;
+        if (playingAudioId === audioId) {
+            current?.pause();
+            setPlayingAudioId(null);
+            return;
+        }
+        if (!url) return;
+        // 用局部常量收口：直接读 `ref.current` 的话 TS 的 null 收窄会被「ref 可能被改」打断。
+        const player = current || new Audio();
+        if (!current) {
+            audioPlayerRef.current = player;
+            player.addEventListener("ended", () => setPlayingAudioId(null));
+        }
+        if (player.src !== url) player.src = url;
+        void player.play().then(
+            () => setPlayingAudioId(audioId),
+            () => setPlayingAudioId(null),
+        );
+    };
 
     // ---- 资产池缩略图：拖拽换位 + 解除链接 ----
     // 拖拽只认「从缩略图本体发起」的 HTML5 drag，且用私有 MIME 类型（不是 text/plain）——
@@ -492,7 +558,8 @@ export function CanvasScriptNodeContent({
         // 签名带行数、单元格总字数、基准字号与「完整/精简」：增删行、改字、调字号、切显示都会变，纯切换视图不会。
         // 前缀 `v2` 是「版式版本」：行高压缩 / 移除镜头图列之后，老节点存下的签名不再命中，会重新适配一次。
         // `v3`（第十五轮）：格内长文封顶 8 行 + 操作列吸附，行高整体变了，同样强制重适配一次。
-        const signature = `v3:${presetId}:${baseFontSize}:${showFullText ? "full" : "compact"}:${columns.length}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
+        // `v4`（本轮）：新增「声音」列（+210px），宽度变了，老节点也要重算一次。
+        const signature = `v4:${presetId}:${baseFontSize}:${showFullText ? "full" : "compact"}:${columns.length}:${showRowAudios ? 1 : 0}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
         if (signature === lastAutoSizeKeyRef.current) return;
         const chromeHeight = Math.max(0, shell.clientHeight - body.clientHeight);
         const width = Math.round(Math.min(AUTO_SIZE_MAX_WIDTH, Math.max(AUTO_SIZE_MIN_WIDTH, tableWidth + AUTO_SIZE_PADDING_X)));
@@ -542,6 +609,8 @@ export function CanvasScriptNodeContent({
             scriptRowAssets: shiftStoryScriptRowAssetsAfterDelete(node.metadata?.scriptRowAssets, deletedShotNo),
             // 「按镜按资产」的键里也有镜号，同样要跟着前移。
             scriptCellAssets: shiftStoryScriptCellAssetsAfterDelete(node.metadata?.scriptCellAssets, deletedShotNo, extraColumns),
+            // 逐镜声音同理：不移的话「第 5 镜的配音」会挂到删行后顶上来的新第 5 镜身上。
+            scriptRowAudios: shiftStoryScriptRowAudiosAfterDelete(node.metadata?.scriptRowAudios, deletedShotNo),
         });
         setSelectedRows(new Set());
         message.success(t("canvas.scriptNode.rowDeleted"));
@@ -561,6 +630,7 @@ export function CanvasScriptNodeContent({
             scriptRows: nextRows,
             scriptRowAssets: remapStoryScriptRowAssets(node.metadata?.scriptRowAssets, mapping),
             scriptCellAssets: remapStoryScriptCellAssets(node.metadata?.scriptCellAssets, mapping, extraColumns),
+            scriptRowAudios: remapStoryScriptRowAudios(node.metadata?.scriptRowAudios, mapping),
             scriptRowNotes: remapStoryScriptRowNotes(node.metadata?.scriptRowNotes, mapping),
         });
         // 勾选按 rowIndex 存，顺序一变就指到别人身上了 —— 清空。
@@ -1168,9 +1238,18 @@ export function CanvasScriptNodeContent({
         </div>
     );
 
-    // 「每段时长」：视频模型按 10s / 15s 成片。选 10 / 15 后会在生成任务里要求模型按这个长度规划
-    // 连续镜头，铺链路时还可以选「按每段时长」把它们自动合并成一个视频节点。
+    // 「每镜时长」：5 秒（默认，**上限**：每镜不超过 5 秒）/ 10 秒 / 15 秒（**锁定**：每镜就是它）/ 不限制。
+    //
+    // 选了之后「铺链」怎么切，由旁边的「视频分段」决定：
+    // - 单镜（默认）：**每一镜就是一整段**（用户原话「每个镜头不超过 5 秒，也能选 10 / 15」），
+    //   铺链时 10/15 直接锁定成片秒数，5 秒按表里时长取、超出压到 5；
+    // - 按每段时长：连续几镜合并凑够 N 秒；
+    // - 每 2 / 3 镜：N 镜合成一段。
+    //
+    // ⚠️ 这里**不自动改「视频分段」**。早先版本一选 10/15 就强切到「按每段时长」，
+    // 结果想要「每镜 10 秒」的人反而拿到「3+3+4 合成一段 10 秒」——镜头被合并掉了。
     const segmentSeconds = resolveStoryScriptSegmentSeconds(node.metadata?.scriptSegmentSeconds);
+    const mergeMode = resolveStoryScriptMergeMode(node.metadata?.scriptMergeMode);
     const segmentSelector = (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
             <span className="opacity-60">{t("canvas.scriptNode.segmentLabel")}</span>
@@ -1182,15 +1261,23 @@ export function CanvasScriptNodeContent({
                         type="button"
                         className="inline-flex h-6 items-center rounded-full border px-2.5 transition"
                         style={{
-                            borderColor: theme.node.stroke,
-                            background: active ? theme.toolbar.activeBg : `${theme.toolbar.panel}aa`,
-                            color: active ? theme.toolbar.activeText : theme.node.text,
+                            borderColor: active ? theme.toolbar.activeText : theme.node.stroke,
+                            // 选中态必须实心：activeBg 是浅米色，和未选中的半透明底几乎没差别，
+                            // 用户会以为「没点上 / 点了没反应」（这坑在其它 pill 上踩过好几次）。
+                            background: active ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                            color: active ? theme.node.panel : theme.node.text,
                             opacity: active ? 1 : 0.7,
                         }}
                         onMouseDown={(event) => event.stopPropagation()}
                         onPointerDown={(event) => event.stopPropagation()}
                         onClick={(event) => {
                             event.stopPropagation();
+                            if (id === "none") {
+                                // 取消分段时，分段方式若停在「按每段时长」会变成「选中但不可用」，一起退回单镜。
+                                patchMetadata({ scriptSegmentSeconds: id, ...(mergeMode === "duration" ? { scriptMergeMode: "shot" } : {}) });
+                                return;
+                            }
+                            // 只改时长，分段方式留给用户自己选（单镜 = 每镜 N 秒，按每段时长 = 合并凑 N 秒）。
                             patchMetadata({ scriptSegmentSeconds: id });
                         }}
                         title={t("canvas.scriptNode.segmentHint")}
@@ -1251,8 +1338,33 @@ export function CanvasScriptNodeContent({
         : { width: tableWidth, tableLayout: "fixed" as const, fontSize: "1em", color: theme.node.text };
 
     // 「视频分段」：铺链路时把连续镜头合并进同一个视频节点（多个分镜提示词 → 一条视频提示词）。
-    // 「按每段时长」需要先在输入区选好 10 秒 / 15 秒，没选就置灰。
-    const mergeMode = resolveStoryScriptMergeMode(node.metadata?.scriptMergeMode);
+    // 「按每段时长」要有目标时长才能凑，选「不限制」时置灰。
+    // 顺便把「按当前设置会切成几段、每段多长」算出来直接显示 —— 这是「选了之后到底有没有生效」
+    // 唯一看得见的证据（表格里没有任何字段会因为选 5 / 10 秒而变化）。
+    //
+    // 单镜模式也要显示（「每镜 5 秒以内 · 共 20 段」/「每镜 10 秒 · 共 20 段」）：以前这里只在
+    // 「按每段时长」时才算，于是选了档位 + 单镜的用户屏幕上什么都没变，看起来就像设置没生效。
+    const segmentPreview = useMemo(() => {
+        if (segmentSeconds === "none" || !rows.length) return "";
+        if (mergeMode === "shot") {
+            // 5 秒是「上限」（默认档），10 / 15 是「锁定」，两种文案不能混。
+            const capped = Number(segmentSeconds) < 10;
+            return t(capped ? "canvas.scriptNode.segmentPreviewShotCap" : "canvas.scriptNode.segmentPreviewShot", {
+                seconds: segmentSeconds,
+                count: rows.length,
+            });
+        }
+        const groups = groupStoryScriptRows(rows, mergeMode, segmentSeconds);
+        if (!groups.length) return "";
+        if (mergeMode === "duration") {
+            return t("canvas.scriptNode.segmentPreview", {
+                seconds: segmentSeconds,
+                count: groups.length,
+                lengths: groups.map((group) => storyScriptGroupDuration(group)).join(" / "),
+            });
+        }
+        return t("canvas.scriptNode.segmentPreviewMerge", { shots: mergeMode, count: groups.length });
+    }, [mergeMode, rows, segmentSeconds, t]);
     const mergeSelector = (
         <div className="flex flex-wrap items-center gap-1.5" style={{ color: theme.node.text }}>
             <span className="opacity-60">{t("canvas.scriptNode.mergeLabel")}</span>
@@ -1265,9 +1377,9 @@ export function CanvasScriptNodeContent({
                         type="button"
                         className="inline-flex h-6 items-center rounded-full border px-2 transition disabled:opacity-35"
                         style={{
-                            borderColor: theme.node.stroke,
-                            background: active ? theme.toolbar.activeBg : `${theme.toolbar.panel}aa`,
-                            color: active ? theme.toolbar.activeText : theme.node.text,
+                            borderColor: active ? theme.toolbar.activeText : theme.node.stroke,
+                            background: active ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                            color: active ? theme.node.panel : theme.node.text,
                             opacity: disabled ? 0.4 : active ? 1 : 0.7,
                         }}
                         disabled={disabled}
@@ -1284,8 +1396,101 @@ export function CanvasScriptNodeContent({
                     </button>
                 );
             })}
+            {segmentPreview ? (
+                <span
+                    className="whitespace-nowrap rounded border px-1.5"
+                    style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText }}
+                    title={
+                        mergeMode === "shot"
+                            ? t(Number(segmentSeconds) < 10 ? "canvas.scriptNode.segmentPreviewShotCapHint" : "canvas.scriptNode.segmentPreviewShotHint", { seconds: segmentSeconds })
+                            : t("canvas.scriptNode.segmentPreviewHint")
+                    }
+                >
+                    {segmentPreview}
+                </span>
+            ) : null}
         </div>
     );
+
+    /**
+     * 「声音」列的一格：这一镜已链接的音频（文件名 + 试听 + 解绑）+ 「+」。
+     *
+     * 与「按镜按资产」图位同一套交互口径（`×` 解绑、`+` 开弹窗），区别只是内容是音频：
+     * 胶囊左边是播放/停止（免得为了确认「这段配音对不对」还要把节点拖出来听），右边是解绑。
+     * 播放器整表共用一个（`audioPlayerRef`），点另一条会自动换掉上一条。
+     */
+    const renderAudioCell = (shotNo: number) => {
+        const ids = scriptRowAudioIds(rowAudios, shotNo);
+        // 已经不在画布上（被删）的音频不再显示 —— 铺链路也会按 existingNodeIds 滤掉，两处口径一致。
+        const visibleIds = ids.filter((id) => !audioCandidates || audioLookup.has(id));
+        return (
+            <td className="border-b px-2 py-0.5 align-top" style={{ borderColor: theme.node.stroke }}>
+                <div className="flex flex-col gap-0.5" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+                    {visibleIds.map((audioId) => {
+                        const meta = audioLookup.get(audioId);
+                        const url = meta?.previewUrl || "";
+                        const playing = playingAudioId === audioId;
+                        return (
+                            <span
+                                key={audioId}
+                                className="group relative flex h-6 w-full min-w-0 items-center gap-1 rounded-md border pl-0.5 pr-1"
+                                style={{ borderColor: theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
+                                title={meta?.title || audioId}
+                            >
+                                <button
+                                    type="button"
+                                    className="inline-flex size-5 shrink-0 items-center justify-center rounded transition hover:opacity-100"
+                                    style={{ opacity: url ? 0.85 : 0.3 }}
+                                    disabled={!url}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                        event.stopPropagation();
+                                        toggleAudioPreview(audioId, url);
+                                    }}
+                                    title={playing ? t("canvas.scriptNode.rowAudioStop") : t("canvas.scriptNode.rowAudioPlay")}
+                                >
+                                    {playing ? <Square className="size-2.5" /> : <Play className="size-2.5" />}
+                                </button>
+                                <Music2 className="size-3 shrink-0 opacity-60" />
+                                <span className="min-w-0 flex-1 truncate text-[0.846em]">{meta?.title || audioId}</span>
+                                {onRowAudiosChange ? (
+                                    <button
+                                        type="button"
+                                        className="hidden size-4 shrink-0 items-center justify-center rounded bg-black/50 text-white group-hover:flex"
+                                        onMouseDown={(event) => event.stopPropagation()}
+                                        onPointerDown={(event) => event.stopPropagation()}
+                                        onClick={(event) => {
+                                            event.stopPropagation();
+                                            onRowAudiosChange(node.id, shotNo, ids.filter((id) => id !== audioId));
+                                        }}
+                                        title={t("canvas.scriptNode.rowAudioRemove")}
+                                    >
+                                        <X className="size-2.5" />
+                                    </button>
+                                ) : null}
+                            </span>
+                        );
+                    })}
+                    <button
+                        type="button"
+                        className="inline-flex h-6 w-full items-center justify-center gap-1 rounded-md border text-[0.846em] transition hover:opacity-100"
+                        style={{ borderColor: theme.node.stroke, opacity: 0.8, color: theme.node.text }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            setRowAudioTarget({ shotNo, ids });
+                        }}
+                        title={visibleIds.length ? t("canvas.scriptNode.rowAudioEdit", { no: shotNo }) : t("canvas.scriptNode.rowAudioAdd", { no: shotNo })}
+                    >
+                        <Music2 className="size-3" />
+                        {visibleIds.length ? t("canvas.scriptNode.rowAudioEditShort") : t("canvas.scriptNode.rowAudioAddShort")}
+                    </button>
+                </div>
+            </td>
+        );
+    };
 
     const tablePanel = (
         <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
@@ -1295,7 +1500,11 @@ export function CanvasScriptNodeContent({
                     <colgroup>
                         {showRowSelect ? <col style={{ width: TABLE_SELECT_WIDTH }} /> : null}
                         {columns.map((column) => (
-                            <col key={column.key} style={{ width: column.width }} />
+                            <Fragment key={column.key}>
+                                <col style={{ width: column.width }} />
+                                {/* 「声音」列紧跟在镜号之后：镜号 + 这一镜配什么音，是同一层信息。 */}
+                                {showRowAudios && column.key === "shot_no" ? <col style={{ width: TABLE_AUDIO_WIDTH }} /> : null}
+                            </Fragment>
                         ))}
                         <col style={{ width: TABLE_ACTION_WIDTH }} />
                     </colgroup>
@@ -1327,32 +1536,45 @@ export function CanvasScriptNodeContent({
                                 // 自建资产列的表头多一个「×」：删列（连带清掉行文本与图位，先确认）。
                                 const extra = extraColumns.find((item) => item.key === column.key);
                                 return (
-                                    <th
-                                        key={column.key}
-                                        className={`sticky top-0 z-10 border-b px-2 py-1 text-left font-semibold whitespace-nowrap ${column.numeric ? "text-right" : ""}`}
-                                        style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}
-                                        title={extra ? t("canvas.scriptNode.extraColumnHint", { role: t(`canvas.scriptNode.assetRole_${extra.role}`) }) : undefined}
-                                    >
-                                        <span className="inline-flex items-center gap-1">
-                                            {column.label}
-                                            {extra ? (
-                                                <button
-                                                    type="button"
-                                                    className="inline-flex size-4 items-center justify-center rounded border opacity-60 transition hover:opacity-100"
-                                                    style={{ borderColor: theme.node.stroke }}
-                                                    onMouseDown={(event) => event.stopPropagation()}
-                                                    onPointerDown={(event) => event.stopPropagation()}
-                                                    onClick={(event) => {
-                                                        event.stopPropagation();
-                                                        removeExtraColumn(extra);
-                                                    }}
-                                                    title={t("canvas.scriptNode.extraColumnRemove")}
-                                                >
-                                                    <X className="size-2.5" />
-                                                </button>
-                                            ) : null}
-                                        </span>
-                                    </th>
+                                    <Fragment key={column.key}>
+                                        <th
+                                            className={`sticky top-0 z-10 border-b px-2 py-1 text-left font-semibold whitespace-nowrap ${column.numeric ? "text-right" : ""}`}
+                                            style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}
+                                            title={extra ? t("canvas.scriptNode.extraColumnHint", { role: t(`canvas.scriptNode.assetRole_${extra.role}`) }) : undefined}
+                                        >
+                                            <span className="inline-flex items-center gap-1">
+                                                {column.label}
+                                                {extra ? (
+                                                    <button
+                                                        type="button"
+                                                        className="inline-flex size-4 items-center justify-center rounded border opacity-60 transition hover:opacity-100"
+                                                        style={{ borderColor: theme.node.stroke }}
+                                                        onMouseDown={(event) => event.stopPropagation()}
+                                                        onPointerDown={(event) => event.stopPropagation()}
+                                                        onClick={(event) => {
+                                                            event.stopPropagation();
+                                                            removeExtraColumn(extra);
+                                                        }}
+                                                        title={t("canvas.scriptNode.extraColumnRemove")}
+                                                    >
+                                                        <X className="size-2.5" />
+                                                    </button>
+                                                ) : null}
+                                            </span>
+                                        </th>
+                                        {showRowAudios && column.key === "shot_no" ? (
+                                            <th
+                                                className="sticky top-0 z-10 border-b px-2 py-1 text-left font-semibold whitespace-nowrap"
+                                                style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}
+                                                title={t("canvas.scriptNode.rowAudioColumnHint")}
+                                            >
+                                                <span className="inline-flex items-center gap-1">
+                                                    <Music2 className="size-3" />
+                                                    {t("canvas.scriptNode.rowAudioColumn")}
+                                                </span>
+                                            </th>
+                                        ) : null}
+                                    </Fragment>
                                 );
                             })}
                             <th className="sticky right-0 top-0 z-30 border-b border-l px-2 py-1 text-left font-semibold whitespace-nowrap" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}>
@@ -1404,17 +1626,17 @@ export function CanvasScriptNodeContent({
                                     const cellFromLock = cellIds.length === 0 && cellLockIds.length > 0;
                                     const cellDisplayIds = cellIds.length ? cellIds : cellLockIds;
                                     return (
-                                        <td
-                                            key={column.key}
-                                            data-canvas-selectable-text
-                                            className={`cursor-text border-b px-2 py-0.5 ${column.numeric ? "text-right tabular-nums" : ""}`}
-                                            style={{ borderColor: theme.node.stroke }}
-                                            title={value || t("canvas.scriptNode.noContent")}
-                                            onDoubleClick={(event) => {
-                                                event.stopPropagation();
-                                                setEditing({ rowIndex, key: column.key });
-                                            }}
-                                        >
+                                        <Fragment key={column.key}>
+                                            <td
+                                                data-canvas-selectable-text
+                                                className={`cursor-text border-b px-2 py-0.5 ${column.numeric ? "text-right tabular-nums" : ""}`}
+                                                style={{ borderColor: theme.node.stroke }}
+                                                title={value || t("canvas.scriptNode.noContent")}
+                                                onDoubleClick={(event) => {
+                                                    event.stopPropagation();
+                                                    setEditing({ rowIndex, key: column.key });
+                                                }}
+                                            >
                                             {value ? (
                                                 // 默认**完整显示**（不截断），但超过 6 行后收进格内滚动：行高由这一行
                                                 // 最高的格子决定，长提示词一完整展开就会把整行撑到 300px 起，
@@ -1542,7 +1764,10 @@ export function CanvasScriptNodeContent({
                                                     ) : null}
                                                 </div>
                                             ) : null}
-                                        </td>
+                                            </td>
+                                            {/* 「声音」列紧跟在镜号之后（与 colgroup / thead 同序）。 */}
+                                            {showRowAudios && column.key === "shot_no" ? renderAudioCell(cellShotNo) : null}
+                                        </Fragment>
                                     );
                                 })}
                                 {/* 右侧吸附：整表 4.2k px 宽，操作列不吸附就得横向拖到底才够得到。 */}
@@ -1735,6 +1960,10 @@ export function CanvasScriptNodeContent({
                     {scriptTitle ? `${scriptTitle} · ` : ""}
                     {t("canvas.scriptNode.shotCount", { count: rows.length })} · {t("canvas.scriptNode.totalDuration", { seconds: totalDuration })}
                 </span>
+                {/* 每镜时长也放到表体操作条：用户看分镜表时就能直接改，不用切回「输入」视图再找。
+                    与「视频分段」并排：选单镜 → 每镜一段（10/15 锁定成片秒数、5 秒是上限）；
+                    选「按每段时长」→ 连续几镜凑够 N 秒。 */}
+                {segmentSelector}
                 {mergeSelector}
                 {/* 手动添加资产列（「宠物」「车辆」…）：自建列的行为与内置资产列一致，铺链路会按分类把图连进图片节点。
                     常驻显示、到上限才禁用 —— 之前到 8 列直接消失，看起来像「这个功能没了 / 加不上」。 */}
@@ -2022,6 +2251,27 @@ export function CanvasScriptNodeContent({
         />
     ) : null;
 
+    // 「声音」列弹窗：只给这一镜挂音频（台词配音 / 音效）。候选只列音频节点、上传只收音频文件，
+    // 也不显示「AI 生成」tab —— 声音没有「按描述生成」这回事。三条路都写回 metadata.scriptRowAudios。
+    const rowAudioDialog = rowAudioTarget ? (
+        <CanvasScriptAssetDialog
+            open
+            theme={theme}
+            candidates={audioCandidates || []}
+            rows={rows}
+            onClose={() => setRowAudioTarget(null)}
+            onLink={() => undefined}
+            onImport={() => undefined}
+            rowMode={{
+                no: rowAudioTarget.shotNo,
+                selectedIds: rowAudioTarget.ids,
+                audio: true,
+                onLink: (nodeIds) => onRowAudiosChange?.(node.id, rowAudioTarget.shotNo, nodeIds),
+                onImport: (files) => onRowAudioImport?.(node.id, rowAudioTarget.shotNo, files),
+            }}
+        />
+    ) : null;
+
     // 「加剧情 / 批量重生成」弹窗：一段只作用于这批镜的剧情 / 要求 + 一个「保持站位一致」开关。
     // 用 antd Modal（portal 到 body，不受画布 pointerdown 吞事件影响）；里面只放 textarea 与自绘 chip，
     // 不放 antd Select / Dropdown 这类自带浮层的控件（画布上容易被全局 pointerdown 判成「点外部」）。
@@ -2166,6 +2416,7 @@ export function CanvasScriptNodeContent({
             {assetDialog}
             {rowAssetDialog}
             {cellAssetDialog}
+            {rowAudioDialog}
             {rowEditDialog}
             {addColumnDialog}
         </>

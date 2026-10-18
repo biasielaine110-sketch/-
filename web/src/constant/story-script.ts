@@ -76,6 +76,11 @@ export type StoryScriptRowTaskInput = {
     characterRefs?: string;
     segmentSeconds?: unknown;
     /**
+     * 与「每镜时长」配套的分段方式：`shot` = 这一镜自己就是成片（10/15 锁死 duration = N，5 秒是上限）；
+     * 其余 = 与相邻镜合并成 N 秒（只要求别超过 N）。不传 = 不加时长说明，输出与改造前逐字一致。
+     */
+    mergeMode?: StoryScriptMergeMode | string | null;
+    /**
      * **这一镜单独追加的剧情 / 修改要求**（用户在行上「加剧情重生成」时写的）。
      * 与 `prompt`（整表级别的补充要求）分开传，任务书里会写成独立一段，语义清楚得多。
      * 留空 = 不加这段，输出与改造前逐字一致。
@@ -98,8 +103,8 @@ export type StoryScriptPreset = {
     rowActions: StoryScriptRowAction[];
     /** 「发送到画布」优先取这一列的内容 */
     insertKey: string;
-    /** 任务书构建器 */
-    buildTask: (input: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown }) => string;
+    /** 任务书构建器（`mergeMode` 决定「每段时长」按「每镜 N 秒」还是「多镜合计 N 秒」写） */
+    buildTask: (input: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null }) => string;
     /**
      * 单镜重生成任务书（「重生成本镜」用）：带上上一镜 / 下一镜上下文，要求模型只重写这一镜，
      * 进而保住「人物站位 / 场景 / 道具与上一镜一致」的连续性。
@@ -364,29 +369,94 @@ const STORY_SCRIPT_STORYBOARD_COMMON_RULES = [
 ];
 
 /**
- * 「每段时长」要求：视频模型按 10s / 15s 成片，所以要求模型把连续若干镜的秒数控制在目标长度以内，
- * 便于铺链路时把它们合并成一个视频节点。不指定（none）时不加任何约束，保持原行为。
+ * 单镜模式下一镜的成片秒数（铺链 / 单镜建视频都走这里）。
+ * - `10` / `15` = **锁定**：用户选了就生效，不管表格里 `duration` 写了几秒；
+ * - `5` = **上限**：表里更短就按表里，超过 5 秒压到 5 秒（默认档的语义是「不超过」）；
+ * - `none` = 完全按表里（1~20 秒）。
  */
-function buildSegmentDurationGuidance(segmentSeconds?: unknown): string {
+export function resolveStoryScriptShotSeconds(duration: unknown, segmentSeconds?: unknown): number {
+    const target = storyScriptSegmentSecondsValue(segmentSeconds);
+    const own = Math.max(1, Math.round(Number(duration) || 0));
+    if (target >= 10) return Math.min(20, target);
+    if (target > 0) return Math.min(target, Math.max(1, Math.min(20, own)));
+    return Math.min(20, own);
+}
+
+/**
+ * 「每镜 / 每段时长」要求。三种口径，取决于「视频分段」怎么设：
+ * - `shot`：**一镜就是一段成片** → 10/15 锁死 `duration` = N；5 秒是上限（≤N）；
+ * - `duration` / `2` / `3`：若干镜合并成一段 → 连续几镜的秒数之和凑到 N；
+ * - 不传 `mergeMode`（老调用 / 探针）：保持「合计约 N 秒」的老文案，与改造前逐字一致。
+ * 不指定（none）时不加任何约束，保持原行为。
+ */
+function buildSegmentDurationGuidance(segmentSeconds?: unknown, mergeMode?: StoryScriptMergeMode | string | null): string {
     const value = storyScriptSegmentSecondsValue(segmentSeconds);
     if (!value) return "";
+    const maxShot = Math.max(3, Math.round(value / 2));
+    const mode = mergeMode === undefined || mergeMode === null ? null : resolveStoryScriptMergeMode(mergeMode);
+    if (mode === "shot") {
+        // 10 / 15 是「锁定」，5 是「上限」——用户对 5 秒的原话是「每镜头不超过 5 秒」。
+        if (value < 10) {
+            return [
+                "## 每镜时长要求",
+                `- 每一镜就是一整段成片，单镜 \`duration\` **不要超过 ${value} 秒**（按内容需要写 2~${value} 秒的整数）。`,
+                `- 铺链时每一镜直接按它自己的 \`duration\` 出片，所以**不要写超过 ${value} 秒的长镜头**。`,
+                `- \`video_motion_prompt\` 里的 \`[时长：Xs]\` 不要超过 ${value} 秒。`,
+            ].join("\n");
+        }
+        return [
+            "## 每镜时长要求",
+            `- 本次成片按每段 ${value} 秒：**每一镜就是一整段成片**，所以 \`duration\` 必须填 ${value}（每镜都是 ${value} 秒）。`,
+            `- 一镜之内要有一个连续的运镜 / 动作把 ${value} 秒填满（起幅 → 过程 → 落幅），不要拆成一堆 2~3 秒的短镜，也不要靠重复动作凑时长。`,
+            `- \`video_motion_prompt\` 里的 \`[时长：Xs]\` 写 ${value} 秒。`,
+            `- 镜头内部时间线要写清（例如 0-${Math.round(value / 3)}s / ${Math.round(value / 3)}-${Math.round((value * 2) / 3)}s / 尾段），方便视频模型一次成片。`,
+        ].join("\n");
+    }
+    if (mode === "2" || mode === "3") {
+        const perSegment = mode === "2" ? 2 : 3;
+        return [
+            "## 分段时长要求",
+            `- 本次目标成片长度约为每段 ${value} 秒（视频模型基本只能按 ${value} 秒出片）。`,
+            `- 每 ${perSegment} 镜会合并成一段，因此请让**连续 ${perSegment} 镜的秒数相加正好等于 ${value} 秒**（约每镜 ${Math.max(1, Math.round(value / perSegment))} 秒）。`,
+            `- \`duration\` 填该镜的实际秒数（整数），不要写成一个大超长镜头。`,
+            `- \`video_motion_prompt\` 里的 \`[时长：Xs]\` 不要超过 ${value} 秒。`,
+        ].join("\n");
+    }
     return [
         "## 分段时长要求",
-        `- 本次目标成片长度约为每段 ${value} 秒。`,
-        `- \`duration\` 仍填该镜的实际秒数（整数），但请让连续若干镜的秒数相加约为 ${value} 秒，方便合成一段完整视频。`,
-        `- 单镜尽量落在 2-${Math.max(3, Math.round(value / 2))} 秒之间，不要写成一个大超长镜头。`,
+        `- 本次目标成片长度约为每段 ${value} 秒（视频模型基本只能按 ${value} 秒出片，长短都算废片）。`,
+        `- \`duration\` 仍填该镜的实际秒数（整数），但请让**连续若干镜的秒数相加正好等于 ${value} 秒**：例如 ${value} 秒可以写成 3+3+4、4+6、5+5，或一镜到底直接 ${value} 秒。`,
+        `- 单镜尽量落在 2-${maxShot} 秒之间，不要写成一个大超长镜头，也不要让某一段凑不满 ${value} 秒。`,
         `- \`video_motion_prompt\` 里的 \`[时长：Xs]\` 不要超过 ${value} 秒。`,
     ].join("\n");
 }
 
+/**
+ * 单镜重生成时的时长约束（一行说明，挂在行任务书里）。
+ * `shot` 模式下 10/15 必须锁死 N 秒（这一镜自己就是成片）、5 秒是上限；其余模式只要求「别超过 N 秒」。
+ */
+function buildRowDurationHint(segmentSeconds?: unknown, mergeMode?: StoryScriptMergeMode | string | null): string {
+    const value = storyScriptSegmentSecondsValue(segmentSeconds);
+    if (!value) return "";
+    const mode = mergeMode === undefined || mergeMode === null ? null : resolveStoryScriptMergeMode(mergeMode);
+    if (mode === "shot") {
+        if (value < 10) {
+            return `本镜时长要求：这一镜就是一整段成片，\`duration\` **不要超过 ${value} 秒**（2~${value} 秒的整数）。`;
+        }
+        return `本镜时长要求：\`duration\` 必须填 ${value} —— 这一镜就是一整段 ${value} 秒的成片，镜头内部要有完整的起幅 / 过程 / 落幅，不要写成 2~3 秒的碎片。`;
+    }
+    if (mode === null) return "";
+    return `本镜时长要求：这一段目标成片 ${value} 秒，这一镜的 \`duration\` 控制在 ${value} 秒以内，给相邻镜留出合并空间。`;
+}
+
 /** 构建分镜脚本生成任务（classic 对应 dramaclaw 的 build_freezone_story_script_task）。 */
-function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmentSeconds }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown }): string {
+function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null }): string {
     const parts = ["根据以下上传剧本内容生成一个完整的故事脚本表。", ...STORY_SCRIPT_COMMON_RULES];
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
     if (characterRefs && characterRefs.trim()) {
         parts.push(`已提供的角色参考（请在角色1 / 角色2 字段里使用完全一致的角色名）：\n${characterRefs.trim()}`);
     }
-    const segmentGuidance = buildSegmentDurationGuidance(segmentSeconds);
+    const segmentGuidance = buildSegmentDurationGuidance(segmentSeconds, mergeMode);
     if (segmentGuidance) parts.push(segmentGuidance);
     parts.push(STORY_SCRIPT_STYLE_HINT);
     parts.push(STORY_SCRIPT_JSON_CONTRACT);
@@ -395,13 +465,13 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
 }
 
 /** 构建「视频分镜脚本」任务。首句即 recipe 的 `planning_prompt` 原文（说明这一节点要产出什么）。 */
-function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown }): string {
+function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null }): string {
     const parts = ["根据创意大纲直接生成含镜号、画面、运镜和转场的分镜脚本表格。", ...STORY_SCRIPT_STORYBOARD_COMMON_RULES];
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
     if (characterRefs && characterRefs.trim()) {
         parts.push(`已提供的角色参考（请在画面描述 / 关键视觉 / 主体动作里使用完全一致的角色名）：\n${characterRefs.trim()}`);
     }
-    const segmentGuidance = buildSegmentDurationGuidance(segmentSeconds);
+    const segmentGuidance = buildSegmentDurationGuidance(segmentSeconds, mergeMode);
     if (segmentGuidance) parts.push(segmentGuidance);
     parts.push(`创意大纲 / 源内容：\n${sourceText.trim()}`);
     return parts.join("\n\n");
@@ -423,9 +493,12 @@ function describeRowForContext(row: StoryScriptRow | undefined, columns: StorySc
  * 「只重写某一镜」的任务书（经典预设）。带上上一镜 / 下一镜上下文，重点要求：
  * 人物站位、场景、道具与前后镜保持一致——这正是「重生成本镜」追回资产描述的关键。
  */
-function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking }: StoryScriptRowTaskInput): string {
+function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode }: StoryScriptRowTaskInput): string {
     const columns = STORY_SCRIPT_CLASSIC_COLUMNS;
     const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请**只重新生成这一镜**（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...STORY_SCRIPT_COMMON_RULES];
+    // 时长是硬约束，放前面：单镜模式下这一镜自己就是成片，模型最容易在这里写成 2~3 秒碎片。
+    const durationHint = buildRowDurationHint(segmentSeconds, mergeMode);
+    if (durationHint) parts.push(durationHint);
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
     if (extraPlot && extraPlot.trim()) parts.push(`这一镜要追加 / 修改的剧情（只改这一镜，其余镜头不要跟着改）：\n${extraPlot.trim()}`);
     const prevText = describeRowForContext(prev, columns);
@@ -449,9 +522,12 @@ function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRef
 }
 
 /** 「只重写某一镜」的任务书（视频分镜脚本预设）。 */
-function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking }: StoryScriptRowTaskInput): string {
+function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode }: StoryScriptRowTaskInput): string {
     const columns = STORY_SCRIPT_STORYBOARD_COLUMNS;
     const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请只重新生成这一镜（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...STORY_SCRIPT_STORYBOARD_COMMON_RULES];
+    // 同 classic：单镜模式下「这一镜 = 一整段成片」，时长必须在重写时就锁死。
+    const durationHint = buildRowDurationHint(segmentSeconds, mergeMode);
+    if (durationHint) parts.push(durationHint);
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
     if (extraPlot && extraPlot.trim()) parts.push(`这一镜要追加 / 修改的剧情（只改这一镜，其余镜头不要跟着改）：\n${extraPlot.trim()}`);
     const prevText = describeRowForContext(prev, columns);
@@ -602,15 +678,25 @@ export function isGlobalScriptAssetRole(role: ScriptAssetRole): boolean {
     return role !== "character";
 }
 
-/** 「每段时长」：视频模型按 10s / 15s 成片，这里同时决定生成时的分段要求与铺链路时的自动合并长度。 */
-export type StoryScriptSegmentSeconds = "none" | "10" | "15";
-export const STORY_SCRIPT_SEGMENT_SECONDS: StoryScriptSegmentSeconds[] = ["none", "10", "15"];
+/**
+ * 「每镜时长」档位（5 / 10 / 15 / 不限制）：同时决定生成时的时长要求与铺链路的成片秒数。
+ * 5 是**上限**（默认）、10 / 15 是**锁定**，口径见 `resolveStoryScriptShotSeconds`。
+ */
+export type StoryScriptSegmentSeconds = "none" | "5" | "10" | "15";
+/**
+ * 「每镜时长」档位。**默认 5 秒**（用户拍板：「默认状态是每镜头不超过 5 秒，也可以选 10 / 15」）。
+ * - `5`：**上限**——每镜写 2~5 秒都行，不许超；
+ * - `10` / `15`：**锁定**——每镜就是 10 / 15 秒（用户明确要「每个镜头 10 秒」）；
+ * - `none`：不限制，完全按表格 `duration`（逃生口，别再塞回默认）。
+ */
+export const STORY_SCRIPT_SEGMENT_SECONDS: StoryScriptSegmentSeconds[] = ["5", "10", "15", "none"];
+export const DEFAULT_STORY_SCRIPT_SEGMENT_SECONDS: StoryScriptSegmentSeconds = "5";
 
 export function resolveStoryScriptSegmentSeconds(value: unknown): StoryScriptSegmentSeconds {
-    return STORY_SCRIPT_SEGMENT_SECONDS.includes(value as StoryScriptSegmentSeconds) ? (value as StoryScriptSegmentSeconds) : "none";
+    return STORY_SCRIPT_SEGMENT_SECONDS.includes(value as StoryScriptSegmentSeconds) ? (value as StoryScriptSegmentSeconds) : DEFAULT_STORY_SCRIPT_SEGMENT_SECONDS;
 }
 
-/** 取「每段时长」的数值；不指定时返回 0。 */
+/** 取「每镜时长」的数值；`none`（不限制）返回 0。 */
 export function storyScriptSegmentSecondsValue(value: unknown): number {
     const id = resolveStoryScriptSegmentSeconds(value);
     return id === "none" ? 0 : Number(id);
@@ -808,6 +894,38 @@ export function shiftStoryScriptRowAssetsAfterDelete(map: unknown, deletedShotNo
         next[String(no > deleted ? no - 1 : no)] = ids;
     }
     return next;
+}
+
+/**
+ * **逐镜声音**：镜号 → 画布上音频节点 id 的列表。存在脚本节点的 `metadata.scriptRowAudios`。
+ *
+ * 与「整表音频资产」(`scriptAssetRoles` 里分类为 `audio` 的那些) 互补：
+ *  - 整表音频：每段视频都连同一条音轨（BGM / 全局旁白）；
+ *  - 逐镜声音：只连**这一镜**所在的视频节点（这一镜的台词配音 / 音效），分段合并时同段各镜的声音都会连上。
+ *
+ * 结构与 `StoryScriptRowAssetMap` 完全一致（键 = 镜号、值 = 有序去重的节点 id），所以直接复用它的
+ * 归一化 / 删行位移 / 调序 remap 实现；下面四个薄封装只是给「声音」一个说得出意图的入口名。
+ */
+export type StoryScriptRowAudioMap = StoryScriptRowAssetMap;
+
+/** 读某一镜关联的音频节点 id（与 `scriptRowAssetIds` 同口径，容错过滤非法项）。 */
+export function scriptRowAudioIds(map: unknown, shotNo: unknown): string[] {
+    return scriptRowAssetIds(map, shotNo);
+}
+
+/** 写某一镜关联的音频节点 id（纯函数；传空数组 = 删掉这一镜的键）。 */
+export function setStoryScriptRowAudioIds(map: unknown, shotNo: unknown, ids: readonly unknown[]): StoryScriptRowAudioMap {
+    return setStoryScriptRowAssetIds(map, shotNo, ids);
+}
+
+/** 删掉第 N 镜后把声音关联整体前移一位（否则「第 5 镜的配音」会留在旧的第 5 镜上）。 */
+export function shiftStoryScriptRowAudiosAfterDelete(map: unknown, deletedShotNo: unknown): StoryScriptRowAudioMap {
+    return shiftStoryScriptRowAssetsAfterDelete(map, deletedShotNo);
+}
+
+/** 调序后按旧镜号 → 新镜号的映射重排声音关联。 */
+export function remapStoryScriptRowAudios(map: unknown, mapping: Map<number, number>): StoryScriptRowAudioMap {
+    return remapStoryScriptRowAssets(map, mapping);
 }
 
 /**
@@ -1437,14 +1555,16 @@ export function buildStoryScriptTask({
     characterRefs,
     preset,
     segmentSeconds,
+    mergeMode,
 }: {
     sourceText: string;
     prompt?: string;
     characterRefs?: string;
     preset?: StoryScriptPresetId | string | null;
     segmentSeconds?: unknown;
+    mergeMode?: StoryScriptMergeMode | string | null;
 }): string {
-    return getStoryScriptPreset(preset).buildTask({ sourceText, prompt, characterRefs, segmentSeconds });
+    return getStoryScriptPreset(preset).buildTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode });
 }
 
 /** 构建「只重写某一镜」的任务书；不传 preset 时保持 classic。 */
