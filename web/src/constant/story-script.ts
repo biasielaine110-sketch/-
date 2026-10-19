@@ -501,19 +501,55 @@ function buildRowDurationHint(segmentSeconds?: unknown, mergeMode?: StoryScriptM
  * 只有在 `hasStoryScriptShotTemplate(sourceText)` 为真时才拼进去 —— 否则任务书与改造前逐字一致。
  */
 const STORY_SCRIPT_TEMPLATE_HINT = [
-    "## 源内容已经是逐镜提示词模版（三列照搬）",
-    "源内容每一镜都是 `- **字段名**：内容` 的标签块，其中下面这三列的内容**已经写好了**，照搬即可：",
+    "## 源内容已经是逐镜提示词模版（照模版填表，不要重新创作）",
+    "源内容每一镜都是 `- **字段名**：内容` 的标签块。",
+    "`shot_no` 取 `镜头编号` 末尾数字（`场次01—镜头009` 就是 9），`duration` 取 `镜头时长` 的秒数（`3 秒` → `3`）。",
+    "下面这些列的内容模版里**已经写好了**，照搬即可：",
     "- `shot_prompt` ← `首帧图片提示词`：整段原文（含末尾的负面句），**不要**改写成 `[…] + […]` 的 8 段式，也不要压缩 / 合并 / 重排。",
-    "- `video_motion_prompt` ← 这一镜里**除** `镜头编号 / 镜头时长 / 所属场景 / 出场人物 / 风格 / 首帧图片提示词 / 镜头叙事作用` 之外的**每一行原样抄进去**（景别、摄影机参数、构图方式、画面内容、人物动作与表演、运镜方式、台词与声音、负面 …），一行一个「标签：内容」，保持模版里的原顺序；**不要**合并，**不要**改写成 `[…] + […]` 或 6 段式。",
+    "- `video_motion_prompt` ← 这一镜里**除** `镜头编号 / 镜头时长 / 所属场景 / 出场人物 / 风格 / 首帧图片提示词 / 镜头叙事作用 / 出场人物资产 / 调用场景资产 / 调用道具资产` 之外的**每一行原样抄进去**（景别、摄影机参数、构图方式、画面内容、人物动作与表演、运镜方式、台词与声音、负面 …），一行一个「标签：内容」，保持模版里的原顺序；**不要**合并，**不要**改写成 `[…] + […]` 或 6 段式。",
     "- `style_prompt` ← `风格提示词` / `视觉风格` 之类的字段；源内容没有这类字段时写 `无`，不要自己编。",
-    "- `镜头编号` → `shot_no`（取末尾数字，`场次02—镜头005` 就是 5）；`镜头时长` → `duration`（纯数字秒）。",
-    "⚠️ 本段**只管上面这三列**。其余列必须照常生成、每一镜都要填满 —— 尤其是资产类列",
-    "（角色1 / 角色描述1 / 角色2 / 角色描述2 / 场景 / 场景描述 / 道具 / 道具描述 / 人物站位）：",
+    "- `character_1` ← `出场人物资产`、`scene` ← `调用场景资产`、`prop` ← `调用道具资产`：**去掉 `P-01` / `S-01` / `D-01` 这类编号，只留资产名**",
+    "  （`P-01 苏晚（同镜头 001 造型；中近景）` → `苏晚`）；括号内与括号后的文字写进对应的**描述列**",
+    "  （`character_description_1` / `scene_description` / `prop_description`）。资产名要与画布素材标题尽量一致，但**不必逐字相同**（意思相近即可），",
+    "  绝对不要换成一个模版里没出现的资产。",
+    "⚠️ 上面这些列以外的列必须照常生成、每一镜都要填满",
+    "（角色2 / 角色描述2 / 人物站位 / 景别 / 画面描述 / 角色动作 / 情绪 / 场景标签 / 光影氛围 / 音效 / 对白 等），",
     "模版里没有这些字段**不代表可以留空**，也不要因为要「照搬」就跳过它们。",
-    "- 本情形下，「分镜提示词按 8 段写 / 视频运动提示词按 6 段写」「括号分段 + 号连接」这类通用写法要求**一律不适用**（三列照模版原文即可），但资产类列的写法要求仍然有效。",
-    "- 若任务书里另有「资产部分自定义要求」/「分镜提示词自定义要求」，**以那两段为准**（与本段先后无关）。",
+    "- 资产**描述**列（角色描述 / 场景描述 / 道具描述 / 人物站位）的写法以「资产部分自定义要求」为准；",
+    "  但**镜数 / 镜号 / 时长 / 资产名**（谁出场、哪个场景、哪个道具）一律以模版为准，自定义要求不能改这几样。",
+    "- 本情形下，「分镜提示词按 8 段写 / 视频运动提示词按 6 段写」「括号分段 + 号连接」这类通用写法要求**一律不适用**（照模版原文即可）。",
     "- 输出仍然只给契约 JSON（`rows` 数组），不要把标签块原样贴回来",
 ].join("\n");
+
+/**
+ * 模版的「镜数 + 镜号 + 时长」清单（动态生成，逐个镜号写死）。
+ *
+ * 用户 2026-10-19 第 03 条：「我使用分镜提示词后，镜头数量请识别这个内容下的，即为 9 个镜头。」
+ * 只写「行数必须一致」不够 —— 模型不知道模版到底几镜。这里把 9 个镜号逐个列出来，
+ * 让「输出 9 行、镜号 1..9」变成可核对的事实而不是模型的自觉。没有模版时返回空串。
+ */
+function buildTemplateShotPlanHint(sourceText: string, onlyShotNo?: number): string {
+    const blocks = splitStoryScriptTemplateBlocks(String(sourceText || ""));
+    if (!blocks.length) return "";
+    const shotNos = blocks.map((block, index) => {
+        const shotField = block.fields.find((field) => /^(镜头编号|镜号)$/.test(normalizeTemplateLabel(field.label)));
+        const no = trailingNumber(shotField?.value || block.heading || "");
+        return no || index + 1;
+    });
+    if (onlyShotNo) {
+        return [
+            "## 本次只重生成一镜（模版共 N 镜）",
+            `源模版共 **${blocks.length} 个镜头**，本次只重写第 **${onlyShotNo}** 镜：`,
+            `\`rows\` 里只放 1 个元素，\`shot_no\` 必须是 ${onlyShotNo}；不要输出其它镜头。`,
+        ].join("\n");
+    }
+    return [
+        "## 本次镜数 / 镜号（照源模版，不许增删）",
+        `源模版共 **${blocks.length} 个镜头**，所以 \`rows\` 必须正好 ${blocks.length} 个元素，`,
+        `\`shot_no\` 依次为：${shotNos.join("、")}（不要重新编号、不要合并镜头、不要补镜头）。`,
+        "每一镜的 `duration` 照该镜 `镜头时长` 的秒数填写。",
+    ].join("\n");
+}
 
 /**
  * 系统提示词侧的「本次输入覆盖」段：源内容自带逐镜模版时**追加**在 system prompt 末尾。
@@ -525,20 +561,32 @@ const STORY_SCRIPT_TEMPLATE_HINT = [
  * 「不要拆解成下面这样」）。所以模版在场时必须**显式作废**这几条，而不是只靠任务书里一句「不适用」。
  * 不拼时会话内容与改造前逐字一致。
  */
-const STORY_SCRIPT_TEMPLATE_SYSTEM_OVERRIDE = [
-    "## Override for this input: the source already contains a per-shot prompt template",
-    "",
-    "The uploaded source is already written shot by shot as `- **field**: value` blocks.",
-    "For this run the formatting rules above are **void**: ignore the chained bracket structure (`[a] + [b] + …`),",
-    "the 8-part order for `shot_prompt`, the 6-part order for `video_motion_prompt`, and their examples.",
-    "",
-    "- `shot_prompt`: copy the `首帧图片提示词` value **verbatim** — every sentence, including the trailing negative list. No rewriting, no shortening, no re-ordering, no bracket chaining.",
-    "- `video_motion_prompt`: copy **every other line of that shot's block verbatim**, one `label: value` per line, keeping the block's original order (景别 / 摄影机参数 / 构图方式 / 画面内容 / 人物动作与表演 / 运镜方式 / 台词与声音 / 负面 …). Do not merge lines and do not chain them with `+`.",
-    "- `style_prompt`: use the block's style field if present, otherwise `无`. Never invent one.",
-    "- Every other column (asset columns, blocking, sound …) is generated normally per the rules above and must not be left empty.",
-    "",
-    "Output must still be the schema JSON object.",
-].join("\n");
+function buildTemplateSystemOverride(singleShot?: boolean): string {
+    return [
+        "## Override for this input: the source already contains a per-shot prompt template",
+        "",
+        "The uploaded source is already written shot by shot as `- **field**: value` blocks.",
+        "For this run the formatting rules above are **void**: ignore the chained bracket structure (`[a] + [b] + …`),",
+        "the 8-part order for `shot_prompt`, the 6-part order for `video_motion_prompt`, and their examples.",
+        "",
+        "- `shot_prompt`: copy the `首帧图片提示词` value **verbatim** — every sentence, including the trailing negative list. No rewriting, no shortening, no re-ordering, no bracket chaining.",
+        "- `video_motion_prompt`: copy **every other line of that shot's block verbatim**, one `label: value` per line, keeping the block's original order (景别 / 摄影机参数 / 构图方式 / 画面内容 / 人物动作与表演 / 运镜方式 / 台词与声音 / 负面 …). Do not merge lines and do not chain them with `+`.",
+        "- `style_prompt`: use the block's style field if present, otherwise `无`. Never invent one.",
+        "- Asset routing: `character_1` ← `出场人物资产`, `scene` ← `调用场景资产`, `prop` ← `调用道具资产`.",
+        "  Strip the `P-01` / `S-01` / `D-01` style code and keep only the asset name (`P-01 苏晚（…）` → `苏晚`);",
+        "  put the parenthetical / trailing text into the matching description column (`character_description_1` /",
+        "  `scene_description` / `prop_description`). Asset names only have to be close to the canvas asset titles —",
+        "  never swap in an asset the template does not mention.",
+        "- `shot_no` ← the trailing number of `镜头编号`; `duration` ← the seconds in `镜头时长` (`3 秒` → `3`).",
+        // 整表生成要「一模版一块」，单镜重生成只要那一镜 —— 两个模式不能共用同一句。
+        singleShot
+            ? "- The task asks for **one shot only**: emit exactly 1 row, and its `shot_no` must be that shot's number."
+            : "- Emit **exactly one row per template block** — same count, same shot numbers, no merging, no extra shots.",
+        "- Every other column (blocking, emotion, sound …) is generated normally per the rules above and must not be left empty.",
+        "",
+        "Output must still be the schema JSON object.",
+    ].join("\n");
+}
 
 /**
  * 系统提示词侧的「用户自定义提示词格式」覆盖段：节点里填了「分镜提示词自定义要求」时追加。
@@ -607,7 +655,7 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
     // ① 通用 8 段/6 段写法不能压过模版原文；② 资产 / 分镜两段自定义要求本身声明了「优先于上文」，
     //    而模型对越靠后的指令越服从 —— 上一版把它放在最末，结果「照搬」压过了用户的资产要求，资产列全空。
     // 没有模版时这段逐字不出现，老任务书不变。
-    if (templateSource) parts.push(STORY_SCRIPT_TEMPLATE_HINT);
+    if (templateSource) parts.push(STORY_SCRIPT_TEMPLATE_HINT, buildTemplateShotPlanHint(sourceText));
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     parts.push(STORY_SCRIPT_JSON_CONTRACT);
     parts.push(`源剧本内容：\n${sourceText.trim()}`);
@@ -624,7 +672,7 @@ function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds
     const segmentGuidance = buildSegmentDurationGuidance(segmentSeconds, mergeMode);
     if (segmentGuidance) parts.push(segmentGuidance);
     // 逐镜模版同样夹在专项要求之前（理由同 classic）。
-    if (hasStoryScriptShotTemplate(sourceText)) parts.push(STORY_SCRIPT_TEMPLATE_HINT);
+    if (hasStoryScriptShotTemplate(sourceText)) parts.push(STORY_SCRIPT_TEMPLATE_HINT, buildTemplateShotPlanHint(sourceText));
     // storyboard 的规则全在 system prompt 里，没有可整段替换的「参考风格要点」，所以只追加专项要求。
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     parts.push(`创意大纲 / 源内容：\n${sourceText.trim()}`);
@@ -672,7 +720,7 @@ function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRef
     if (currentText) parts.push(`这一镜当前的内容（可以全部重写，也可以只修掉不合理或缺失的字段）：\n${currentText}`);
     if (characterRefs && characterRefs.trim()) parts.push(`已提供的角色参考（请在角色1 / 角色2 字段里使用完全一致的角色名）：\n${characterRefs.trim()}`);
     // 逐镜模版同样夹在专项要求之前（理由同整表任务书）。
-    if (hasStoryScriptShotTemplate(sourceText)) parts.push(STORY_SCRIPT_TEMPLATE_HINT);
+    if (hasStoryScriptShotTemplate(sourceText)) parts.push(STORY_SCRIPT_TEMPLATE_HINT, buildTemplateShotPlanHint(sourceText, row.shot_no));
     /**
      * 「参考风格要点」必须排在专项要求**之前**（老版本排在其后，是个坑）：
      * 它里面写着「分镜提示词按 8 段写 / 视频运动提示词按 6 段写」，与用户自定义格式直接冲突；
@@ -850,6 +898,8 @@ export function resolveScriptSystemPrompt(
         verbatimTemplate?: boolean;
         /** 节点里填了「分镜提示词自定义要求」→ 以用户那套格式为准，同样作废链式写法。 */
         customShotFormat?: boolean;
+        /** 本次只重生成一镜（单镜任务书）→ 覆盖段改成「只要这一镜」，不能说「一模版一块」。 */
+        singleShot?: boolean;
     },
 ): string {
     const custom = typeof override === "string" ? override.trim() : "";
@@ -857,7 +907,7 @@ export function resolveScriptSystemPrompt(
     // 这两种情形都必须显式作废预设里的链式写法（见两个 *_SYSTEM_OVERRIDE 的注释）：
     // 模型对 system prompt 的服从度高于任务书末段的「以上不适用」，只改任务书压不住。
     const extra: string[] = [];
-    if (options?.verbatimTemplate) extra.push(STORY_SCRIPT_TEMPLATE_SYSTEM_OVERRIDE);
+    if (options?.verbatimTemplate) extra.push(buildTemplateSystemOverride(options?.singleShot));
     if (options?.customShotFormat) extra.push(STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE);
     // 都没有时返回字符串与改造前逐字一致（探针守着老调用点）。
     return extra.length ? `${base}\n\n${extra.join("\n\n")}` : base;
@@ -1093,10 +1143,74 @@ function dedupeStoryScriptStyleLines(text: string): string {
         .join("\n");
 }
 
+/** 资产编号前缀：`P-01` / `S-01` / `D-01`（与模版解析共用同一套写法）。 */
+const STORY_SCRIPT_ASSET_CODE_PREFIX = /^[A-Za-z]{1,3}\s*[-_－]?\s*\d{1,4}\s*[:：.、]?\s*/;
+
+/**
+ * 资产名归一化：去 `P-01` 编号、去括号注释、去空白与标点。
+ *
+ * 用户原话：「可以进行相近识别，资产命名类似的就可以，不用把资产名锁太死」。
+ * 模版里写 `S-01 奶茶店门外人行道（阴天午后，主光上方偏左…）`，画布素材标题可能只叫
+ * 「奶茶店门口」——归一化之后再算相似度，才不会因为多了编号 / 注释 / 几个字就掉链。
+ */
+function normalizeScriptAssetMatchText(value: string): string {
+    return String(value || "")
+        .replace(STORY_SCRIPT_ASSET_CODE_PREFIX, "")
+        .replace(/[（(][^）)]*[）)]/g, "")
+        .replace(/[\s_\-－·、,，。.：:；;/\\|"'“”‘’「」『』【】\[\]（）()]/g, "")
+        .toLowerCase();
+}
+
+/** 字符二元组（中文按字切，英文数字按字切都够用）。 */
+function scriptAssetBigrams(text: string): string[] {
+    const chars = Array.from(text);
+    if (chars.length <= 2) return [text];
+    const out: string[] = [];
+    for (let index = 0; index < chars.length - 1; index += 1) out.push(chars[index] + chars[index + 1]);
+    return out;
+}
+
+/**
+ * 资产名相似度（0~1）：完全相同 1、双向包含 0.9、其余取「二元组 Dice」与「字符集合 Jaccard」的较大值。
+ *
+ * 为什么两个指标都要：`奶茶店门外人行道` vs `奶茶店门口` 靠 Dice 命中（0.55），
+ * `苏晚` vs `苏小晚` 靠 Jaccard 命中（0.67）—— 单用任何一个都会漏一类「明显是同一个资产」的名字。
+ */
+export function storyScriptAssetNameSimilarity(left: string, right: string): number {
+    const a = normalizeScriptAssetMatchText(left);
+    const b = normalizeScriptAssetMatchText(right);
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    if (a.includes(b) || b.includes(a)) return 0.9;
+    const leftBigrams = scriptAssetBigrams(a);
+    const rightBigrams = scriptAssetBigrams(b);
+    const rightCount = new Map<string, number>();
+    for (const item of rightBigrams) rightCount.set(item, (rightCount.get(item) || 0) + 1);
+    let overlap = 0;
+    for (const item of leftBigrams) {
+        const count = rightCount.get(item) || 0;
+        if (count > 0) {
+            overlap += 1;
+            rightCount.set(item, count - 1);
+        }
+    }
+    const dice = (2 * overlap) / (leftBigrams.length + rightBigrams.length);
+    const leftSet = new Set(Array.from(a));
+    const rightSet = new Set(Array.from(b));
+    let shared = 0;
+    for (const char of leftSet) if (rightSet.has(char)) shared += 1;
+    const jaccard = shared / (leftSet.size + rightSet.size - shared);
+    return Math.max(dice, jaccard);
+}
+
+/** 判定「算同一个资产」的相似度门槛。0.5 = 一半字符二元组重合，够宽松又不会把苏晚对上苏晴。 */
+export const STORY_SCRIPT_ASSET_MATCH_THRESHOLD = 0.5;
+
 /**
  * 一行分镜该连哪些上游素材图。
  * - 预设没有 `assetKeys`（如 storyboard）→ 不区分角色，全部素材图都连；
- * - 有 `assetKeys` → 用这些列的值与素材标题做宽松匹配（去掉空格/下划线/标点后双向包含）；
+ * - 有 `assetKeys` → 用这些列的值与素材标题做**相近匹配**（编号 / 括号注释 / 标点先归一，
+ *   再按 `storyScriptAssetNameSimilarity` 算相似度，≥ 0.5 就算同一个资产）；
  * - 这一镜的资产列全是「无」→ 不连（纯环境镜头不该被塞进角色图）；
  * - 有名字但一个都没对上（模型可能改写了角色名）→ 退回全部连，宁可多连也不要漏角色。
  */
@@ -1110,12 +1224,10 @@ export function matchStoryScriptRowAssets(
     if (!keys?.length) return assets;
     const names = keys.map((key) => storyScriptCellText(row[key])).filter(Boolean);
     if (!names.length) return [];
-    const normalize = (value: string) => value.replace(/[\s_\-·、,，。.]/g, "").toLowerCase();
-    const targets = names.map(normalize).filter(Boolean);
     const matched = assets.filter((asset) => {
-        const title = normalize(asset.title);
+        const title = normalizeScriptAssetMatchText(asset.title);
         if (!title) return false;
-        return targets.some((target) => title.includes(target) || target.includes(title));
+        return names.some((name) => storyScriptAssetNameSimilarity(name, asset.title) >= STORY_SCRIPT_ASSET_MATCH_THRESHOLD);
     });
     return matched.length ? matched : assets;
 }
@@ -2466,6 +2578,11 @@ const STORY_SCRIPT_TEMPLATE_KNOWN_LABELS = new Set(
         "镜头叙事作用", "叙事作用", "首帧图片提示词", "图片提示词", "首帧提示词", "分镜提示词",
         "视频运动提示词", "风格提示词", "视觉风格", "画面风格", "影像风格", "风格",
         "负面", "负面提示词", "转场方式", "转场",
+        // 资产调用行（用户模版把「这一镜用哪些资产」单独列出来，名字带 P-01 / S-01 / D-01 这类编号）
+        "出场人物资产", "出场人物资产1", "出场人物资产2", "人物资产", "角色资产", "出场角色资产",
+        "出场人物2资产", "第二人物资产",
+        "调用场景资产", "场景资产", "使用场景资产", "调用场景",
+        "调用道具资产", "道具资产", "使用道具资产", "调用道具",
     ].map(normalizeTemplateLabel),
 );
 
@@ -2546,6 +2663,40 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
     return blocks;
 }
 
+/**
+ * 资产编号前缀：`P-01` / `S-01` / `D-01` / `C_2` 这类（用户模版里的资产 ID）。匹配不到就原样返回。
+ */
+const STORY_SCRIPT_TEMPLATE_ASSET_CODE = /^[A-Za-z]{1,3}\s*[-_－]?\s*\d{1,4}\s*[:：.、]?\s*/;
+
+/**
+ * 把一行「资产调用」拆成「名字 + 描述」：
+ *   `P-01 苏晚（同镜头 001 造型；中近景）`           → 苏晚 / 同镜头 001 造型；中近景
+ *   `D-01 蜜桃乌龙茶（两杯），苏晚持有，杯壁有指痕`   → 蜜桃乌龙茶 / 两杯，苏晚持有，杯壁有指痕
+ *   `S-01 奶茶店门外人行道`                         → 奶茶店门外人行道 / （空）
+ *
+ * 名字列必须干净（不带 `P-01` 编号、不带括号里的注释）——它是拿去和画布素材标题做匹配的键，
+ * 留着编号反而匹配不上（用户原话：「不用把资产名锁太死」）。描述列则要保留括号内**和**括号后的全部内容。
+ */
+function splitTemplateAssetValue(value: string): { name: string; description: string } {
+    const raw = String(value || "").trim();
+    if (!raw) return { name: "", description: "" };
+    const body = raw.replace(STORY_SCRIPT_TEMPLATE_ASSET_CODE, "").trim();
+    const open = body.search(/[（(]/);
+    if (open < 0) {
+        // 没有括号：第一个逗号 / 分号前是名字，剩下是描述（「蜜桃乌龙茶，两杯，苏晚持有」这种写法）。
+        const cut = body.search(/[，,；;]/);
+        if (cut < 0) return { name: body, description: "" };
+        return { name: body.slice(0, cut).trim() || body, description: body.slice(cut + 1).trim() };
+    }
+    const name = body.slice(0, open).trim().replace(/[，,、；;]$/, "");
+    const tail = body.slice(open).trim();
+    const close = tail.search(/[）)]/);
+    const inner = close < 0 ? tail.replace(/^[（(]/, "") : tail.slice(1, close);
+    const after = close < 0 ? "" : tail.slice(close + 1).replace(/^[，,、；;\s]+/, "").trim();
+    const description = [inner.trim(), after].filter(Boolean).join("，");
+    return { name: name || body, description };
+}
+
 /** 模板块 → 分镜行。列映射只落在**当前预设真有这一列**的字段上。 */
 function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]): StoryScriptRow[] {
     const blocks = splitStoryScriptTemplateBlocks(text);
@@ -2597,6 +2748,26 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
             if (hasColumn("dialogue")) record.dialogue = /^无台词/.test(dialogue) ? "无台词" : dialogue;
         }
 
+        /**
+         * 资产调用行 → 资产列。用户 2026-10-19 明确要求：
+         * 「每个镜头使用的资产请识别这个内容下的：`出场人物资产` / `调用场景资产` / `调用道具资产`」。
+         * 名字列（角色1 / 场景 / 道具）以模版为准 —— 这是「这一镜用哪张资产图」的唯一依据；
+         * 描述列只在模版确实给了括号内容时才有值，覆盖层那边还会再判一次「模型没写才补」。
+         */
+        const assetFields: Array<[string[], string, string]> = [
+            [["出场人物资产", "出场人物资产1", "人物资产", "角色资产", "出场角色资产"], "character_1", "character_description_1"],
+            [["出场人物资产2", "出场人物2资产", "第二人物资产"], "character_2", "character_description_2"],
+            [["调用场景资产", "场景资产", "使用场景资产", "调用场景"], "scene", "scene_description"],
+            [["调用道具资产", "道具资产", "使用道具资产", "调用道具"], "prop", "prop_description"],
+        ];
+        for (const [labels, nameKey, descriptionKey] of assetFields) {
+            if (!hasColumn(nameKey)) continue;
+            const split = splitTemplateAssetValue(pick(...labels));
+            if (!split.name) continue;
+            record[nameKey] = split.name;
+            if (split.description && hasColumn(descriptionKey)) record[descriptionKey] = split.description;
+        }
+
         // 分镜提示词 = 首帧图片提示词（storyboard 没有这一列时退到画面描述 —— 那边生图就看画面描述）。
         const firstFrame = pick("首帧图片提示词", "图片提示词", "首帧提示词");
         if (firstFrame) {
@@ -2639,18 +2810,25 @@ export function countStoryScriptTemplateShots(text: string): number {
     return splitStoryScriptTemplateBlocks(String(text || "")).length;
 }
 
-/** 模版里**以模版为准**的列（模型写了也覆盖）：三列提示词。 */
-const STORY_SCRIPT_TEMPLATE_FORCE_KEYS = new Set(["shot_prompt", "video_motion_prompt", "style_prompt"]);
+/**
+ * 模版里**以模版为准**的列（模型写了也覆盖）：
+ *  - 三列提示词（照抄）；
+ *  - 资产**名字**列（角色1 / 角色2 / 场景 / 道具）—— 模版的 `出场人物资产` / `调用场景资产` /
+ *    `调用道具资产` 就是「这一镜用哪张资产」的唯一依据，模型改写名字会导致铺链路连错图。
+ * 资产**描述**列刻意不在里面（模版给的括号注释通常比「资产部分自定义要求」生成的短），只在模型没写时才补。
+ */
+const STORY_SCRIPT_TEMPLATE_FORCE_KEYS = new Set(["shot_prompt", "video_motion_prompt", "style_prompt", "character_1", "character_2", "scene", "prop"]);
 
 /**
- * 把源模版的三列提示词**确定性地**盖到模型产出的行上。
+ * 把源模版的提示词 / 资产 / 时长**确定性地**盖到模型产出的行上。
  *
  * 为什么要这一步（任务书里已经要求「照搬」了）：模型对「照搬」的执行率不是 100%，而用户要的是
  * 「我贴什么就填什么」。这里兜底：
  *  - `shot_prompt` / `video_motion_prompt` / `style_prompt`：模版有值就**以模版为准**（覆盖模型）；
- *  - 其余列（场景 / 景别 / 画面描述 / 角色动作 / 运镜 / 音效 / 时长…）：**只补空**，模型写了的不覆盖；
- *  - 资产描述类列（角色描述1/2、场景描述、道具描述）模版根本不产出 → **一个字节都不碰**，
- *    仍旧由模型按「资产部分自定义要求」生成（上一版被打成空的正是这几列）。
+ *  - 资产名字列（角色1 / 角色2 / 场景 / 道具）：同上，以模版为准（用户 03/04 的明确要求）；
+ *  - `duration`：模版写了 `镜头时长` 就以模版为准（用户原话：「镜头的时长请识别这个内容下的，即为 3 秒」）；
+ *  - 其余列（景别 / 画面描述 / 角色动作 / 运镜 / 音效 / 资产描述列…）：**只补空**，模型写了的不覆盖；
+ *  - `shot_no` 刻意不覆盖：图位表（`scriptRowAssets`）以镜号为键，事后改号会让已有图位错位。
  * 没识别到模版 → 原样返回（同一个数组引用），老流程零变化。
  */
 export function applyStoryScriptTemplateOverlay(
@@ -2678,6 +2856,8 @@ export function applyStoryScriptTemplateOverlay(
         const patch = anyShotMatch ? byShot.get(shot) : templateRows[index];
         if (!patch) return row;
         const next: StoryScriptRow = { ...row };
+        const templateDuration = Number(patch.duration);
+        if (Number.isFinite(templateDuration) && templateDuration > 0) next.duration = templateDuration;
         for (const column of columns) {
             const key = column.key;
             if (column.numeric || key === "shot_no") continue;

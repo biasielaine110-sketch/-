@@ -6664,7 +6664,17 @@ function AtelierCanvasPage() {
                     }),
                 );
                 message.success(t("canvas.scriptNode.generated", { count: parsedRows.length }));
-                if (templateShots) message.info(t("canvas.scriptNode.templateApplied", { count: templateShots }));
+                if (templateShots) {
+                    message.info(t("canvas.scriptNode.templateApplied", { count: templateShots }));
+                    /**
+                     * 镜数对不上要**当场说**（用户 03：「镜头数量请识别这个内容下的，即为 9 个镜头」）。
+                     * 任务书里已经把镜数写死了，但模型仍可能少吐 / 多吐；这时覆盖层只能按顺序盖前 N 块，
+                     * 用户看到的却是「明明有 9 镜，表里只有 7 行」却不知道为什么。给个可操作的提示。
+                     */
+                    if (parsedRows.length !== templateShots) {
+                        message.warning(t("canvas.scriptNode.templateShotCountMismatch", { expected: templateShots, actual: parsedRows.length }));
+                    }
+                }
             } catch (error) {
                 if (controller.signal.aborted) return;
                 const detail = error instanceof Error ? error.message : String(error);
@@ -6740,6 +6750,8 @@ function AtelierCanvasPage() {
                 const systemPrompt = resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt, {
                     verbatimTemplate: hasStoryScriptShotTemplate(sourceText),
                     customShotFormat: hasScriptGenerationPrompt(sourceNode.metadata?.scriptShotPrompt),
+                    // 单镜重生成：覆盖段要说「只要这一镜」，否则会和「一模版一块」自相矛盾。
+                    singleShot: true,
                 });
                 // 逐镜串行：每改完一镜就写回，下一镜的 prev / next 读到的就是刚改完的版本。
                 let workingRows = [...sourceRows];
