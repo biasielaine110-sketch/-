@@ -118,6 +118,13 @@ import {
     videoExtension,
 } from "@/lib/canvas/canvas-generation-helpers";
 import { buildDocxBlob, buildMarkdownBlob, isDocumentFile, readDocumentAsText, type TextExportFormat } from "@/lib/canvas/document-text";
+import {
+    clipboardTextSnapshot,
+    extractClipboardRemoteImage,
+    isPasteableNodeFile,
+    mediaFileFromClipboardText,
+    resolveClipboardMediaKind,
+} from "@/lib/canvas/clipboard-paste";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType } from "@/lib/canvas/node-registry";
 import { convertNodeType, convertedNodeKeptMedia, nodeConversionTarget } from "@/lib/canvas/node-type-conversion";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
@@ -381,6 +388,8 @@ function AtelierCanvasPage() {
     const imageInputRef = useRef<HTMLInputElement>(null);
     const uploadTargetRef = useRef<{ nodeId?: string; position?: Position } | null>(null);
     const clipboardRef = useRef<CanvasClipboard | null>(null);
+    /** 最近一次 Ctrl+C 写进系统剪贴板的那段文字 + 时间，用来区分内部复制和外部内容。 */
+    const clipboardFingerprintRef = useRef<{ text: string; at: number } | null>(null);
     const historyRef = useRef<{ past: CanvasHistoryEntry[]; future: CanvasHistoryEntry[] }>({ past: [], future: [] });
     const lastHistoryRef = useRef<CanvasHistoryEntry | null>(null);
     const historyCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1638,6 +1647,16 @@ function AtelierCanvasPage() {
                 .filter((connection) => selectedIds.has(connection.fromNodeId) || selectedIds.has(connection.toNodeId))
                 .map((connection) => ({ ...connection })),
         };
+
+        // 同步把「这段剪贴板是画布自己的」这个事实写进系统剪贴板：粘贴时用它区分内部复制与外部内容。
+        // 失败（iframe / 未授权）不影响内部 Ctrl+V —— `clipboardFingerprintRef.at` 还有一段宽限窗口。
+        const snapshot = clipboardTextSnapshot(copiedNodes);
+        clipboardFingerprintRef.current = { text: snapshot, at: Date.now() };
+        void navigator.clipboard
+            ?.writeText(snapshot)
+            .catch(() => {
+                // 写入失败时不清空指纹：宽限窗口内的粘贴仍按内部复制处理。
+            });
     }, []);
 
     const copyNodeImageToClipboard = useCallback(async (nodeId: string) => {
@@ -1661,16 +1680,57 @@ function AtelierCanvasPage() {
         }
     }, [message, t]);
 
-    /** C: spawn a new media node that only carries the selected image/video content. */
+    /**
+     * C: 复制创建选中节点的内容。
+     *
+     * - 图 / 视频 / 音频（已出片）：新建一个**只带素材内容**的同类节点（旧行为，保持）；
+     * - 其余所有类型（文本 / 脚本 / 配置 / 合并 / 对话 / 分组 / 标注…）：整节点克隆。文本带正文、
+     *   脚本带整张分镜表、配置带模型与提示词；分组会把组内子节点一起复制并重挂 groupId。
+     */
     const duplicateSelectedMediaAsNode = useCallback(() => {
         if (selectedNodeIdsRef.current.size !== 1) {
-            message.warning(t("canvas.shortcut.copyImageNeedSelect"));
+            message.warning(t("canvas.shortcut.copyNodeNeedSelect"));
             return;
         }
         const nodeId = Array.from(selectedNodeIdsRef.current)[0];
         const node = nodesRef.current.find((item) => item.id === nodeId);
-        if (!node || (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Annotate && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) {
-            message.warning(t("canvas.shortcut.copyImageNeedSelect"));
+        if (!node) return;
+
+        // 只有「纯素材」三类走快捷复制：只有它们的内容能完整塞进一个新节点。
+        // 标注（Annotate）虽然也带图，但笔画存在别的字段里，走素材分支会把标注丢干净 → 归到整节点克隆。
+        const isMediaType = node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio;
+        // 非媒体节点（以及还没生成内容的媒体节点）：整节点克隆 —— 任何类型都能复制出一份。
+        if (!isMediaType || !node.metadata?.content) {
+            const stamp = Date.now();
+            const members = node.type === CanvasNodeType.Group ? nodesRef.current.filter((item) => item.id === node.id || item.metadata?.groupId === node.id) : [node];
+            const idMap = new Map<string, string>();
+            const clones = members.map((item, index) => {
+                const id = `${item.type}-${stamp}-${index}-${Math.random().toString(36).slice(2, 7)}`;
+                idMap.set(item.id, id);
+                return {
+                    ...item,
+                    id,
+                    title: item.title.endsWith(" Copy") ? item.title : `${item.title} Copy`,
+                    position: { ...item.position },
+                    // 深拷贝：脚本节点的 rows / 图位表都是嵌套对象，浅拷贝会让副本和原件共用同一份数据。
+                    metadata: item.metadata ? (JSON.parse(JSON.stringify(item.metadata)) as CanvasNodeData["metadata"]) : undefined,
+                };
+            });
+            const dx = node.width + 48;
+            const placed = clones.map((item) => {
+                const groupId = item.metadata?.groupId;
+                const remapped = groupId ? idMap.get(groupId) : undefined;
+                return {
+                    ...item,
+                    position: { x: item.position.x + dx, y: item.position.y },
+                    metadata: remapped ? { ...item.metadata, groupId: remapped } : item.metadata,
+                };
+            });
+            setNodes((prev) => [...prev, ...placed]);
+            nodesRef.current = [...nodesRef.current, ...placed];
+            setSelectedNodeIds(new Set(placed.map((item) => item.id)));
+            setSelectedConnectionId(null);
+            message.success(t("canvas.shortcut.copyImageNodeDone"));
             return;
         }
 
@@ -1712,6 +1772,7 @@ function AtelierCanvasPage() {
             },
         };
         setNodes((prev) => [...prev, copy]);
+        nodesRef.current = [...nodesRef.current, copy];
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
         setDialogNodeId(id);
@@ -2644,9 +2705,10 @@ function AtelierCanvasPage() {
             const STAGGER = 40;
             files.forEach((file, index) => {
                 const position = { x: basePosition.x + index * STAGGER, y: basePosition.y + index * STAGGER };
-                if (isDocumentFile(file)) void createDocumentTextNode(file, position);
-                else if (isAudioFile(file)) void createAudioFileNode(file, position);
-                else if (file.type.startsWith("video/")) void createVideoFileNode(file, position);
+                const kind = resolveClipboardMediaKind(file);
+                if (kind === "document") void createDocumentTextNode(file, position);
+                else if (kind === "audio") void createAudioFileNode(file, position);
+                else if (kind === "video") void createVideoFileNode(file, position);
                 else void createImageFileNode(file, position).catch((error) => {
                     console.error("[canvas] file node failed", error);
                     message.error(t("canvas.projectPage.clipboardImageFailed"));
@@ -2679,6 +2741,28 @@ function AtelierCanvasPage() {
             message.warning(t("canvas.projectPage.clipboardReadBlocked"));
         }
     }, [createTextNodeFromClipboard, message, pasteClipboardImageFile, t]);
+
+    /**
+     * 剪贴板 html 里只有远程图地址时，把图抓回来落成图片节点。
+     *
+     * 走 `imageToDataUrl`（内部已有代理兜底），比 `fetch` 直连更能过掉没给 CORS 的站点；
+     * 抓不下来就明确报错，别让用户对着空白画布猜。
+     */
+    const pasteRemoteImage = useCallback(
+        async (url: string, position: Position = getPastePosition()) => {
+            try {
+                const dataUrl = await imageToDataUrl({ url });
+                const file = dataUrlToClipboardFile(dataUrl);
+                if (!file) throw new Error(t("canvas.projectPage.clipboardImageFailed"));
+                await createImageFileNode(file, position);
+                message.success(t("canvas.projectPage.clipboardImageAdded"));
+            } catch (error) {
+                console.warn("[canvas] clipboard remote image failed", url, error);
+                message.error(t("canvas.projectPage.clipboardImageFailed"));
+            }
+        },
+        [createImageFileNode, getPastePosition, message, t],
+    );
 
     const resetSelectedNodesToOriginalSize = useCallback((explicitIds?: Iterable<string>) => {
         const selectedIds = new Set(explicitIds || selectedNodeIdsRef.current);
@@ -2869,12 +2953,11 @@ function AtelierCanvasPage() {
             }
 
             if (isModifierShortcut && !event.altKey && key === "v") {
-                // **只有画布内部复制过节点时才接管 Ctrl+V**。
-                // 以前这里无条件 `preventDefault()`：原生 paste 事件随之不再触发，只剩
-                // `navigator.clipboard.read()` 一条路，而它在 Firefox 没实现、在 iframe / 未授权时
-                // 直接抛 NotAllowedError —— 外部图片和文字就「总粘贴不上」。
-                // 现在外部内容一律交给浏览器原生的 paste 事件（见上面的 window paste 监听）。
-                if (pasteCopiedNodes()) event.preventDefault();
+                // **绝不在这里 `preventDefault()`**：一旦拦掉，原生 paste 事件就不触发，只剩
+                // `navigator.clipboard.read()` 一条路（Firefox 没实现、iframe / 未授权直接
+                // NotAllowedError），外部图片和文字就「总粘贴不上」。
+                // 内部节点粘贴现在由 window paste 监听按「剪贴板指纹」判断（见 copySelectedNodes
+                // 写指纹 + handlePaste 第 2 步），所以这里只让位、什么都不做。
                 return;
             }
 
@@ -3068,7 +3151,7 @@ function AtelierCanvasPage() {
                 .filter((file): file is File => Boolean(file));
             const dropped = Array.from(data.files || []);
             const candidates = dropped.length ? dropped : itemFiles;
-            const files = candidates.filter((file) => file.type.startsWith("image/") || file.type.startsWith("video/") || isAudioFile(file) || isDocumentFile(file));
+            const files = candidates.filter(isPasteableNodeFile);
             if (files.length) {
                 event.preventDefault();
                 // 剪贴板里的图常常没有文件名（`File.name === ""`），补一个，否则节点标题会是空白。
@@ -3081,11 +3164,39 @@ function AtelierCanvasPage() {
                 return;
             }
 
+            const plain = data.getData("text/plain") || "";
             const html = data.getData("text/html");
+            const plainText = plain.trim();
+            /**
+             * 剪贴板里同时带正文和一张图时（网页 / Word / 飞书复制整段），正文才是用户要的东西：
+             * 只有「没有正文」或「正文就是这个图片地址」才把图单独落成节点，否则落到第 5 步当文本。
+             * 少了这个判断，复制一段带插图的文章会只贴出一张图，看起来就是「文字没识别上」。
+             */
+            const onlyImageSource = (src: string) => !plainText || plainText === src;
 
-            // 2) 只有 html、图是内嵌 data: URL 的（Word / 飞书 / 语雀 / 网页编辑器）。
+            // 2) 画布内部复制：只有确认「剪贴板里这段文字是我们写的」才当成节点复制，否则一律当外部内容。
+            //    以前这一步在 keydown 里无条件抢占，导致复制过节点之后所有外部粘贴都失效。
+            const fingerprint = clipboardFingerprintRef.current;
+            const internalNodes = Boolean(clipboardRef.current?.nodes.length);
+            if (internalNodes) {
+                const ownText = Boolean(fingerprint) && plain.trim() === fingerprint?.text.trim();
+                // 刚按完 Ctrl+C（writeText 可能还没落地 / 被拒），且剪贴板里没有可用的外部内容。
+                const justCopied = Boolean(fingerprint) && Date.now() - (fingerprint?.at || 0) < 800;
+                if (ownText || (!plain.trim() && !html)) {
+                    event.preventDefault();
+                    pasteCopiedNodes();
+                    return;
+                }
+                if (justCopied && !plain.trim()) {
+                    event.preventDefault();
+                    pasteCopiedNodes();
+                    return;
+                }
+            }
+
+            // 3) html 里内嵌的 data: 图（Word / 飞书 / 语雀 / 网页编辑器）。
             const embeddedImage = extractClipboardDataImage(html);
-            if (embeddedImage) {
+            if (embeddedImage && onlyImageSource(embeddedImage)) {
                 const embeddedFile = dataUrlToClipboardFile(embeddedImage);
                 if (embeddedFile) {
                     event.preventDefault();
@@ -3094,23 +3205,39 @@ function AtelierCanvasPage() {
                 }
             }
 
-            // 3) 文本 / 富文本。以前**没有这条分支**：外部文字粘贴直接落空（画布不是可编辑区），
-            //    用户看到的就是「粘不进来」。
-            const plain = data.getData("text/plain");
+            // 4) html 里的远程图地址：剪贴板既没有 file 项、src 也不是 data:（网页正文最常见的形状）。
+            const remoteImage = extractClipboardRemoteImage(html);
+            if (remoteImage && onlyImageSource(remoteImage)) {
+                event.preventDefault();
+                void pasteRemoteImage(remoteImage, position);
+                return;
+            }
+
+            // 5) 文本 / 富文本。纯文本本身就是 data: 媒体时按媒体节点落，别塞成一段 base64 文字。
             const text = plain.trim() ? plain : clipboardHtmlToText(html);
+            const mediaFile = mediaFileFromClipboardText(text.trim());
+            if (mediaFile) {
+                event.preventDefault();
+                createNodesFromFiles([mediaFile], position);
+                return;
+            }
             if (createTextNodeFromClipboard(text)) {
                 event.preventDefault();
                 message.success(t("canvas.projectPage.clipboardTextAdded"));
                 return;
             }
 
-            // 4) clipboardData 里什么都没有（部分内嵌 WebView / 扩展）：退回异步 Clipboard API。
+            // 6) clipboardData 里什么都没有（部分内嵌 WebView / 扩展）：先试内部节点，再退回异步 Clipboard API。
+            if (pasteCopiedNodes()) {
+                event.preventDefault();
+                return;
+            }
             if (!plain && !html) void pasteSystemClipboard();
         };
 
         window.addEventListener("paste", handlePaste);
         return () => window.removeEventListener("paste", handlePaste);
-    }, [createNodesFromFiles, createTextNodeFromClipboard, getPastePosition, message, pasteClipboardImageFile, pasteSystemClipboard, t]);
+    }, [createNodesFromFiles, createTextNodeFromClipboard, getPastePosition, message, pasteClipboardImageFile, pasteCopiedNodes, pasteRemoteImage, pasteSystemClipboard, t]);
 
     const handleConnectStart = useCallback(
         (event: ReactMouseEvent, nodeId: string, handleType: "source" | "target") => {
@@ -7485,8 +7612,9 @@ function AtelierCanvasPage() {
             const videoX = imageX + imageWidth + gapX;
 
             // 先摘掉「一行连图片提示词都凑不出来」的空行，再按分段方式切组——否则空行会把合并的镜数算歪。
+            // `scriptExtras` 必须传进去：风格提示词也可能活在自建列（列名带「风格」）里。
             const renderable = rows
-                .map((row, index) => ({ row, index, prompts: preset.buildShotPrompts(row) }))
+                .map((row, index) => ({ row, index, prompts: preset.buildShotPrompts(row, scriptExtras) }))
                 .filter((item) => Boolean(item.prompts.imagePrompt));
             if (!renderable.length) {
                 message.warning(t("canvas.scriptNode.pipelineEmpty"));
@@ -7678,7 +7806,9 @@ function AtelierCanvasPage() {
             if (!row) return;
             const presetId = resolveStoryScriptPresetId(source.metadata?.scriptPreset);
             const preset = getStoryScriptPreset(presetId);
-            const prompts = preset.buildShotPrompts(row);
+            // 与「一键铺链」同口径：风格提示词可能来自自建列（列名带「风格」），所以 extras 必须一起传。
+            const shotExtras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
+            const prompts = preset.buildShotPrompts(row, shotExtras);
             const shotNo = row.shot_no || rowIndex + 1;
             // 与「一键铺链」同口径：单镜时长档位（10/15 锁定、5 是上限、none 按表里）。
             const seconds = resolveStoryScriptShotSeconds(row.duration, source.metadata?.scriptSegmentSeconds);
@@ -7705,7 +7835,6 @@ function AtelierCanvasPage() {
                 .map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
             // 「按镜按资产」图位 + **资产锁定**：这一镜每一格该用哪张图（格子图优先、按资产名的锁兜底）；
             // 它们精准指定过的那几个分类，让资产条不再对同一镜重复分派。
-            const shotExtras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
             const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows, shotExtras);
             // 「资产名」查表：与整条铺链路同口径 —— 表里的资产名优先，查不到回落到图片节点标题。
             const assetNameOf = (assetNodeId: string) => {

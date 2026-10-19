@@ -123,8 +123,11 @@ export type StoryScriptPreset = {
     /**
      * 「一键铺链路」用来从一行分镜里抽出图片/视频提示词。不同预设的列语义不同，所以下沉到预设。
      * 缺列时允许兜底拼接，但**不允许返回空串**（调用方靠空串判断这一行铺不出来）。
+     *
+     * `extras` 是「新建列」：风格提示词也可以活在自建列里（列名带「风格」），
+     * 所以铺链必须把它一路传进来，否则那条列填了也白填。
      */
-    buildShotPrompts: (row: StoryScriptRow) => StoryScriptShotPrompts;
+    buildShotPrompts: (row: StoryScriptRow, extras?: readonly StoryScriptExtraColumn[] | null) => StoryScriptShotPrompts;
     /**
      * 行内哪几列是「角色 / 资产名」：铺链路时拿这些值去和上游图片节点的标题匹配，只把命中的
      * 资产图连到该镜的图片节点上。留空表示「这一行不区分角色」，把全部素材图都连上。
@@ -616,28 +619,47 @@ export function withStoryScriptStyle(prompt: string, style?: unknown): string {
 }
 
 /**
+ * 这一镜该用的风格提示词。
+ *
+ * 预设自带的 `style_prompt` 列优先；用户用「新建列」把风格单独拎出去时（列名如「场景风格」「风格提示词」），
+ * 自建列里第一个非空值兜底 —— 否则一键铺链明明看得到那一列，却不会把它带进图片 / 视频节点。
+ */
+export function resolveStoryScriptStyleText(row: StoryScriptRow, extras?: readonly StoryScriptExtraColumn[] | null): string {
+    const own = typeof row.style_prompt === "string" ? storyScriptCellText(row.style_prompt) : "";
+    if (own) return own;
+    for (const column of extras || []) {
+        if (!/风格/.test(String(column.label || ""))) continue;
+        const value = storyScriptCellText(row[column.key]);
+        if (value) return value;
+    }
+    return "";
+}
+
+/**
  * 经典预设：`shot_prompt` / `video_motion_prompt` 本身已是成段的完整提示词（8 段 / 6 段），
  * 有就直接用；模型偶尔漏列，此时用可见描述兜底拼一条，避免这一行铺不出链路。
  * 两条提示词最后都拼上「风格提示词」列（见 `withStoryScriptStyle`）。
  */
-function buildClassicShotPrompts(row: StoryScriptRow): StoryScriptShotPrompts {
+function buildClassicShotPrompts(row: StoryScriptRow, extras?: readonly StoryScriptExtraColumn[] | null): StoryScriptShotPrompts {
     const imagePrompt =
         storyScriptCellText(row.shot_prompt) ||
         joinStoryScriptPromptParts([row.visual_description, row.shot, row.emotion, row.scene_tags, row.lighting_mood]);
     const videoPrompt =
         storyScriptCellText(row.video_motion_prompt) ||
         joinStoryScriptPromptParts([row.character_action, row.visual_description, row.shot, row.emotion]);
+    const style = resolveStoryScriptStyleText(row, extras);
     return {
-        imagePrompt: withStoryScriptStyle(imagePrompt, row.style_prompt),
-        videoPrompt: withStoryScriptStyle(videoPrompt, row.style_prompt),
+        imagePrompt: withStoryScriptStyle(imagePrompt, style),
+        videoPrompt: withStoryScriptStyle(videoPrompt, style),
     };
 }
 
 /** 视频分镜脚本预设：没有独立的「生成提示词」列，按 recipe 对该列的语义（可直接当 prompt）现拼。 */
-function buildStoryboardShotPrompts(row: StoryScriptRow): StoryScriptShotPrompts {
+function buildStoryboardShotPrompts(row: StoryScriptRow, extras?: readonly StoryScriptExtraColumn[] | null): StoryScriptShotPrompts {
+    const style = resolveStoryScriptStyleText(row, extras);
     return {
-        imagePrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.visual_description, row.key_visual]), row.style_prompt),
-        videoPrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.camera_movement, row.character_action, row.visual_description, row.emotion]), row.style_prompt),
+        imagePrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.visual_description, row.key_visual]), style),
+        videoPrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.camera_movement, row.character_action, row.visual_description, row.emotion]), style),
     };
 }
 
@@ -910,7 +932,24 @@ export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; image
         .filter((item) => Boolean(item.body));
     if (!kept.length) return "";
     if (kept.length === 1) return kept[0].body;
-    return [`多镜头连续片段（共 ${kept.length} 镜）：`, ...kept.map((item) => `第${item.no}镜\n${item.body}`)].join("\n\n");
+    const merged = [`多镜头连续片段（共 ${kept.length} 镜）：`, ...kept.map((item) => `第${item.no}镜\n${item.body}`)].join("\n\n");
+    // 同一场戏各镜的风格提示词通常一模一样：逐镜重复 N 遍只会把提示词撑长、稀释画面描述。同文只留一条。
+    return dedupeStoryScriptStyleLines(merged);
+}
+
+/** 合并后的视频提示词里，重复的「视觉风格：…」只保留第一次出现的那条。 */
+function dedupeStoryScriptStyleLines(text: string): string {
+    const seen = new Set<string>();
+    return text
+        .split("\n")
+        .filter((line) => {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("视觉风格：")) return true;
+            if (seen.has(trimmed)) return false;
+            seen.add(trimmed);
+            return true;
+        })
+        .join("\n");
 }
 
 /**
