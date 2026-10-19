@@ -35,7 +35,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -6584,6 +6584,17 @@ function AtelierCanvasPage() {
                 assetPrompt: sourceNode.metadata?.scriptAssetPrompt,
                 shotPrompt: sourceNode.metadata?.scriptShotPrompt,
             });
+            /**
+             * 用户贴进来的「模版」有两种位置，两种都要「照抄结构」而不是拆成括号链：
+             *  ① 源内容本身就是逐镜标签块（`- **首帧图片提示词**：…`）；
+             *  ② 「分镜提示词自定义要求」里直接写了一整套字段清单 / 长段范文。
+             * 这两种情形都必须把预设 system prompt 里的「8 段 / 6 段 / `[a] + [b]` 链式」**显式作废**——
+             * 只在任务书里写「以上不适用」压不住（模型对 system prompt 的服从度更高）。
+             */
+            const scriptSystemPrompt = resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt, {
+                verbatimTemplate: hasStoryScriptShotTemplate(sourceText),
+                customShotFormat: hasScriptGenerationPrompt(sourceNode.metadata?.scriptShotPrompt),
+            });
             const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
             const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
             if (!isAiConfigReady(textConfig, textConfig.model)) {
@@ -6602,7 +6613,7 @@ function AtelierCanvasPage() {
                 const answer = await requestImageQuestion(
                     textConfig,
                     [
-                        { role: "system", content: resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt) },
+                        { role: "system", content: scriptSystemPrompt },
                         { role: "user", content: userContent },
                     ],
                     (streamed) => setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptRaw: streamed } } : node))),
@@ -6725,7 +6736,11 @@ function AtelierCanvasPage() {
             const batch = indexes.length > 1;
             try {
                 const hydrated = context.referenceImages.length ? await hydrateNodeGenerationContext(context) : context;
-                const systemPrompt = resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt);
+                // 与整表生成同一口径：模版 / 自定义分镜提示词在场 → system prompt 侧作废链式写法。
+                const systemPrompt = resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt, {
+                    verbatimTemplate: hasStoryScriptShotTemplate(sourceText),
+                    customShotFormat: hasScriptGenerationPrompt(sourceNode.metadata?.scriptShotPrompt),
+                });
                 // 逐镜串行：每改完一镜就写回，下一镜的 prev / next 读到的就是刚改完的版本。
                 let workingRows = [...sourceRows];
                 let done = 0;

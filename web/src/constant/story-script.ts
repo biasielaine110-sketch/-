@@ -503,21 +503,91 @@ function buildRowDurationHint(segmentSeconds?: unknown, mergeMode?: StoryScriptM
 const STORY_SCRIPT_TEMPLATE_HINT = [
     "## 源内容已经是逐镜提示词模版（三列照搬）",
     "源内容每一镜都是 `- **字段名**：内容` 的标签块，其中下面这三列的内容**已经写好了**，照搬即可：",
-    "- `首帧图片提示词` → `shot_prompt`（整段原文，含末尾的负面词；不要改写 / 压缩 / 合并）",
-    "- `景别` / `摄影机参数` / `构图方式` / `画面内容` / `人物动作与表演` / `运镜方式` / `台词与声音` → `video_motion_prompt`，按这个顺序逐行写「标签：内容」，缺哪个跳过哪个",
-    "- `风格提示词` / `视觉风格` 之类的字段 → `style_prompt`；源内容没有这类字段时留空，不要自己编",
-    "- `镜头编号` → `shot_no`（取末尾数字，`场次02—镜头005` 就是 5）；`镜头时长` → `duration`（纯数字秒）",
+    "- `shot_prompt` ← `首帧图片提示词`：整段原文（含末尾的负面句），**不要**改写成 `[…] + […]` 的 8 段式，也不要压缩 / 合并 / 重排。",
+    "- `video_motion_prompt` ← 这一镜里**除** `镜头编号 / 镜头时长 / 所属场景 / 出场人物 / 风格 / 首帧图片提示词 / 镜头叙事作用` 之外的**每一行原样抄进去**（景别、摄影机参数、构图方式、画面内容、人物动作与表演、运镜方式、台词与声音、负面 …），一行一个「标签：内容」，保持模版里的原顺序；**不要**合并，**不要**改写成 `[…] + […]` 或 6 段式。",
+    "- `style_prompt` ← `风格提示词` / `视觉风格` 之类的字段；源内容没有这类字段时写 `无`，不要自己编。",
+    "- `镜头编号` → `shot_no`（取末尾数字，`场次02—镜头005` 就是 5）；`镜头时长` → `duration`（纯数字秒）。",
     "⚠️ 本段**只管上面这三列**。其余列必须照常生成、每一镜都要填满 —— 尤其是资产类列",
     "（角色1 / 角色描述1 / 角色2 / 角色描述2 / 场景 / 场景描述 / 道具 / 道具描述 / 人物站位）：",
     "模版里没有这些字段**不代表可以留空**，也不要因为要「照搬」就跳过它们。",
-    "- 本情形下，「分镜提示词按 8 段写 / 视频运动提示词按 6 段写」这类通用分段要求**不适用**（三列照模版原文即可），但资产类列的写法要求仍然有效。",
+    "- 本情形下，「分镜提示词按 8 段写 / 视频运动提示词按 6 段写」「括号分段 + 号连接」这类通用写法要求**一律不适用**（三列照模版原文即可），但资产类列的写法要求仍然有效。",
     "- 若任务书里另有「资产部分自定义要求」/「分镜提示词自定义要求」，**以那两段为准**（与本段先后无关）。",
     "- 输出仍然只给契约 JSON（`rows` 数组），不要把标签块原样贴回来",
 ].join("\n");
 
+/**
+ * 系统提示词侧的「本次输入覆盖」段：源内容自带逐镜模版时**追加**在 system prompt 末尾。
+ *
+ * 为什么任务书里写了还不够：预设 system prompt 的「Prompt formatting rules」把 `shot_prompt` 的
+ * **8 段链式结构**、`video_motion_prompt` 的 **6 段链式结构**、以及 `[a] + [b] + …` 的连接方式
+ * 写成了硬约束，还配了两条完整示例；`STORY_SCRIPT_COMMON_RULES` 里也有一句「采用括号分段 + 号连接的格式」。
+ * 模型对 system prompt 的服从度远高于任务书末段的嘱咐，于是照样吐 `（…）+（…）`（用户反馈的原话：
+ * 「不要拆解成下面这样」）。所以模版在场时必须**显式作废**这几条，而不是只靠任务书里一句「不适用」。
+ * 不拼时会话内容与改造前逐字一致。
+ */
+const STORY_SCRIPT_TEMPLATE_SYSTEM_OVERRIDE = [
+    "## Override for this input: the source already contains a per-shot prompt template",
+    "",
+    "The uploaded source is already written shot by shot as `- **field**: value` blocks.",
+    "For this run the formatting rules above are **void**: ignore the chained bracket structure (`[a] + [b] + …`),",
+    "the 8-part order for `shot_prompt`, the 6-part order for `video_motion_prompt`, and their examples.",
+    "",
+    "- `shot_prompt`: copy the `首帧图片提示词` value **verbatim** — every sentence, including the trailing negative list. No rewriting, no shortening, no re-ordering, no bracket chaining.",
+    "- `video_motion_prompt`: copy **every other line of that shot's block verbatim**, one `label: value` per line, keeping the block's original order (景别 / 摄影机参数 / 构图方式 / 画面内容 / 人物动作与表演 / 运镜方式 / 台词与声音 / 负面 …). Do not merge lines and do not chain them with `+`.",
+    "- `style_prompt`: use the block's style field if present, otherwise `无`. Never invent one.",
+    "- Every other column (asset columns, blocking, sound …) is generated normally per the rules above and must not be left empty.",
+    "",
+    "Output must still be the schema JSON object.",
+].join("\n");
+
+/**
+ * 系统提示词侧的「用户自定义提示词格式」覆盖段：节点里填了「分镜提示词自定义要求」时追加。
+ *
+ * 用户原话：「当使用了我的分镜提示词的提示词模版后……完全提取复制该段模版内容……不要拆解成下面这样，
+ * （固定机位，全景平视，35mm）+（苏晚右手将奶茶杯抬至胸前……）」。他们贴进自定义框的往往就是一整套
+ * 字段清单（景别 / 摄影机参数 / 构图方式 / 画面内容 / 人物动作与表演 / 运镜方式 / 台词与声音 / 负面）
+ * 或一整段长范文（「最高画质，杰作，超精细，16:9 电影画幅……」），要的是**照着这段写**；
+ * 而预设 system prompt 里的「8 段 / 6 段 / `[a] + [b]` 链式」会把它压成括号链。
+ * 自定义要求虽然声明了「优先于上文」，但模型对 system prompt 的服从度更高，所以必须在这里**显式作废**。
+ * 不拼时会话内容与改造前逐字一致。
+ */
+const STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE = [
+    "## Override for this input: the user supplied a custom prompt specification",
+    "",
+    "The task below contains a `分镜提示词自定义要求` section written by the user. That section defines the",
+    "required structure and wording of `shot_prompt` / `video_motion_prompt` / `style_prompt`.",
+    "For this run the formatting rules above are **void**: ignore the chained bracket structure (`[a] + [b] + …`),",
+    "the 8-part order for `shot_prompt`, the 6-part order for `video_motion_prompt`, and all of their examples.",
+    "",
+    "- If the specification enumerates fields (e.g. 景别 / 摄影机参数 / 构图方式 / 画面内容 / 人物动作与表演 /",
+    "  运镜方式 / 台词与声音 / 负面), emit **one `label: value` line per field, in the user's order** —",
+    "  never merge two fields into one `(...) + (...)` chain.",
+    "- If it gives a long sample paragraph (e.g. a fixed quality string followed by a scene description), keep that",
+    "  paragraph's **fixed wording verbatim** (质量串 / 画幅串 / 负面串 / 标点照抄) and only replace the",
+    "  shot-specific parts with this shot's content. Do not compress it into brackets.",
+    "- Never shorten, summarise, re-order or re-bracket the specification.",
+    "- Routing: if the section gives two separate specifications (one for 分镜提示词, one for 视频运动提示词), fill each into",
+    "  its own column. If it gives only one unlabeled one: a field list (景别 / 摄影机参数 / 构图方式 / 画面内容 /",
+    "  人物动作与表演 / 运镜方式 / 台词与声音 / 负面) belongs to `video_motion_prompt`; a long prose paragraph",
+    "  (quality string + scene + negatives) belongs to `shot_prompt`.",
+    "- Every other column is still generated normally per the rules above.",
+    "",
+    "Output must still be the schema JSON object.",
+].join("\n");
+
 /** 构建分镜脚本生成任务（classic 对应 dramaclaw 的 build_freezone_story_script_task）。 */
 function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown }): string {
-    const parts = ["根据以下上传剧本内容生成一个完整的故事脚本表。", ...STORY_SCRIPT_COMMON_RULES];
+    /**
+     * 源内容自带逐镜模版 → 把公共规则里「分镜提示词和视频运动提示词都采用括号分段 + 号连接的格式」
+     * 这一条**整条摘掉**。留着它，模型会照样吐 `（…）+（…）`（用户原话「不要拆解成下面这样」）——
+     * 这句在规则清单里，比任务书后段的嘱咐更靠前也更强硬。没模版时规则逐字不变。
+     */
+    const templateSource = hasStoryScriptShotTemplate(sourceText);
+    // 「分镜提示词自定义要求」在场时同理：用户给的是一套自己的格式，公共规则里那句「括号分段 + 号连接」
+    // 与它直接冲突，留着就还是会被模型当成硬要求执行（见 STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE）。
+    const customShotPrompt = hasScriptGenerationPrompt(shotPrompt);
+    const commonRules = templateSource || customShotPrompt ? STORY_SCRIPT_COMMON_RULES.filter((rule) => !rule.includes("括号分段")) : STORY_SCRIPT_COMMON_RULES;
+    const parts = ["根据以下上传剧本内容生成一个完整的故事脚本表。", ...commonRules];
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
     if (characterRefs && characterRefs.trim()) {
         parts.push(`已提供的角色参考（请在角色1 / 角色2 字段里使用完全一致的角色名）：\n${characterRefs.trim()}`);
@@ -537,7 +607,7 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
     // ① 通用 8 段/6 段写法不能压过模版原文；② 资产 / 分镜两段自定义要求本身声明了「优先于上文」，
     //    而模型对越靠后的指令越服从 —— 上一版把它放在最末，结果「照搬」压过了用户的资产要求，资产列全空。
     // 没有模版时这段逐字不出现，老任务书不变。
-    if (hasStoryScriptShotTemplate(sourceText)) parts.push(STORY_SCRIPT_TEMPLATE_HINT);
+    if (templateSource) parts.push(STORY_SCRIPT_TEMPLATE_HINT);
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     parts.push(STORY_SCRIPT_JSON_CONTRACT);
     parts.push(`源剧本内容：\n${sourceText.trim()}`);
@@ -579,7 +649,10 @@ function describeRowForContext(row: StoryScriptRow | undefined, columns: StorySc
  */
 function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: StoryScriptRowTaskInput): string {
     const columns = STORY_SCRIPT_CLASSIC_COLUMNS;
-    const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请**只重新生成这一镜**（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...STORY_SCRIPT_COMMON_RULES];
+    const templateSource = hasStoryScriptShotTemplate(sourceText);
+    // 同整表任务书：模版或自定义分镜提示词在场 → 摘掉「括号分段 + 号连接」这条。
+    const commonRules = templateSource || hasScriptGenerationPrompt(shotPrompt) ? STORY_SCRIPT_COMMON_RULES.filter((rule) => !rule.includes("括号分段")) : STORY_SCRIPT_COMMON_RULES;
+    const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请**只重新生成这一镜**（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...commonRules];
     // 时长是硬约束，放前面：单镜模式下这一镜自己就是成片，模型最容易在这里写成 2~3 秒碎片。
     const durationHint = buildRowDurationHint(segmentSeconds, mergeMode);
     if (durationHint) parts.push(durationHint);
@@ -600,9 +673,21 @@ function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRef
     if (characterRefs && characterRefs.trim()) parts.push(`已提供的角色参考（请在角色1 / 角色2 字段里使用完全一致的角色名）：\n${characterRefs.trim()}`);
     // 逐镜模版同样夹在专项要求之前（理由同整表任务书）。
     if (hasStoryScriptShotTemplate(sourceText)) parts.push(STORY_SCRIPT_TEMPLATE_HINT);
+    /**
+     * 「参考风格要点」必须排在专项要求**之前**（老版本排在其后，是个坑）：
+     * 它里面写着「分镜提示词按 8 段写 / 视频运动提示词按 6 段写」，与用户自定义格式直接冲突；
+     * 排在自定义要求后面，模型会把它当成更晚、更强的一条，于是照样吐 `（…）+（…）`。
+     * 与整表任务书同一口径：设了自定义要求 → 对应那几行整段省掉。
+     */
+    const hasAssetCustom = hasScriptGenerationPrompt(assetPrompt);
+    const hasShotCustom = hasScriptGenerationPrompt(shotPrompt);
+    parts.push(
+        hasAssetCustom || hasShotCustom
+            ? ["参考风格要点：", ...STORY_SCRIPT_STYLE_HINT_COMMON, ...(hasShotCustom ? [] : STORY_SCRIPT_STYLE_HINT_SHOT), ...(hasAssetCustom ? [] : STORY_SCRIPT_STYLE_HINT_ASSET)].join("\n")
+            : STORY_SCRIPT_STYLE_HINT,
+    );
     // 专项要求比「参考风格要点」更具体，放在它后面（越靠后越优先）。
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
-    parts.push(STORY_SCRIPT_STYLE_HINT);
     parts.push(STORY_SCRIPT_JSON_CONTRACT);
     parts.push(`只输出这一镜：JSON 的 rows 数组里只放 1 个元素，\`shot_no\` 必须是 ${row.shot_no}。`);
     if (sourceText.trim()) parts.push(`源剧本内容：\n${sourceText.trim()}`);
@@ -757,9 +842,25 @@ export function getStoryScriptSystemPrompt(preset?: StoryScriptPresetId | string
  * 不改代码就能换掉生成策略；列定义 / 解析 / 导出仍按预设走，所以覆盖不会破坏表格结构。
  * 返回值一定是非空字符串（预设本身保证非空），调用方无需再判空。
  */
-export function resolveScriptSystemPrompt(preset?: StoryScriptPresetId | string | null, override?: unknown): string {
+export function resolveScriptSystemPrompt(
+    preset?: StoryScriptPresetId | string | null,
+    override?: unknown,
+    options?: {
+        /** 源内容自带逐镜标签模版 → 作废「8 段 / 6 段 / 括号+号链式」。 */
+        verbatimTemplate?: boolean;
+        /** 节点里填了「分镜提示词自定义要求」→ 以用户那套格式为准，同样作废链式写法。 */
+        customShotFormat?: boolean;
+    },
+): string {
     const custom = typeof override === "string" ? override.trim() : "";
-    return custom || getStoryScriptSystemPrompt(preset);
+    const base = custom || getStoryScriptSystemPrompt(preset);
+    // 这两种情形都必须显式作废预设里的链式写法（见两个 *_SYSTEM_OVERRIDE 的注释）：
+    // 模型对 system prompt 的服从度高于任务书末段的「以上不适用」，只改任务书压不住。
+    const extra: string[] = [];
+    if (options?.verbatimTemplate) extra.push(STORY_SCRIPT_TEMPLATE_SYSTEM_OVERRIDE);
+    if (options?.customShotFormat) extra.push(STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE);
+    // 都没有时返回字符串与改造前逐字一致（探针守着老调用点）。
+    return extra.length ? `${base}\n\n${extra.join("\n\n")}` : base;
 }
 
 /** 该节点是否用的是自定义系统提示词（供 UI 打「已自定义」角标）。 */
@@ -803,6 +904,9 @@ export function buildScriptShotPromptSection(override?: unknown): string {
         "## 分镜提示词自定义要求（分镜提示词 / 视频运动提示词 / 风格提示词）",
         "- 以下要求**优先于**上文所有与提示词写法相关的说明（段落结构、括号分段、技术参数等）；有冲突时以本段为准。",
         "- 本段只影响与画面 / 运镜 / 提示词写法相关的列（分镜提示词、视频运动提示词、风格提示词，以及画面描述、关键视觉、主体动作、镜头运动这类可见描述）；其余列仍按上文要求输出。",
+        // 用户贴进来的常常就是「模版」本身（字段清单或长段范文），要的是照抄结构而不是归纳成括号链。
+        "- 如果本段给的是**模版**（字段清单、固定句式、长段范文），就按它**逐行原样照写**：字段名、字段顺序、固定文字（质量串 / 画幅串 / 负面串 / 标点）一律保留，只把与该镜有关的占位内容换成本镜内容；**不要**合并字段，**不要**改写成 `（…）+（…）` 或 8 段 / 6 段链式，**不要**压缩、概括、调序。",
+        "- 落列口径：本段若分别给了「分镜提示词」和「视频运动提示词」两套写法，就各自填进对应列，不要混在一起；只给一套且没点名列时 —— `景别 / 摄影机参数 / 构图方式 / 画面内容 / 人物动作与表演 / 运镜方式 / 台词与声音 / 负面` 这一组字段清单归**视频运动提示词**，整段「画质 + 场景 + 负面」式的长范文归**分镜提示词**。",
         text,
     ].join("\n");
 }
