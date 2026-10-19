@@ -3,9 +3,14 @@ import type { TextPromptEntry } from "@/constant/text-prompt-library";
 /**
  * 分镜表（脚本节点）的**两套执行方案**。
  *
- * - `builtin`：默认。完全用预设自带的内置 system prompt / 任务书（改造前逐字一致）。
+ * - `builtin`：预设自带的内置 system prompt / 任务书（改造前逐字一致）。
  * - `library`：改用「词库」（设置页的文本节点词库，`config.textPrompts`）里的三段提示词——
  *   自定义系统提示词、资产提示词、分镜提示词各填一段。
+ *
+ * ⚠️ `builtin` 已经**不是默认值**了（2026-10-19 用户要求：默认走第二套词库）。默认行为由
+ * `shouldAutoApplyScriptLibraryScheme` 判定：新建 / 未选过方案的节点会自动预填第二套。
+ * `resolveScriptSchemeId` 只做归一化（读的时候认不出就按内置渲染），**不要**把它的默认值改成
+ * `library` —— 那样按钮会亮成第二套、而三个输入框还是空的，界面与行为对不上。
  *
  * 为什么是「预填进那三个输入框」而不是另开一条注入通道：那三个字段本来就是这个节点的
  * 覆盖入口（`resolveScriptSystemPrompt` / `buildScriptGenerationPromptSections` 都读它们），
@@ -113,4 +118,37 @@ export function buildScriptLibraryPrefill(entries: readonly TextPromptEntry[] | 
     if (!result.asset) result.missing.push("asset");
     if (!result.shot) result.missing.push("shot");
     return result;
+}
+
+/** 有效文本（去空白后非空）—— 只看「有没有人填过」，不关心内容。 */
+function hasText(value: unknown): boolean {
+    return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * 是否该**自动**套用第二套（词库）—— 用户 2026-10-19 要求「分镜表生成默认选择第二套词库的方案，
+ * 需要调整再自行选择第一套或者手动添加提示词」。
+ *
+ * 判断放在这里而不是组件里：这是纯逻辑（不依赖 React / 节点对象），可以拿探针把四种例外钉死；
+ * 组件只负责「返回 true 就落一次 patchMetadata」。
+ *
+ * 四条例外（任一命中就不自动套用）：
+ *  1. `scheme` 已有值 —— 用户明确点过第一套或第二套，尊重选择（第一套也是合法选择，不是「没选」）；
+ *  2. 词库三段一段都取不到 —— 切了等于没切，留在第一套（界面另有提示让他去补词库）；
+ *  3. 三个提示词框里已经有人手填过 —— 「手动添加提示词」是用户点名的第三条路，优先级高于默认值；
+ *  4. 传空 prefill —— 词库还没加载出来时先不动，等它到了再判断。
+ */
+export function shouldAutoApplyScriptLibraryScheme(options: {
+    scheme?: unknown;
+    prefill?: ScriptLibraryPrefill | null;
+    customSystemPrompt?: unknown;
+    customAssetPrompt?: unknown;
+    customShotPrompt?: unknown;
+}): boolean {
+    if (hasText(options.scheme)) return false;
+    const prefill = options.prefill;
+    if (!prefill) return false;
+    if (!hasText(prefill.system) && !hasText(prefill.asset) && !hasText(prefill.shot)) return false;
+    if (hasText(options.customSystemPrompt) || hasText(options.customAssetPrompt) || hasText(options.customShotPrompt)) return false;
+    return true;
 }

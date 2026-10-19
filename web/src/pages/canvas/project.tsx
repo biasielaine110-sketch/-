@@ -7770,15 +7770,14 @@ function AtelierCanvasPage() {
                 const shotNoTo = last.row.shot_no || last.index + 1;
                 const shots = members.map((member) => ({
                     shotNo: member.row.shot_no || member.index + 1,
-                    imagePrompt: member.prompts.imagePrompt,
+                    // ⚠️ 只带视频段：视频节点不再拼分镜提示词（用户 2026-10-19 要求）。
+                    // 分镜提示词已经在本镜的文本 / 图片节点上，视频节点拿的是它的关键帧首帧。
                     videoPrompt: member.prompts.videoPrompt,
                 }));
                 // 视频节点的「资产绑定」：本段所有资产图都是直连视频节点的，顺序与写连线时一致 ——
                 // groupAssetIds（Set 保序）→ 音频（音频只连视频、但不进「图片资产」绑定，拼装时按 kind 过滤掉）。
                 const videoBinding = buildScriptAssetBindingPrompt([...groupAssetIds, ...audioRefs.map((asset) => asset.id)], nodesRef.current, assetNameOf, assetRoleOf);
-                const baseVideoPrompt = merged
-                    ? buildMergedVideoNodePrompt(shots)
-                    : buildVideoNodePrompt(shots[0].imagePrompt, shots[0].videoPrompt) || shots[0].imagePrompt;
+                const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
                 const videoPrompt = withScriptAssetBinding(baseVideoPrompt, videoBinding);
                 // 单镜模式：10/15 秒 = 锁定成片秒数（不抄表里旧值，否则「选了 10 秒铺出来还是 3 秒」）；
                 // 5 秒 = 上限（表里更短就按表里）。合并模式仍按本段各镜 duration 累加。
@@ -7860,9 +7859,11 @@ function AtelierCanvasPage() {
             const seconds = resolveStoryScriptShotSeconds(row.duration, source.metadata?.scriptSegmentSeconds);
             const videoWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Video].width;
             const videoHeight = NODE_DEFAULT_SIZE[CanvasNodeType.Video].height;
+            // 与「一键铺链路」同口径：视频节点只放视频段，不再拼分镜提示词（用户 2026-10-19 要求）；
+            // 也不再拿 imagePrompt 兜底 —— 那一兜就是把分镜提示词整段灌进视频节点。
             const videoNode: CanvasNodeData = {
                 ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, {
-                    prompt: buildVideoNodePrompt(prompts.imagePrompt, prompts.videoPrompt) || prompts.imagePrompt,
+                    prompt: buildVideoNodePrompt(prompts.videoPrompt),
                     status: NODE_STATUS_IDLE,
                     ...(seconds ? { seconds: String(seconds) } : {}),
                 }),

@@ -1145,15 +1145,19 @@ export function storyScriptGroupDuration(group: StoryScriptRowGroup): number {
 }
 
 /**
- * 把多个镜头合并成一个视频节点的提示词：逐镜列出（分镜提示词 + 视频运动提示词）。
+ * 把多个镜头合并成一个视频节点的提示词：逐镜列出**视频段**（视频运动提示词 / 镜头运动 …）。
  *
  * 与 `buildVideoNodePrompt` 的差别：单镜内部按行去重，但**镜与镜之间不去重**——不同镜头合法地
  * 复用同一句动作描述时，去重会丢掉先后顺序。只剩一个镜有内容时等价于 `buildVideoNodePrompt`
  * （不加「多镜头」抬头，也不挂镜号）。
+ *
+ * ⚠️ 这里**不再收 `imagePrompt`**（2026-10-19 用户要求：铺链路出的视频节点里不要塞分镜表中的
+ * 「分镜提示词」）。分镜提示词已经在本镜的文本节点 / 图片节点上，关键帧就是按它生成的；视频节点
+ * 再抄一遍，只会让长段画面描述把运镜指令淹掉，模型反而抓不到「怎么动」。
  */
-export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; imagePrompt?: unknown; videoPrompt?: unknown }>): string {
+export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; videoPrompt?: unknown }>): string {
     const kept = shots
-        .map((shot, index) => ({ no: shot.shotNo || index + 1, body: buildVideoNodePrompt(shot.imagePrompt, shot.videoPrompt) }))
+        .map((shot, index) => ({ no: shot.shotNo || index + 1, body: buildVideoNodePrompt(shot.videoPrompt) }))
         .filter((item) => Boolean(item.body));
     if (!kept.length) return "";
     if (kept.length === 1) return kept[0].body;
@@ -2280,24 +2284,19 @@ export function joinStoryScriptPromptParts(parts: unknown[]): string {
 }
 
 /**
- * 视频节点最终的提示词 = 分镜提示词（画面/角色/环境）+ 视频运动提示词（运镜/动作/时长）。
+ * 视频节点最终的提示词 = **视频段**（视频运动提示词 / 镜头运动），**不拼分镜提示词**。
  *
- * 生视频时只给运镜段会丢掉画面信息，所以把两段都写进视频节点；按**行**去重（两段可能共享
- * 同一句画面描述，例如经典预设的兜底路径），避免同一句出现两遍。分镜提示词在前、运镜在后。
+ * 2026-10-19 用户明确要求：「一键铺链路创建出的视频节点中不需要添加分镜表中的分镜提示词」。
+ * 原因是口径本来就不该重复——分镜提示词是「这一镜长什么样」，已经写进本镜的文本节点、并拿来
+ * 生成关键帧图片了；视频节点拿到的是这张关键帧（首帧），再灌一遍整段画面描述只会稀释运镜与
+ * 动作指令（长提示词里模型最容易丢掉的就是「怎么动」）。
+ *
+ * 所以视频节点的提示词来源收敛成一处：`buildShotPrompts().videoPrompt`。
+ * 预设自己的兜底仍然有效（经典预设缺 `video_motion_prompt` 时用 角色动作 + 画面描述 … 拼一段），
+ * 那是「运镜列缺失时的兜底」，不是把分镜提示词整段搬过来。
  */
-export function buildVideoNodePrompt(imagePrompt: unknown, videoPrompt: unknown): string {
-    const seen = new Set<string>();
-    const lines: string[] = [];
-    for (const part of [storyScriptCellText(imagePrompt), storyScriptCellText(videoPrompt)]) {
-        if (!part) continue;
-        for (const rawLine of part.split("\n")) {
-            const line = rawLine.trim();
-            if (!line || seen.has(line)) continue;
-            seen.add(line);
-            lines.push(line);
-        }
-    }
-    return lines.join("\n");
+export function buildVideoNodePrompt(videoPrompt: unknown): string {
+    return storyScriptCellText(videoPrompt);
 }
 
 function toText(value: unknown): string {

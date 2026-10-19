@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { buildScriptLibraryPrefill, resolveScriptSchemeId, type ScriptSchemeId } from "@/constant/script-scheme";
+import { buildScriptLibraryPrefill, resolveScriptSchemeId, shouldAutoApplyScriptLibraryScheme, type ScriptSchemeId } from "@/constant/script-scheme";
 import {
     collectScriptCellPromptCandidate,
     collectStoryScriptAssetFillTargets,
@@ -626,6 +626,38 @@ export function CanvasScriptNodeContent({
     const totalDuration = rows.reduce((sum, row) => sum + (Number(row.duration) || 0), 0);
 
     const patchMetadata = (patch: Partial<CanvasNodeData["metadata"]>) => onConfigChange(node.id, patch);
+
+    /**
+     * 「第二套（词库）是默认方案」——用户 2026-10-19 的要求。
+     *
+     * 为什么靠挂载后**自动预填一次**，而不是把 `resolveScriptSchemeId` 的默认值改成 `library`：
+     * 那个函数只做归一化。默认值一改，按钮会亮成「第二套」、可三个输入框还是空的，生成时照样走
+     * 内置提示词 —— 界面与行为对不上，比不默认更糟。唯一正确的落点是「挂载后真的把三段填进去」。
+     *
+     * 判断条件（已选方案 / 词库空 / 手填过 / prefill 未就绪 → 不动）收在
+     * `shouldAutoApplyScriptLibraryScheme` 里，探针能钉住；这里只管落库。
+     */
+    const schemeAutoAppliedRef = useRef(false);
+    useEffect(() => {
+        if (schemeAutoAppliedRef.current) return;
+        const shouldApply = shouldAutoApplyScriptLibraryScheme({
+            scheme: node.metadata?.scriptScheme,
+            prefill: libraryPrefill,
+            customSystemPrompt: node.metadata?.scriptSystemPrompt,
+            customAssetPrompt: node.metadata?.scriptAssetPrompt,
+            customShotPrompt: node.metadata?.scriptShotPrompt,
+        });
+        if (!shouldApply) return;
+        schemeAutoAppliedRef.current = true;
+        patchMetadata({
+            scriptScheme: "library",
+            ...(libraryPrefill.system ? { scriptSystemPrompt: libraryPrefill.system } : {}),
+            ...(libraryPrefill.asset ? { scriptAssetPrompt: libraryPrefill.asset } : {}),
+            ...(libraryPrefill.shot ? { scriptShotPrompt: libraryPrefill.shot } : {}),
+        });
+        // patchMetadata 每次渲染都是新函数；真正的闸门是 shouldApply 与 ref，重复执行最多「看一眼就退出」。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [libraryPrefill, node.metadata?.scriptAssetPrompt, node.metadata?.scriptScheme, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt]);
 
     const updateRow = (rowIndex: number, key: string, value: string) => {
         const numeric = columns.some((column) => column.key === key && column.numeric);
@@ -1322,6 +1354,10 @@ export function CanvasScriptNodeContent({
                 <span className="opacity-60" title={t("canvas.scriptNode.schemeLibraryMissingHint")}>
                     {t("canvas.scriptNode.schemeLibraryMissing", { count: libraryPrefill.missing.length })}
                 </span>
+            ) : null}
+            {/* 默认是第二套；词库空时自动切不动，必须说清楚「为什么还亮着第一套」，否则看着像功能失效。 */}
+            {!node.metadata?.scriptScheme && !libraryPrefill.system && !libraryPrefill.asset && !libraryPrefill.shot ? (
+                <span className="opacity-60">{t("canvas.scriptNode.schemeLibraryDefaultOff")}</span>
             ) : null}
         </div>
     );
