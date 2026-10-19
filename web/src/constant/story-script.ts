@@ -2333,8 +2333,13 @@ export function storyScriptToMarkdown(rows: StoryScriptRow[], title?: string, pr
 type StoryScriptTemplateField = { label: string; value: string };
 type StoryScriptTemplateBlock = { heading: string; fields: StoryScriptTemplateField[] };
 
-const STORY_SCRIPT_TEMPLATE_BOLD_LINE = /^\s*[-*•+]?\s*\*\*(.+?)\*\*\s*[：:]\s*(.*)$/;
-const STORY_SCRIPT_TEMPLATE_PLAIN_LINE = /^\s*[-*•+]\s*([^：:*\n]{2,14}?)\s*[：:]\s*(.*)$/;
+/**
+ * 行首可选的列表符号：`-` / `*` / `•` / `+`，也容忍 `1.` `1、` `1)` `（1）` 这类有序列表
+ * （从 Word / 飞书 / 大纲工具里粘出来的模版经常带序号，缺了这一项就整段认不出来）。
+ */
+const STORY_SCRIPT_TEMPLATE_BULLET = String.raw`(?:[-*•+]|\d+[.、)）]|（\d+）)`;
+const STORY_SCRIPT_TEMPLATE_BOLD_LINE = new RegExp(String.raw`^\s*` + STORY_SCRIPT_TEMPLATE_BULLET + String.raw`?\s*\*\*(.+?)\*\*\s*[：:]\s*(.*)$`);
+const STORY_SCRIPT_TEMPLATE_PLAIN_LINE = new RegExp(String.raw`^\s*` + STORY_SCRIPT_TEMPLATE_BULLET + String.raw`\s*([^：:*\n]{2,14}?)\s*[：:]\s*(.*)$`);
 const STORY_SCRIPT_TEMPLATE_HEADING = /^\s*#{1,6}\s*(.+?)\s*$/;
 
 /** 标签归一：去空白 / 星号 / 顿号 / 斜杠 / 括号，让「人物动作与表演」和「人物动作」能对上。 */
@@ -2521,6 +2526,15 @@ export function hasStoryScriptShotTemplate(text: string): boolean {
     return splitStoryScriptTemplateBlocks(String(text || "")).length > 0;
 }
 
+/**
+ * 源内容里识别到的逐镜模版块数（0 = 没识别到）。
+ * UI 用它显示「已识别 N 块」——用户最需要知道的就是「到底认没认出来」，
+ * 以前这一步全靠猜（「是没识别到，还是模型没生成？」）。
+ */
+export function countStoryScriptTemplateShots(text: string): number {
+    return splitStoryScriptTemplateBlocks(String(text || "")).length;
+}
+
 /** 模版里**以模版为准**的列（模型写了也覆盖）：三列提示词。 */
 const STORY_SCRIPT_TEMPLATE_FORCE_KEYS = new Set(["shot_prompt", "video_motion_prompt", "style_prompt"]);
 
@@ -2549,11 +2563,15 @@ export function applyStoryScriptTemplateOverlay(
         const shot = Number(row.shot_no) || 0;
         if (shot && !byShot.has(shot)) byShot.set(shot, row);
     }
-    // 镜号一个都对不上（模型自己重编了号）→ 只按「块数 == 行数」顺序对齐，否则宁可不动。
-    const sequential = templateRows.length === rows.length;
+    /**
+     * 镜号一个都对不上（模型自己从 1 重新编号，最常见）→ **按顺序对齐**。
+     * 只看「行数是否相等」是不够的：模版 12 块、模型只吐了 8 行时也该把前 8 块对上去，
+     * 以前这种情形整层静默不做，用户看到的就是「三列还是空的」。
+     */
+    const anyShotMatch = rows.some((row, index) => byShot.has(Number(row.shot_no) || index + 1));
     return rows.map((row, index) => {
         const shot = Number(row.shot_no) || index + 1;
-        const patch = byShot.get(shot) || (sequential ? templateRows[index] : undefined);
+        const patch = anyShotMatch ? byShot.get(shot) : templateRows[index];
         if (!patch) return row;
         const next: StoryScriptRow = { ...row };
         for (const column of columns) {

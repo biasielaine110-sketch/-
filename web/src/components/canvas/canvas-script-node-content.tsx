@@ -11,6 +11,7 @@ import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialo
 import {
     collectScriptCellPromptCandidate,
     collectStoryScriptAssetFillTargets,
+    countStoryScriptTemplateShots,
     dropStoryScriptCellAssetColumn,
     dropStoryScriptRowColumn,
     getStoryScriptColumns,
@@ -425,6 +426,12 @@ export function CanvasScriptNodeContent({
     }, [extraPrompt]);
 
     const canGenerate = Boolean(sourceDraft.trim() || connectedTextValue) && !isRunning;
+    /**
+     * 源内容里认到的「逐镜模版」块数（`- **首帧图片提示词**：…` 那种）。
+     * >0 就说明「分镜提示词 / 视频运动提示词 / 风格提示词」会按模版原文填进去。
+     * 以前这个判断完全不可见：三列为空时用户只能猜是「没认出来」还是「模型没生成」。
+     */
+    const templateShots = useMemo(() => countStoryScriptTemplateShots(sourceDraft), [sourceDraft]);
     const activeReferences = useMemo(() => (references || []).filter((item) => item.active), [references]);
     // 「试一试」只在真·空场景出现（没结果、没连线、没手填），否则会挤占输入区。
     const showTryActions = !rows.length && activeReferences.length === 0 && !sourceDraft.trim();
@@ -1348,6 +1355,19 @@ export function CanvasScriptNodeContent({
                 }}
                 placeholder={connectedTextValue ? t("canvas.scriptNode.sourcePlaceholderLinked") : t("canvas.scriptNode.sourcePlaceholder")}
             />
+            {templateShots ? (
+                <div
+                    className="shrink-0 rounded-lg border px-2 py-1 text-[0.923em] leading-snug"
+                    style={{ borderColor: "#16a34a66", background: "#16a34a14", color: theme.node.text }}
+                >
+                    {t("canvas.scriptNode.templateDetected", { count: templateShots })}
+                </div>
+            ) : sourceDraft.trim() ? (
+                // 反向证据：贴了内容却没认出模版 → 三列由模型生成（用户就不用再猜「是没认出来吗」）。
+                <div className="shrink-0 px-1 text-[0.846em] leading-snug opacity-45" style={{ color: theme.node.text }}>
+                    {t("canvas.scriptNode.templateMissed")}
+                </div>
+            ) : null}
             <input
                 data-canvas-text-input
                 className="shrink-0 rounded-xl border px-2 py-1.5 text-[1em] outline-none"

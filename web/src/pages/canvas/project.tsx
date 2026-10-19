@@ -35,7 +35,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -6621,6 +6621,11 @@ function AtelierCanvasPage() {
                  * 生成，这样「三列照搬」就不会把资产提示词一起打空。没识别到模版时原样返回。
                  */
                 const parsedRows = applyStoryScriptTemplateOverlay(parsed.rows, sourceText, presetId);
+                /**
+                 * 把「认没认出模版」这件事**明说出来**：以前三列为空时用户只能猜
+                 * （「是没识别到，还是模型没生成？」），日志和 UI 都没有证据。
+                 */
+                const templateShots = countStoryScriptTemplateShots(sourceText);
                 setNodes((prev) =>
                     prev.map((node) => {
                         if (node.id !== nodeId) return node;
@@ -6648,6 +6653,7 @@ function AtelierCanvasPage() {
                     }),
                 );
                 message.success(t("canvas.scriptNode.generated", { count: parsedRows.length }));
+                if (templateShots) message.info(t("canvas.scriptNode.templateApplied", { count: templateShots }));
             } catch (error) {
                 if (controller.signal.aborted) return;
                 const detail = error instanceof Error ? error.message : String(error);
