@@ -2605,6 +2605,23 @@ function trailingNumber(value: string): number {
 }
 
 /**
+ * 只有一个字段也算模版的「强锚点」。
+ *
+ * 用户 03 给的模版就是每镜只有一行 `- **首帧图片提示词**：` 起头、正文全在下面几行 ——
+ * 这种块字段数是 1，老门槛（≥2 字段）会整块丢掉，表现就是「我贴了模版，但三列还是模型自己写的」。
+ * 只放这几个一看就是分镜模版的标签，普通剧本里的单行加粗（`**注意**：…`）不会被误判。
+ */
+const STORY_SCRIPT_TEMPLATE_SOLO_ANCHORS = new Set(
+    ["首帧图片提示词", "图片提示词", "首帧提示词", "分镜提示词", "视频提示词"].map(normalizeTemplateLabel),
+);
+
+function isSingleFieldTemplateBlock(block: StoryScriptTemplateBlock): boolean {
+    if (block.fields.length !== 1) return false;
+    const only = block.fields[0];
+    return Boolean(only && STORY_SCRIPT_TEMPLATE_SOLO_ANCHORS.has(normalizeTemplateLabel(only.label)) && only.value.trim());
+}
+
+/**
  * 把文本切成「一镜一块」。开新块的三种情况：镜号标题行、块内第二次出现 `镜头编号`、以及块外的首个字段。
  * 字段内的续行（换行 / 缩进）并进上一个字段。
  */
@@ -2615,7 +2632,8 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
 
     const flush = () => {
         // 少于两个字段、或没有任何锚点标签 → 不是模版块，直接丢掉。
-        if (current && current.fields.length >= 2 && current.fields.some((field) => isTemplateAnchor(field.label))) {
+        // 例外：单字段的强锚点块（`- **首帧图片提示词**：` + 整段正文）也要认。
+        if (current && current.fields.some((field) => isTemplateAnchor(field.label)) && (current.fields.length >= 2 || isSingleFieldTemplateBlock(current))) {
             blocks.push(current);
         }
         current = null;
@@ -2649,6 +2667,13 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
             // 没有标题行时，第二次出现「镜头编号」就是新的一镜。
             const isShotNo = /^(镜头编号|镜号)$/.test(normalizeTemplateLabel(matched.label));
             if (isShotNo && current && current.fields.some((field) => /^(镜头编号|镜号)$/.test(normalizeTemplateLabel(field.label)))) {
+                flush();
+            } else if (
+                // 单字段模版（每镜只有一行 `- **首帧图片提示词**：`）：同一锚点第二次出现就是下一镜。
+                // 不加这条，整段 10 镜会被并成一块，`fields` 去重后只剩第一镜的提示词。
+                STORY_SCRIPT_TEMPLATE_SOLO_ANCHORS.has(normalizeTemplateLabel(matched.label)) &&
+                current?.fields.some((field) => normalizeTemplateLabel(field.label) === normalizeTemplateLabel(matched.label))
+            ) {
                 flush();
             }
             if (!current) current = { heading: "", fields: [] };

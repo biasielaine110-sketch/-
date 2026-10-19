@@ -147,6 +147,17 @@ export type CanvasNodeMetadata = {
      * 与 `scriptAssetPrompt` 平行、互不影响 —— 用户要「资产的生成和分镜提示词的生成用不同的提示词控制」。
      */
     scriptShotPrompt?: string;
+    /**
+     * 脚本生成器：**执行方案**。`builtin`（默认）= 只用预设自带的内置提示词，三个自定义字段留空；
+     * `library` = 从「词库」预填「自定义系统提示词 / 资产提示词 / 分镜提示词」三段
+     * （见 constant/script-scheme.ts）。预填只是写入那三个字段，之后照常可改 —— 方案不封闭。
+     */
+    scriptScheme?: import("@/constant/script-scheme").ScriptSchemeId;
+    /**
+     * 从方案二切回方案一时暂存的三段提示词：切回去（或再切回来）直接恢复，
+     * 不用为了「对比一下两套效果」反复重填。
+     */
+    scriptLibraryBackup?: { system?: string; asset?: string; shot?: string };
     /** 脚本生成器：结构化分镜表（见 constant/story-script.ts）。 */
     scriptRows?: import("@/constant/story-script").StoryScriptRow[];
     /** 脚本生成器：输出预设（classic / storyboard），决定系统提示词与输出列。 */

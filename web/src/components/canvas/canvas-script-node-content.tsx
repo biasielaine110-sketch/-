@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
+import { buildScriptLibraryPrefill, resolveScriptSchemeId, type ScriptSchemeId } from "@/constant/script-scheme";
 import {
     collectScriptCellPromptCandidate,
     collectStoryScriptAssetFillTargets,
@@ -343,6 +344,16 @@ export function CanvasScriptNodeContent({
     // 输出格式预设：列定义、行操作都从这里来。
     const presetId = resolveStoryScriptPresetId(node.metadata?.scriptPreset);
     const preset = useMemo(() => getStoryScriptPreset(presetId), [presetId]);
+    /**
+     * 「两套执行方案」：`builtin` = 预设自带的内置提示词（默认，与改造前逐字一致）；
+     * `library` = 从「词库」把三段提示词**预填**进下面那三个输入框。
+     *
+     * 为什么只预填、不另开注入通道：三个字段本来就是节点级覆盖入口，预填完用户还能照常点开改；
+     * 而且切换方案**绝不碰 `scriptSource`** —— 用户单独设定的分镜表识别内容（那套 `- **首帧图片提示词**：`
+     * 模版）必须被方案二原样继承（这正是用户 02 的要求）。
+     */
+    const schemeId = resolveScriptSchemeId(node.metadata?.scriptScheme);
+    const libraryPrefill = useMemo(() => buildScriptLibraryPrefill(globalConfig?.textPrompts), [globalConfig?.textPrompts]);
     /**
      * 手动追加的资产列（用户自建：「宠物」「车辆」…）。行为与内置资产列一致 ——
      * 格子里能挂图、能上锁，铺链路时按 `role` 连进这一镜的图片节点。
@@ -775,6 +786,80 @@ export function CanvasScriptNodeContent({
         });
     };
 
+    /** 方案二 toast 里「缺了哪一段」的中文名。 */
+    const schemePartLabel = (part: "system" | "asset" | "shot") => t(`canvas.scriptNode.schemePart_${part}`);
+
+    /**
+     * 真正落地方案切换。
+     *
+     * - 方案二 = 把词库里的三段提示词一键填进那三个输入框（填完用户仍可打开弹窗改一两句）。
+     *   词库里**没找到**的段落保持原样，不清空 —— 用户可能只想要其中一段。
+     * - 切回第一套 = 还原成「切到方案二之前」的样子（走 `scriptLibraryBackup`，没设过就清空）。
+     * - 两套都**不动** `scriptSource` / `scriptRows`：前者是用户单独设定的分镜表识别内容（02 要继承），
+     *   后者是已有结果 —— 换方案只影响下一次生成，没必要清空。
+     */
+    const applyScheme = (next: ScriptSchemeId) => {
+        if (next === "library") {
+            const prefill = libraryPrefill;
+            // 三段全没命中（词库空 / 标题对不上）：不切，直接提示去补词库 —— 切了也是「什么都没变」，更难懂。
+            if (prefill.missing.length >= 3) {
+                message.error(t("canvas.scriptNode.schemeEmptyLibrary"));
+                return;
+            }
+            patchMetadata({
+                scriptScheme: "library",
+                // 已经是方案二时**不要**覆盖备份：再点一次是「按当前词库刷新」，
+                // 这时若把当下的字段再存进备份，真正切换前的原值就永久丢了。
+                ...(schemeId === "library"
+                    ? {}
+                    : {
+                          scriptLibraryBackup: {
+                              system: node.metadata?.scriptSystemPrompt,
+                              asset: node.metadata?.scriptAssetPrompt,
+                              shot: node.metadata?.scriptShotPrompt,
+                          },
+                      }),
+                ...(prefill.system ? { scriptSystemPrompt: prefill.system } : {}),
+                ...(prefill.asset ? { scriptAssetPrompt: prefill.asset } : {}),
+                ...(prefill.shot ? { scriptShotPrompt: prefill.shot } : {}),
+            });
+            if (prefill.missing.length) {
+                message.warning(t("canvas.scriptNode.schemeLibraryPartial", { names: prefill.missing.map(schemePartLabel).join(" / ") }));
+            } else {
+                message.success(t("canvas.scriptNode.schemeLibraryApplied"));
+            }
+            return;
+        }
+        const backup = node.metadata?.scriptLibraryBackup;
+        patchMetadata({
+            scriptScheme: "builtin",
+            scriptLibraryBackup: undefined,
+            scriptSystemPrompt: backup?.system,
+            scriptAssetPrompt: backup?.asset,
+            scriptShotPrompt: backup?.shot,
+        });
+        message.success(t("canvas.scriptNode.schemeBuiltinApplied"));
+    };
+
+    const switchScheme = (next: ScriptSchemeId) => {
+        if (next === schemeId) {
+            // 再点「第二套」= 按当前词库重新预填（用户刚在设置里改了词条时用得上）。
+            if (next === "library") applyScheme(next);
+            return;
+        }
+        // 切回第一套会把第二套填进去的三段提示词撤掉 —— 手动改过就确认一下，别默默丢内容。
+        if (next === "builtin" && (hasCustomSystemPrompt || hasCustomAssetPrompt || hasCustomShotPrompt)) {
+            modal.confirm({
+                title: t("canvas.scriptNode.schemeSwitchBackConfirm"),
+                okText: t("canvas.scriptNode.schemeSwitchBack"),
+                cancelText: t("common.cancel"),
+                onOk: () => applyScheme(next),
+            });
+            return;
+        }
+        applyScheme(next);
+    };
+
     const stopIfInteractive = (event: ReactMouseEvent | ReactPointerEvent) => {
         const target = event.target;
         if (!(target instanceof Element)) return;
@@ -1185,6 +1270,47 @@ export function CanvasScriptNodeContent({
             </div>
         ) : null;
 
+    // 「执行方案」总开关：第一套 = 预设自带的内置提示词；第二套 = 从词库预填三段提示词。
+    // 放在预设切换行**之前**——预设决定「出哪些列」，方案决定「用哪套提示词」，后者层次更高。
+    const schemeSelector = (
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
+            <span className="opacity-60">{t("canvas.scriptNode.schemeLabel")}</span>
+            {(["builtin", "library"] as const).map((id) => {
+                const active = id === schemeId;
+                return (
+                    <button
+                        key={id}
+                        type="button"
+                        className="inline-flex h-6 items-center rounded-full border px-2.5 transition"
+                        style={{
+                            borderColor: active ? theme.toolbar.activeText : theme.node.stroke,
+                            // 选中态必须实心：`activeBg` 是浅米色，和未选中的半透明底几乎没差别，
+                            // 看起来像「没点上」（这坑在时长 pill 上踩过）。
+                            background: active ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                            color: active ? theme.node.panel : theme.node.text,
+                            opacity: active ? 1 : 0.7,
+                        }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            switchScheme(id);
+                        }}
+                        title={t(`canvas.scriptNode.scheme_${id}_hint`)}
+                    >
+                        {t(`canvas.scriptNode.scheme_${id}`)}
+                    </button>
+                );
+            })}
+            {/* 方案二在词库里没找全时给个显式提示，否则用户会以为「点了没反应」（内容其实是原样保留的）。 */}
+            {schemeId === "library" && libraryPrefill.missing.length ? (
+                <span className="opacity-60" title={t("canvas.scriptNode.schemeLibraryMissingHint")}>
+                    {t("canvas.scriptNode.schemeLibraryMissing", { count: libraryPrefill.missing.length })}
+                </span>
+            ) : null}
+        </div>
+    );
+
     // 输出格式预设切换：放在输入区（它只影响「生成什么」，且切换会清空结果回到输入态）。
     const presetSwitcher = (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
@@ -1338,6 +1464,7 @@ export function CanvasScriptNodeContent({
 
     const sourcePanel = (
         <div className="flex min-h-0 flex-1 flex-col gap-1.5 px-2 pb-2">
+            {schemeSelector}
             {presetSwitcher}
             {segmentSelector}
             <div className="flex shrink-0 items-center gap-2 text-[0.923em] opacity-60" style={{ color: theme.node.text }}>
@@ -1364,6 +1491,8 @@ export function CanvasScriptNodeContent({
                     style={{ borderColor: "#16a34a66", background: "#16a34a14", color: theme.node.text }}
                 >
                     {t("canvas.scriptNode.templateDetected", { count: templateShots })}
+                    {/* 02：方案二**继承**这段识别内容（只有提示词被换掉，模版本身一个字不动）——写明比让人猜好。 */}
+                    {schemeId === "library" ? ` ${t("canvas.scriptNode.schemeTemplateInherited")}` : ""}
                 </div>
             ) : sourceDraft.trim() ? (
                 // 反向证据：贴了内容却没认出模版 → 三列由模型生成（用户就不用再猜「是没认出来吗」）。
@@ -2022,6 +2151,9 @@ export function CanvasScriptNodeContent({
                     {scriptTitle ? `${scriptTitle} · ` : ""}
                     {t("canvas.scriptNode.shotCount", { count: rows.length })} · {t("canvas.scriptNode.totalDuration", { seconds: totalDuration })}
                 </span>
+                {/* 执行方案也放到表体操作条：看表时想「换套提示词再重生成」不用切回输入视图。
+                    与「每镜时长 / 视频分段」并排，都属于「怎么生成」的那一组。 */}
+                {schemeSelector}
                 {/* 每镜时长也放到表体操作条：用户看分镜表时就能直接改，不用切回「输入」视图再找。
                     与「视频分段」并排：选单镜 → 每镜一段（10/15 锁定成片秒数、5 秒是上限）；
                     选「按每段时长」→ 连续几镜凑够 N 秒。 */}
