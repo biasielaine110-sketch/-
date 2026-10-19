@@ -205,6 +205,40 @@ export const STORY_SCRIPT_STORYBOARD_COLUMNS: StoryScriptColumn[] = [
 
 export const DEFAULT_STORY_SCRIPT_PROMPT = "根据我上传的剧本生成一个完整的故事脚本";
 
+/**
+ * 表格横向宽度的放大倍数（用户 2026-10-19 要求「分镜表的横向宽度增宽 1 倍」）。
+ *
+ * 为什么是「放大每一列」而不是「把节点拉宽」：节点的自动适配有 2200px 封顶
+ * （`AUTO_SIZE_MAX_WIDTH`），拉宽节点只会让它更早顶到上限、屏幕外溢出；而列宽翻倍是
+ * 每一格真的变宽 —— 一句话不再被挤成三行窄条，读一镜不用来回横滚找列。
+ *
+ * ⚠️ 这是**显示**口径，只作用于 `resolveStoryScriptDisplayColumns`：解析 / 导出 / 任务书
+ * 都不看 `width`，所以别把它挪进 `STORY_SCRIPT_CLASSIC_COLUMNS` 的声明里（会变成数据口径）。
+ */
+export const STORY_SCRIPT_COLUMN_WIDTH_SCALE = 2;
+
+/**
+ * 「简洁版」隐藏的列（用户点名的六列）。按 key 判、不按列名 —— 两个预设对同一列的叫法不同
+ * （如 `character_action` 在 classic 叫「角色动作」、storyboard 叫「主体动作」），
+ * 而 storyboard 压根没有 `scene_tags` / `lighting_mood`，过滤时自然就滤不到，不用分支。
+ */
+export const STORY_SCRIPT_COMPACT_HIDDEN_KEYS: readonly string[] = ["visual_description", "character_action", "blocking", "emotion", "scene_tags", "lighting_mood"];
+
+export function isStoryScriptCompactHiddenColumn(key: string): boolean {
+    return STORY_SCRIPT_COMPACT_HIDDEN_KEYS.includes(String(key || ""));
+}
+
+/**
+ * 表格**实际渲染**的列：简洁版先滤掉那六列，再把列宽放大 `STORY_SCRIPT_COLUMN_WIDTH_SCALE` 倍。
+ *
+ * 只用在渲染 / 算表宽 / 自动适配签名上；行数据、编辑、导出、铺链仍走完整的 `columns`
+ * （隐藏只是「不显示」，不是「删掉」——切回完整版内容一个字都不能少）。
+ */
+export function resolveStoryScriptDisplayColumns(columns: readonly StoryScriptColumn[], compact?: boolean): StoryScriptColumn[] {
+    const visible = compact ? (columns || []).filter((column) => !isStoryScriptCompactHiddenColumn(column.key)) : columns || [];
+    return visible.map((column) => ({ ...column, width: Math.round(column.width * STORY_SCRIPT_COLUMN_WIDTH_SCALE) }));
+}
+
 /** 经典预设的 system prompt（与剧集画布同源，保留其表风格、时长、括号分段等全部约束）。 */
 export const STORY_SCRIPT_SYSTEM_PROMPT = `# Freezone Story Script Generator
 

@@ -218,6 +218,11 @@ export type CanvasNodeMetadata = {
      * 组件里除外壳挂的这个 px 值外一律用 em，所以只改它就能整体缩放分镜表与各类文字。
      */
     scriptFontSize?: number;
+    /**
+     * 脚本生成器：分镜表「简洁版」——隐藏画面描述 / 角色动作 / 人物站位 / 情绪 / 场景标签 / 光影氛围六列。
+     * `undefined` = 完整版（老存档没有这个键，语义相同）。只影响显示，行数据不删。
+     */
+    scriptCompactColumns?: boolean;
     /** 脚本生成器：生成的脚本标题。 */
     scriptTitle?: string;
     /** 脚本生成器：解析失败时保留的原始返回，供用户查看/复制。 */

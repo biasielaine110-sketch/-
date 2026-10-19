@@ -32,6 +32,7 @@ import {
     remapStoryScriptRowNotes,
     reorderStoryScriptRows,
     resolveScriptAssetRole,
+    resolveStoryScriptDisplayColumns,
     resolveStoryScriptFontSize,
     resolveStoryScriptMergeMode,
     resolveStoryScriptPresetId,
@@ -361,6 +362,19 @@ export function CanvasScriptNodeContent({
     const extraColumns = useMemo(() => normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns), [node.metadata?.scriptExtraColumns]);
     // 表格实际渲染的列 = 预设列 + 自建资产列（解析 / 导出仍只按预设列走，自建列是用户手填的）。
     const columns = useMemo(() => getStoryScriptColumnsWithExtras(presetId, extraColumns), [presetId, extraColumns]);
+    /**
+     * 「简洁版」：只隐藏六列（画面描述 / 角色动作 / 人物站位 / 情绪 / 场景标签 / 光影氛围），
+     * **不删数据** —— 行里那几个字段照旧，切回完整版立刻回来。
+     *
+     * 存 metadata 而不是组件 state：节点滚出视口会被卸载，state 一丢用户切过的简洁版就变回完整版
+     * （这个坑在计时起点上踩过，见项目备忘）。
+     */
+    const compactColumns = node.metadata?.scriptCompactColumns === true;
+    /**
+     * 渲染用的列：简洁版过滤 + 列宽放大（`STORY_SCRIPT_COLUMN_WIDTH_SCALE`，用户要求横向宽度增宽 1 倍）。
+     * ⚠️ 只有**渲染 / 表宽 / 自动适配签名**走它；行编辑、导出、铺链、任务书仍用完整的 `columns`。
+     */
+    const displayColumns = useMemo(() => resolveStoryScriptDisplayColumns(columns, compactColumns), [columns, compactColumns]);
     // 勾选列只在「支持批量操作」时出现（没接线就完全不占宽度）。
     const showRowSelect = Boolean(onRegenerateRows || onBuildShotVideos);
     // 「声音」列：逐镜挂台词配音 / 音效。接线了才出现（旧调用点不受影响）。
@@ -368,11 +382,11 @@ export function CanvasScriptNodeContent({
     // 勾选列挂在 preset 列之前，所以表格实际宽度要把它一起算上（否则自动适配会窄）。
     const tableWidth = useMemo(
         () =>
-            columns.reduce((sum, column) => sum + column.width, 0) +
+            displayColumns.reduce((sum, column) => sum + column.width, 0) +
             TABLE_ACTION_WIDTH +
             (showRowSelect ? TABLE_SELECT_WIDTH : 0) +
             (showRowAudios ? TABLE_AUDIO_WIDTH : 0),
-        [columns, showRowSelect, showRowAudios],
+        [displayColumns, showRowSelect, showRowAudios],
     );
 
     const [view, setView] = useState<"source" | "table">(rows.length ? "table" : "source");
@@ -587,7 +601,8 @@ export function CanvasScriptNodeContent({
         // 前缀 `v2` 是「版式版本」：行高压缩 / 移除镜头图列之后，老节点存下的签名不再命中，会重新适配一次。
         // `v3`（第十五轮）：格内长文封顶 8 行 + 操作列吸附，行高整体变了，同样强制重适配一次。
         // `v4`（本轮）：新增「声音」列（+210px），宽度变了，老节点也要重算一次。
-        const signature = `v4:${presetId}:${baseFontSize}:${showFullText ? "full" : "compact"}:${columns.length}:${showRowAudios ? 1 : 0}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
+        // `v5`：列宽整体放大一倍 + 「简洁版」隐藏六列，表宽变化很大 → 老节点强制重适配一次。
+        const signature = `v5:${presetId}:${baseFontSize}:${showFullText ? "full" : "compact"}:${compactColumns ? "slim" : "wide"}:${displayColumns.length}:${tableWidth}:${showRowAudios ? 1 : 0}:${rows.length}:${rows.reduce((sum, row) => sum + columns.reduce((acc, column) => acc + String(row[column.key] ?? "").length, 0), 0)}`;
         if (signature === lastAutoSizeKeyRef.current) return;
         const chromeHeight = Math.max(0, shell.clientHeight - body.clientHeight);
         const width = Math.round(Math.min(AUTO_SIZE_MAX_WIDTH, Math.max(AUTO_SIZE_MIN_WIDTH, tableWidth + AUTO_SIZE_PADDING_X)));
@@ -596,7 +611,7 @@ export function CanvasScriptNodeContent({
         onConfigChange(node.id, { scriptAutoSizeKey: signature });
         if (Math.abs(width - node.width) < 8 && Math.abs(height - node.height) < 8) return;
         onNodeSizeChange(node.id, width, height);
-    }, [baseFontSize, columns, fullscreen, isRunning, node.height, node.id, node.width, onConfigChange, onNodeSizeChange, presetId, rows, showFullText, tableWidth, view]);
+    }, [baseFontSize, columns, compactColumns, displayColumns, fullscreen, isRunning, node.height, node.id, node.width, onConfigChange, onNodeSizeChange, presetId, rows, showFullText, tableWidth, view]);
 
     // 全屏时 Esc 退出；单元格编辑弹窗开着时让 Esc 先归它（否则会连带把全屏也关掉）。
     useEffect(() => {
@@ -1690,7 +1705,7 @@ export function CanvasScriptNodeContent({
                 <table ref={tableRef} className="border-separate border-spacing-0 leading-tight" style={tableStyle}>
                     <colgroup>
                         {showRowSelect ? <col style={{ width: TABLE_SELECT_WIDTH }} /> : null}
-                        {columns.map((column) => (
+                        {displayColumns.map((column) => (
                             <Fragment key={column.key}>
                                 <col style={{ width: column.width }} />
                                 {/* 「声音」列紧跟在镜号之后：镜号 + 这一镜配什么音，是同一层信息。 */}
@@ -1723,7 +1738,7 @@ export function CanvasScriptNodeContent({
                                     </button>
                                 </th>
                             ) : null}
-                            {columns.map((column) => {
+                            {displayColumns.map((column) => {
                                 // 自建资产列的表头多一个「×」：删列（连带清掉行文本与图位，先确认）。
                                 const extra = extraColumns.find((item) => item.key === column.key);
                                 return (
@@ -1799,7 +1814,7 @@ export function CanvasScriptNodeContent({
                                         </button>
                                     </td>
                                 ) : null}
-                                {columns.map((column) => {
+                                {displayColumns.map((column) => {
                                     const value = String(row[column.key] ?? "");
                                     // 「按镜按资产」图位：挂在资产列（角色1 / 角色2 / 场景 / 道具 / 人物站位 **+ 自建资产列**）上。
                                     // 这一格的图**只属于这一镜的这一列**，铺链路时也只连到这一镜的图片 / 视频节点。
@@ -2202,6 +2217,31 @@ export function CanvasScriptNodeContent({
                         {t("canvas.scriptNode.assetFillAll", { count: missingAssetRowCount })}
                     </button>
                 ) : null}
+                {/* 简洁版 / 完整版：一键隐藏「画面描述 / 角色动作 / 人物站位 / 情绪 / 场景标签 / 光影氛围」六列。
+                    与右边「完整显示 / 精简」不是一回事：那个是压单格行数，这个是直接少几列。
+                    只影响显示（行数据一个字不删），且状态写进 metadata —— 节点被卸载回来仍是用户选的那一档。 */}
+                <button
+                    type="button"
+                    className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition"
+                    style={{
+                        borderColor: compactColumns ? theme.toolbar.activeText : theme.node.stroke,
+                        // 选中态实心：`activeBg` 是浅米色，一排描边胶囊里会被读成「禁用」。
+                        background: compactColumns ? theme.toolbar.activeText : "transparent",
+                        color: compactColumns ? theme.node.panel : theme.node.text,
+                        opacity: compactColumns ? 1 : 0.75,
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        // 关掉时写 `undefined`（不是 false）：老节点 / 老存档里没这个键，语义就是「完整版」。
+                        patchMetadata({ scriptCompactColumns: compactColumns ? undefined : true });
+                    }}
+                    title={compactColumns ? t("canvas.scriptNode.compactColumnsRestoreHint") : t("canvas.scriptNode.compactColumnsHint")}
+                >
+                    <AlignJustify className="size-3" />
+                    {compactColumns ? t("canvas.scriptNode.compactColumnsRestore") : t("canvas.scriptNode.compactColumns")}
+                </button>
                 {/* 完整显示 / 精简：默认完整（不用拖滑条就能看全每格内容），太长时再切精简。 */}
                 <button
                     type="button"
