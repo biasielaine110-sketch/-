@@ -486,7 +486,7 @@ export default {
             title: "Story script",
             empty: "Paste a script or connect a text node, then hit Generate",
             sourceLabel: "Source script",
-            sourcePlaceholder: "Paste or type the script here — or connect a text node to the left handle",
+            sourcePlaceholder: "Paste the script, or a per-shot template (- **First-frame image prompt**: …) — its fields are mapped into the matching columns",
             sourcePlaceholderLinked: "Leave empty to use the connected text node content",
             promptPlaceholder: "Extra requirements (optional), e.g. keep the lead as Shen Zhaozhao, max 12 shots",
             generate: "Generate script",

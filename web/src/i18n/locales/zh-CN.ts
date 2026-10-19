@@ -486,7 +486,7 @@ export default {
             title: "脚本生成器",
             empty: "粘贴剧本或接入文本节点后点击「生成脚本」",
             sourceLabel: "剧本原文",
-            sourcePlaceholder: "粘贴或输入剧本内容，也可以把文本节点连到左侧圆点上",
+            sourcePlaceholder: "粘贴或输入剧本内容；直接贴逐镜模版（- **首帧图片提示词**：… / - **镜头时长**：…）会按字段自动落进对应列",
             sourcePlaceholderLinked: "留空则使用已接入的文本节点内容",
             promptPlaceholder: "补充要求（可选），例如：主角固定为沈昭昭，控制在 12 个镜头以内",
             generate: "生成脚本",

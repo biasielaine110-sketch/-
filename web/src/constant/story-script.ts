@@ -487,6 +487,34 @@ function buildRowDurationHint(segmentSeconds?: unknown, mergeMode?: StoryScriptM
     return `本镜时长要求：这一段目标成片 ${value} 秒，这一镜的 \`duration\` 控制在 ${value} 秒以内，给相邻镜留出合并空间。`;
 }
 
+/**
+ * 源内容本身就是「逐镜标签块」模版时的额外要求：**三列原文搬运**，不许模型改写 / 压缩。
+ *
+ * ⚠️ 这段的**作用域必须收窄到三列**（`shot_prompt` / `video_motion_prompt` / `style_prompt`）。
+ * 第一版写成了「必须原文搬运、不要重写、源内容没给的列按原规则自己补」且**排在资产 / 分镜两段
+ * 自定义要求之后**，结果模型把「照搬」当成最高指令：模版里没有的资产列（角色描述 / 场景描述 /
+ * 道具描述 / 人物站位）直接留空，连用户填在「资产部分自定义要求」里的写法也一起失效
+ * （用户反馈：「现在连资产的提示词都识别不到了，生出的完全是默认提示词模版」）。
+ * 现在拆成两层：
+ *  1. 本段只交代「这三列从模版照搬」，并明说**其余列（尤其资产列）照常按规则生成、必须填满**；
+ *  2. 本段在任务书里**排在两段自定义要求之前**，那两段仍然最后说话。
+ * 只有在 `hasStoryScriptShotTemplate(sourceText)` 为真时才拼进去 —— 否则任务书与改造前逐字一致。
+ */
+const STORY_SCRIPT_TEMPLATE_HINT = [
+    "## 源内容已经是逐镜提示词模版（三列照搬）",
+    "源内容每一镜都是 `- **字段名**：内容` 的标签块，其中下面这三列的内容**已经写好了**，照搬即可：",
+    "- `首帧图片提示词` → `shot_prompt`（整段原文，含末尾的负面词；不要改写 / 压缩 / 合并）",
+    "- `景别` / `摄影机参数` / `构图方式` / `画面内容` / `人物动作与表演` / `运镜方式` / `台词与声音` → `video_motion_prompt`，按这个顺序逐行写「标签：内容」，缺哪个跳过哪个",
+    "- `风格提示词` / `视觉风格` 之类的字段 → `style_prompt`；源内容没有这类字段时留空，不要自己编",
+    "- `镜头编号` → `shot_no`（取末尾数字，`场次02—镜头005` 就是 5）；`镜头时长` → `duration`（纯数字秒）",
+    "⚠️ 本段**只管上面这三列**。其余列必须照常生成、每一镜都要填满 —— 尤其是资产类列",
+    "（角色1 / 角色描述1 / 角色2 / 角色描述2 / 场景 / 场景描述 / 道具 / 道具描述 / 人物站位）：",
+    "模版里没有这些字段**不代表可以留空**，也不要因为要「照搬」就跳过它们。",
+    "- 本情形下，「分镜提示词按 8 段写 / 视频运动提示词按 6 段写」这类通用分段要求**不适用**（三列照模版原文即可），但资产类列的写法要求仍然有效。",
+    "- 若任务书里另有「资产部分自定义要求」/「分镜提示词自定义要求」，**以那两段为准**（与本段先后无关）。",
+    "- 输出仍然只给契约 JSON（`rows` 数组），不要把标签块原样贴回来",
+].join("\n");
+
 /** 构建分镜脚本生成任务（classic 对应 dramaclaw 的 build_freezone_story_script_task）。 */
 function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown }): string {
     const parts = ["根据以下上传剧本内容生成一个完整的故事脚本表。", ...STORY_SCRIPT_COMMON_RULES];
@@ -505,6 +533,11 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
             ? ["参考风格要点：", ...STORY_SCRIPT_STYLE_HINT_COMMON, ...(hasShotCustom ? [] : STORY_SCRIPT_STYLE_HINT_SHOT), ...(hasAssetCustom ? [] : STORY_SCRIPT_STYLE_HINT_ASSET)].join("\n")
             : STORY_SCRIPT_STYLE_HINT,
     );
+    // 源内容自带逐镜模版 → 交代「三列照搬」。位置刻意夹在「参考风格要点」之后、两段自定义要求之前：
+    // ① 通用 8 段/6 段写法不能压过模版原文；② 资产 / 分镜两段自定义要求本身声明了「优先于上文」，
+    //    而模型对越靠后的指令越服从 —— 上一版把它放在最末，结果「照搬」压过了用户的资产要求，资产列全空。
+    // 没有模版时这段逐字不出现，老任务书不变。
+    if (hasStoryScriptShotTemplate(sourceText)) parts.push(STORY_SCRIPT_TEMPLATE_HINT);
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     parts.push(STORY_SCRIPT_JSON_CONTRACT);
     parts.push(`源剧本内容：\n${sourceText.trim()}`);
@@ -520,6 +553,8 @@ function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds
     }
     const segmentGuidance = buildSegmentDurationGuidance(segmentSeconds, mergeMode);
     if (segmentGuidance) parts.push(segmentGuidance);
+    // 逐镜模版同样夹在专项要求之前（理由同 classic）。
+    if (hasStoryScriptShotTemplate(sourceText)) parts.push(STORY_SCRIPT_TEMPLATE_HINT);
     // storyboard 的规则全在 system prompt 里，没有可整段替换的「参考风格要点」，所以只追加专项要求。
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     parts.push(`创意大纲 / 源内容：\n${sourceText.trim()}`);
@@ -563,6 +598,8 @@ function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRef
     const currentText = describeRowForContext(row, columns);
     if (currentText) parts.push(`这一镜当前的内容（可以全部重写，也可以只修掉不合理或缺失的字段）：\n${currentText}`);
     if (characterRefs && characterRefs.trim()) parts.push(`已提供的角色参考（请在角色1 / 角色2 字段里使用完全一致的角色名）：\n${characterRefs.trim()}`);
+    // 逐镜模版同样夹在专项要求之前（理由同整表任务书）。
+    if (hasStoryScriptShotTemplate(sourceText)) parts.push(STORY_SCRIPT_TEMPLATE_HINT);
     // 专项要求比「参考风格要点」更具体，放在它后面（越靠后越优先）。
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     parts.push(STORY_SCRIPT_STYLE_HINT);
@@ -2188,6 +2225,12 @@ export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetI
 
     const tableRows = parseMarkdownTable(raw, columns);
     if (tableRows.length) return { ok: true, title: "", rows: tableRows };
+
+    // 最后才试「用户自有模版」的逐镜标签块（`- **首帧图片提示词**：…`）。
+    // 放在表格之后是刻意的：模型真吐了表格就还走表格，老行为不变。
+    const templateRows = parseStoryScriptTemplateRows(raw, columns);
+    if (templateRows.length) return { ok: true, title: "", rows: templateRows };
+
     return { ok: false, error: "无法解析为分镜表结构（既不是 JSON，也不是 Markdown 表格）" };
 }
 
@@ -2264,3 +2307,263 @@ export function storyScriptToMarkdown(rows: StoryScriptRow[], title?: string, pr
     const body = rows.map((row) => `| ${columns.map((column) => String(row[column.key] ?? "").replace(/[\r\n|]+/g, " ")).join(" | ")} |`);
     return [title ? `### ${title}` : "", header, separator, ...body].filter(Boolean).join("\n");
 }
+
+/* ───────────────────────── 逐镜「标签块」模版 ───────────────────────── */
+
+/**
+ * 用户自带的逐镜提示词模版长这样（一镜一块）：
+ *
+ * ```
+ * ## 场次02—镜头005
+ * - **镜头编号**：场次02—镜头005
+ * - **镜头时长**：3 秒｜时间码 00:15—00:18
+ * - **景别**：中景
+ * - **首帧图片提示词**：调用 FS-02。16:9。……
+ * - **Seedance 2.0 视频提示词**：Seedance 2.0，时长 3 秒，……
+ * ```
+ *
+ * 这类块要能被「认出来」并落到三列上：
+ * - `首帧图片提示词` → `shot_prompt`（分镜提示词）
+ * - 景别 / 摄影机参数 / 构图方式 / 画面内容 / 人物动作与表演 / 运镜方式 / 台词与声音 → `video_motion_prompt`
+ * - 风格类字段（风格提示词 / 视觉风格 …）→ `style_prompt`
+ *
+ * ⚠️ **只在识别到这种块时生效**：普通剧本、契约 JSON、Markdown 表格全走原来的路，一个字节都不变。
+ * 语法上靠「`**加粗标签**：值` 且至少有两个标签、且含一个锚点标签」来认，普通剧本里不会出现这种写法。
+ */
+type StoryScriptTemplateField = { label: string; value: string };
+type StoryScriptTemplateBlock = { heading: string; fields: StoryScriptTemplateField[] };
+
+const STORY_SCRIPT_TEMPLATE_BOLD_LINE = /^\s*[-*•+]?\s*\*\*(.+?)\*\*\s*[：:]\s*(.*)$/;
+const STORY_SCRIPT_TEMPLATE_PLAIN_LINE = /^\s*[-*•+]\s*([^：:*\n]{2,14}?)\s*[：:]\s*(.*)$/;
+const STORY_SCRIPT_TEMPLATE_HEADING = /^\s*#{1,6}\s*(.+?)\s*$/;
+
+/** 标签归一：去空白 / 星号 / 顿号 / 斜杠 / 括号，让「人物动作与表演」和「人物动作」能对上。 */
+function normalizeTemplateLabel(label: string): string {
+    return String(label || "")
+        .replace(/[\s*`]/g, "")
+        .replace(/[与和及／/、,，:：()（）　]/g, "");
+}
+
+/** 视频运动提示词按这个顺序拼（用户指定，不是文档里的出现顺序）。 */
+const STORY_SCRIPT_TEMPLATE_MOTION_LABELS = ["景别", "摄影机参数", "构图方式", "画面内容", "人物动作与表演", "运镜方式", "台词与声音"];
+
+/** 不加粗的 `- 标签：值` 只认这些标签，否则 `16:9。` 这种值会被误当成新字段。 */
+const STORY_SCRIPT_TEMPLATE_KNOWN_LABELS = new Set(
+    [
+        "镜头编号", "镜号", "镜头", "所属场景", "场景", "出场人物", "人物", "角色",
+        "镜头时长", "时长", "景别", "摄影机参数", "摄像机参数", "构图方式", "构图",
+        "画面内容", "画面描述", "人物动作与表演", "人物动作", "主体动作", "表演",
+        "运镜方式", "镜头运动", "运镜", "台词与声音", "台词", "音效", "声音", "台词旁白", "音效配乐",
+        "镜头叙事作用", "叙事作用", "首帧图片提示词", "图片提示词", "首帧提示词", "分镜提示词",
+        "视频运动提示词", "风格提示词", "视觉风格", "画面风格", "影像风格", "风格",
+        "负面", "负面提示词", "转场方式", "转场",
+    ].map(normalizeTemplateLabel),
+);
+
+/** 锚点标签：没有其中一个就不算「模版块」（防止把普通剧本里的几行加粗当成分镜）。 */
+const STORY_SCRIPT_TEMPLATE_ANCHORS = new Set(
+    ["镜头编号", "镜号", "首帧图片提示词", "图片提示词", "分镜提示词", "画面内容", "镜头时长", "景别", "人物动作与表演", "运镜方式"].map(normalizeTemplateLabel),
+);
+
+function isTemplateAnchor(label: string): boolean {
+    const normalized = normalizeTemplateLabel(label);
+    if (STORY_SCRIPT_TEMPLATE_ANCHORS.has(normalized)) return true;
+    // `Seedance 2.0 视频提示词` 这类带前缀的写法：以「视频提示词」结尾就认。
+    return /视频提示词$/.test(normalized) && !/运动提示词$/.test(normalized);
+}
+
+/** 取末尾一段数字（`场次02—镜头005` → 5）；没有则 0。 */
+function trailingNumber(value: string): number {
+    const matches = String(value || "").match(/\d+/g);
+    return matches?.length ? Number(matches[matches.length - 1]) : 0;
+}
+
+/**
+ * 把文本切成「一镜一块」。开新块的三种情况：镜号标题行、块内第二次出现 `镜头编号`、以及块外的首个字段。
+ * 字段内的续行（换行 / 缩进）并进上一个字段。
+ */
+function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[] {
+    const blocks: StoryScriptTemplateBlock[] = [];
+    let current: StoryScriptTemplateBlock | null = null;
+    let lastField: StoryScriptTemplateField | null = null;
+
+    const flush = () => {
+        // 少于两个字段、或没有任何锚点标签 → 不是模版块，直接丢掉。
+        if (current && current.fields.length >= 2 && current.fields.some((field) => isTemplateAnchor(field.label))) {
+            blocks.push(current);
+        }
+        current = null;
+        lastField = null;
+    };
+
+    for (const rawLine of String(raw || "").split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+
+        const heading = line.match(STORY_SCRIPT_TEMPLATE_HEADING);
+        if (heading) {
+            const text = heading[1].trim();
+            // 只把「场次 / 镜头」这类镜号标题当块边界，其它小标题忽略（别把一块拆成两块）。
+            if (/场次|镜头|镜号|第\s*\d+\s*镜|\bshot\b|\bscene\b/i.test(text)) {
+                flush();
+                current = { heading: text, fields: [] };
+            }
+            continue;
+        }
+
+        const bold = line.match(STORY_SCRIPT_TEMPLATE_BOLD_LINE);
+        const plain = bold ? null : line.match(STORY_SCRIPT_TEMPLATE_PLAIN_LINE);
+        const matched = bold
+            ? { label: bold[1].trim(), value: bold[2].trim() }
+            : plain && STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(plain[1]))
+              ? { label: plain[1].trim(), value: plain[2].trim() }
+              : null;
+
+        if (matched) {
+            // 没有标题行时，第二次出现「镜头编号」就是新的一镜。
+            const isShotNo = /^(镜头编号|镜号)$/.test(normalizeTemplateLabel(matched.label));
+            if (isShotNo && current && current.fields.some((field) => /^(镜头编号|镜号)$/.test(normalizeTemplateLabel(field.label)))) {
+                flush();
+            }
+            if (!current) current = { heading: "", fields: [] };
+            lastField = { label: matched.label, value: matched.value };
+            current.fields.push(lastField);
+            continue;
+        }
+
+        if (lastField) lastField.value = `${lastField.value}\n${line}`.trim();
+    }
+    flush();
+    return blocks;
+}
+
+/** 模板块 → 分镜行。列映射只落在**当前预设真有这一列**的字段上。 */
+function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]): StoryScriptRow[] {
+    const blocks = splitStoryScriptTemplateBlocks(text);
+    if (!blocks.length) return [];
+    const hasColumn = (key: string) => columns.some((column) => column.key === key);
+    const rows: StoryScriptRow[] = [];
+
+    for (const block of blocks) {
+        const fields = new Map<string, string>();
+        for (const field of block.fields) {
+            const key = normalizeTemplateLabel(field.label);
+            if (!fields.has(key) && field.value) fields.set(key, field.value);
+        }
+        const pick = (...labels: string[]) => {
+            for (const label of labels) {
+                const value = fields.get(normalizeTemplateLabel(label));
+                if (value) return value;
+            }
+            return "";
+        };
+        // `Seedance 2.0 视频提示词` 这类带前缀的：字段名结尾是「视频提示词」但又不是「视频运动提示词」。
+        const videoPromptField = Array.from(fields.entries()).find(([key]) => /视频.*提示词$/.test(key) && !/运动提示词$/.test(key))?.[1] || "";
+
+        const record: Record<string, unknown> = {};
+        const shotNo = trailingNumber(pick("镜头编号", "镜号")) || trailingNumber(block.heading);
+        if (shotNo) record.shot_no = shotNo;
+        const duration = /^\d+/.exec(pick("镜头时长", "时长"))?.[0];
+        if (duration) record.duration = Number(duration);
+
+        // 能直接对上列名的字段（先填列，视频运动提示词那边还会再拼一遍，互不影响）。
+        const direct: Array<[string[], string]> = [
+            [["所属场景", "场景"], "scene"],
+            [["出场人物", "人物", "角色"], "character_1"],
+            [["景别"], "shot"],
+            [["画面内容", "画面描述"], "visual_description"],
+            [["人物动作与表演", "人物动作", "主体动作"], "character_action"],
+            [["运镜方式", "镜头运动"], "camera_movement"],
+            [["转场方式", "转场"], "transition"],
+        ];
+        for (const [labels, key] of direct) {
+            if (!hasColumn(key)) continue;
+            const value = pick(...labels);
+            if (value) record[key] = value;
+        }
+        const dialogue = pick("台词与声音", "台词", "台词旁白");
+        if (dialogue) {
+            if (hasColumn("sound")) record.sound = dialogue;
+            // 「无台词；鞋底轻擦声…」这类：对白列写「无台词」，声音列留全段。
+            if (hasColumn("dialogue")) record.dialogue = /^无台词/.test(dialogue) ? "无台词" : dialogue;
+        }
+
+        // 分镜提示词 = 首帧图片提示词（storyboard 没有这一列时退到画面描述 —— 那边生图就看画面描述）。
+        const firstFrame = pick("首帧图片提示词", "图片提示词", "首帧提示词");
+        if (firstFrame) {
+            if (hasColumn("shot_prompt")) record.shot_prompt = firstFrame;
+            else if (hasColumn("visual_description")) record.visual_description = firstFrame;
+        }
+
+        const style = pick("风格提示词", "视觉风格", "画面风格", "影像风格", "风格");
+        if (style && hasColumn("style_prompt")) record.style_prompt = style;
+
+        if (hasColumn("video_motion_prompt")) {
+            const motionLines = STORY_SCRIPT_TEMPLATE_MOTION_LABELS.map((label) => {
+                const value = pick(label);
+                return value ? `${label}：${value}` : "";
+            }).filter(Boolean);
+            const motion = motionLines.length ? motionLines.join("\n") : pick("视频运动提示词") || videoPromptField;
+            if (motion) record.video_motion_prompt = motion;
+        }
+
+        if (!Object.keys(record).length) continue;
+        rows.push(normalizeStoryScriptRow(record, rows.length, columns));
+    }
+    return rows;
+}
+
+/**
+ * 这段文本是不是「逐镜标签块」模版（任务书靠它决定要不要加「原文搬运」要求）。
+ * 只认块级命中，不认零星几行 —— 普通剧本不会出现 `- **首帧图片提示词**：…` 这种写法。
+ */
+export function hasStoryScriptShotTemplate(text: string): boolean {
+    return splitStoryScriptTemplateBlocks(String(text || "")).length > 0;
+}
+
+/** 模版里**以模版为准**的列（模型写了也覆盖）：三列提示词。 */
+const STORY_SCRIPT_TEMPLATE_FORCE_KEYS = new Set(["shot_prompt", "video_motion_prompt", "style_prompt"]);
+
+/**
+ * 把源模版的三列提示词**确定性地**盖到模型产出的行上。
+ *
+ * 为什么要这一步（任务书里已经要求「照搬」了）：模型对「照搬」的执行率不是 100%，而用户要的是
+ * 「我贴什么就填什么」。这里兜底：
+ *  - `shot_prompt` / `video_motion_prompt` / `style_prompt`：模版有值就**以模版为准**（覆盖模型）；
+ *  - 其余列（场景 / 景别 / 画面描述 / 角色动作 / 运镜 / 音效 / 时长…）：**只补空**，模型写了的不覆盖；
+ *  - 资产描述类列（角色描述1/2、场景描述、道具描述）模版根本不产出 → **一个字节都不碰**，
+ *    仍旧由模型按「资产部分自定义要求」生成（上一版被打成空的正是这几列）。
+ * 没识别到模版 → 原样返回（同一个数组引用），老流程零变化。
+ */
+export function applyStoryScriptTemplateOverlay(
+    rows: StoryScriptRow[],
+    sourceText: string,
+    preset?: StoryScriptPresetId | string | null,
+): StoryScriptRow[] {
+    if (!rows?.length) return rows;
+    const columns = getStoryScriptColumns(preset);
+    const templateRows = parseStoryScriptTemplateRows(String(sourceText || ""), columns);
+    if (!templateRows.length) return rows;
+    const byShot = new Map<number, StoryScriptRow>();
+    for (const row of templateRows) {
+        const shot = Number(row.shot_no) || 0;
+        if (shot && !byShot.has(shot)) byShot.set(shot, row);
+    }
+    // 镜号一个都对不上（模型自己重编了号）→ 只按「块数 == 行数」顺序对齐，否则宁可不动。
+    const sequential = templateRows.length === rows.length;
+    return rows.map((row, index) => {
+        const shot = Number(row.shot_no) || index + 1;
+        const patch = byShot.get(shot) || (sequential ? templateRows[index] : undefined);
+        if (!patch) return row;
+        const next: StoryScriptRow = { ...row };
+        for (const column of columns) {
+            const key = column.key;
+            if (column.numeric || key === "shot_no") continue;
+            const value = storyScriptCellText(patch[key]);
+            if (!value) continue;
+            if (STORY_SCRIPT_TEMPLATE_FORCE_KEYS.has(key) || !storyScriptCellText(next[key])) next[key] = value;
+        }
+        return next;
+    });
+}
+

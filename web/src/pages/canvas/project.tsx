@@ -35,7 +35,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -6615,6 +6615,12 @@ function AtelierCanvasPage() {
                     message.error(t("canvas.scriptNode.parseFailed"));
                     return;
                 }
+                /**
+                 * 源内容是「逐镜标签模版」时，三列提示词以**模版原文**为准（模型照搬的执行率不是 100%，
+                 * 而用户要的是贴什么填什么）。资产描述类列不在覆盖范围内 —— 仍由模型按「资产部分自定义要求」
+                 * 生成，这样「三列照搬」就不会把资产提示词一起打空。没识别到模版时原样返回。
+                 */
+                const parsedRows = applyStoryScriptTemplateOverlay(parsed.rows, sourceText, presetId);
                 setNodes((prev) =>
                     prev.map((node) => {
                         if (node.id !== nodeId) return node;
@@ -6623,7 +6629,7 @@ function AtelierCanvasPage() {
                         const extraKeys = normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns).map((item) => item.key);
                         const previousRows = node.metadata?.scriptRows || [];
                         const rowsWithExtras = extraKeys.length
-                            ? parsed.rows.map((row, index) => {
+                            ? parsedRows.map((row, index) => {
                                   const previous = previousRows.find((item, position) => (Number(item.shot_no) || position + 1) === (Number(row.shot_no) || index + 1));
                                   if (!previous) return row;
                                   const next = { ...row };
@@ -6633,7 +6639,7 @@ function AtelierCanvasPage() {
                                   }
                                   return next;
                               })
-                            : parsed.rows;
+                            : parsedRows;
                         return {
                             ...node,
                             title: parsed.title || node.title,
@@ -6641,7 +6647,7 @@ function AtelierCanvasPage() {
                         };
                     }),
                 );
-                message.success(t("canvas.scriptNode.generated", { count: parsed.rows.length }));
+                message.success(t("canvas.scriptNode.generated", { count: parsedRows.length }));
             } catch (error) {
                 if (controller.signal.aborted) return;
                 const detail = error instanceof Error ? error.message : String(error);
