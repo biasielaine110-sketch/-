@@ -7372,22 +7372,29 @@ function AtelierCanvasPage() {
         );
     }, []);
 
-    /** 逐镜导入本地音频：建音频节点、落位并立刻关联到这一镜（只收音频，其余挡下并提示）。 */
+    /**
+     * 逐镜导入本地音频：建音频节点、落位并立刻关联到这一镜（只收音频，其余挡下并提示）。
+     * 返回新建节点的 id：弹窗拿它把新音频并入当前勾选、并保持在打开状态 —— 一格挂多条不用反复开窗。
+     */
     const handleRowAudioImport = useCallback(
-        async (nodeId: string, shotNo: number, files: File[]) => {
+        async (nodeId: string, shotNo: number, files: File[]): Promise<string[]> => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
-            if (!source || !files.length) return;
+            if (!source || !files.length) return [];
             const items = await buildAssetItems(files);
             const audios = items.filter((item) => item.node.type === CanvasNodeType.Audio);
             if (!audios.length) {
                 if (items.length) message.warning(t("canvas.scriptNode.rowAudioOnlyAudio"));
-                return;
+                return [];
             }
             const placed = placeRowAssetNodes(source, audios);
-            if (!placed.length) return;
-            appendRowAudios(nodeId, shotNo, placed.map((node) => node.id));
+            if (!placed.length) return [];
+            const ids = placed.map((node) => node.id);
+            appendRowAudios(nodeId, shotNo, ids);
             revealNodes(placed, "center");
-            message.success(t("canvas.scriptNode.rowAudioImported", { count: placed.length, no: shotNo }));
+            // 提示里带上「这一镜现在共几条」：一次选多个文件、或反复追加时，用户才看得出是累积而不是替换。
+            const total = scriptRowAudioIds(source.metadata?.scriptRowAudios, shotNo).length + placed.length;
+            message.success(t("canvas.scriptNode.rowAudioImported", { count: placed.length, no: shotNo, total }));
+            return ids;
         },
         [appendRowAudios, buildAssetItems, message, placeRowAssetNodes, revealNodes, t],
     );
@@ -8031,7 +8038,7 @@ function AtelierCanvasPage() {
                         rowAudios={contentNode.metadata?.scriptRowAudios}
                         audioCandidates={getScriptAudioCandidates()}
                         onRowAudiosChange={handleRowAudiosChange}
-                        onRowAudioImport={(nodeId, shotNo, files) => void handleRowAudioImport(nodeId, shotNo, files)}
+                        onRowAudioImport={(nodeId, shotNo, files) => handleRowAudioImport(nodeId, shotNo, files)}
                         cellAssets={contentNode.metadata?.scriptCellAssets}
                         onCellAssetsChange={handleCellAssetsChange}
                         onCellAssetImport={(nodeId, shotNo, columnKey, files) => void handleCellAssetImport(nodeId, shotNo, columnKey, files)}

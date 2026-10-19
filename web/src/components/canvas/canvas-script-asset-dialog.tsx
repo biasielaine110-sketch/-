@@ -9,6 +9,7 @@ import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
 import { collectScriptAssetPromptCandidates, scriptAssetColumnRole, SCRIPT_ASSET_GENERATABLE_ROLE_IDS, SCRIPT_ASSET_ROLE_IDS, type ScriptAssetPromptCandidate, type ScriptAssetRole, type StoryScriptRow } from "@/constant/story-script";
 import { resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasTheme } from "@/lib/canvas-theme";
+import { isAudioFile } from "@/lib/canvas/canvas-generation-helpers";
 
 /**
  * 脚本节点的「添加资产」弹窗：三条路都收敛到「把素材变成脚本节点的上游」。
@@ -74,7 +75,11 @@ export type ScriptRowAssetMode = {
     audio?: boolean;
     /** 确认：用整组 id 替换这一镜的关联（取消勾选即解绑）。 */
     onLink: (nodeIds: string[]) => void;
-    onImport: (files: File[]) => void;
+    /**
+     * 上传本地文件。返回新建节点的 id 时，弹窗会把它们**并入当前勾选并保持打开** ——
+     * 这样「再挂一条」不用反复关窗重开（声音列一格常要挂台词 + 音效 + 环境声好几条）。
+     */
+    onImport: (files: File[]) => void | Promise<string[] | void>;
     /** `model` 是本次生成要用的生图模型（不传就跟随节点默认的图片模型）；`styleTemplateId` 是本次生成挑的风格模板。 */
     onGenerate?: (prompt: string, title: string, model?: string, styleTemplateId?: string) => void;
 };
@@ -100,7 +105,13 @@ type CanvasScriptAssetDialogProps = {
 const isClassifiable = (kind: ScriptAssetCandidate["kind"]) => kind === "image" || kind === "video" || kind === "audio";
 
 /** 上传 / 拖拽 / 粘贴时只认图片、视频、音频文件。导出给节点本体复用（直接往节点上拖文件）。 */
-export const isAssetFile = (file: File) => file.type.startsWith("image/") || file.type.startsWith("video/") || file.type.startsWith("audio/");
+export const isAssetFile = (file: File) => file.type.startsWith("image/") || file.type.startsWith("video/") || isAudioFile(file);
+
+/**
+ * 系统文件选择器的 `accept`：音频口径必须把扩展名也列出来 —— 只写 `audio/*` 时，
+ * 没注册 MIME 的 m4a / aac / flac 在选择器里会显示成灰色（用户以为「不支持」）。
+ */
+const AUDIO_ACCEPT = "audio/*,.mp3,.wav,.m4a,.m4b,.aac,.flac,.ogg,.oga,.opus,.webm,.wma,.aif,.aiff,.amr";
 
 /**
  * 本弹窗这次接受哪些文件：声音模式（`rowMode.audio`）只收音频，其余模式与原来一致。
@@ -108,7 +119,7 @@ export const isAssetFile = (file: File) => file.type.startsWith("image/") || fil
  * 刻意写成**模块级函数**而不是组件里的 `const`：粘贴 effect 的依赖数组在组件体靠前求值，
  * 引用在其后才声明的 `const` 会踩 TDZ（见项目备忘）。传 `audioOnly` 进来就没有这个先后问题。
  */
-const acceptsFile = (file: File, audioOnly: boolean) => (audioOnly ? file.type.startsWith("audio/") : isAssetFile(file));
+const acceptsFile = (file: File, audioOnly: boolean) => (audioOnly ? isAudioFile(file) : isAssetFile(file));
 
 export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose, onLink, onImport, onGenerate, poolAssets, rowMode }: CanvasScriptAssetDialogProps) {
     const { t } = useTranslation();
@@ -127,6 +138,8 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
     /** 「按镜按资产」生成时这一格单独挑的生图模型（空 = 跟随节点默认的图片模型）。 */
     const [genModel, setGenModel] = useState("");
     const [dragging, setDragging] = useState(false);
+    /** 逐镜模式上传中：上传是异步的，期间禁掉「选文件」按钮，避免连点选两批。 */
+    const [uploading, setUploading] = useState(false);
     const fileRef = useRef<HTMLInputElement>(null);
     // 已为「当前打开目标」初始化过草稿的签名：rowMode 每次渲染都是新对象，靠它区分「换了目标」与「重新渲染」。
     const initKeyRef = useRef("");
@@ -145,6 +158,7 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
             setGenStyleOpen(false);
             setGenModel("");
             setDragging(false);
+            setUploading(false);
             return;
         }
         const key = rowMode ? `row:${rowMode.no}:${rowMode.columnKey || ""}:${rowMode.selectedIds.join(",")}` : "asset";
@@ -349,7 +363,11 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                     }}
                 >
                     <Link2 className="size-3.5" />
-                    {isRowMode ? t("canvas.scriptNode.rowImageLinkSelected", { count: selected.length }) : t("canvas.scriptNode.assetLinkSelected", { count: selected.length })}
+                    {isAudioMode
+                        ? t("canvas.scriptNode.rowAudioLinkSelected", { count: selected.length })
+                        : isRowMode
+                          ? t("canvas.scriptNode.rowImageLinkSelected", { count: selected.length })
+                          : t("canvas.scriptNode.assetLinkSelected", { count: selected.length })}
                 </button>
             </div>
         </div>
@@ -362,7 +380,7 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                 ref={fileRef}
                 type="file"
                 // 声音模式只收音频：用户在系统选择器里看不到图片 / 视频，少一次错选。
-                accept={isAudioMode ? "audio/*" : "image/*,video/*,audio/*"}
+                accept={isAudioMode ? AUDIO_ACCEPT : `image/*,video/*,${AUDIO_ACCEPT}`}
                 multiple
                 className="hidden"
                 onChange={(event) => {
@@ -372,14 +390,35 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                     if (!files.length) return;
                     // ⚠️ 逐镜模式必须走 `rowMode.onImport`：走外层那个会把音频当成「整表资产」导入，
                     // 结果是文件进来了、这一镜的声音列却还是空的。
-                    if (rowMode) rowMode.onImport(files);
-                    else onImport(files, uploadRole);
-                    onClose();
+                    if (!rowMode) {
+                        onImport(files, uploadRole);
+                        onClose();
+                        return;
+                    }
+                    // 逐镜模式：上传是异步的（传完才有节点 id）。拿得到 id 就**并入当前勾选并留在弹窗**，
+                    // 让用户能接着挂下一条；拿不到 id（老签名返回 void）就沿用「传完即关」的老行为。
+                    const pending = rowMode.onImport(files);
+                    if (!pending || typeof (pending as Promise<string[]>).then !== "function") {
+                        onClose();
+                        return;
+                    }
+                    setUploading(true);
+                    void (pending as Promise<string[] | void>)
+                        .then((ids) => {
+                            if (ids?.length) {
+                                setSelected((prev) => Array.from(new Set([...prev, ...ids])));
+                                return;
+                            }
+                            onClose();
+                        })
+                        .catch(() => onClose())
+                        .finally(() => setUploading(false));
                 }}
             />
             <button
                 type="button"
-                className="inline-flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed px-3 py-10 text-[13px] transition"
+                disabled={uploading}
+                className="inline-flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed px-3 py-10 text-[13px] transition disabled:opacity-50"
                 style={{
                     borderColor: dragging ? theme.toolbar.activeBg : theme.node.stroke,
                     color: theme.node.text,
@@ -388,7 +427,7 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                 onClick={() => fileRef.current?.click()}
             >
                 <Upload className="size-5" />
-                {t("canvas.scriptNode.assetChooseFile")}
+                {uploading ? t("canvas.scriptNode.assetUploading") : t("canvas.scriptNode.assetChooseFile")}
                 <span className="text-[11px] opacity-60">{t("canvas.scriptNode.assetDropHint")}</span>
             </button>
         </div>

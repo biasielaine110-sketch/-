@@ -221,8 +221,11 @@ type CanvasScriptNodeContentProps = {
     audioCandidates?: ScriptAssetCandidate[];
     /** 逐镜声音关联变更：整组替换这一镜的音频节点 id（传空数组即解绑）。 */
     onRowAudiosChange?: (nodeId: string, shotNo: number, ids: string[]) => void;
-    /** 逐镜导入本地音频：建音频节点并立刻关联到这一镜。 */
-    onRowAudioImport?: (nodeId: string, shotNo: number, files: File[]) => void;
+    /**
+     * 逐镜导入本地音频：建音频节点并立刻关联到这一镜。
+     * 返回新建的音频节点 id —— 弹窗据此把它们并入勾选并**保持打开**，方便一镜连挂好几条。
+     */
+    onRowAudioImport?: (nodeId: string, shotNo: number, files: File[]) => void | Promise<string[] | void>;
     /**
      * **按镜按资产**挂图：`"镜号:资产列key"`（如 `"3:scene"`）→ 图片节点 id 列表
      * （存在 metadata.scriptCellAssets）。在资产列格子里导入 / 链接 / 生成，铺链路时只连到这一镜的那一个资产。
@@ -1539,10 +1542,12 @@ export function CanvasScriptNodeContent({
                             event.stopPropagation();
                             setRowAudioTarget({ shotNo, ids });
                         }}
-                        title={visibleIds.length ? t("canvas.scriptNode.rowAudioEdit", { no: shotNo }) : t("canvas.scriptNode.rowAudioAdd", { no: shotNo })}
+                        // 这一格是**复数**的：文案永远表达「再挂一条」，绝不写「改声音」——
+                        // 否则会让人以为点进去是把已有那条换掉，而不是追加。
+                        title={visibleIds.length ? t("canvas.scriptNode.rowAudioAddMore", { no: shotNo, count: visibleIds.length }) : t("canvas.scriptNode.rowAudioAdd", { no: shotNo })}
                     >
-                        <Music2 className="size-3" />
-                        {visibleIds.length ? t("canvas.scriptNode.rowAudioEditShort") : t("canvas.scriptNode.rowAudioAddShort")}
+                        {visibleIds.length ? <Plus className="size-3" /> : <Music2 className="size-3" />}
+                        {visibleIds.length ? t("canvas.scriptNode.rowAudioAddMoreShort", { count: visibleIds.length }) : t("canvas.scriptNode.rowAudioAddShort")}
                     </button>
                 </div>
             </td>

@@ -474,8 +474,16 @@ export function sourceNodeReferenceImages(node: CanvasNodeData | null) {
     ];
 }
 
+/**
+ * 音频文件判定（上传 / 拖拽 / 粘贴三条路共用一套口径）。
+ *
+ * ⚠️ 扩展名兜底**不能只写 mp3/wav**：配音素材常是 m4a / aac / flac / ogg / opus，
+ * 而 Windows 资源管理器拖进来的文件 `file.type` 经常是空串 —— 只认 MIME 会把它们静默丢掉，
+ * 表现就是「一次选了三个音频，只进去一个」。MIME 命中就不再看扩展名。
+ */
 export function isAudioFile(file: File) {
-    return file.type.startsWith("audio/") || /\.(mp3|wav)$/i.test(file.name);
+    if (file.type.startsWith("audio/")) return true;
+    return /\.(mp3|wav|m4a|m4b|aac|flac|ogg|oga|opus|weba|webm|wma|aif|aiff|amr)$/i.test(file.name);
 }
 
 export function buildAngleLabel(params: CanvasImageAngleParams) {
