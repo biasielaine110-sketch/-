@@ -2915,6 +2915,98 @@ function applyKrea2PastoralMjSettings(
     return { workflow: next };
 }
 
+// MJ 风格工作流 V2.0 (runninghub.ai 2112477095216926722 / runninghub.cn 2112477039575003138).
+// Export: MJ风格工作流V2.0_api.json. Pure text-to-image Krea2-turbo graph with a six-LoRA stack
+// (cinematic_layout → detail_slider → realism_engine → zidiusArt → MJ 影视柔光 → MJ 风格滤镜).
+// The generic writers leave three knobs wrong:
+//   - output shape is ignored: EmptyLatentImage (198) takes width/height as links into
+//     ResolutionSelector (205), whose `aspect_ratio` is a label enum ("16:9 (Widescreen)") that
+//     writeRunningHubSize can neither read nor produce — every run stayed 16:9;
+//   - the same selector's `megapixels` is 4, and writeRunningHubTier force-maps any 1/2/4 onto
+//     the canvas tier; a named aspect preset (always "1k") therefore knocked the author's 4MP
+//     delivery down to 1MP;
+//   - KSampler (202) bakes a fixed seed, so identical inputs repeated identical images.
+// The prompt itself already lands on CR Prompt Text (214), but for the wrong reason: the generic
+// scorer rates 214 *and* CLIPTextEncode (199) 40, and 199's `text` is a link back into 214, so the
+// second write happens to be a no-op. It is written here explicitly so a node re-order can never
+// paint the encoder directly, or leak into the zeroed-out negative (200). Scoped to these two ids.
+const KREA2_MJ_STYLE_WORKFLOW_IDS = new Set(["2112477095216926722", "2112477039575003138"]);
+const KREA2_MJ_STYLE_PROMPT_NODE = "214";
+const KREA2_MJ_STYLE_SELECTOR_NODE = "205";
+const KREA2_MJ_STYLE_SAMPLER_NODE = "202";
+
+function isKrea2MjStyleWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    // The runtime id can arrive channel-encoded ("<channelId>::<model>") or prefixed ("rh-<id>").
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return KREA2_MJ_STYLE_WORKFLOW_IDS.has(id);
+    });
+}
+
+function applyKrea2MjStyleSettings(
+    workflow: ComfyWorkflow,
+    pristine: ComfyWorkflow,
+    prompt: string,
+    size?: { width: number; height: number } | null,
+    aspect = "",
+    rawSize = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+
+    // User prompt → ⚙️ CR Prompt Text (214). 199 consumes it through a link, so writing the source
+    // node is enough; the negative is ConditioningZeroOut (200) off the same encode (cfg 1).
+    if (prompt.trim()) {
+        const promptNode =
+            next[KREA2_MJ_STYLE_PROMPT_NODE] ||
+            findComfyNode(next, (node) => /CR\s*Prompt\s*Text/i.test(String(node.class_type || "")) && typeof node.inputs?.prompt === "string");
+        if (promptNode?.inputs && typeof promptNode.inputs.prompt === "string") promptNode.inputs.prompt = prompt;
+    }
+
+    // Canvas shape + precision → ResolutionSelector (205). Aspect is the label enum that only this
+    // adapter can produce; `megapixels` is rewritten here after the tier writer so the author's 4MP
+    // acts as a floor (a shape preset must not silently drop delivery to 1MP), while an explicit
+    // resolution request may still raise it.
+    const selector =
+        next[KREA2_MJ_STYLE_SELECTOR_NODE] ||
+        findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        const nextAspect = aspect || (size?.width && size.height ? closestResolutionSelectorAspect(size.width, size.height) : "");
+        if (nextAspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(nextAspect);
+        }
+        if (typeof selector.inputs.megapixels === "number") {
+            const bakedSelector =
+                pristine[KREA2_MJ_STYLE_SELECTOR_NODE] ||
+                findComfyNode(pristine, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+            const baked = typeof bakedSelector?.inputs?.megapixels === "number" ? bakedSelector.inputs.megapixels : NaN;
+            const explicit = Number(megapixels);
+            if (typeof megapixels === "string" && megapixels.trim() && Number.isFinite(explicit) && explicit > 0) {
+                selector.inputs.megapixels = explicit;
+            } else {
+                const tier = canvasResolutionTier(rawSize);
+                if (tier) {
+                    const tierMegapixels = tier === "4k" ? 4 : tier === "2k" ? 2 : 1;
+                    selector.inputs.megapixels = Number.isFinite(baked) && baked > 0 ? Math.max(baked, tierMegapixels) : tierMegapixels;
+                }
+            }
+        }
+    }
+
+    // Fixed seed on KSampler (202) → identical images for identical inputs; randomize per run.
+    const sampler = next[KREA2_MJ_STYLE_SAMPLER_NODE] || findComfyNode(next, (node) => /^KSampler/i.test(String(node.class_type || "")));
+    if (sampler?.inputs && typeof sampler.inputs.seed === "number") sampler.inputs.seed = randomComfySeed();
+
+    return { workflow: next };
+}
+
 /** Workflows that prefer model-script Export (API) JSON + comfy/run when the shared id denies ACL. */
 function usesRunningHubLocalExportGraph(workflowId?: string | null) {
     return (
@@ -3333,6 +3425,11 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const unified = applyQwenImage21UnifiedSettings(patched, workflow, prompt, size, aspect, imageValues);
         patched = unified.workflow;
         if (unified.structuralRepair) structuralRepair = true;
+    }
+    // Runs after the generic size/tier writers: the selector's label enum and the 4MP floor are
+    // both things those writers would get wrong (see applyKrea2MjStyleSettings).
+    if (isKrea2MjStyleWorkflow(workflowId)) {
+        patched = applyKrea2MjStyleSettings(patched, workflow, prompt, size, aspect, rawSize, megapixels).workflow;
     }
     if (isMinimaxH3StoryWorkflow(workflowId)) {
         // Pristine (pre-tier) megapixels become the fallback so an unset precision keeps the
