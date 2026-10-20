@@ -626,14 +626,63 @@ function applyQwenImage21DualSettings(
 //     baked, so an unknown 百万像素 combo value can never hard-fail the task;
 //   - the KSampler (12) bakes a fixed seed, so identical inputs repeated identical images.
 // The single reference loader (193) also feeds the optimizer's 图像_01, so the generic LoadImage
-// mapping is enough — no graph rewiring. Everything below is scoped to these two ids only.
+// mapping is enough *when the user actually brings a picture* — see the T2I branch below for the
+// one case where the link itself has to go. Everything below is scoped to these two ids only.
 const QWEN_IMAGE_21_UNIFIED_WORKFLOW_IDS = new Set(["2105280251281625089", "2105280279937130497"]);
+const QWEN_IMAGE_21_UNIFIED_OPTIMIZER_NODE = "179";
+const QWEN_IMAGE_21_UNIFIED_ROUTE_NODE = "170";
+const QWEN_IMAGE_21_UNIFIED_OPTIMIZER_IMAGE_FIELD = "图像_01";
 
 function isQwenImage21UnifiedWorkflow(workflowId?: string | null) {
     return Boolean(workflowId && QWEN_IMAGE_21_UNIFIED_WORKFLOW_IDS.has(workflowId));
 }
 
-function applyQwenImage21UnifiedSettings(workflow: ComfyWorkflow, pristine: ComfyWorkflow, prompt: string, size?: { width: number; height: number } | null, aspect = "") {
+/**
+ * Drop the saved graph's demo reference so a text-to-image run really is text-to-image.
+ *
+ * LoadImageGoohai (193) ships the workflow author's demo portrait, and that one node feeds both
+ * 179.图像_01 and, through GoohaiRouteBlocker (170), the encoder's image_01. `图像_01` is the
+ * graph's own mode switch: with an image attached the optimizer runs its vision/I2I PE model —
+ * it describes that portrait and folds the description into the prompt — and reports "do not
+ * block" on 是否阻断, so the same portrait also conditions the sampler. The canvas only rewrites
+ * 193.image when the user brings a reference, so *every* run without one was silently an edit of
+ * the author's demo character: role sheets, scenery, everything came back with that person.
+ *
+ * nodeInfoList overrides scalars only and cannot unlink an input, so this is a graph repair:
+ * unlink 图像_01 (the state the RunningHub UI shows when no image is connected, which puts the
+ * optimizer on its 文生图 model) and pin 是否阻断 so the reference can never reach the encoder
+ * even if the optimizer still answers "pass". Only runs with no reference take this path; a run
+ * that does have one keeps the author's graph untouched.
+ */
+function disconnectQwenImage21UnifiedDemoReference(workflow: ComfyWorkflow) {
+    const optimizer =
+        workflow[QWEN_IMAGE_21_UNIFIED_OPTIMIZER_NODE] ||
+        findComfyNode(workflow, (node) => /QwenImagePromptOptimizer/i.test(String(node.class_type || "")));
+    let repaired = false;
+    if (optimizer?.inputs && Array.isArray(optimizer.inputs[QWEN_IMAGE_21_UNIFIED_OPTIMIZER_IMAGE_FIELD])) {
+        delete optimizer.inputs[QWEN_IMAGE_21_UNIFIED_OPTIMIZER_IMAGE_FIELD];
+        repaired = true;
+    }
+    // The route blocker is the one whose 是否阻断 is still a link (174 is a second blocker in the
+    // same graph, but it is wired to a constant `true` and drives the mask slot).
+    const route =
+        workflow[QWEN_IMAGE_21_UNIFIED_ROUTE_NODE] ||
+        findComfyNode(workflow, (node) => node.class_type === "GoohaiRouteBlocker" && Array.isArray(node.inputs?.["是否阻断"]));
+    if (route?.inputs && Array.isArray(route.inputs["是否阻断"])) {
+        route.inputs["是否阻断"] = true;
+        repaired = true;
+    }
+    return repaired;
+}
+
+function applyQwenImage21UnifiedSettings(
+    workflow: ComfyWorkflow,
+    pristine: ComfyWorkflow,
+    prompt: string,
+    size?: { width: number; height: number } | null,
+    aspect = "",
+    imageValues: string[] = [],
+) {
     const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
 
     // User prompt → DF_Text_Box "Text" (node 22), head of the
@@ -675,7 +724,11 @@ function applyQwenImage21UnifiedSettings(workflow: ComfyWorkflow, pristine: Comf
         else if (/KSampler|SamplerCustom/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
     }
 
-    return next;
+    // No reference from the canvas → the saved demo portrait must not be what gets edited.
+    const hasReference = imageValues.some((value) => Boolean(String(value || "").trim()));
+    const structuralRepair = hasReference ? false : disconnectQwenImage21UnifiedDemoReference(next);
+
+    return { workflow: next, structuralRepair };
 }
 
 // MiniMax H3 高一致性-故事多分镜图 workflow (reference-to-video + 6 storyboard frames).
@@ -3273,8 +3326,14 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         patched = dual.workflow;
         structuralRepair = dual.rewired;
     }
-    // Runs after the generic prompt writer so the scoped prompt slot wins over it.
-    if (isQwenImage21UnifiedWorkflow(workflowId)) patched = applyQwenImage21UnifiedSettings(patched, workflow, prompt, size, aspect);
+    // Runs after the generic prompt writer so the scoped prompt slot wins over it. A run with no
+    // reference also gets a graph repair (see applyQwenImage21UnifiedSettings) that unlinks the
+    // author's demo portrait — hence `graph` below for that case.
+    if (isQwenImage21UnifiedWorkflow(workflowId)) {
+        const unified = applyQwenImage21UnifiedSettings(patched, workflow, prompt, size, aspect, imageValues);
+        patched = unified.workflow;
+        if (unified.structuralRepair) structuralRepair = true;
+    }
     if (isMinimaxH3StoryWorkflow(workflowId)) {
         // Pristine (pre-tier) megapixels become the fallback so an unset precision keeps the
         // workflow's own default instead of the tier writer's 1k downgrade.
