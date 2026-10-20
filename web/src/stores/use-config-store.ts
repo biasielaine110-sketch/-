@@ -60,7 +60,7 @@ export type AiConfig = {
     channelMode: "remote" | "local";
     baseUrl: string;
     apiKey: string;
-    /** Ordered backup keys for the active channel (auto-switch on balance exhaustion). */
+    /** Ordered backup keys for the active channel (random pick per call; auto-switch when a key is refused). */
     apiKeys?: string[];
     apiFormat: ApiCallFormat;
     channels: ModelChannel[];

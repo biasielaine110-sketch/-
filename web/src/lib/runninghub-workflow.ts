@@ -236,6 +236,22 @@ function isBalanceMessage(message: string) {
     return /NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message);
 }
 
+/**
+ * "This key cannot serve this request" — a different account in the same channel may still work, so
+ * the caller walks to the next key instead of failing the whole generation. Covers a drained balance,
+ * a dead/revoked key (401), and a workflow the account has no access to (multi-account channels often
+ * hold keys with uneven workflow permissions, which otherwise fails at random).
+ * Deliberately NOT included: UNKNOWN_ERROR and plain network/transport errors — those say nothing
+ * about the key, and retrying every key just multiplies the wait.
+ */
+export function isRunningHubKeyFailoverMessage(message: string) {
+    const text = String(message || "");
+    if (isBalanceMessage(text) || isAuthMessage(text) || isWorkflowPermissionMessage(text)) return true;
+    return /status\s*code\s*40[13]|unauthori[sz]ed|invalid\s*(?:api[\s-_]*)?key|api[\s-_]*key\s*(?:is\s*)?(?:invalid|expired|rejected|not\s*(?:valid|found|exist))|token\s*(?:is\s*)?(?:invalid|expired)/i.test(
+        text,
+    );
+}
+
 function isUnknownServerError(message: string) {
     return /UNKNOWN_ERROR|^Unknown error/i.test(message);
 }
@@ -4160,8 +4176,8 @@ export async function runRunningHubWorkflow(args: {
     // Key list: primary + backups, deduped. With multiple keys the order is shuffled per call
     // (Fisher-Yates below) so every generation spreads load across accounts at random — applies
     // to both runninghub.cn and runninghub.ai, which are the only origins that reach this
-    // function. The balance-exhaustion fallback then walks the shuffled order unchanged, so an
-    // exhausted key still falls through to the next one.
+    // function. A key the platform refuses (drained balance, dead key, no workflow access) then
+    // falls through to the next one in the same shuffled order.
     const keys = Array.from(
         new Set(
             [primary, ...(args.apiKeys || []).map((key) => runningHubApiKey(args.baseUrl, key))]
@@ -4176,7 +4192,7 @@ export async function runRunningHubWorkflow(args: {
         [keys[i], keys[j]] = [keys[j], keys[i]];
     }
 
-    const isBalanceError = (error: unknown) => isBalanceMessage(errorText(error));
+    const canTryNextKey = (error: unknown) => isRunningHubKeyFailoverMessage(errorText(error));
 
     let lastError: unknown = null;
     for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
@@ -4187,10 +4203,11 @@ export async function runRunningHubWorkflow(args: {
             // Cancellation must propagate immediately — never switch keys on a user abort.
             if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
             lastError = error;
-            // Only a balance/quota error justifies moving to the next key. Anything else
-            // (auth, bad workflow, unknown server error) is surfaced as-is.
-            if (!isBalanceError(error)) throw explainRunningHubError(error, workflowId);
-            // Fall through to the next key; when the last key also runs out, surface the balance error.
+            // A key-level rejection (balance / auth / no workflow access) moves on to the next key.
+            // Anything else (bad graph, unknown server error, transport failure) is surfaced as-is:
+            // retrying it with every key would only multiply the wait.
+            if (!canTryNextKey(error)) throw explainRunningHubError(error, workflowId);
+            // Fall through to the next key; when the last key is refused too, surface that last error.
         }
     }
     throw explainRunningHubError(lastError, workflowId);
@@ -4242,7 +4259,10 @@ async function runRunningHubWorkflowWithKey(args: {
         workflow = await fetchWorkflow(origin, apiKey, workflowId, request.signal).catch((error: unknown) => {
             if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
             const message = errorText(error);
-            if (isAuthMessage(message)) throw explainRunningHubError(error, workflowId);
+            // A dead key is the outer loop's business: rethrow untouched so it can see the marker
+            // (APIKEY_UNAUTHORIZED / TOKEN_INVALID …) and fail over to the next account. Wrapping it
+            // in an explained error here is what used to make a bad key look like a dead end.
+            if (isAuthMessage(message)) throw error;
             if (isWorkflowPermissionMessage(message) && usesRunningHubLocalExportGraph(workflowId)) {
                 fetchPermissionDenied = true;
                 return null;
@@ -4359,7 +4379,8 @@ async function runRunningHubWorkflowWithKey(args: {
     } catch (error) {
         if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
         const message = errorText(error);
-        if (isAuthMessage(message)) throw explainRunningHubError(error, workflowId);
+        // Dead key → hand it back untouched so the outer loop can fail over to the next account.
+        if (isAuthMessage(message)) throw error;
         // Balance/quota errors are terminal and platform-side — surface them directly instead of
         // retrying or probing the webapp fallback (which would just fail the same way again).
         // They are rethrown raw so the outer multi-key loop can switch to the next key.
@@ -4416,9 +4437,10 @@ async function runRunningHubWorkflowWithKey(args: {
         }
     }
     if (task.errorMessage || isFailedStatus(task.status)) {
-        // A failed task can also carry a balance error in its failure reason — let the outer loop switch keys.
+        // A failed task can also carry a key-level rejection (balance / dead key / lost workflow
+        // access) in its failure reason — let the outer loop switch keys.
         const message = task.errorMessage || "";
-        if (isBalanceMessage(message)) {
+        if (isRunningHubKeyFailoverMessage(message)) {
             const err = new Error(message);
             if (isLastKey) throw explainRunningHubError(err, workflowId);
             throw err;
@@ -4429,8 +4451,8 @@ async function runRunningHubWorkflowWithKey(args: {
         try {
             task = await pollTaskOutputs({ origin, apiKey, taskId: task.taskId, signal: request.signal });
         } catch (error) {
-            // Polling can surface a late balance failure; let the outer loop switch keys.
-            if (isBalanceMessage(errorText(error))) {
+            // Polling can surface a late key-level rejection; let the outer loop switch keys.
+            if (isRunningHubKeyFailoverMessage(errorText(error))) {
                 if (isLastKey) throw explainRunningHubError(error, workflowId);
                 throw error;
             }
