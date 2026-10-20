@@ -2922,9 +2922,10 @@ function applyKrea2PastoralMjSettings(
 //   - output shape is ignored: EmptyLatentImage (198) takes width/height as links into
 //     ResolutionSelector (205), whose `aspect_ratio` is a label enum ("16:9 (Widescreen)") that
 //     writeRunningHubSize can neither read nor produce — every run stayed 16:9;
-//   - the same selector's `megapixels` is 4, and writeRunningHubTier force-maps any 1/2/4 onto
-//     the canvas tier; a named aspect preset (always "1k") therefore knocked the author's 4MP
-//     delivery down to 1MP;
+//   - the same selector's `megapixels` is 4, and writeRunningHubTier force-maps 1/2/4 onto the
+//     canvas tier. A tier number is not an area: 4MP at 16:9 is ~2672x1504, so a 4K selection
+//     could never deliver 3840x2160 and a 2K one could never deliver 2048x1152. Owned here, from
+//     the resolved canvas pixels; `auto` alone keeps the baked 4MP.
 //   - KSampler (202) bakes a fixed seed, so identical inputs repeated identical images.
 // The prompt itself already lands on CR Prompt Text (214), but for the wrong reason: the generic
 // scorer rates 214 *and* CLIPTextEncode (199) 40, and 199's `text` is a link back into 214, so the
@@ -2952,7 +2953,6 @@ function isKrea2MjStyleWorkflow(workflowId?: string | null) {
 
 function applyKrea2MjStyleSettings(
     workflow: ComfyWorkflow,
-    pristine: ComfyWorkflow,
     prompt: string,
     size?: { width: number; height: number } | null,
     aspect = "",
@@ -2971,9 +2971,9 @@ function applyKrea2MjStyleSettings(
     }
 
     // Canvas shape + precision → ResolutionSelector (205). Aspect is the label enum that only this
-    // adapter can produce; `megapixels` is rewritten here after the tier writer so the author's 4MP
-    // acts as a floor (a shape preset must not silently drop delivery to 1MP), while an explicit
-    // resolution request may still raise it.
+    // adapter can produce; `megapixels` is an absolute area, rewritten here after the tier writer so
+    // the canvas preset is what actually ships (2048x1152 → 2.36MP, 3840x2160 → 8.29MP, `auto` →
+    // the author's 4MP).
     const selector =
         next[KREA2_MJ_STYLE_SELECTOR_NODE] ||
         findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
@@ -2983,18 +2983,20 @@ function applyKrea2MjStyleSettings(
             selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(nextAspect);
         }
         if (typeof selector.inputs.megapixels === "number") {
-            const bakedSelector =
-                pristine[KREA2_MJ_STYLE_SELECTOR_NODE] ||
-                findComfyNode(pristine, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
-            const baked = typeof bakedSelector?.inputs?.megapixels === "number" ? bakedSelector.inputs.megapixels : NaN;
             const explicit = Number(megapixels);
             if (typeof megapixels === "string" && megapixels.trim() && Number.isFinite(explicit) && explicit > 0) {
                 selector.inputs.megapixels = explicit;
             } else {
-                const tier = canvasResolutionTier(rawSize);
-                if (tier) {
-                    const tierMegapixels = tier === "4k" ? 4 : tier === "2k" ? 2 : 1;
-                    selector.inputs.megapixels = Number.isFinite(baked) && baked > 0 ? Math.max(baked, tierMegapixels) : tierMegapixels;
+                // WYSIWYG: `megapixels` is an absolute area, so the canvas preset has to be converted
+                // into the pixel budget it actually stands for. A tier number is wrong for every
+                // ratio but square — 4 would be ~2672x1504 at 16:9, not the 4K preset's 3840x2160,
+                // and 2 would be 1792x1008 at 16:9, not 2048x1152. Fractions are fine here: the same
+                // ResolutionSelector accepts 8.3 / 4.2 elsewhere in this file. `auto` (no concrete
+                // size) is the one case that keeps the author's baked 4MP.
+                const pixels = size?.width && size.height ? size : resolveCanvasPixels(rawSize);
+                if (pixels?.width && pixels.height) {
+                    const area = Math.round(((pixels.width * pixels.height) / 1_000_000) * 100) / 100;
+                    if (Number.isFinite(area) && area > 0) selector.inputs.megapixels = Math.min(16, Math.max(0.1, area));
                 }
             }
         }
@@ -3426,10 +3428,10 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         patched = unified.workflow;
         if (unified.structuralRepair) structuralRepair = true;
     }
-    // Runs after the generic size/tier writers: the selector's label enum and the 4MP floor are
-    // both things those writers would get wrong (see applyKrea2MjStyleSettings).
+    // Runs after the generic size/tier writers: the selector's label enum and the WYSIWYG
+    // megapixels are both things those writers cannot deliver (see applyKrea2MjStyleSettings).
     if (isKrea2MjStyleWorkflow(workflowId)) {
-        patched = applyKrea2MjStyleSettings(patched, workflow, prompt, size, aspect, rawSize, megapixels).workflow;
+        patched = applyKrea2MjStyleSettings(patched, prompt, size, aspect, rawSize, megapixels).workflow;
     }
     if (isMinimaxH3StoryWorkflow(workflowId)) {
         // Pristine (pre-tier) megapixels become the fallback so an unset precision keeps the
