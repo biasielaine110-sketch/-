@@ -3547,6 +3547,93 @@ export function applyRunningHubReferenceAudios(workflow: ComfyWorkflow, fileName
     return { workflow: applied ? next : workflow, applied, planted };
 }
 
+/**
+ * Reference video → `ref_videos.ref_video_N` slots (VHS_LoadVideo 27 on the 文武双全 graph).
+ *
+ * A clip is not interchangeable with an image the way images are with each other: the slot's
+ * loader stays the node the sampler links into, and it reads a *filename inside the worker's input
+ * dir* — exactly what `/task/openapi/upload` returns. The author shipped `video: ""`, and the
+ * family adapter prunes that slot as invalid, so this MUST run before `buildWorkflowPatch` or a
+ * supplied clip is silently dropped.
+ *
+ * Scoping is the caller's job (only graphs whose adapter understands the slot call this).
+ */
+export function applyRunningHubReferenceVideos(workflow: ComfyWorkflow, fileNames: string[]): { workflow: ComfyWorkflow; applied: number } {
+    const names = (fileNames || [])
+        .map((name) => String(name || "").trim())
+        .filter(Boolean)
+        .slice(0, 3);
+    if (!names.length) return { workflow, applied: 0 };
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    let applied = 0;
+
+    // Authored slot order (`ref_video_0`, `_1`, …) decides which upload lands where — never the
+    // loader's node id, which in these exports is not even monotonic.
+    for (const node of Object.values(next)) {
+        const inputs = node?.inputs;
+        if (!inputs) continue;
+        const slots = Object.keys(inputs)
+            .map((key) => ({ key, index: Number(/^ref_videos\.ref_video_(\d+)$/.exec(key)?.[1] ?? NaN) }))
+            .filter((slot) => Number.isFinite(slot.index))
+            .sort((a, b) => a.index - b.index);
+        if (!slots.length) continue;
+        slots.forEach((slot, position) => {
+            const name = names[position];
+            if (!name) return;
+            const link = inputs[slot.key];
+            const sourceId = Array.isArray(link) ? String(link[0]) : "";
+            const loader = sourceId ? next[sourceId] : undefined;
+            if (!loader || !isComfyVideoLoaderNode(loader)) return;
+            writeComfyVideoName(loader, name);
+            applied += 1;
+        });
+    }
+    if (applied) return { workflow: next, applied };
+
+    // Fallback: graphs that consume a clip through a plain loader (no `ref_videos.*` slot), in
+    // document order — mirrors the audio fallback so a clip is never silently ignored.
+    const loaders = Object.entries(next)
+        .filter(([, node]) => isComfyVideoLoaderNode(node))
+        .sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true }));
+    loaders.slice(0, names.length).forEach(([, node], position) => {
+        writeComfyVideoName(node, names[position]);
+        applied += 1;
+    });
+    return { workflow: applied ? next : workflow, applied };
+}
+
+function isComfyVideoLoaderNode(node?: ComfyNode) {
+    return /^(VHS_LoadVideo\w*|LoadVideo\w*)$/i.test(String(node?.class_type || ""));
+}
+
+function comfyVideoFieldName(node?: ComfyNode) {
+    const inputs = node?.inputs || {};
+    for (const field of ["video", "file", "video_path", "filename"]) {
+        if (field in inputs) return field;
+    }
+    return "";
+}
+
+/** Write the uploaded filename; keep VHS's `videopreview` blob pointing at the same upload. */
+function writeComfyVideoName(node: ComfyNode, name: string) {
+    const inputs = node?.inputs;
+    if (!inputs) return;
+    const field = comfyVideoFieldName(node);
+    if (field) inputs[field] = name;
+    const preview = inputs.videopreview;
+    if (typeof preview !== "string" || !preview.trim()) return;
+    try {
+        const parsed = JSON.parse(preview) as Record<string, unknown> | null;
+        if (!parsed || typeof parsed !== "object") return;
+        parsed.filename = name;
+        if ("subfolder" in parsed) parsed.subfolder = "";
+        if ("type" in parsed) parsed.type = "input";
+        inputs.videopreview = JSON.stringify(parsed);
+    } catch {
+        // A non-JSON preview string is author data — leave it untouched.
+    }
+}
+
 /** Container extension for the uploaded filename — RunningHub keys the file type off it. */
 function audioFileExtension(source: string) {
     const mime = (/^data:([^;,]+)[;,]/.exec(source)?.[1] || "").toLowerCase();
@@ -3557,6 +3644,17 @@ function audioFileExtension(source: string) {
     if (/flac/.test(mime)) return ".flac";
     if (/webm/.test(mime)) return ".webm";
     return ".mp3";
+}
+
+/** Container extension for the uploaded clip — RunningHub keys the file type off it. */
+function videoFileExtension(source: string) {
+    const mime = (/^data:([^;,]+)[;,]/.exec(source)?.[1] || "").toLowerCase();
+    if (/quicktime|mov/.test(mime)) return ".mov";
+    if (/webm/.test(mime)) return ".webm";
+    if (/matroska|mkv/.test(mime)) return ".mkv";
+    if (/x-msvideo|avi/.test(mime)) return ".avi";
+    if (/gif/.test(mime)) return ".gif";
+    return ".mp4";
 }
 
 export type RunningHubNodeInfo = { nodeId: string; fieldName: string; fieldValue: string };
@@ -4102,6 +4200,15 @@ async function uploadAudioFile(origin: string, apiKey: string, source: string, f
     return uploadBinary(origin, apiKey, source, fileName, signal, { shrink: false, fallbackType: "audio/mpeg" });
 }
 
+/**
+ * Reference clips go up byte-for-byte for the same reason audio does: `shrinkOversizedReferenceDataUrl`
+ * decodes through an `<img>`, which turns a clip into a corrupt payload. Direct-first matters here
+ * because a clip is far bigger than any image, and the Pages proxy closes large multipart bodies.
+ */
+async function uploadVideoFile(origin: string, apiKey: string, source: string, fileName: string, signal?: AbortSignal) {
+    return uploadBinary(origin, apiKey, source, fileName, signal, { shrink: false, fallbackType: "video/mp4", preferDirect: true });
+}
+
 async function uploadBinary(
     origin: string,
     apiKey: string,
@@ -4381,6 +4488,8 @@ export async function runRunningHubWorkflow(args: {
     referenceDataUrls?: string[];
     /** Audio references (data: URLs) → uploaded, then written into `ref_audios.ref_audio_*`. */
     referenceAudioDataUrls?: string[];
+    /** Video reference (data: URL) → uploaded, then written into `ref_videos.ref_video_*`. */
+    referenceVideoDataUrls?: string[];
     signal?: AbortSignal;
 }): Promise<RunningHubMedia> {
     const origin = runningHubOrigin(args.baseUrl);
@@ -4451,6 +4560,7 @@ async function runRunningHubWorkflowWithKey(args: {
         media?: "image" | "video";
         referenceDataUrls?: string[];
         referenceAudioDataUrls?: string[];
+        referenceVideoDataUrls?: string[];
         signal?: AbortSignal;
     };
 }): Promise<RunningHubMedia> {
@@ -4561,25 +4671,42 @@ async function runRunningHubWorkflowWithKey(args: {
     // billing a render that ignores it (also covers the webapp/nodeInfo path, which has no graph).
     if (audioSources.length && !audioPatch?.applied) throw new Error(apiText("runningHubAudioNotApplied"));
     const audioOverrides = audioPatch?.applied ? workflowNodeInfoList(workflow!, audioPatch.workflow) : [];
-    const patch: RunningHubWorkflowPatch = audioPatch?.workflow
-        ? buildWorkflowPatch(audioPatch.workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "")
-        : workflow
-          ? buildWorkflowPatch(workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "")
-          : { nodeInfoList: [] };
+    // Reference clip: only the 文武双全 family has an adapter that understands `ref_videos.*`
+    // (everywhere else the slot, if any, is pruned or means something else). Uploaded and written
+    // BEFORE the per-workflow patch for the same reason audio is: that patch deletes an empty
+    // `VHS_LoadVideo` slot, so filling it first is what keeps the link and the author's node id.
+    const videoSources = isMinimaxH3YzjinyuWorkflow(workflowId) ? (request.referenceVideoDataUrls || []).filter(Boolean).slice(0, 1) : [];
+    const uploadedVideos: string[] = [];
+    for (let index = 0; index < videoSources.length; index += 1) {
+        uploadedVideos.push(await uploadVideoFile(origin, apiKey, videoSources[index], `ref-video-${index + 1}${videoFileExtension(videoSources[index])}`, request.signal));
+    }
+    let prepared: ComfyWorkflow | undefined = audioPatch?.workflow || workflow || undefined;
+    let videoApplied = 0;
+    if (prepared && uploadedVideos.length) {
+        const videoPatch = applyRunningHubReferenceVideos(prepared, uploadedVideos);
+        videoApplied = videoPatch.applied;
+        prepared = videoPatch.workflow;
+    }
+    // Same contract as audio: a clip that cannot be placed is an error, never a render that ignores it.
+    if (videoSources.length && !videoApplied) throw new Error(apiText("runningHubVideoNotApplied"));
+    const patch: RunningHubWorkflowPatch = prepared
+        ? buildWorkflowPatch(prepared, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "")
+        : { nodeInfoList: [] };
     const overrides = [...patch.nodeInfoList, ...audioOverrides];
     // Planted `LoadAudio` nodes only exist in our copy, and `nodeInfoList` cannot create links —
-    // ship the graph whenever the audio had to invent nodes.
-    const repairedGraph = patch.graph || (audioPatch?.planted ? audioPatch.workflow : undefined);
+    // ship the graph whenever the audio had to invent nodes, or a clip filename had to be written
+    // into a loader the saved workflow left blank.
+    const repairedGraph = patch.graph || (audioPatch?.planted ? audioPatch.workflow : undefined) || (videoApplied ? prepared : undefined);
     // `strength` is here for the LoRA 味型 knob (strength_model on the MJ graph) — without it the
     // whitelist silently drops the override and the picker does nothing.
-    const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|audio|resolution|megapixel|aspect_ratio|switch|strength/i.test(item.fieldName));
+    const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|audio|video|resolution|megapixel|aspect_ratio|switch|strength/i.test(item.fieldName));
     // Observability for the "finished but unrelated to my references" class of bug: one line that
     // shows whether the uploads and their overrides actually made it into the submission.
-    const referenceCount = (request.referenceDataUrls || []).filter(Boolean).length + audioSources.length;
+    const referenceCount = (request.referenceDataUrls || []).filter(Boolean).length + audioSources.length + videoSources.length;
     const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
     if (referenceCount) {
         console.info(
-            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
         );
     }
     let task: RunningHubTaskView;

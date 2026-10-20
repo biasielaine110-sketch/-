@@ -30,12 +30,12 @@ import {
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
-import type { ReferenceAudio } from "@/types/media";
+import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
 type VideoResponse = { id: string; status?: string; error?: { message?: string }; url?: string; result_url?: string; video_url?: string; content?: { video_url?: string; url?: string } | null };
 type ApiVideoResponse = VideoResponse | { code?: number | string; data?: VideoResponse | null; msg?: string; message?: string; error?: { message?: string } };
 type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
-type RequestOptions = { signal?: AbortSignal; referenceAudios?: ReferenceAudio[] };
+type RequestOptions = { signal?: AbortSignal; referenceAudios?: ReferenceAudio[]; referenceVideos?: ReferenceVideo[] };
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string; extraImages?: string[] };
@@ -301,6 +301,13 @@ async function createRunningHubVideoTask(
         }),
     );
     const audioSources = await resolveNativeComfyAudioSources(options?.referenceAudios || [], options?.signal);
+    // 文武双全 (YZ金鱼) is the only RunningHub family whose graph exposes `ref_videos.ref_video_0`.
+    // Scoped to it so every other model keeps its image+audio-only payload (and never pays for an
+    // upload it cannot place). A clip the user wired but we cannot read must fail loudly instead of
+    // rendering something unrelated.
+    const requestedVideos = options?.referenceVideos || [];
+    const videoSources = isMinimaxH3YzjinyuWorkflowId(model) ? await resolveRunningHubVideoSources(requestedVideos, options?.signal) : [];
+    if (requestedVideos.length && isMinimaxH3YzjinyuWorkflowId(model) && !videoSources.length) throw new Error(apiText("referenceVideoReadFailed"));
     const result = await runRunningHubWorkflow({
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
@@ -320,6 +327,8 @@ async function createRunningHubVideoTask(
         // Timbre / voice reference: uploaded and written into `ref_audios.ref_audio_*` by the
         // RunningHub adapter. Without this the audio node on the canvas did nothing at all.
         referenceAudioDataUrls: audioSources,
+        // Same story for a clip wired into the video node: written into `ref_videos.ref_video_0`.
+        ...(videoSources.length ? { referenceVideoDataUrls: videoSources } : {}),
         signal: options?.signal,
     });
     const videoUrl = result.videos[0];
@@ -453,6 +462,51 @@ async function resolveNativeComfyAudioSources(audios: ReferenceAudio[], signal?:
         }
     }
     return out;
+}
+
+/**
+ * Resolve a canvas clip into an **uploadable data URL**. RunningHub's VHS loader takes a filename
+ * inside the worker's input dir, so a remote URL cannot be handed through untouched the way an
+ * image URL can — the bytes have to go up (same reason audio is resolved to a data URL).
+ * Canvas clips live in IndexedDB under a `media:` storage key; anything else falls back to the
+ * three-step fetch ladder the result download uses (COS/TOS buckets omit ACAO).
+ */
+async function resolveRunningHubVideoSources(videos: ReferenceVideo[], signal?: AbortSignal): Promise<string[]> {
+    const video = videos[0];
+    if (!video) return [];
+    const type = video.type || "video/mp4";
+    const url = String(video.url || "").trim();
+    const storageKey = String(video.storageKey || "").trim();
+    const asDataUrl = async (blob: Blob) => blobToDataUrl(blob.type.startsWith("video/") ? blob : new Blob([blob], { type }));
+    if (storageKey.includes(":")) {
+        try {
+            const { getMediaBlob } = await import("@/services/file-storage");
+            const blob = await getMediaBlob(storageKey);
+            if (blob?.size) return [await asDataUrl(blob)];
+        } catch {
+            // fall through to the URL ladder
+        }
+    }
+    if (/^data:video\//i.test(url)) return [url];
+    if (/^blob:/i.test(url) || url.startsWith("/")) {
+        try {
+            const blob = await (await fetch(url, { signal })).blob();
+            if (blob.size) return [await asDataUrl(blob)];
+        } catch (error) {
+            if (signal?.aborted) throw error;
+        }
+        return [];
+    }
+    if (!/^https?:\/\//i.test(url)) return [];
+    for (const target of [...new Set([url, proxyMediaUrl(url), forceProxyMediaUrl(url)].filter(Boolean))]) {
+        try {
+            const response = await axios.get<Blob>(target, { responseType: "blob", signal });
+            if (response.data?.size) return [await asDataUrl(response.data)];
+        } catch (error) {
+            if (axios.isCancel(error) || signal?.aborted) throw error;
+        }
+    }
+    return [];
 }
 
 /**

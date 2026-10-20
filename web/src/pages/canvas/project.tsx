@@ -5218,6 +5218,9 @@ function AtelierCanvasPage() {
                         const videoResult = await requestVideoGeneration(generationConfig, effectivePrompt, referenceImages, {
                             signal: controller.signal,
                             referenceAudios: generationContext.referenceAudios || [],
+                            // A clip wired into the video node is a real reference (not just a frame):
+                            // the RunningHub 文武双全 graph maps it onto `ref_videos.ref_video_0`.
+                            referenceVideos: generationContext.referenceVideos || [],
                         });
                         if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
                         const video = await storeGeneratedVideo(videoResult);
@@ -5586,6 +5589,7 @@ function AtelierCanvasPage() {
                         const videoResult = await requestVideoGeneration(generationConfig, prompt, retryImages, {
                             signal: controller.signal,
                             referenceAudios: context?.referenceAudios || [],
+                            referenceVideos: context?.referenceVideos || [],
                         });
                         if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
                         const video = await storeGeneratedVideo(videoResult);
