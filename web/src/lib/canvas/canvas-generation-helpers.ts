@@ -406,6 +406,7 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         videoAudioMode:
             node?.metadata?.audioMode || nativeVideoDefaults.videoAudioMode || config.videoAudioMode || defaultConfig.videoAudioMode,
         videoFisherMode: node?.metadata?.fisherMode || config.videoFisherMode || defaultConfig.videoFisherMode,
+        mjFlavor: node?.metadata?.mjFlavor || config.mjFlavor || defaultConfig.mjFlavor,
         audioVoice: node?.metadata?.audioVoice || config.audioVoice || defaultConfig.audioVoice,
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,

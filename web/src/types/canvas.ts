@@ -259,6 +259,8 @@ export type CanvasNodeMetadata = {
     audioMode?: string;
     /** Work-Fisher RH pipeline mode: `video` | `character` | `scene` | `multiview`. */
     fisherMode?: string;
+    /** MJ 风格 V2.0 LoRA 味型：`strong` | `standard` | `light` | `off`. */
+    mjFlavor?: string;
     /** Native H3 client FIFO: 1-based queue position while waiting/running. */
     nativeVideoQueuePosition?: number;
     /** Native H3 client FIFO: total jobs in the canvas queue. */

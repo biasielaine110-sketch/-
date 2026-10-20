@@ -2935,6 +2935,20 @@ const KREA2_MJ_STYLE_WORKFLOW_IDS = new Set(["2112477095216926722", "21124770395
 const KREA2_MJ_STYLE_PROMPT_NODE = "214";
 const KREA2_MJ_STYLE_SELECTOR_NODE = "205";
 const KREA2_MJ_STYLE_SAMPLER_NODE = "202";
+/** 210 krea2-Cc-MJ-影视柔光 / 211 krea2-Cc-MJ-风格滤镜 — the two LoRAs that carry the MJ look. */
+const KREA2_MJ_FLAVOR_NODES = ["210", "211"] as const;
+/** `standard` is null on purpose: the author's 0.55 / 0.60 stays untouched unless asked. */
+const KREA2_MJ_FLAVOR_STRENGTHS: Record<string, readonly [number, number] | null> = {
+    strong: [0.8, 0.85],
+    standard: null,
+    light: [0.3, 0.3],
+    off: [0, 0],
+};
+
+function normalizeKrea2MjFlavor(value?: string | null) {
+    const raw = String(value || "").trim().toLowerCase();
+    return raw === "strong" || raw === "light" || raw === "off" ? raw : "standard";
+}
 
 function isKrea2MjStyleWorkflow(workflowId?: string | null) {
     const raw = String(workflowId || "")
@@ -2951,6 +2965,11 @@ function isKrea2MjStyleWorkflow(workflowId?: string | null) {
     });
 }
 
+/** Public gate for the MJ 风格 V2.0 T2I graph (the canvas shows its 味型 picker only for it). */
+export function isKrea2MjStyleWorkflowId(workflowId?: string | null) {
+    return isKrea2MjStyleWorkflow(workflowId);
+}
+
 function applyKrea2MjStyleSettings(
     workflow: ComfyWorkflow,
     prompt: string,
@@ -2958,6 +2977,7 @@ function applyKrea2MjStyleSettings(
     aspect = "",
     rawSize = "",
     megapixels = "",
+    mjFlavor = "",
 ): { workflow: ComfyWorkflow } {
     const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
 
@@ -3000,6 +3020,19 @@ function applyKrea2MjStyleSettings(
                 }
             }
         }
+    }
+
+    // MJ 味型 → the two MJ LoRAs only (210 影视柔光 / 211 风格滤镜). `standard` writes nothing so the
+    // author's 0.55 / 0.60 stays authoritative; `off` zeroes both rather than unlinking them, because
+    // a strength is a scalar nodeInfoList can carry while a link change needs the whole graph.
+    // 209 zidiusArt is the baseline art style and is intentionally NOT part of this knob.
+    const flavor = KREA2_MJ_FLAVOR_STRENGTHS[normalizeKrea2MjFlavor(mjFlavor)];
+    if (flavor) {
+        KREA2_MJ_FLAVOR_NODES.forEach((nodeId, index) => {
+            const node = next[nodeId];
+            const strength = flavor[index];
+            if (node?.inputs && typeof node.inputs.strength_model === "number") node.inputs.strength_model = strength;
+        });
     }
 
     // Fixed seed on KSampler (202) → identical images for identical inputs; randomize per run.
@@ -3323,7 +3356,7 @@ export function workflowNodeInfoList(before: ComfyWorkflow, after: ComfyWorkflow
 
 // Exported for the workflow-diagnostics path and tests: the transformation is the risky part, so it
 // is exercised directly instead of only through a live task submission.
-export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string, megapixels = ""): RunningHubWorkflowPatch {
+export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string, megapixels = "", mjFlavor = ""): RunningHubWorkflowPatch {
     let patched = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
     // The 四视图 asset-card graph opts out of the generic writers entirely (see
     // applyMinimaxH3FourViewSettings for what each of them would break here). Its own adapter
@@ -3431,7 +3464,7 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
     // Runs after the generic size/tier writers: the selector's label enum and the WYSIWYG
     // megapixels are both things those writers cannot deliver (see applyKrea2MjStyleSettings).
     if (isKrea2MjStyleWorkflow(workflowId)) {
-        patched = applyKrea2MjStyleSettings(patched, prompt, size, aspect, rawSize, megapixels).workflow;
+        patched = applyKrea2MjStyleSettings(patched, prompt, size, aspect, rawSize, megapixels, mjFlavor).workflow;
     }
     if (isMinimaxH3StoryWorkflow(workflowId)) {
         // Pristine (pre-tier) megapixels become the fallback so an unset precision keeps the
@@ -4096,6 +4129,8 @@ export async function runRunningHubWorkflow(args: {
     seconds?: string;
     /** Megapixels override for workflows exposing a ResolutionSelector (MiniMax H3 story). */
     resolution?: string;
+    /** MJ 风格 V2.0 LoRA 味型 (`strong` | `standard` | `light` | `off`) — that pair only. */
+    mjFlavor?: string;
     /** Work-Fisher pipeline mode (video / character / scene / multiview). */
     fisherMode?: string;
     media?: "image" | "video";
@@ -4165,6 +4200,8 @@ async function runRunningHubWorkflowWithKey(args: {
         size?: string;
         seconds?: string;
         resolution?: string;
+        /** MJ 风格 V2.0 LoRA 味型 (`strong` | `standard` | `light` | `off`) — that pair only. */
+        mjFlavor?: string;
         fisherMode?: string;
         media?: "image" | "video";
         referenceDataUrls?: string[];
@@ -4273,15 +4310,17 @@ async function runRunningHubWorkflowWithKey(args: {
     if (audioSources.length && !audioPatch?.applied) throw new Error(apiText("runningHubAudioNotApplied"));
     const audioOverrides = audioPatch?.applied ? workflowNodeInfoList(workflow!, audioPatch.workflow) : [];
     const patch: RunningHubWorkflowPatch = audioPatch?.workflow
-        ? buildWorkflowPatch(audioPatch.workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "")
+        ? buildWorkflowPatch(audioPatch.workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "")
         : workflow
-          ? buildWorkflowPatch(workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "")
+          ? buildWorkflowPatch(workflow, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "")
           : { nodeInfoList: [] };
     const overrides = [...patch.nodeInfoList, ...audioOverrides];
     // Planted `LoadAudio` nodes only exist in our copy, and `nodeInfoList` cannot create links —
     // ship the graph whenever the audio had to invent nodes.
     const repairedGraph = patch.graph || (audioPatch?.planted ? audioPatch.workflow : undefined);
-    const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|audio|resolution|megapixel|aspect_ratio|switch/i.test(item.fieldName));
+    // `strength` is here for the LoRA 味型 knob (strength_model on the MJ graph) — without it the
+    // whitelist silently drops the override and the picker does nothing.
+    const keptOverrides = overrides.filter((item) => /text|prompt|string|value|caption|positive|image|url|image_path|audio|resolution|megapixel|aspect_ratio|switch|strength/i.test(item.fieldName));
     // Observability for the "finished but unrelated to my references" class of bug: one line that
     // shows whether the uploads and their overrides actually made it into the submission.
     const referenceCount = (request.referenceDataUrls || []).filter(Boolean).length + audioSources.length;

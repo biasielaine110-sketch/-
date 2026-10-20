@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import { isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId } from "@/lib/runninghub-workflow";
+import { isKrea2MjStyleWorkflowId, isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId } from "@/lib/runninghub-workflow";
 import { isMidjourneyModel } from "@/services/api/image";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
@@ -53,7 +53,7 @@ export function midjourneyVersionLabel(value: string) {
 
 type ImageSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "quality" | "size" | "count" | "background" | "mjVersion" | "videoSeconds" | "videoResolution", value: string) => void;
+    onConfigChange: (key: "quality" | "size" | "count" | "background" | "mjVersion" | "mjFlavor" | "videoSeconds" | "videoResolution", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
@@ -67,6 +67,14 @@ const storyboardResolutionOptions = [
     { value: "1", label: "1MP ≈720p" },
     { value: "2", label: "2MP ≈1080p" },
     { value: "4", label: "4MP ≈1440p" },
+];
+// MJ 风格 V2.0: scales the two MJ LoRAs only (210 影视柔光 / 211 风格滤镜). `standard` is the
+// workflow's own 0.55 / 0.60 and writes nothing; `off` zeroes them but keeps the rest of the stack.
+const mjFlavorOptions = [
+    { value: "strong", labelKey: "mjFlavorStrong" },
+    { value: "standard", labelKey: "mjFlavorStandard" },
+    { value: "light", labelKey: "mjFlavorLight" },
+    { value: "off", labelKey: "mjFlavorOff" },
 ];
 
 export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10 }: ImageSettingsPanelProps) {
@@ -90,6 +98,9 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
         isMinimaxH3SelfLiftWorkflowId(modelOptionName(config.model || config.imageModel || "")) ||
         isMinimaxH3RefTopWorkflowId(modelOptionName(config.model || config.imageModel || ""));
     const videoDuration = Math.max(1, Math.floor(Number(config.videoSeconds) || 6));
+    // MJ 风格 v2.0 pair only — every other model hides the picker rather than showing a dead knob.
+    const mjStyle = isKrea2MjStyleWorkflowId(modelOptionName(config.model || config.imageModel || ""));
+    const mjFlavor = mjFlavorOptions.some((item) => item.value === config.mjFlavor) ? config.mjFlavor : "standard";
     const selectedAspect = aspectOptions.find((item) => (item.size || item.value) === activeSize || item.value === activeSize);
     const dimensions = readSizeDimensions(activeSize, selectedAspect || aspectOptions[0]);
     const selectAspect = (value: string) => {
@@ -122,6 +133,18 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             {midjourneyVersionOptions.map((item) => (
                                 <OptionPill key={item.value} selected={mjVersion === item.value} theme={theme} onClick={() => onConfigChange("mjVersion", item.value)}>
                                     {item.label}
+                                </OptionPill>
+                            ))}
+                        </div>
+                    </div>
+                ) : null}
+                {mjStyle ? (
+                    <div className="space-y-2.5">
+                        <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.mjFlavor")}</SettingTitle>
+                        <div className="grid grid-cols-4 gap-2.5">
+                            {mjFlavorOptions.map((item) => (
+                                <OptionPill key={item.value} selected={mjFlavor === item.value} theme={theme} onClick={() => onConfigChange("mjFlavor", item.value)}>
+                                    {t(`settingsPanels.image.${item.labelKey}`)}
                                 </OptionPill>
                             ))}
                         </div>

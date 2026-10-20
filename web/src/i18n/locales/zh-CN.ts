@@ -55,6 +55,11 @@ export default {
             count: "生成张数",
             images: "{{count}} 张",
             mjVersion: "版本",
+            mjFlavor: "MJ 味型（LoRA 权重）",
+            mjFlavorStrong: "重",
+            mjFlavorStandard: "标准",
+            mjFlavorLight: "轻",
+            mjFlavorOff: "关",
         },
         video: {
             title: "视频设置",

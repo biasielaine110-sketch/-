@@ -107,6 +107,12 @@ export type AiConfig = {
      * Only honored for the Fisher workflow id pair.
      */
     videoFisherMode: string;
+    /**
+     * MJ 风格工作流 V2.0 LoRA 味型：`strong` | `standard` | `light` | `off`.
+     * Only the 2112477095216926722 / 2112477039575003138 id pair reads it (it scales the two
+     * MJ LoRAs); every other model ignores the field.
+     */
+    mjFlavor: string;
     systemPrompt: string;
     reasoningEffort: ReasoningEffort;
     /** direct = browser→API (no Vercel 60s cap); proxy = via /api/proxy for CORS. */
@@ -202,6 +208,7 @@ export const defaultConfig: AiConfig = {
     videoSeed: "19960422",
     videoAudioMode: "lock_source",
     videoFisherMode: "video",
+    mjFlavor: "standard",
     systemPrompt: "",
     reasoningEffort: "auto",
     // Default via same-origin proxy — most relay APIs block browser CORS.
@@ -503,6 +510,9 @@ export const useConfigStore = create<ConfigStore>()(
                         videoFisherMode: /^(character|scene|multiview|video)$/i.test(String(config.videoFisherMode || ""))
                             ? String(config.videoFisherMode).toLowerCase()
                             : "video",
+                        mjFlavor: /^(strong|standard|light|off)$/i.test(String(config.mjFlavor || ""))
+                            ? String(config.mjFlavor).toLowerCase()
+                            : "standard",
                         canvasImageCount: config.canvasImageCount || "1",
                         mjVersion: config.mjVersion || defaultConfig.mjVersion,
                         quality: config.quality || "medium",

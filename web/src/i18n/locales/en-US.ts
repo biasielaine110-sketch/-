@@ -55,6 +55,11 @@ export default {
             count: "Image count",
             images: "{{count}} images",
             mjVersion: "Version",
+            mjFlavor: "MJ flavor (LoRA strength)",
+            mjFlavorStrong: "Strong",
+            mjFlavorStandard: "Standard",
+            mjFlavorLight: "Light",
+            mjFlavorOff: "Off",
         },
         video: {
             title: "Video settings",
