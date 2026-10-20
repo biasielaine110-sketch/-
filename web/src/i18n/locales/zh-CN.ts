@@ -60,6 +60,9 @@ export default {
             mjFlavorStandard: "标准",
             mjFlavorLight: "轻",
             mjFlavorOff: "关",
+            mjFlavorSoftLora: "MJ 柔光（MJ 味来源）",
+            mjFlavorFilterLora: "MJ 风格滤镜（MJ 味来源）",
+            mjFlavorFixedHint: "其余四层固定：0.60 画风 · 0.40 构图 · 0.60 细节 · 0.50 写实",
         },
         video: {
             title: "视频设置",

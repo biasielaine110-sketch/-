@@ -60,6 +60,9 @@ export default {
             mjFlavorStandard: "Standard",
             mjFlavorLight: "Light",
             mjFlavorOff: "Off",
+            mjFlavorSoftLora: "MJ soft light (flavor source)",
+            mjFlavorFilterLora: "MJ style filter (flavor source)",
+            mjFlavorFixedHint: "The other four stay put: 0.60 art source / 0.40 composition / 0.60 detail / 0.50 realism",
         },
         video: {
             title: "Video settings",

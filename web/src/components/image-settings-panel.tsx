@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import { isKrea2MjStyleWorkflowId, isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId } from "@/lib/runninghub-workflow";
+import { isKrea2MjStyleWorkflowId, isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, krea2MjFlavorWeights } from "@/lib/runninghub-workflow";
 import { isMidjourneyModel } from "@/services/api/image";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
@@ -101,6 +101,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
     // MJ 风格 v2.0 pair only — every other model hides the picker rather than showing a dead knob.
     const mjStyle = isKrea2MjStyleWorkflowId(modelOptionName(config.model || config.imageModel || ""));
     const mjFlavor = mjFlavorOptions.some((item) => item.value === config.mjFlavor) ? config.mjFlavor : "standard";
+    const selectedFlavorWeights = krea2MjFlavorWeights(mjFlavor);
     const selectedAspect = aspectOptions.find((item) => (item.size || item.value) === activeSize || item.value === activeSize);
     const dimensions = readSizeDimensions(activeSize, selectedAspect || aspectOptions[0]);
     const selectAspect = (value: string) => {
@@ -142,11 +143,19 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     <div className="space-y-2.5">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.mjFlavor")}</SettingTitle>
                         <div className="grid grid-cols-4 gap-2.5">
-                            {mjFlavorOptions.map((item) => (
-                                <OptionPill key={item.value} selected={mjFlavor === item.value} theme={theme} onClick={() => onConfigChange("mjFlavor", item.value)}>
-                                    {t(`settingsPanels.image.${item.labelKey}`)}
-                                </OptionPill>
-                            ))}
+                            {mjFlavorOptions.map((item) => {
+                                const [soft, filter] = krea2MjFlavorWeights(item.value);
+                                return (
+                                    <OptionPill key={item.value} selected={mjFlavor === item.value} theme={theme} subtitle={`${weight(soft)}/${weight(filter)}`} onClick={() => onConfigChange("mjFlavor", item.value)}>
+                                        {t(`settingsPanels.image.${item.labelKey}`)}
+                                    </OptionPill>
+                                );
+                            })}
+                        </div>
+                        <div className="space-y-0.5 text-[11px] leading-4" style={{ color: theme.node.muted }}>
+                            <div>{`${weight(selectedFlavorWeights[0])} · ${t("settingsPanels.image.mjFlavorSoftLora")}`}</div>
+                            <div>{`${weight(selectedFlavorWeights[1])} · ${t("settingsPanels.image.mjFlavorFilterLora")}`}</div>
+                            <div className="opacity-75">{t("settingsPanels.image.mjFlavorFixedHint")}</div>
                         </div>
                     </div>
                 ) : null}
@@ -269,18 +278,32 @@ export function imageSizeLabel(size: string) {
     return aspectOptions.find((item) => (item.size || item.value) === size || item.value === size)?.label || size;
 }
 
-function OptionPill({ selected, theme, onClick, children }: { selected: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {
+function OptionPill({ selected, theme, onClick, subtitle, children }: { selected: boolean; theme: CanvasTheme; onClick: () => void; subtitle?: ReactNode; children: ReactNode }) {
     return (
         <button
             type="button"
-            className="h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80"
+            className={
+                subtitle
+                    ? "flex h-auto min-h-9 cursor-pointer flex-col items-center justify-center gap-0.5 rounded-xl border px-1 py-1 text-sm leading-tight transition hover:opacity-80"
+                    : "h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80"
+            }
             style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={onClick}
         >
-            {children}
+            <span>{children}</span>
+            {subtitle ? (
+                <span className="text-[11px]" style={{ color: theme.node.muted }}>
+                    {subtitle}
+                </span>
+            ) : null}
         </button>
     );
+}
+
+/** 0.8 → "0.80", 0 → "0.00" — LoRA weights are always shown with two decimals. */
+function weight(value: number) {
+    return Number(value || 0).toFixed(2);
 }
 
 function DimensionInput({ prefix, value, disabled, theme, alignToStep, onChange }: { prefix: string; value: number; disabled: boolean; theme: CanvasTheme; alignToStep: boolean; onChange: (value: number | null) => void }) {

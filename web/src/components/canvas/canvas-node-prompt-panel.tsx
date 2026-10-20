@@ -542,6 +542,9 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
         sunoVocalGender: node.metadata?.sunoVocalGender || globalConfig.sunoVocalGender || defaultConfig.sunoVocalGender,
         count: String(node.metadata?.count || (mode === "image" ? globalConfig.canvasImageCount || globalConfig.count : globalConfig.count) || defaultConfig.count),
         mjVersion: node.metadata?.mjVersion || globalConfig.mjVersion || defaultConfig.mjVersion,
+        // The 味型 pills write straight into node metadata, so it has to be read back here —
+        // without this the picker re-rendered from the global default and every click looked dead.
+        mjFlavor: node.metadata?.mjFlavor || globalConfig.mjFlavor || defaultConfig.mjFlavor,
     };
 }
 

@@ -253,6 +253,7 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
         sunoVocalGender: node.metadata?.sunoVocalGender || globalConfig.sunoVocalGender || defaultConfig.sunoVocalGender,
         count: String(node.metadata?.count || (mode === "image" ? globalConfig.canvasImageCount || globalConfig.count : globalConfig.count) || defaultConfig.count),
         mjVersion: node.metadata?.mjVersion || globalConfig.mjVersion || defaultConfig.mjVersion,
+        mjFlavor: node.metadata?.mjFlavor || globalConfig.mjFlavor || defaultConfig.mjFlavor,
     };
 }
 

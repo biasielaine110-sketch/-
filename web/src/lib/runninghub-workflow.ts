@@ -2944,10 +2944,20 @@ const KREA2_MJ_FLAVOR_STRENGTHS: Record<string, readonly [number, number] | null
     light: [0.3, 0.3],
     off: [0, 0],
 };
+/** What `standard` means in numbers: the graph's own 210 / 211 weights, left untouched. */
+const KREA2_MJ_FLAVOR_AUTHOR_WEIGHTS = [0.55, 0.6] as const;
 
 function normalizeKrea2MjFlavor(value?: string | null) {
     const raw = String(value || "").trim().toLowerCase();
     return raw === "strong" || raw === "light" || raw === "off" ? raw : "standard";
+}
+
+/**
+ * Effective 210 (MJ 柔光) / 211 (MJ 风格滤镜) weights for a tier — single source of truth for the
+ * canvas picker, so the numbers shown can never drift away from what is actually written.
+ */
+export function krea2MjFlavorWeights(flavor?: string | null): readonly [number, number] {
+    return KREA2_MJ_FLAVOR_STRENGTHS[normalizeKrea2MjFlavor(flavor)] || KREA2_MJ_FLAVOR_AUTHOR_WEIGHTS;
 }
 
 function isKrea2MjStyleWorkflow(workflowId?: string | null) {
