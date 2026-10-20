@@ -348,6 +348,7 @@ export default {
         runningHubH3HdDynamicScriptRequired: "RunningHub 工作流 {{id}}（MiniMax-H3 高速大动态/无劣化抗形变）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（如 MiniMax-H3 高速大动态 _ 无劣化抗形变模糊工作流）粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
         runningHubH3FisherScriptRequired: "RunningHub 工作流 {{id}}（Work-Fisher 短剧全流程）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（如【Work-Fisher】AI短剧制作全流程）粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
         runningHubH3FisherModeScriptRequired: "Work-Fisher 工作流 {{id}} 当前模式「{{mode}}」在脚本里没有对应 Export。请切回「多参生视频」，或把角色/场景/多视角的 Export JSON 放进脚本对象的 character / scene / multiview 键后再试。",
+        runningHubH3YzjinyuScriptRequired: "RunningHub 工作流 {{id}}（YZ金鱼 MiniMax H3 终极篇·文武双全）暂无 API 访问权限。请把「Export Workflow (API)」导出的 JSON（YZ金鱼-MiniMax H3 终极篇-文武双全_api.json）粘贴到该模型的「脚本」字段后重试；无需联系作者开通。",
         runningHubWorkflowNotRun: "这个工作流还不能用接口调用。请先在 RunningHub 网站上打开它，保存并成功运行一次。",
         runningHubNoTaskId: "RunningHub 未返回 taskId",
         runningHubTaskFailed: "RunningHub 任务失败",

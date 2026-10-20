@@ -2715,6 +2715,210 @@ function applyMinimaxH3FisherSettings(
     return { workflow: next, structuralRepair: true };
 }
 
+// YZ金鱼 MiniMax H3 终极篇·文武双全 — runninghub.ai 2112546467369263106 /
+// runninghub.cn 2112546421823070209. Export: YZ金鱼-MiniMax H3 终极篇-文武双全_api.json.
+//
+// Shape: MiniMaxH3ReferenceToVideo (265) whose `prompt` links to Text (263) and whose
+// width/height link into ResolutionSelector (252); `length` comes from ComfyMathExpression (250)
+// driven by PrimitiveFloat「视频时长（秒）」(259) so the 17n+5 frame contract stays intact. Sampling
+// is `SelfLiftH3Sampler` (397) behind a two-LoRA stack (192 → 53 @0.8 → 400 @0.35) and the
+// attention/sigma-shift/chunk chain (331 → 332 → 333 → 401 → 329). Media: 6 image refs
+// (`ref_images.ref_image_0..5`), 1 video ref (`ref_videos.ref_video_0` → VHS_LoadVideo 27) and 3
+// audio refs (`ref_audios.ref_audio_0..2` → LoadAudio 48/14/15).
+//
+// Every generic writer misses a knob here, and each miss is fatal rather than cosmetic:
+//   - the size writer cannot produce `aspect_ratio`'s label enum and the tier writer force-maps
+//     any `megapixels` onto a 1/2/4 set, silently rescaling the authored 1.5MP (1633×919 @16:9);
+//   - the seconds writer cannot reach 259 (field `value`, title 视频时长) and must never touch
+//     `length`, which is a *link* carrying H3's 17n+5 frame count;
+//   - nothing randomizes `SelfLiftH3Sampler.seed` — its class name carries neither "KSampler" nor
+//     "RandomNoise" — so identical inputs replayed an identical clip;
+//   - LoadImage 49/50/51 ship baked hash filenames that do not exist on the workers while
+//     19/23/43 ship `"None"`, so an unfilled image slot must be *disconnected* (a stranger's render
+//     or a missing-file failure otherwise);
+//   - VHS_LoadVideo (27) ships an empty path and LoadAudio 14/15/48 ship `"None"`; RunningHub
+//     rejects those, so unfilled media slots are unlinked and pruned too.
+//
+// 文武双全 = text path and reference path are both first class: with no reference at all every
+// `ref_images.*` link is dropped and the node degrades to plain text-to-video, so an empty ref list
+// is NOT an error here (unlike the Singularity / Fisher adapters). Scoped to these two ids only.
+const MINIMAX_H3_YZJINYU_WORKFLOW_IDS = new Set(["2112546467369263106", "2112546421823070209"]);
+const MINIMAX_H3_YZJINYU_SECONDS = { min: 2, max: 30 };
+/** SelfLift upscales internally, so the selector is the *delivered* size; 4MP is the safe ceiling. */
+const MINIMAX_H3_YZJINYU_MAX_MEGAPIXELS = 4;
+
+function isMinimaxH3YzjinyuWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return MINIMAX_H3_YZJINYU_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate for the H3 文武双全 clip graph (text-to-video + multi-ref, audio refs included). */
+export function isMinimaxH3YzjinyuWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3YzjinyuWorkflow(workflowId);
+}
+
+function applyMinimaxH3YzjinyuSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    seconds?: string,
+    aspect = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow; structuralRepair: boolean } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    // Always structural: unused ref slots are unlinked below and the local Export (API) JSON path
+    // (used when the shared workflow denies getJsonApiFormat) can only run by submitting the whole
+    // graph. Returning graph every time keeps both routes on the same contract.
+    const structuralRepair = true;
+
+    // Author-only junk nodes (307/308/309/363): placeholders that never feed the sampler chain and
+    // only bloat the payload.
+    for (const [id, node] of Object.entries(next)) {
+        if (/忽略多组|孤海/.test(String(node?.class_type || ""))) delete next[id];
+    }
+
+    // Reference images → `ref_images.ref_image_N` slot order, never LoadImage id order. The audio
+    // refs were already written into 48/14/15 by applyRunningHubReferenceAudios *before* this runs.
+    let writtenReferences = 0;
+    const disconnected: string[] = [];
+    const slotInfo = minimaxH3ReferenceVideoSlots(next);
+    if (slotInfo) {
+        const { consumer, slots } = slotInfo;
+        slots.forEach((slot, position) => {
+            const loader = next[slot.sourceId];
+            const field = loader ? imageFieldName(loader) : "";
+            const value = imageValues[position];
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+                return;
+            }
+            // Unfilled: drop the link so neither the baked hash nor the `"None"` placeholder reaches
+            // the worker. Everything below re-links by slot key, so the order stays contiguous.
+            if (consumer.inputs && slot.key in consumer.inputs) {
+                delete consumer.inputs[slot.key];
+                disconnected.push(slot.sourceId);
+            }
+        });
+        // Empty video / audio slots fail validation on RunningHub (27 ships "" and 14/15/48 ship
+        // "None" when the canvas brought no timbre reference).
+        for (const key of Object.keys(consumer.inputs || {})) {
+            if (!/^ref_(videos|audios)\./.test(key)) continue;
+            const link = consumer.inputs?.[key];
+            const sourceId = Array.isArray(link) ? String(link[0]) : "";
+            const media = sourceId ? next[sourceId] : undefined;
+            if (!media?.inputs) {
+                delete consumer.inputs![key];
+                continue;
+            }
+            const type = String(media.class_type || "");
+            const video = String(media.inputs.video || "").trim();
+            const audio = String(media.inputs.audio || "").trim();
+            const emptyVideo = /VHS_LoadVideo|LoadVideo/i.test(type) && !video;
+            const emptyAudio = /LoadAudio/i.test(type) && (!audio || /^none$/i.test(audio));
+            if (emptyVideo || emptyAudio) {
+                delete consumer.inputs![key];
+                disconnected.push(sourceId);
+            }
+        }
+    } else if (imageValues.length) {
+        // Unexpected export: fall back to the generic mapping (upload → LoadImage, document order)
+        // rather than silently rendering the author's baked references.
+        const loaders = Object.entries(next).filter(([, node]) => /LoadImage/i.test(String(node?.class_type || "")) && imageFieldName(node));
+        imageValues.forEach((value, index) => {
+            const loader = loaders[index]?.[1];
+            const field = loader ? imageFieldName(loader) : "";
+            if (value && field && loader?.inputs) {
+                loader.inputs[field] = value;
+                writtenReferences += 1;
+            }
+        });
+    }
+    if (disconnected.length) {
+        // VHS/LoadAudio 节点没有可保留的片段，直接整节点删掉（prune 只覆盖图片链）。
+        for (const id of disconnected) {
+            if (next[id] && /LoadAudio|VHS_LoadVideo|LoadVideo/i.test(String(next[id]?.class_type || ""))) delete next[id];
+        }
+        pruneOrphanedReferenceChain(next, disconnected);
+    }
+    // Only an unapplied *upload* is an error — a text-only run is legitimate for this graph.
+    if (imageValues.length && !writtenReferences) throw new Error(apiText("runningHubReferenceNotApplied"));
+
+    // Duration → PrimitiveFloat「视频时长（秒）」(259). Only the seconds are written: 250 turns them
+    // into `max(5, round(s*24))` plus a modulus fix-up, so rewriting the `length` link would break
+    // the 17n+5 contract.
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_YZJINYU_SECONDS.max, Math.max(MINIMAX_H3_YZJINYU_SECONDS.min, duration));
+        const durationNode =
+            next["259"] ||
+            findComfyNode(next, (node) => /Primitive(Float|Int)/i.test(String(node.class_type || "")) && /时长|duration|长度/i.test(String(node._meta?.title || "")));
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
+    }
+
+    // Output shape → ResolutionSelector (252), which is the *delivered* size (the H3 node links its
+    // width/height into it and SelfLift upscales internally). Lift-only: the delivered budget can
+    // raise the authored 1.5MP bake but never drops below it, so picking 720p on the canvas cannot
+    // silently downscale a graph the author shipped at ~919p.
+    const selector = next["252"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        if (aspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+        }
+        if (typeof selector.inputs.megapixels === "number") {
+            const authored = Number(selector.inputs.megapixels);
+            const base = Number.isFinite(authored) && authored > 0 ? authored : 1.5;
+            const requested = singularityDeliveredMegapixels(megapixels);
+            selector.inputs.megapixels = requested > 0 ? Math.min(Math.max(base, requested), MINIMAX_H3_YZJINYU_MAX_MEGAPIXELS) : base;
+        }
+    }
+
+    // Prompt → whatever the H3 node's `prompt` link resolves to (Text node 263, field `text` — not
+    // `value`). Written last so an empty canvas prompt keeps the author's baked text.
+    if (prompt.trim()) {
+        const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;
+        const link = consumer?.inputs?.prompt;
+        const sourceId = Array.isArray(link) ? String(link[0]) : "";
+        const promptNode =
+            (sourceId ? next[sourceId] : undefined) ||
+            next["263"] ||
+            findComfyNode(next, (node) => /^Text$/i.test(String(node.class_type || "")) && typeof node.inputs?.text === "string");
+        if (promptNode?.inputs) {
+            if (typeof promptNode.inputs.text === "string") promptNode.inputs.text = prompt;
+            else if (typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+        }
+    }
+
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        // `SelfLiftH3Sampler` draws a low-res pass then upscales to the full frame; with tiling off
+        // that upscale holds the entire frame in VRAM and long clips die with "显存不足". The
+        // author's sibling exports ship it on.
+        if (/SelfLiftH3Sampler/i.test(type) && typeof node.inputs?.highres_tiling === "boolean") {
+            node.inputs.highres_tiling = true;
+        }
+        // SelfLift hard-requires the standard Euler sampler (KSamplerSelect → 397).
+        if (/KSamplerSelect/i.test(type) && node.inputs && "sampler_name" in node.inputs) {
+            node.inputs.sampler_name = "euler";
+        }
+        // Fixed seed → every run replayed the same clip; the H3 sampler class name is matched by no
+        // shared randomizer.
+        if (/RandomNoise/i.test(type) && typeof node.inputs?.noise_seed === "number") node.inputs.noise_seed = randomComfySeed();
+        else if (/SamplerCustom|KSampler|SelfLiftH3Sampler/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+    }
+
+    return { workflow: next, structuralRepair };
+}
+
 // Qwen Image 2.1 + Flux2 Klein 皮肤肌理 T2I (runninghub.ai U2108554415855054850 /
 // runninghub.cn 2108554405246226433). Two-stage graph: KSampler (161) drafts from CLIPTextEncode
 // (5)/(7), then SamplerCustomAdvanced + RandomNoise (50) refines with a fixed Klein enhance prompt
@@ -3077,6 +3281,7 @@ function usesRunningHubLocalExportGraph(workflowId?: string | null) {
         isMinimaxH3SingularityWorkflow(workflowId) ||
         isMinimaxH3HdDynamicWorkflow(workflowId) ||
         isMinimaxH3FisherWorkflow(workflowId) ||
+        isMinimaxH3YzjinyuWorkflow(workflowId) ||
         isKrea2PastoralMjWorkflow(workflowId) ||
         isKrea2AidenLoraWorkflow(workflowId)
     );
@@ -3084,7 +3289,12 @@ function usesRunningHubLocalExportGraph(workflowId?: string | null) {
 
 /** Multi-ref Export graphs that prefer browser-direct upload/create (Pages proxy ERR_CONNECTION_CLOSED). */
 function prefersRunningHubDirectSubmit(workflowId?: string | null) {
-    return isMinimaxH3SingularityWorkflow(workflowId) || isMinimaxH3HdDynamicWorkflow(workflowId) || isMinimaxH3FisherWorkflow(workflowId);
+    return (
+        isMinimaxH3SingularityWorkflow(workflowId) ||
+        isMinimaxH3HdDynamicWorkflow(workflowId) ||
+        isMinimaxH3FisherWorkflow(workflowId) ||
+        isMinimaxH3YzjinyuWorkflow(workflowId)
+    );
 }
 
 function applyQwenKleinSkinSettings(
@@ -3442,6 +3652,14 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const fisher = applyMinimaxH3FisherSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
         const list = workflowNodeInfoList(workflow, fisher.workflow);
         return { nodeInfoList: list, graph: fisher.workflow };
+    }
+    // YZ金鱼 文武双全 opts out (see applyMinimaxH3YzjinyuSettings): Text prompt node, self-lifting
+    // sampler behind a two-LoRA stack, duration on a Float the seconds writer misses, and six baked /
+    // "None" reference slots that must be unlinked. Always ship `graph` for the local Export path.
+    if (isMinimaxH3YzjinyuWorkflow(workflowId)) {
+        const yzjinyu = applyMinimaxH3YzjinyuSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
+        const list = workflowNodeInfoList(workflow, yzjinyu.workflow);
+        return { nodeInfoList: list, graph: yzjinyu.workflow };
     }
     // Qwen+Klein 皮肤肌理 T2I opts out for the same class of reasons (see applyQwenKleinSkinSettings):
     // the generic prompt scorer would overwrite the negative and Klein enhance CLIP slots, the size
@@ -4300,6 +4518,10 @@ async function runRunningHubWorkflowWithKey(args: {
                 ? i18n.t("apiErrors.runningHubH3FisherScriptRequired", { id: workflowId })
                 : i18n.t("apiErrors.runningHubH3FisherModeScriptRequired", { id: workflowId, mode: fisherMode }),
         );
+    }
+    // YZ金鱼 文武双全: same ACL story — the shared id commonly denies getJsonApiFormat.
+    if (!workflow && isMinimaxH3YzjinyuWorkflow(workflowId)) {
+        throw new Error(i18n.t("apiErrors.runningHubH3YzjinyuScriptRequired", { id: workflowId }));
     }
     const preferDirectSubmit = prefersRunningHubDirectSubmit(workflowId);
     const refs = (request.referenceDataUrls || []).filter(Boolean).slice(0, 8);

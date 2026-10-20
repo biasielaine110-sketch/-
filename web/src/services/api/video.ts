@@ -22,6 +22,7 @@ import {
     isMinimaxH3FisherWorkflowId,
     isMinimaxH3HdDynamicWorkflowId,
     isMinimaxH3SingularityWorkflowId,
+    isMinimaxH3YzjinyuWorkflowId,
     pickRunningHubWorkflowId,
     runningHubOrigin,
     runRunningHubWorkflow,
@@ -309,8 +310,8 @@ async function createRunningHubVideoTask(
         prompt,
         size: config.size,
         seconds: config.videoSeconds,
-        // Singularity / HD Dynamic / Fisher: canvas vquality → ResolutionSelector megapixels mapping.
-        ...(isMinimaxH3SingularityWorkflowId(model) || isMinimaxH3HdDynamicWorkflowId(model) || isMinimaxH3FisherWorkflowId(model)
+        // Singularity / HD Dynamic / Fisher / 文武双全: canvas vquality → ResolutionSelector megapixels mapping.
+        ...(isMinimaxH3SingularityWorkflowId(model) || isMinimaxH3HdDynamicWorkflowId(model) || isMinimaxH3FisherWorkflowId(model) || isMinimaxH3YzjinyuWorkflowId(model)
             ? { resolution: config.vquality }
             : {}),
         ...(isMinimaxH3FisherWorkflowId(model) ? { fisherMode: config.videoFisherMode } : {}),

@@ -4,7 +4,7 @@ import i18n from "@/i18n";
 import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { proxyApiUrl, isKnownDirectCorsUrl } from "@/lib/api-proxy";
 import { isComfyH3SingleReferenceImageWorkflow, parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi, type ComfyWorkflow } from "@/lib/comfyui-native";
-import { isKrea2MjStyleWorkflowId, isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
+import { isKrea2MjStyleWorkflowId, isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, isMinimaxH3YzjinyuWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { nanoid } from "nanoid";
 import { compressBodyImagesForProxy, compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
@@ -1804,7 +1804,9 @@ async function requestRunningHubImages(config: AiConfig, prompt: string, referen
         isMinimaxH3StoryWorkflowId(config.model || config.imageModel) ||
         isMinimaxH3VibeShortWorkflowId(config.model || config.imageModel) ||
         isMinimaxH3SelfLiftWorkflowId(config.model || config.imageModel) ||
-        isMinimaxH3RefTopWorkflowId(config.model || config.imageModel);
+        isMinimaxH3RefTopWorkflowId(config.model || config.imageModel) ||
+        // 文武双全: clip-only finish on the image path too, so it takes the same seconds/scale gate.
+        isMinimaxH3YzjinyuWorkflowId(config.model || config.imageModel);
     // The 四视图 asset-card graph must NOT receive seconds/resolution on this path. It is a
     // fixed 2-second four-shot design (its own prompt says so) whose sheet is cut from the clip
     // and then run through SeedVR2 upscaling — pushing the duration to the canvas default (6s)
@@ -1848,7 +1850,8 @@ async function requestRunningHubImages(config: AiConfig, prompt: string, referen
         (isMinimaxH3FourViewWorkflowId(config.model || config.imageModel) ||
             isMinimaxH3VibeShortWorkflowId(config.model || config.imageModel) ||
             isMinimaxH3SelfLiftWorkflowId(config.model || config.imageModel) ||
-            isMinimaxH3RefTopWorkflowId(config.model || config.imageModel))
+            isMinimaxH3RefTopWorkflowId(config.model || config.imageModel) ||
+            isMinimaxH3YzjinyuWorkflowId(config.model || config.imageModel))
     ) {
         return [{ id: nanoid(), dataUrl: "", videoUrls: result.videos }];
     }

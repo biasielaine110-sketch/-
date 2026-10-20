@@ -19,6 +19,7 @@ import {
     isMinimaxH3FisherWorkflowId,
     isMinimaxH3HdDynamicWorkflowId,
     isMinimaxH3SingularityWorkflowId,
+    isMinimaxH3YzjinyuWorkflowId,
     normalizeFisherPipelineMode,
     type FisherPipelineMode,
 } from "@/lib/runninghub-workflow";
@@ -222,15 +223,16 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const singularityRh = !h3Comfy && isMinimaxH3SingularityWorkflowId(model);
     const hdDynamicRh = !h3Comfy && isMinimaxH3HdDynamicWorkflowId(model);
     const fisherRh = !h3Comfy && isMinimaxH3FisherWorkflowId(model);
+    const yzjinyuRh = !h3Comfy && isMinimaxH3YzjinyuWorkflowId(model);
     const fisherMode = normalizeFisherPipelineMode(config.videoFisherMode);
     const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
     const qualityChoices = useMemo(() => {
         if (nativeComfy && !h3Comfy) return resolutionOptionsForFamily(nativeFamily);
-        if (singularityRh || hdDynamicRh || fisherRh) return twoPassResolutionOptions;
+        if (singularityRh || hdDynamicRh || fisherRh || yzjinyuRh) return twoPassResolutionOptions;
         if (relayH3) return relayH3ResolutionOptions;
         return resolutionOptions;
-    }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, hdDynamicRh, fisherRh, relayH3]);
+    }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, hdDynamicRh, fisherRh, yzjinyuRh, relayH3]);
     const fisherModeChoices: Array<{ value: FisherPipelineMode; labelKey: string }> = [
         { value: "video", labelKey: "video" },
         { value: "character", labelKey: "character" },

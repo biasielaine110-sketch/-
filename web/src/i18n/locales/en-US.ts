@@ -348,6 +348,7 @@ export default {
         runningHubH3HdDynamicScriptRequired: "RunningHub workflow {{id}} (MiniMax-H3 high-motion / no-degrade) is not open for API access. Paste its Export Workflow (API) JSON into this model's script field and retry — you do not need the author to unlock it.",
         runningHubH3FisherScriptRequired: "RunningHub workflow {{id}} (Work-Fisher short-drama pipeline) is not open for API access. Paste its Export Workflow (API) JSON into this model's script field and retry — you do not need the author to unlock it.",
         runningHubH3FisherModeScriptRequired: "Work-Fisher workflow {{id}} has no Export for mode \"{{mode}}\" in the model script. Switch back to multi-ref video, or put character / scene / multiview Export JSON under those keys in the script object.",
+        runningHubH3YzjinyuScriptRequired: "RunningHub workflow {{id}} (YZ MiniMax H3 Ultimate · Text+Ref) denies API access. Paste the Export Workflow (API) JSON (YZ-MiniMax-H3-Ultimate-Text-Ref_api.json) into that model's Script field and retry; no author approval needed.",
         runningHubWorkflowNotRun: "This workflow cannot be called yet. Open it on RunningHub, save it, and run it successfully once.",
         runningHubNoTaskId: "RunningHub did not return a taskId",
         runningHubTaskFailed: "RunningHub task failed",
