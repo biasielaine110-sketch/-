@@ -2576,10 +2576,21 @@ export function storyScriptToMarkdown(rows: StoryScriptRow[], title?: string, pr
  * - 景别 / 摄影机参数 / 构图方式 / 画面内容 / 人物动作与表演 / 运镜方式 / 台词与声音 → `video_motion_prompt`
  * - 风格类字段（风格提示词 / 视觉风格 …）→ `style_prompt`
  *
+ * 用户 2026-10-22 又给了一种写法（第三套方案 · 火X20 的输出）：标签不带加粗、也不带冒号，
+ * 而是**整行一个方括号标签**，景别 / 机位写在**标题后面的方括号**里：
+ *
+ * ```
+ * #### 镜头 01：[全景 / 贴地机位低角度仰拍]
+ * 【静帧提示词】
+ * 正午烈日下的城市柏油马路。30岁疲惫中国男人（林舟）……
+ * ```
+ *
+ * 两种都要认（`【静帧提示词】` 那个方括号里的标签，就是字段名）。
+ *
  * ⚠️ **只在识别到这种块时生效**：普通剧本、契约 JSON、Markdown 表格全走原来的路，一个字节都不变。
  * 语法上靠「`**加粗标签**：值` 且至少有两个标签、且含一个锚点标签」来认，普通剧本里不会出现这种写法。
  */
-type StoryScriptTemplateField = { label: string; value: string };
+type StoryScriptTemplateField = { label: string; value: string; bracket?: boolean };
 type StoryScriptTemplateBlock = { heading: string; fields: StoryScriptTemplateField[] };
 
 /**
@@ -2590,6 +2601,14 @@ const STORY_SCRIPT_TEMPLATE_BULLET = String.raw`(?:[-*•+]|\d+[.、)）]|（\d+
 const STORY_SCRIPT_TEMPLATE_BOLD_LINE = new RegExp(String.raw`^\s*` + STORY_SCRIPT_TEMPLATE_BULLET + String.raw`?\s*\*\*(.+?)\*\*\s*[：:]\s*(.*)$`);
 const STORY_SCRIPT_TEMPLATE_PLAIN_LINE = new RegExp(String.raw`^\s*` + STORY_SCRIPT_TEMPLATE_BULLET + String.raw`\s*([^：:*\n]{2,14}?)\s*[：:]\s*(.*)$`);
 const STORY_SCRIPT_TEMPLATE_HEADING = /^\s*#{1,6}\s*(.+?)\s*$/;
+/**
+ * 整行一个方括号标签（第三套方案 · 火X20 的写法）：`【静帧提示词】` / `【视频提示词】`，
+ * 冒号可有可无，值可以和标签同行。
+ *
+ * ⚠️ 只认**已知标签**（见 `STORY_SCRIPT_TEMPLATE_KNOWN_LABELS`）—— `【空镜】`、`【转场：黑场】`
+ * 这种「给模型看的批注」在输出里很常见，一律当正文续行，不能当字段名，否则正文会被切碎。
+ */
+const STORY_SCRIPT_TEMPLATE_BRACKET_LINE = /^\s*【\s*([^】\n]{1,16}?)\s*】\s*[：:]?\s*(.*)$/;
 
 /** 标签归一：去空白 / 星号 / 顿号 / 斜杠 / 括号，让「人物动作与表演」和「人物动作」能对上。 */
 function normalizeTemplateLabel(label: string): string {
@@ -2609,7 +2628,11 @@ const STORY_SCRIPT_TEMPLATE_KNOWN_LABELS = new Set(
         "画面内容", "画面描述", "人物动作与表演", "人物动作", "主体动作", "表演",
         "运镜方式", "镜头运动", "运镜", "台词与声音", "台词", "音效", "声音", "台词旁白", "音效配乐",
         "镜头叙事作用", "叙事作用", "首帧图片提示词", "图片提示词", "首帧提示词", "分镜提示词",
+        // 第三套方案（火X20）的写法：`【静帧提示词】` 下面接整段画面提示词，`【视频提示词】` 接视频段。
+        "静帧提示词", "画面提示词", "首帧图提示词", "分镜图提示词", "视频提示词",
         "视频运动提示词", "风格提示词", "视觉风格", "画面风格", "影像风格", "风格",
+        // 机位（`[全景 / 贴地机位低角度仰拍]` 里的后半段，单独成行时也要能认）
+        "机位", "拍摄机位", "摄影机机位", "摄像机机位",
         "负面", "负面提示词", "转场方式", "转场",
         // 资产调用行（用户模版把「这一镜用哪些资产」单独列出来，名字带 P-01 / S-01 / D-01 这类编号）
         "出场人物资产", "出场人物资产1", "出场人物资产2", "人物资产", "角色资产", "出场角色资产",
@@ -2621,7 +2644,7 @@ const STORY_SCRIPT_TEMPLATE_KNOWN_LABELS = new Set(
 
 /** 锚点标签：没有其中一个就不算「模版块」（防止把普通剧本里的几行加粗当成分镜）。 */
 const STORY_SCRIPT_TEMPLATE_ANCHORS = new Set(
-    ["镜头编号", "镜号", "首帧图片提示词", "图片提示词", "分镜提示词", "画面内容", "镜头时长", "景别", "人物动作与表演", "运镜方式"].map(normalizeTemplateLabel),
+    ["镜头编号", "镜号", "首帧图片提示词", "图片提示词", "分镜提示词", "静帧提示词", "画面提示词", "画面内容", "镜头时长", "景别", "人物动作与表演", "运镜方式"].map(normalizeTemplateLabel),
 );
 
 function isTemplateAnchor(label: string): boolean {
@@ -2637,6 +2660,39 @@ function trailingNumber(value: string): number {
     return matches?.length ? Number(matches[matches.length - 1]) : 0;
 }
 
+/** 常见景别（用在标题方括号摘要是「景别 / 机位」两段式的时候，先把景别摘出来）。 */
+const STORY_SCRIPT_TEMPLATE_SHOT_SIZE = /^(?:大远景|远景|大全景|全景|小全景|中全景|中景|中近景|近景|特写|大特写|微距|空镜|中远景|半身景|全身景)$/;
+
+/**
+ * 标题里的「镜号 + 方括号摘要」—— 第三套方案（火X20）的标题长这样：
+ *
+ * ```
+ * #### 镜头 01：[全景 / 贴地机位低角度仰拍]
+ * ```
+ *
+ * 返回 `{ shotNo: 1, shotSize: "全景", camera: "贴地机位低角度仰拍" }`。
+ *
+ * ⚠️ 镜号只从**方括号之前**那截取：整行跑 `trailingNumber` 会被摘要里的数字抢走
+ * （`[全景 / 24mm 广角]` 会变成「第 24 镜」）。
+ */
+function parseTemplateHeading(heading: string): { shotNo: number; shotSize: string; camera: string } {
+    const text = String(heading || "").trim();
+    const bracket = /[\[［【(（]([^\]］】)）]+)[\]］】)）]/.exec(text);
+    if (!bracket) return { shotNo: trailingNumber(text), shotSize: "", camera: "" };
+    const bracketText = bracket[1].trim();
+    // `[00:12—00:15]` / `[3 秒]` 这类是时间码 / 时长，不是景别机位摘要 —— 别塞进景别里。
+    if (/^[\d\s:：\-—~～.秒sS]+$/.test(bracketText)) {
+        return { shotNo: trailingNumber(text.slice(0, bracket.index)), shotSize: "", camera: "" };
+    }
+    const segments = bracketText
+        .split(/[/／|｜、，,;；]+/)
+        .map((segment) => segment.trim())
+        .filter(Boolean);
+    const sizeIndex = segments.findIndex((segment) => STORY_SCRIPT_TEMPLATE_SHOT_SIZE.test(segment));
+    const shotSize = sizeIndex >= 0 ? segments.splice(sizeIndex, 1)[0] : "";
+    return { shotNo: trailingNumber(text.slice(0, bracket.index)), shotSize, camera: segments.join(" / ") };
+}
+
 /**
  * 只有一个字段也算模版的「强锚点」。
  *
@@ -2645,7 +2701,7 @@ function trailingNumber(value: string): number {
  * 只放这几个一看就是分镜模版的标签，普通剧本里的单行加粗（`**注意**：…`）不会被误判。
  */
 const STORY_SCRIPT_TEMPLATE_SOLO_ANCHORS = new Set(
-    ["首帧图片提示词", "图片提示词", "首帧提示词", "分镜提示词", "视频提示词"].map(normalizeTemplateLabel),
+    ["首帧图片提示词", "图片提示词", "首帧提示词", "分镜提示词", "视频提示词", "静帧提示词", "画面提示词", "首帧图提示词", "分镜图提示词"].map(normalizeTemplateLabel),
 );
 
 function isSingleFieldTemplateBlock(block: StoryScriptTemplateBlock): boolean {
@@ -2676,6 +2732,8 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
     for (const rawLine of String(raw || "").split(/\r?\n/)) {
         const line = rawLine.trim();
         if (!line) continue;
+        // `---` / `***` 水平分隔线：既不是字段也不是正文，跳过（模型常在镜与镜之间加一条）。
+        if (/^[-*_]{3,}$/.test(line)) continue;
 
         const heading = line.match(STORY_SCRIPT_TEMPLATE_HEADING);
         if (heading) {
@@ -2689,12 +2747,16 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
         }
 
         const bold = line.match(STORY_SCRIPT_TEMPLATE_BOLD_LINE);
-        const plain = bold ? null : line.match(STORY_SCRIPT_TEMPLATE_PLAIN_LINE);
+        // 整行方括号标签（`【静帧提示词】`）：只认已知标签，不认识的当正文续行（见正则上的注释）。
+        const bracket = bold ? null : line.match(STORY_SCRIPT_TEMPLATE_BRACKET_LINE);
+        const plain = bold || bracket ? null : line.match(STORY_SCRIPT_TEMPLATE_PLAIN_LINE);
         const matched = bold
-            ? { label: bold[1].trim(), value: bold[2].trim() }
-            : plain && STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(plain[1]))
-              ? { label: plain[1].trim(), value: plain[2].trim() }
-              : null;
+            ? { label: bold[1].trim(), value: bold[2].trim(), bracket: false }
+            : bracket && STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(bracket[1]))
+              ? { label: bracket[1].trim(), value: bracket[2].trim(), bracket: true }
+              : plain && STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(plain[1]))
+                ? { label: plain[1].trim(), value: plain[2].trim(), bracket: false }
+                : null;
 
         if (matched) {
             // 没有标题行时，第二次出现「镜头编号」就是新的一镜。
@@ -2710,7 +2772,7 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
                 flush();
             }
             if (!current) current = { heading: "", fields: [] };
-            lastField = { label: matched.label, value: matched.value };
+            lastField = { label: matched.label, value: matched.value, bracket: matched.bracket };
             current.fields.push(lastField);
             continue;
         }
@@ -2779,7 +2841,20 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
         const videoPromptField = Array.from(fields.entries()).find(([key]) => /视频.*提示词$/.test(key) && !/运动提示词$/.test(key))?.[1] || "";
 
         const record: Record<string, unknown> = {};
-        const shotNo = trailingNumber(pick("镜头编号", "镜号")) || trailingNumber(block.heading);
+        const headingInfo = parseTemplateHeading(block.heading);
+        /**
+         * 标题方括号里的摘要（`[全景 / 贴地机位低角度仰拍]`）当作「景别 / 机位」的后备字段。
+         * 块里真的写了 `- **景别**：` / `【机位】` 时以块内为准（这里只在没有时补）。
+         */
+        if (headingInfo.shotSize) {
+            const key = normalizeTemplateLabel("景别");
+            if (!fields.has(key)) fields.set(key, headingInfo.shotSize);
+        }
+        if (headingInfo.camera) {
+            const key = normalizeTemplateLabel("机位");
+            if (!fields.has(key)) fields.set(key, headingInfo.camera);
+        }
+        const shotNo = trailingNumber(pick("镜头编号", "镜号")) || headingInfo.shotNo;
         if (shotNo) record.shot_no = shotNo;
         const duration = /^\d+/.exec(pick("镜头时长", "时长"))?.[0];
         if (duration) record.duration = Number(duration);
@@ -2791,13 +2866,23 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
             [["景别"], "shot"],
             [["画面内容", "画面描述"], "visual_description"],
             [["人物动作与表演", "人物动作", "主体动作"], "character_action"],
-            [["运镜方式", "镜头运动"], "camera_movement"],
+            [["运镜方式", "镜头运动", "机位"], "camera_movement"],
             [["转场方式", "转场"], "transition"],
         ];
         for (const [labels, key] of direct) {
             if (!hasColumn(key)) continue;
             const value = pick(...labels);
             if (value) record[key] = value;
+        }
+        /**
+         * classic 预设**没有**「镜头运动」列。标题方括号里的机位（`[全景 / 贴地机位低角度仰拍]`）
+         * 不能就这么丢掉 —— 并到景别里显示（`全景｜贴地机位低角度仰拍`），否则「完整填入」是一句空话。
+         *
+         * ⚠️ 只并**标题摘要**里的机位：老模版那种独立 `运镜方式：固定机位…` 是完整句子，
+         * 无差别 pick 进来会既挤又串味（第一版就是那么写的，直接把老探针打红了）。
+         */
+        if (!hasColumn("camera_movement") && hasColumn("shot") && headingInfo.camera) {
+            if (record.shot) record.shot = `${record.shot}｜${headingInfo.camera}`;
         }
         const dialogue = pick("台词与声音", "台词", "台词旁白");
         if (dialogue) {
@@ -2827,7 +2912,8 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
         }
 
         // 分镜提示词 = 首帧图片提示词（storyboard 没有这一列时退到画面描述 —— 那边生图就看画面描述）。
-        const firstFrame = pick("首帧图片提示词", "图片提示词", "首帧提示词");
+        // `静帧提示词` / `画面提示词` 是第三套方案（火X20）的叫法，同一个位置。
+        const firstFrame = pick("首帧图片提示词", "图片提示词", "首帧提示词", "静帧提示词", "画面提示词", "首帧图提示词", "分镜图提示词", "分镜提示词");
         if (firstFrame) {
             if (hasColumn("shot_prompt")) record.shot_prompt = firstFrame;
             else if (hasColumn("visual_description")) record.visual_description = firstFrame;
@@ -2841,7 +2927,20 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
                 const value = pick(label);
                 return value ? `${label}：${value}` : "";
             }).filter(Boolean);
-            const motion = motionLines.length ? motionLines.join("\n") : pick("视频运动提示词") || videoPromptField;
+            /**
+             * 第三套方案（火X20）是**显式分段**的：`【视频提示词】` 那一段就是视频提示词全文，
+             * 不能被上面按标签拼出来的「景别：…」顶掉（景别来自标题摘要，只是个摘要）。
+             * 老模版（加粗标签）没有这种分段，仍按标签拼 —— 老行为一个字不改。
+             */
+            const bracketVideoPrompt =
+                block.fields.find(
+                    (field) =>
+                        field.bracket &&
+                        /视频.*提示词$/.test(normalizeTemplateLabel(field.label)) &&
+                        !/运动提示词$/.test(normalizeTemplateLabel(field.label)) &&
+                        field.value.trim(),
+                )?.value || "";
+            const motion = bracketVideoPrompt || (motionLines.length ? motionLines.join("\n") : pick("视频运动提示词") || videoPromptField);
             if (motion) record.video_motion_prompt = motion;
         }
 
