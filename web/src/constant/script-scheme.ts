@@ -187,3 +187,38 @@ export function resolveAutoApplyScriptScheme(options: {
     if (hasSchemePrompt(options.libraryPrefill)) return "library";
     return null;
 }
+
+/**
+ * 老节点迁移：2026-10-19 那版「默认第二套」把 `scriptScheme: "library"` **写进了 metadata**，
+ * 这些节点在新默认（第三套）下会一直亮着第二套，看着像「默认没生效」。
+ *
+ * 只在**能证明「这三段是机器填的、没人动过」**时才迁：
+ *  1. 当前方案是 `library`；
+ *  2. 没有 `scriptLibraryBackup` —— 有 backup 说明用户从第一套手动点过来的（`applyScheme` 才会写）；
+ *  3. 三段正文与**当前词库的第二套预填逐字相同**（用户改一个字就不迁，宁可让他自己点）；
+ *  4. 第三套至少取得到 system/shot 那一段（否则迁过去是空的）。
+ *
+ * 全中才返回 true。迁移动作 = 用第三套预填覆盖，**不写 backup**（原本就是空的）。
+ */
+export function shouldMigrateLegacyLibraryScheme(options: {
+    scheme?: unknown;
+    libraryBackup?: unknown;
+    customSystemPrompt?: unknown;
+    customAssetPrompt?: unknown;
+    customShotPrompt?: unknown;
+    libraryPrefill?: ScriptSchemePrefill | null;
+    x20Prefill?: ScriptSchemePrefill | null;
+}): boolean {
+    if (resolveScriptSchemeId(options.scheme) !== "library") return false;
+    if (options.libraryBackup && typeof options.libraryBackup === "object") return false;
+    if (!hasSchemePrompt(options.x20Prefill)) return false;
+    const prefill = options.libraryPrefill;
+    if (!hasSchemePrompt(prefill) || !prefill) return false;
+    const same = (actual: unknown, expected: string) => (typeof actual === "string" ? actual.trim() : "") === expected.trim();
+    if (!same(options.customSystemPrompt, prefill.system)) return false;
+    if (!same(options.customShotPrompt, prefill.shot)) return false;
+    // 资产段可能当时就没命中（保持空），两种都算机器填：要么一样、要么本来就没填。
+    const asset = typeof options.customAssetPrompt === "string" ? options.customAssetPrompt.trim() : "";
+    if (asset && asset !== prefill.asset.trim()) return false;
+    return true;
+}

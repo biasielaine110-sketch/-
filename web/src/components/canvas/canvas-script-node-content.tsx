@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
+import { buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, shouldMigrateLegacyLibraryScheme, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import {
     collectScriptCellPromptCandidate,
     collectStoryScriptAssetFillTargets,
@@ -655,18 +655,31 @@ export function CanvasScriptNodeContent({
             customAssetPrompt: node.metadata?.scriptAssetPrompt,
             customShotPrompt: node.metadata?.scriptShotPrompt,
         });
-        if (!auto) return;
+        // 老节点：10-19 那版默认把 "library" 写进了 metadata，会盖住新默认（第三套）。
+        // 只有「没有 backup + 三段与第二套预填逐字相同 + 第三套可用」才迁 —— 那是当时机器填的，
+        // 用户改过一个字就留在第二套，让他自己点。
+        const migrate = !auto && shouldMigrateLegacyLibraryScheme({
+            scheme: node.metadata?.scriptScheme,
+            libraryBackup: node.metadata?.scriptLibraryBackup,
+            customSystemPrompt: node.metadata?.scriptSystemPrompt,
+            customAssetPrompt: node.metadata?.scriptAssetPrompt,
+            customShotPrompt: node.metadata?.scriptShotPrompt,
+            libraryPrefill,
+            x20Prefill,
+        });
+        const next = auto || (migrate ? "x20" : null);
+        if (!next) return;
         schemeAutoAppliedRef.current = true;
-        const prefill = auto === "x20" ? x20Prefill : libraryPrefill;
+        const prefill = next === "x20" ? x20Prefill : libraryPrefill;
         patchMetadata({
-            scriptScheme: auto,
+            scriptScheme: next,
             ...(prefill.system ? { scriptSystemPrompt: prefill.system } : {}),
             ...(prefill.asset ? { scriptAssetPrompt: prefill.asset } : {}),
             ...(prefill.shot ? { scriptShotPrompt: prefill.shot } : {}),
         });
-        // patchMetadata 每次渲染都是新函数；真正的闸门是 auto 与 ref，重复执行最多「看一眼就退出」。
+        // patchMetadata 每次渲染都是新函数；真正的闸门是 next 与 ref，重复执行最多「看一眼就退出」。
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [libraryPrefill, node.metadata?.scriptAssetPrompt, node.metadata?.scriptScheme, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt, x20Prefill]);
+    }, [libraryPrefill, node.metadata?.scriptAssetPrompt, node.metadata?.scriptLibraryBackup, node.metadata?.scriptScheme, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt, x20Prefill]);
 
     const updateRow = (rowIndex: number, key: string, value: string) => {
         const numeric = columns.some((column) => column.key === key && column.numeric);
