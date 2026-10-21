@@ -27,6 +27,15 @@ const DIRECT_CORS_HOSTS = [
     // Cloudflare Pages /api/proxy often cannot reach Funnel (or gets reset), which surfaces as
     // networkFailed with `/api/proxy?target=…/images/edits` for cn:miora-image-edit etc.
     "ts.net",
+    // aicost.me (New API relay). Verified 2026-10-21 against https://infinite-atelier.pages.dev:
+    // OPTIONS /v1/images/edits → 204 with `ACAO: *` + `ACAH: *` + `ACAM: GET,POST,PUT,DELETE,OPTIONS`,
+    // and the same `ACAO: *` on actual responses (/v1/images/edits 401, /v1/models 401).
+    // Why it must not go through /api/proxy: image edits are multipart with reference files, and the
+    // CF-Pages → aicost hop is what dies mid-body — Chrome shows
+    // `net::ERR_HTTP2_PROTOCOL_ERROR` on `/api/proxy?target=…/v1/images/edits` even for a 700KB body
+    // (the local Function relays 6MB fine, so it is that hop, not our code). Browser→aicost direct
+    // sidesteps Cloudflare entirely.
+    "aicost.me",
     // Do NOT list seetacloud / cpolar / ngrok here: those ComfyUI gateways omit CORS for the
     // canvas origin, so browser-direct fails. They must stay on /api/proxy (+ allow_custom_ports).
 ];
