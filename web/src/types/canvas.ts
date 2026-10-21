@@ -148,14 +148,16 @@ export type CanvasNodeMetadata = {
      */
     scriptShotPrompt?: string;
     /**
-     * 脚本生成器：**执行方案**。`builtin`（默认）= 只用预设自带的内置提示词，三个自定义字段留空；
-     * `library` = 从「词库」预填「自定义系统提示词 / 资产提示词 / 分镜提示词」三段
-     * （见 constant/script-scheme.ts）。预填只是写入那三个字段，之后照常可改 —— 方案不封闭。
+     * 脚本生成器：**执行方案**（三套）。`builtin` = 只用预设自带的内置提示词，三个自定义字段留空；
+     * `library` = 从词库预填三段（自定义 ←「分镜表------首帧图和视频提示词」/ 资产 ←「资产提取」+「最佳拍档」/
+     * 分镜 ← 同自定义）；`x20` = 自定义与分镜都换「火_X20_主图分镜图_简洁版」，资产同上。
+     * **默认自动套用 `x20`**（词库缺词时回落 `library`），见 constant/script-scheme.ts 的
+     * `resolveAutoApplyScriptScheme`。预填只是写入那三个字段，之后照常可改 —— 方案不封闭。
      */
     scriptScheme?: import("@/constant/script-scheme").ScriptSchemeId;
     /**
-     * 从方案二切回方案一时暂存的三段提示词：切回去（或再切回来）直接恢复，
-     * 不用为了「对比一下两套效果」反复重填。
+     * 从词库方案切回第一套时暂存的三段提示词：切回去（或再切回来）直接恢复，
+     * 不用为了「对比两套效果」反复重填。只在**离开第一套**时写入。
      */
     scriptLibraryBackup?: { system?: string; asset?: string; shot?: string };
     /** 脚本生成器：结构化分镜表（见 constant/story-script.ts）。 */
@@ -220,7 +222,8 @@ export type CanvasNodeMetadata = {
     scriptFontSize?: number;
     /**
      * 脚本生成器：分镜表「简洁版」——隐藏画面描述 / 角色动作 / 人物站位 / 情绪 / 场景标签 / 光影氛围六列。
-     * `undefined` = 完整版（老存档没有这个键，语义相同）。只影响显示，行数据不删。
+     * **默认就是简洁版**（2026-10-21 用户要求），所以 `undefined` / `true` 都按简洁渲染，
+     * 只有显式切到完整版时才存 `false`。只影响显示，行数据不删。
      */
     scriptCompactColumns?: boolean;
     /** 脚本生成器：生成的脚本标题。 */

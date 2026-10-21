@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { buildScriptLibraryPrefill, resolveScriptSchemeId, shouldAutoApplyScriptLibraryScheme, type ScriptSchemeId } from "@/constant/script-scheme";
+import { buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import {
     collectScriptCellPromptCandidate,
     collectStoryScriptAssetFillTargets,
@@ -346,15 +346,18 @@ export function CanvasScriptNodeContent({
     const presetId = resolveStoryScriptPresetId(node.metadata?.scriptPreset);
     const preset = useMemo(() => getStoryScriptPreset(presetId), [presetId]);
     /**
-     * 「两套执行方案」：`builtin` = 预设自带的内置提示词（默认，与改造前逐字一致）；
-     * `library` = 从「词库」把三段提示词**预填**进下面那三个输入框。
+     * 「三套执行方案」：`builtin` = 预设自带的内置提示词；`library` = 词库（分镜表 · 首帧图和视频提示词）；
+     * `x20` = 词库（火_X20_主图分镜图_简洁版）—— **默认就是第三套**，见 `resolveAutoApplyScriptScheme`。
      *
      * 为什么只预填、不另开注入通道：三个字段本来就是节点级覆盖入口，预填完用户还能照常点开改；
      * 而且切换方案**绝不碰 `scriptSource`** —— 用户单独设定的分镜表识别内容（那套 `- **首帧图片提示词**：`
-     * 模版）必须被方案二原样继承（这正是用户 02 的要求）。
+     * 模版）必须被方案原样继承（这正是用户 02 的要求）。
      */
     const schemeId = resolveScriptSchemeId(node.metadata?.scriptScheme);
-    const libraryPrefill = useMemo(() => buildScriptLibraryPrefill(globalConfig?.textPrompts), [globalConfig?.textPrompts]);
+    const x20Prefill = useMemo(() => buildScriptSchemePrefill(globalConfig?.textPrompts, "x20"), [globalConfig?.textPrompts]);
+    const libraryPrefill = useMemo(() => buildScriptSchemePrefill(globalConfig?.textPrompts, "library"), [globalConfig?.textPrompts]);
+    /** 当前方案对应的预填（第一套没有预填）。 */
+    const schemePrefill: ScriptSchemePrefill | null = schemeId === "x20" ? x20Prefill : schemeId === "library" ? libraryPrefill : null;
     /**
      * 手动追加的资产列（用户自建：「宠物」「车辆」…）。行为与内置资产列一致 ——
      * 格子里能挂图、能上锁，铺链路时按 `role` 连进这一镜的图片节点。
@@ -366,10 +369,13 @@ export function CanvasScriptNodeContent({
      * 「简洁版」：只隐藏六列（画面描述 / 角色动作 / 人物站位 / 情绪 / 场景标签 / 光影氛围），
      * **不删数据** —— 行里那几个字段照旧，切回完整版立刻回来。
      *
+     * 默认就是简洁版（2026-10-21 用户：03 分镜表默认选择简洁版显示），所以 `undefined` 按「开」算；
+     * 只有用户显式切成完整版时才会存 `false`（三态语义，别退回 `=== true`）。
+     *
      * 存 metadata 而不是组件 state：节点滚出视口会被卸载，state 一丢用户切过的简洁版就变回完整版
      * （这个坑在计时起点上踩过，见项目备忘）。
      */
-    const compactColumns = node.metadata?.scriptCompactColumns === true;
+    const compactColumns = node.metadata?.scriptCompactColumns !== false;
     /**
      * 渲染用的列：简洁版过滤 + 列宽放大（`STORY_SCRIPT_COLUMN_WIDTH_SCALE`，用户要求横向宽度增宽 1 倍）。
      * ⚠️ 只有**渲染 / 表宽 / 自动适配签名**走它；行编辑、导出、铺链、任务书仍用完整的 `columns`。
@@ -628,36 +634,39 @@ export function CanvasScriptNodeContent({
     const patchMetadata = (patch: Partial<CanvasNodeData["metadata"]>) => onConfigChange(node.id, patch);
 
     /**
-     * 「第二套（词库）是默认方案」——用户 2026-10-19 的要求。
+     * 「第三套（火X20 简洁版）是默认方案」——用户 2026-10-21 的要求（此前 2026-10-19 的默认是第二套，
+     * 现在降为「第三套词库缺失时的兜底」）。
      *
-     * 为什么靠挂载后**自动预填一次**，而不是把 `resolveScriptSchemeId` 的默认值改成 `library`：
-     * 那个函数只做归一化。默认值一改，按钮会亮成「第二套」、可三个输入框还是空的，生成时照样走
+     * 为什么靠挂载后**自动预填一次**，而不是把 `resolveScriptSchemeId` 的默认值改成 `x20`：
+     * 那个函数只做归一化。默认值一改，按钮会亮成「第三套」、可三个输入框还是空的，生成时照样走
      * 内置提示词 —— 界面与行为对不上，比不默认更糟。唯一正确的落点是「挂载后真的把三段填进去」。
      *
-     * 判断条件（已选方案 / 词库空 / 手填过 / prefill 未就绪 → 不动）收在
-     * `shouldAutoApplyScriptLibraryScheme` 里，探针能钉住；这里只管落库。
+     * 判断条件（已选方案 / 手填过 / 两套词库都空 / prefill 未就绪 → 不动）收在
+     * `resolveAutoApplyScriptScheme` 里，探针能钉住；这里只管落库。
      */
     const schemeAutoAppliedRef = useRef(false);
     useEffect(() => {
         if (schemeAutoAppliedRef.current) return;
-        const shouldApply = shouldAutoApplyScriptLibraryScheme({
+        const auto = resolveAutoApplyScriptScheme({
             scheme: node.metadata?.scriptScheme,
-            prefill: libraryPrefill,
+            x20Prefill,
+            libraryPrefill,
             customSystemPrompt: node.metadata?.scriptSystemPrompt,
             customAssetPrompt: node.metadata?.scriptAssetPrompt,
             customShotPrompt: node.metadata?.scriptShotPrompt,
         });
-        if (!shouldApply) return;
+        if (!auto) return;
         schemeAutoAppliedRef.current = true;
+        const prefill = auto === "x20" ? x20Prefill : libraryPrefill;
         patchMetadata({
-            scriptScheme: "library",
-            ...(libraryPrefill.system ? { scriptSystemPrompt: libraryPrefill.system } : {}),
-            ...(libraryPrefill.asset ? { scriptAssetPrompt: libraryPrefill.asset } : {}),
-            ...(libraryPrefill.shot ? { scriptShotPrompt: libraryPrefill.shot } : {}),
+            scriptScheme: auto,
+            ...(prefill.system ? { scriptSystemPrompt: prefill.system } : {}),
+            ...(prefill.asset ? { scriptAssetPrompt: prefill.asset } : {}),
+            ...(prefill.shot ? { scriptShotPrompt: prefill.shot } : {}),
         });
-        // patchMetadata 每次渲染都是新函数；真正的闸门是 shouldApply 与 ref，重复执行最多「看一眼就退出」。
+        // patchMetadata 每次渲染都是新函数；真正的闸门是 auto 与 ref，重复执行最多「看一眼就退出」。
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [libraryPrefill, node.metadata?.scriptAssetPrompt, node.metadata?.scriptScheme, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt]);
+    }, [libraryPrefill, node.metadata?.scriptAssetPrompt, node.metadata?.scriptScheme, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt, x20Prefill]);
 
     const updateRow = (rowIndex: number, key: string, value: string) => {
         const numeric = columns.some((column) => column.key === key && column.numeric);
@@ -833,68 +842,73 @@ export function CanvasScriptNodeContent({
         });
     };
 
-    /** 方案二 toast 里「缺了哪一段」的中文名。 */
+    /** 方案 toast 里「缺了哪一段」的中文名。 */
     const schemePartLabel = (part: "system" | "asset" | "shot") => t(`canvas.scriptNode.schemePart_${part}`);
 
     /**
      * 真正落地方案切换。
      *
-     * - 方案二 = 把词库里的三段提示词一键填进那三个输入框（填完用户仍可打开弹窗改一两句）。
+     * - 第二 / 第三套 = 把词库里的三段提示词一键填进那三个输入框（填完用户仍可打开弹窗改一两句）。
      *   词库里**没找到**的段落保持原样，不清空 —— 用户可能只想要其中一段。
-     * - 切回第一套 = 还原成「切到方案二之前」的样子（走 `scriptLibraryBackup`，没设过就清空）。
-     * - 两套都**不动** `scriptSource` / `scriptRows`：前者是用户单独设定的分镜表识别内容（02 要继承），
+     * - 切回第一套 = 还原成「切到词库方案之前」的样子（走 `scriptLibraryBackup`，没设过就清空）。
+     * - 三套都**不动** `scriptSource` / `scriptRows`：前者是用户单独设定的分镜表识别内容（02 要继承），
      *   后者是已有结果 —— 换方案只影响下一次生成，没必要清空。
      */
     const applyScheme = (next: ScriptSchemeId) => {
-        if (next === "library") {
-            const prefill = libraryPrefill;
-            // 三段全没命中（词库空 / 标题对不上）：不切，直接提示去补词库 —— 切了也是「什么都没变」，更难懂。
-            if (prefill.missing.length >= 3) {
-                message.error(t("canvas.scriptNode.schemeEmptyLibrary"));
-                return;
-            }
+        if (next === "builtin") {
+            const backup = node.metadata?.scriptLibraryBackup;
             patchMetadata({
-                scriptScheme: "library",
-                // 已经是方案二时**不要**覆盖备份：再点一次是「按当前词库刷新」，
-                // 这时若把当下的字段再存进备份，真正切换前的原值就永久丢了。
-                ...(schemeId === "library"
-                    ? {}
-                    : {
-                          scriptLibraryBackup: {
-                              system: node.metadata?.scriptSystemPrompt,
-                              asset: node.metadata?.scriptAssetPrompt,
-                              shot: node.metadata?.scriptShotPrompt,
-                          },
-                      }),
-                ...(prefill.system ? { scriptSystemPrompt: prefill.system } : {}),
-                ...(prefill.asset ? { scriptAssetPrompt: prefill.asset } : {}),
-                ...(prefill.shot ? { scriptShotPrompt: prefill.shot } : {}),
+                scriptScheme: "builtin",
+                scriptLibraryBackup: undefined,
+                scriptSystemPrompt: backup?.system,
+                scriptAssetPrompt: backup?.asset,
+                scriptShotPrompt: backup?.shot,
             });
-            if (prefill.missing.length) {
-                message.warning(t("canvas.scriptNode.schemeLibraryPartial", { names: prefill.missing.map(schemePartLabel).join(" / ") }));
-            } else {
-                message.success(t("canvas.scriptNode.schemeLibraryApplied"));
-            }
+            message.success(t("canvas.scriptNode.schemeBuiltinApplied"));
             return;
         }
-        const backup = node.metadata?.scriptLibraryBackup;
+        const prefill = next === "x20" ? x20Prefill : libraryPrefill;
+        // 判据只看「自定义 / 分镜」那一段：资产段两套共用，只剩资产段时切过去填的东西与另一套一模一样，
+        // 按钮写着第三套、实际跑第二套 —— 比切不动更难懂。这种情况直接提示去补词库。
+        if (!prefill.system && !prefill.shot) {
+            message.error(t(next === "x20" ? "canvas.scriptNode.schemeEmptyX20" : "canvas.scriptNode.schemeEmptyLibrary"));
+            return;
+        }
         patchMetadata({
-            scriptScheme: "builtin",
-            scriptLibraryBackup: undefined,
-            scriptSystemPrompt: backup?.system,
-            scriptAssetPrompt: backup?.asset,
-            scriptShotPrompt: backup?.shot,
+            scriptScheme: next,
+            // 只在**离开第一套**时备份：第二套 ↔ 第三套互换时若再备份，存进去的会是刚被另一套预填的文案，
+            // 用户真正手写的那份就永久丢了。
+            ...(schemeId === "builtin"
+                ? {
+                      scriptLibraryBackup: {
+                          system: node.metadata?.scriptSystemPrompt,
+                          asset: node.metadata?.scriptAssetPrompt,
+                          shot: node.metadata?.scriptShotPrompt,
+                      },
+                  }
+                : {}),
+            ...(prefill.system ? { scriptSystemPrompt: prefill.system } : {}),
+            ...(prefill.asset ? { scriptAssetPrompt: prefill.asset } : {}),
+            ...(prefill.shot ? { scriptShotPrompt: prefill.shot } : {}),
         });
-        message.success(t("canvas.scriptNode.schemeBuiltinApplied"));
+        if (prefill.missing.length) {
+            message.warning(
+                t(next === "x20" ? "canvas.scriptNode.schemeX20Partial" : "canvas.scriptNode.schemeLibraryPartial", {
+                    names: prefill.missing.map(schemePartLabel).join(" / "),
+                }),
+            );
+        } else {
+            message.success(t(next === "x20" ? "canvas.scriptNode.schemeX20Applied" : "canvas.scriptNode.schemeLibraryApplied"));
+        }
     };
 
     const switchScheme = (next: ScriptSchemeId) => {
         if (next === schemeId) {
-            // 再点「第二套」= 按当前词库重新预填（用户刚在设置里改了词条时用得上）。
-            if (next === "library") applyScheme(next);
+            // 再点当前方案 = 按当前词库重新预填（用户刚在设置里改了词条时用得上）；第一套没得刷新。
+            if (next !== "builtin") applyScheme(next);
             return;
         }
-        // 切回第一套会把第二套填进去的三段提示词撤掉 —— 手动改过就确认一下，别默默丢内容。
+        // 切回第一套会把词库方案填进去的三段提示词撤掉 —— 手动改过就确认一下，别默默丢内容。
         if (next === "builtin" && (hasCustomSystemPrompt || hasCustomAssetPrompt || hasCustomShotPrompt)) {
             modal.confirm({
                 title: t("canvas.scriptNode.schemeSwitchBackConfirm"),
@@ -1317,12 +1331,13 @@ export function CanvasScriptNodeContent({
             </div>
         ) : null;
 
-    // 「执行方案」总开关：第一套 = 预设自带的内置提示词；第二套 = 从词库预填三段提示词。
+    // 「执行方案」总开关：第一套 = 预设自带的内置提示词；第二套 = 词库（分镜表 · 首帧图和视频提示词）；
+    // 第三套 = 词库（火_X20_主图分镜图_简洁版）—— **默认就是第三套**。
     // 放在预设切换行**之前**——预设决定「出哪些列」，方案决定「用哪套提示词」，后者层次更高。
     const schemeSelector = (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
             <span className="opacity-60">{t("canvas.scriptNode.schemeLabel")}</span>
-            {(["builtin", "library"] as const).map((id) => {
+            {SCRIPT_SCHEME_IDS.map((id) => {
                 const active = id === schemeId;
                 return (
                     <button
@@ -1349,15 +1364,17 @@ export function CanvasScriptNodeContent({
                     </button>
                 );
             })}
-            {/* 方案二在词库里没找全时给个显式提示，否则用户会以为「点了没反应」（内容其实是原样保留的）。 */}
-            {schemeId === "library" && libraryPrefill.missing.length ? (
+            {/* 词库方案在词库里没找全时给个显式提示，否则用户会以为「点了没反应」（内容其实是原样保留的）。 */}
+            {schemePrefill && schemePrefill.missing.length ? (
                 <span className="opacity-60" title={t("canvas.scriptNode.schemeLibraryMissingHint")}>
-                    {t("canvas.scriptNode.schemeLibraryMissing", { count: libraryPrefill.missing.length })}
+                    {t("canvas.scriptNode.schemeLibraryMissing", { count: schemePrefill.missing.length })}
                 </span>
             ) : null}
-            {/* 默认是第二套；词库空时自动切不动，必须说清楚「为什么还亮着第一套」，否则看着像功能失效。 */}
-            {!node.metadata?.scriptScheme && !libraryPrefill.system && !libraryPrefill.asset && !libraryPrefill.shot ? (
-                <span className="opacity-60">{t("canvas.scriptNode.schemeLibraryDefaultOff")}</span>
+            {/* 默认是第三套；两套词库都取不到「自定义 / 分镜」那一段时自动切不动，必须说清楚
+                「为什么还亮着第一套」，否则看着像功能失效。判据只认那一段 —— 资产段两套共用，
+                只有资产词条时切过去也等于没切（见 `resolveAutoApplyScriptScheme`）。 */}
+            {!node.metadata?.scriptScheme && !x20Prefill.system && !x20Prefill.shot && !libraryPrefill.system && !libraryPrefill.shot ? (
+                <span className="opacity-60">{t("canvas.scriptNode.schemeX20DefaultOff")}</span>
             ) : null}
         </div>
     );
@@ -1542,8 +1559,8 @@ export function CanvasScriptNodeContent({
                     style={{ borderColor: "#16a34a66", background: "#16a34a14", color: theme.node.text }}
                 >
                     {t("canvas.scriptNode.templateDetected", { count: templateShots })}
-                    {/* 02：方案二**继承**这段识别内容（只有提示词被换掉，模版本身一个字不动）——写明比让人猜好。 */}
-                    {schemeId === "library" ? ` ${t("canvas.scriptNode.schemeTemplateInherited")}` : ""}
+                    {/* 02：词库方案（第二 / 第三套）**继承**这段识别内容（只有提示词被换掉，模版本身一个字不动）。 */}
+                    {schemeId !== "builtin" ? ` ${t("canvas.scriptNode.schemeTemplateInherited")}` : ""}
                 </div>
             ) : sourceDraft.trim() ? (
                 // 反向证据：贴了内容却没认出模版 → 三列由模型生成（用户就不用再猜「是没认出来吗」）。
@@ -2270,8 +2287,9 @@ export function CanvasScriptNodeContent({
                     onPointerDown={(event) => event.stopPropagation()}
                     onClick={(event) => {
                         event.stopPropagation();
-                        // 关掉时写 `undefined`（不是 false）：老节点 / 老存档里没这个键，语义就是「完整版」。
-                        patchMetadata({ scriptCompactColumns: compactColumns ? undefined : true });
+                        // 默认是简洁版（`undefined` 也按开算），所以这里必须写**显式 false** 才能真正关掉；
+                        // 三态语义：undefined = 默认（简洁）、true = 简洁、false = 完整版。
+                        patchMetadata({ scriptCompactColumns: compactColumns ? false : true });
                     }}
                     title={compactColumns ? t("canvas.scriptNode.compactColumnsRestoreHint") : t("canvas.scriptNode.compactColumnsHint")}
                 >
