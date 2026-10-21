@@ -5,7 +5,17 @@
 // Vercel handler (web/api/proxy.js). Keep it just under the canvas's documented
 // "线上代理最长约 5 分钟" expectation (apiErrors.proxyTimedOut).
 const PROXY_TIMEOUT_MS = 290_000;
-const UPLOAD_BUFFER_MAX = 8_000_000;
+/**
+ * Buffered multipart ceiling.
+ *
+ * Streaming a multipart body from the edge to the origin is what the canvas sees as
+ * `net::ERR_HTTP2_PROTOCOL_ERROR` (or ERR_CONNECTION_CLOSED) on
+ * `/api/proxy?target=…/task/openapi/upload`: the origin answers before the body is drained, so the
+ * HTTP/2 stream is reset mid-upload. The old 8MB ceiling pushed every reference clip (5–30MB) onto
+ * that streaming path, which is why image uploads worked and clip uploads died. Workers get ~128MB
+ * of memory per isolate, so a 32MB buffer leaves plenty of headroom for the response.
+ */
+const UPLOAD_BUFFER_MAX = 40_000_000;
 
 // Error responses MUST carry CORS headers too. Without them the browser classifies the
 // response as a cross-origin failure, the canvas maps it to apiErrors.networkFailed and the
@@ -63,9 +73,11 @@ const SKIP_HEADERS = new Set([
  */
 function shouldBufferBody(pathname, contentType, contentLength) {
     const len = Number(contentLength || 0);
-    if (Number.isFinite(len) && len > UPLOAD_BUFFER_MAX) return false;
-    if (/\/upload(\/|$)/i.test(pathname)) return true;
-    if ((contentType || "").toLowerCase().includes("multipart/form-data")) return true;
+    const isUpload = /\/upload(\/|$)/i.test(pathname);
+    const isMultipart = (contentType || "").toLowerCase().includes("multipart/form-data");
+    // Upload / multipart: always buffer when it fits the ceiling — including when the browser did
+    // not report a length (chunked), because a streamed multipart is exactly what breaks.
+    if (isUpload || isMultipart) return !(Number.isFinite(len) && len > UPLOAD_BUFFER_MAX);
     if (Number.isFinite(len) && len > 0 && len <= UPLOAD_BUFFER_MAX) return true;
     return false;
 }

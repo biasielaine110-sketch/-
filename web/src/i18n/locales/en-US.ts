@@ -369,6 +369,8 @@ export default {
         referenceImageReadFailed: "Failed to read the reference image. Choose another image or upload it again.",
         referenceAudioReadFailed: "Failed to read the reference audio. Choose another audio file or upload it again.",
         referenceVideoReadFailed: "Failed to read the reference clip (its local data is missing). Re-upload that video node and try again.",
+        referenceVideoTooLarge: "The reference clip is too large ({{size}}MB, limit {{limit}}MB). It is only used as a conditioning reference, so it does not need that bitrate — pick a shorter or smaller clip (10 seconds or less works well).",
+        referenceVideoUploadFailed: "Uploading the reference clip to RunningHub failed ({{name}}): {{detail}}. Retry in a moment, or use a shorter clip; if it keeps failing, check this machine's connection to RunningHub.",
         invalidReferenceVideo: "A reference video must be a public URL, asset ID, or locally saved video",
         invalidReferenceAudio: "Reference audio must be a public URL, asset ID, or locally saved audio file",
         videoModelRequired: "Configure a video model first",

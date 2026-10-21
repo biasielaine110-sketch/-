@@ -369,6 +369,8 @@ export default {
         referenceImageReadFailed: "参考图读取失败，请换一张图片或重新上传",
         referenceAudioReadFailed: "参考音频读取失败，请换一个音频或重新上传",
         referenceVideoReadFailed: "参考视频读取失败（读不到本地视频数据），请重新上传该视频节点后再试",
+        referenceVideoTooLarge: "参考视频过大（{{size}}MB，上限 {{limit}}MB）。这个视频只作为参考条件，不需要这么高的码率：请换一段更短或更小的视频（建议 10 秒内）。",
+        referenceVideoUploadFailed: "参考视频上传 RunningHub 失败（{{name}}）：{{detail}}。可稍后重试，或换一段更短的视频；若一直失败，请检查本机到 RunningHub 的网络。",
         invalidReferenceVideo: "参考视频必须是公网 URL、资产 ID，或本地已保存的视频",
         invalidReferenceAudio: "参考音频必须是公网 URL、资产 ID，或本地已保存的音频",
         videoModelRequired: "请先配置视频模型",

@@ -35,7 +35,12 @@ export type RunningHubTaskView = {
 const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 20 * 60 * 1000;
 
-const apiText = (key: string) => i18n.t(`apiErrors.${key}`);
+// `values` feeds i18next interpolation ({{size}} / {{limit}} …). Callers that pass only a key keep
+// the previous behaviour exactly. The call is typed through a narrow signature because i18next's
+// generic overloads pick the `{returnDetails:true}` shape for a loose options argument, which would
+// make every call site "not a string".
+const apiText = (key: string, values?: Record<string, string | number>): string =>
+    (i18n.t as (k: string, options?: Record<string, unknown>) => string)(`apiErrors.${key}`, values);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -4196,17 +4201,40 @@ async function uploadImage(
  * through an `<img>`, so running an mp3 through it yields a broken file (or a 0-byte blob) and
  * RunningHub then loads nothing — the task still succeeds with the model's own voice.
  */
-async function uploadAudioFile(origin: string, apiKey: string, source: string, fileName: string, signal?: AbortSignal) {
-    return uploadBinary(origin, apiKey, source, fileName, signal, { shrink: false, fallbackType: "audio/mpeg" });
+async function uploadAudioFile(origin: string, apiKey: string, source: string, fileName: string, signal?: AbortSignal, preferDirect = false) {
+    // A 30s 48k stereo WAV is already ~10MB, so an audio ref is not automatically "small": the same
+    // oversized-multipart path that broke clip uploads applies. Both upload hosts answer with
+    // `Access-Control-Allow-Origin: *`, so the direct hop is viable and the (buffered) proxy stays
+    // the fallback.
+    return uploadBinary(origin, apiKey, source, fileName, signal, { shrink: false, fallbackType: "audio/mpeg", preferDirect });
 }
 
 /**
  * Reference clips go up byte-for-byte for the same reason audio does: `shrinkOversizedReferenceDataUrl`
  * decodes through an `<img>`, which turns a clip into a corrupt payload. Direct-first matters here
- * because a clip is far bigger than any image, and the Pages proxy closes large multipart bodies.
+ * because a clip is far bigger than any image, and the Pages proxy used to choke on large multipart
+ * bodies (`net::ERR_HTTP2_PROTOCOL_ERROR` on `/api/proxy?target=…/upload`).
+ *
+ * Two guards make a failure diagnosable instead of a bare network error:
+ *   - a clip over the ceiling is refused up front with its real size (a reference clip never needs
+ *     to be that big, and an oversized body dies inside the edge before any status comes back).
+ *     The value tracks the edge proxy's buffered ceiling (`UPLOAD_BUFFER_MAX` in
+ *     `functions/_lib/proxy.js`, 40MB) minus header/encoding slack: refusing a clip the proxy could
+ *     actually relay would be a self-inflicted regression;
+ *   - a failed upload names the file and the transport that failed.
  */
+const RUNNINGHUB_VIDEO_UPLOAD_MAX_BYTES = 36_000_000;
+
 async function uploadVideoFile(origin: string, apiKey: string, source: string, fileName: string, signal?: AbortSignal) {
-    return uploadBinary(origin, apiKey, source, fileName, signal, { shrink: false, fallbackType: "video/mp4", preferDirect: true });
+    const bytes = source.startsWith("data:") ? getDataUrlByteSize(source) : 0;
+    if (bytes > RUNNINGHUB_VIDEO_UPLOAD_MAX_BYTES) {
+        throw new Error(apiText("referenceVideoTooLarge", { size: Math.round((bytes / 1_000_000) * 10) / 10, limit: RUNNINGHUB_VIDEO_UPLOAD_MAX_BYTES / 1_000_000 }));
+    }
+    try {
+        return await uploadBinary(origin, apiKey, source, fileName, signal, { shrink: false, fallbackType: "video/mp4", preferDirect: true });
+    } catch (error) {
+        throw new Error(apiText("referenceVideoUploadFailed", { name: fileName, detail: errorText(error).slice(0, 180) }));
+    }
 }
 
 async function uploadBinary(
@@ -4662,9 +4690,13 @@ async function runRunningHubWorkflowWithKey(args: {
     // patch. Singularity's patch deletes `LoadAudio("None")` slots as invalid; filling them first is
     // what keeps the slot, and the author's node ids, alive.
     const audioSources = (request.referenceAudioDataUrls || []).filter(Boolean).slice(0, 3);
+    // 文武双全 only: its clips are big *and* it uploads audio/video through the same endpoint, so let
+    // the browser reach RunningHub first and keep the edge out of the byte path. Other families keep
+    // the previous proxy-only behaviour (no behaviour change for them).
+    const yzjinyuRefs = isMinimaxH3YzjinyuWorkflow(workflowId);
     const uploadedAudios: string[] = [];
     for (let index = 0; index < audioSources.length; index += 1) {
-        uploadedAudios.push(await uploadAudioFile(origin, apiKey, audioSources[index], `ref-audio-${index + 1}${audioFileExtension(audioSources[index])}`, request.signal));
+        uploadedAudios.push(await uploadAudioFile(origin, apiKey, audioSources[index], `ref-audio-${index + 1}${audioFileExtension(audioSources[index])}`, request.signal, yzjinyuRefs));
     }
     const audioPatch = workflow && uploadedAudios.length ? applyRunningHubReferenceAudios(workflow, uploadedAudios) : null;
     // Silence is the bug we are fixing: audio that cannot be placed must fail loudly instead of
@@ -4675,7 +4707,7 @@ async function runRunningHubWorkflowWithKey(args: {
     // (everywhere else the slot, if any, is pruned or means something else). Uploaded and written
     // BEFORE the per-workflow patch for the same reason audio is: that patch deletes an empty
     // `VHS_LoadVideo` slot, so filling it first is what keeps the link and the author's node id.
-    const videoSources = isMinimaxH3YzjinyuWorkflow(workflowId) ? (request.referenceVideoDataUrls || []).filter(Boolean).slice(0, 1) : [];
+    const videoSources = yzjinyuRefs ? (request.referenceVideoDataUrls || []).filter(Boolean).slice(0, 1) : [];
     const uploadedVideos: string[] = [];
     for (let index = 0; index < videoSources.length; index += 1) {
         uploadedVideos.push(await uploadVideoFile(origin, apiKey, videoSources[index], `ref-video-${index + 1}${videoFileExtension(videoSources[index])}`, request.signal));
