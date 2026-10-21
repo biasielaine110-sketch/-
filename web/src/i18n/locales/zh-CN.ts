@@ -308,6 +308,8 @@ export default {
             "该 Gemini 图片模型需走 OpenAI 生图接口 /v1/images/generations（不要用 generateContent）。请将渠道调用格式设为 OpenAI。当前模型：{{model}}",
         unsupportedAspectRatio:
             "当前尺寸比例不被模型支持，已尽量映射到标准比例；请改用 1:1、16:9、3:2、9:16 等常见比例后重试。当前模型：{{model}}",
+        unsupportedImageSize:
+            "该模型只接受固定的几个尺寸（1024x1024 / 1024x768 / 1152x768 / 1280x720 / 720x1280 / 1344x576 等）。画布已按最接近的画幅自动换算，若仍失败请把节点的尺寸改成「自动」。当前模型：{{model}}",
         providerChannelFailed: "上游渠道暂时不可用（get_channel_failed）。请稍后重试，或换用 Gemini / GPT Image / Seedream 等模型。",
         modelNotFoundOnProvider: "当前渠道不支持该模型（model_not_found）：{{model}}。请确认模型名，或改用渠道已开通的模型。",
         providerImageUploadFailed: "参考图上传到接口失败，无法进行图生图。请检查渠道是否支持 /v1/uploads/images，或稍后重试",

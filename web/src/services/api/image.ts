@@ -10,6 +10,7 @@ import { nanoid } from "nanoid";
 import { compressBodyImagesForProxy, compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { isMioraQueueBaseUrl, mediaUrlToDataUrl, runMioraGeneration } from "@/lib/miora-queue";
+import { isMioraImageFamilyModel, isUnsupportedImageSizeError, resolveMioraImageSize } from "@/constant/image-size-presets";
 import { uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
 import { fetchRemoteImageBlob, imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
@@ -260,6 +261,10 @@ function normalizeImageApiErrorMessage(message: string, model?: string) {
     if (/aspect_ratio\s+\S+\s+is not supported/i.test(message)) {
         return apiText("unsupportedAspectRatio", { model: model || "?" });
     }
+    // miora 系模型（hy-image-3.5* / miora-image*）只认固定尺寸表，原始报错是一大段 JSON + code:14402。
+    if (isUnsupportedImageSizeError(message)) {
+        return apiText("unsupportedImageSize", { model: model || "?" });
+    }
     if (/get_channel_failed|Please wait and try again later/i.test(message)) {
         return apiText("providerChannelFailed");
     }
@@ -440,7 +445,7 @@ function resolveOpenAiImageParams(config: AiConfig, count: number) {
     }
 
     const quality = normalizeQuality(config.quality);
-    const requestSize = isGptImageModel(config.model) ? resolveGptImageRequestSize(config.model, quality, config.size) : resolveRequestSize(quality, config.size);
+    const requestSize = isGptImageModel(config.model) ? resolveGptImageRequestSize(config.model, quality, config.size) : resolveRequestSize(quality, config.size, config.model);
     const background = normalizeBackground(config.background);
     // miora 上游一次只出一张；n>1 会被网关 400。
     const params: Record<string, string | number | boolean | Record<string, unknown>> = {
@@ -1103,16 +1108,31 @@ function validateImageSize(width: number, height: number) {
     if (pixels < IMAGE_MIN_PIXELS || pixels > IMAGE_MAX_PIXELS) throw new Error(apiText("imagePixelLimit"));
 }
 
-function resolveRequestSize(quality: string | undefined, size: string) {
+/**
+ * 「质量 + 比例」→ 明确像素尺寸。
+ *
+ * ⚠️ miora 系模型（`hy-image-3.5*` / `miora-image*`）上游**只认固定尺寸表**，任意像素值会整单 400
+ * `unsupported_image_size`（再被网关包成 502）。所以这类模型算完尺寸后必须再过一遍
+ * `resolveMioraImageSize` 吸附到白名单档位 —— 见 `constant/image-size-presets.ts`。
+ */
+function resolveRequestSize(quality: string | undefined, size: string, model?: string) {
     const value = size.trim();
     if (!value || value.toLowerCase() === "auto") return undefined;
     const dimensions = parseImageDimensions(value);
+    let resolved: string;
     if (dimensions) {
         validateImageSize(dimensions.width, dimensions.height);
-        return `${dimensions.width}x${dimensions.height}`;
+        resolved = `${dimensions.width}x${dimensions.height}`;
+    } else if (value.includes(":")) {
+        resolved = resolveSize(quality, value);
+    } else {
+        throw new Error(apiText("invalidImageSizeFormat"));
     }
-    if (value.includes(":")) return resolveSize(quality, value);
-    throw new Error(apiText("invalidImageSizeFormat"));
+    if (model && isMioraImageFamilyModel(model)) {
+        // 白名单吸附：1:1 / 4:3 / 3:2 / 16:9 / 9:16 / 21:9 各一档，画幅保持不变、只是落到可用的档位。
+        return resolveMioraImageSize(resolved) || undefined;
+    }
+    return resolved;
 }
 
 /**
@@ -2931,7 +2951,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     }
     if (script) {
         const quality = normalizeQuality(config.quality);
-        const requestSize = isGptImageModel(requestConfig.model) ? resolveGptImageRequestSize(requestConfig.model, quality, config.size) : resolveRequestSize(quality, config.size);
+        const requestSize = isGptImageModel(requestConfig.model) ? resolveGptImageRequestSize(requestConfig.model, quality, config.size) : resolveRequestSize(quality, config.size, requestConfig.model);
         const background = normalizeBackground(config.background);
         try {
             const result = await runModelPlugin({
@@ -3058,7 +3078,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
     if (script) {
         const quality = normalizeQuality(config.quality);
-        const requestSize = isGptImageModel(requestConfig.model) ? resolveGptImageRequestSize(requestConfig.model, quality, config.size) : resolveRequestSize(quality, config.size);
+        const requestSize = isGptImageModel(requestConfig.model) ? resolveGptImageRequestSize(requestConfig.model, quality, config.size) : resolveRequestSize(quality, config.size, requestConfig.model);
         const background = normalizeBackground(config.background);
         const refs = await Promise.all(references.map((image) => prepareReferenceDataUrl(image, Math.max(1, references.length))));
         try {
@@ -3218,6 +3238,20 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         return images;
     } catch (error) {
         const message = readAxiosError(error, apiText("requestFailed"));
+        // 上游只接受固定尺寸（如 miora 的 hy-image-3.5-edit）：去掉 size 再试一次，让它按参考图自己定尺寸。
+        // 这一步是白名单的兜底 —— 尺寸表万一又变，用户也不至于只看到一坨 502 JSON。
+        if (!mask && isUnsupportedImageSizeError(message)) {
+            const retryForm = new FormData();
+            formData.forEach((value, key) => {
+                if (key !== "size") retryForm.append(key, value);
+            });
+            try {
+                const retryResponse = await postImageForm<ImageApiResponse>(requestConfig, "/images/edits", retryForm, options);
+                return await resolveImageApiResponse(requestConfig, retryResponse.data, options);
+            } catch (retryError) {
+                throw new Error(normalizeImageApiErrorMessage(readAxiosError(retryError, message), requestConfig.model));
+            }
+        }
         if (isGeminiNativeImageModel(requestConfig.model) && isImagenOnlyEndpointError(message) && !mask) {
             try {
                 return await requestGeminiImages({ ...requestConfig, apiFormat: "gemini" }, requestPrompt, references, n, options);

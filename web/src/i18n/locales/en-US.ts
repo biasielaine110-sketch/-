@@ -308,6 +308,8 @@ export default {
             "This Gemini image model requires the OpenAI image endpoint /v1/images/generations (not generateContent). Set the channel API format to OpenAI. Current model: {{model}}",
         unsupportedAspectRatio:
             "This aspect ratio is not supported by the model. Use a common ratio such as 1:1, 16:9, 3:2, or 9:16 and try again. Current model: {{model}}",
+        unsupportedImageSize:
+            "This model only accepts a fixed set of sizes (1024x1024 / 1024x768 / 1152x768 / 1280x720 / 720x1280 / 1344x576, etc.). The canvas auto-snaps to the closest aspect ratio; if it still fails, set the node size to \"auto\". Current model: {{model}}",
         providerChannelFailed: "Upstream channel is temporarily unavailable (get_channel_failed). Retry later, or switch to Gemini / GPT Image / Seedream.",
         modelNotFoundOnProvider: "This channel does not support the model (model_not_found): {{model}}. Check the model name or pick one enabled on the channel.",
         providerImageUploadFailed: "Failed to upload the reference image to the provider. Check that the channel supports /v1/uploads/images, then try again.",
