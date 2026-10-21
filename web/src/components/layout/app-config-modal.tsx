@@ -79,7 +79,14 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     };
 
     const finishConfig = () => {
-        const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.apiKey.trim() && channel.models.length);
+        // A channel counts as configured when the unified API is filled in, or when at least one
+        // of its models carries its own independent endpoint + key.
+        const ready = config.channels.some(
+            (channel) =>
+                channel.models.length > 0 &&
+                Boolean(channel.baseUrl.trim() || channel.models.some((model) => model.baseUrl?.trim())) &&
+                Boolean(channel.apiKey.trim() || channel.models.some((model) => model.apiKey?.trim() || model.apiKeys?.length)),
+        );
         setConfigDialogOpen(false);
         if (!ready) return;
         message.success(t(shouldPromptContinue ? "config.savedContinue" : "config.saved"));

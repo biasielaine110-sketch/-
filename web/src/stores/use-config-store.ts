@@ -23,6 +23,20 @@ export type ChannelModel = {
     capability: ModelCapability;
     /** Per-model protocol; falls back to the channel default when omitted. */
     apiFormat?: ApiCallFormat;
+    /**
+     * Independent API group for this single model ("模型独立 API").
+     *
+     * Every field is independently optional and falls back to the channel API, so a model only
+     * overrides the parts it actually needs. Leaving all four empty is the default and means
+     * "this model uses the unified channel API". As soon as one is set, that model's requests are
+     * sent with its own endpoint / key / transport while its siblings in the same channel keep
+     * using the channel values. Resolution order: model → channel → global Preferences.
+     */
+    baseUrl?: string;
+    apiKey?: string;
+    /** Ordered backup keys for the model's own API. Ignored while the model has no own key. */
+    apiKeys?: string[];
+    apiTransport?: ApiTransport;
     script?: string;
     /** When false the model stays in the channel but is hidden from pickers. Defaults to true. */
     enabled?: boolean;
@@ -380,14 +394,17 @@ export function resolveModelScript(config: AiConfig, value: string) {
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {
-    const channel = resolveModelChannel(config, model);
-    if (!model.trim() || !channel.baseUrl.trim()) return false;
+    if (!model.trim()) return false;
+    // Resolve through the model's own API group first: an independent-API model can be ready
+    // (or not) independently of the channel's unified endpoint/key.
+    const request = resolveModelRequestConfig(config, model);
+    if (!request.baseUrl.trim()) return false;
     // Native ComfyUI often has no auth token (or key embedded in RunningHub proxy URL).
-    const script = channel.models.find((item) => item.name === modelOptionName(model))?.script || "";
-    if (isNativeComfyUiBaseUrl(channel.baseUrl) || parseComfyApiWorkflow(script)) return true;
+    const script = resolveModelScript(config, model);
+    if (isNativeComfyUiBaseUrl(request.baseUrl) || parseComfyApiWorkflow(script)) return true;
     // WorkBuddy local queue uses built-in ImageGen / VideoGen — no API key.
-    if (isMioraQueueBaseUrl(channel.baseUrl)) return true;
-    return Boolean(channel.apiKey.trim());
+    if (isMioraQueueBaseUrl(request.baseUrl)) return true;
+    return Boolean(request.apiKey.trim());
 }
 
 export const useConfigStore = create<ConfigStore>()(
@@ -555,10 +572,21 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         const canvasName = typeof item === "string" ? undefined : item.canvasName?.trim() || undefined;
         const apiFormat = typeof item === "string" || item.apiFormat == null ? undefined : normalizeApiFormat(item.apiFormat);
         const enabled = typeof item === "string" || item.enabled == null ? undefined : Boolean(item.enabled);
+        // Per-model independent API: only persisted when actually set, so models without an
+        // override keep zero extra fields (and keep following the channel API).
+        const modelBaseUrl = typeof item === "string" ? "" : item.baseUrl?.trim() || "";
+        const modelKeys = typeof item === "string" ? [] : parseApiKeys([item.apiKey || "", ...(item.apiKeys || [])].join("\n"));
+        const modelTransport = typeof item === "string" || (item.apiTransport !== "direct" && item.apiTransport !== "proxy") ? undefined : item.apiTransport;
         const entry: ChannelModel = { name, capability, script };
         if (canvasName && canvasName !== name) entry.canvasName = canvasName;
         if (apiFormat) entry.apiFormat = apiFormat;
         if (enabled === false) entry.enabled = false;
+        if (modelBaseUrl) entry.baseUrl = normalizeProviderBaseUrl(modelBaseUrl);
+        if (modelKeys.length) {
+            entry.apiKey = modelKeys[0];
+            if (modelKeys.length > 1) entry.apiKeys = modelKeys.slice(1);
+        }
+        if (modelTransport) entry.apiTransport = modelTransport;
         result.push(entry);
     }
     return result;
@@ -654,14 +682,76 @@ export function resolveModelRequestConfig(config: AiConfig, value: string) {
     const channel = resolveModelChannel(config, value);
     const modelName = modelOptionName(value || config.model);
     const model = channel.models.find((item) => item.name === modelName);
+    const api = resolveChannelModelApiGroup(channel, model, config.apiTransport);
     return {
         ...config,
         model: modelName,
-        baseUrl: normalizeProviderBaseUrl(channel.baseUrl),
-        apiKey: sanitizeApiKey(channel.apiKey),
-        apiKeys: channelApiKeys(channel),
+        baseUrl: api.baseUrl,
+        apiKey: api.apiKey,
+        apiKeys: api.apiKeys,
+        apiFormat: api.apiFormat,
+        apiTransport: api.apiTransport,
+    };
+}
+
+/** True when this model carries its own API group (any override field set). */
+export function channelModelHasApiOverride(model?: Pick<ChannelModel, "baseUrl" | "apiKey" | "apiKeys" | "apiTransport"> | null): boolean {
+    if (!model) return false;
+    if (model.baseUrl?.trim()) return true;
+    if (sanitizeApiKey(model.apiKey || "")) return true;
+    if ((model.apiKeys || []).some((key) => sanitizeApiKey(key))) return true;
+    return model.apiTransport === "direct" || model.apiTransport === "proxy";
+}
+
+/**
+ * Ordered API keys for one model: its own independent keys when set, otherwise the channel's
+ * unified keys. Mirrors `channelApiKeys` so the multi-key failover behaves identically.
+ */
+export function resolveChannelModelApiKeys(
+    channel: Pick<ModelChannel, "apiKey" | "apiKeys">,
+    model?: Pick<ChannelModel, "apiKey" | "apiKeys"> | null,
+): string[] {
+    const own = channelApiKeys({ apiKey: model?.apiKey || "", apiKeys: model?.apiKeys || [] });
+    return own.length ? own : channelApiKeys(channel);
+}
+
+export type ChannelModelApiGroup = {
+    baseUrl: string;
+    apiKey: string;
+    apiKeys: string[];
+    apiFormat: ApiCallFormat;
+    apiTransport: ApiTransport;
+    /** Where each part came from — the editor shows this so the fallback is never a mystery. */
+    baseUrlSource: "model" | "channel";
+    apiKeySource: "model" | "channel";
+    apiTransportSource: "model" | "channel" | "global";
+};
+
+/**
+ * Effective API group for a channel model — "模型独立 API 默认为统一的渠道 API".
+ *
+ * Each field resolves on its own: model override → channel value → global Preferences. So a model
+ * that only sets `baseUrl` still authenticates with the channel key, and a model with nothing set
+ * behaves exactly like before this feature existed.
+ */
+export function resolveChannelModelApiGroup(
+    channel: ModelChannel,
+    model?: Pick<ChannelModel, "baseUrl" | "apiKey" | "apiKeys" | "apiFormat" | "apiTransport"> | null,
+    globalTransport?: ApiTransport | null,
+): ChannelModelApiGroup {
+    const ownBaseUrl = model?.baseUrl?.trim() || "";
+    const ownKeys = channelApiKeys({ apiKey: model?.apiKey || "", apiKeys: model?.apiKeys || [] });
+    const ownTransport = model?.apiTransport === "direct" || model?.apiTransport === "proxy" ? model.apiTransport : undefined;
+    const keys = ownKeys.length ? ownKeys : channelApiKeys(channel);
+    return {
+        baseUrl: normalizeProviderBaseUrl(ownBaseUrl || channel.baseUrl),
+        apiKey: keys[0] || "",
+        apiKeys: keys,
         apiFormat: resolveChannelModelApiFormat(channel, model),
-        apiTransport: resolveChannelApiTransport(channel, config.apiTransport),
+        apiTransport: ownTransport || resolveChannelApiTransport(channel, globalTransport),
+        baseUrlSource: ownBaseUrl ? "model" : "channel",
+        apiKeySource: ownKeys.length ? "model" : "channel",
+        apiTransportSource: ownTransport ? "model" : channel.apiTransport ? "channel" : "global",
     };
 }
 

@@ -1,12 +1,13 @@
 import { Button, Drawer, Input, Segmented, Select, Space, Switch } from "antd";
-import { GripVertical, ListPlus, Trash2 } from "lucide-react";
+import { Cable, GripVertical, ListPlus, Trash2 } from "lucide-react";
 import { useEffect, useState, type DragEvent as ReactDragEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { HealthDot } from "@/components/model-picker";
-import { encodeChannelModel, defaultBaseUrlForApiFormat, defaultConfig, guessCapability, isChannelModelEnabled, normalizeChannelModels, parseApiKeys, resolveChannelModelApiFormat, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { channelModelHasApiOverride, encodeChannelModel, defaultBaseUrlForApiFormat, defaultConfig, guessCapability, isChannelModelEnabled, normalizeChannelModels, parseApiKeys, resolveChannelModelApiFormat, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 import { runningHubOrigin } from "@/lib/runninghub-workflow";
 import { getModelHealth, modelHealthKey, subscribeModelHealth } from "@/services/api/model-health";
+import { ChannelModelApiEditor, type ChannelModelApiPatch } from "./channel-model-api-editor";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
 
@@ -17,6 +18,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const [draft, setDraft] = useState<ModelChannel | null>(channel);
     const [selectOpen, setSelectOpen] = useState(false);
     const [scriptTarget, setScriptTarget] = useState<ScriptTarget | null>(null);
+    const [apiTargetName, setApiTargetName] = useState("");
     const [draggingModelName, setDraggingModelName] = useState<string | null>(null);
     const [dragOverModelName, setDragOverModelName] = useState<string | null>(null);
     const [, bumpHealth] = useState(0);
@@ -66,6 +68,24 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const setModelEnabled = (name: string, enabled: boolean) =>
         setModels(draft.models.map((model) => (model.name === name ? { ...model, enabled: enabled ? undefined : false } : model)));
     const setScript = (name: string, script: string) => setModels(draft.models.map((model) => (model.name === name ? { ...model, script: script || undefined } : model)));
+    // Per-model independent API: a field set to `undefined` in the patch drops that override, so
+    // clearing every field returns the model to the channel's unified API.
+    const setModelApi = (name: string, patch: ChannelModelApiPatch) =>
+        setModels(
+            draft.models.map((model) => {
+                if (model.name !== name) return model;
+                const next: ChannelModel = { ...model };
+                if (patch.baseUrl) next.baseUrl = patch.baseUrl;
+                else delete next.baseUrl;
+                if (patch.apiKey) next.apiKey = patch.apiKey;
+                else delete next.apiKey;
+                if (patch.apiKeys?.length) next.apiKeys = patch.apiKeys;
+                else delete next.apiKeys;
+                if (patch.apiTransport) next.apiTransport = patch.apiTransport;
+                else delete next.apiTransport;
+                return next;
+            }),
+        );
     const setCanvasName = (name: string, canvasName: string) =>
         setModels(
             draft.models.map((model) => {
@@ -185,6 +205,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                 {draft.models.length ? (
                     draft.models.map((model) => {
                         const enabled = isChannelModelEnabled(model);
+                        const hasOwnApi = channelModelHasApiOverride(model);
                         return (
                         <div
                             key={model.name}
@@ -237,6 +258,16 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                                     onChange={(value) => setModelApiFormat(model.name, value)}
                                 />
                                 <Segmented size="small" value={model.capability} options={capabilityOptions} onChange={(value) => setCapability(model.name, value as ModelCapability)} />
+                                <Button
+                                    size="small"
+                                    type={hasOwnApi ? "primary" : "default"}
+                                    ghost={hasOwnApi}
+                                    icon={<Cable className="size-3.5" />}
+                                    title={hasOwnApi ? t("config.modelApi.buttonOverrideTitle") : t("config.modelApi.buttonTitle")}
+                                    onClick={() => setApiTargetName(model.name)}
+                                >
+                                    {t(hasOwnApi ? "config.modelApi.buttonOverride" : "config.modelApi.button")}
+                                </Button>
                                 <Button size="small" type={model.script ? "primary" : "default"} ghost={Boolean(model.script)} onClick={() => setScriptTarget({ name: model.name, capability: model.capability, value: model.script || "" })}>
                                     {t(model.script ? "config.channelEditor.scriptReady" : "config.channelEditor.script")}
                                 </Button>
@@ -251,6 +282,14 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
             </div>
 
             <ModelSelectModal open={selectOpen} channel={draft} selectedNames={draft.models.map((model) => model.name)} onConfirm={applySelection} onClose={() => setSelectOpen(false)} />
+
+            <ChannelModelApiEditor
+                open={Boolean(apiTargetName)}
+                channel={draft}
+                model={draft.models.find((model) => model.name === apiTargetName) || null}
+                onSave={(patch) => apiTargetName && setModelApi(apiTargetName, patch)}
+                onClose={() => setApiTargetName("")}
+            />
 
             <ModelScriptEditor
                 open={Boolean(scriptTarget)}
