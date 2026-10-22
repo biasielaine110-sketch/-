@@ -587,6 +587,7 @@ export default {
             deleteRow: "Delete this shot",
             rowDeleted: "Shot deleted",
             noContent: "—",
+            assetDescriptionSameAsShot: "See shot {{no}}",
             shotLabel: "Shot {{no}}",
             shotCount: "{{count}} shots",
             totalDuration: "≈{{seconds}}s total",

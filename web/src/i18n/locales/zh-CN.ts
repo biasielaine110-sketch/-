@@ -587,6 +587,7 @@ export default {
             deleteRow: "删除这一镜",
             rowDeleted: "已删除该镜",
             noContent: "无",
+            assetDescriptionSameAsShot: "同第 {{no}} 镜",
             shotLabel: "第 {{no}} 镜",
             shotCount: "共 {{count}} 镜",
             totalDuration: "总时长约 {{seconds}} 秒",

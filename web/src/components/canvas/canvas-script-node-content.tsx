@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent as React
 import { createPortal } from "react-dom";
 import { App, Modal } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Copy, FileText, GripVertical, Image as ImageIcon, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Copy, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -10,6 +10,7 @@ import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type S
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import { buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import {
+    buildStoryScriptAssetDescriptionHints,
     collectScriptCellPromptCandidate,
     collectStoryScriptAssetFillTargets,
     countStoryScriptTemplateShots,
@@ -527,6 +528,11 @@ export function CanvasScriptNodeContent({
         [rows, presetId, extraColumns],
     );
     const missingAssetRowCount = useMemo(() => rowAssetFillTargets.filter((targets) => targets.length).length, [rowAssetFillTargets]);
+    /**
+     * 「资产描述只在首现镜写全」→ 后面几镜的描述格是空的。纯显示用的占位表：`镜号:描述列key` → 首现镜号。
+     * 只影响这一格的提示文案，**不改数据**（导出 / 下游看到的仍是空，不是「（同第 3 镜）」）。
+     */
+    const assetDescriptionHints = useMemo(() => buildStoryScriptAssetDescriptionHints(rows, presetId), [rows, presetId]);
     // 缩略图 / 标题查表（按节点 id）。节点被删后取不到，渲染时会退化成占位图标。
     const imageLookup = useMemo(() => {
         const map = new Map<string, ScriptAssetCandidate>();
@@ -2022,7 +2028,16 @@ export function CanvasScriptNodeContent({
                                                     {value}
                                                 </div>
                                             ) : (
-                                                <div className="opacity-35">{t("canvas.scriptNode.noContent")}</div>
+                                                // 描述列空着但同名前文已经写过 → 给个「同第 N 镜」的弱提示，
+                                                // 免得用户以为是漏生成（数据仍是空，双击编辑也仍是真正的空）。
+                                                assetDescriptionHints[`${cellShotNo}:${column.key}`] ? (
+                                                    <div className="flex items-center gap-1 opacity-45">
+                                                        <CornerDownRight className="size-2.5 shrink-0" />
+                                                        <span>{t("canvas.scriptNode.assetDescriptionSameAsShot", { no: assetDescriptionHints[`${cellShotNo}:${column.key}`] })}</span>
+                                                    </div>
+                                                ) : (
+                                                    <div className="opacity-35">{t("canvas.scriptNode.noContent")}</div>
+                                                )
                                             )}
                                             {showCellSlot ? (
                                                 <div className="mt-0.5 flex flex-wrap items-center gap-1" onDoubleClick={(event) => event.stopPropagation()}>
@@ -2640,7 +2655,7 @@ export function CanvasScriptNodeContent({
                 columnKey: cellAssetTarget.columnKey,
                 label: cellAssetTarget.label,
                 selectedIds: cellAssetTarget.ids,
-                candidate: collectScriptCellPromptCandidate(cellAssetTarget.columnKey, rows.find((row) => (row.shot_no || 0) === cellAssetTarget.shotNo) || null, extraColumns),
+                candidate: collectScriptCellPromptCandidate(cellAssetTarget.columnKey, rows.find((row) => (row.shot_no || 0) === cellAssetTarget.shotNo) || null, extraColumns, rows),
                 title: t("canvas.scriptNode.cellAssetDialogTitle", { no: cellAssetTarget.shotNo, label: cellAssetTarget.label }),
                 model: cellModel,
                 onModelChange: (model) => onCellModelChange?.(node.id, model),

@@ -35,7 +35,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -6587,6 +6587,8 @@ function AtelierCanvasPage() {
                 // 两路专项自定义要求：资产一套、分镜提示词一套（用户要求分开控制，互不影响）。
                 assetPrompt: sourceNode.metadata?.scriptAssetPrompt,
                 shotPrompt: sourceNode.metadata?.scriptShotPrompt,
+                // 同名资产只在首现镜写全描述 → 输出变短，整表生成更快。
+                assetDedupe: true,
             });
             /**
              * 用户贴进来的「模版」有两种位置，两种都要「照抄结构」而不是拆成括号链：
@@ -6598,6 +6600,8 @@ function AtelierCanvasPage() {
             const scriptSystemPrompt = resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt, {
                 verbatimTemplate: hasStoryScriptShotTemplate(sourceText),
                 customShotFormat: hasScriptGenerationPrompt(sourceNode.metadata?.scriptShotPrompt),
+                // 三套方案通用：第二 / 第三套的 system 是用户词库文本，只能靠这段追加去重规则。
+                assetDedupe: true,
             });
             const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
             const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
@@ -6637,6 +6641,13 @@ function AtelierCanvasPage() {
                  */
                 const parsedRows = applyStoryScriptTemplateOverlay(parsed.rows, sourceText, presetId);
                 /**
+                 * 资产描述去重兜底：system 里已经要求「同名资产只在首现镜写全」，但模型不一定 100% 服从
+                 * （第二 / 第三套方案尤其如此）。这里再按名字归一化清一遍重复描述 —— 名字列不动，
+                 * 所以图位 / 资产锁 / 铺链路不受影响；描述为空的行，表格会给「（同第 N 镜）」占位，
+                 * 逐格「AI 生成」也会回填首现镜的描述（`findStoryScriptAssetDescription`）。幂等。
+                 */
+                const dedupedRows = dedupeStoryScriptAssetDescriptions(parsedRows, presetId);
+                /**
                  * 把「认没认出模版」这件事**明说出来**：以前三列为空时用户只能猜
                  * （「是没识别到，还是模型没生成？」），日志和 UI 都没有证据。
                  */
@@ -6649,7 +6660,7 @@ function AtelierCanvasPage() {
                         const extraKeys = normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns).map((item) => item.key);
                         const previousRows = node.metadata?.scriptRows || [];
                         const rowsWithExtras = extraKeys.length
-                            ? parsedRows.map((row, index) => {
+                            ? dedupedRows.map((row, index) => {
                                   const previous = previousRows.find((item, position) => (Number(item.shot_no) || position + 1) === (Number(row.shot_no) || index + 1));
                                   if (!previous) return row;
                                   const next = { ...row };
@@ -6659,7 +6670,7 @@ function AtelierCanvasPage() {
                                   }
                                   return next;
                               })
-                            : parsedRows;
+                            : dedupedRows;
                         return {
                             ...node,
                             title: parsed.title || node.title,
@@ -6756,6 +6767,8 @@ function AtelierCanvasPage() {
                     customShotFormat: hasScriptGenerationPrompt(sourceNode.metadata?.scriptShotPrompt),
                     // 单镜重生成：覆盖段要说「只要这一镜」，否则会和「一模版一块」自相矛盾。
                     singleShot: true,
+                    // 与整表生成同一口径：同名资产只在首现镜写全描述。
+                    assetDedupe: true,
                 });
                 // 逐镜串行：每改完一镜就写回，下一镜的 prev / next 读到的就是刚改完的版本。
                 let workingRows = [...sourceRows];
@@ -6808,6 +6821,9 @@ function AtelierCanvasPage() {
                         if (kept !== undefined) rewritten[extraKey] = kept;
                     }
                     workingRows = workingRows.map((item, index) => (index === rowIndex ? rewritten : item));
+                    // 单镜重写常把「后面几镜」的描述又写全了（模型看不到整表已经去重过）——
+                    // 这里再跑一遍幂等去重，保证「首现镜写全、其余留空」在单镜改动后依然成立。
+                    workingRows = dedupeStoryScriptAssetDescriptions(workingRows, presetId);
                     done += 1;
                     setNodes((prev) =>
                         prev.map((node) =>

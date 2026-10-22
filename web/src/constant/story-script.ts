@@ -114,7 +114,7 @@ export type StoryScriptPreset = {
     /** 「发送到画布」优先取这一列的内容 */
     insertKey: string;
     /** 任务书构建器（`mergeMode` 决定「每段时长」按「每镜 N 秒」还是「多镜合计 N 秒」写） */
-    buildTask: (input: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown }) => string;
+    buildTask: (input: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown; assetDedupe?: boolean }) => string;
     /**
      * 单镜重生成任务书（「重生成本镜」用）：带上上一镜 / 下一镜上下文，要求模型只重写这一镜，
      * 进而保住「人物站位 / 场景 / 道具与上一镜一致」的连续性。
@@ -658,7 +658,7 @@ const STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE = [
 ].join("\n");
 
 /** 构建分镜脚本生成任务（classic 对应 dramaclaw 的 build_freezone_story_script_task）。 */
-function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown }): string {
+function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetDedupe }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown; assetDedupe?: boolean }): string {
     /**
      * 源内容自带逐镜模版 → 把公共规则里「分镜提示词和视频运动提示词都采用括号分段 + 号连接的格式」
      * 这一条**整条摘掉**。留着它，模型会照样吐 `（…）+（…）`（用户原话「不要拆解成下面这样」）——
@@ -691,13 +691,15 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
     // 没有模版时这段逐字不出现，老任务书不变。
     if (templateSource) parts.push(STORY_SCRIPT_TEMPLATE_HINT, buildTemplateShotPlanHint(sourceText));
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
+    // 资产描述去重：紧贴 JSON 契约之前（模型对越靠后的指令越服从），与 system 里那段是同一份文本。
+    if (assetDedupe) parts.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
     parts.push(STORY_SCRIPT_JSON_CONTRACT);
     parts.push(`源剧本内容：\n${sourceText.trim()}`);
     return parts.join("\n\n");
 }
 
 /** 构建「视频分镜脚本」任务。首句即 recipe 的 `planning_prompt` 原文（说明这一节点要产出什么）。 */
-function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown }): string {
+function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetDedupe }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown; assetDedupe?: boolean }): string {
     const parts = ["根据创意大纲直接生成含镜号、画面、运镜和转场的分镜脚本表格。", ...STORY_SCRIPT_STORYBOARD_COMMON_RULES];
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
     if (characterRefs && characterRefs.trim()) {
@@ -709,6 +711,7 @@ function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds
     if (hasStoryScriptShotTemplate(sourceText)) parts.push(STORY_SCRIPT_TEMPLATE_HINT, buildTemplateShotPlanHint(sourceText));
     // storyboard 的规则全在 system prompt 里，没有可整段替换的「参考风格要点」，所以只追加专项要求。
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
+    if (assetDedupe) parts.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
     parts.push(`创意大纲 / 源内容：\n${sourceText.trim()}`);
     return parts.join("\n\n");
 }
@@ -934,6 +937,11 @@ export function resolveScriptSystemPrompt(
         customShotFormat?: boolean;
         /** 本次只重生成一镜（单镜任务书）→ 覆盖段改成「只要这一镜」，不能说「一模版一块」。 */
         singleShot?: boolean;
+        /**
+         * 资产描述去重（同名资产只在首现镜写全，后面几镜留空）→ 追加 `STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE`。
+         * 单独一个开关，是因为第二 / 第三套的 system 是用户词库里的文本，没法改原文，只能往后追加。
+         */
+        assetDedupe?: boolean;
     },
 ): string {
     const custom = typeof override === "string" ? override.trim() : "";
@@ -943,6 +951,8 @@ export function resolveScriptSystemPrompt(
     const extra: string[] = [];
     if (options?.verbatimTemplate) extra.push(buildTemplateSystemOverride(options?.singleShot));
     if (options?.customShotFormat) extra.push(STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE);
+    // 去重段放最后：它要压过前面（含用户词库）关于「每镜都写全资产描述」的说明。
+    if (options?.assetDedupe) extra.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
     // 都没有时返回字符串与改造前逐字一致（探针守着老调用点）。
     return extra.length ? `${base}\n\n${extra.join("\n\n")}` : base;
 }
@@ -1945,13 +1955,17 @@ const SCRIPT_ASSET_DESCRIPTION_COLUMNS: Record<ScriptAssetRole, Array<{ nameKey?
 
 /**
  * 从分镜表里抽某一类资产的描述候选，供资产对话框一键填入生图提示词。
- * 按「标题 + 描述」去重并保留首次出现顺序（同一角色在多镜里重复出现只留一条）。
+ * 按「标题」去重并保留首次出现顺序（同一角色在多镜里重复出现只留一条）。
+ *
+ * ⚠️ 资产描述「只在首现镜写全」之后，后面几镜这一格是空的 —— 这里**按名字去重而不是按
+ * 「名字 + 描述」**，否则同一个角色会冒出「名字 / 完整描述」和「名字 / 只有名字」两条候选，
+ * 而且顺序靠后的那条描述还是残缺的。万一先出现的是空描述（手改过的表），后来补上的描述会覆盖回去。
  */
 export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonly StoryScriptRow[] | null): ScriptAssetPromptCandidate[] {
     const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
     if (!specs.length || !rows?.length) return [];
     const out: ScriptAssetPromptCandidate[] = [];
-    const seen = new Set<string>();
+    const seen = new Map<string, number>();
     for (const row of rows) {
         for (const spec of specs) {
             const name = spec.nameKey ? storyScriptCellText(row[spec.nameKey]) : "";
@@ -1959,9 +1973,13 @@ export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonl
             const title = name || text.slice(0, 24);
             const prompt = text || name;
             if (!title || !prompt) continue;
-            const dedupe = `${title}\u0000${prompt}`;
-            if (seen.has(dedupe)) continue;
-            seen.add(dedupe);
+            const existing = seen.get(title);
+            if (existing !== undefined) {
+                // 已经有这一条了：只在「之前只剩名字、这次有真描述」时升级，别把完整描述换掉。
+                if (out[existing].prompt === name && hasMeaningfulAssetDescription(text)) out[existing] = { title, prompt };
+                continue;
+            }
+            seen.set(title, out.length);
             out.push({ title, prompt });
         }
     }
@@ -1979,6 +1997,7 @@ export function collectScriptCellPromptCandidate(
     columnKey: unknown,
     row?: StoryScriptRow | null,
     extras?: readonly StoryScriptExtraColumn[] | null,
+    rows?: readonly StoryScriptRow[] | null,
 ): ScriptAssetPromptCandidate | null {
     if (typeof columnKey !== "string" || !row) return null;
     // 自建资产列：这一格本身就是「名字 + 描述」二合一，所以名字和提示词都取同一个格子的文字。
@@ -1987,11 +2006,156 @@ export function collectScriptCellPromptCandidate(
     if (!spec) return null;
     const name = spec.nameKey ? storyScriptCellText(row[spec.nameKey]) : "";
     const text = joinStoryScriptPromptParts(spec.textKeys.map((key) => storyScriptCellText(row[key])));
+    // 「资产描述只在首现镜写全」之后，后面几镜这一格是空的 —— 直接拿名字当提示词去生图，
+    // 出来的角色会走样。这里回填**全表首现镜**的描述（见 `findStoryScriptAssetDescription`）。
+    const inherited = !text && !extra && spec.nameKey ? findStoryScriptAssetDescription(rows, spec, name, row) : "";
     const title = name || text.slice(0, 24);
-    const prompt = text || name;
+    const prompt = text || inherited || name;
     if (!title || !prompt) return null;
     return { title, prompt };
 }
+
+/**
+ * 「同名资产的描述只在首现镜写全，后面几镜留空」—— 用户 2026-10-23 的提速诉求。
+ *
+ * 三处共用同一套口径，缺一处就会露馅：
+ *  1. **提示词侧**：`STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE` 追加进 system，让模型别重复写
+ *     （这才是真省时间的那一步：输出短了，生成就快）；
+ *  2. **解析后归一化** `dedupeStoryScriptAssetDescriptions`：模型不听话时兜底，把重复描述清空
+ *     （幂等，反复跑结果一样）；
+ *  3. **显示占位** `buildStoryScriptAssetDescriptionHints` + **单格回填**
+ *     `findStoryScriptAssetDescription`：表格看着不漏、逐格「AI 生成」还能拿到首现镜的描述。
+ *
+ * ⚠️ 只动**描述列**，名字列（角色1 / 角色2 / 场景 / 道具）永远每镜必填 ——
+ * 图位、资产锁、铺链路全靠名字匹配（`matchStoryScriptRowAssets` / `scriptShotPreciseAssetRefs`）。
+ */
+function scriptAssetDescriptionSpecs(preset?: StoryScriptPresetId | string | null) {
+    const columns = new Set(getStoryScriptPreset(preset).columns.map((column) => column.key));
+    return Object.entries(SCRIPT_ASSET_COLUMN_SPECS)
+        .filter(([, spec]) => Boolean(spec.nameKey) && columns.has(String(spec.nameKey)))
+        .map(([columnKey, spec]) => ({ columnKey, nameKey: String(spec.nameKey), textKeys: spec.textKeys }));
+}
+
+/** 描述「写了东西」——空串与「无」都算没写（`无` 是「这一镜没有这个资产」，不该当首现镜的描述）。 */
+function hasMeaningfulAssetDescription(value: string): boolean {
+    const text = value.trim();
+    return Boolean(text) && text !== "无";
+}
+
+function readStoryScriptAssetDescription(row: StoryScriptRow, textKeys: readonly string[]): string {
+    return joinStoryScriptPromptParts(textKeys.map((key) => storyScriptCellText(row[key]))).trim();
+}
+
+/** 找同名的「首现描述」：优先这一镜之前（按镜号），没有再退到全表（顺序反了也能救回来）。 */
+export function findStoryScriptAssetDescription(
+    rows: readonly StoryScriptRow[] | null | undefined,
+    spec: { nameKey?: string; textKeys: readonly string[] },
+    name: string,
+    current?: StoryScriptRow | null,
+): string {
+    const wanted = normalizeScriptAssetMatchText(name);
+    const nameKey = spec.nameKey;
+    if (!wanted || !nameKey) return "";
+    const currentShot = Number(current?.shot_no) || 0;
+    const matches = (rows || [])
+        .filter((row) => row && normalizeScriptAssetMatchText(storyScriptCellText(row[nameKey])) === wanted)
+        .sort((left, right) => (Number(left.shot_no) || 0) - (Number(right.shot_no) || 0));
+    const earlier = currentShot ? matches.filter((row) => (Number(row.shot_no) || 0) < currentShot) : matches;
+    for (const row of [...earlier, ...matches]) {
+        const text = readStoryScriptAssetDescription(row, spec.textKeys);
+        if (hasMeaningfulAssetDescription(text)) return text;
+    }
+    return "";
+}
+
+/**
+ * 解析后归一化：同一个资产名在前面的镜头已经写过描述 → 这一镜的描述列清空。
+ *
+ * 幂等；只有真的改了才返回新数组（其余情况原样返回，避免无意义的重渲染 / 重存）。
+ * 自建资产列不参与（它是「名字 + 描述」二合一，清空就丢了名字）。
+ */
+export function dedupeStoryScriptAssetDescriptions(
+    rows: readonly StoryScriptRow[] | null | undefined,
+    preset?: StoryScriptPresetId | string | null,
+): StoryScriptRow[] {
+    const list = Array.isArray(rows) ? rows : [];
+    if (list.length < 2) return list as StoryScriptRow[];
+    const specs = scriptAssetDescriptionSpecs(preset);
+    if (!specs.length) return list as StoryScriptRow[];
+    /** `列key\u0000归一化名字` → 首现镜号 */
+    const firstSeen = new Map<string, number>();
+    let changed = false;
+    const next = list.map((row, index) => {
+        const shotNo = Number(row.shot_no) || index + 1;
+        let copy: StoryScriptRow | null = null;
+        for (const spec of specs) {
+            const name = storyScriptCellText(row[spec.nameKey]);
+            const normalized = normalizeScriptAssetMatchText(name);
+            if (!normalized) continue;
+            const key = `${spec.columnKey}\u0000${normalized}`;
+            const text = readStoryScriptAssetDescription(row, spec.textKeys);
+            const meaningful = hasMeaningfulAssetDescription(text);
+            if (!firstSeen.has(key)) {
+                if (meaningful) firstSeen.set(key, shotNo);
+                continue;
+            }
+            if (!meaningful) continue;
+            // 只复制一次：同一行可能有好几列都要清空（角色描述1 + 场景描述…）。
+            const target: StoryScriptRow = copy ?? { ...row };
+            for (const textKey of spec.textKeys) target[textKey] = "";
+            copy = target;
+            changed = true;
+        }
+        return copy || row;
+    });
+    return changed ? next : (list as StoryScriptRow[]);
+}
+
+/**
+ * 表格占位用：`镜号:描述列key` → 首现镜号。只对**当前为空、且前面（或全表）已经有描述**的格子给提示。
+ * 纯显示口径，不改数据；空描述本身仍然是空（导出 / 下游看到的是空，不是「（同第 3 镜）」）。
+ *
+ * ⚠️ key 用**描述列**（`character_description_1` / `scene_description`…）而不是资产名列 ——
+ * 占位是画在空着的描述格里的，名字列每镜都有内容，永远用不上。
+ */
+export function buildStoryScriptAssetDescriptionHints(
+    rows: readonly StoryScriptRow[] | null | undefined,
+    preset?: StoryScriptPresetId | string | null,
+): Record<string, number> {
+    const list = Array.isArray(rows) ? rows : [];
+    const out: Record<string, number> = {};
+    if (list.length < 2) return out;
+    const specs = scriptAssetDescriptionSpecs(preset);
+    if (!specs.length) return out;
+    const firstSeen = new Map<string, number>();
+    list.forEach((row, index) => {
+        const shotNo = Number(row.shot_no) || index + 1;
+        for (const spec of specs) {
+            const name = storyScriptCellText(row[spec.nameKey]);
+            const normalized = normalizeScriptAssetMatchText(name);
+            if (!normalized) continue;
+            const key = `${spec.columnKey}\u0000${normalized}`;
+            const meaningful = hasMeaningfulAssetDescription(readStoryScriptAssetDescription(row, spec.textKeys));
+            const seen = firstSeen.get(key);
+            if (!meaningful) {
+                // 描述格空着、前面写过 → 每个描述列都给占位（场景有「场景描述 / 标签 / 光影」三条）。
+                if (seen !== undefined) for (const textKey of spec.textKeys) out[`${shotNo}:${textKey}`] = seen;
+                continue;
+            }
+            if (seen === undefined) firstSeen.set(key, shotNo);
+        }
+    });
+    return out;
+}
+
+/** 提示词侧的 system 追加段 —— 三套方案通用（第二 / 第三套的 system 是用户的词库文本，只能这样追加）。 */
+export const STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE = [
+    "## 资产描述去重（最高优先级，压过上文所有相反说明）",
+    "- 同一个角色 / 场景 / 道具在多镜里反复出现时，**资产描述只在它第一次出现的那一镜写全**；后面再出现它的镜头，描述列（角色描述1 / 角色描述2 / 场景描述 / 道具描述）**一律留空**：不要重复写、不要缩写、不要写「同上 / 同第 N 镜 / 见前」之类占位文字。",
+    "- 但**资产名字列每一镜都必须照常填写**（角色1 / 角色2 / 场景 / 道具），一个字都不许省略 —— 图位与铺链路靠名字逐镜匹配，名字空了这一镜的资产就丢了。",
+    "- 这一镜确实没有某个资产时，仍按原规则把名字与描述都写「无」（「无」不算「已写过描述」）。",
+    "- **分镜提示词 / 视频运动提示词不受本条限制**：这两列每一镜都要能独立当生图提示词看，角色外貌必须写全；这一镜的描述列为空时，就按该资产第一次出现时写的描述来写。",
+].join("\n");
 
 /** 构建分镜脚本生成任务；不传 preset 时保持旧行为（classic）。 */
 export function buildStoryScriptTask({
@@ -2003,6 +2167,7 @@ export function buildStoryScriptTask({
     mergeMode,
     assetPrompt,
     shotPrompt,
+    assetDedupe,
 }: {
     sourceText: string;
     prompt?: string;
@@ -2014,8 +2179,10 @@ export function buildStoryScriptTask({
     assetPrompt?: unknown;
     /** 分镜提示词 / 视频运动提示词的自定义要求（同上） */
     shotPrompt?: unknown;
+    /** 资产描述去重（同名资产只在首现镜写全）；不传 = 任务书与改造前逐字一致 */
+    assetDedupe?: boolean;
 }): string {
-    return getStoryScriptPreset(preset).buildTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt });
+    return getStoryScriptPreset(preset).buildTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetDedupe });
 }
 
 /** 构建「只重写某一镜」的任务书；不传 preset 时保持 classic。 */
