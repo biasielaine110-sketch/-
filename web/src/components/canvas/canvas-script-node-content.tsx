@@ -955,8 +955,12 @@ export function CanvasScriptNodeContent({
     /**
      * 真正落地方案切换。
      *
+     * 口径（用户 2026-10-23 拍板）：**选哪套就按哪套执行**，缺内容用第一套内置提示词补，不许跨方案回落。
+     *
      * - 第二 / 第三套 = 把词库里的三段提示词一键填进那三个输入框（填完用户仍可打开弹窗改一两句）。
-     *   词库里**没找到**的段落保持原样，不清空 —— 用户可能只想要其中一段。
+     *   词库里**没找到**的段落显式**清空**（不是保持原样）：字段留空 → 生成时回落到该预设自带的
+     *   内置提示词/任务书，这正是「以第一套内置补充」。若保持上一次方案填进去的文案，会出现
+     *   「按钮写着第二套、实际跑的是第三套的句子」——比缺内容更难懂。
      * - 切回第一套 = 还原成「切到词库方案之前」的样子（走 `scriptLibraryBackup`，没设过就清空）。
      * - 三套都**不动** `scriptSource` / `scriptRows`：前者是用户单独设定的分镜表识别内容（02 要继承），
      *   后者是已有结果 —— 换方案只影响下一次生成，没必要清空。
@@ -975,12 +979,6 @@ export function CanvasScriptNodeContent({
             return;
         }
         const prefill = next === "x20" ? x20Prefill : libraryPrefill;
-        // 判据只看「自定义 / 分镜」那一段：资产段两套共用，只剩资产段时切过去填的东西与另一套一模一样，
-        // 按钮写着第三套、实际跑第二套 —— 比切不动更难懂。这种情况直接提示去补词库。
-        if (!prefill.system && !prefill.shot) {
-            message.error(t(next === "x20" ? "canvas.scriptNode.schemeEmptyX20" : "canvas.scriptNode.schemeEmptyLibrary"));
-            return;
-        }
         patchMetadata({
             scriptScheme: next,
             // 只在**离开第一套**时备份：第二套 ↔ 第三套互换时若再备份，存进去的会是刚被另一套预填的文案，
@@ -994,9 +992,10 @@ export function CanvasScriptNodeContent({
                       },
                   }
                 : {}),
-            ...(prefill.system ? { scriptSystemPrompt: prefill.system } : {}),
-            ...(prefill.asset ? { scriptAssetPrompt: prefill.asset } : {}),
-            ...(prefill.shot ? { scriptShotPrompt: prefill.shot } : {}),
+            // 缺段也照写（空串）：空 = 生成时用预设内置提示词补，见本函数注释。
+            scriptSystemPrompt: prefill.system,
+            scriptAssetPrompt: prefill.asset,
+            scriptShotPrompt: prefill.shot,
         });
         if (prefill.missing.length) {
             message.warning(

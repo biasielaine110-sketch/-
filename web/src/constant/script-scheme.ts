@@ -162,8 +162,12 @@ function hasSchemePrompt(prefill?: ScriptSchemePrefill | null): boolean {
 
 /**
  * 节点建好（或老节点第一次打开）时该**自动**套用哪套方案 —— 用户 2026-10-23 要求
- * 「01 分镜表默认使用第二套执行方案，要换由用户自己选」，所以第二套优先；
- * 2026-10-21 的「默认第三套」降为「第二套词库缺失时的兜底」。
+ * 「01 分镜表默认使用第二套执行方案，要换由用户自己选」。
+ *
+ * ⚠️ **不做跨方案回落**（2026-10-23 用户追加口径）：选哪套就按哪套执行，某套在词库里缺内容时
+ * 该段直接用**第一套内置提示词**（= 字段留空，见 `resolveScriptSystemPrompt` /
+ * `buildScriptGenerationPromptSections`），绝不偷偷换成另一套。所以这里只返回 `library`，
+ * 词库里没有就返回 `null`（组件不预填，节点停在第一套内置）。
  *
  * 判断放在这里而不是组件里：这是纯逻辑（不依赖 React / 节点对象），可以拿探针把例外钉死；
  * 组件只负责「返回了方案 id 就落一次 patchMetadata」。
@@ -171,8 +175,8 @@ function hasSchemePrompt(prefill?: ScriptSchemePrefill | null): boolean {
  * 四条例外（任一命中就不自动套用）：
  *  1. `scheme` 已有值 —— 用户明确点过某一套，尊重选择（第一套也是合法选择，不是「没选」）；
  *  2. 三段提示词框里已经有人手填过 —— 「手动添加提示词」是用户点名的第三条路，优先级高于默认值；
- *  3. 两套词库方案都一段都取不到（**只认自定义 / 分镜那一段**，见 `hasSchemePrompt`）——
- *     切了等于没切，留在第一套（界面另有提示让他去补词库）；
+ *  3. 第二套在词库里缺「自定义 / 分镜」那一段（见 `hasSchemePrompt`）—— 没有可预填的内容，
+ *     留在第一套（界面另提示去补词库）；
  *  4. prefill 还没就绪（词库尚未从 store 拿到）—— 先不动，等它到了再判断。
  *
  * 注意：**没有「老节点迁移」了**。10-19 那版把 `library` 写进 metadata 的节点，现在正好就是新默认，
@@ -189,6 +193,5 @@ export function resolveAutoApplyScriptScheme(options: {
     if (hasText(options.scheme)) return null;
     if (hasText(options.customSystemPrompt) || hasText(options.customAssetPrompt) || hasText(options.customShotPrompt)) return null;
     if (hasSchemePrompt(options.libraryPrefill)) return "library";
-    if (hasSchemePrompt(options.x20Prefill)) return "x20";
     return null;
 }
