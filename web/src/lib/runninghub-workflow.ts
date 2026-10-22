@@ -3092,6 +3092,136 @@ function applyKrea2AidenLoraSettings(
     return { workflow: next };
 }
 
+// WorkFisher 全能生图王 (moss_image T2I)
+// (runninghub.ai 2113237431129858050 / runninghub.cn 2113237270584188929).
+// Export: 【WorkFisher】全能生图王 _ 适配所有类型_api.json
+//
+// Why every generic writer mis-fires on this graph:
+//   - the positive CLIP (29) is a *link* from the LLM prompt expander (61), so writeRunningHubPrompt
+//     only finds the 41k-char `role` system prompt, the negative (36) and the PreviewAny (56) text;
+//   - the latent size is a link (`EmptyFlux2LatentImage` 35 ← `ResolutionSelector` 19) and that
+//     selector takes a label enum ("16:9 (Widescreen)"), which writeRunningHubSize refuses to touch;
+//   - the delivered pixels come from SeedVR2 (46) capped by `INTConstant` 50, not from the latent
+//     (the graph renders a draft, downscales it to 0.3MP at 49, then upsamples from that);
+//   - KSampler (31), the upscaler (46) and the expander (61) all carry baked seeds → same picture
+//     for identical inputs, always;
+//   - the author keeps four sinks (draft save 9, preview 52, A/B comparer 47, 4K save 51), so one
+//     generation would come back as several images.
+// Scoped to these two ids — every other workflow keeps the generic writers untouched.
+const WORKFISHER_MOSS_WORKFLOW_IDS = new Set(["2113237431129858050", "2113237270584188929"]);
+
+function isWorkFisherMossWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return WORKFISHER_MOSS_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate for the 全能生图王 moss_image T2I graph (RH.ai / RH.cn id pair above). */
+export function isWorkFisherMossWorkflowId(workflowId?: string | null) {
+    return isWorkFisherMossWorkflow(workflowId);
+}
+
+function applyWorkFisherMossSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    size?: { width: number; height: number } | null,
+    aspect = "",
+    rawSize = "",
+    megapixels = "",
+): { workflow: ComfyWorkflow } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+
+    // 1) User text → the `Text (User Prompt)` primitive (57) the expander reads. Never the expander's
+    //    `role` (its 41k system prompt), the negative (36) or the preview (56).
+    const userPrompt =
+        next["57"] ||
+        findComfyNode(next, (node) => /PrimitiveString|StringConstant/i.test(String(node.class_type || "")) && typeof node.inputs?.value === "string");
+    if (userPrompt?.inputs && prompt.trim() && typeof userPrompt.inputs.value === "string") userPrompt.inputs.value = prompt.trim();
+
+    // 2) Reference image → the expander's single `image1` slot (62 → 61). With no reference, drop
+    //    the link *and* the loader: the author's `example.png` lives in their own input dir, so
+    //    submitting our own graph would ask RunningHub for a file this account cannot resolve.
+    const expander = next["61"] || findComfyNode(next, (node) => /RH_LLMAPI_Pro_Node/i.test(String(node.class_type || "")) && "image1" in (node.inputs || {}));
+    const loader = next["62"] || findComfyNode(next, (node) => /LoadImage/i.test(String(node.class_type || "")));
+    const loaderId = loader ? Object.entries(next).find(([, node]) => node === loader)?.[0] || "" : "";
+    const reference = imageValues.find(Boolean) || "";
+    if (expander?.inputs) {
+        if (reference && loaderId) {
+            if (typeof loader?.inputs?.image === "string") loader.inputs.image = reference;
+            expander.inputs.image1 = [loaderId, 0];
+        } else {
+            delete expander.inputs.image1;
+            if (loaderId) delete next[loaderId];
+        }
+    }
+
+    // 3) Aspect + resolution. `ResolutionSelector` (19) wants the label enum, so the canvas ratio goes
+    //    through the shared table. The delivered long side is `INTConstant` (50) — SeedVR2's
+    //    `resolution` — which is the only knob that survives the 0.3MP → upscale round trip.
+    const selector = next["19"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    const tier = canvasResolutionTier(rawSize);
+    if (selector?.inputs) {
+        const nextAspect = aspect || (size?.width && size.height ? closestResolutionSelectorAspect(size.width, size.height) : "");
+        if (nextAspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(nextAspect);
+        }
+        const explicit = Number(megapixels);
+        if (typeof megapixels === "string" && megapixels.trim() && Number.isFinite(explicit) && explicit > 0 && typeof selector.inputs.megapixels === "number") {
+            selector.inputs.megapixels = explicit;
+        } else if (typeof selector.inputs.megapixels === "number" && tier) {
+            const tierMegapixels = tier === "4k" ? 4 : tier === "2k" ? 2 : 1;
+            const baked = selector.inputs.megapixels;
+            selector.inputs.megapixels = Number.isFinite(baked) && baked > 0 ? Math.max(baked, tierMegapixels) : tierMegapixels;
+        }
+    }
+    const delivered = next["50"] || findComfyNode(next, (node) => /INTConstant/i.test(String(node.class_type || "")) && typeof node.inputs?.value === "number");
+    if (tier && delivered?.inputs && typeof delivered.inputs.value === "number") delivered.inputs.value = TIER_LONG_SIDE[tier];
+
+    // 4) Baked seeds → a fresh one per run (draft sampler + upscaler + expander).
+    for (const node of Object.values(next)) {
+        const type = String(node.class_type || "");
+        if (/KSampler|SamplerCustom/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+        else if (/SeedVR2/i.test(type) && typeof node.inputs?.seed === "number") node.inputs.seed = randomComfySeed();
+    }
+    if (typeof expander?.inputs?.seed === "number") expander.inputs.seed = randomComfySeed();
+
+    // 5) One image per run: keep the SaveImage fed by the upscaler (the 4K `Work-Fisher` file) and
+    //    drop the author's draft save / preview / A/B comparer / final-prompt preview. If the graph
+    //    ever loses its upscaler, keep every save rather than returning nothing.
+    const upscalerIds = new Set(
+        Object.entries(next)
+            .filter(([, node]) => /SeedVR2/i.test(String(node?.class_type || "")))
+            .map(([id]) => id),
+    );
+    const saveIds = Object.entries(next)
+        .filter(([, node]) => /^SaveImage$/i.test(String(node?.class_type || "")))
+        .map(([id]) => id);
+    const finalSaves = saveIds.filter((id) => {
+        const link = next[id]?.inputs?.images;
+        return Array.isArray(link) && upscalerIds.has(String(link[0]));
+    });
+    if (finalSaves.length) {
+        for (const id of saveIds) {
+            if (!finalSaves.includes(id)) delete next[id];
+        }
+    }
+    for (const [id, node] of Object.entries(next)) {
+        const type = String(node?.class_type || "");
+        if (/Image\s*Comparer/i.test(type) || /^PreviewImage$/i.test(type) || /^PreviewAny$/i.test(type)) delete next[id];
+    }
+
+    return { workflow: next };
+}
+
 function snap16(value: number) {
     return Math.max(64, Math.round(value / 16) * 16);
 }
@@ -3288,7 +3418,8 @@ function usesRunningHubLocalExportGraph(workflowId?: string | null) {
         isMinimaxH3FisherWorkflow(workflowId) ||
         isMinimaxH3YzjinyuWorkflow(workflowId) ||
         isKrea2PastoralMjWorkflow(workflowId) ||
-        isKrea2AidenLoraWorkflow(workflowId)
+        isKrea2AidenLoraWorkflow(workflowId) ||
+        isWorkFisherMossWorkflow(workflowId)
     );
 }
 
@@ -3787,6 +3918,15 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const aiden = applyKrea2AidenLoraSettings(workflow, prompt, size, aspect, rawSize, megapixels);
         const list = workflowNodeInfoList(workflow, aiden.workflow);
         return { nodeInfoList: list, graph: aiden.workflow };
+    }
+    // 全能生图王 moss_image T2I opts out (see applyWorkFisherMossSettings): the user prompt lands on
+    // a primitive behind the LLM expander (the positive CLIP is a link), the selector wants a label
+    // enum, the delivered long side is the SeedVR2 INT constant, and the graph has four sinks.
+    // Always ship `graph` so a denied getJsonApiFormat can still run via the model script.
+    if (isWorkFisherMossWorkflow(workflowId)) {
+        const workfisher = applyWorkFisherMossSettings(workflow, prompt, imageValues, size, aspect, rawSize, megapixels);
+        const list = workflowNodeInfoList(workflow, workfisher.workflow);
+        return { nodeInfoList: list, graph: workfisher.workflow };
     }
     if (prompt.trim()) patched = writeRunningHubPrompt(patched, prompt);
     if (size) patched = writeRunningHubSize(patched, size.width, size.height, aspect);
@@ -4643,6 +4783,11 @@ async function runRunningHubWorkflowWithKey(args: {
     if (!workflow && isKrea2AidenLoraWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubKrea2AidenLoraScriptRequired", { id: workflowId }));
     }
+    // 全能生图王: same story — the shared id commonly denies getJsonApiFormat, and this graph cannot
+    // be driven through nodeInfoList alone (see applyWorkFisherMossSettings), so ask for the Export.
+    if (!workflow && isWorkFisherMossWorkflow(workflowId)) {
+        throw new Error(i18n.t("apiErrors.runningHubWorkFisherScriptRequired", { id: workflowId }));
+    }
     // Singularity / HD Dynamic / Fisher: local Export JSON required when remote ACL denies.
     if (!workflow && isMinimaxH3SingularityWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubH3SingularityScriptRequired", { id: workflowId }));
@@ -4743,10 +4888,10 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     let task: RunningHubTaskView;
     try {
-        // Aiden / Pastoral MJ / Singularity / HD Dynamic / Fisher: submit Export via create+workflow
-        // (not comfy/run — RH often returns NOT_FOUND). Prefer browser-direct create for multi-ref
-        // full graphs (Pages proxy ERR_CONNECTION_CLOSED).
-        if ((isKrea2AidenLoraWorkflow(workflowId) || isKrea2PastoralMjWorkflow(workflowId) || preferDirectSubmit) && repairedGraph) {
+        // Aiden / Pastoral MJ / 全能生图王 / Singularity / HD Dynamic / Fisher: submit Export via
+        // create+workflow (not comfy/run — RH often returns NOT_FOUND). Prefer browser-direct create
+        // for multi-ref full graphs (Pages proxy ERR_CONNECTION_CLOSED).
+        if ((isKrea2AidenLoraWorkflow(workflowId) || isKrea2PastoralMjWorkflow(workflowId) || isWorkFisherMossWorkflow(workflowId) || preferDirectSubmit) && repairedGraph) {
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, preferDirectSubmit);
         } else if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             // SelfLift / Qwen+Klein: shared workflowId often denies create/getJsonApiFormat.
