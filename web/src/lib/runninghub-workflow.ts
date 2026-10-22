@@ -16,6 +16,9 @@ import {
     type ComfyWorkflow,
 } from "@/lib/comfyui-native";
 import { compressReferenceDataUrl, dataUrlToFile, getDataUrlByteSize } from "@/lib/image-utils";
+// Vendored Export (API) copy of 全能生图王 — see bundledRunningHubGraph. Baked preview artifacts
+// (the author's local /view URLs) are blanked; both nodes are pruned before submission anyway.
+import workfisherMossWorkflow from "./runninghub-workflows/workfisher-moss-image.json";
 
 type RequestOptions = { signal?: AbortSignal };
 
@@ -3129,6 +3132,19 @@ export function isWorkFisherMossWorkflowId(workflowId?: string | null) {
     return isWorkFisherMossWorkflow(workflowId);
 }
 
+/**
+ * Export (API) graph shipped with the build for a family whose upstream copy is usually ACL-denied.
+ *
+ * 全能生图王 is a third-party app: `getJsonApiFormat` answers "您暂时无权限访问该工作流" for most keys,
+ * so without this the model only runs after the user hand-pastes a 46KB JSON into the model script.
+ * A model script still wins (it is the user's override); this is the floor. Deep-cloned per call so
+ * the patcher never mutates the module constant.
+ */
+function bundledRunningHubGraph(workflowId: string): ComfyWorkflow | null {
+    if (isWorkFisherMossWorkflow(workflowId)) return JSON.parse(JSON.stringify(workfisherMossWorkflow)) as unknown as ComfyWorkflow;
+    return null;
+}
+
 function applyWorkFisherMossSettings(
     workflow: ComfyWorkflow,
     prompt: string,
@@ -4743,7 +4759,7 @@ async function runRunningHubWorkflowWithKey(args: {
         ? null
         : isMinimaxH3FisherWorkflow(workflowId)
           ? resolveFisherWorkflowFromScript(request.script, fisherMode)
-          : parseComfyApiWorkflow(request.script);
+          : parseComfyApiWorkflow(request.script) || bundledRunningHubGraph(workflowId);
     let workflow = localExportGraph;
     let fetchPermissionDenied = false;
     if (!workflow) {
@@ -4782,11 +4798,6 @@ async function runRunningHubWorkflowWithKey(args: {
     // is commonly ACL-denied, and falling through to webapp/nodeInfo would clobber llama templates.
     if (!workflow && isKrea2AidenLoraWorkflow(workflowId)) {
         throw new Error(i18n.t("apiErrors.runningHubKrea2AidenLoraScriptRequired", { id: workflowId }));
-    }
-    // 全能生图王: same story — the shared id commonly denies getJsonApiFormat, and this graph cannot
-    // be driven through nodeInfoList alone (see applyWorkFisherMossSettings), so ask for the Export.
-    if (!workflow && isWorkFisherMossWorkflow(workflowId)) {
-        throw new Error(i18n.t("apiErrors.runningHubWorkFisherScriptRequired", { id: workflowId }));
     }
     // Singularity / HD Dynamic / Fisher: local Export JSON required when remote ACL denies.
     if (!workflow && isMinimaxH3SingularityWorkflow(workflowId)) {
@@ -4913,8 +4924,15 @@ async function runRunningHubWorkflowWithKey(args: {
         if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS|余额不足|额度不足/i.test(message)) {
             throw error;
         }
-        // Aiden / Pastoral / Singularity / HD Dynamic already submitted create+workflow; never fall into webapp.
-        if (isKrea2AidenLoraWorkflow(workflowId) || isKrea2PastoralMjWorkflow(workflowId) || preferDirectSubmit) {
+        // 全能生图王: `create` can still answer "您暂时无权限访问该工作流" for a third-party app even when
+        // the graph we hold is perfectly runnable. Push the same patched graph through
+        // `/task/openapi/comfy/run` once — that endpoint does not need the app ACL — before surfacing.
+        if (isWorkFisherMossWorkflow(workflowId) && repairedGraph) {
+            console.warn(`[runninghub] ${workflowId}: create+workflow failed (${message.slice(0, 160)}), retrying via comfy/run`);
+            task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal).catch((retryError: unknown) => {
+                throw explainRunningHubError(retryError, workflowId);
+            });
+        } else if (isKrea2AidenLoraWorkflow(workflowId) || isKrea2PastoralMjWorkflow(workflowId) || preferDirectSubmit) {
             throw explainRunningHubError(error, workflowId);
         }
         // Local-export graphs already preferred comfy/run above. If that endpoint is unavailable on

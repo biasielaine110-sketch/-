@@ -17,6 +17,16 @@ import { CONFIG_STORE_KEY, type ApiTransport } from "@/stores/use-config-store";
 const DIRECT_CORS_HOSTS = [
     "autodl.art",
     "runninghub.cn",
+    // runninghub.ai (海外站). Same API surface as runninghub.cn, verified 2026-10-22 against
+    // https://infinite-atelier.pages.dev: OPTIONS /task/openapi/create → 204 with
+    // `ACAO: https://infinite-atelier.pages.dev` + `ACAH: authorization,content-type`, and every
+    // other endpoint we hit (/task/openapi/upload `ACAO: *`, /outputs, /status, /v2/query,
+    // /getJsonApiFormat, /comfy/run) answers with permissive ACAO too.
+    // Why it must not go through /api/proxy: task creation posts a JSON body (workflow nodeInfoList
+    // / full graph, tens of KB) and the CF-Pages → upstream hop resets the request body, which shows
+    // up in the UI as `/api/proxy?target=https://www.runninghub.ai/.../create` failing. Browser-direct
+    // skips Cloudflare entirely — same reasoning as runninghub.cn above.
+    "runninghub.ai",
     // RunningHub result-file CDN (rh-images/rh-videos *.xiaoyaoyou.com, ByteDance TOS fronted).
     // Verified per-host: sends `Access-Control-Allow-Origin: *` + `Allow-Methods: GET, HEAD`, so a
     // plain media GET passes CORS straight from the browser, while the Vercel edge (overseas)
