@@ -9,10 +9,11 @@ import type { TextPromptEntry } from "@/constant/text-prompt-library";
  * - `x20`：同样走词库，但自定义提示词与分镜提示词换成
  *   「***********火_X20_主图分镜图_简洁版****************************」，资产提示词同上。
  *
- * ⚠️ 默认是 **`x20`**（2026-10-21 用户要求：02 分镜表默认第三套）。但 `resolveScriptSchemeId`
- * **只做归一化**，不承担默认值 —— 默认行为由 `resolveAutoApplyScriptScheme` 判定，组件在挂载后
- * 真的把三段预填进去。若把这里的默认值改成 `x20`，按钮会亮成第三套、而三个输入框还是空的，
- * 生成时照样走内置提示词，界面与行为对不上（这个坑第一版就踩过）。
+ * ⚠️ 默认是 **`library`（第二套）**（2026-10-23 用户要求：01 分镜表默认第二套，要换哪套由用户自己点）。
+ * 2026-10-21 那版默认第三套已作废。`resolveScriptSchemeId` **只做归一化**，不承担默认值 ——
+ * 默认行为由 `resolveAutoApplyScriptScheme` 判定，组件在挂载后真的把三段预填进去。若把这里的默认值
+ * 改成 `library`，按钮会亮成第二套、而三个输入框还是空的，生成时照样走内置提示词，界面与行为对不上
+ *（这个坑第一版就踩过）。
  *
  * 为什么是「预填进那三个输入框」而不是另开一条注入通道：那三个字段本来就是这个节点的
  * 覆盖入口（`resolveScriptSystemPrompt` / `buildScriptGenerationPromptSections` 都读它们），
@@ -150,9 +151,9 @@ function hasText(value: unknown): boolean {
  * 这套方案「真的可用」吗 —— **只看能区分两套的那一段**（自定义提示词 / 分镜提示词）。
  *
  * ⚠️ 资产段不能作为判据：两套方案共用同两条资产词条，只要词库里有资产词条，两套的 `asset`
- * 就都有内容。若把它算进来，「第三套的分镜词条缺失、只剩资产段」会被判成第三套可用 ——
- * 而它填进去的东西与第二套完全一样，等于按钮写着第三套、实际跑第二套。这种只有资产段的
- * 残状态一律判为「不可用」，让判定继续往第二套 / 第一套回落。
+ * 就都有内容。若把它算进来，「第二套的分镜词条缺失、只剩资产段」会被判成第二套可用 ——
+ * 而它填进去的东西与第三套完全一样，等于按钮写着第二套、实际跑第三套。这种只有资产段的
+ * 残状态一律判为「不可用」，让判定继续往另一套 / 第一套回落。
  */
 function hasSchemePrompt(prefill?: ScriptSchemePrefill | null): boolean {
     if (!prefill) return false;
@@ -160,8 +161,9 @@ function hasSchemePrompt(prefill?: ScriptSchemePrefill | null): boolean {
 }
 
 /**
- * 节点建好（或老节点第一次打开）时该**自动**套用哪套方案 —— 用户 2026-10-21 要求
- * 「02 分镜表默认选择第三套执行方案」，2026-10-19 的第二套退为「第三套词库缺失时的兜底」。
+ * 节点建好（或老节点第一次打开）时该**自动**套用哪套方案 —— 用户 2026-10-23 要求
+ * 「01 分镜表默认使用第二套执行方案，要换由用户自己选」，所以第二套优先；
+ * 2026-10-21 的「默认第三套」降为「第二套词库缺失时的兜底」。
  *
  * 判断放在这里而不是组件里：这是纯逻辑（不依赖 React / 节点对象），可以拿探针把例外钉死；
  * 组件只负责「返回了方案 id 就落一次 patchMetadata」。
@@ -172,6 +174,9 @@ function hasSchemePrompt(prefill?: ScriptSchemePrefill | null): boolean {
  *  3. 两套词库方案都一段都取不到（**只认自定义 / 分镜那一段**，见 `hasSchemePrompt`）——
  *     切了等于没切，留在第一套（界面另有提示让他去补词库）；
  *  4. prefill 还没就绪（词库尚未从 store 拿到）—— 先不动，等它到了再判断。
+ *
+ * 注意：**没有「老节点迁移」了**。10-19 那版把 `library` 写进 metadata 的节点，现在正好就是新默认，
+ * 不必也不能再迁到第三套（那会把用户看到/用着的第二套偷偷换掉）。
  */
 export function resolveAutoApplyScriptScheme(options: {
     scheme?: unknown;
@@ -183,42 +188,7 @@ export function resolveAutoApplyScriptScheme(options: {
 }): ScriptLibrarySchemeId | null {
     if (hasText(options.scheme)) return null;
     if (hasText(options.customSystemPrompt) || hasText(options.customAssetPrompt) || hasText(options.customShotPrompt)) return null;
-    if (hasSchemePrompt(options.x20Prefill)) return "x20";
     if (hasSchemePrompt(options.libraryPrefill)) return "library";
+    if (hasSchemePrompt(options.x20Prefill)) return "x20";
     return null;
-}
-
-/**
- * 老节点迁移：2026-10-19 那版「默认第二套」把 `scriptScheme: "library"` **写进了 metadata**，
- * 这些节点在新默认（第三套）下会一直亮着第二套，看着像「默认没生效」。
- *
- * 只在**能证明「这三段是机器填的、没人动过」**时才迁：
- *  1. 当前方案是 `library`；
- *  2. 没有 `scriptLibraryBackup` —— 有 backup 说明用户从第一套手动点过来的（`applyScheme` 才会写）；
- *  3. 三段正文与**当前词库的第二套预填逐字相同**（用户改一个字就不迁，宁可让他自己点）；
- *  4. 第三套至少取得到 system/shot 那一段（否则迁过去是空的）。
- *
- * 全中才返回 true。迁移动作 = 用第三套预填覆盖，**不写 backup**（原本就是空的）。
- */
-export function shouldMigrateLegacyLibraryScheme(options: {
-    scheme?: unknown;
-    libraryBackup?: unknown;
-    customSystemPrompt?: unknown;
-    customAssetPrompt?: unknown;
-    customShotPrompt?: unknown;
-    libraryPrefill?: ScriptSchemePrefill | null;
-    x20Prefill?: ScriptSchemePrefill | null;
-}): boolean {
-    if (resolveScriptSchemeId(options.scheme) !== "library") return false;
-    if (options.libraryBackup && typeof options.libraryBackup === "object") return false;
-    if (!hasSchemePrompt(options.x20Prefill)) return false;
-    const prefill = options.libraryPrefill;
-    if (!hasSchemePrompt(prefill) || !prefill) return false;
-    const same = (actual: unknown, expected: string) => (typeof actual === "string" ? actual.trim() : "") === expected.trim();
-    if (!same(options.customSystemPrompt, prefill.system)) return false;
-    if (!same(options.customShotPrompt, prefill.shot)) return false;
-    // 资产段可能当时就没命中（保持空），两种都算机器填：要么一样、要么本来就没填。
-    const asset = typeof options.customAssetPrompt === "string" ? options.customAssetPrompt.trim() : "";
-    if (asset && asset !== prefill.asset.trim()) return false;
-    return true;
 }

@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, shouldMigrateLegacyLibraryScheme, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
+import { buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import {
     collectScriptCellPromptCandidate,
     collectStoryScriptAssetFillTargets,
@@ -740,20 +740,21 @@ export function CanvasScriptNodeContent({
     const patchMetadata = (patch: Partial<CanvasNodeData["metadata"]>) => onConfigChange(node.id, patch);
 
     /**
-     * 「第三套（火X20 简洁版）是默认方案」——用户 2026-10-21 的要求（此前 2026-10-19 的默认是第二套，
-     * 现在降为「第三套词库缺失时的兜底」）。
+     * 「第二套（分镜表 · 首帧图和视频提示词）是默认方案」——用户 2026-10-23 的要求
+     * （2026-10-21 的「默认第三套」已作废，第三套降为「第二套词库缺失时的兜底」，切换权交回用户）。
      *
-     * 为什么靠挂载后**自动预填一次**，而不是把 `resolveScriptSchemeId` 的默认值改成 `x20`：
-     * 那个函数只做归一化。默认值一改，按钮会亮成「第三套」、可三个输入框还是空的，生成时照样走
+     * 为什么靠挂载后**自动预填一次**，而不是把 `resolveScriptSchemeId` 的默认值改掉：
+     * 那个函数只做归一化。默认值一改，按钮会亮成第二套、可三个输入框还是空的，生成时照样走
      * 内置提示词 —— 界面与行为对不上，比不默认更糟。唯一正确的落点是「挂载后真的把三段填进去」。
      *
      * 判断条件（已选方案 / 手填过 / 两套词库都空 / prefill 未就绪 → 不动）收在
      * `resolveAutoApplyScriptScheme` 里，探针能钉住；这里只管落库。
+     * 老节点不再迁移：10-19 那版写进 metadata 的 `library` 正好就是现在的默认。
      */
     const schemeAutoAppliedRef = useRef(false);
     useEffect(() => {
         if (schemeAutoAppliedRef.current) return;
-        const auto = resolveAutoApplyScriptScheme({
+        const next = resolveAutoApplyScriptScheme({
             scheme: node.metadata?.scriptScheme,
             x20Prefill,
             libraryPrefill,
@@ -761,19 +762,6 @@ export function CanvasScriptNodeContent({
             customAssetPrompt: node.metadata?.scriptAssetPrompt,
             customShotPrompt: node.metadata?.scriptShotPrompt,
         });
-        // 老节点：10-19 那版默认把 "library" 写进了 metadata，会盖住新默认（第三套）。
-        // 只有「没有 backup + 三段与第二套预填逐字相同 + 第三套可用」才迁 —— 那是当时机器填的，
-        // 用户改过一个字就留在第二套，让他自己点。
-        const migrate = !auto && shouldMigrateLegacyLibraryScheme({
-            scheme: node.metadata?.scriptScheme,
-            libraryBackup: node.metadata?.scriptLibraryBackup,
-            customSystemPrompt: node.metadata?.scriptSystemPrompt,
-            customAssetPrompt: node.metadata?.scriptAssetPrompt,
-            customShotPrompt: node.metadata?.scriptShotPrompt,
-            libraryPrefill,
-            x20Prefill,
-        });
-        const next = auto || (migrate ? "x20" : null);
         if (!next) return;
         schemeAutoAppliedRef.current = true;
         const prefill = next === "x20" ? x20Prefill : libraryPrefill;
@@ -785,7 +773,7 @@ export function CanvasScriptNodeContent({
         });
         // patchMetadata 每次渲染都是新函数；真正的闸门是 next 与 ref，重复执行最多「看一眼就退出」。
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [libraryPrefill, node.metadata?.scriptAssetPrompt, node.metadata?.scriptLibraryBackup, node.metadata?.scriptScheme, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt, x20Prefill]);
+    }, [libraryPrefill, x20Prefill, node.metadata?.scriptAssetPrompt, node.metadata?.scriptScheme, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt]);
 
     const updateRow = (rowIndex: number, key: string, value: string) => {
         const numeric = columns.some((column) => column.key === key && column.numeric);
@@ -1451,7 +1439,7 @@ export function CanvasScriptNodeContent({
         ) : null;
 
     // 「执行方案」总开关：第一套 = 预设自带的内置提示词；第二套 = 词库（分镜表 · 首帧图和视频提示词）；
-    // 第三套 = 词库（火_X20_主图分镜图_简洁版）—— **默认就是第三套**。
+    // 第三套 = 词库（火_X20_主图分镜图_简洁版）—— **默认是第二套，换哪套由用户自己点**。
     // 放在预设切换行**之前**——预设决定「出哪些列」，方案决定「用哪套提示词」，后者层次更高。
     const schemeSelector = (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
@@ -1489,7 +1477,7 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.schemeLibraryMissing", { count: schemePrefill.missing.length })}
                 </span>
             ) : null}
-            {/* 默认是第三套；两套词库都取不到「自定义 / 分镜」那一段时自动切不动，必须说清楚
+            {/* 默认是第二套；两套词库都取不到「自定义 / 分镜」那一段时自动切不动，必须说清楚
                 「为什么还亮着第一套」，否则看着像功能失效。判据只认那一段 —— 资产段两套共用，
                 只有资产词条时切过去也等于没切（见 `resolveAutoApplyScriptScheme`）。 */}
             {!node.metadata?.scriptScheme && !x20Prefill.system && !x20Prefill.shot && !libraryPrefill.system && !libraryPrefill.shot ? (
