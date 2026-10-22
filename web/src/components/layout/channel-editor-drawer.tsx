@@ -146,7 +146,9 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     return (
         <Drawer
             open={open}
-            size={720}
+            // 一行里要塞「模型名 + 画布名 + 开关 + 协议 + 能力 + 独立 API + 调用脚本 + 删除」，
+            // 720 太挤：模型名会被压成「g...」，只能靠 title 猜。放宽到 1080（小屏收到 96vw）。
+            size="min(1080px, 96vw)"
             title={t("config.channelEditor.title")}
             onClose={onClose}
             styles={{ body: { paddingTop: 16 } }}
@@ -225,14 +227,15 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                             >
                                 <GripVertical className="size-4" />
                             </span>
-                            <div className="min-w-0 flex-1">
+                            {/* 名字列给下限：右侧控件组是 shrink-0，名字列一旦无下限就会被压到只剩省略号。 */}
+                            <div className="min-w-[13rem] flex-1">
                                 <span className="inline-flex max-w-full items-center gap-2 text-sm" title={model.name}>
                                     <ChannelModelHealth draft={draft} model={model} />
                                     <span className={`truncate ${enabled ? "" : "line-through text-stone-400"}`}>{model.name}</span>
                                 </span>
                                 <Input
                                     size="small"
-                                    className="mt-1 max-w-xs"
+                                    className="mt-1 max-w-sm"
                                     placeholder={model.name}
                                     value={model.canvasName || ""}
                                     title={t("config.channelEditor.canvasNameHint")}
