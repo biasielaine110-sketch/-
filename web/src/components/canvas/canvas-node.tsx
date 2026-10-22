@@ -260,7 +260,11 @@ export const CanvasNode = React.memo(function CanvasNode({
         const root = nodeContentRef.current;
         if (!root) return;
 
-        const scrollables = Array.from(root.querySelectorAll<HTMLElement>("[data-canvas-scroll-position], [data-canvas-no-zoom]"));
+        // `data-canvas-scroll-managed="self"` 的容器自己记位置（分镜表：表体随视图 / 生成状态进出
+        // DOM，用索引当 key 会错位），这里跳过，免得两套恢复逻辑互相覆盖。
+        const scrollables = Array.from(root.querySelectorAll<HTMLElement>("[data-canvas-scroll-position], [data-canvas-no-zoom]")).filter(
+            (element) => element.dataset.canvasScrollManaged !== "self",
+        );
         if (!scrollables.length) return;
 
         let saved: Record<string, { top: number; left: number }> = {};

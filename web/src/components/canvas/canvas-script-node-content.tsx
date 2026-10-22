@@ -136,6 +136,48 @@ const AUTO_SIZE_PADDING_X = 24;
  */
 const TABLE_CELL_MAX_LINES = 6;
 
+/**
+ * 分镜表表体的滚动位置（横向为主，纵向顺手一起记）。
+ *
+ * 为什么必须自己记：节点**离开视口就被画布裁剪卸载**（`project.tsx` 的 `visibleNodes`），
+ * `bodyRef` 连同它的 `scrollLeft` 一起消失，回来时是全新的 DOM，浏览器只能给 0 ——
+ * 用户看到的就是「滑到第 8 列，切走再切回来，又回到最左边」。表宽 2.6k~4.2k px，
+ * 每次都要重新横着找列，非常难用。
+ *
+ * 为什么不用 metadata：滚动是每帧都可能发生的事，逐帧 `onConfigChange` 会让整张画布重渲。
+ * 这里跟文本节点 / 通用节点保持同一套做法 —— 落 localStorage，按节点 id 分键。
+ */
+const SCRIPT_TABLE_SCROLL_KEY = "infinite-atelier:script-table-scroll";
+
+type ScriptTableScrollPosition = { left: number; top: number };
+
+function readScriptTableScroll(nodeId: string): ScriptTableScrollPosition | null {
+    try {
+        const stored = window.localStorage.getItem(SCRIPT_TABLE_SCROLL_KEY);
+        if (!stored) return null;
+        const positions = JSON.parse(stored) as Record<string, ScriptTableScrollPosition | undefined>;
+        const position = positions[nodeId];
+        if (!position) return null;
+        const left = Number(position.left);
+        const top = Number(position.top);
+        if (!Number.isFinite(left) && !Number.isFinite(top)) return null;
+        return { left: Number.isFinite(left) ? Math.max(0, left) : 0, top: Number.isFinite(top) ? Math.max(0, top) : 0 };
+    } catch {
+        return null;
+    }
+}
+
+function writeScriptTableScroll(nodeId: string, position: ScriptTableScrollPosition) {
+    try {
+        const stored = window.localStorage.getItem(SCRIPT_TABLE_SCROLL_KEY);
+        const positions = stored ? (JSON.parse(stored) as Record<string, ScriptTableScrollPosition>) : {};
+        positions[nodeId] = position;
+        window.localStorage.setItem(SCRIPT_TABLE_SCROLL_KEY, JSON.stringify(positions));
+    } catch {
+        // 隐私模式 / 配额满：滚动照常可用，只是记不住位置。
+    }
+}
+
 /** 三个「试一试」快捷动作（对应剧集画布 ScriptNode 的 SCRIPT_ACTIONS）：在脚本节点左侧建好对应上游节点并连边。 */
 export type ScriptGenAction = "fromScript" | "fromVideoRef" | "fromCharacter";
 
@@ -584,13 +626,15 @@ export function CanvasScriptNodeContent({
     }, [rows.length]);
 
     // 画布在外层对 wheel 做 preventDefault（缩放），节点内滚动必须自己拦下来。
+    // `fullscreen` 也得进依赖：进出全屏时 `shell` 会被 portal 挪走，表体是**新的 DOM**，
+    // 不重绑就只在窗口里生效、全屏时滚轮又变回缩放画布。
     useEffect(() => {
         const el = bodyRef.current;
         if (!el) return;
         const stop = (event: WheelEvent) => event.stopPropagation();
         el.addEventListener("wheel", stop, { passive: true });
         return () => el.removeEventListener("wheel", stop);
-    }, [view, rows.length, isRunning]);
+    }, [fullscreen, view, rows.length, isRunning]);
 
     // 生成出分镜表之后，按「内容多少」自动适配节点窗口：高 = 全部行高（不用再隔着滚动条数行），
     // 宽 = 表格宽度（封顶，见 AUTO_SIZE_MAX_WIDTH）。只在「内容签名」变化时算一次，
@@ -618,6 +662,68 @@ export function CanvasScriptNodeContent({
         if (Math.abs(width - node.width) < 8 && Math.abs(height - node.height) < 8) return;
         onNodeSizeChange(node.id, width, height);
     }, [baseFontSize, columns, compactColumns, displayColumns, fullscreen, isRunning, node.height, node.id, node.width, onConfigChange, onNodeSizeChange, presetId, rows, showFullText, tableWidth, view]);
+
+    /**
+     * 表体的滚动位置：卸载 / 重挂之后不许归位。
+     *
+     * 触发点有四个，看起来像四种问题，成因是同一个 —— **表体 DOM 被重建了**，浏览器只能给 0：
+     *  ① 节点滚出视口被画布裁剪卸载（`project.tsx` 的 `visibleNodes`），再滚回来；
+     *  ② 进 / 出「全屏」：`shell` 被 `createPortal` 挪到 body 下，元素是新的；
+     *  ③ 「剧本原文 ↔ 分镜表」来回切；
+     *  ④ 重新生成期间表体换成运行面板，结束后再挂回来。
+     * 表宽 2.6k~4.2k px，横向滚到第 8 列再切走就等于白找一次，所以位置必须记下来。
+     *
+     * 为什么退出 `canvas-node.tsx` 的通用机制（`data-canvas-scroll-managed="self"`）：
+     * 那套按「DOM 里的第几个滚动容器」当 key，而本节点里滚动容器会随视图 / 引用条增减变化，
+     * 索引一漂就把别的位置套到表体上（或者干脆套不上）。这里用节点 id 当 key，稳定。
+     */
+    useEffect(() => {
+        if (view !== "table" || !rows.length || isRunning) return;
+        const el = bodyRef.current;
+        if (!el) return;
+
+        const saved = readScriptTableScroll(node.id);
+        let cancelled = false;
+        // 自己写 scrollLeft 也会派发 scroll 事件：不挡掉就会把「被布局夹小的值」当成用户的
+        // 操作再存一遍，下次真的回不去了。
+        let applying = false;
+        const apply = () => {
+            if (cancelled || !saved) return;
+            applying = true;
+            el.scrollLeft = Math.min(saved.left, Math.max(0, el.scrollWidth - el.clientWidth));
+            el.scrollTop = Math.min(saved.top, Math.max(0, el.scrollHeight - el.clientHeight));
+            window.requestAnimationFrame(() => {
+                applying = false;
+            });
+        };
+
+        // 连补几帧：上面「自动适配尺寸」的 effect 会在这之后改节点宽高，宽度一变可滚动范围跟着变，
+        // 浏览器会把 scrollLeft 夹回去 —— 只在第一帧写等于白写。再挂一个 240ms 的兜底
+        // （单元格缩略图解码完可能又让表宽变了一点）。
+        apply();
+        let frames = 0;
+        let frame = window.requestAnimationFrame(function step() {
+            apply();
+            frames += 1;
+            if (frames < 4) frame = window.requestAnimationFrame(step);
+        });
+        const timer = window.setTimeout(apply, 240);
+
+        const save = () => {
+            if (applying) return;
+            writeScriptTableScroll(node.id, { left: el.scrollLeft, top: el.scrollTop });
+        };
+        el.addEventListener("scroll", save, { passive: true });
+
+        return () => {
+            cancelled = true;
+            window.cancelAnimationFrame(frame);
+            window.clearTimeout(timer);
+            el.removeEventListener("scroll", save);
+            // 卸载那一刻最后再写一次：最后一小段滚动可能还没落库。
+            writeScriptTableScroll(node.id, { left: el.scrollLeft, top: el.scrollTop });
+        };
+    }, [fullscreen, isRunning, node.id, rows.length, tableWidth, view]);
 
     // 全屏时 Esc 退出；单元格编辑弹窗开着时让 Esc 先归它（否则会连带把全屏也关掉）。
     useEffect(() => {
@@ -1767,7 +1873,15 @@ export function CanvasScriptNodeContent({
     const tablePanel = (
         <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
             {assetToolbar}
-            <div ref={bodyRef} data-canvas-no-zoom className="script-scrollbar min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
+            {/* `data-canvas-scroll-managed="self"`：滚动位置由本组件自己记（见上面的 effect），
+                让 canvas-node 的通用机制跳过它 —— 那套按 DOM 索引当 key，表体会漂。 */}
+            <div
+                ref={bodyRef}
+                data-canvas-no-zoom
+                data-canvas-scroll-managed="self"
+                className="script-scrollbar min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border"
+                style={{ borderColor: theme.node.stroke, background: theme.node.panel }}
+            >
                 <table ref={tableRef} className="border-separate border-spacing-0 leading-tight" style={tableStyle}>
                     <colgroup>
                         {showRowSelect ? <col style={{ width: TABLE_SELECT_WIDTH }} /> : null}
