@@ -15,7 +15,7 @@ import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/l
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, isKnownDirectCorsUrl } from "@/lib/api-proxy";
+import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, forceProxyApiUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
 import { uploadTemporaryPublicImage } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import {
@@ -97,6 +97,44 @@ function aiUrlForBody(config: AiConfig, path: string, body: unknown) {
 function mapOversizeUploadError(error: unknown, bypassed: boolean): unknown {
     if (bypassed && axios.isAxiosError(error) && !error.response) return new Error(apiText("payloadTooLarge"));
     return error;
+}
+
+/**
+ * True for a browser network-layer failure (no HTTP response at all). Axios collapses every
+ * transport failure to `ERR_NETWORK`, so an HTTP/2 reset (`net::ERR_HTTP2_PROTOCOL_ERROR`, which is
+ * what a relay edge does when it slams the connection shut) lands here too — that is exactly the
+ * case worth retrying on the other transport, because the proxy hop often still answers with a
+ * readable edge error page.
+ */
+function isTransportFailure(error: unknown) {
+    if (!axios.isAxiosError(error) || error.response) return false;
+    const code = String((error as { code?: string }).code || "");
+    if (!code || code === "ERR_NETWORK" || code === "ERR_FAILED") return true;
+    return /ERR_(HTTP2|HTTP3|CONNECTION|QUIC|SSL|TIMED_OUT|EMPTY_RESPONSE|INCOMPLETE_CHUNKED)/i.test(code);
+}
+
+/**
+ * Run a create POST, and when the transport dies without a response, retry once on the *other*
+ * transport (direct ↔ site proxy). Two reasons this is worth doing rather than just surfacing the
+ * error:
+ *   1. A flaky edge on either hop sometimes succeeds on the other one.
+ *   2. When the direct hop is reset but the proxy hop answers (e.g. Cloudflare `1016 Origin DNS
+ *      error` HTML for a relay whose origin DNS is broken), the user gets that diagnosable answer
+ *      instead of a bare `net::ERR_HTTP2_PROTOCOL_ERROR`.
+ * Oversized bodies never go proxy-side (that hop resets request bodies) — they keep the direct try.
+ */
+async function retryAlternateTransport<T>(config: AiConfig, path: string, primaryUrl: string, body: unknown, run: (url: string) => Promise<T>): Promise<T> {
+    try {
+        return await run(primaryUrl);
+    } catch (error) {
+        if (axios.isCancel(error) || !isTransportFailure(error)) throw error;
+        const proxied = /\/api(?:-)?proxy\?target=/i.test(primaryUrl);
+        const alternate = proxied ? buildApiUrl(config.baseUrl, path) : forceProxyApiUrl(primaryUrl);
+        if (!alternate || alternate === primaryUrl) throw error;
+        if (!proxied && estimateBodyBytes(body) > PROXY_BODY_SAFE_BYTES) throw error;
+        console.warn(`[video] ${path} via ${proxied ? "proxy" : "direct"} failed at the transport layer; retrying alternate transport`);
+        return run(alternate);
+    }
 }
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
@@ -711,8 +749,9 @@ export async function requestVideoUpscale(config: AiConfig, options: VideoUpscal
     };
     let taskId = "";
     try {
+        const postUrl = aiApiUrl(requestConfig, "/videos");
         const created = unwrapVideoTaskResponse(
-            (await axios.post<ApiVideoResponse>(aiApiUrl(requestConfig, "/videos"), payload, { headers: aiHeaders(requestConfig, "application/json"), signal: options.signal })).data,
+            (await retryAlternateTransport(requestConfig, "/videos", postUrl, payload, (url) => axios.post<ApiVideoResponse>(url, payload, { headers: aiHeaders(requestConfig, "application/json"), signal: options.signal }))).data,
         );
         taskId = created.id || "";
         if (!taskId) throw new Error(apiText("noVideoTaskId"));
@@ -789,8 +828,9 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
             watermark,
         };
         try {
+            const postUrl = aiApiUrl(config, "/videos");
             const created = unwrapVideoResponse(
-                (await axios.post<ApiVideoResponse>(aiApiUrl(config, "/videos"), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data,
+                (await retryAlternateTransport(config, "/videos", postUrl, payload, (url) => axios.post<ApiVideoResponse>(url, payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal }))).data,
             );
             if (!created.id) throw new Error(apiText("noVideoTaskId"));
             return { id: created.id, provider: "openai", model };
@@ -828,7 +868,9 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     files.forEach((file) => body.append("input_reference", file));
     const { url: postUrl, bypass } = aiUrlForBody(config, "/videos", body);
     try {
-        const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(postUrl, body, { headers: aiHeaders(config), signal: options?.signal })).data);
+        const created = unwrapVideoResponse(
+            (await retryAlternateTransport(config, "/videos", postUrl, body, (url) => axios.post<ApiVideoResponse>(url, body, { headers: aiHeaders(config), signal: options?.signal }))).data,
+        );
         if (!created.id) throw new Error(apiText("noVideoTaskId"));
         return { id: created.id, provider: "openai", model };
     } catch (error) {
@@ -1063,7 +1105,7 @@ async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, pr
         const { url: postUrl, bypass } = aiUrlForBody(config, "/videos", payload);
         try {
             const created = unwrapVideoResponse(
-                (await axios.post<ApiVideoResponse>(postUrl, payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data,
+                (await retryAlternateTransport(config, "/videos", postUrl, payload, (url) => axios.post<ApiVideoResponse>(url, payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal }))).data,
             );
             if (!created.id) throw new Error(apiText("noVideoTaskId"));
             return { id: created.id, provider: "openai", model };
@@ -1094,7 +1136,9 @@ async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, pr
         }
         const { url: postUrl, bypass } = aiUrlForBody(config, "/videos", body);
         try {
-            const created = unwrapVideoResponse((await axios.post<ApiVideoResponse>(postUrl, body, { headers: aiHeaders(config), signal: options?.signal })).data);
+            const created = unwrapVideoResponse(
+                (await retryAlternateTransport(config, "/videos", postUrl, body, (url) => axios.post<ApiVideoResponse>(url, body, { headers: aiHeaders(config), signal: options?.signal }))).data,
+            );
             if (!created.id) throw new Error(apiText("noVideoTaskId"));
             return { id: created.id, provider: "openai", model };
         } catch (error) {
@@ -1391,14 +1435,41 @@ function readAxiosError(error: unknown, fallback: string) {
             const hint = url ? `\n${url}` : "";
             // Pages proxy 502 without ACAO used to surface here as a fake CORS/network failure.
             if (/\/api(?:-)?proxy\?target=/i.test(url)) return `${apiText("proxyUnreachable")}${hint}`;
-            if (error.code === "ERR_NETWORK" && isKnownDirectCorsUrl(url)) return `${apiText("directHostUnreachable")}${hint}`;
+            if (error.code === "ERR_NETWORK" && isKnownDirectCorsUrl(url)) {
+                // Only a ts.net tunnel deserves the Tailscale/Funnel checklist — an ordinary relay
+                // (aicost.me, autodl.art …) failing this way is the provider's edge, not a tunnel.
+                return `${apiText(isTunnelCorsUrl(url) ? "directHostUnreachable" : "directHostUnreachableApi")}${hint}`;
+            }
+            // A reset/protocol failure is not "blocked by CORS" — the request went out and the
+            // connection died mid-flight (HTTP/2 RST_STREAM, TLS teardown, proxy kill).
+            if (/ERR_(HTTP2|HTTP3|QUIC|CONNECTION_RESET|CONNECTION_CLOSED|EMPTY_RESPONSE|INCOMPLETE_CHUNKED)/i.test(String(error.code || ""))) {
+                return `${apiText("endpointReset")}${hint}`;
+            }
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
         }
         const responseData = error.response?.data;
+        // Cloudflare edge page instead of an API answer → the provider's own origin is broken.
+        const edge = clarifyVideoEdgeError(error.response?.status, responseData);
+        if (edge) return edge;
         return readApiErrorMessage(responseData) || statusMessage(error.response?.status, fallback);
     }
     if (error instanceof DOMException && error.name === "AbortError") return apiText("requestCanceled");
     return error instanceof Error ? readApiErrorMessage(error.message) || readNetworkMessage(error.message) || error.message : fallback;
+}
+
+/**
+ * Relays answer with a Cloudflare error page (HTML) when their *own* origin is broken: 530 with
+ * "1016 Origin DNS error" means Cloudflare cannot resolve the API host at all, 52x means the origin
+ * is down/overloaded. Say that plainly — it is a provider outage, not a canvas setting.
+ */
+function clarifyVideoEdgeError(status: number | undefined, data: unknown) {
+    const text = typeof data === "string" ? data : "";
+    if (!text || !/cloudflare/i.test(text)) return "";
+    const errorCode = text.match(/errorCode["'\s:=]+(\d{3,4})/i)?.[1] || "";
+    if (errorCode === "1016" || /Origin DNS error/i.test(text)) return apiText("originDnsError");
+    const code = Number(errorCode) || Number(status) || 0;
+    if (code >= 520 && code <= 530) return apiText("originOverloaded", { status: String(code) });
+    return apiText("originOverloaded", { status: "5xx" });
 }
 
 function readNetworkMessage(message: string) {

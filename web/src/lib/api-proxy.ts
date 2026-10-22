@@ -140,6 +140,59 @@ export function forceProxyMediaUrl(directUrl: string): string {
     }
 }
 
+/**
+ * Build a proxied URL for an API POST unconditionally — the alternate rung of a transport ladder.
+ *
+ * `proxyApiUrl` already returns the direct URL for `DIRECT_CORS_HOSTS` entries, which is right most
+ * of the time but leaves no second chance: a relay whose edge resets the connection mid-request
+ * (`net::ERR_HTTP2_PROTOCOL_ERROR` in Chrome, seen on aicost.me `/v1/videos`) fails outright even
+ * when the proxy hop would still return a readable Cloudflare error page. Callers use this to retry
+ * once and then report *that* answer instead of a bare protocol error. Returns "" when the proxy
+ * cannot help at all (same-origin / non-http scheme / loopback or RFC1918 host).
+ */
+export function forceProxyApiUrl(directUrl: string): string {
+    const normalized = normalizeProxyTarget(directUrl);
+    try {
+        const target = new URL(normalized);
+        if (typeof window !== "undefined" && target.origin === window.location.origin) return "";
+        if (target.protocol !== "http:" && target.protocol !== "https:") return "";
+        // 本机 / 内网地址：直连失败时代理也够不着（边缘节点在云端），换一跳只会换个错误。
+        if (isEdgeUnreachableHost(target.hostname)) return "";
+        return buildProxyUrl(normalized);
+    } catch {
+        return "";
+    }
+}
+
+/** Loopback / RFC1918 主机：Cloudflare 边缘永远访问不到，走代理等于换个报错。 */
+function isEdgeUnreachableHost(hostname: string): boolean {
+    const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    if (!host) return false;
+    if (host === "localhost" || host.endsWith(".localhost")) return true;
+    if (host === "::1" || host === "0.0.0.0") return true;
+    if (/^127\./.test(host)) return true;
+    if (/^10\./.test(host)) return true;
+    if (/^192\.168\./.test(host)) return true;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+    if (host.endsWith(".local") || host.endsWith(".lan")) return true;
+    return false;
+}
+
+/**
+ * True when the URL points at a tunnel host (Tailscale Funnel/Serve `*.ts.net`). Only these deserve
+ * the "check Tailscale login / funnel status" advice — telling an ordinary relay user to debug a
+ * funnel they never set up just wastes their time.
+ */
+export function isTunnelCorsUrl(url: string): boolean {
+    try {
+        const target = new URL(normalizeProxyTarget(String(url || "")), typeof window !== "undefined" ? window.location.origin : "http://localhost");
+        const host = target.host.replace(/:\d+$/, "").toLowerCase();
+        return host === "ts.net" || host.endsWith(".ts.net");
+    } catch {
+        return false;
+    }
+}
+
 function buildProxyUrl(directUrl: string) {
     const target = normalizeProxyTarget(directUrl);
     const path = import.meta.env.DEV ? "/api-proxy" : "/api/proxy";

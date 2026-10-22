@@ -2,7 +2,7 @@ import axios from "axios";
 
 import i18n from "@/i18n";
 import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
-import { proxyApiUrl, isKnownDirectCorsUrl } from "@/lib/api-proxy";
+import { proxyApiUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
 import { isComfyH3SingleReferenceImageWorkflow, parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi, type ComfyWorkflow } from "@/lib/comfyui-native";
 import { isKrea2MjStyleWorkflowId, isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, isMinimaxH3YzjinyuWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
@@ -1715,7 +1715,8 @@ function readAxiosError(error: unknown, fallback: string) {
             // Verified CORS-open host (e.g. ts.net funnel) that produced no response at all: the
             // endpoint is down, not blocked — say so instead of sending users to CORS settings.
             if (error.code === "ERR_NETWORK" && isKnownDirectCorsUrl(url)) {
-                return `${apiText("directHostUnreachable")}${hint}`;
+                // ts.net gets the Funnel checklist; an ordinary relay gets the generic relay advice.
+                return `${apiText(isTunnelCorsUrl(url) ? "directHostUnreachable" : "directHostUnreachableApi")}${hint}`;
             }
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
         }
