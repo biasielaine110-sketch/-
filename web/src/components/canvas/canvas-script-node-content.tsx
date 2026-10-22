@@ -690,6 +690,14 @@ export function CanvasScriptNodeContent({
 
         const saved = readScriptTableScroll(node.id);
         let cancelled = false;
+        /**
+         * 最后一次**有效**的滚动位置 —— 落库只认它。
+         *
+         * ⚠️ 绝不在卸载时回读 DOM：React 删除节点是「先摘 DOM、后跑 effect cleanup」，
+         * 游离元素没有布局盒，`el.scrollLeft` 恒为 0。老版本正是在 cleanup 里读了 DOM，
+         * 于是每次切走都把用户滚到的位置覆盖成 0 —— 表现就是「离开界面后自动归位」。
+         */
+        let latest: ScriptTableScrollPosition = saved ?? { left: el.scrollLeft, top: el.scrollTop };
         // 自己写 scrollLeft 也会派发 scroll 事件：不挡掉就会把「被布局夹小的值」当成用户的
         // 操作再存一遍，下次真的回不去了。
         let applying = false;
@@ -717,7 +725,11 @@ export function CanvasScriptNodeContent({
 
         const save = () => {
             if (applying) return;
-            writeScriptTableScroll(node.id, { left: el.scrollLeft, top: el.scrollTop });
+            // 表体还没被撑开（自动适配尺寸之前 / 刚重建）时 scrollLeft 会被浏览器夹成 0，
+            // 那不是用户的操作，不能拿它覆盖已存的位置。
+            if (el.scrollWidth - el.clientWidth <= 0 && latest.left > 0) return;
+            latest = { left: el.scrollLeft, top: el.scrollTop };
+            writeScriptTableScroll(node.id, latest);
         };
         el.addEventListener("scroll", save, { passive: true });
 
@@ -726,8 +738,11 @@ export function CanvasScriptNodeContent({
             window.cancelAnimationFrame(frame);
             window.clearTimeout(timer);
             el.removeEventListener("scroll", save);
-            // 卸载那一刻最后再写一次：最后一小段滚动可能还没落库。
-            writeScriptTableScroll(node.id, { left: el.scrollLeft, top: el.scrollTop });
+            // 元素还在文档里（视图切换 / 重挂 effect）才回读 DOM；已被摘走就落最后有效值。
+            if (el.isConnected && (el.scrollWidth - el.clientWidth > 0 || latest.left === 0)) {
+                latest = { left: el.scrollLeft, top: el.scrollTop };
+            }
+            writeScriptTableScroll(node.id, latest);
         };
     }, [fullscreen, isRunning, node.id, rows.length, tableWidth, view]);
 

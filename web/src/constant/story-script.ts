@@ -2861,6 +2861,78 @@ function parseTemplateHeading(heading: string): { shotNo: number; shotSize: stri
 }
 
 /**
+ * 标题行里「顺手拖出来的字段」。
+ *
+ * 模型（尤其第三套方案 · 火X20）经常把标签**贴在标题同一行**：
+ *
+ * ```
+ * #### 镜头 01：[全景 / 贴地机位低角度仰拍]【静帧提示词】正午烈日下的城市柏油马路。30岁……
+ * ### 镜头 01：[中景] **首帧图片提示词**：电影级写实摄影质感，2.39:1 宽银幕……
+ * ```
+ *
+ * 老实现把这整行当标题 `continue` 掉 —— 块里一个字段都没有，也就达不到「≥2 字段 /
+ * 单字段强锚点」的门槛，整块被丢掉，用户看到的就是「第三套 / 第二套的分镜提示词没识别到」。
+ *
+ * 返回 `{ heading, fields }`：`heading` 只留镜号 + 方括号摘要（给 `parseTemplateHeading`），
+ * `fields` 是拖在后面的那些字段（后续行照旧并进最后一个字段的 `value`）。
+ * 一行里可能不止一个字段（`【静帧提示词】A【视频提示词】B`），所以要按标签逐个切。
+ */
+function splitTemplateHeadingInlineFields(text: string): { heading: string; fields: StoryScriptTemplateField[] } {
+    const trimmed = String(text || "").trim();
+    const knownLabel = (label: string) => STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(label));
+
+    /** 从一段文字里找「下一个已知标签」的起始位置（`【标签】` / `**标签**` 都认）。 */
+    const nextLabelIndex = (value: string): number => {
+        const bracketRe = /【\s*([^】\n]{1,16}?)\s*】/g;
+        let match: RegExpExecArray | null;
+        while ((match = bracketRe.exec(value))) {
+            if (match.index > 0 && knownLabel(match[1])) return match.index;
+        }
+        const boldRe = /\*\*([^*\n]{1,20}?)\*\*/g;
+        while ((match = boldRe.exec(value))) {
+            if (match.index > 0 && knownLabel(match[1])) return match.index;
+        }
+        return -1;
+    };
+
+    // 标题结束的位置 = 第一个已知标签的起点（`[全景 / 机位]` 这种摘要不是标签，跳过）。
+    const firstBracket = /【\s*([^】\n]{1,16}?)\s*】/.exec(trimmed);
+    const bracketStart = firstBracket && firstBracket.index > 0 && knownLabel(firstBracket[1]) ? firstBracket.index : -1;
+    let boldStart = -1;
+    const boldRe = /\*\*([^*\n]{1,20}?)\*\*/g;
+    let boldMatch: RegExpExecArray | null;
+    while ((boldMatch = boldRe.exec(trimmed)) && boldStart < 0) {
+        if (boldMatch.index > 0 && knownLabel(boldMatch[1])) boldStart = boldMatch.index;
+    }
+    const candidates = [bracketStart, boldStart].filter((index) => index > 0);
+    if (!candidates.length) return { heading: trimmed, fields: [] };
+    const start = Math.min(...candidates);
+
+    const fields: StoryScriptTemplateField[] = [];
+    let rest = trimmed.slice(start);
+    // 上限只是防「一段超长正文里反复出现标签」把这里拖成 O(n²)，正常一行最多两个字段。
+    for (let guard = 0; rest && guard < 6; guard += 1) {
+        const bracket = rest.match(/^【\s*([^】\n]{1,16}?)\s*】\s*[：:]?\s*([\s\S]*)$/);
+        if (bracket && knownLabel(bracket[1])) {
+            const cut = nextLabelIndex(bracket[2]);
+            fields.push({ label: bracket[1].trim(), value: (cut > 0 ? bracket[2].slice(0, cut) : bracket[2]).trim(), bracket: true });
+            rest = cut > 0 ? bracket[2].slice(cut) : "";
+            continue;
+        }
+        const bold = rest.match(/^\s*(?:[-*•+]\s*)?\*\*([^*\n]{1,20}?)\*\*\s*[：:]?\s*([\s\S]*)$/);
+        if (bold && knownLabel(bold[1])) {
+            const cut = nextLabelIndex(bold[2]);
+            fields.push({ label: bold[1].trim(), value: (cut > 0 ? bold[2].slice(0, cut) : bold[2]).trim(), bracket: false });
+            rest = cut > 0 ? bold[2].slice(cut) : "";
+            continue;
+        }
+        break;
+    }
+    if (!fields.length) return { heading: trimmed, fields: [] };
+    return { heading: trimmed.slice(0, start).trim(), fields };
+}
+
+/**
  * 只有一个字段也算模版的「强锚点」。
  *
  * 用户 03 给的模版就是每镜只有一行 `- **首帧图片提示词**：` 起头、正文全在下面几行 ——
@@ -2896,6 +2968,21 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
         lastField = null;
     };
 
+    /** 开一个新块：`headingText` 里若拖着字段（`镜头 01：[全景]【静帧提示词】…`）一并进块。 */
+    const startBlock = (headingText: string) => {
+        const inline = splitTemplateHeadingInlineFields(headingText);
+        flush();
+        const block: StoryScriptTemplateBlock = { heading: inline.heading, fields: [] };
+        current = block;
+        for (const field of inline.fields) {
+            block.fields.push(field);
+            // 续行并进**最后一个**字段：`【静帧提示词】A【视频提示词】B` 之后的行属于视频段。
+            lastField = field;
+        }
+    };
+    /** 这一行是不是「镜号标题」（`镜头 02` / `场次02—镜头005` / `第 3 镜`）；不是就当正文续行。 */
+    const looksLikeShotHeading = (text: string) => /场次|镜头|镜号|第\s*\d+\s*镜|\bshot\b|\bscene\b/i.test(text);
+
     for (const rawLine of String(raw || "").split(/\r?\n/)) {
         const line = rawLine.trim();
         if (!line) continue;
@@ -2906,10 +2993,21 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
         if (heading) {
             const text = heading[1].trim();
             // 只把「场次 / 镜头」这类镜号标题当块边界，其它小标题忽略（别把一块拆成两块）。
-            if (/场次|镜头|镜号|第\s*\d+\s*镜|\bshot\b|\bscene\b/i.test(text)) {
-                flush();
-                current = { heading: text, fields: [] };
-            }
+            if (looksLikeShotHeading(text)) startBlock(text);
+            continue;
+        }
+
+        /**
+         * 不加 `#` 的镜号标题，两种写法都要当块边界，否则这一行会被当成**上一镜的续行**
+         * 塞进提示词末尾（`…参考《白日焰火》。\n**镜头 02：中景**`，正文被污染）：
+         *  - `**镜头 02：中景**` / `**镜头 02：中景**：`（加粗成一行，冒号在加粗里或在外）
+         *  - `镜头 02：中景`（裸标题，必须是「镜号 + 数字」才认，否则 `镜头缓慢横移…` 这种正文会被切走）
+         */
+        const shotHeadingOnly =
+            /^\s*(?:[-*•+]\s*)?\*\*([^*\n]{1,24}?)\*\*\s*[：:]?\s*$/.exec(line)?.[1] ??
+            (/^(?:镜头|场次|镜号|第)\s*[0-9０-９一二三四五六七八九十]{1,3}\s*[：:]/.test(line) ? line : "");
+        if (shotHeadingOnly && looksLikeShotHeading(shotHeadingOnly) && !STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(shotHeadingOnly))) {
+            startBlock(shotHeadingOnly);
             continue;
         }
 
@@ -2924,6 +3022,13 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
               : plain && STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(plain[1]))
                 ? { label: plain[1].trim(), value: plain[2].trim(), bracket: false }
                 : null;
+
+        // `**镜头 02：中景**：`（加粗、无值、标签也不是已知字段）：仍按标题处理，别建成一个空字段 ——
+        // 建了空字段，后面几行提示词就全并进它，整镜内容静默消失。
+        if (matched && !matched.value && looksLikeShotHeading(matched.label) && !STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(matched.label))) {
+            startBlock(matched.label);
+            continue;
+        }
 
         if (matched) {
             // 没有标题行时，第二次出现「镜头编号」就是新的一镜。
