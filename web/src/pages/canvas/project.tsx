@@ -35,7 +35,8 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptDirectorFormatHint, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -6591,6 +6592,15 @@ function AtelierCanvasPage() {
                 assetDedupe: true,
             });
             /**
+             * 方案 = 第四套（影视分镜导演）时，任务书**末尾**再压一段「`video_motion_prompt` 只能是八段标签块」。
+             * 第四套的 system 来自用户词库，只说图像段用什么标签、没说这一列放什么；而任务书里还带着
+             * 第一套的 `[时长：Xs]` —— 两头一夹，模型就把「`[时长：4s]` + 图像段正文」塞进视频列。
+             * 任务书末尾 + system 末尾双挂（`directorScheme`），只挂一处压不住。
+             */
+            const directorScheme = resolveScriptSchemeId(sourceNode.metadata?.scriptScheme) === "director";
+            const directorFormatHint = buildStoryScriptDirectorFormatHint(sourceNode.metadata?.scriptScheme);
+            const scriptTask = directorFormatHint ? `${task}\n\n${directorFormatHint}` : task;
+            /**
              * 用户贴进来的「模版」有两种位置，两种都要「照抄结构」而不是拆成括号链：
              *  ① 源内容本身就是逐镜标签块（`- **首帧图片提示词**：…`）；
              *  ② 「分镜提示词自定义要求」里直接写了一整套字段清单 / 长段范文。
@@ -6602,6 +6612,8 @@ function AtelierCanvasPage() {
                 customShotFormat: hasScriptGenerationPrompt(sourceNode.metadata?.scriptShotPrompt),
                 // 三套方案通用：第二 / 第三套的 system 是用户词库文本，只能靠这段追加去重规则。
                 assetDedupe: true,
+                // 第四套：压上「video_motion_prompt 只能是八段标签块」（见 STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT）。
+                directorScheme,
             });
             const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
             const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
@@ -6616,8 +6628,8 @@ function AtelierCanvasPage() {
                 // 连线参考图作为多模态输入喂给视觉模型；hydrate 会把画布资源转成可发送的 dataUrl。
                 const hydrated = context.referenceImages.length ? await hydrateNodeGenerationContext(context) : context;
                 const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
-                    ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
-                    : task;
+                    ? [{ type: "text" as const, text: scriptTask }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
+                    : scriptTask;
                 const answer = await requestImageQuestion(
                     textConfig,
                     [
@@ -6648,6 +6660,13 @@ function AtelierCanvasPage() {
                  */
                 const dedupedRows = dedupeStoryScriptAssetDescriptions(parsedRows, presetId);
                 /**
+                 * 第四套方案：把 `video_motion_prompt` 确定性收敛成八段标签块。
+                 * 模版在场时上面那层覆盖已经给了逐字原文（本函数幂等，合规就一个字都不动）；
+                 * 模版不在场（用户只贴剧本）时，模型经常把图像段塞进视频列 → 这里按行内各列重新组装，
+                 * 保证表格里看到的永远是 `- **时长**：…` 那种八行块，而不是「像拼出来的」一段话。
+                 */
+                const finalRows = directorScheme ? normalizeStoryScriptDirectorRows(dedupedRows, presetId) : dedupedRows;
+                /**
                  * 把「认没认出模版」这件事**明说出来**：以前三列为空时用户只能猜
                  * （「是没识别到，还是模型没生成？」），日志和 UI 都没有证据。
                  */
@@ -6660,7 +6679,7 @@ function AtelierCanvasPage() {
                         const extraKeys = normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns).map((item) => item.key);
                         const previousRows = node.metadata?.scriptRows || [];
                         const rowsWithExtras = extraKeys.length
-                            ? dedupedRows.map((row, index) => {
+                            ? finalRows.map((row, index) => {
                                   const previous = previousRows.find((item, position) => (Number(item.shot_no) || position + 1) === (Number(row.shot_no) || index + 1));
                                   if (!previous) return row;
                                   const next = { ...row };
@@ -6670,7 +6689,7 @@ function AtelierCanvasPage() {
                                   }
                                   return next;
                               })
-                            : dedupedRows;
+                            : finalRows;
                         return {
                             ...node,
                             title: parsed.title || node.title,
@@ -6746,6 +6765,12 @@ function AtelierCanvasPage() {
                 .map((input) => input.title.trim())
                 .filter(Boolean)
                 .join("、");
+            /**
+             * 与整表生成同一口径：第四套（影视分镜导演）的 `video_motion_prompt` 只能是八段标签块。
+             * 单镜重跑也必须挂 —— 只挂整表的话，用户点一次「重新生成这一镜」格式就退回图像段。
+             */
+            const directorScheme = resolveScriptSchemeId(sourceNode.metadata?.scriptScheme) === "director";
+            const directorFormatHint = buildStoryScriptDirectorFormatHint(sourceNode.metadata?.scriptScheme);
             const extraPlot = (options?.extraPlot || "").trim();
             // 默认保持站位一致（= 改造前的行为）；只有显式传 false 才放开。
             const keepBlocking = options?.keepBlocking !== false;
@@ -6769,6 +6794,8 @@ function AtelierCanvasPage() {
                     singleShot: true,
                     // 与整表生成同一口径：同名资产只在首现镜写全描述。
                     assetDedupe: true,
+                    // 与整表生成同一口径：第四套的视频列只能是八段标签块。
+                    directorScheme,
                 });
                 // 逐镜串行：每改完一镜就写回，下一镜的 prev / next 读到的就是刚改完的版本。
                 let workingRows = [...sourceRows];
@@ -6793,9 +6820,11 @@ function AtelierCanvasPage() {
                         assetPrompt: sourceNode.metadata?.scriptAssetPrompt,
                         shotPrompt: sourceNode.metadata?.scriptShotPrompt,
                     });
+                    // 第四套：单镜任务书末尾同样压「video_motion_prompt 只能是八段标签块」。
+                    const rowTask = directorFormatHint ? `${task}\n\n${directorFormatHint}` : task;
                     const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
-                        ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
-                        : task;
+                        ? [{ type: "text" as const, text: rowTask }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
+                        : rowTask;
                     const answer = await requestImageQuestion(textConfig, [
                         { role: "system", content: systemPrompt },
                         { role: "user", content: userContent },
@@ -6827,6 +6856,14 @@ function AtelierCanvasPage() {
                         if (kept !== undefined) rewritten[extraKey] = kept;
                     }
                     workingRows = workingRows.map((item, index) => (index === rowIndex ? rewritten : item));
+                    /**
+                     * 第四套：把这一镜的 `video_motion_prompt` 收敛成八段标签块（时间码按整表累加算，
+                     * 所以要看整张表）。**只替换刚重写的那一行** —— 其它行是用户已经在用的内容，不碰。
+                     */
+                    if (directorScheme) {
+                        const normalizedRows = normalizeStoryScriptDirectorRows(workingRows, presetId);
+                        workingRows = workingRows.map((item, index) => (index === rowIndex ? normalizedRows[index] : item));
+                    }
                     // 单镜重写常把「后面几镜」的描述又写全了（模型看不到整表已经去重过）——
                     // 这里再跑一遍幂等去重，保证「首现镜写全、其余留空」在单镜改动后依然成立。
                     workingRows = dedupeStoryScriptAssetDescriptions(workingRows, presetId);

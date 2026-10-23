@@ -944,6 +944,11 @@ export function resolveScriptSystemPrompt(
          * 单独一个开关，是因为第二 / 第三套的 system 是用户词库里的文本，没法改原文，只能往后追加。
          */
         assetDedupe?: boolean;
+        /**
+         * 方案 = 第四套（影视分镜导演）→ 追加「`video_motion_prompt` 只能是八段标签块」的覆盖段。
+         * 第四套的 system 是用户词库文本，一个字都改不了，只能往后追加（见 `STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT`）。
+         */
+        directorScheme?: boolean;
     },
 ): string {
     const custom = typeof override === "string" ? override.trim() : "";
@@ -953,6 +958,9 @@ export function resolveScriptSystemPrompt(
     const extra: string[] = [];
     if (options?.verbatimTemplate) extra.push(buildTemplateSystemOverride(options?.singleShot));
     if (options?.customShotFormat) extra.push(STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE);
+    // 第四套的八段格式排在自定义分镜要求之后：用户词库那段只说「图像段用什么标签」，
+    // 没说 video_motion_prompt 放什么，这句要最后压上。
+    if (options?.directorScheme) extra.push(STORY_SCRIPT_DIRECTOR_VIDEO_SYSTEM_OVERRIDE);
     // 去重段放最后：它要压过前面（含用户词库）关于「每镜都写全资产描述」的说明。
     if (options?.assetDedupe) extra.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
     // 都没有时返回字符串与改造前逐字一致（探针守着老调用点）。
@@ -3468,7 +3476,19 @@ export function hasStoryScriptShotTemplate(text: string): boolean {
  * 以前这一步全靠猜（「是没识别到，还是模型没生成？」）。
  */
 export function countStoryScriptTemplateShots(text: string): number {
-    return splitStoryScriptTemplateBlocks(String(text || "")).length;
+    const blocks = splitStoryScriptTemplateBlocks(String(text || ""));
+    if (!blocks.length) return 0;
+    /**
+     * ⚠️ 数的是**镜**，不是块。第四套一镜有两个块（`### 镜头01提示词` 图像块 + `### 镜头01｜标题` 视频块），
+     * 以前直接用 `blocks.length` → 12 镜的文档报「识别到 24 镜」。
+     * 用户看到的「是没识别到吗？」里那个数字就对不上，反倒让人以为解析坏了。
+     * 全部块都带镜号时按镜号去重；有块没镜号（老模版）才退回按块数算。
+     */
+    const shotNumbers = blocks.map((block) => {
+        const shotField = block.fields.find((field) => /^(镜头编号|镜号)$/.test(normalizeTemplateLabel(field.label)));
+        return trailingNumber(shotField?.value || block.heading || "");
+    });
+    return shotNumbers.every((no) => no > 0) ? new Set(shotNumbers).size : blocks.length;
 }
 
 /**
@@ -3558,5 +3578,140 @@ export function applyStoryScriptTemplateOverlayToShot(
     const patch = parseStoryScriptTemplateRows(String(sourceText || ""), columns).find((templateRow) => Number(templateRow.shot_no) === shot);
     if (!patch) return row;
     return overlayStoryScriptRow(row, patch, columns);
+}
+
+// ---------------------------------------------------------------------------
+// 第四套方案（影视分镜导演）· `video_motion_prompt` 的**格式护栏**
+// ---------------------------------------------------------------------------
+
+/**
+ * 第四套视频块的八个字段，顺序就是用户模版原文的顺序。
+ * 逐字复制（模版在场）与确定性组装（模版不在场）都照这个顺序。
+ */
+export const STORY_SCRIPT_DIRECTOR_VIDEO_LABELS = ["时长", "景别／机位", "运镜", "人物站位与构图", "主体与动作", "光影与色调", "转场建议", "对白"] as const;
+
+/**
+ * 第四套 `video_motion_prompt` 的**唯一合法格式**说明（用户 2026-10-24 给的实样）。
+ *
+ * 为什么要单独一段（这是用户连着四次说「还是不对」的根因）：
+ * 第四套的 system 提示词是用户词库里的「影视分镜导演」，它只交代「每镜写一块、图像段用
+ * `**主体与动作提示词：**`」，**完全没说 `video_motion_prompt` 这一列该放什么**；而任务书里还带着
+ * 第一套的 `- \`video_motion_prompt\` 里的 \`[时长：Xs]\` 写 N 秒`。两头一夹，模型就把
+ * 「`[时长：4s]` + 图像段正文」塞进视频运动提示词 —— 既不是括号链、也不是八段标签块，
+ * 用户看到的就是「感觉像拼出来的」。
+ *
+ * ⚠️ 这段必须**同时**进 system（作废上文写法）与任务书末尾（最后说话），只放一处压不住；
+ * ⚠️ 只在方案 = `director` 时拼进去 —— 第一/二/三套的 `[时长：Xs]` 链式格式一个字节都不能变。
+ */
+export const STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT = [
+    "## `video_motion_prompt` 的唯一合法格式（第四套 · 影视分镜导演）",
+    "`video_motion_prompt` **不是**图像提示词，**不是** `[a] + [b]` 括号链。它必须是一块逐行标签文本：",
+    "一行一个字段，标签原样写成 `- **标签**：`，值紧跟冒号，顺序固定为下面八行（示例只用来说明格式）：",
+    "- **时长**：6秒，00:59—01:05。",
+    "- **景别／机位**：中景，平视。",
+    "- **运镜**：固定镜头。",
+    "- **人物站位与构图**：苏晚位于右侧三分线，两杯茶在胸腹之间；左侧留出后续移动空间。",
+    "- **主体与动作**：苏晚收紧握杯的手，低声说完一句。",
+    "- **光影与色调**：门檐下柔光不变，杯壁凝结水珠清楚。",
+    "- **转场建议**：在“问一句”结束后切行走全景。",
+    "- **对白**：",
+    "“……算了。总得问一句。”",
+    "硬约束：",
+    "- 禁止出现 `[时长：4s]` 这类方括号写法；时长只写在 `- **时长**：` 这一行（秒数 + 起止时间码）。",
+    "- 禁止把 `主体与动作提示词` / `独立风格提示词` / `首帧图片提示词` 的**图像段**内容写进 `video_motion_prompt`（图像段归 `shot_prompt`）。",
+    "- `- **对白**：` 单独占一行，台词写在**下一行**（不加引号也行）；这一镜没有对白就写 `- **对白**：无`。",
+    "- 八行都要有，不许合并成一段，也不许省成一句概括。",
+].join("\n");
+
+/** system 侧的挂载形态：先声明「本节压过上文」，再给格式。 */
+const STORY_SCRIPT_DIRECTOR_VIDEO_SYSTEM_OVERRIDE = [
+    "本节优先级高于上文所有关于 `video_motion_prompt` 的写法说明（含 6 段链式、`[a] + [b]` 括号连接、`[时长：Xs]`）。",
+    STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT,
+].join("\n");
+
+/** 一行是不是「已经是八段标签块」（至少命中四个标签就算 —— 容忍模型少写一两行）。 */
+function isDirectorVideoBlockText(text: unknown): boolean {
+    const value = String(text || "");
+    if (!value) return false;
+    let hits = 0;
+    for (const label of STORY_SCRIPT_DIRECTOR_VIDEO_LABELS) {
+        if (value.includes(`- **${label}**`)) hits += 1;
+        // `景别/机位`（半角斜杠）也算。
+        else if (label === "景别／机位" && value.includes("- **景别/机位**")) hits += 1;
+    }
+    return hits >= 4;
+}
+
+/** 秒 → `MM:SS`（整表时间码按 `duration` 累加，与用户模版的 `00:59—01:05` 同口径）。 */
+export function formatStoryScriptTimecode(totalSeconds: number): string {
+    const safe = Math.max(0, Math.round(Number(totalSeconds) || 0));
+    const pad = (value: number) => String(value).padStart(2, "0");
+    return `${pad(Math.floor(safe / 60))}:${pad(safe % 60)}`;
+}
+
+/** 清理要落进标签行的值：去首尾空白、抹掉结尾重复的句读（行尾会统一补 `。`）。 */
+function cleanDirectorFieldValue(value: unknown): string {
+    return storyScriptCellText(value).trim().replace(/[。．.；;，,、\s]+$/, "");
+}
+
+/** 从模型自己的文字里捞「机位 / 运镜 / 转场」—— 这三样在本仓的列里没有独立列。 */
+const DIRECTOR_CAMERA_ANGLE_PATTERN = /(微俯|微仰|平视|仰视|俯视|仰拍|俯拍|平拍|过肩|航拍|贴地|顶拍|侧拍|俯角|仰角)/;
+const DIRECTOR_CAMERA_MOVE_PATTERN = /(固定镜头|固定机位|缓慢推镜|推镜头|推镜|拉镜头|拉镜|摇镜|摇摄|横移|移镜|跟拍|跟镜|升降|手持|环绕|旋转|变焦|甩镜)/;
+const DIRECTOR_TRANSITION_PATTERN = /转场(?:建议|方式|手法)?\s*[：:]\s*([^\n。；;]+)/;
+
+/**
+ * 第四套：把每一行的 `video_motion_prompt` **收敛成八段标签块**。
+ *
+ * 两种情况：
+ *  ① 已经是八段块（模版逐字复制、或模型自己写对了）→ **一个字都不动**；
+ *  ② 还是模型写的图像段 / 括号链 → 用这一行**自己的列**确定性组装一份八行块，
+ *     机位 / 运镜 / 转场从原文里捞（本仓没有这几列），捞不到写 `无`。
+ *
+ * 为什么要这一步而不是继续加提示词：用户前后四次反馈的都是「格式不对」，
+ * 提示词的服从率做不到 100%，而这是一个**纯函数就能保证**的事 —— 表格里的东西不该靠模型自觉。
+ * 时间码按 `duration` 累加算，和用户模版里的 `00:59—01:05` 同一口径。
+ *
+ * ⚠️ 只给 `director` 方案调用（`storyboard` 预设没有 `video_motion_prompt` 列，直接原样返回）。
+ * ⚠️ 幂等：已经合规的行原样返回，所以整表重跑 / 单镜重跑反复调用都不会累积变形。
+ */
+export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[], preset?: StoryScriptPresetId | string | null): StoryScriptRow[] {
+    if (!rows?.length) return rows as StoryScriptRow[];
+    const columns = getStoryScriptColumns(preset);
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
+
+    let cursor = 0;
+    const timeline = rows.map((row) => {
+        const duration = Math.max(1, Math.round(Number(row.duration) || 0) || 1);
+        const entry = { start: cursor, duration };
+        cursor += duration;
+        return entry;
+    });
+
+    return rows.map((row, index) => {
+        if (isDirectorVideoBlockText(row.video_motion_prompt)) return row;
+        const { start, duration } = timeline[index];
+        const blob = [storyScriptCellText(row.video_motion_prompt), storyScriptCellText(row.shot_prompt), storyScriptCellText(row.visual_description)].join("\n");
+        const angle = (blob.match(DIRECTOR_CAMERA_ANGLE_PATTERN) || [])[1] || "";
+        const move = (blob.match(DIRECTOR_CAMERA_MOVE_PATTERN) || [])[1] || "";
+        const transition = ((blob.match(DIRECTOR_TRANSITION_PATTERN) || [])[1] || "").trim();
+        const shotSize = cleanDirectorFieldValue(row.shot);
+        const dialogue = storyScriptCellText(row.dialogue).trim();
+        const lines = [
+            `- **时长**：${duration}秒，${formatStoryScriptTimecode(start)}—${formatStoryScriptTimecode(start + duration)}。`,
+            `- **景别／机位**：${[shotSize, angle].filter(Boolean).join("，") || "无"}。`,
+            `- **运镜**：${move || "无"}。`,
+            `- **人物站位与构图**：${cleanDirectorFieldValue(row.blocking) || "无"}。`,
+            `- **主体与动作**：${cleanDirectorFieldValue(row.character_action) || "无"}。`,
+            `- **光影与色调**：${cleanDirectorFieldValue(row.lighting_mood) || "无"}。`,
+            `- **转场建议**：${transition || "无"}。`,
+            dialogue ? `- **对白**：\n${dialogue}` : "- **对白**：无",
+        ];
+        return { ...row, video_motion_prompt: lines.join("\n") };
+    });
+}
+
+/** 方案 = 第四套时，任务书末尾追加的格式段（`null` 表示这套不需要）。 */
+export function buildStoryScriptDirectorFormatHint(scheme?: unknown): string {
+    return String(scheme || "") === "director" ? STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT : "";
 }
 
