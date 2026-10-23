@@ -3165,7 +3165,7 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
     const blocks = splitStoryScriptTemplateBlocks(text);
     if (!blocks.length) return [];
     const hasColumn = (key: string) => columns.some((column) => column.key === key);
-    const rows: StoryScriptRow[] = [];
+    const records: Array<Record<string, unknown>> = [];
 
     for (const block of blocks) {
         const fields = new Map<string, string>();
@@ -3298,9 +3298,45 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
         }
 
         if (!Object.keys(record).length) continue;
-        rows.push(normalizeStoryScriptRow(record, rows.length, columns));
+        records.push(record);
     }
-    return rows;
+    return mergeStoryScriptTemplateRecords(records, columns);
+}
+
+/**
+ * 第四套方案（影视分镜导演）的一镜有**两个块**：
+ *
+ * ```
+ * ### 镜头01提示词        ← 图像块：主体与动作提示词 / 独立风格提示词
+ * ### 镜头01｜决定        ← 视频块：时长 / 景别／机位 / 运镜 / 声音 …
+ * ```
+ *
+ * 不合并的后果（变体探针抓到的实况）：同一镜号出**两行** —— 图像行有分镜提示词但视频运动提示词是空的，
+ * 视频行反过来；覆盖层 `applyStoryScriptTemplateOverlay` 又只取每镜第一行 → 模型行的
+ * **视频运动提示词永远拿不到模版内容**，用户看到的就是「视频运动提示词没识别出来」。
+ *
+ * 合并规则：按 `shot_no` 分组（镜号 0 = 没标题没镜号的块，**永不合并**，保住「无标题连续两镜」的分块）；
+ * 冲突时先到先得（图像块与视频块的键基本不相交，撞上说明内容真不同，别让后块把前块冲掉）。
+ */
+function mergeStoryScriptTemplateRecords(records: Array<Record<string, unknown>>, columns: StoryScriptColumn[]): StoryScriptRow[] {
+    const merged: Array<Record<string, unknown>> = [];
+    const indexByShot = new Map<number, number>();
+    for (const record of records) {
+        const shot = Number(record.shot_no) || 0;
+        const at = shot > 0 ? indexByShot.get(shot) : undefined;
+        if (at === undefined) {
+            if (shot > 0) indexByShot.set(shot, merged.length);
+            merged.push(record);
+            continue;
+        }
+        const target = merged[at];
+        for (const [key, value] of Object.entries(record)) {
+            if (key === "shot_no") continue;
+            if (storyScriptCellText(target[key])) continue;
+            target[key] = value;
+        }
+    }
+    return merged.map((record, index) => normalizeStoryScriptRow(record, index, columns));
 }
 
 /**
