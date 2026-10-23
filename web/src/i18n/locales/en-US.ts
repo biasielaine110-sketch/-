@@ -791,6 +791,8 @@ export default {
             merge_shot: "One shot",
             merge_2: "Every 2",
             merge_3: "Every 3",
+            merge_4: "Every 4",
+            merge_5: "Every 5",
             merge_duration: "By segment length",
             mergeHint: "Merge consecutive shots into one video node: their shot prompts are combined into a single video prompt; image nodes stay per shot",
             mergeDurationDisabled: "\"No limit\" has no target to reach — pick 5s / 10s / 15s first",

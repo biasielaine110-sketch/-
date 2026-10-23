@@ -457,7 +457,7 @@ export function resolveStoryScriptShotSeconds(duration: unknown, segmentSeconds?
 /**
  * 「每镜 / 每段时长」要求。三种口径，取决于「视频分段」怎么设：
  * - `shot`：**一镜就是一段成片** → 10/15 锁死 `duration` = N；5 秒是上限（≤N）；
- * - `duration` / `2` / `3`：若干镜合并成一段 → 连续几镜的秒数之和凑到 N；
+ * - `duration` / `2` / `3` / `4` / `5`：若干镜合并成一段 → 连续几镜的秒数之和凑到 N；
  * - 不传 `mergeMode`（老调用 / 探针）：保持「合计约 N 秒」的老文案，与改造前逐字一致。
  * 不指定（none）时不加任何约束，保持原行为。
  */
@@ -484,8 +484,9 @@ function buildSegmentDurationGuidance(segmentSeconds?: unknown, mergeMode?: Stor
             `- 镜头内部时间线要写清（例如 0-${Math.round(value / 3)}s / ${Math.round(value / 3)}-${Math.round((value * 2) / 3)}s / 尾段），方便视频模型一次成片。`,
         ].join("\n");
     }
-    if (mode === "2" || mode === "3") {
-        const perSegment = mode === "2" ? 2 : 3;
+    // 「每 N 镜合并」这一族（2~5）：数字直接来自档位本身，加档位不用改这里。
+    const perSegment = mode === null ? 1 : storyScriptMergeGroupSize(mode);
+    if (perSegment > 1) {
         return [
             "## 分段时长要求",
             `- 本次目标成片长度约为每段 ${value} 秒（视频模型基本只能按 ${value} 秒出片）。`,
@@ -1084,12 +1085,23 @@ export function storyScriptSegmentSecondsValue(value: unknown): number {
     return id === "none" ? 0 : Number(id);
 }
 
-/** 铺链路时的视频分段方式：单镜 / 每 N 镜合并 / 按每段时长自动合并。 */
-export type StoryScriptMergeMode = "shot" | "2" | "3" | "duration";
-export const STORY_SCRIPT_MERGE_MODES: StoryScriptMergeMode[] = ["shot", "2", "3", "duration"];
+/** 铺链路时的视频分段方式：单镜 / 每 N 镜合并（2~5）/ 按每段时长自动合并。 */
+export type StoryScriptMergeMode = "shot" | "2" | "3" | "4" | "5" | "duration";
+export const STORY_SCRIPT_MERGE_MODES: StoryScriptMergeMode[] = ["shot", "2", "3", "4", "5", "duration"];
 
 export function resolveStoryScriptMergeMode(value: unknown): StoryScriptMergeMode {
     return STORY_SCRIPT_MERGE_MODES.includes(value as StoryScriptMergeMode) ? (value as StoryScriptMergeMode) : "shot";
+}
+
+/**
+ * 「每 N 镜一段」的 N（`shot` / `duration` 返回 1）。
+ *
+ * 为什么不写成 `=== "2" ? 2 : === "3" ? 3 : 1`：用户 2026-10-24 要求补 4 / 5 镜一档，
+ * 这种三元链每加一档要走改三处（类型、数组、这行），一不小心就漏。改成把档位本身当数字用。
+ */
+export function storyScriptMergeGroupSize(mode?: StoryScriptMergeMode | string | null): number {
+    const size = Number(resolveStoryScriptMergeMode(mode));
+    return Number.isFinite(size) && size > 1 ? size : 1;
 }
 
 /**
@@ -1127,7 +1139,7 @@ export type StoryScriptRowGroup = { rows: StoryScriptRow[] };
 /**
  * 把分镜行切成一段一段，**每个分组铺出一个视频节点**。
  * - `shot`：一镜一段；
- * - `2` / `3`：连续 2 / 3 镜一段；
+ * - `2` / `3` / `4` / `5`：连续 N 镜一段；
  * - `duration`：按每段目标时长累加，凑够目标就切段（第一镜就超长时也单独成段；没设时长则退回单镜）。
  */
 export function groupStoryScriptRows(
@@ -1153,7 +1165,7 @@ export function groupStoryScriptRows(
         if (current.length) groups.push({ rows: current });
         return groups;
     }
-    const size = resolved === "2" ? 2 : resolved === "3" ? 3 : 1;
+    const size = storyScriptMergeGroupSize(resolved);
     const groups: StoryScriptRowGroup[] = [];
     for (let index = 0; index < rows.length; index += size) groups.push({ rows: rows.slice(index, index + size) });
     return groups;
@@ -1182,8 +1194,22 @@ export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; video
     if (!kept.length) return "";
     if (kept.length === 1) return kept[0].body;
     const merged = [`多镜头连续片段（共 ${kept.length} 镜）：`, ...kept.map((item) => `第${item.no}镜\n${item.body}`)].join("\n\n");
+    // 第四套每镜的提示词末尾都带一句「不要出现字幕和音乐…」：4 镜合并会重复 4 遍。
+    // 它是**整段**的总要求，所以只留一条、放到最末（没有这句时原样返回，其它套不受影响）。
+    const collapsed = collapseDirectorSoundNotes(merged);
     // 同一场戏各镜的风格提示词通常一模一样：逐镜重复 N 遍只会把提示词撑长、稀释画面描述。同文只留一条。
-    return dedupeStoryScriptStyleLines(merged);
+    return dedupeStoryScriptStyleLines(collapsed);
+}
+
+/**
+ * 多镜合并时把「不要出现字幕和音乐…」收敛成一条（放最末）。
+ * 一句都没有时**原样返回**，所以第一/二/三套的合并结果一个字节都不变。
+ */
+function collapseDirectorSoundNotes(text: string): string {
+    const value = String(text || "");
+    if (!value.includes("不要出现字幕和音乐")) return value;
+    const lines = value.split("\n").filter((line) => !line.includes("不要出现字幕和音乐"));
+    return withDirectorSoundNote(lines.join("\n").replace(/\n{3,}/g, "\n\n"));
 }
 
 /** 合并后的视频提示词里，重复的「视觉风格：…」只保留第一次出现的那条。 */
@@ -3591,6 +3617,15 @@ export function applyStoryScriptTemplateOverlayToShot(
 export const STORY_SCRIPT_DIRECTOR_VIDEO_LABELS = ["时长", "景别／机位", "运镜", "人物站位与构图", "主体与动作", "光影与色调", "转场建议", "对白"] as const;
 
 /**
+ * 第四套：`video_motion_prompt` 末尾**默认追加**的一句声音要求（用户 2026-10-24 给的原话，一个字不改）。
+ *
+ * 为什么是后置追加而不是让模型自己写：用户要的是「每一镜的输出里都有这一行」，
+ * 这种「每条都必须带」的东西靠提示词会漏，靠 `normalizeStoryScriptDirectorRows` 才能 100% 保证。
+ * 提示词里也照样写一遍（模型自己写了就按 `includes` 去重，不会出现两行）。
+ */
+export const STORY_SCRIPT_DIRECTOR_SOUND_NOTE = "不要出现字幕和音乐，只要台词和环境音效。";
+
+/**
  * 第四套 `video_motion_prompt` 的**唯一合法格式**说明（用户 2026-10-24 给的实样）。
  *
  * 为什么要单独一段（这是用户连着四次说「还是不对」的根因）：
@@ -3622,6 +3657,7 @@ export const STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT = [
     "- `- **主体与动作**` 只写「人名 + 具体动作」，**一个外貌词都不许带**：年龄、面孔、五官、发型、发色、肤色、身材、上衣、裤子、鞋子、配饰全部不写。人名用 `角色1` / `角色2` 列里的名字原样写（`苏晚`），不要写成 `27岁的中国女生苏晚，亚洲面孔、五官…穿米白针织衫` —— 外貌与服装属于 `角色描述1/2` 列和 `shot_prompt` 的图像段，写进视频运动提示词会让视频模型按文字重新捏一个人。",
     "- `- **对白**：` 单独占一行，台词写在**下一行**（不加引号也行）；这一镜没有对白就写 `- **对白**：无`。",
     "- 八行都要有，不许合并成一段，也不许省成一句概括。",
+    `- 八行之后**另起一行**、原样写上这一句（不带标签、不要并进对白）：\`${STORY_SCRIPT_DIRECTOR_SOUND_NOTE}\``,
     // 图像段（`shot_prompt`）同样不许写角色外貌 —— 用户 2026-10-24 晚追加要求。
     // 放在同一个常量里，是因为它跟上面一样「只在第四套生效、且必须 system + 任务书两处都挂」。
     "",
@@ -3780,6 +3816,15 @@ function stripDirectorAppearanceFromPrompt(value: unknown, names: readonly strin
     return result || names.join("、");
 }
 
+/** 第四套：给视频运动提示词补上「不要字幕和音乐」那一行（已经有就一个字不动）。 */
+function withDirectorSoundNote(text: string): string {
+    const value = String(text || "");
+    if (!value.trim()) return value;
+    // 按键词判，不整句比对：模型可能写成「不要出现字幕和音乐」不带句号，或顺手加个 `- `。
+    if (value.includes("不要出现字幕和音乐")) return value;
+    return `${value.replace(/\s+$/, "")}\n\n${STORY_SCRIPT_DIRECTOR_SOUND_NOTE}`;
+}
+
 /** 第四套：把**已经合规**的八段块里的 `主体与动作` 那一行就地换掉（其余行一个字不动）。 */
 function rewriteDirectorSubjectLine(blockText: string, names: readonly string[]): string {
     const lines = String(blockText || "").split("\n");
@@ -3830,6 +3875,7 @@ const DIRECTOR_TRANSITION_PATTERN = /转场(?:建议|方式|手法)?\s*[：:]\s*
  * 为什么要这一步而不是继续加提示词：用户前后四次反馈的都是「格式不对」，
  * 提示词的服从率做不到 100%，而这是一个**纯函数就能保证**的事 —— 表格里的东西不该靠模型自觉。
  * 时间码按 `duration` 累加算，和用户模版里的 `00:59—01:05` 同一口径。
+ * 两条路径出来的结果**末尾都补一句声音要求**（`STORY_SCRIPT_DIRECTOR_SOUND_NOTE`，已有就不重复）。
  *
  * ⚠️ 只给 `director` 方案调用（`storyboard` 预设没有 `video_motion_prompt` 列，直接原样返回）。
  * ⚠️ 幂等：已经合规（且主体行没有外貌词）的行原样返回，反复调用不会累积变形。
@@ -3857,7 +3903,7 @@ export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[]
         //    （模版逐字复制过来的行本来就没有外貌词，剥完逐字相同 → 等于没动）。
         if (isDirectorVideoBlockText(row.video_motion_prompt)) {
             const original = String(row.video_motion_prompt);
-            const rewritten = rewriteDirectorSubjectLine(original, names);
+            const rewritten = withDirectorSoundNote(rewriteDirectorSubjectLine(original, names));
             if (rewritten === original && !shotPatch) return row;
             return {
                 ...row,
@@ -3882,7 +3928,7 @@ export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[]
             `- **转场建议**：${transition || "无"}。`,
             dialogue ? `- **对白**：\n${dialogue}` : "- **对白**：无",
         ];
-        return { ...row, video_motion_prompt: lines.join("\n"), ...(shotPatch || null) };
+        return { ...row, video_motion_prompt: withDirectorSoundNote(lines.join("\n")), ...(shotPatch || null) };
     });
 }
 
