@@ -539,9 +539,10 @@ const STORY_SCRIPT_TEMPLATE_HINT = [
     "源内容每一镜都是 `- **字段名**：内容` 的标签块。",
     "`shot_no` 取 `镜头编号` 末尾数字（`场次01—镜头009` 就是 9），`duration` 取 `镜头时长` 的秒数（`3 秒` → `3`）。",
     "下面这些列的内容模版里**已经写好了**，照搬即可：",
-    "- `shot_prompt` ← `首帧图片提示词`：整段原文（含末尾的负面句），**不要**改写成 `[…] + […]` 的 8 段式，也不要压缩 / 合并 / 重排。",
-    "- `video_motion_prompt` ← 这一镜里**除** `镜头编号 / 镜头时长 / 所属场景 / 出场人物 / 风格 / 首帧图片提示词 / 镜头叙事作用 / 出场人物资产 / 调用场景资产 / 调用道具资产` 之外的**每一行原样抄进去**（景别、摄影机参数、构图方式、画面内容、人物动作与表演、运镜方式、台词与声音、负面 …），一行一个「标签：内容」，保持模版里的原顺序；**不要**合并，**不要**改写成 `[…] + […]` 或 6 段式。",
-    "- `style_prompt` ← `风格提示词` / `视觉风格` 之类的字段；源内容没有这类字段时写 `无`，不要自己编。",
+    "- `shot_prompt` ← `首帧图片提示词` / `主体与动作提示词`：整段原文（含末尾的负面句），**不要**改写成 `[…] + […]` 的 8 段式，也不要压缩 / 合并 / 重排。",
+    "- `video_motion_prompt` ← 这一镜里**除** `镜头编号 / 镜头时长 / 所属场景 / 出场人物 / 风格 / 首帧图片提示词 / 主体与动作提示词 / 独立风格提示词 / 镜头叙事作用 / 出场人物资产 / 调用场景资产 / 调用道具资产` 之外的**每一行原样抄进去**（景别、景别／机位、摄影机参数、构图方式、画面内容、人物站位与构图、人物动作与表演、主体与动作、运镜方式、光影与色调、转场建议、台词与声音、声音、负面 …），一行一个「标签：内容」，保持模版里的原顺序；**不要**合并，**不要**改写成 `[…] + […]` 或 6 段式。",
+    "- `style_prompt` ← `风格提示词` / `独立风格提示词` / `视觉风格` 之类的字段；源内容没有这类字段时写 `无`，不要自己编。",
+    "- 模版里的 `>` 引用标记、`####` 标题、`---` 分隔线都不是正文，落列时去掉；只保留提示词文字本身。",
     "- `character_1` ← `出场人物资产`、`scene` ← `调用场景资产`、`prop` ← `调用道具资产`：**去掉 `P-01` / `S-01` / `D-01` 这类编号，只留资产名**",
     "  （`P-01 苏晚（同镜头 001 造型；中近景）` → `苏晚`）；括号内与括号后的文字写进对应的**描述列**",
     "  （`character_description_1` / `scene_description` / `prop_description`）。资产名要与画布素材标题尽量一致，但**不必逐字相同**（意思相近即可），",
@@ -603,9 +604,10 @@ function buildTemplateSystemOverride(singleShot?: boolean): string {
         "For this run the formatting rules above are **void**: ignore the chained bracket structure (`[a] + [b] + …`),",
         "the 8-part order for `shot_prompt`, the 6-part order for `video_motion_prompt`, and their examples.",
         "",
-        "- `shot_prompt`: copy the `首帧图片提示词` value **verbatim** — every sentence, including the trailing negative list. No rewriting, no shortening, no re-ordering, no bracket chaining.",
-        "- `video_motion_prompt`: copy **every other line of that shot's block verbatim**, one `label: value` per line, keeping the block's original order (景别 / 摄影机参数 / 构图方式 / 画面内容 / 人物动作与表演 / 运镜方式 / 台词与声音 / 负面 …). Do not merge lines and do not chain them with `+`.",
-        "- `style_prompt`: use the block's style field if present, otherwise `无`. Never invent one.",
+        "- `shot_prompt`: copy the `首帧图片提示词` (or `主体与动作提示词`) value **verbatim** — every sentence, including the trailing negative list. No rewriting, no shortening, no re-ordering, no bracket chaining.",
+        "- `video_motion_prompt`: copy **every other line of that shot's block verbatim**, one `label: value` per line, keeping the block's original order (景别 / 景别／机位 / 摄影机参数 / 构图方式 / 画面内容 / 人物站位与构图 / 人物动作与表演 / 主体与动作 / 运镜方式 / 光影与色调 / 转场建议 / 台词与声音 / 声音 / 负面 …). Do not merge lines and do not chain them with `+`.",
+        "- Drop the markdown decoration (`>`, `####`, `---`) — copy the prompt text itself.",
+        "- `style_prompt`: use the block's style field if present (`风格提示词` / `独立风格提示词` / `视觉风格`), otherwise `无`. Never invent one.",
         "- Asset routing: `character_1` ← `出场人物资产`, `scene` ← `调用场景资产`, `prop` ← `调用道具资产`.",
         "  Strip the `P-01` / `S-01` / `D-01` style code and keep only the asset name (`P-01 苏晚（…）` → `苏晚`);",
         "  put the parenthetical / trailing text into the matching description column (`character_description_1` /",
@@ -2766,6 +2768,22 @@ type StoryScriptTemplateBlock = { heading: string; fields: StoryScriptTemplateFi
  */
 const STORY_SCRIPT_TEMPLATE_BULLET = String.raw`(?:[-*•+]|\d+[.、)）]|（\d+）)`;
 const STORY_SCRIPT_TEMPLATE_BOLD_LINE = new RegExp(String.raw`^\s*` + STORY_SCRIPT_TEMPLATE_BULLET + String.raw`?\s*\*\*(.+?)\*\*\s*[：:]\s*(.*)$`);
+/**
+ * 第四套方案（影视分镜导演）的字段写法：**冒号在加粗里面**。
+ *
+ * ```
+ * **主体与动作提示词：**      ← 值在下一行（通常是 `>` 引用行）
+ * **声音：**此处改为真实低声对白
+ * ```
+ *
+ * 上面的老正则要求冒号在 `**` **外面**（`- **标签**：值`），这种写法一行都匹配不上 →
+ * 标签被当成正文续行；块首时更是整行丢弃（`lastField` 还是 null）→ 整块字段不足被 `flush` 丢掉，
+ * 用户看到的就是「第四套的提示词没识别到」。
+ *
+ * ⚠️ 值可以紧随 `**`（`**声音：**此处…`），也可以为空（下一行 / 引用行接续）。
+ * ⚠️ 只认已知标签（见下方 `KNOWN_LABELS`），别让剧本里的 `**注意：**…` 变成字段。
+ */
+const STORY_SCRIPT_TEMPLATE_BOLD_INNER_COLON = new RegExp(String.raw`^\s*` + STORY_SCRIPT_TEMPLATE_BULLET + String.raw`?\s*\*\*\s*([^*\n]{1,24}?)\s*[：:]\s*\*\*\s*(.*)$`);
 const STORY_SCRIPT_TEMPLATE_PLAIN_LINE = new RegExp(String.raw`^\s*` + STORY_SCRIPT_TEMPLATE_BULLET + String.raw`\s*([^：:*\n]{2,14}?)\s*[：:]\s*(.*)$`);
 const STORY_SCRIPT_TEMPLATE_HEADING = /^\s*#{1,6}\s*(.+?)\s*$/;
 /**
@@ -2785,7 +2803,25 @@ function normalizeTemplateLabel(label: string): string {
 }
 
 /** 视频运动提示词按这个顺序拼（用户指定，不是文档里的出现顺序）。 */
-const STORY_SCRIPT_TEMPLATE_MOTION_LABELS = ["景别", "摄影机参数", "构图方式", "画面内容", "人物动作与表演", "运镜方式", "台词与声音"];
+const STORY_SCRIPT_TEMPLATE_MOTION_LABELS = [
+    "景别",
+    // 第四套方案（影视分镜导演）的视频段字段，顺序照用户模版原文（景别／机位 → 运镜 → 站位 → 动作 → 光影 → 转场 → 声音）。
+    // 归一后与老标签互不撞车（`景别／机位` → `景别机位`），老模版里没有这些字段，输出一个字节都不变。
+    "景别／机位",
+    "摄影机参数",
+    "构图方式",
+    "画面内容",
+    // 第四套方案（影视分镜导演）用 `运镜`（老模版是 `运镜方式`），两者归一后不同 key，各占一位。
+    "运镜",
+    "人物站位与构图",
+    "人物动作与表演",
+    "主体与动作",
+    "运镜方式",
+    "光影与色调",
+    "转场建议",
+    "台词与声音",
+    "声音",
+];
 
 /** 不加粗的 `- 标签：值` 只认这些标签，否则 `16:9。` 这种值会被误当成新字段。 */
 const STORY_SCRIPT_TEMPLATE_KNOWN_LABELS = new Set(
@@ -2797,6 +2833,22 @@ const STORY_SCRIPT_TEMPLATE_KNOWN_LABELS = new Set(
         "镜头叙事作用", "叙事作用", "首帧图片提示词", "图片提示词", "首帧提示词", "分镜提示词",
         // 第三套方案（火X20）的写法：`【静帧提示词】` 下面接整段画面提示词，`【视频提示词】` 接视频段。
         "静帧提示词", "画面提示词", "首帧图提示词", "分镜图提示词", "视频提示词",
+        /**
+         * 第四套方案（影视分镜导演）的写法，两种块都要认：
+         *
+         * ```
+         * ### 镜头01提示词
+         * **主体与动作提示词：**
+         * > 中景，平视，固定镜头。约二十八岁的苏晚……
+         * **独立风格提示词：**
+         * > 写实都市电影质感，五十毫米镜头……
+         * ```
+         *
+         * 视频块用另一组字段（`景别／机位` / `运镜` / `人物站位与构图` / `主体与动作` / `光影与色调` /
+         * `转场建议` / `声音`）。这些标签归一后（去「与」、去「／」）是 `景别机位` / `人物站位构图` …
+         * 所以下面的字面量写原样即可，`normalizeTemplateLabel` 会统一。
+         */
+        "主体与动作提示词", "独立风格提示词", "景别／机位", "人物站位与构图", "光影与色调", "转场建议",
         "视频运动提示词", "风格提示词", "视觉风格", "画面风格", "影像风格", "风格",
         // 机位（`[全景 / 贴地机位低角度仰拍]` 里的后半段，单独成行时也要能认）
         "机位", "拍摄机位", "摄影机机位", "摄像机机位",
@@ -2811,7 +2863,12 @@ const STORY_SCRIPT_TEMPLATE_KNOWN_LABELS = new Set(
 
 /** 锚点标签：没有其中一个就不算「模版块」（防止把普通剧本里的几行加粗当成分镜）。 */
 const STORY_SCRIPT_TEMPLATE_ANCHORS = new Set(
-    ["镜头编号", "镜号", "首帧图片提示词", "图片提示词", "分镜提示词", "静帧提示词", "画面提示词", "画面内容", "镜头时长", "景别", "人物动作与表演", "运镜方式"].map(normalizeTemplateLabel),
+    [
+        "镜头编号", "镜号", "首帧图片提示词", "图片提示词", "分镜提示词", "静帧提示词", "画面提示词", "画面内容", "镜头时长", "景别", "人物动作与表演", "运镜方式",
+        // 第四套方案（影视分镜导演）：`**主体与动作提示词：**` / `**独立风格提示词：**` 是分镜块，
+        // `景别／机位` / `人物站位与构图` 是视频块 —— 两种块都必须能独立成立（否则视频块没有锚点被丢弃）。
+        "主体与动作提示词", "独立风格提示词", "景别／机位", "人物站位与构图",
+    ].map(normalizeTemplateLabel),
 );
 
 function isTemplateAnchor(label: string): boolean {
@@ -2940,7 +2997,12 @@ function splitTemplateHeadingInlineFields(text: string): { heading: string; fiel
  * 只放这几个一看就是分镜模版的标签，普通剧本里的单行加粗（`**注意**：…`）不会被误判。
  */
 const STORY_SCRIPT_TEMPLATE_SOLO_ANCHORS = new Set(
-    ["首帧图片提示词", "图片提示词", "首帧提示词", "分镜提示词", "视频提示词", "静帧提示词", "画面提示词", "首帧图提示词", "分镜图提示词"].map(normalizeTemplateLabel),
+    [
+        "首帧图片提示词", "图片提示词", "首帧提示词", "分镜提示词", "视频提示词", "静帧提示词", "画面提示词", "首帧图提示词", "分镜图提示词",
+        // 第四套方案（影视分镜导演）：模型经常不写 `### 镜头 N` 标题、每镜只有一行主体提示词，
+        // 只有把这两个也算强锚点，「同一标签第二次出现 = 下一镜」的切块才会生效。
+        "主体与动作提示词", "独立风格提示词",
+    ].map(normalizeTemplateLabel),
 );
 
 function isSingleFieldTemplateBlock(block: StoryScriptTemplateBlock): boolean {
@@ -2984,7 +3046,12 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
     const looksLikeShotHeading = (text: string) => /场次|镜头|镜号|第\s*\d+\s*镜|\bshot\b|\bscene\b/i.test(text);
 
     for (const rawLine of String(raw || "").split(/\r?\n/)) {
-        const line = rawLine.trim();
+        /**
+         * `>` 引用行：第四套方案（影视分镜导演）的提示词正文就写成引用块
+         * （`**主体与动作提示词：**` 下面接 `> 中景，平视…`）。
+         * 不剥掉引用标记，整段提示词会带着 `> ` 落进单元格，`> **标签**` 也认不出来。
+         */
+        const line = rawLine.trim().replace(/^(?:>\s*)+/, "").trim();
         if (!line) continue;
         // `---` / `***` 水平分隔线：既不是字段也不是正文，跳过（模型常在镜与镜之间加一条）。
         if (/^[-*_]{3,}$/.test(line)) continue;
@@ -3012,16 +3079,20 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
         }
 
         const bold = line.match(STORY_SCRIPT_TEMPLATE_BOLD_LINE);
+        // 第四套方案：冒号在加粗里（`**主体与动作提示词：**`），只认已知标签。
+        const boldInner = bold ? null : line.match(STORY_SCRIPT_TEMPLATE_BOLD_INNER_COLON);
         // 整行方括号标签（`【静帧提示词】`）：只认已知标签，不认识的当正文续行（见正则上的注释）。
-        const bracket = bold ? null : line.match(STORY_SCRIPT_TEMPLATE_BRACKET_LINE);
-        const plain = bold || bracket ? null : line.match(STORY_SCRIPT_TEMPLATE_PLAIN_LINE);
+        const bracket = bold || boldInner ? null : line.match(STORY_SCRIPT_TEMPLATE_BRACKET_LINE);
+        const plain = bold || boldInner || bracket ? null : line.match(STORY_SCRIPT_TEMPLATE_PLAIN_LINE);
         const matched = bold
             ? { label: bold[1].trim(), value: bold[2].trim(), bracket: false }
-            : bracket && STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(bracket[1]))
-              ? { label: bracket[1].trim(), value: bracket[2].trim(), bracket: true }
-              : plain && STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(plain[1]))
-                ? { label: plain[1].trim(), value: plain[2].trim(), bracket: false }
-                : null;
+            : boldInner && STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(boldInner[1]))
+              ? { label: boldInner[1].trim(), value: boldInner[2].trim(), bracket: false }
+              : bracket && STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(bracket[1]))
+                ? { label: bracket[1].trim(), value: bracket[2].trim(), bracket: true }
+                : plain && STORY_SCRIPT_TEMPLATE_KNOWN_LABELS.has(normalizeTemplateLabel(plain[1]))
+                  ? { label: plain[1].trim(), value: plain[2].trim(), bracket: false }
+                  : null;
 
         // `**镜头 02：中景**：`（加粗、无值、标签也不是已知字段）：仍按标题处理，别建成一个空字段 ——
         // 建了空字段，后面几行提示词就全并进它，整镜内容静默消失。
@@ -3135,11 +3206,19 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
         const direct: Array<[string[], string]> = [
             [["所属场景", "场景"], "scene"],
             [["出场人物", "人物", "角色"], "character_1"],
-            [["景别"], "shot"],
+            // 第四套方案（影视分镜导演）把景别和机位并成一行 `景别／机位`（`双手与奶茶杯特写，轻俯视`）。
+            [["景别", "景别／机位"], "shot"],
             [["画面内容", "画面描述"], "visual_description"],
-            [["人物动作与表演", "人物动作", "主体动作"], "character_action"],
-            [["运镜方式", "镜头运动", "机位"], "camera_movement"],
-            [["转场方式", "转场"], "transition"],
+            [["人物动作与表演", "人物动作", "主体动作", "主体与动作"], "character_action"],
+            [["运镜方式", "镜头运动", "运镜", "机位"], "camera_movement"],
+            // 第四套方案：`人物站位与构图` / `光影与色调` 是独立字段，分别落站位与光影两列
+            // （classic 里这两列默认被「简洁版」隐藏，但数据必须在，切回完整版就看得见）。
+            [["人物站位与构图", "人物站位"], "blocking"],
+            [["光影与色调", "光影氛围"], "lighting_mood"],
+            [["转场方式", "转场", "转场建议"], "transition"],
+            // 第四套方案把声音单独成段（`**声音：**…`）—— classic 的音效列接它，
+            // 后面 `台词与声音` 那段逻辑若命中会覆盖（老模版行为不变）。
+            [["声音", "音效"], "sound"],
         ];
         for (const [labels, key] of direct) {
             if (!hasColumn(key)) continue;
@@ -3184,14 +3263,16 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
         }
 
         // 分镜提示词 = 首帧图片提示词（storyboard 没有这一列时退到画面描述 —— 那边生图就看画面描述）。
-        // `静帧提示词` / `画面提示词` 是第三套方案（火X20）的叫法，同一个位置。
-        const firstFrame = pick("首帧图片提示词", "图片提示词", "首帧提示词", "静帧提示词", "画面提示词", "首帧图提示词", "分镜图提示词", "分镜提示词");
+        // `静帧提示词` / `画面提示词` 是第三套方案（火X20）的叫法，`主体与动作提示词` 是第四套
+        // （影视分镜导演）的叫法，同一个位置。
+        const firstFrame = pick("首帧图片提示词", "图片提示词", "首帧提示词", "静帧提示词", "画面提示词", "首帧图提示词", "分镜图提示词", "分镜提示词", "主体与动作提示词");
         if (firstFrame) {
             if (hasColumn("shot_prompt")) record.shot_prompt = firstFrame;
             else if (hasColumn("visual_description")) record.visual_description = firstFrame;
         }
 
-        const style = pick("风格提示词", "视觉风格", "画面风格", "影像风格", "风格");
+        // `独立风格提示词` 是第四套方案（影视分镜导演）对风格段的叫法，与 `风格提示词` 同义。
+        const style = pick("独立风格提示词", "风格提示词", "视觉风格", "画面风格", "影像风格", "风格");
         if (style && hasColumn("style_prompt")) record.style_prompt = style;
 
         if (hasColumn("video_motion_prompt")) {
