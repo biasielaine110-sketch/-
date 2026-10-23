@@ -504,6 +504,52 @@ export function CanvasScriptNodeContent({
     const [addColumnOpen, setAddColumnOpen] = useState(false);
     const [addColumnLabel, setAddColumnLabel] = useState("");
     const [addColumnRole, setAddColumnRole] = useState<ScriptAssetRole>("scene");
+    // 「按住空格 = 小抓手」：光标变 grab，按住拖动直接平移表体（scrollLeft/scrollTop），不用去够滑条。
+    // 与画布的空格平移是同一手势，但这里作用在表体上 —— 表体内按下必须截住 mousedown/pointerdown，
+    // 否则 project.tsx 的 handleNodeMouseDown（节点外壳 onMouseDown）会把整个节点拖走。
+    const [spacePanArmed, setSpacePanArmed] = useState(false);
+    const [spacePanning, setSpacePanning] = useState(false);
+    const spaceHeldRef = useRef(false);
+    const spaceHoverRef = useRef(false);
+    const spacePanStateRef = useRef<{ pointerId: number; startX: number; startY: number; scrollLeft: number; scrollTop: number } | null>(null);
+
+    useEffect(() => {
+        const isEditableTarget = (target: EventTarget | null) => {
+            if (!(target instanceof Element)) return false;
+            return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || Boolean(target.closest("[contenteditable='true'],[data-canvas-text-input]"));
+        };
+        const syncArmed = () => setSpacePanArmed(spaceHeldRef.current && spaceHoverRef.current);
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.code !== "Space") return;
+            spaceHeldRef.current = true;
+            // 输入框里按空格是打字，不拦截；只在表体悬停时亮抓手。
+            if (isEditableTarget(event.target)) return;
+            // 与画布空格平移一致：挡掉空格默认的页面滚动。
+            event.preventDefault();
+            syncArmed();
+        };
+        const handleKeyUp = (event: KeyboardEvent) => {
+            if (event.code !== "Space") return;
+            spaceHeldRef.current = false;
+            spacePanStateRef.current = null;
+            setSpacePanning(false);
+            syncArmed();
+        };
+        const handleBlur = () => {
+            spaceHeldRef.current = false;
+            spacePanStateRef.current = null;
+            setSpacePanning(false);
+            syncArmed();
+        };
+        window.addEventListener("keydown", handleKeyDown);
+        window.addEventListener("keyup", handleKeyUp);
+        window.addEventListener("blur", handleBlur);
+        return () => {
+            window.removeEventListener("keydown", handleKeyDown);
+            window.removeEventListener("keyup", handleKeyUp);
+            window.removeEventListener("blur", handleBlur);
+        };
+    }, []);
 
     useEffect(() => {
         setSourceDraft(source);
@@ -1903,8 +1949,52 @@ export function CanvasScriptNodeContent({
                 ref={bodyRef}
                 data-canvas-no-zoom
                 data-canvas-scroll-managed="self"
-                className="script-scrollbar min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border"
+                className={`script-scrollbar min-h-0 flex-1 overflow-auto overscroll-contain rounded-xl border ${spacePanning ? "cursor-grabbing select-none" : spacePanArmed ? "cursor-grab" : ""}`}
                 style={{ borderColor: theme.node.stroke, background: theme.node.panel }}
+                onPointerEnter={() => {
+                    spaceHoverRef.current = true;
+                    setSpacePanArmed(spaceHeldRef.current);
+                }}
+                onPointerLeave={() => {
+                    spaceHoverRef.current = false;
+                    setSpacePanArmed(false);
+                }}
+                // 按住空格按下 = 开始平移：截住 mousedown + pointerdown 两条传播链
+                // （节点拖拽挂在 onMouseDown，画布滚轮/平移看 data-canvas-no-zoom），preventDefault 防止拖黑选中文字。
+                onPointerDown={(event) => {
+                    if (!spacePanArmed || event.button !== 0) return;
+                    const el = bodyRef.current;
+                    if (!el) return;
+                    event.stopPropagation();
+                    event.preventDefault();
+                    el.setPointerCapture(event.pointerId);
+                    spacePanStateRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, scrollLeft: el.scrollLeft, scrollTop: el.scrollTop };
+                    setSpacePanning(true);
+                }}
+                onMouseDown={(event) => {
+                    if (!spacePanArmed || event.button !== 0) return;
+                    event.stopPropagation();
+                    event.preventDefault();
+                }}
+                onPointerMove={(event) => {
+                    const pan = spacePanStateRef.current;
+                    if (!pan || pan.pointerId !== event.pointerId) return;
+                    const el = bodyRef.current;
+                    if (!el) return;
+                    el.scrollLeft = pan.scrollLeft - (event.clientX - pan.startX);
+                    el.scrollTop = pan.scrollTop - (event.clientY - pan.startY);
+                }}
+                onPointerUp={(event) => {
+                    const pan = spacePanStateRef.current;
+                    if (!pan || pan.pointerId !== event.pointerId) return;
+                    spacePanStateRef.current = null;
+                    setSpacePanning(false);
+                    bodyRef.current?.releasePointerCapture(event.pointerId);
+                }}
+                onPointerCancel={() => {
+                    spacePanStateRef.current = null;
+                    setSpacePanning(false);
+                }}
             >
                 <table ref={tableRef} className="border-separate border-spacing-0 leading-tight" style={tableStyle}>
                     <colgroup>
