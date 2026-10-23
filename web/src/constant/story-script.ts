@@ -3622,11 +3622,18 @@ export const STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT = [
     "- `- **主体与动作**` 只写「人名 + 具体动作」，**一个外貌词都不许带**：年龄、面孔、五官、发型、发色、肤色、身材、上衣、裤子、鞋子、配饰全部不写。人名用 `角色1` / `角色2` 列里的名字原样写（`苏晚`），不要写成 `27岁的中国女生苏晚，亚洲面孔、五官…穿米白针织衫` —— 外貌与服装属于 `角色描述1/2` 列和 `shot_prompt` 的图像段，写进视频运动提示词会让视频模型按文字重新捏一个人。",
     "- `- **对白**：` 单独占一行，台词写在**下一行**（不加引号也行）；这一镜没有对白就写 `- **对白**：无`。",
     "- 八行都要有，不许合并成一段，也不许省成一句概括。",
+    // 图像段（`shot_prompt`）同样不许写角色外貌 —— 用户 2026-10-24 晚追加要求。
+    // 放在同一个常量里，是因为它跟上面一样「只在第四套生效、且必须 system + 任务书两处都挂」。
+    "",
+    "## `shot_prompt`（分镜提示词 / 图像段）同样不写角色外貌与服装",
+    "人物**只用名字指代**（`苏晚`），不要写：年龄、性别+年龄段、面孔、五官、眼睛眉毛鼻子嘴、发型发色、肤色皮肤质感、身高体型、上衣裤子裙子鞋子、饰品。",
+    "角色的长相与服装由**角色资产参考图**负责，写进 `shot_prompt` 只会和参考图打架；这一列只写：景别、机位、构图、人物站位与动作、场景与道具、光线与色调、镜头与画质参数。",
+    "硬约束：`shot_prompt` 里出现「27岁的中国男生林舟，亚洲面孔，东亚五官，身高178厘米，精瘦身形…穿洗旧深灰色纯棉翻领夹克」这类描写，等于让图像模型忽略参考图重新捏人。",
 ].join("\n");
 
 /** system 侧的挂载形态：先声明「本节压过上文」，再给格式。 */
 const STORY_SCRIPT_DIRECTOR_VIDEO_SYSTEM_OVERRIDE = [
-    "本节优先级高于上文所有关于 `video_motion_prompt` 的写法说明（含 6 段链式、`[a] + [b]` 括号连接、`[时长：Xs]`）。",
+    "本节优先级高于上文所有关于 `video_motion_prompt` 的写法说明（含 6 段链式、`[a] + [b]` 括号连接、`[时长：Xs]`），也高于上文任何要求你在 `shot_prompt` / 主体与动作提示词里描写角色长相与服装的说法。",
     STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT,
 ].join("\n");
 
@@ -3656,16 +3663,24 @@ function cleanDirectorFieldValue(value: unknown): string {
 }
 
 /**
- * 「外貌 / 服装」的特征词 —— 出现在 `- **主体与动作**` 的分句里就整句丢掉。
+ * 「外貌 / 服装」的特征词 —— 出现在 `- **主体与动作**` 分句或 `shot_prompt` 分句里就整句丢掉。
  *
- * 只收**没有歧义**的写法（岁 / 面孔 / 五官 / 发型 / 肤色 / 穿着 / 衣服鞋袜 / 身材…），
- * 故意不收 `表情` `唇` `下颌` `视线` 这类表演词 —— 用户模版里的正样本就是
- * 「表情从抿唇转为放松下颌」，收到了就把正确内容也删了。
+ * 只收**没有歧义**的写法（岁 / 面孔 / 五官 / 眼眉鼻唇 / 发型 / 肤色 / 穿着 / 衣服鞋袜 / 身材 / 配饰…），
+ * 故意不收 `表情` `抿唇` `唇` `下颌` `视线` 这类表演词 —— 用户模版里的正样本就是
+ * 「表情从抿唇转为放松下颌」，收到了就把正确内容也删了（所以唇只收 `薄唇` / `厚唇` / `唇色`）。
  *
  * ⚠️ `穿` 只收「身穿 / 穿着 / 穿的 / 穿洗」，不收裸 `穿`（`穿过街道` 是动作，不是服装）。
  */
-const DIRECTOR_SUBJECT_APPEARANCE_PATTERN =
-    /(\d+岁|面孔|五官|长相|眉眼|双眼|眼眸|发型|头发|短发|长发|卷发|发丝|发色|肤色|皮肤|油光|泛油|身穿|穿着|穿的|穿洗|上身|下身|外套|夹克|衬衫|T恤|卫衣|毛衣|上衣|连衣裙|裙子|裤子|牛仔裤|运动裤|鞋|靴|帽|围巾|眼镜|手表|妆容|口红|体型|身材|身高|精瘦|微胖|发福)/;
+const DIRECTOR_SUBJECT_APPEARANCE_PATTERN = new RegExp(
+    [
+        String.raw`\d+岁`,
+        "面孔|五官|长相|眉眼|眉形|浓眉|细眉|双眼|眼眸|眼睛|眼神光|鼻梁|鼻翼|薄唇|厚唇|唇色",
+        "发型|头发|短发|长发|卷发|发丝|发色|肤色|皮肤|素颜|妆容|浓妆|淡妆|油光|泛油",
+        "身穿|穿着|穿的|穿洗|上身|下身|外套|夹克|衬衫|T恤|卫衣|毛衣|上衣|连衣裙|裙子|裤子|牛仔裤|运动裤",
+        "帆布鞋|运动鞋|球鞋|板鞋|皮鞋|凉鞋|高跟鞋|靴|帽|围巾|眼镜|手表|饰品|耳环|项链|戒指|手链|指甲",
+        "体型|身材|身形|身高|肩宽|锁骨|精瘦|微胖|发福",
+    ].join("|"),
+);
 
 /** 第四套：从 `角色1` / `角色2` 列取「人名」（名字列每镜必填，取第一个分隔符之前那段）。 */
 function resolveDirectorSubjectNames(row: StoryScriptRow): string[] {
@@ -3711,6 +3726,58 @@ function cleanDirectorSubjectValue(value: unknown, names: readonly string[]): st
         text = `${missing.join("、")}，${text}`;
     }
     return text;
+}
+
+/**
+ * 第四套：`shot_prompt`（分镜提示词 / 图像段）里也**不写角色外貌与服装**。
+ *
+ * 用户 2026-10-24 晚的要求：`shot_prompt` 和 `- **主体与动作**` 一样，只留人名，不写
+ * 「27岁的中国男生林舟，亚洲面孔，东亚五官，身高178厘米，精瘦身形…穿洗旧深灰色纯棉翻领夹克…」
+ * —— 角色的长相与服装由角色资产参考图决定，写进提示词只会和参考图打架。
+ *
+ * 做法比 `cleanDirectorSubjectValue` 保守：**只按 `，；。` 切分句**（不切 `、`），
+ * 所以「夹克、上衣、牛仔裤和帆布鞋」这种顿号枚举整段一起丢，其它地方的顿号枚举一个字不动。
+ * 丢完把句首的「他/她」换成被丢掉的那个人名；整段都是外貌时兜底写人名。
+ *
+ * ⚠️ 没有外貌词时**原样返回**（模版逐字复制的图像段不能被重排标点）。
+ * ⚠️ 幂等：剥干净之后再跑，没有外貌词 → 直接原样返回。
+ */
+function stripDirectorAppearanceFromPrompt(value: unknown, names: readonly string[]): string {
+    const text = storyScriptCellText(value).trim();
+    if (!text) return text;
+    if (!DIRECTOR_SUBJECT_APPEARANCE_PATTERN.test(text)) return text;
+    const tokens = text.split(/([，,；;。])/);
+    const kept: Array<{ text: string; sep: string }> = [];
+    let droppedName = "";
+    for (let index = 0; index < tokens.length; index += 2) {
+        const clause = tokens[index];
+        const sep = tokens[index + 1] || "";
+        const trimmed = clause.trim();
+        if (!trimmed) continue;
+        if (DIRECTOR_SUBJECT_APPEARANCE_PATTERN.test(trimmed)) {
+            const found = names.find((name) => trimmed.includes(name));
+            if (found && !droppedName) droppedName = found;
+            continue;
+        }
+        let body = trimmed;
+        const spoken = kept.map((item) => item.text).join("");
+        const wantedName = droppedName || (names.length === 1 && !spoken.includes(names[0]) ? names[0] : "");
+        if (wantedName && /^[他她](?!们)/.test(body)) {
+            body = body.replace(/^[他她](?!们)/, wantedName);
+            droppedName = "";
+        }
+        kept.push({ text: body, sep });
+    }
+    const result = kept
+        .map((item) => `${item.text}${item.sep}`)
+        .join("")
+        .replace(/\s+([，,；;。])/g, "$1")
+        .replace(/([，,；;])[，,；;]+/g, "$1")
+        .replace(/([，,；;])。/g, "。")
+        .replace(/。{2,}/g, "。")
+        .replace(/^[，,；;。]+/, "")
+        .trim();
+    return result || names.join("、");
 }
 
 /** 第四套：把**已经合规**的八段块里的 `主体与动作` 那一行就地换掉（其余行一个字不动）。 */
@@ -3782,15 +3849,24 @@ export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[]
 
     return rows.map((row, index) => {
         const names = resolveDirectorSubjectNames(row);
+        // `shot_prompt`（图像段）同样不许带角色外貌 / 服装 —— 两条路径（合规块 / 组装）都要剥。
+        const rawShotPrompt = storyScriptCellText(row.shot_prompt);
+        const cleanedShotPrompt = stripDirectorAppearanceFromPrompt(rawShotPrompt, names);
+        const shotPatch = cleanedShotPrompt === rawShotPrompt ? null : { shot_prompt: cleanedShotPrompt };
         // ① 已经是八段块：只把 `主体与动作` 那一行的外貌 / 服装剥掉，其余行一个字不动
         //    （模版逐字复制过来的行本来就没有外貌词，剥完逐字相同 → 等于没动）。
         if (isDirectorVideoBlockText(row.video_motion_prompt)) {
             const original = String(row.video_motion_prompt);
             const rewritten = rewriteDirectorSubjectLine(original, names);
-            return rewritten === original ? row : { ...row, video_motion_prompt: rewritten };
+            if (rewritten === original && !shotPatch) return row;
+            return {
+                ...row,
+                ...(rewritten === original ? null : { video_motion_prompt: rewritten }),
+                ...(shotPatch || null),
+            };
         }
         const { start, duration } = timeline[index];
-        const blob = [storyScriptCellText(row.video_motion_prompt), storyScriptCellText(row.shot_prompt), storyScriptCellText(row.visual_description)].join("\n");
+        const blob = [storyScriptCellText(row.video_motion_prompt), rawShotPrompt, storyScriptCellText(row.visual_description)].join("\n");
         const angle = (blob.match(DIRECTOR_CAMERA_ANGLE_PATTERN) || [])[1] || "";
         const move = (blob.match(DIRECTOR_CAMERA_MOVE_PATTERN) || [])[1] || "";
         const transition = ((blob.match(DIRECTOR_TRANSITION_PATTERN) || [])[1] || "").trim();
@@ -3806,7 +3882,7 @@ export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[]
             `- **转场建议**：${transition || "无"}。`,
             dialogue ? `- **对白**：\n${dialogue}` : "- **对白**：无",
         ];
-        return { ...row, video_motion_prompt: lines.join("\n") };
+        return { ...row, video_motion_prompt: lines.join("\n"), ...(shotPatch || null) };
     });
 }
 
