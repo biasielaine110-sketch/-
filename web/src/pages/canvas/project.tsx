@@ -35,7 +35,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptExtraColumns, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -6814,7 +6814,13 @@ function AtelierCanvasPage() {
                     }
                     // 行位置与镜号以原表为准；重写结果只覆盖这一行的各列内容。
                     const shotNo = row.shot_no || rowIndex + 1;
-                    const rewritten: typeof row = { ...parsed.rows[0], shot_no: shotNo };
+                    /**
+                     * 模版覆盖（与整表生成同一口径）：源内容是逐镜模版时，这一镜的三列提示词 / 资产名 /
+                     * 时长仍以模版原文为准 —— 只按镜号精确匹配，模版里没有这一镜就不动。
+                     * 少了这一步，用户点一次「重生成这一镜」，视频运动提示词就退回模型自己写的图像段
+                     * （2026-10-24 用户反馈：「第 4 套的视频运动提示词还是这样」）。
+                     */
+                    const rewritten: typeof row = applyStoryScriptTemplateOverlayToShot({ ...parsed.rows[0], shot_no: shotNo }, sourceText, presetId);
                     // 自建资产列按原值回填（见上面 scriptExtraKeys 的说明）。
                     for (const extraKey of scriptExtraKeys) {
                         const kept = row[extraKey];

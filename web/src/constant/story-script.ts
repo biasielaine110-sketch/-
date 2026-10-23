@@ -3516,17 +3516,47 @@ export function applyStoryScriptTemplateOverlay(
         const shot = Number(row.shot_no) || index + 1;
         const patch = anyShotMatch ? byShot.get(shot) : templateRows[index];
         if (!patch) return row;
-        const next: StoryScriptRow = { ...row };
-        const templateDuration = Number(patch.duration);
-        if (Number.isFinite(templateDuration) && templateDuration > 0) next.duration = templateDuration;
-        for (const column of columns) {
-            const key = column.key;
-            if (column.numeric || key === "shot_no") continue;
-            const value = storyScriptCellText(patch[key]);
-            if (!value) continue;
-            if (STORY_SCRIPT_TEMPLATE_FORCE_KEYS.has(key) || !storyScriptCellText(next[key])) next[key] = value;
-        }
-        return next;
+        return overlayStoryScriptRow(row, patch, columns);
     });
+}
+
+/** 把模版里某一镜的值盖到一行上（整表 / 单镜两条路径共用同一套覆盖口径）。 */
+function overlayStoryScriptRow(row: StoryScriptRow, patch: StoryScriptRow, columns: StoryScriptColumn[]): StoryScriptRow {
+    const next: StoryScriptRow = { ...row };
+    const templateDuration = Number(patch.duration);
+    if (Number.isFinite(templateDuration) && templateDuration > 0) next.duration = templateDuration;
+    for (const column of columns) {
+        const key = column.key;
+        if (column.numeric || key === "shot_no") continue;
+        const value = storyScriptCellText(patch[key]);
+        if (!value) continue;
+        if (STORY_SCRIPT_TEMPLATE_FORCE_KEYS.has(key) || !storyScriptCellText(next[key])) next[key] = value;
+    }
+    return next;
+}
+
+/**
+ * 单镜重生成（「重生成这一镜」/ 批量重生成 / 加剧情重写）专用的模版覆盖：
+ * **只按镜号精确匹配**，模版里没有这一镜就原样返回。
+ *
+ * ⚠️ 为什么不复用 `applyStoryScriptTemplateOverlay`：那套在「镜号一个都对不上」时会按**索引**回退，
+ * 对单行来说等于「拿第 1 镜的模版盖第 5 镜」—— 串镜比不覆盖糟得多。
+ *
+ * 为什么必须有这一步（2026-10-24 用户反馈）：整表生成有覆盖层，但单镜重生成没有 → 用户点一次
+ * 「重生成这一镜」，视频运动提示词就退回模型自己写的图像段（`主体与动作提示词：[时长：4s] …`），
+ * 表现出来就是「第 4 套方案的视频运动提示词还是那样」。
+ */
+export function applyStoryScriptTemplateOverlayToShot(
+    row: StoryScriptRow,
+    sourceText: string,
+    preset?: StoryScriptPresetId | string | null,
+): StoryScriptRow {
+    if (!row) return row;
+    const shot = Number(row.shot_no) || 0;
+    if (!shot) return row;
+    const columns = getStoryScriptColumns(preset);
+    const patch = parseStoryScriptTemplateRows(String(sourceText || ""), columns).find((templateRow) => Number(templateRow.shot_no) === shot);
+    if (!patch) return row;
+    return overlayStoryScriptRow(row, patch, columns);
 }
 
