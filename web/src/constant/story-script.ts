@@ -2825,6 +2825,54 @@ const STORY_SCRIPT_TEMPLATE_MOTION_LABELS = [
     "声音",
 ];
 
+/**
+ * 第四套方案（影视分镜导演）**视频块**的特征标签（归一后）。老模版（第二套）的字段里
+ * 没有这几个（老模版用 `景别` / `人物动作与表演` / `运镜方式`），所以命中任意一个就能断定
+ * 「这是第四套的视频块」→ 视频运动提示词改走**逐字重建**（见 `buildDirectorVideoMotion`），
+ * 老模版仍按 `MOTION_LABELS` 拼 `标签：值`，一个字节都不变。
+ * ⚠️ 故意不放 `声音` / `主体与动作` / `转场建议`：老模版也可能有这些字段，放进来会误伤老模版。
+ */
+const STORY_SCRIPT_DIRECTOR_VIDEO_MARKS = new Set(
+    ["景别／机位", "人物站位与构图", "光影与色调", "表演要求", "对白"].map(normalizeTemplateLabel),
+);
+
+/** 图像 / 风格段字段：逐字重建视频运动提示词时要跳过（模型偶尔把两块写进同一块时别串味）。 */
+const STORY_SCRIPT_TEMPLATE_IMAGE_ONLY_LABELS = new Set(
+    [
+        "主体与动作提示词", "独立风格提示词", "风格提示词", "视觉风格", "画面风格", "影像风格",
+        "首帧图片提示词", "图片提示词", "首帧提示词", "分镜提示词", "静帧提示词", "画面提示词", "首帧图提示词", "分镜图提示词",
+    ].map(normalizeTemplateLabel),
+);
+
+/**
+ * 第四套视频块 → 视频运动提示词**逐字重建**（用户 2026-10-23 要求：模版内容连标签一起完整复制，
+ * 一行一条，不要揉到一起）：
+ *
+ * ```
+ * - **时长**：6秒，00:04—00:10。
+ * - **景别／机位**：近景，平视。
+ * ...
+ * - **对白**：
+ * “李曼，……我是没出息。”     ← 值里的续行原样保留（`**对白**：` 空值 + 下一行台词）
+ * ```
+ *
+ * 按块内**原始顺序**、用块里写的**标签原文**，每个字段渲染成 `- **标签**：值`；
+ * 方括号字段（`【标签】值`）保持方括号写法。`时长` / `对白` 不在 `MOTION_LABELS` 里也照收 ——
+ * 这正是逐字重建相对按标签拼的主要增益。
+ */
+function buildDirectorVideoMotion(block: StoryScriptTemplateBlock): string {
+    const seen = new Set<string>();
+    const lines: string[] = [];
+    for (const field of block.fields) {
+        const key = normalizeTemplateLabel(field.label);
+        if (!field.value.trim() || seen.has(key)) continue;
+        if (STORY_SCRIPT_TEMPLATE_IMAGE_ONLY_LABELS.has(key)) continue;
+        seen.add(key);
+        lines.push(field.bracket ? `【${field.label}】${field.value}` : `- **${field.label}**：${field.value}`);
+    }
+    return lines.join("\n");
+}
+
 /** 不加粗的 `- 标签：值` 只认这些标签，否则 `16:9。` 这种值会被误当成新字段。 */
 const STORY_SCRIPT_TEMPLATE_KNOWN_LABELS = new Set(
     [
@@ -3156,7 +3204,9 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
             continue;
         }
 
-        if (lastField) lastField.value = `${lastField.value}\n${line}`.trim();
+        // 空值标签（`- **对白**：`）的续行以 `\n` 开头：保住「值在下一行」的原始排版，
+        // 第四套视频运动提示词逐字重建时要按原样输出两行。字段映射侧会 trim，列数据不受影响。
+        if (lastField) lastField.value = lastField.value ? `${lastField.value}\n${line}` : `\n${line}`;
     }
     flush();
     return blocks;
@@ -3207,7 +3257,8 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
         const fields = new Map<string, string>();
         for (const field of block.fields) {
             const key = normalizeTemplateLabel(field.label);
-            if (!fields.has(key) && field.value) fields.set(key, field.value);
+            // trim：空值标签的续行值带前导 `\n`（保排版用），进列映射前去掉，别让单元格以空行开头。
+            if (!fields.has(key) && field.value.trim()) fields.set(key, field.value.trim());
         }
         const pick = (...labels: string[]) => {
             for (const label of labels) {
@@ -3315,6 +3366,13 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
         if (style && hasColumn("style_prompt")) record.style_prompt = style;
 
         if (hasColumn("video_motion_prompt")) {
+            /**
+             * 第四套（影视分镜导演）视频块：特征字段命中 → **逐字重建**——
+             * 按块内原始顺序连 `- **标签**：` 一起复制、一行一条、续行（`**对白**：` 下面的台词行）原样保留。
+             * 用户 2026-10-23 明确要求这种形态；`时长` / `对白` 不在 MOTION_LABELS 里，按标签拼会漏。
+             */
+            const isDirectorVideo = block.fields.some((field) => STORY_SCRIPT_DIRECTOR_VIDEO_MARKS.has(normalizeTemplateLabel(field.label)));
+            const directorMotion = isDirectorVideo ? buildDirectorVideoMotion(block) : "";
             const motionLines = STORY_SCRIPT_TEMPLATE_MOTION_LABELS.map((label) => {
                 const value = pick(label);
                 return value ? `${label}：${value}` : "";
@@ -3332,7 +3390,7 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
                         !/运动提示词$/.test(normalizeTemplateLabel(field.label)) &&
                         field.value.trim(),
                 )?.value || "";
-            const motion = bracketVideoPrompt || (motionLines.length ? motionLines.join("\n") : pick("视频运动提示词") || videoPromptField);
+            const motion = bracketVideoPrompt || directorMotion || (motionLines.length ? motionLines.join("\n") : pick("视频运动提示词") || videoPromptField);
             if (motion) record.video_motion_prompt = motion;
         }
 
