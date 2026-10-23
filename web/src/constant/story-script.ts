@@ -2819,6 +2819,8 @@ const STORY_SCRIPT_TEMPLATE_MOTION_LABELS = [
     "运镜方式",
     "光影与色调",
     "转场建议",
+    // 第四套方案实样（2026-10-23）：`- **表演要求**：…` 也是视频段的一段，少了它「完整复制」就不完整。
+    "表演要求",
     "台词与声音",
     "声音",
 ];
@@ -2848,7 +2850,7 @@ const STORY_SCRIPT_TEMPLATE_KNOWN_LABELS = new Set(
          * `转场建议` / `声音`）。这些标签归一后（去「与」、去「／」）是 `景别机位` / `人物站位构图` …
          * 所以下面的字面量写原样即可，`normalizeTemplateLabel` 会统一。
          */
-        "主体与动作提示词", "独立风格提示词", "景别／机位", "人物站位与构图", "光影与色调", "转场建议",
+        "主体与动作提示词", "独立风格提示词", "景别／机位", "人物站位与构图", "光影与色调", "转场建议", "表演要求",
         "视频运动提示词", "风格提示词", "视觉风格", "画面风格", "影像风格", "风格",
         // 机位（`[全景 / 贴地机位低角度仰拍]` 里的后半段，单独成行时也要能认）
         "机位", "拍摄机位", "摄影机机位", "摄像机机位",
@@ -2880,8 +2882,42 @@ function isTemplateAnchor(label: string): boolean {
 
 /** 取末尾一段数字（`场次02—镜头005` → 5）；没有则 0。 */
 function trailingNumber(value: string): number {
-    const matches = String(value || "").match(/\d+/g);
-    return matches?.length ? Number(matches[matches.length - 1]) : 0;
+    const text = String(value || "");
+    const digitMatches = text.match(/\d+/g);
+    if (digitMatches?.length) return Number(digitMatches[digitMatches.length - 1]);
+    /**
+     * 中文数字镜号：`### 镜头七｜“总得问一句”` / `### 镜头十二提示词`。
+     * 模型经常用中文数字写镜号（用户 2026-10-23 实样），只认阿拉伯数字的话镜号 = 0
+     * → 同一镜的图像块 / 视频块合并不了、覆盖层按错位行号乱补 → 视频运动提示词拿不到模版内容。
+     * 只在**没有阿拉伯数字**时才走这条路（`镜头06` 的 6 优先），且必须紧跟 镜头 / 镜号 / 第，
+     * 避免把标题里「三十秒」这类时间词当成镜号。
+     */
+    const chinese = /(?:镜头|镜号|第)\s*([一二三四五六七八九十]{1,3})(?![秒分时])/.exec(text);
+    if (chinese) return chineseNumeralToNumber(chinese[1]);
+    return 0;
+}
+
+/** 中文数字 → 数值（`七` → 7、`十二` → 12、`二十七` → 27）；不在词表里返回 0。 */
+function chineseNumeralToNumber(text: string): number {
+    const value = String(text || "").trim();
+    if (!/^[一二三四五六七八九十]{1,3}$/.test(value)) return 0;
+    const digit: Record<string, number> = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+    if (value === "十") return 10;
+    const tenIndex = value.indexOf("十");
+    if (tenIndex < 0) return digit[value] || 0;
+    const tens = tenIndex === 0 ? 1 : digit[value[0]] || 0;
+    const ones = tenIndex === value.length - 1 ? 0 : digit[value[tenIndex + 1]] || 0;
+    return tens * 10 + ones;
+}
+
+/**
+ * 时长里的中文数字：`二十七至三十秒，三秒` → 取**最后一个**「N秒」= 3。
+ * 只在老规则（`/^\d+/` 取开头数字）失手时才用 —— `6秒，00:24—00:30` 这类照旧走老规则，零回归。
+ */
+function trailingChineseDurationSeconds(text: string): number {
+    const matches = Array.from(String(text || "").matchAll(/([一二三四五六七八九十]{1,3})\s*秒/g));
+    if (!matches.length) return 0;
+    return chineseNumeralToNumber(matches[matches.length - 1][1]);
 }
 
 /** 常见景别（用在标题方括号摘要是「景别 / 机位」两段式的时候，先把景别摘出来）。 */
@@ -3199,7 +3235,10 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
         }
         const shotNo = trailingNumber(pick("镜头编号", "镜号")) || headingInfo.shotNo;
         if (shotNo) record.shot_no = shotNo;
-        const duration = /^\d+/.exec(pick("镜头时长", "时长"))?.[0];
+        // 时长：先按老规则取开头数字（`6秒` / `2-5秒` → 6 / 2），失手再用中文数字兜底
+        // （`二十七至三十秒，三秒` → 取最后一个「N秒」= 3，用户 2026-10-23 实样）。
+        const durationText = pick("镜头时长", "时长");
+        const duration = /^\d+/.exec(durationText)?.[0] ?? trailingChineseDurationSeconds(durationText);
         if (duration) record.duration = Number(duration);
 
         // 能直接对上列名的字段（先填列，视频运动提示词那边还会再拼一遍，互不影响）。
@@ -3298,10 +3337,20 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
         }
 
         if (!Object.keys(record).length) continue;
+        // 标记这块是不是「视频块」（含 时长 / 运镜 / 转场 / 声音 这类视频段字段）。
+        // 模型有时把视频段字段写进图像块（或反过来），合并同镜号两块时靠它裁决冲突归谁。
+        record.__videoBlock = [
+            "时长", "镜头时长", "运镜", "运镜方式", "转场建议", "转场方式", "景别／机位", "人物站位与构图", "光影与色调", "表演要求", "声音",
+        ].some((label) => fields.has(normalizeTemplateLabel(label)));
         records.push(record);
     }
     return mergeStoryScriptTemplateRecords(records, columns);
 }
+
+/** 合并同镜号两块时，这些列以「视频块」的值为准；其余列（分镜 / 风格提示词等）以「图像块」为准。 */
+const STORY_SCRIPT_VIDEO_SIDE_KEYS = new Set([
+    "video_motion_prompt", "camera_movement", "blocking", "lighting_mood", "transition", "sound", "shot", "character_action", "duration",
+]);
 
 /**
  * 第四套方案（影视分镜导演）的一镜有**两个块**：
@@ -3315,8 +3364,10 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
  * 视频行反过来；覆盖层 `applyStoryScriptTemplateOverlay` 又只取每镜第一行 → 模型行的
  * **视频运动提示词永远拿不到模版内容**，用户看到的就是「视频运动提示词没识别出来」。
  *
- * 合并规则：按 `shot_no` 分组（镜号 0 = 没标题没镜号的块，**永不合并**，保住「无标题连续两镜」的分块）；
- * 冲突时先到先得（图像块与视频块的键基本不相交，撞上说明内容真不同，别让后块把前块冲掉）。
+ * 合并规则：按 `shot_no` 分组（镜号 0 = 没标题没镜号的块，**永不合并**，保住「无标题连续两镜」的分块）。
+ * 键冲突时按 `__videoBlock` 裁决（模型有时把视频段字段写进图像块：`主体与动作` 撞上图像块时，
+ * 视频运动提示词必须用**视频块**那份，否则格子里的就是画面描述 —— 用户 2026-10-23 实样）；
+ * 两块同侧时先到先得。
  */
 function mergeStoryScriptTemplateRecords(records: Array<Record<string, unknown>>, columns: StoryScriptColumn[]): StoryScriptRow[] {
     const merged: Array<Record<string, unknown>> = [];
@@ -3330,9 +3381,15 @@ function mergeStoryScriptTemplateRecords(records: Array<Record<string, unknown>>
             continue;
         }
         const target = merged[at];
+        const incomingVideo = Boolean(record.__videoBlock);
+        const targetVideo = Boolean(target.__videoBlock);
         for (const [key, value] of Object.entries(record)) {
-            if (key === "shot_no") continue;
-            if (storyScriptCellText(target[key])) continue;
+            if (key === "shot_no" || key === "__videoBlock") continue;
+            if (storyScriptCellText(target[key])) {
+                if (STORY_SCRIPT_VIDEO_SIDE_KEYS.has(key) && incomingVideo && !targetVideo) target[key] = value;
+                else if (!STORY_SCRIPT_VIDEO_SIDE_KEYS.has(key) && !incomingVideo && targetVideo) target[key] = value;
+                continue;
+            }
             target[key] = value;
         }
     }
