@@ -3703,17 +3703,21 @@ export function applyRunningHubReferenceAudios(workflow: ComfyWorkflow, fileName
 // MiniMax H3 台词方言（`<d>[Chinese]…</d>` + `(S1) says:`）
 // ---------------------------------------------------------------------------
 //
-// 用户 2026-10-24 的反馈：「参考音色后，生成的视频会出现没有让他说的台词对话」。
-// 不是图的问题，是**提示词方言**的问题 —— H3 只认官方那套台词标记：
+// 用户 2026-10-24 的两次反馈：
+//   ① 「参考音色后，生成的视频会出现没有让他说的台词对话」（该念的没念）
+//   ② 「我的意思是总是出现我未描述的对话台词」（不该念的乱念）
+// 都不是图/音频接线问题（`applyRunningHubReferenceAudios` 本来就支持 1–3 条，`ref_audios.ref_audio_N`
+// 落点也对），而是**提示词契约**问题。H3 的 Qwen3VL 编码器只认官方台词标记：
 //   `苏晚 (S1) says: <d>[Chinese]你终于来了。</d>`
-// 我们分镜表第四套吐出来的是 `- **对白**：` + `苏晚：“你终于来了。”`，这是自然语言，
-// H3 的 Qwen3VL 编码器会把它读成「描述」而不是「要念出来的台词」；再叠上一条音色参考，
-// 模型就把整条片子当氛围片生成 —— 画面有声，没人说话。
-// 官方另有两条硬规则，一并在这里补上：
-//   ① 音色参考必须**显式绑定**到说话人，且声明「只取音色、不复制原台词」
-//      （不声明时模型倾向于整条复制参考音轨，于是它也「不念」我们写的台词）；
-//   ② 多说话人必须给 `(S1)` / `(S2)` 稳定 ID，否则双人对白串音。
-// 只在 MiniMax H3 家族 + 提示词里确实有 `对白` 块时才动；作者自己写的 `<d>` 一个字节不改。
+// 我们分镜表第四套吐出来的是 `- **对白**：` + `苏晚：“你终于来了。”`，这是自然语言 →
+// 被读成「画面描述」而不是「要念出来的台词」；再叠上一条音色参考，模型就把整条片子当氛围片生成。
+// 反过来，参考音频里有真人说话、而提示词又没锁死台词时，模型会**顺着参考音轨往下说**，
+// 成片里冒出用户没写过的台词（第二条反馈）。
+// 所以这里给两样东西：
+//   A. 头部「音色声明」——每一条 `<Audio N>` 都点名，只取音色、不得复述/续写其中内容；
+//   B. 尾部「台词锁定」——全片只许念 `<d>` 里那 N 句，禁止新增/旁白/画外音/复述参考音轨。
+// 多说话人还必须给 `(S1)` / `(S2)` 稳定 ID，否则双人对白串音。
+// 只在 MiniMax H3 家族调用；别的模型一个字节不变。作者自带 `<d>` 的正文也不动，只补契约。
 
 /** H3 台词标签里的语种：跟台词本身走，不按界面语言。 */
 function h3DialogueLanguage(text: string) {
@@ -3729,104 +3733,196 @@ const H3_DIALOGUE_SPEAKER = /^([^：:，,。；;、「」“”"'（）()\s]{1,1
 const H3_DIALOGUE_STAGE_VERB = /(说|道|问|答|喊|叫|念|读|笑|叹|应|嘟囔|开口|低语|自语)$/;
 const H3_PRONOUN_SPEAKER = /^(他|她|我|你|俺|咱)$/;
 
+/** 台词锁定的幂等标记：提示词里已经有这段就不再追加。 */
+const H3_DIALOGUE_LOCK_MARK = "【台词锁定】";
+
+function countH3DialogueLines(text: string) {
+    return (text.match(/<\s*d\s*>/gi) || []).length;
+}
+
+/**
+ * 音色声明：**每一条**传进来的 `<Audio N>` 都必须点名。
+ *
+ * 只声明「绑得上说话人」的那几条，剩下的 `<Audio 2>`/`<Audio 3>` 在提示词里是孤儿，
+ * 模型就会把它当成「另一条待续写的台词轨」→ 成片里冒出用户没写过的台词（用户第二次反馈就是这个）。
+ */
+function buildH3TimbreDeclaration(audioCount: number, speakers: string[], sourceText: string) {
+    if (audioCount <= 0) return "";
+    const anySpeaker = speakers.some((name) => Boolean(String(name || "").trim())) || /\(S\d+\)/.test(sourceText);
+    const rows: string[] = [];
+    for (let index = 0; index < audioCount; index += 1) {
+        const tag = `S${index + 1}`;
+        const name = (speakers[index] || "").trim();
+        const hasTag = new RegExp(`\\(${tag}\\)`).test(sourceText);
+        let who = "";
+        if (name) who = `${name} (${tag})`;
+        else if (hasTag) who = `the speaker (${tag})`;
+        // 整条提示词没有任何说话人（无对白块）→ 第 1 条仍按音色参考声明，别降级成「备用样本」。
+        else if (!anySpeaker && index === 0) who = "the speaking character";
+        rows.push(
+            who
+                ? `<Audio ${index + 1}> is the voice-timbre reference for ${who}: reference only — take the voice timbre, never reproduce, continue or translate anything spoken inside <Audio ${index + 1}>.`
+                : `<Audio ${index + 1}> is an extra timbre sample only and carries no dialogue — never reproduce, continue or translate anything spoken inside <Audio ${index + 1}>.`,
+        );
+    }
+    return rows.join("\n");
+}
+
+/**
+ * 台词锁定：贴在提示词末尾（用户自己的写法也是结尾放 `【强制声明】`）。
+ *
+ * 用户第二次反馈「总是出现我未描述的对话台词」—— 参考音频里有真人说话时，H3 会顺着往下说；
+ * 只写「只取音色」压不住，必须把「全片只有这 N 句台词」写成硬约束。
+ */
+function buildH3DialogueLock(lineCount: number) {
+    const rows = [H3_DIALOGUE_LOCK_MARK];
+    if (lineCount > 0) {
+        rows.push(
+            `全片只允许说出 <d> 与 </d> 之间写出的台词，共 ${lineCount} 句：一字不改、不增不减、不重复。`,
+            "不得新增、补写、续写、复述、翻译或改写任何未写出的台词；不得以旁白、画外音、内心独白、字幕朗读的形式增加人声。",
+            "参考音频（<Audio N>）只提供音色：它里面已经说过的内容不得出现在成片里，也不得被接着往下说、换语言重说。",
+            "只有 <d> 标记内的文字是台词；其它位置（人物描述、站位、镜头描述、引号里的话）一律不许念出来。",
+            "没有写出台词的段落必须完全无人声，只保留环境音与音效。",
+        );
+    } else {
+        rows.push(
+            "本条视频没有任何台词：全片禁止出现任何人声（无对白、无旁白、无画外音、无内心独白、无字幕朗读），只保留环境音与音效。",
+            "参考音频（<Audio N>）只提供音色，其中已说出的内容不得出现在成片里，也不得被接着往下说。",
+        );
+    }
+    return rows.join("\n");
+}
+
+/** 把「音色声明（头）+ 台词锁定（尾）」贴到提示词上，幂等。`lineCount < 0` 表示不锁台词。 */
+function withH3VoiceContract(text: string, audioCount: number, lineCount: number, speakers: string[]) {
+    // ⚠️ 判重只能认「声明行」本身：正文里 `says using the voice timbre referenced from <Audio 1>` 也带
+    // `<Audio 1>` 字样，早期版本用 `includes("<Audio 1>")` 判重 → 声明永远加不上。
+    const hasDeclaration = text.includes("<Audio 1> is ");
+    const declaration = hasDeclaration ? "" : buildH3TimbreDeclaration(audioCount, speakers, text);
+    const lock = lineCount < 0 || text.includes(H3_DIALOGUE_LOCK_MARK) ? "" : buildH3DialogueLock(lineCount);
+    if (!declaration && !lock) return text;
+    const head = declaration ? `${declaration}\n\n` : "";
+    if (!lock) return `${head}${text}`;
+    return `${head}${text.replace(/\s*$/, "")}\n\n${lock}`;
+}
+
+/** 从作者自己写的 H3 提示词里捞出 `名字 (S1)` 形式的说话人，用来绑音色。 */
+function extractH3Speakers(text: string) {
+    const speakers: string[] = [];
+    const pattern = /([^\s<>()：:，,。]{1,12})\s*\(S(\d+)\)/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text))) {
+        const index = Number(match[2]) - 1;
+        if (!Number.isFinite(index) || index < 0 || index > 8) continue;
+        if (!speakers[index]) speakers[index] = match[1].trim();
+    }
+    return speakers;
+}
+
 /**
  * 把画布的 `- **对白**：名字：“台词”` 改写成 H3 的官方台词块。
  *
  * 输出形态（`audioCount` 决定要不要挂音色绑定）：
  * ```
- * <Audio 1> is the voice-timbre reference for 苏晚 (S1): reference — take only the voice timbre,
- * never copy the original spoken content of <Audio 1>.
+ * <Audio 1> is the voice-timbre reference for 苏晚 (S1): reference only — take the voice timbre,
+ * never reproduce, continue or translate anything spoken inside <Audio 1>.
  *
  * - **时长**：…
  * - **对白**：
  * 苏晚 (S1) says using the voice timbre referenced from <Audio 1>:
  * <d>[Chinese]你终于来了。</d>
+ *
+ * 【台词锁定】
+ * 全片只允许说出 <d> 与 </d> 之间写出的台词，共 1 句：…
  * ```
  *
- * ⚠️ 幂等：已经带 `<d>` 的提示词原样返回；没有 `对白` 块的提示词只在有音色参考时补声明。
+ * ⚠️ 幂等：已经带 `<d>` 的提示词**正文一个字不改**，但仍然补「音色声明 + 台词锁定」
+ *   （早期版本这里直接 return，导致作者自带 `<d>` 的提示词既没绑音色、也没锁台词）。
  * ⚠️ 只在 H3 家族调用（见 `isMinimaxH3FamilyWorkflow`），别的模型一个字节不变。
  */
 export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioCount?: number }): string {
     const text = String(prompt || "");
     if (!text.trim()) return text;
-    // 作者/用户自己写的 H3 台词标记 → 完全不动。
-    if (/<\s*d\s*>/i.test(text)) return text;
     const audioCount = Math.max(0, Math.min(3, Math.round(Number(options?.audioCount) || 0)));
-    const timbreDeclaration = (speakers: string[]) => {
-        if (!audioCount) return "";
-        // 绑不上说话人的音频不声明（只传 1 条音色却给了 3 个空槽时，多写的声明只会迷惑模型）。
-        const declared = Math.min(audioCount, Math.max(1, speakers.length));
-        const rows: string[] = [];
-        for (let index = 0; index < declared; index += 1) {
-            const who = speakers[index] ? `${speakers[index]} (S${index + 1})` : `the speaking character (S${index + 1})`;
-            rows.push(
-                `<Audio ${index + 1}> is the voice-timbre reference for ${who}: reference — take only the voice timbre, never copy the spoken content of <Audio ${index + 1}>.`,
-            );
-        }
-        return rows.join("\n");
-    };
+
+    // 作者/用户自己写的 H3 台词标记 → 正文不动，只补契约（不补就照样会念参考音轨里的内容）。
+    if (/<\s*d\s*>/i.test(text)) {
+        return withH3VoiceContract(text, audioCount, countH3DialogueLines(text), extractH3Speakers(text));
+    }
 
     const lines = text.split("\n");
     const labelIndex = lines.findIndex((line) => H3_DIALOGUE_LABEL.test(line));
     if (labelIndex < 0) {
-        const declaration = timbreDeclaration([]);
-        return declaration ? `${declaration}\n\n${text}` : text;
+        // 没有对白块时**不锁台词**（可能只是没写说话人，不代表这段是默片），只补音色声明。
+        return withH3VoiceContract(text, audioCount, -1, []);
     }
 
-    const labelMatch = lines[labelIndex].match(H3_DIALOGUE_LABEL)!;
-    const collected = [labelMatch[2]];
-    let cursor = labelIndex + 1;
-    while (cursor < lines.length) {
-        const next = lines[cursor];
-        if (/^\s*-\s*\*\*/.test(next) || /^\s*#{1,6}\s/.test(next)) break;
-        // 八行之后那句「不要出现字幕和音乐…」不是台词，别把它补上人名。
-        if (next.trim().startsWith("不要出现字幕和音乐")) break;
-        collected.push(next);
-        cursor += 1;
-    }
-    const tail: string[] = [];
-    while (collected.length > 0 && !collected[collected.length - 1].trim()) tail.unshift(collected.pop() as string);
-
-    const spoken = collected
-        .join("\n")
-        .split(/\n+/)
-        .map((line) => line.trim())
-        .filter((line) => line && !H3_DIALOGUE_SILENT.test(line));
-    if (!spoken.length) return text;
-
+    // ⚠️ 多镜合并（每 2/3/4/5 镜一段）的提示词里有**多个** `- **对白**：` 块，
+    // 只转第一块会让其余镜的对白退回自然语言（模型当描述读 → 不念，或者自己编）。
     const speakers: string[] = [];
-    const blocks: string[] = [];
-    for (const line of spoken) {
-        const match = line.match(H3_DIALOGUE_SPEAKER);
-        const rawSpeaker = match && !H3_DIALOGUE_STAGE_VERB.test(match[1].trim()) ? match[1].trim() : "";
-        const body = rawSpeaker ? line.slice(match![0].length).trim() : line.trim();
-        // `苏晚：“台词”` → `<d>台词</d>`：`<d>` 本身就是台词的边界，引号留在里面会被一起念出来。
-        const spokenBody = body
-            .replace(/^[「『“"']+/, "")
-            .replace(/[」』”"']+$/, "")
-            .trim();
-        if (!spokenBody) continue;
-        const name = H3_PRONOUN_SPEAKER.test(rawSpeaker) ? speakers[0] || "" : rawSpeaker;
-        if (name && !speakers.includes(name)) speakers.push(name);
-        const speakerIndex = name ? speakers.indexOf(name) : 0;
-        const speakerId = `S${speakerIndex + 1}`;
-        const who = name ? `${name} (${speakerId})` : `(${speakerId})`;
-        // 只有这条说话人**确实有**对应的音色参考时才写绑定（第 2 个说话人没给音频就别借用第 1 条）。
-        const voice = audioCount >= speakerIndex + 1 ? ` using the voice timbre referenced from <Audio ${speakerIndex + 1}>` : "";
-        blocks.push(`${who} says${voice}:`, `<d>[${h3DialogueLanguage(spokenBody)}]${spokenBody}</d>`);
-    }
-    if (!blocks.length) return text;
+    const out: string[] = [];
+    let lineCount = 0;
+    let converted = false;
+    let index = 0;
+    while (index < lines.length) {
+        const line = lines[index];
+        if (!H3_DIALOGUE_LABEL.test(line)) {
+            out.push(line);
+            index += 1;
+            continue;
+        }
+        const labelMatch = line.match(H3_DIALOGUE_LABEL)!;
+        const collected = [labelMatch[2]];
+        let cursor = index + 1;
+        while (cursor < lines.length) {
+            const next = lines[cursor];
+            if (/^\s*-\s*\*\*/.test(next) || /^\s*#{1,6}\s/.test(next)) break;
+            // 八行之后那句「不要出现字幕和音乐…」不是台词，别把它补上人名。
+            if (next.trim().startsWith("不要出现字幕和音乐")) break;
+            collected.push(next);
+            cursor += 1;
+        }
+        const tail: string[] = [];
+        while (collected.length > 0 && !collected[collected.length - 1].trim()) tail.unshift(collected.pop() as string);
 
-    const declaration = timbreDeclaration(speakers);
-    const next = [
-        ...(declaration ? [declaration, ""] : []),
-        ...lines.slice(0, labelIndex),
-        `${labelMatch[1].replace(/\s*$/, "")}`,
-        ...blocks,
-        ...tail,
-        ...lines.slice(cursor),
-    ];
-    return next.join("\n");
+        const spoken = collected
+            .join("\n")
+            .split(/\n+/)
+            .map((value) => value.trim())
+            .filter((value) => value && !H3_DIALOGUE_SILENT.test(value));
+        const blocks: string[] = [];
+        for (const value of spoken) {
+            const match = value.match(H3_DIALOGUE_SPEAKER);
+            const rawSpeaker = match && !H3_DIALOGUE_STAGE_VERB.test(match[1].trim()) ? match[1].trim() : "";
+            const body = rawSpeaker ? value.slice(match![0].length).trim() : value.trim();
+            // `苏晚：“台词”` → `<d>台词</d>`：`<d>` 本身就是台词的边界，引号留在里面会被一起念出来。
+            const spokenBody = body
+                .replace(/^[「『“"']+/, "")
+                .replace(/[」』”"']+$/, "")
+                .trim();
+            if (!spokenBody) continue;
+            const name = H3_PRONOUN_SPEAKER.test(rawSpeaker) ? speakers[0] || "" : rawSpeaker;
+            if (name && !speakers.includes(name)) speakers.push(name);
+            const speakerIndex = name ? speakers.indexOf(name) : 0;
+            const speakerId = `S${speakerIndex + 1}`;
+            const who = name ? `${name} (${speakerId})` : `(${speakerId})`;
+            // 只有这条说话人**确实有**对应的音色参考时才写绑定（第 2 个说话人没给音频就别借用第 1 条）。
+            const voice = audioCount >= speakerIndex + 1 ? ` using the voice timbre referenced from <Audio ${speakerIndex + 1}>` : "";
+            blocks.push(`${who} says${voice}:`, `<d>[${h3DialogueLanguage(spokenBody)}]${spokenBody}</d>`);
+        }
+        if (!blocks.length) {
+            // 默镜 / 只有 `无`：原样保留（不补人名、不生成空 <d>）。
+            out.push(...lines.slice(index, cursor));
+            index = cursor;
+            continue;
+        }
+        out.push(`${labelMatch[1].replace(/\s*$/, "")}`, ...blocks, ...tail);
+        lineCount += blocks.length / 2;
+        converted = true;
+        index = cursor;
+    }
+    if (!converted) return withH3VoiceContract(text, audioCount, 0, speakers);
+    return withH3VoiceContract(out.join("\n"), audioCount, lineCount, speakers);
 }
 
 /**
