@@ -3650,12 +3650,13 @@ export const STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT = [
     "- **光影与色调**：门檐下柔光不变，杯壁凝结水珠清楚。",
     "- **转场建议**：在“问一句”结束后切行走全景。",
     "- **对白**：",
-    "“……算了。总得问一句。”",
+    "苏晚：“……算了。总得问一句。”",
     "硬约束：",
     "- 禁止出现 `[时长：4s]` 这类方括号写法；时长只写在 `- **时长**：` 这一行（秒数 + 起止时间码）。",
     "- 禁止把 `主体与动作提示词` / `独立风格提示词` / `首帧图片提示词` 的**图像段**内容写进 `video_motion_prompt`（图像段归 `shot_prompt`）。",
     "- `- **主体与动作**` 只写「人名 + 具体动作」，**一个外貌词都不许带**：年龄、面孔、五官、发型、发色、肤色、身材、上衣、裤子、鞋子、配饰全部不写。人名用 `角色1` / `角色2` 列里的名字原样写（`苏晚`），不要写成 `27岁的中国女生苏晚，亚洲面孔、五官…穿米白针织衫` —— 外貌与服装属于 `角色描述1/2` 列和 `shot_prompt` 的图像段，写进视频运动提示词会让视频模型按文字重新捏一个人。",
     "- `- **对白**：` 单独占一行，台词写在**下一行**（不加引号也行）；这一镜没有对白就写 `- **对白**：无`。",
+    "- **台词必须标注说话人**：每一行台词都以 `角色名：` 开头，名字用 `角色1` / `角色2` 列里的原名（`苏晚：“……”`）。一镜里有两个人说话就一行一个说话人（`苏晚：“……”` 换行 `陈默：“……”`），**禁止**写成没有主语的裸台词（`“……”`）—— 视频模型要据此判断谁在第几秒开口，缺主语时双人对白会串音或干脆不出声。",
     "- 八行都要有，不许合并成一段，也不许省成一句概括。",
     `- 八行之后**另起一行**、原样写上这一句（不带标签、不要并进对白）：\`${STORY_SCRIPT_DIRECTOR_SOUND_NOTE}\``,
     // 图像段（`shot_prompt`）同样不许写角色外貌 —— 用户 2026-10-24 晚追加要求。
@@ -3858,6 +3859,107 @@ function rewriteDirectorSubjectLine(blockText: string, names: readonly string[])
     return out.join("\n");
 }
 
+/** 「无对白」的几种写法（整段就这些字 → 收敛成 `无`）。 */
+const DIRECTOR_DIALOGUE_SILENT_PATTERN = /^(无|无台词|无对白|（无）|\(无\)|none)$/i;
+
+/** `名字：` / `名字:` —— 说话人标签只认短、无标点的词头。 */
+const DIRECTOR_DIALOGUE_SPEAKER_PATTERN = /^([^：:，,。；;、「」“”"'（）()\s]{1,12})\s*[：:]\s*/;
+
+/** 「他低声说：」「苏晚问：」这类是**舞台提示**，不是说话人标签（结尾是说话动词）。 */
+const DIRECTOR_DIALOGUE_STAGE_VERB_PATTERN = /(说|道|问|答|喊|叫|念|读|笑|叹|应|嘟囔|开口|低语|自语)$/;
+
+/**
+ * 第四套：`- **对白**` 里的台词**必须标注说话人**（用户 2026-10-24 要求）。
+ *
+ * 为什么非要纯函数兜底：提示词里已经写死「每行台词以 `角色名：` 开头」，但模型照旧会写裸台词
+ * （`“……算了。总得问一句。”`）。而这句话是要喂给视频模型的 —— 双人对白没有主语时，
+ * 视频模型不知道谁在第几秒开口，结果是串音、或者干脆没人出声（用户反馈的「没有让他说的台词」）。
+ *
+ * 判定顺序（幂等：合规台词原样返回）：
+ *  1. 整段是 `无` / `无台词` → 收敛成 `无`；
+ *  2. 行首已经是本镜角色名（`苏晚：` / `苏晚（低声）：`）→ 原样保留；
+ *  3. 行首是「他/她」这种代词标签 → 换成本镜第一主角的名字（`他：“…”` → `苏晚：“…”`）；
+ *  4. 行首是别的短词但不是说话动词（`画外音：`）→ 当成说话人保留；
+ *  5. 其余（裸台词）→ 补 `主角名：` 前缀。
+ *
+ * ⚠️ 一镜里没有 `角色1` / `角色2` 名字时**不加前缀**（编不出名字就不编，交给提示词侧）。
+ */
+function ensureDirectorDialogueSpeakers(value: unknown, names: readonly string[]): string {
+    const text = storyScriptCellText(value).trim();
+    if (!text) return "";
+    if (DIRECTOR_DIALOGUE_SILENT_PATTERN.test(text)) return "";
+    const speakerNames = names.filter(Boolean);
+    const primary = speakerNames[0] || "";
+    const rows: string[] = [];
+    for (const raw of text.split(/\n+/)) {
+        const line = raw.trim();
+        if (!line || DIRECTOR_DIALOGUE_SILENT_PATTERN.test(line)) continue;
+        if (!primary) {
+            rows.push(line);
+            continue;
+        }
+        if (speakerNames.some((name) => line.startsWith(name))) {
+            rows.push(line);
+            continue;
+        }
+        const match = line.match(DIRECTOR_DIALOGUE_SPEAKER_PATTERN);
+        const speaker = match ? match[1].trim() : "";
+        if (match && speaker && !DIRECTOR_DIALOGUE_STAGE_VERB_PATTERN.test(speaker)) {
+            // 代词标签换人名；`画外音：` / `旁白：` 这类照原样留着。
+            rows.push(/^(他|她)$/.test(speaker) ? `${primary}${line.slice(speaker.length)}` : line);
+            continue;
+        }
+        rows.push(`${primary}：${line}`);
+    }
+    return rows.join("\n");
+}
+
+/**
+ * 第四套：把**已经合规**的八段块里的 `- **对白**：` 就地修好（其余行一个字不动）。
+ *
+ * 值可能折行（`- **对白**：` 空值 + 下一行台词），所以从标签行一直收到下一个 `- **标签**` /
+ * 标题 / 末尾那句声音要求为止。收完交给 `ensureDirectorDialogueSpeakers` 补说话人。
+ *
+ * ⚠️ 必须停在那句 `不要出现字幕和音乐…`（它在八行之后、不带标签），否则会被当成台词补上人名。
+ * ⚠️ 幂等：合规的台词（已带说话人）收完与原文逐字相同 → 原样吐回。
+ */
+function rewriteDirectorDialogueBlock(blockText: string, names: readonly string[]): string {
+    const lines = String(blockText || "").split("\n");
+    const out: string[] = [];
+    for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        const match = line.match(/^(\s*-\s*\*\*对白\*\*\s*[：:]\s*)([\s\S]*)$/);
+        if (!match) {
+            out.push(line);
+            continue;
+        }
+        const collected = [match[2]];
+        let cursor = index + 1;
+        while (cursor < lines.length) {
+            const next = lines[cursor];
+            if (/^\s*-\s*\*\*/.test(next) || /^\s*#{1,6}\s/.test(next)) break;
+            if (next.trim().startsWith("不要出现字幕和音乐")) break;
+            collected.push(next);
+            cursor += 1;
+        }
+        // 尾部空行原样留着（声音要求那句前面通常空一行）。
+        const tail: string[] = [];
+        while (collected.length > 1 && !collected[collected.length - 1].trim()) tail.unshift(collected.pop() as string);
+        const raw = collected.join("\n");
+        const ensured = ensureDirectorDialogueSpeakers(raw, names);
+        if (ensured === raw.trim()) {
+            // 合规 → 原样吐回**原始行**（不能把 match[2] 当成新行再拼一遍，那会凭空多一个空行）。
+            out.push(...lines.slice(index, cursor));
+        } else if (!ensured || ensured === "无") {
+            out.push(`${match[1].replace(/\s*$/, "")}无`, ...tail);
+        } else {
+            out.push(`${match[1].replace(/\s*$/, "")}`, ...ensured.split("\n"), ...tail);
+        }
+        index = cursor - 1;
+    }
+    return out.join("\n");
+}
+
 /** 从模型自己的文字里捞「机位 / 运镜 / 转场」—— 这三样在本仓的列里没有独立列。 */
 const DIRECTOR_CAMERA_ANGLE_PATTERN = /(微俯|微仰|平视|仰视|俯视|仰拍|俯拍|平拍|过肩|航拍|贴地|顶拍|侧拍|俯角|仰角)/;
 const DIRECTOR_CAMERA_MOVE_PATTERN = /(固定镜头|固定机位|缓慢推镜|推镜头|推镜|拉镜头|拉镜|摇镜|摇摄|横移|移镜|跟拍|跟镜|升降|手持|环绕|旋转|变焦|甩镜)/;
@@ -3903,7 +4005,7 @@ export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[]
         //    （模版逐字复制过来的行本来就没有外貌词，剥完逐字相同 → 等于没动）。
         if (isDirectorVideoBlockText(row.video_motion_prompt)) {
             const original = String(row.video_motion_prompt);
-            const rewritten = withDirectorSoundNote(rewriteDirectorSubjectLine(original, names));
+            const rewritten = withDirectorSoundNote(rewriteDirectorDialogueBlock(rewriteDirectorSubjectLine(original, names), names));
             if (rewritten === original && !shotPatch) return row;
             return {
                 ...row,
@@ -3917,7 +4019,8 @@ export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[]
         const move = (blob.match(DIRECTOR_CAMERA_MOVE_PATTERN) || [])[1] || "";
         const transition = ((blob.match(DIRECTOR_TRANSITION_PATTERN) || [])[1] || "").trim();
         const shotSize = cleanDirectorFieldValue(row.shot);
-        const dialogue = storyScriptCellText(row.dialogue).trim();
+        // 台词带说话人（`苏晚：“……”`）—— 视频模型据此判断谁开口（用户 2026-10-24 要求）。
+        const dialogue = ensureDirectorDialogueSpeakers(row.dialogue, names);
         const lines = [
             `- **时长**：${duration}秒，${formatStoryScriptTimecode(start)}—${formatStoryScriptTimecode(start + duration)}。`,
             `- **景别／机位**：${[shotSize, angle].filter(Boolean).join("，") || "无"}。`,

@@ -345,6 +345,10 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                                 </OptionPill>
                             ))}
                         </div>
+                        {/* 音色参考的口径：3 条上限、必须配图、台词写在提示词里（音频只给音色）。 */}
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.fisherAudioHint")}
+                        </div>
                     </SettingGroup>
                 ) : null}
                 <SettingGroup title={t("settingsPanels.video.quality")} color={theme.node.muted}>

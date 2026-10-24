@@ -103,6 +103,7 @@ export default {
             fisherMode: "Pipeline mode",
             fisherModeHint: "Work-Fisher: the pasted script defaults to multi-ref video. Character / scene / multiview need Export JSON under character / scene / multiview keys in the model script.",
             fisherQualityHint: "Work-Fisher is single-pass (no latent upscale): resolution is capped at the Export bake (~0.8 MP); duration max is 12s (Export default 10s). Longer multi-ref clips often hit SamplerCustomAdvanced VRAM OOM.",
+            fisherAudioHint: "Voice references: up to 3 clips (2–15s each, clean single speaker), one bound per speaker. Audio cannot be submitted alone — always attach a reference image too. The reference must say different words than the line (it only supplies timbre); the line itself goes in the prompt. A storyboard `- **对白**：` line is converted to H3's `苏晚 (S1) says: <d>[Chinese]…</d>` with the timbre binding attached.",
             fisherModes: {
                 video: "Multi-ref video",
                 character: "Character assets",

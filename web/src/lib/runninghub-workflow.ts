@@ -3699,6 +3699,156 @@ export function applyRunningHubReferenceAudios(workflow: ComfyWorkflow, fileName
     return { workflow: applied ? next : workflow, applied, planted };
 }
 
+// ---------------------------------------------------------------------------
+// MiniMax H3 台词方言（`<d>[Chinese]…</d>` + `(S1) says:`）
+// ---------------------------------------------------------------------------
+//
+// 用户 2026-10-24 的反馈：「参考音色后，生成的视频会出现没有让他说的台词对话」。
+// 不是图的问题，是**提示词方言**的问题 —— H3 只认官方那套台词标记：
+//   `苏晚 (S1) says: <d>[Chinese]你终于来了。</d>`
+// 我们分镜表第四套吐出来的是 `- **对白**：` + `苏晚：“你终于来了。”`，这是自然语言，
+// H3 的 Qwen3VL 编码器会把它读成「描述」而不是「要念出来的台词」；再叠上一条音色参考，
+// 模型就把整条片子当氛围片生成 —— 画面有声，没人说话。
+// 官方另有两条硬规则，一并在这里补上：
+//   ① 音色参考必须**显式绑定**到说话人，且声明「只取音色、不复制原台词」
+//      （不声明时模型倾向于整条复制参考音轨，于是它也「不念」我们写的台词）；
+//   ② 多说话人必须给 `(S1)` / `(S2)` 稳定 ID，否则双人对白串音。
+// 只在 MiniMax H3 家族 + 提示词里确实有 `对白` 块时才动；作者自己写的 `<d>` 一个字节不改。
+
+/** H3 台词标签里的语种：跟台词本身走，不按界面语言。 */
+function h3DialogueLanguage(text: string) {
+    if (/[\uac00-\ud7af]/.test(text)) return "Korean";
+    if (/[\u3040-\u30ff]/.test(text)) return "Japanese";
+    return "Chinese";
+}
+
+const H3_DIALOGUE_LABEL = /^(\s*-\s*\*\*\s*对白\s*\*\*\s*[：:]\s*)([\s\S]*)$/;
+const H3_DIALOGUE_SILENT = /^(无|无台词|无对白|（无）|\(无\)|none)$/i;
+const H3_DIALOGUE_SPEAKER = /^([^：:，,。；;、「」“”"'（）()\s]{1,12})\s*[：:]\s*/;
+/** `他低声说：` / `苏晚问：` 是舞台提示，不是说话人。 */
+const H3_DIALOGUE_STAGE_VERB = /(说|道|问|答|喊|叫|念|读|笑|叹|应|嘟囔|开口|低语|自语)$/;
+const H3_PRONOUN_SPEAKER = /^(他|她|我|你|俺|咱)$/;
+
+/**
+ * 把画布的 `- **对白**：名字：“台词”` 改写成 H3 的官方台词块。
+ *
+ * 输出形态（`audioCount` 决定要不要挂音色绑定）：
+ * ```
+ * <Audio 1> is the voice-timbre reference for 苏晚 (S1): reference — take only the voice timbre,
+ * never copy the original spoken content of <Audio 1>.
+ *
+ * - **时长**：…
+ * - **对白**：
+ * 苏晚 (S1) says using the voice timbre referenced from <Audio 1>:
+ * <d>[Chinese]你终于来了。</d>
+ * ```
+ *
+ * ⚠️ 幂等：已经带 `<d>` 的提示词原样返回；没有 `对白` 块的提示词只在有音色参考时补声明。
+ * ⚠️ 只在 H3 家族调用（见 `isMinimaxH3FamilyWorkflow`），别的模型一个字节不变。
+ */
+export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioCount?: number }): string {
+    const text = String(prompt || "");
+    if (!text.trim()) return text;
+    // 作者/用户自己写的 H3 台词标记 → 完全不动。
+    if (/<\s*d\s*>/i.test(text)) return text;
+    const audioCount = Math.max(0, Math.min(3, Math.round(Number(options?.audioCount) || 0)));
+    const timbreDeclaration = (speakers: string[]) => {
+        if (!audioCount) return "";
+        // 绑不上说话人的音频不声明（只传 1 条音色却给了 3 个空槽时，多写的声明只会迷惑模型）。
+        const declared = Math.min(audioCount, Math.max(1, speakers.length));
+        const rows: string[] = [];
+        for (let index = 0; index < declared; index += 1) {
+            const who = speakers[index] ? `${speakers[index]} (S${index + 1})` : `the speaking character (S${index + 1})`;
+            rows.push(
+                `<Audio ${index + 1}> is the voice-timbre reference for ${who}: reference — take only the voice timbre, never copy the spoken content of <Audio ${index + 1}>.`,
+            );
+        }
+        return rows.join("\n");
+    };
+
+    const lines = text.split("\n");
+    const labelIndex = lines.findIndex((line) => H3_DIALOGUE_LABEL.test(line));
+    if (labelIndex < 0) {
+        const declaration = timbreDeclaration([]);
+        return declaration ? `${declaration}\n\n${text}` : text;
+    }
+
+    const labelMatch = lines[labelIndex].match(H3_DIALOGUE_LABEL)!;
+    const collected = [labelMatch[2]];
+    let cursor = labelIndex + 1;
+    while (cursor < lines.length) {
+        const next = lines[cursor];
+        if (/^\s*-\s*\*\*/.test(next) || /^\s*#{1,6}\s/.test(next)) break;
+        // 八行之后那句「不要出现字幕和音乐…」不是台词，别把它补上人名。
+        if (next.trim().startsWith("不要出现字幕和音乐")) break;
+        collected.push(next);
+        cursor += 1;
+    }
+    const tail: string[] = [];
+    while (collected.length > 0 && !collected[collected.length - 1].trim()) tail.unshift(collected.pop() as string);
+
+    const spoken = collected
+        .join("\n")
+        .split(/\n+/)
+        .map((line) => line.trim())
+        .filter((line) => line && !H3_DIALOGUE_SILENT.test(line));
+    if (!spoken.length) return text;
+
+    const speakers: string[] = [];
+    const blocks: string[] = [];
+    for (const line of spoken) {
+        const match = line.match(H3_DIALOGUE_SPEAKER);
+        const rawSpeaker = match && !H3_DIALOGUE_STAGE_VERB.test(match[1].trim()) ? match[1].trim() : "";
+        const body = rawSpeaker ? line.slice(match![0].length).trim() : line.trim();
+        // `苏晚：“台词”` → `<d>台词</d>`：`<d>` 本身就是台词的边界，引号留在里面会被一起念出来。
+        const spokenBody = body
+            .replace(/^[「『“"']+/, "")
+            .replace(/[」』”"']+$/, "")
+            .trim();
+        if (!spokenBody) continue;
+        const name = H3_PRONOUN_SPEAKER.test(rawSpeaker) ? speakers[0] || "" : rawSpeaker;
+        if (name && !speakers.includes(name)) speakers.push(name);
+        const speakerIndex = name ? speakers.indexOf(name) : 0;
+        const speakerId = `S${speakerIndex + 1}`;
+        const who = name ? `${name} (${speakerId})` : `(${speakerId})`;
+        // 只有这条说话人**确实有**对应的音色参考时才写绑定（第 2 个说话人没给音频就别借用第 1 条）。
+        const voice = audioCount >= speakerIndex + 1 ? ` using the voice timbre referenced from <Audio ${speakerIndex + 1}>` : "";
+        blocks.push(`${who} says${voice}:`, `<d>[${h3DialogueLanguage(spokenBody)}]${spokenBody}</d>`);
+    }
+    if (!blocks.length) return text;
+
+    const declaration = timbreDeclaration(speakers);
+    const next = [
+        ...(declaration ? [declaration, ""] : []),
+        ...lines.slice(0, labelIndex),
+        `${labelMatch[1].replace(/\s*$/, "")}`,
+        ...blocks,
+        ...tail,
+        ...lines.slice(cursor),
+    ];
+    return next.join("\n");
+}
+
+/**
+ * 所有 MiniMax H3 视频家族 —— 台词方言（`<d>[语言]` + `(S1) says:`）统一在这里收口。
+ *
+ * 只在 H3 上写方言：别的模型（Seedance / Kling / mj 等）吃自然语言，改了就是破坏。
+ * 四视图那支是图像资产卡（不生成台词），故意不在名单里。
+ */
+function isMinimaxH3FamilyWorkflow(workflowId?: string | null) {
+    return (
+        isMinimaxH3StoryWorkflow(workflowId) ||
+        isMinimaxH3FiveSegmentWorkflow(workflowId) ||
+        isMinimaxH3ReferenceClipWorkflow(workflowId) ||
+        isMinimaxH3SelfLiftWorkflow(workflowId) ||
+        isMinimaxH3RefTopWorkflow(workflowId) ||
+        isMinimaxH3SingularityWorkflow(workflowId) ||
+        isMinimaxH3HdDynamicWorkflow(workflowId) ||
+        isMinimaxH3FisherWorkflow(workflowId) ||
+        isMinimaxH3YzjinyuWorkflow(workflowId)
+    );
+}
+
 /**
  * Reference video → `ref_videos.ref_video_N` slots (VHS_LoadVideo 27 on the 文武双全 graph).
  *
@@ -4877,8 +5027,15 @@ async function runRunningHubWorkflowWithKey(args: {
     }
     // Same contract as audio: a clip that cannot be placed is an error, never a render that ignores it.
     if (videoSources.length && !videoApplied) throw new Error(apiText("runningHubVideoNotApplied"));
+    // MiniMax H3 只认官方那套台词标记（`苏晚 (S1) says:` + `<d>[Chinese]台词</d>`）。分镜表第四套
+    // 吐出来的是自然语言 `- **对白**：苏晚：“…”`，原样喂进去等于让人物「描述」台词而不是「说」——
+    // 再叠一条音色参考，模型就把片子当氛围片生成（用户 2026-10-24 的「没有台词对话」）。
+    // `audioCount` 决定要不要补 `<Audio N> is the voice-timbre reference …` 绑定声明。
+    const effectivePrompt = isMinimaxH3FamilyWorkflow(workflowId)
+        ? adaptMinimaxH3ReferencePrompt(request.prompt, { audioCount: uploadedAudios.length })
+        : request.prompt;
     const patch: RunningHubWorkflowPatch = prepared
-        ? buildWorkflowPatch(prepared, request.prompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "")
+        ? buildWorkflowPatch(prepared, effectivePrompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "")
         : { nodeInfoList: [] };
     const overrides = [...patch.nodeInfoList, ...audioOverrides];
     // Planted `LoadAudio` nodes only exist in our copy, and `nodeInfoList` cannot create links —
@@ -4969,7 +5126,7 @@ async function runRunningHubWorkflowWithKey(args: {
                     return [] as WebappNode[];
                 });
                 if (nodes.length) {
-                    task = await submitWebappTask(origin, apiKey, workflowId, buildWebappNodeInfoList(nodes, request.prompt, uploaded, request.size, request.seconds, request.media), request.signal);
+                    task = await submitWebappTask(origin, apiKey, workflowId, buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media), request.signal);
                 } else if (!workflow) {
                     task = await submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((retryError: unknown) => {
                         throw explainRunningHubError(retryError, workflowId);
