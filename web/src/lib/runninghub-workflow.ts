@@ -1824,7 +1824,10 @@ function applyMinimaxH3VibeShortSettings(
 
     // Prompt → the multiline node the sampler's `prompt` link resolves to (node 138). Written last
     // so an empty canvas prompt keeps the author's baked text rather than blanking it.
-    if (prompt.trim()) {
+    // ⚠️ 空提示词也要写。作者导出里那个 prompt 节点（138）塞着一段示例台词，
+    // 「prompt 为空就不写」等于把作者的示例台词原样念出来 —— 用户「总是出现我没写过的台词」
+    // 最像这个（示例台词是作者写死的，所以每次都是同一批句子）。
+    {
         const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;
         const sourceId = consumer ? minimaxH3FourViewPromptSource(next, consumer) : "";
         const promptNode =
@@ -1832,6 +1835,19 @@ function applyMinimaxH3VibeShortSettings(
             next["138"] ||
             findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
         if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+
+        // 兜底清扫：同图里其它还带 `<d>` 台词标记的文本节点（作者示例）一律清空，
+        // 万一上面挑错了节点，也不会把别人的台词当成本片台词念出来。
+        const promptNodeId = promptNode ? Object.keys(next).find((id) => next[id] === promptNode) || "" : "";
+        for (const [id, node] of Object.entries(next)) {
+            if (id === promptNodeId) continue;
+            if (!/PrimitiveString|CLIPTextEncode|^Text$|String/i.test(String(node?.class_type || ""))) continue;
+            const inputs = (node?.inputs || {}) as Record<string, unknown>;
+            const value = inputs.value ?? inputs.text;
+            if (typeof value !== "string" || !/<\s*d\s*>/i.test(value)) continue;
+            if ("value" in inputs) inputs.value = "";
+            else if ("text" in inputs) inputs.text = "";
+        }
     }
 
     // The graph bakes a fixed noise seed — identical inputs would render an identical clip on
@@ -1963,7 +1979,10 @@ function applyMinimaxH3SelfLiftSettings(
 
     // Prompt → the multiline node the sampler's `prompt` link resolves to (138). Written last so an
     // empty canvas prompt keeps the author's baked text rather than blanking it.
-    if (prompt.trim()) {
+    // ⚠️ 空提示词也要写。作者导出里那个 prompt 节点（138）塞着一段示例台词，
+    // 「prompt 为空就不写」等于把作者的示例台词原样念出来 —— 用户「总是出现我没写过的台词」
+    // 最像这个（示例台词是作者写死的，所以每次都是同一批句子）。
+    {
         const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;
         const sourceId = consumer ? minimaxH3FourViewPromptSource(next, consumer) : "";
         const promptNode =
@@ -1971,6 +1990,19 @@ function applyMinimaxH3SelfLiftSettings(
             next["138"] ||
             findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
         if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+
+        // 兜底清扫：同图里其它还带 `<d>` 台词标记的文本节点（作者示例）一律清空，
+        // 万一上面挑错了节点，也不会把别人的台词当成本片台词念出来。
+        const promptNodeId = promptNode ? Object.keys(next).find((id) => next[id] === promptNode) || "" : "";
+        for (const [id, node] of Object.entries(next)) {
+            if (id === promptNodeId) continue;
+            if (!/PrimitiveString|CLIPTextEncode|^Text$|String/i.test(String(node?.class_type || ""))) continue;
+            const inputs = (node?.inputs || {}) as Record<string, unknown>;
+            const value = inputs.value ?? inputs.text;
+            if (typeof value !== "string" || !/<\s*d\s*>/i.test(value)) continue;
+            if ("value" in inputs) inputs.value = "";
+            else if ("text" in inputs) inputs.text = "";
+        }
     }
 
     // VRAM: `SelfLiftH3Sampler` ("SelfLift Progressive Sampler") draws a low-res pass at
@@ -2509,7 +2541,10 @@ function applyMinimaxH3HdDynamicSettings(
     }
 
     // Prompt → PrimitiveStringMultiline (138) linked from H3 `prompt`.
-    if (prompt.trim()) {
+    // ⚠️ 空提示词也要写。作者导出里那个 prompt 节点（138）塞着一段示例台词，
+    // 「prompt 为空就不写」等于把作者的示例台词原样念出来 —— 用户「总是出现我没写过的台词」
+    // 最像这个（示例台词是作者写死的，所以每次都是同一批句子）。
+    {
         const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;
         const sourceId = consumer ? minimaxH3FourViewPromptSource(next, consumer) : "";
         const promptNode =
@@ -2517,6 +2552,19 @@ function applyMinimaxH3HdDynamicSettings(
             next["138"] ||
             findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
         if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+
+        // 兜底清扫：同图里其它还带 `<d>` 台词标记的文本节点（作者示例）一律清空，
+        // 万一上面挑错了节点，也不会把别人的台词当成本片台词念出来。
+        const promptNodeId = promptNode ? Object.keys(next).find((id) => next[id] === promptNode) || "" : "";
+        for (const [id, node] of Object.entries(next)) {
+            if (id === promptNodeId) continue;
+            if (!/PrimitiveString|CLIPTextEncode|^Text$|String/i.test(String(node?.class_type || ""))) continue;
+            const inputs = (node?.inputs || {}) as Record<string, unknown>;
+            const value = inputs.value ?? inputs.text;
+            if (typeof value !== "string" || !/<\s*d\s*>/i.test(value)) continue;
+            if ("value" in inputs) inputs.value = "";
+            else if ("text" in inputs) inputs.text = "";
+        }
     }
 
     for (const node of Object.values(next)) {
@@ -2704,7 +2752,10 @@ function applyMinimaxH3FisherSettings(
 
     // Keep ref_image_size on the authored "match" contract from Export (node 136).
 
-    if (prompt.trim()) {
+    // ⚠️ 空提示词也要写。作者导出里那个 prompt 节点（138）塞着一段示例台词，
+    // 「prompt 为空就不写」等于把作者的示例台词原样念出来 —— 用户「总是出现我没写过的台词」
+    // 最像这个（示例台词是作者写死的，所以每次都是同一批句子）。
+    {
         const consumer = minimaxH3ReferenceVideoSlots(next)?.consumer;
         const sourceId = consumer ? minimaxH3FourViewPromptSource(next, consumer) : "";
         const promptNode =
@@ -2712,6 +2763,19 @@ function applyMinimaxH3FisherSettings(
             next["138"] ||
             findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
         if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+
+        // 兜底清扫：同图里其它还带 `<d>` 台词标记的文本节点（作者示例）一律清空，
+        // 万一上面挑错了节点，也不会把别人的台词当成本片台词念出来。
+        const promptNodeId = promptNode ? Object.keys(next).find((id) => next[id] === promptNode) || "" : "";
+        for (const [id, node] of Object.entries(next)) {
+            if (id === promptNodeId) continue;
+            if (!/PrimitiveString|CLIPTextEncode|^Text$|String/i.test(String(node?.class_type || ""))) continue;
+            const inputs = (node?.inputs || {}) as Record<string, unknown>;
+            const value = inputs.value ?? inputs.text;
+            if (typeof value !== "string" || !/<\s*d\s*>/i.test(value)) continue;
+            if ("value" in inputs) inputs.value = "";
+            else if ("text" in inputs) inputs.text = "";
+        }
     }
 
     for (const node of Object.values(next)) {
@@ -3743,8 +3807,12 @@ function countH3DialogueLines(text: string) {
 /**
  * 音色声明：**每一条**传进来的 `<Audio N>` 都必须点名。
  *
- * 只声明「绑得上说话人」的那几条，剩下的 `<Audio 2>`/`<Audio 3>` 在提示词里是孤儿，
- * 模型就会把它当成「另一条待续写的台词轨」→ 成片里冒出用户没写过的台词（用户第二次反馈就是这个）。
+ * 措辞照抄 MiniMax 官方 Ref2VA 的 subject_definitions 写法：
+ * `<Audio 1> is the voice-timbre reference for <Subject 1> (S1). It provides vocal tone and pacing
+ * only; do not copy its original words.` —— 官方明确「只给音色和节奏、不复制原词」。
+ *
+ * ⚠️ 只声明绑得上说话人的那几条，剩下的 `<Audio 2>`/`<Audio 3>` 在提示词里就是孤儿，
+ * 模型会把它们当成「另一条待播的台词轨」→ 成片里冒出用户没写过的台词。
  */
 function buildH3TimbreDeclaration(audioCount: number, speakers: string[], sourceText: string) {
     if (audioCount <= 0) return "";
@@ -3761,8 +3829,8 @@ function buildH3TimbreDeclaration(audioCount: number, speakers: string[], source
         else if (!anySpeaker && index === 0) who = "the speaking character";
         rows.push(
             who
-                ? `<Audio ${index + 1}> is the voice-timbre reference for ${who}: reference only — take the voice timbre, never reproduce, continue or translate anything spoken inside <Audio ${index + 1}>.`
-                : `<Audio ${index + 1}> is an extra timbre sample only and carries no dialogue — never reproduce, continue or translate anything spoken inside <Audio ${index + 1}>.`,
+                ? `<Audio ${index + 1}> is the voice-timbre reference for ${who}. It provides vocal tone and pacing only; do not copy its original words.`
+                : `<Audio ${index + 1}> is an extra timbre sample and carries no dialogue. It only provides vocal tone; do not copy its original words.`,
         );
     }
     return rows.join("\n");
@@ -3773,6 +3841,7 @@ function buildH3TimbreDeclaration(audioCount: number, speakers: string[], source
  *
  * 用户第二次反馈「总是出现我未描述的对话台词」—— 参考音频里有真人说话时，H3 会顺着往下说；
  * 只写「只取音色」压不住，必须把「全片只有这 N 句台词」写成硬约束。
+ * 最后两行抄自 MiniMax 官方 voice-clone 示例的 `AVOID:` 清单（paraphrased dialogue / extra lines）。
  */
 function buildH3DialogueLock(lineCount: number) {
     const rows = [H3_DIALOGUE_LOCK_MARK];
@@ -3782,7 +3851,8 @@ function buildH3DialogueLock(lineCount: number) {
             "不得新增、补写、续写、复述、翻译或改写任何未写出的台词；不得以旁白、画外音、内心独白、字幕朗读的形式增加人声。",
             "参考音频（<Audio N>）只提供音色：它里面已经说过的内容不得出现在成片里，也不得被接着往下说、换语言重说。",
             "只有 <d> 标记内的文字是台词；其它位置（人物描述、站位、镜头描述、引号里的话）一律不许念出来。",
-            "没有写出台词的段落必须完全无人声，只保留环境音与音效。",
+            "本提示词里的说明文字、英文标记、`says:` 行、`<Subject N>`／`<Picture N>`／`<Audio N>` 声明、镜头描述都不是台词，一个字都不许念。",
+            "说话人只在对应 <d> 的那一刻开口：台词之前和之后双唇保持闭合，不许出声；没有台词的镜头必须完全无人声，只保留环境音与音效。",
         );
     } else {
         rows.push(
@@ -3790,13 +3860,17 @@ function buildH3DialogueLock(lineCount: number) {
             "参考音频（<Audio N>）只提供音色，其中已说出的内容不得出现在成片里，也不得被接着往下说。",
         );
     }
+    rows.push(
+        "Avoid: paraphrased dialogue, extra spoken lines, narration, off-screen voice, subtitle or on-screen text, voice drift.",
+    );
     return rows.join("\n");
 }
 
 /** 把「音色声明（头）+ 台词锁定（尾）」贴到提示词上，幂等。`lineCount < 0` 表示不锁台词。 */
 function withH3VoiceContract(text: string, audioCount: number, lineCount: number, speakers: string[]) {
-    // ⚠️ 判重只能认「声明行」本身：正文里 `says using the voice timbre referenced from <Audio 1>` 也带
-    // `<Audio 1>` 字样，早期版本用 `includes("<Audio 1>")` 判重 → 声明永远加不上。
+    // ⚠️ 判重只认「声明行」本身（`<Audio 1> is …`）。早期版本用 `includes("<Audio 1>")`，
+    // 而正文里任何一处提到 `<Audio 1>`（比如旧版的 `says … referenced from <Audio 1>`）都会命中，
+    // 结果声明一条都加不上。
     const hasDeclaration = text.includes("<Audio 1> is ");
     const declaration = hasDeclaration ? "" : buildH3TimbreDeclaration(audioCount, speakers, text);
     const lock = lineCount < 0 || text.includes(H3_DIALOGUE_LOCK_MARK) ? "" : buildH3DialogueLock(lineCount);
@@ -3824,12 +3898,12 @@ function extractH3Speakers(text: string) {
  *
  * 输出形态（`audioCount` 决定要不要挂音色绑定）：
  * ```
- * <Audio 1> is the voice-timbre reference for 苏晚 (S1): reference only — take the voice timbre,
- * never reproduce, continue or translate anything spoken inside <Audio 1>.
+ * <Audio 1> is the voice-timbre reference for 苏晚 (S1). It provides vocal tone and pacing only;
+ * do not copy its original words.
  *
  * - **时长**：…
  * - **对白**：
- * 苏晚 (S1) says using the voice timbre referenced from <Audio 1>:
+ * 苏晚 (S1) says:
  * <d>[Chinese]你终于来了。</d>
  *
  * 【台词锁定】
@@ -3906,9 +3980,11 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
             const speakerIndex = name ? speakers.indexOf(name) : 0;
             const speakerId = `S${speakerIndex + 1}`;
             const who = name ? `${name} (${speakerId})` : `(${speakerId})`;
-            // 只有这条说话人**确实有**对应的音色参考时才写绑定（第 2 个说话人没给音频就别借用第 1 条）。
-            const voice = audioCount >= speakerIndex + 1 ? ` using the voice timbre referenced from <Audio ${speakerIndex + 1}>` : "";
-            blocks.push(`${who} says${voice}:`, `<d>[${h3DialogueLanguage(spokenBody)}]${spokenBody}</d>`);
+            // ⚠️ 说话人标记里**不要塞 `<Audio N>` 标签**：官方写法是
+            // `名字 (Sx) says:` + 独立一行 `<d>[语言]台词</d>`，音色归属写在提示词开头的声明里。
+            // 早期版本写成 `says using the voice timbre referenced from <Audio 1>:` ——
+            // 媒体标签和台词标记粘在同一行，模型容易把参考音频的内容一起带出来（「乱说话」）。
+            blocks.push(`${who} says:`, `<d>[${h3DialogueLanguage(spokenBody)}]${spokenBody}</d>`);
         }
         if (!blocks.length) {
             // 默镜 / 只有 `无`：原样保留（不补人名、不生成空 <d>）。
