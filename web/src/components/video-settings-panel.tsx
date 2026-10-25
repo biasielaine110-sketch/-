@@ -211,7 +211,8 @@ type VideoSettingsPanelProps = {
             | "videoSeed"
             | "videoAudioMode"
             | "videoFisherMode"
-            | "videoFisherLoraStrength",
+            | "videoFisherLoraStrength"
+            | "videoFisherStyleFields",
         value: string,
     ) => void;
     theme: CanvasTheme;
@@ -231,6 +232,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const yzjinyuRh = !h3Comfy && isMinimaxH3YzjinyuWorkflowId(model);
     const fisherMode = normalizeFisherPipelineMode(config.videoFisherMode);
     const fisherLoraStrength = normalizeFisherLoraStrength(config.videoFisherLoraStrength);
+    /** 「提交视觉风格字段」：只有显式 `on` 才算打开（默认 off = 整行不发，见 `H3_SCAFFOLD_STYLE_LABELS`）。 */
+    const fisherStyleFieldsOn = String(config.videoFisherStyleFields || "off") === "on";
     const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
     const qualityChoices = useMemo(() => {
@@ -374,6 +377,25 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         </div>
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                             {t("settingsPanels.video.fisherLoraHint")}
+                        </div>
+                        {/* 「提交视觉风格字段」：默认不提交 —— `视觉风格：…` 那一行整行不进提示词，
+                            因为 H3 会把那段中文当旁白念出来（2026-10-25 第八次报障）。打开只用于 A/B。 */}
+                        <div
+                            className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-[11px]"
+                            style={{ borderColor: theme.node.stroke, color: theme.node.muted }}
+                        >
+                            <span>{t("settingsPanels.video.fisherStyleFields")}</span>
+                            <div className="flex shrink-0 gap-2">
+                                <OptionPill selected={!fisherStyleFieldsOn} theme={theme} onClick={() => onConfigChange("videoFisherStyleFields", "off")}>
+                                    {t("settingsPanels.video.fisherStyleFieldsOff")}
+                                </OptionPill>
+                                <OptionPill selected={fisherStyleFieldsOn} theme={theme} onClick={() => onConfigChange("videoFisherStyleFields", "on")}>
+                                    {t("settingsPanels.video.fisherStyleFieldsOn")}
+                                </OptionPill>
+                            </div>
+                        </div>
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.fisherStyleFieldsHint")}
                         </div>
                         {/* 字幕：H3 把硬字幕烧进画面（图里没有字幕节点、节点也没有开关，静音镜照样出字），
                             唯一可靠的办法是生成后把底部那一条切掉。 */}

@@ -4087,7 +4087,7 @@ function toH3PictureReferences(text: string) {
     return String(text || "").replace(H3_PICTURE_REFERENCE, (_match, zh: string, en: string) => `<Picture ${zh || en}>`);
 }
 
-function stripH3Scaffolding(text: string) {
+function stripH3Scaffolding(text: string, options?: { keepStyleFields?: boolean }) {
     const out: string[] = [];
     for (const raw of String(text || "").split("\n")) {
         const trimmed = raw.trim();
@@ -4113,8 +4113,10 @@ function stripH3Scaffolding(text: string) {
             const label = labelled[1].trim();
             const value = labelled[2].trim();
             if (H3_SCAFFOLD_ALWAYS_DROP.has(label)) continue;
-            // 风格类：**连值一起丢**（只有 Fisher 走这里，见 `H3_SCAFFOLD_STYLE_LABELS` 的注释）
-            if (H3_SCAFFOLD_STYLE_LABELS.has(label)) continue;
+            // 风格类：**连值一起丢**（只有 Fisher 走这里，见 `H3_SCAFFOLD_STYLE_LABELS` 的注释）。
+            // `keepStyleFields` = 视频设置面板上的「提交视觉风格字段」开关（Fisher 三个 id，默认关）。
+            // 打开后不丢整行，而是落到下面那条兜底「只留值」—— 字段名照样不发音，风格文字能进提示词。
+            if (!options?.keepStyleFields && H3_SCAFFOLD_STYLE_LABELS.has(label)) continue;
             // 我们自己的「参考图片编号：图片1、图片2。请按这些编号理解提示词中的图片引用。」也是说明文，
             // 整行不许念（值里的「请按这些编号理解…」就是一句招人声的中文）
             if (/^(?:参考图片编号|参考图编号|图片编号|图编号|编号)$/.test(label)) continue;
@@ -4527,7 +4529,7 @@ function extractH3Speakers(text: string) {
  */
 export function adaptMinimaxH3ReferencePrompt(
     prompt: string,
-    options?: { audioCount?: number; dropSoundNote?: boolean; audioNegation?: boolean },
+    options?: { audioCount?: number; dropSoundNote?: boolean; audioNegation?: boolean; keepStyleFields?: boolean },
 ): string {
     // ⚠️ 空提示词不能原样交给 H3：它是**音视频联合生成**的模型，空提示词 + 参考图会让它自己编一段戏。
     // 先垫一句纯画面描述（不加任何「台词」相关的说明）。
@@ -4569,6 +4571,16 @@ export function adaptMinimaxH3ReferencePrompt(
     const minimal = audioNegation;
 
     /**
+     * **提交风格字段**（Fisher 三个 id 的视频设置开关，默认关 = `false`）。
+     *
+     * `false`：`视觉风格 / 画面风格 / 影像风格 / 风格提示词 / 风格` 整行丢弃（标签和值都不发，
+     * 见 `H3_SCAFFOLD_STYLE_LABELS`）—— 这是 2026-10-25 第八次报障的修法。
+     * `true`：不丢整行，只丢字段名、把值发出去（走 `stripH3Scaffolding` 的兜底分支），
+     * 让风格文字重新影响画面。用户要求保留这个口子做 A/B：**风险同时回来**（那段裸中文可能被念）。
+     */
+    const keepStyleFields = Boolean(options?.keepStyleFields);
+
+    /**
      * 出口统一收口（顺序不能换）：
      *  1. **有台词**的出口先摘掉模板尾巴里「只要对白和环境音效」那半句（对白已有 `<d>` 定界）；
      *  2. 再剥分镜表字段骨架（`画面：`/`时长：`/`音效：` 这些标签会被 H3 当台词念出来）；
@@ -4584,7 +4596,7 @@ export function adaptMinimaxH3ReferencePrompt(
         // 干净模式：把我们自己那句模板尾巴（「不要出现字幕和文字，不要音乐…」）整行也去掉 ——
         // 它既是一句会被念出来的说明，又点了「字幕/文字/音乐」三个词（H3 顺着名词生成，越说越有）。
         const raw = minimal ? stripH3SoundNote(head) : head;
-        const cleaned = stripH3Scaffolding(speaking ? stripDialogueInvitationClause(raw) : raw);
+        const cleaned = stripH3Scaffolding(speaking ? stripDialogueInvitationClause(raw) : raw, { keepStyleFields });
         // 剥完什么都不剩（正文只有 `时长` / `对白：无` 这类字段）→ 干净模式垫那句中立画面描述，
         // **不要回落到 `head`**：回落等于把「时长/对白」这些标签又发给 H3，正是被念出来的那批词。
         const body = cleaned || (minimal ? H3_SILENT_FALLBACK_PROMPT : head.replace(/\s+$/, ""));
@@ -5738,6 +5750,8 @@ export async function runRunningHubWorkflow(args: {
     mjFlavor?: string;
     /** Work-Fisher 风格 LoRA（279 `MysticXXX_MMH3-V1`）权重：`0` = 关（默认），0.2/0.35/0.5 为档位。 */
     fisherLoraStrength?: string;
+    /** Work-Fisher 是否把 `视觉风格：…` 那一行的值提交给模型：`on` = 提交（只丢字段名），其余 = 整行不发。 */
+    fisherStyleFields?: string;
     /** Work-Fisher pipeline mode (video / character / scene / multiview). */
     fisherMode?: string;
     media?: "image" | "video";
@@ -5814,6 +5828,8 @@ async function runRunningHubWorkflowWithKey(args: {
         mjFlavor?: string;
         /** Work-Fisher 风格 LoRA（279）权重，`0` = 关（默认）。 */
         fisherLoraStrength?: string;
+        /** Work-Fisher 是否提交 `视觉风格：…` 的值：`on` = 提交，其余 = 整行不发（默认）。 */
+        fisherStyleFields?: string;
         fisherMode?: string;
         media?: "image" | "video";
         referenceDataUrls?: string[];
@@ -5992,12 +6008,16 @@ async function runRunningHubWorkflowWithKey(args: {
               // 官方声音槽位给 H3 全族，但两句否定式（No dialogue / non_diegetic_music: N/A）
               // **只给这两个 id** —— 别的族提示词里没转成 `<d>` 的台词、或本来要的 BGM 会被一起压掉。
               audioNegation: isMinimaxH3FisherWorkflow(workflowId),
+              // 「提交视觉风格字段」开关（Fisher 三个 id 的设置面板，默认关）。
+              // 关 = `视觉风格 / 画面风格 / …` 整行不发（连值一起丢）；开 = 只丢字段名、值照发。
+              keepStyleFields: isMinimaxH3FisherWorkflow(workflowId) && String(request.fisherStyleFields || "") === "on",
           })
         : request.prompt;
     // 排查「模型说了我没写过的话」时最缺的就是这一行 —— 实际提交给 H3 的正文原样打出来，
     // 用户直接复制给我们就能定位（是不是有多余的 <d>、是不是还有别的字段在招它开口）。
     if (isMinimaxH3FamilyWorkflow(workflowId)) {
-        console.info(`[runninghub] h3 prompt (${workflowId}) audio=${uploadedAudios.length}:\n${effectivePrompt}`);
+        const styleFieldsOn = isMinimaxH3FisherWorkflow(workflowId) && String(request.fisherStyleFields || "") === "on";
+        console.info(`[runninghub] h3 prompt (${workflowId}) audio=${uploadedAudios.length} styleFields=${styleFieldsOn ? "on" : "off"}:\n${effectivePrompt}`);
     }
     const patch: RunningHubWorkflowPatch = prepared
         ? buildWorkflowPatch(prepared, effectivePrompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "", request.fisherLoraStrength || "")

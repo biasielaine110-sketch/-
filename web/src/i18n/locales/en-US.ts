@@ -114,6 +114,11 @@ export default {
             fisherLoraOff: "Off",
             fisherLoraHint:
                 "This is the single root cause of the Korean voice, baked-in subtitles and lines you never wrote: the author's MysticXXX_MMH3-V1 is trained on live-action K-drama footage, so it carries a Korean accent, burned subtitles and uninvited dialogue, and at strength 0.5 it overrides your prompt. Off (0) by default = plain official H3: Chinese, no burned text, and it says exactly what you wrote. Raise it if you want that K-drama look — the difference shows from 0.2, but the accent and subtitles come back with it.",
+            fisherStyleFields: "Submit the style field",
+            fisherStyleFieldsOff: "Don't submit",
+            fisherStyleFieldsOn: "Submit",
+            fisherStyleFieldsHint:
+                "Off by default: the `视觉风格 / 画面风格 / 影像风格 / 风格提示词 / 风格` lines are dropped whole (label and value), because H3 reads that Chinese as narration. When on, only the value after the colon survives (the label is still stripped), so the style text affects the picture again — and so does the risk of it being read aloud. Use it for A/B testing; the durable fix is to fold style words into the 画面 field or use the style LoRA tier.",
             cropSubtitlesHint:
                 "H3 burns hard subtitles into the picture — the graph has no subtitle node and the node has no subtitle switch, and even a silent shot comes back with text (it is baked into the author's live-action-style LoRA). So the clip is re-rendered locally after generation, three ways:\n· Fit (default): cut the bottom 12%, then scale back up proportionally — the output keeps the original 720×1280 / 1920×1080, resolution unchanged, framing about 14% tighter (≈7% off each side);\n· Crop: cut only, the file gets shorter (720×1126), framing untouched but no longer exactly 9:16;\n· Blur: nothing is cropped, the subtitle band is covered with a blurred copy of the frame above it, framing untouched, at the cost of one soft strip at the bottom.\nAll three re-encode (cropping requires decoding and redrawing). The bitrate is now 12–24 Mbps (≈8 bit/px), visually lossless with VP9, and the audio track is kept as-is. If any step fails the original clip is kept, so you never lose a render.",
             fisherModes: {

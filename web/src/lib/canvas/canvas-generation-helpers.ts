@@ -409,6 +409,8 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         videoFisherMode: node?.metadata?.fisherMode || config.videoFisherMode || defaultConfig.videoFisherMode,
         videoFisherLoraStrength:
             node?.metadata?.fisherLoraStrength || config.videoFisherLoraStrength || defaultConfig.videoFisherLoraStrength,
+        videoFisherStyleFields:
+            node?.metadata?.fisherStyleFields || config.videoFisherStyleFields || defaultConfig.videoFisherStyleFields,
         mjFlavor: node?.metadata?.mjFlavor || config.mjFlavor || defaultConfig.mjFlavor,
         audioVoice: node?.metadata?.audioVoice || config.audioVoice || defaultConfig.audioVoice,
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,

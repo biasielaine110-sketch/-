@@ -130,6 +130,14 @@ export type AiConfig = {
      */
     videoFisherLoraStrength: string;
     /**
+     * Work-Fisher 是否把 `视觉风格：…` 那一行的**值**提交给模型：`"on"` = 提交，其余（默认 `"off"`）= 整行不发。
+     *
+     * 整行不发是 2026-10-25 第八次报障的修法（H3 会把那段中文当旁白念出来）。这个开关是给用户
+     * 自己做 A/B 的口子：打开后风格文字重新影响画面，但「被念」的风险同时回来。
+     * Only the Fisher id trio reads it（`isMinimaxH3FisherWorkflow`）。
+     */
+    videoFisherStyleFields: string;
+    /**
      * MJ 风格工作流 V2.0 LoRA 味型：`strong` | `standard` | `light` | `off`.
      * Only the 2112477095216926722 / 2112477039575003138 id pair reads it (it scales the two
      * MJ LoRAs); every other model ignores the field.
@@ -232,6 +240,7 @@ export const defaultConfig: AiConfig = {
     videoAudioMode: "lock_source",
     videoFisherMode: "video",
     videoFisherLoraStrength: "0",
+    videoFisherStyleFields: "off",
     mjFlavor: "standard",
     systemPrompt: "",
     reasoningEffort: "auto",
@@ -542,6 +551,8 @@ export const useConfigStore = create<ConfigStore>()(
                         videoFisherLoraStrength: ["0", "0.2", "0.35", "0.5"].includes(String(config.videoFisherLoraStrength ?? ""))
                             ? String(config.videoFisherLoraStrength)
                             : "0",
+                        // 只有显式 `on` 才算打开；旧存档/脏值一律 `off`（整行不发，最安全）。
+                        videoFisherStyleFields: String(config.videoFisherStyleFields ?? "") === "on" ? "on" : "off",
                         mjFlavor: /^(strong|standard|light|off)$/i.test(String(config.mjFlavor || ""))
                             ? String(config.mjFlavor).toLowerCase()
                             : "standard",
