@@ -518,6 +518,7 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
         vquality: node.metadata?.vquality || nativeVideoDefaults.vquality || globalConfig.vquality || defaultConfig.vquality,
         videoGenerateAudio: node.metadata?.generateAudio || globalConfig.videoGenerateAudio || defaultConfig.videoGenerateAudio,
         videoWatermark: node.metadata?.watermark || globalConfig.videoWatermark || defaultConfig.videoWatermark,
+        videoCropSubtitles: node.metadata?.cropSubtitles || globalConfig.videoCropSubtitles || defaultConfig.videoCropSubtitles,
         videoSteps: node.metadata?.steps || globalConfig.videoSteps || defaultConfig.videoSteps,
         videoRefImageSize: node.metadata?.refImageSize || globalConfig.videoRefImageSize || defaultConfig.videoRefImageSize,
         videoSamplerName: node.metadata?.samplerName || globalConfig.videoSamplerName || defaultConfig.videoSamplerName,
@@ -552,6 +553,7 @@ function videoConfigPatch(key: keyof AiConfig, value: string) {
     if (key === "videoSeconds") return { seconds: value };
     if (key === "videoGenerateAudio") return { generateAudio: value };
     if (key === "videoWatermark") return { watermark: value };
+    if (key === "videoCropSubtitles") return { cropSubtitles: value };
     if (key === "videoSteps") return { steps: value };
     if (key === "videoRefImageSize") return { refImageSize: value };
     if (key === "videoSamplerName") return { samplerName: value };

@@ -246,6 +246,8 @@ export type CanvasNodeMetadata = {
     vquality?: string;
     generateAudio?: string;
     watermark?: string;
+    /** 生成后自动切掉画面底部字幕带（H3/Fisher 会把字幕烧进画面，图上没有可关的开关）。 */
+    cropSubtitles?: string;
     /** ComfyUI video sampling steps. */
     steps?: string;
     /** MiniMax H3 reference image sizing (match / max). */
@@ -368,6 +370,7 @@ export type CanvasNodeConvertedSnapshot = {
     vquality?: string;
     generateAudio?: string;
     watermark?: string;
+    cropSubtitles?: string;
     steps?: string;
     refImageSize?: string;
     samplerName?: string;

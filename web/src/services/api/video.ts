@@ -28,6 +28,7 @@ import {
     runRunningHubWorkflow,
 } from "@/lib/runninghub-workflow";
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
+import { cropVideoBottomBand } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -372,9 +373,31 @@ async function createRunningHubVideoTask(
     const videoUrl = result.videos[0];
     if (!videoUrl) throw new Error(apiText("runningHubNoVideo"));
     const id = nanoid();
+    /**
+     * 去字幕：H3 把硬字幕烧进画面（图里没有字幕节点、节点也没有字幕开关，连静音镜都照样出字），
+     * 唯一可靠的办法是生成后把底部那一条切掉。范围只开 Fisher（用户 2026-10-25 报的就是它），
+     * 开关在视频设置面板里（默认开）。裁切是「尽力而为」：拿不到字节 / 浏览器不支持录制 / 超时
+     * 一律保持原片 —— 带字幕的片子也比没有片子强。
+     */
+    const cropped =
+        isMinimaxH3FisherWorkflowId(model) && config.videoCropSubtitles !== "false"
+            ? await cropVideoBottomBand(
+                  { url: videoUrl },
+                  // 实时播放一遍才能保住音轨，所以超时按片长放宽，再留 30 秒余量。
+                  { timeoutMs: (Math.max(1, Number(config.videoSeconds) || 10) + 30) * 1000 },
+              ).then((output) => {
+                  console.info(`[runninghub] ${model}: subtitle crop ${output ? `${output.width}x${output.height} ${output.mimeType}` : "skipped (kept original)"}`);
+                  return output;
+              })
+            : null;
     // Storyboard-style workflows emit extra images next to the video (e.g. per-scene frames).
     // Carry them through so the canvas can place every output instead of dropping all but one.
-    pluginVideoResults.set(id, { url: videoUrl, mimeType: "video/mp4", ...(result.images.length ? { extraImages: result.images } : {}) });
+    pluginVideoResults.set(
+        id,
+        cropped
+            ? { blob: cropped.blob, mimeType: cropped.mimeType, ...(result.images.length ? { extraImages: result.images } : {}) }
+            : { url: videoUrl, mimeType: "video/mp4", ...(result.images.length ? { extraImages: result.images } : {}) },
+    );
     return { id, provider: "plugin", model };
 }
 

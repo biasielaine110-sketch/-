@@ -199,6 +199,7 @@ type VideoSettingsPanelProps = {
             | "videoSeconds"
             | "videoGenerateAudio"
             | "videoWatermark"
+            | "videoCropSubtitles"
             | "videoSteps"
             | "videoRefImageSize"
             | "videoSamplerName"
@@ -348,6 +349,25 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         {/* 音色参考的口径：3 条上限、必须配图、台词写在提示词里（音频只给音色）。 */}
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                             {t("settingsPanels.video.fisherAudioHint")}
+                        </div>
+                        {/* 字幕：H3 把硬字幕烧进画面（图里没有字幕节点、节点也没有开关，静音镜照样出字），
+                            唯一可靠的办法是生成后把底部那一条切掉。 */}
+                        <div
+                            className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-[11px]"
+                            style={{ borderColor: theme.node.stroke, color: theme.node.muted }}
+                        >
+                            <span>{t("settingsPanels.video.cropSubtitles")}</span>
+                            <div className="flex shrink-0 gap-2">
+                                <OptionPill selected={config.videoCropSubtitles !== "false"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "true")}>
+                                    {t("settingsPanels.video.cropSubtitlesOn")}
+                                </OptionPill>
+                                <OptionPill selected={config.videoCropSubtitles === "false"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "false")}>
+                                    {t("settingsPanels.video.cropSubtitlesOff")}
+                                </OptionPill>
+                            </div>
+                        </div>
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.cropSubtitlesHint")}
                         </div>
                     </SettingGroup>
                 ) : null}

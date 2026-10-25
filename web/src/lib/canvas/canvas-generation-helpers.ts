@@ -397,6 +397,7 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         vquality: node?.metadata?.vquality || nativeVideoDefaults.vquality || config.vquality || defaultConfig.vquality,
         videoGenerateAudio: node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
         videoWatermark: node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark,
+        videoCropSubtitles: node?.metadata?.cropSubtitles || config.videoCropSubtitles || defaultConfig.videoCropSubtitles,
         videoSteps: node?.metadata?.steps || config.videoSteps || defaultConfig.videoSteps,
         videoRefImageSize: node?.metadata?.refImageSize || config.videoRefImageSize || defaultConfig.videoRefImageSize,
         videoSamplerName: node?.metadata?.samplerName || config.videoSamplerName || defaultConfig.videoSamplerName,

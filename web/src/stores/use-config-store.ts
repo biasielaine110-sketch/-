@@ -99,6 +99,8 @@ export type AiConfig = {
     vquality: string;
     videoGenerateAudio: string;
     videoWatermark: string;
+    /** 生成后自动切掉画面底部字幕带（H3/Fisher 会把字幕烧进画面，图里无字幕节点可关）。 */
+    videoCropSubtitles: string;
     /** ComfyUI video sampling steps (BasicScheduler.steps). */
     videoSteps: string;
     /** MiniMax H3 reference image sizing (match / max). */
@@ -214,6 +216,7 @@ export const defaultConfig: AiConfig = {
     vquality: "720",
     videoGenerateAudio: "true",
     videoWatermark: "false",
+    videoCropSubtitles: "true",
     videoSteps: "40",
     videoRefImageSize: "max",
     videoSamplerName: "dpmpp_2m",
@@ -510,6 +513,7 @@ export const useConfigStore = create<ConfigStore>()(
                         vquality: config.vquality || "720",
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
+                        videoCropSubtitles: config.videoCropSubtitles || "true",
                         videoSteps: config.videoSteps || defaultConfig.videoSteps,
                         videoRefImageSize: config.videoRefImageSize || defaultConfig.videoRefImageSize,
                         videoSamplerName: config.videoSamplerName || defaultConfig.videoSamplerName,
