@@ -3947,34 +3947,11 @@ function stripDialogueInvitationClause(text: string) {
         .replace(/[，,]\s*。/g, "。");
 }
 
-/**
- * 官方 AV 三字段的**第一个**槽位 `integrated_multimodal_description` —— 2026-10-25 第六次报障的根因之二。
- *
- * 前几轮只补了后两个槽位（`overall_soundscape` / `non_diegetic_music`），**正文一直裸着**：
- * 一段中文分镜表（`- **画面**：…` / `- **时长**：…` / `【镜头 1】`）直接顶在提示词最前面，
- * 没有任何「这是画面描述」的标签。H3 拿到「中文 + 一个正在说话的人物 + 一条音色参考」，
- * 最自然的解释就是**这是一段中文台词稿** —— 于是它把 `画面：` `时长：` 这些字段名一起念出来。
- * 用户的原话完全对得上：多出来的声音「像在念我的分镜表文字」。
- *
- * 修法不是删字段（正文是用户的分镜表，我们不改写），而是**给它套上官方描述槽位**：
- * 同一段文字挂到 `integrated_multimodal_description:` 下面，它就从「稿」变成「描述」。
- * 台词仍然只有 `<d>` 一处来源，声音归属仍然只有 `overall_soundscape` 一处。
- *
- * ⚠️ 只给 Fisher 两个 id（`audioNegation`）—— 别的族提示词格式各不同，别硬套。
- * ⚠️ 幂等：已经有 `integrated_multimodal_description:` 就一个字节都不动（用户/作者自己写过官方格式）。
- */
-const H3_DESCRIPTION_SLOT_MARK = /integrated_multimodal_description\s*:/i;
-
-function wrapH3DescriptionSlot(text: string) {
-    if (H3_DESCRIPTION_SLOT_MARK.test(text)) return text;
-    const soundAt = text.search(/\n\s*overall_soundscape\s*:/i);
-    // 没有声音槽位说明这段提示词不归我们收尾（例如用户自己写了整套官方格式）→ 原样返回。
-    if (soundAt < 0) return text;
-    const body = text.slice(0, soundAt).replace(/\s+$/, "");
-    if (!body) return text;
-    const tail = text.slice(soundAt).replace(/^\n+/, "");
-    return `integrated_multimodal_description:\n${body}\n\n${tail}`;
-}
+// ⚠️ **已废弃：`wrapH3DescriptionSlot`（官方第一个槽位）。**
+// 第六轮曾把正文套进 `integrated_multimodal_description:`，第七次报障证明反向有害 ——
+// 用户「把你配置的规范都读出来了，我写的对话一个字都没念」。原因是 H3 并不解析这套槽位名，
+// 它把整段提示词（含槽位头）当素材往下生成，于是 `integrated_multimodal_description:` 这种
+// 英文标识也进了「可念内容」。Fisher 现在走「干净模式」，只发正文 + `<d>`（见 `adaptMinimaxH3ReferencePrompt`）。
 
 /**
  * 把分镜表的**字段骨架**从正文里摘掉 —— 用户第六次报障的原话是「像在念我的分镜表文字」。
@@ -3994,10 +3971,14 @@ function wrapH3DescriptionSlot(text: string) {
  *
  * ⚠️ 只给 Fisher 两个 id（`audioNegation`）跑：别的族吃的是自然语言，剥掉标签反而丢信息。
  */
-const H3_SCAFFOLD_ALWAYS_DROP = new Set([
-    "时长", "镜头时长", "镜头编号", "转场建议", "转场", "音效", "声音", "环境音",
-    "台词与声音", "声音设计", "字幕", "备注",
-]);
+const H3_SCAFFOLD_ALWAYS_DROP = new Set(["时长", "镜头时长", "镜头编号", "转场建议", "转场", "字幕", "备注"]);
+/**
+ * 音效类标签：**只留值、不留标签**。
+ *
+ * ⚠️ 2026-10-25 第七次报障后，声音槽位整个撤掉了（见 `adaptMinimaxH3ReferencePrompt` 的「干净模式」），
+ * 环境音只能回到正文里；但字段名 `音效：` 仍然不念 —— 用户投诉的「念分镜表文字」针对的是标签本身。
+ */
+const H3_SCAFFOLD_SOUND_LABELS = new Set(["音效", "声音", "环境音", "台词与声音", "声音设计"]);
 const H3_SCAFFOLD_DIALOGUE_LABELS = new Set(["对白", "台词"]);
 const H3_SCAFFOLD_KEEP_VALUE = new Set([
     "画面", "视觉风格", "风格", "主体与动作", "动作", "景别", "景别／机位", "景别/机位", "机位",
@@ -4009,7 +3990,6 @@ const H3_EMPTY_VALUE = /^(?:无|没有|none|n\/?a|—+|–|-|（无）|\(无\))\
 
 function stripH3Scaffolding(text: string) {
     const out: string[] = [];
-    let shotNo = 0;
     for (const raw of String(text || "").split("\n")) {
         const trimmed = raw.trim();
         if (!trimmed) {
@@ -4026,16 +4006,18 @@ function stripH3Scaffolding(text: string) {
             out.push(trimmed);
             continue;
         }
-        if (H3_SHOT_HEADING.test(trimmed)) {
-            shotNo += 1;
-            out.push(`[Shot ${shotNo}]`);
-            continue;
-        }
+        // 镜号标题（`【镜头 1】`）**原样保留**：它是用户的分镜结构，也是模型认镜边界的地方。
+        // ⚠️ 2026-10-25 第七次报障：改写成英文 `[Shot 1]` 反而多出一串可以被念出来的英文 token，
+        // 且消息是「把你配置的规范都读出来了」—— 用户的原文越少被改写，越不容易被当稿子念。
         const labelled = trimmed.match(/^[-*·•]?\s*\*{0,2}\s*([^：:*]{1,14}?)\s*\*{0,2}\s*[：:]\s*(.*)$/);
         if (labelled) {
             const label = labelled[1].trim();
             const value = labelled[2].trim();
             if (H3_SCAFFOLD_ALWAYS_DROP.has(label)) continue;
+            if (H3_SCAFFOLD_SOUND_LABELS.has(label)) {
+                if (value && !H3_EMPTY_VALUE.test(value)) out.push(value);
+                continue;
+            }
             if (H3_SCAFFOLD_DIALOGUE_LABELS.has(label)) {
                 if (!value || H3_EMPTY_VALUE.test(value)) continue;
                 out.push(value);
@@ -4456,11 +4438,32 @@ export function adaptMinimaxH3ReferencePrompt(
     const mixedShots = dropSoundNote && declaresH3SilentDialogue(text);
 
     /**
-     * 出口统一收口（2026-10-25 第六次报障，顺序不能换）：
+     * **干净模式**（= Fisher 两个 id）：只发「正文 + `<d>`」，**我们写的说明一句都不加**。
+     *
+     * 2026-10-25 第七次报障，用户两条原话：
+     *  ①「这次更离谱，怎么把你配置的规范都读出来了，然后我写的对话提示词一个字都没念」；
+     *  ②「没有挂参考音色，没有写对话提示词内容的，还是在自己瞎念内容」。
+     * 第六轮加的东西 —— `integrated_multimodal_description:` 槽位头、`overall_soundscape: Quiet,
+     * continuous … No dialogue, no voices. The description is never read aloud.`、
+     * `non_diegetic_music: N/A`、`【静场】`／`【口型约定】`／`【台词锁定】` —— 全是**我们写的散文**。
+     * H3 不解析槽位、不读指令，它把提示词整体当素材往下生成，于是**把我们这些说明当台词念了出来**
+     * （用户听到的「规范」就是它们），真台词反而被淹掉。
+     *
+     * 这条路线（写满声音槽位 + 口头约束）连试三轮，用户反馈从「还是在乱说话」一路到「更离谱」，
+     * 结论：**这套模型不吃说明文，只吃叙事 + `<d>`**。所以 Fisher 回到最小形态：
+     *  - 保留：台词方言（`苏晚 (S1) says:` + `<d>[Chinese]…</d>`）、删除模板邀请句、剥离字段名；
+     *  - 去掉：槽位头 / 英文说明 / 静场 / 口型约定 / 台词锁定；
+     *  - 参考音频照旧挂（音色要靠它），但只留官方那**一句** `<Audio N> is the voice-timbre reference …`。
+     * ⚠️ 别的族不受影响（调用点只对 Fisher 传 `audioNegation`）。
+     */
+    const minimal = audioNegation;
+
+    /**
+     * 出口统一收口（顺序不能换）：
      *  1. **有台词**的出口先摘掉模板尾巴里「只要对白和环境音效」那半句（对白已有 `<d>` 定界）；
      *  2. 再剥分镜表字段骨架（`画面：`/`时长：`/`音效：` 这些标签会被 H3 当台词念出来）；
-     *  3. 最后套官方描述槽位 `integrated_multimodal_description:`。
-     * ⚠️ 2 只能作用于**正文**（`overall_soundscape:` 之前），别把槽位里那些 `Shot N:` 行当标签吃掉。
+     *  3. 干净模式**不再套** `integrated_multimodal_description:` —— 那个头本身就会念，而且 H3 不解析它。
+     * ⚠️ 2 只能作用于**正文**（`overall_soundscape:` 之前），别把用户自己写的槽位行当标签吃掉。
      * ⚠️ 静音镜那条路走的是 `dropDialogueInvitation`（改成「只要环境音效」），两者别混。
      */
     const finish = (value: string, speaking: boolean) => {
@@ -4468,16 +4471,23 @@ export function adaptMinimaxH3ReferencePrompt(
         const cut = value.search(/\n\s*overall_soundscape\s*:/i);
         const head = cut < 0 ? value : value.slice(0, cut);
         const tail = cut < 0 ? "" : value.slice(cut).replace(/^\n+/, "");
-        const cleaned = stripH3Scaffolding(speaking ? stripDialogueInvitationClause(head) : head);
-        const body = cleaned || head.replace(/\s+$/, "");
-        return wrapH3DescriptionSlot(tail ? `${body}\n\n${tail}` : body);
+        // 干净模式：把我们自己那句模板尾巴（「不要出现字幕和文字，不要音乐…」）整行也去掉 ——
+        // 它既是一句会被念出来的说明，又点了「字幕/文字/音乐」三个词（H3 顺着名词生成，越说越有）。
+        const raw = minimal ? stripH3SoundNote(head) : head;
+        const cleaned = stripH3Scaffolding(speaking ? stripDialogueInvitationClause(raw) : raw);
+        // 剥完什么都不剩（正文只有 `时长` / `对白：无` 这类字段）→ 干净模式垫那句中立画面描述，
+        // **不要回落到 `head`**：回落等于把「时长/对白」这些标签又发给 H3，正是被念出来的那批词。
+        const body = cleaned || (minimal ? H3_SILENT_FALLBACK_PROMPT : head.replace(/\s+$/, ""));
+        // 干净模式不套描述槽位（header 本身会被念）；用户自己写的槽位（`tail`）原样留在原位。
+        return tail ? `${body}\n\n${tail}` : body;
     };
 
-    // 作者/用户自己写的 H3 台词标记 → 正文不动，只补契约（不补就照样会念参考音轨里的内容）。
+    // 作者/用户自己写的 H3 台词标记 → 正文不动，只补音色声明（干净模式连台词锁定都不补）。
     if (/<\s*d\s*>/i.test(text)) {
         // 已带 `<d>` 又声明了静音镜 = 一镜说、一镜不说：正文不动，尾部补一句口型约定。
-        const body = mixedShots ? withH3MixedLipsyncNote(text) : text;
-        return finish(withH3AudioStatement(withH3VoiceContract(body, audioCount, countH3DialogueLines(text), extractH3Speakers(text)), audioNegation), true);
+        const body = mixedShots && !minimal ? withH3MixedLipsyncNote(text) : text;
+        const contract = withH3VoiceContract(body, audioCount, minimal ? -1 : countH3DialogueLines(text), extractH3Speakers(text));
+        return finish(minimal ? contract : withH3AudioStatement(contract, audioNegation), true);
     }
 
     const lines = text.split("\n");
@@ -4490,9 +4500,12 @@ export function adaptMinimaxH3ReferencePrompt(
         // 改成「只要环境音效」—— 那句本身就在邀请模型说话，是「没写台词也在说话」的直接来源。
         // `lineCount = 0` 只会在**真的挂了参考音频**时落成一行「本段没有台词」。
         const base = dropDialogueInvitation(text);
-        // Fisher（静音镜）：没有 `<d>` → 人物闭嘴、声音落画外，音轨照旧保留。
-        const quiet = dropSoundNote ? withH3NarrationShotNote(stripH3SoundNote(base)) : base;
-        return finish(withH3AudioStatement(withH3VoiceContract(quiet, audioCount, 0, []), audioNegation), false);
+        // Fisher（静音镜）：没有 `<d>` → 撤掉我们自己那句模板声音说明。
+        // ⚠️ 干净模式**连【静场】也不加** —— 那句正是被念出来的「规范」（第七次报障）。
+        const quiet = dropSoundNote ? stripH3SoundNote(base) : base;
+        const silentBody = dropSoundNote && !minimal ? withH3NarrationShotNote(quiet) : quiet;
+        const contract = withH3VoiceContract(silentBody, audioCount, minimal ? -1 : 0, []);
+        return finish(minimal ? contract : withH3AudioStatement(contract, audioNegation), false);
     }
 
     // ⚠️ 多镜合并（每 2/3/4/5 镜一段）的提示词里有**多个** `- **对白**：` 块，
@@ -4581,22 +4594,22 @@ export function adaptMinimaxH3ReferencePrompt(
         index = cursor;
     }
     // 一个能认的台词都没有（全是 `无` / 全被守住）→ 有音频时只加一行「本段没有台词」，否则原样交出去。
-    if (!converted) {
+     if (!converted) {
         const base = dropDialogueInvitation(text);
         // 同上：全段一个能认的台词都没有 → 静场（闭嘴 + 只有环境音），音轨照旧。
-        const quiet = dropSoundNote ? withH3NarrationShotNote(stripH3SoundNote(base)) : base;
-        return finish(withH3AudioStatement(withH3VoiceContract(quiet, audioCount, 0, speakers), audioNegation), false);
+        // ⚠️ 干净模式不加【静场】（会被念出来，见 `minimal`）。
+        const quiet = dropSoundNote ? stripH3SoundNote(base) : base;
+        const silentBody = dropSoundNote && !minimal ? withH3NarrationShotNote(quiet) : quiet;
+        const contract = withH3VoiceContract(silentBody, audioCount, minimal ? -1 : 0, speakers);
+        return finish(minimal ? contract : withH3AudioStatement(contract, audioNegation), false);
     }
     // 至少一镜转成了 `<d>`：如果同时还有 `- **对白**：无` 的镜头，补「按镜头的口型约定」——
     // 否则那几镜没有任何约束，模型会把它们填成人声噪杂（用户 2026-10-25 的混合镜诉求）。
+    // ⚠️ 干净模式下这句也不贴（第七次报障：它被念出来了）。
     const joined = out.join("\n");
-    return finish(
-        withH3AudioStatement(
-            withH3VoiceContract(mixedShots ? withH3MixedLipsyncNote(joined) : joined, audioCount, lineCount, speakers),
-            audioNegation,
-        ),
-        true,
-    );
+    const finalBody = mixedShots && !minimal ? withH3MixedLipsyncNote(joined) : joined;
+    const contract = withH3VoiceContract(finalBody, audioCount, minimal ? -1 : lineCount, speakers);
+    return finish(minimal ? contract : withH3AudioStatement(contract, audioNegation), true);
 }
 
 /**
