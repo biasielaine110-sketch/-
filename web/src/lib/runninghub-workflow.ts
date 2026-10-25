@@ -2596,13 +2596,6 @@ const MINIMAX_H3_FISHER_WORKFLOW_IDS = new Set(["2110621324220567554", "21106210
 const MINIMAX_H3_FISHER_SECONDS = { min: 2, max: 12 };
 /** Export bake ceiling — selector MP is the sampler latent on this single-pass graph. */
 const MINIMAX_H3_FISHER_MAX_MEGAPIXELS = 0.8;
-/**
- * 静音镜（`- **对白**：无`）把工作流自带的**风格 LoRA** 强度设到这里。
- *
- * 0 = 彻底摘掉那个 `MysticXXX_MMH3-V1` 的偏置（它连声音一起训，H3 音频分支被带成韩语腔）。
- * 想留一点质感可以调到 0.15~0.25，代价是韩语可能回来一点。**音轨始终保留**（用户要环境音效）。
- */
-const MINIMAX_H3_FISHER_SILENT_STYLE_LORA_STRENGTH = 0;
 
 export type FisherPipelineMode = "video" | "character" | "scene" | "multiview";
 
@@ -2759,25 +2752,14 @@ function applyMinimaxH3FisherSettings(
 
     // Keep ref_image_size on the authored "match" contract from Export (node 136).
 
-    // ⚠️ 静音镜（`- **对白**：无`）**保留音轨、只关掉风格 LoRA** —— 用户 2026-10-25 先要
-    // 「不要再冒韩语」，随即明确「我需要保持环境音效啊」，所以不能摘音轨（`84f8517` 摘过，已撤回）。
-    // 真实提交日志已经证明提示词这条线是干净的：`audio=0`（没挂参考音频）、`noDialogue=1`、
-    // 正文是我们自己的中文、作者写死在节点 138 的韩文示例也被无条件覆盖了 —— 模型照样开口说韩语。
-    // 图里也**没有任何音频输入**（无 LoadAudio / ref_audios.*），声音全由模型长出来；
-    // 唯一的韩语来源是作者焊死的节点 279 `MysticXXX_MMH3-V1`（强度 0.5）—— 真人实拍短片
-    // 连声音一起训出来的 LoRA，H3 是音视频联合模型，它的音频分支被带成韩语腔：
-    // `对白：无` 写在提示词里都压不住（纯文本约束对 LoRA 偏置无效）。
-    // 所以只动这一个旋钮：把**风格 LoRA**（`LoraLoaderModelOnly`）强度归零 ——
-    // 音轨、画面构图、参考图、提示词一个字节都不动，只把那段韩语偏置摘掉，环境音效照旧由 H3 生成。
-    // ⚠️ 不碰 `LoraLoaderBypassModelOnly`（那是 4 步加速 LoRA，归零会变成慢速采样）。
-    if (shouldSuppressH3Speech(prompt)) {
-        for (const node of Object.values(next)) {
-            if (!/^LoraLoaderModelOnly$/i.test(String(node?.class_type || ""))) continue;
-            const lora = node?.inputs as Record<string, unknown> | undefined;
-            if (!lora || typeof lora.strength_model !== "number") continue;
-            lora.strength_model = MINIMAX_H3_FISHER_SILENT_STYLE_LORA_STRENGTH;
-        }
-    }
+    // ⚠️ 静音镜这里**什么都不用改图** —— 用户 2026-10-25 的最终口径是
+    // 「把乱讲的台词直接换成旁白音，不让人物动嘴，只有我提示词里写的台词才动嘴」：
+    // 唇动是 `<d>` 驱动的，没有 `<d>` 就已经不会对口型；再由适配器在正文末尾追加一句
+    // `【旁白镜】…人物全程闭口…声音是画外旁白与环境音`（见 `withH3NarrationShotNote`），
+    // 声音就落到画外。所以：
+    //   - 音轨照旧（用户要环境音效，`84f8517` 摘过，已撤回）；
+    //   - 风格 LoRA 照旧用作者写的强度（有声镜/静音镜质感一致，`405ab7c` 归零过，已撤回）；
+    //   - 画面/采样/解码链路一个字节不动。
 
     // ⚠️ 空提示词也要写。作者导出里那个 prompt 节点（138）塞着一段示例台词，
     // 「prompt 为空就不写」等于把作者的示例台词原样念出来 —— 用户「总是出现我没写过的台词」
@@ -3871,6 +3853,28 @@ function stripH3SoundNote(text: string) {
         .join("\n");
 }
 
+/**
+ * 静音镜的「旁白镜」声明 —— 用户 2026-10-25 的第三条思路：
+ * 「把乱讲的台词，直接换成旁白音，不让人物动嘴，只有我提示词里写的台词才动嘴」。
+ *
+ * 关键事实：H3 的**唇动是 `<d>` 驱动的**。这一镜没有 `<d>`（`- **对白**：无`），
+ * 所以只要再明确一句「人物闭口」，长出来的声音就落在画外，成了旁白 —— 不用去跟模型抢
+ * 「有没有声音」（那条路已经证明抢不赢：`对白：无` 写在正文里它照样开口，见 `84f8517`/`405ab7c`）。
+ * 音轨照旧保留（用户要环境音效），风格 LoRA 也照旧用作者的强度（有声镜/静音镜质感一致）。
+ *
+ * 写法跟着作者导出里那套方言走：句末用【】标题 + 正向的画面描述，别写成一大段禁止清单
+ * （堆「禁止旁白/画外音/内心独白…」等于把「人声」这些词喂给它）。
+ */
+const H3_NARRATION_SHOT_NOTE =
+    "【旁白镜】画面内人物全程闭口，唇形与下颌静止，没有开口说话的动作；声音是画外旁白与环境音，旁白不出现在画面里。";
+
+/** 幂等：正文里已经有这句就不再追加。 */
+function withH3NarrationShotNote(text: string) {
+    const body = text.replace(/\s+$/, "");
+    if (body.includes("【旁白镜】")) return body;
+    return `${body}\n\n${H3_NARRATION_SHOT_NOTE}`;
+}
+
 /** 台词锁定的幂等标记：提示词里已经有这段就不再追加。 */
 const H3_DIALOGUE_LOCK_MARK = "【台词锁定】";
 
@@ -4020,7 +4024,9 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         // 那句本身就在邀请模型说话，是「没写台词也在说话」的直接来源。
         // `lineCount = 0` 只会在**真的挂了参考音频**时落成一行「本段没有台词」。
         const base = dropDialogueInvitation(text);
-        return withH3VoiceContract(dropSoundNote ? stripH3SoundNote(base) : base, audioCount, 0, []);
+        // Fisher（静音镜）：没有 `<d>` → 人物闭嘴、声音落画外，音轨照旧保留。
+        const quiet = dropSoundNote ? withH3NarrationShotNote(stripH3SoundNote(base)) : base;
+        return withH3VoiceContract(quiet, audioCount, 0, []);
     }
 
     // ⚠️ 多镜合并（每 2/3/4/5 镜一段）的提示词里有**多个** `- **对白**：` 块，
@@ -4111,7 +4117,9 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
     // 一个能认的台词都没有（全是 `无` / 全被守住）→ 有音频时只加一行「本段没有台词」，否则原样交出去。
     if (!converted) {
         const base = dropDialogueInvitation(text);
-        return withH3VoiceContract(dropSoundNote ? stripH3SoundNote(base) : base, audioCount, 0, speakers);
+        // 同上：全段一个能认的台词都没有 → 旁白镜（闭嘴 + 画外音），音轨照旧。
+        const quiet = dropSoundNote ? withH3NarrationShotNote(stripH3SoundNote(base)) : base;
+        return withH3VoiceContract(quiet, audioCount, 0, speakers);
     }
     return withH3VoiceContract(out.join("\n"), audioCount, lineCount, speakers);
 }
@@ -4134,27 +4142,11 @@ export function isMinimaxH3FisherSilentShot(workflowId: string | null | undefine
  * 分镜表里「这一镜没有台词」的**明确写法**：`- **对白**：无`（用户 2026-10-25：
  * 「静音镜正常是这样的，`- **对白**：无`」）。
  *
- * ⚠️ 只用来决定「要不要挂音轨」，**绝不改写这一行**。故意比 `isMinimaxH3FisherSilentShot`
- * 更严：那个只问「有没有 `<d>`」（台词转换失败也算静音），这个问「用户是不是明说了没有台词」。
- * 用严的那个做静音判据，才不会把「台词写歪了没转成 `<d>`」的有声镜静悄悄变成无声片。
+ * ⚠️ 只做判断，**绝不改写这一行**。故意比 `isMinimaxH3FisherSilentShot` 更严：
+ * 那个只问「有没有 `<d>`」（台词没转成 `<d>` 也算静音），这个问「用户是不是明说了没有台词」。
  */
 export function declaresH3SilentDialogue(prompt: string) {
     return /^[^\S\r\n]*[-*]?\s*\*\*对白\*\*\s*[：:]\s*(?:无|none|n\/a|（无）|\(无\)|—+|–|-)\s*[。.]?\s*$/im.test(String(prompt || ""));
-}
-
-/**
- * 静音镜要不要**压掉人声**（只给 Fisher 用）。
- *
- * 两个条件同时成立才动手：① 用户明写了 `- **对白**：无`；② 整段提示词里**没有**任何 `<d>`。
- * ② 是给「多镜合并」留的：一条提示词里既有 `对白：无` 又有别人说话时，`<d>` 在 → 不动手，
- * 否则会把该念的台词一起变成无声片。
- *
- * ⚠️ 命中后的动作**不是**摘音轨（用户 2026-10-25「我需要保持环境音效啊」），而是把风格 LoRA
- * 强度归零 —— 见 `applyMinimaxH3FisherSettings`。
- */
-export function shouldSuppressH3Speech(prompt: string) {
-    const text = String(prompt || "");
-    return declaresH3SilentDialogue(text) && !/<\s*d\s*>/i.test(text);
 }
 
 /**
@@ -5329,11 +5321,13 @@ async function runRunningHubWorkflowWithKey(args: {
     // ⚠️ 提示词里那行 `- **对白**：无` **保持原样**（用户 2026-10-25：「静音镜正常是这样的」），
     // 曾经试过整块删掉，已回滚 —— 分镜表的写法不归我们改。
     // ⚠️ 光「不挂参考音频」还不够：用户随后仍报「还是在说韩文」，日志证明提示词干净（audio=0、
-    // noDialogue=1）。根因在作者焊死的韩语味风格 LoRA，文本压不住 —— 所以静音镜再来一步
-    // 「把风格 LoRA 强度归零」（在 `applyMinimaxH3FisherSettings` 里做，画面/提示词/音轨都不动）。
-    // 用户紧接着明确「我需要保持环境音效啊」，所以**不摘音轨**（`84f8517` 摘过，已撤回）。
+    // noDialogue=1）。根因在作者焊死的韩语味风格 LoRA，文本压不住。
+    // 用户最终口径（2026-10-25）：「把乱讲的台词直接换成旁白音，不让人物动嘴，只有我提示词里
+    // 写的台词才动嘴」—— 于是**不去消灭声音**，而是让声音落画外：适配器在无 `<d>` 的正文末尾
+    // 追加 `【旁白镜】人物全程闭口…声音是画外旁白与环境音`（`withH3NarrationShotNote`）。
+    // 所以这里既**不摘音轨**（`84f8517` 摘过，已撤回）、也**不动风格 LoRA**（`405ab7c` 归零过，已撤回）。
     const fisherDialogueFree = isMinimaxH3FisherSilentShot(workflowId, request.prompt);
-    const fisherSilentDeclared = isMinimaxH3FisherWorkflow(workflowId) && shouldSuppressH3Speech(request.prompt);
+    const fisherSilentDeclared = isMinimaxH3FisherWorkflow(workflowId) && declaresH3SilentDialogue(request.prompt);
     const audioSources = fisherDialogueFree ? [] : (request.referenceAudioDataUrls || []).filter(Boolean).slice(0, 3);
     // 文武双全 only: its clips are big *and* it uploads audio/video through the same endpoint, so let
     // the browser reach RunningHub first and keep the edge out of the byte path. Other families keep
@@ -5399,7 +5393,7 @@ async function runRunningHubWorkflowWithKey(args: {
     const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
     if (referenceCount) {
         console.info(
-            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1" : ""}${fisherSilentDeclared ? " speechOff=1(styleLora=0)" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1" : ""}${fisherSilentDeclared ? " narrationShot=1" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
         );
     }
     let task: RunningHubTaskView;
