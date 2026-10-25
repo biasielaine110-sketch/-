@@ -4546,7 +4546,13 @@ function extractH3Speakers(text: string) {
  */
 export function adaptMinimaxH3ReferencePrompt(
     prompt: string,
-    options?: { audioCount?: number; dropSoundNote?: boolean; audioNegation?: boolean; keepStyleFields?: boolean },
+    options?: {
+        audioCount?: number;
+        dropSoundNote?: boolean;
+        audioNegation?: boolean;
+        keepStyleFields?: boolean;
+        cleanPrompt?: boolean;
+    },
 ): string {
     // ⚠️ 空提示词不能原样交给 H3：它是**音视频联合生成**的模型，空提示词 + 参考图会让它自己编一段戏。
     // 先垫一句纯画面描述（不加任何「台词」相关的说明）。
@@ -4559,6 +4565,25 @@ export function adaptMinimaxH3ReferencePrompt(
      * 和 `dropSoundNote` 是两件事，故意分开传 —— 见 `withH3AudioStatement` 的注释。
      */
     const audioNegation = Boolean(options?.audioNegation);
+    /**
+     * **独立模型专用的干净提示词出口**（2026-10-26，用户选 A）。
+     *
+     * 只有 `STANDALONE_H3_EXPORT_WORKFLOW_IDS`（`2114341115852099586`）传 `true`。
+     * 它借的是 Fisher「干净模式」的**提示词层**，不借 Fisher 的任何数值/音频补丁：
+     *  - 剥分镜表字段名（`- **时长**` / `画面：` …）、`视觉风格：…` 整行丢掉、撤掉我们自动追加的
+     *    模板声音说明（「不要出现字幕和文字…」）；
+     *  - **一个字都不加**：`<Audio N> is the voice-timbre reference …`、`【台词锁定】`、
+     *    `overall_soundscape:` / `non_diegetic_music:`、`【静场】`、`【口型约定】` 全部不给。
+     *    用户原话：「当对白无的时候，他还在念一些规范性的台词内容」—— 念的就是这些**我们写的散文**。
+     *
+     * ⚠️ 与 `audioNegation` 的一处刻意差别：Fisher 会保留那句英文音色声明（`<Audio 1> is …`），
+     *    独立模型**连它也不给**（`voiceAudio` 归零）。代价是参考音轨没有文字绑定，模型有
+     *    「顺着参考音频续写台词」的风险；如果实测复读参考音轨原词，把 `voiceAudio` 改回
+     *    `audioCount` 即可（只影响这一个 id）。
+     * ⚠️ 分辨率 / 时长 / LoRA / 参考图 / 静音镜是否挂音频 / 提交路径 **一律不动** ——
+     *    那些在 `applyMinimaxH3FisherSettings` 与 `isMinimaxH3FisherSilentShot` 里，本函数不碰。
+     */
+    const cleanPrompt = Boolean(options?.cleanPrompt);
     /**
      * **混合镜**：这段提示词里既有要念的台词，又有明说 `- **对白**：无` 的镜头。
      * 命中就贴「按镜头的口型约定」而不是「全片旁白」（`withH3MixedLipsyncNote`）。
@@ -4585,7 +4610,12 @@ export function adaptMinimaxH3ReferencePrompt(
      *  - 参考音频照旧挂（音色要靠它），但只留官方那**一句** `<Audio N> is the voice-timbre reference …`。
      * ⚠️ 别的族不受影响（调用点只对 Fisher 传 `audioNegation`）。
      */
-    const minimal = audioNegation;
+    const minimal = audioNegation || cleanPrompt;
+    /**
+     * 音色声明 / 台词锁定的注入条数。独立模型（`cleanPrompt`）归零 —— 它不要任何我们写的说明文，
+     * 包括那句 `<Audio 1> is the voice-timbre reference …`（用户听的「规范」里最像样的一条）。
+     */
+    const voiceAudio = cleanPrompt ? 0 : audioCount;
 
     /**
      * **提交风格字段**（Fisher 三个 id 的视频设置开关，默认关 = `false`）。
@@ -4606,7 +4636,8 @@ export function adaptMinimaxH3ReferencePrompt(
      * ⚠️ 静音镜那条路走的是 `dropDialogueInvitation`（改成「只要环境音效」），两者别混。
      */
     const finish = (value: string, speaking: boolean) => {
-        if (!audioNegation) return value;
+        // `minimal` = Fisher 干净模式 **或** 独立模型的干净提示词出口，两者走同一套剥离。
+        if (!minimal) return value;
         const cut = value.search(/\n\s*overall_soundscape\s*:/i);
         const head = cut < 0 ? value : value.slice(0, cut);
         const tail = cut < 0 ? "" : value.slice(cut).replace(/^\n+/, "");
@@ -4625,7 +4656,7 @@ export function adaptMinimaxH3ReferencePrompt(
     if (/<\s*d\s*>/i.test(text)) {
         // 已带 `<d>` 又声明了静音镜 = 一镜说、一镜不说：正文不动，尾部补一句口型约定。
         const body = mixedShots && !minimal ? withH3MixedLipsyncNote(text) : text;
-        const contract = withH3VoiceContract(body, audioCount, minimal ? -1 : countH3DialogueLines(text), extractH3Speakers(text));
+        const contract = withH3VoiceContract(body, voiceAudio, minimal ? -1 : countH3DialogueLines(text), extractH3Speakers(text));
         return finish(minimal ? contract : withH3AudioStatement(contract, audioNegation), true);
     }
 
@@ -4643,7 +4674,7 @@ export function adaptMinimaxH3ReferencePrompt(
         // ⚠️ 干净模式**连【静场】也不加** —— 那句正是被念出来的「规范」（第七次报障）。
         const quiet = dropSoundNote ? stripH3SoundNote(base) : base;
         const silentBody = dropSoundNote && !minimal ? withH3NarrationShotNote(quiet) : quiet;
-        const contract = withH3VoiceContract(silentBody, audioCount, minimal ? -1 : 0, []);
+        const contract = withH3VoiceContract(silentBody, voiceAudio, minimal ? -1 : 0, []);
         return finish(minimal ? contract : withH3AudioStatement(contract, audioNegation), false);
     }
 
@@ -4741,7 +4772,7 @@ export function adaptMinimaxH3ReferencePrompt(
         // ⚠️ 干净模式不加【静场】（会被念出来，见 `minimal`）。
         const quiet = dropSoundNote ? stripH3SoundNote(base) : base;
         const silentBody = dropSoundNote && !minimal ? withH3NarrationShotNote(quiet) : quiet;
-        const contract = withH3VoiceContract(silentBody, audioCount, minimal ? -1 : 0, speakers);
+        const contract = withH3VoiceContract(silentBody, voiceAudio, minimal ? -1 : 0, speakers);
         return finish(minimal ? contract : withH3AudioStatement(contract, audioNegation), false);
     }
     // 至少一镜转成了 `<d>`：如果同时还有 `- **对白**：无` 的镜头，补「按镜头的口型约定」——
@@ -4749,7 +4780,7 @@ export function adaptMinimaxH3ReferencePrompt(
     // ⚠️ 干净模式下这句也不贴（第七次报障：它被念出来了）。
     const joined = out.join("\n");
     const finalBody = mixedShots && !minimal ? withH3MixedLipsyncNote(joined) : joined;
-    const contract = withH3VoiceContract(finalBody, audioCount, minimal ? -1 : lineCount, speakers);
+    const contract = withH3VoiceContract(finalBody, voiceAudio, minimal ? -1 : lineCount, speakers);
     return finish(minimal ? contract : withH3AudioStatement(contract, audioNegation), true);
 }
 
@@ -6032,21 +6063,25 @@ async function runRunningHubWorkflowWithKey(args: {
     const effectivePrompt = isMinimaxH3FamilyWorkflow(workflowId)
         ? adaptMinimaxH3ReferencePrompt(request.prompt, {
               audioCount: uploadedAudios.length,
-              // Fisher：静音镜连「只要环境音效」那句模板声音说明都不给（用户 2026-10-25）。
-              dropSoundNote: isMinimaxH3FisherWorkflow(workflowId),
+              // 静音镜连「只要环境音效」那句模板声音说明都不给（用户 2026-10-25）。
+              // Fisher + 独立模型都吃这一步（两家都不要我们写的说明文）。
+              dropSoundNote: isMinimaxH3FisherWorkflow(workflowId) || isStandaloneH3ExportWorkflow(workflowId),
               // 官方声音槽位给 H3 全族，但两句否定式（No dialogue / non_diegetic_music: N/A）
               // **只给这两个 id** —— 别的族提示词里没转成 `<d>` 的台词、或本来要的 BGM 会被一起压掉。
               audioNegation: isMinimaxH3FisherWorkflow(workflowId),
-              // 「提交视觉风格字段」开关（Fisher 三个 id 的设置面板，默认关）。
+              // 「提交视觉风格字段」开关（Fisher 两个 id 的设置面板，默认关）。
               // 关 = `视觉风格 / 画面风格 / …` 整行不发（连值一起丢）；开 = 只丢字段名、值照发。
               keepStyleFields: isMinimaxH3FisherWorkflow(workflowId) && String(request.fisherStyleFields || "") === "on",
+              // 独立模型（2026-10-26 用户选 A）：只借干净模式的**提示词层**，数值/音频/提交全不动。
+              cleanPrompt: isStandaloneH3ExportWorkflow(workflowId),
           })
         : request.prompt;
     // 排查「模型说了我没写过的话」时最缺的就是这一行 —— 实际提交给 H3 的正文原样打出来，
     // 用户直接复制给我们就能定位（是不是有多余的 <d>、是不是还有别的字段在招它开口）。
     if (isMinimaxH3FamilyWorkflow(workflowId)) {
         const styleFieldsOn = isMinimaxH3FisherWorkflow(workflowId) && String(request.fisherStyleFields || "") === "on";
-        console.info(`[runninghub] h3 prompt (${workflowId}) audio=${uploadedAudios.length} styleFields=${styleFieldsOn ? "on" : "off"}:\n${effectivePrompt}`);
+        const mode = isMinimaxH3FisherWorkflow(workflowId) ? "fisher" : isStandaloneH3ExportWorkflow(workflowId) ? "clean" : "plain";
+        console.info(`[runninghub] h3 prompt (${workflowId}) mode=${mode} audio=${uploadedAudios.length} styleFields=${styleFieldsOn ? "on" : "off"}:\n${effectivePrompt}`);
     }
     const patch: RunningHubWorkflowPatch = prepared
         ? buildWorkflowPatch(prepared, effectivePrompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "", request.fisherLoraStrength || "")
