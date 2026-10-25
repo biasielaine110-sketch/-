@@ -3797,8 +3797,35 @@ const H3_DIALOGUE_SPEAKER = /^([^：:，,。；;、「」“”"'（）()\s]{1,1
 const H3_DIALOGUE_STAGE_VERB = /(说|道|问|答|喊|叫|念|读|笑|叹|应|嘟囔|开口|低语|自语)$/;
 const H3_PRONOUN_SPEAKER = /^(他|她|我|你|俺|咱)$/;
 
+/**
+ * 分镜表里的**字段名**：`- **对白**：` 下面如果漏了下一镜的标签行（写成了 `景别：中景`），
+ * `H3_DIALOGUE_SPEAKER` 会把「景别」当成说话人，整行被包进 `<d>` 念出来 —— 这就是
+ * 用户 2026-10-25 怀疑的「把我的提示词都当成对话台词」。命中的一律不当说话人。
+ */
+const H3_FIELD_LABEL =
+    /^(时长|时间|秒数|景别|机位|景别／机位|运镜|运镜方式|人物站位|人物站位与构图|人物动作与表演|主体与动作|光影|光影与色调|转场|转场建议|对白|台词|声音|音效|台词与声音|负面|画面|画面内容|构图方式|摄影机参数|摄影机|风格|镜头|镜号|镜头编号|镜头时长|场景|道具|情绪|角色|角色1|角色2|出场人物|风格提示词|画面描述)$/;
+
+/**
+ * 第四套 `video_motion_prompt` 末尾那句是**我们自动追加**的：
+ * `不要出现字幕和音乐，只要台词和环境音效。` —— 「只要台词」等于明确邀请模型说话。
+ * 这一镜没有对白时，把它改成「只要环境音效」。
+ */
+function dropDialogueInvitation(text: string) {
+    return text.replace(/只要台词([和与])环境音效/g, "只要环境音效");
+}
+
 /** 台词锁定的幂等标记：提示词里已经有这段就不再追加。 */
 const H3_DIALOGUE_LOCK_MARK = "【台词锁定】";
+
+/**
+ * 空提示词的兜底正文。
+ *
+ * H3 是**音视频联合生成**模型：喂空串等于让它自由发挥 —— 有参考图时会自己编一段戏，
+ * 还常常连带编出台词/韩语对白（作者那支 `MysticXXX_MMH3-V1` LoRA 本身就是韩剧味）。
+ * 这句只写画面，人声交给 `buildH3DialogueLock(0)` 压住。
+ */
+const H3_SILENT_FALLBACK_PROMPT =
+    "沿用参考图里的人物、场景、光线与构图，人物做自然的细微动作，镜头稳定，写实质感。";
 
 function countH3DialogueLines(text: string) {
     return (text.match(/<\s*d\s*>/gi) || []).length;
@@ -3843,26 +3870,24 @@ function buildH3TimbreDeclaration(audioCount: number, speakers: string[], source
  * 只写「只取音色」压不住，必须把「全片只有这 N 句台词」写成硬约束。
  * 最后两行抄自 MiniMax 官方 voice-clone 示例的 `AVOID:` 清单（paraphrased dialogue / extra lines）。
  */
-function buildH3DialogueLock(lineCount: number) {
+/**
+ * 台词锁定：**只有真的挂了参考音频时才加**，而且只加两行。
+ *
+ * ⚠️ 2026-10-25 用户第三次反馈「越改越糟，不管写不写对白全在乱说话」——
+ * 上一版这里追加的是一大段中文 + 一条英文 `Avoid: …` 清单。H3 是**音视频联合**模型
+ * （文本编码器是 Qwen3-VL，不是会听指令的 LLM），几百字的「台词/人声/对白/旁白/画外音」
+ * 说明反而把这些词喂给了它 —— 越强调越说。所以：
+ *   - `audioCount <= 0`（没有参考音色，根本没有「复读参考音轨」的风险）→ **一个字都不加**；
+ *   - 有音色参考 → 只留「只念 <d>、不重复音频原词」两行，不列举、不写英文清单。
+ */
+function buildH3DialogueLock(lineCount: number, audioCount: number) {
+    if (audioCount <= 0) return "";
     const rows = [H3_DIALOGUE_LOCK_MARK];
     if (lineCount > 0) {
-        rows.push(
-            `全片只允许说出 <d> 与 </d> 之间写出的台词，共 ${lineCount} 句：一字不改、不增不减、不重复。`,
-            "不得新增、补写、续写、复述、翻译或改写任何未写出的台词；不得以旁白、画外音、内心独白、字幕朗读的形式增加人声。",
-            "参考音频（<Audio N>）只提供音色：它里面已经说过的内容不得出现在成片里，也不得被接着往下说、换语言重说。",
-            "只有 <d> 标记内的文字是台词；其它位置（人物描述、站位、镜头描述、引号里的话）一律不许念出来。",
-            "本提示词里的说明文字、英文标记、`says:` 行、`<Subject N>`／`<Picture N>`／`<Audio N>` 声明、镜头描述都不是台词，一个字都不许念。",
-            "说话人只在对应 <d> 的那一刻开口：台词之前和之后双唇保持闭合，不许出声；没有台词的镜头必须完全无人声，只保留环境音与音效。",
-        );
+        rows.push(`只念 <d> 与 </d> 之间的台词，共 ${lineCount} 句；<Audio N> 只借音色，不重复、不续写、不翻译它里面的内容。`);
     } else {
-        rows.push(
-            "本条视频没有任何台词：全片禁止出现任何人声（无对白、无旁白、无画外音、无内心独白、无字幕朗读），只保留环境音与音效。",
-            "参考音频（<Audio N>）只提供音色，其中已说出的内容不得出现在成片里，也不得被接着往下说。",
-        );
+        rows.push("本段没有台词：只保留环境音与音效，不要出现人声。");
     }
-    rows.push(
-        "Avoid: paraphrased dialogue, extra spoken lines, narration, off-screen voice, subtitle or on-screen text, voice drift.",
-    );
     return rows.join("\n");
 }
 
@@ -3873,7 +3898,7 @@ function withH3VoiceContract(text: string, audioCount: number, lineCount: number
     // 结果声明一条都加不上。
     const hasDeclaration = text.includes("<Audio 1> is ");
     const declaration = hasDeclaration ? "" : buildH3TimbreDeclaration(audioCount, speakers, text);
-    const lock = lineCount < 0 || text.includes(H3_DIALOGUE_LOCK_MARK) ? "" : buildH3DialogueLock(lineCount);
+    const lock = lineCount < 0 || text.includes(H3_DIALOGUE_LOCK_MARK) ? "" : buildH3DialogueLock(lineCount, audioCount);
     if (!declaration && !lock) return text;
     const head = declaration ? `${declaration}\n\n` : "";
     if (!lock) return `${head}${text}`;
@@ -3907,16 +3932,18 @@ function extractH3Speakers(text: string) {
  * <d>[Chinese]你终于来了。</d>
  *
  * 【台词锁定】
- * 全片只允许说出 <d> 与 </d> 之间写出的台词，共 1 句：…
+ * 只念 <d> 与 </d> 之间的台词，共 1 句；<Audio N> 只借音色，不重复、不续写、不翻译它里面的内容。
  * ```
  *
- * ⚠️ 幂等：已经带 `<d>` 的提示词**正文一个字不改**，但仍然补「音色声明 + 台词锁定」
- *   （早期版本这里直接 return，导致作者自带 `<d>` 的提示词既没绑音色、也没锁台词）。
+ * ⚠️ 幂等：已经带 `<d>` 的提示词**正文一个字不改**，但仍然补「音色声明 +（有音频时）台词锁定」。
+ * ⚠️ **没有对白块、也没有音频时，一个字节都不改**：2026-10-25 用户反馈「越改越糟，不写对白也在
+ *   乱说话」—— 追加的「台词/人声/对白」说明文字本身会被音视频模型当成内容。
  * ⚠️ 只在 H3 家族调用（见 `isMinimaxH3FamilyWorkflow`），别的模型一个字节不变。
  */
 export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioCount?: number }): string {
-    const text = String(prompt || "");
-    if (!text.trim()) return text;
+    // ⚠️ 空提示词不能原样交给 H3：它是**音视频联合生成**的模型，空提示词 + 参考图会让它自己编一段戏。
+    // 先垫一句纯画面描述（不加任何「台词」相关的说明）。
+    const text = String(prompt || "").trim() ? String(prompt) : H3_SILENT_FALLBACK_PROMPT;
     const audioCount = Math.max(0, Math.min(3, Math.round(Number(options?.audioCount) || 0)));
 
     // 作者/用户自己写的 H3 台词标记 → 正文不动，只补契约（不补就照样会念参考音轨里的内容）。
@@ -3927,8 +3954,13 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
     const lines = text.split("\n");
     const labelIndex = lines.findIndex((line) => H3_DIALOGUE_LABEL.test(line));
     if (labelIndex < 0) {
-        // 没有对白块时**不锁台词**（可能只是没写说话人，不代表这段是默片），只补音色声明。
-        return withH3VoiceContract(text, audioCount, -1, []);
+        // ⚠️ 没有对白块 → **什么都不加**。用户 2026-10-25：「你修复完还没最开始没修的时候好，
+        // 现在不管写不写对白都在乱说话」—— 上一版在这里追加一大段「本条视频没有任何台词…」，
+        // 反而把「台词/人声/对白/旁白」这些词喂给了音视频模型（它不听指令，只顺着词往下生成）。
+        // 只做一件有实际作用的事：把第四套自动追加的「只要台词和环境音效」改成「只要环境音效」——
+        // 那句本身就在邀请模型说话，是「没写台词也在说话」的直接来源。
+        // `lineCount = 0` 只会在**真的挂了参考音频**时落成一行「本段没有台词」。
+        return withH3VoiceContract(dropDialogueInvitation(text), audioCount, 0, []);
     }
 
     // ⚠️ 多镜合并（每 2/3/4/5 镜一段）的提示词里有**多个** `- **对白**：` 块，
@@ -3965,9 +3997,21 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
             .map((value) => value.trim())
             .filter((value) => value && !H3_DIALOGUE_SILENT.test(value));
         const blocks: string[] = [];
+        // 认不出来的行**原样留在原位**，绝不被包进 `<d>`。
+        const kept: string[] = [];
         for (const value of spoken) {
             const match = value.match(H3_DIALOGUE_SPEAKER);
-            const rawSpeaker = match && !H3_DIALOGUE_STAGE_VERB.test(match[1].trim()) ? match[1].trim() : "";
+            const candidate = match ? match[1].trim() : "";
+            const quoted = /^[「『“"']/.test(value);
+            // ⚠️ 只有两种行算台词：`说话人：台词`（说话人还不能是字段名）、或整行带引号。
+            // 其余（下一镜的字段、画面描述、声音要求）一律不动 —— 用户 2026-10-25 怀疑的
+            // 「把我的提示词都当成对话台词」，就是这些行被误包进 `<d>` 造成的。
+            const rawSpeaker =
+                candidate && !H3_FIELD_LABEL.test(candidate) && !H3_DIALOGUE_STAGE_VERB.test(candidate) ? candidate : "";
+            if (!rawSpeaker && !quoted) {
+                kept.push(value);
+                continue;
+            }
             const body = rawSpeaker ? value.slice(match![0].length).trim() : value.trim();
             // `苏晚：“台词”` → `<d>台词</d>`：`<d>` 本身就是台词的边界，引号留在里面会被一起念出来。
             const spokenBody = body
@@ -3992,12 +4036,13 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
             index = cursor;
             continue;
         }
-        out.push(`${labelMatch[1].replace(/\s*$/, "")}`, ...blocks, ...tail);
+        out.push(`${labelMatch[1].replace(/\s*$/, "")}`, ...blocks, ...kept, ...tail);
         lineCount += blocks.length / 2;
         converted = true;
         index = cursor;
     }
-    if (!converted) return withH3VoiceContract(text, audioCount, 0, speakers);
+    // 一个能认的台词都没有（全是 `无` / 全被守住）→ 有音频时只加一行「本段没有台词」，否则原样交出去。
+    if (!converted) return withH3VoiceContract(dropDialogueInvitation(text), audioCount, 0, speakers);
     return withH3VoiceContract(out.join("\n"), audioCount, lineCount, speakers);
 }
 
