@@ -22,6 +22,29 @@ import { forceProxyMediaUrl, proxyMediaUrl } from "@/lib/api-proxy";
 export const VIDEO_SUBTITLE_BAND_RATIO = 0.12;
 
 /**
+ * 去掉字幕带的三种做法（2026-10-25 用户：「能不能不降低画面精度」）：
+ *  - `fill`（默认）：切掉底部那条，再**等比放大铺满原尺寸** —— 输出仍是 720×1280 / 1920×1080，
+ *    构图变紧约 14%（左右各切约 7%），分辨率与码率都不降；
+ *  - `crop`：只切，文件变矮（720×1126）—— 原构图、无缩放，但尺寸不是标准 9:16；
+ *  - `blur`：一个像素都不裁，用上方画面模糊盖住字幕带 —— 构图零损失，代价是底部一条模糊。
+ *
+ * ⚠️ 三者都必须重编码（裁切本身就要求解码后重画），所以「不降精度」指的是
+ * **分辨率不变 + 码率给足**，不是「不压缩」。
+ */
+export type SubtitleCropMode = "fill" | "crop" | "blur";
+
+/** 面板/存档里的字符串 → 模式；`null` = 关闭去字幕。旧存档的 `"true"` 现在等于 `fill`。 */
+export function normalizeSubtitleCropMode(value?: string | null): SubtitleCropMode | null {
+    const raw = String(value ?? "")
+        .trim()
+        .toLowerCase();
+    if (!raw || raw === "false" || raw === "off" || raw === "0" || raw === "none") return null;
+    if (raw === "crop") return "crop";
+    if (raw === "blur") return "blur";
+    return "fill";
+}
+
+/**
  * 裁掉底部 `ratio` 之后的高度。纯函数，给探针用。
  * - 取偶数：h264/mp4 要求偶数高，奇数会直接编码失败；
  * - `ratio` 夹在 0–0.4：写 1 会把画面裁没；
@@ -153,7 +176,7 @@ async function fetchVideoBlob(url: string): Promise<Blob> {
  */
 export async function cropVideoBottomBand(
     source: { url?: string; blob?: Blob },
-    options?: { ratio?: number; timeoutMs?: number },
+    options?: { ratio?: number; timeoutMs?: number; mode?: SubtitleCropMode },
 ): Promise<CroppedVideo | null> {
     // 每一条「静默放弃」都留一句原因：用户下次说「还是有字幕」时，控制台能直接指出卡在哪一步
     // （没录制器 / 取不到字节 / 尺寸读不出来 / 编码抛错），不用再靠猜。
@@ -169,6 +192,8 @@ export async function cropVideoBottomBand(
 
     const ratio = Math.min(0.4, Math.max(0, Number(options?.ratio ?? VIDEO_SUBTITLE_BAND_RATIO) || 0));
     if (ratio <= 0) return bail("裁切比例为 0");
+    /** `fill`（默认，输出原尺寸）/ `crop`（输出变矮）/ `blur`（原尺寸 + 模糊盖住字幕带）。 */
+    const mode: SubtitleCropMode = options?.mode || "fill";
 
     let objectUrl = "";
     let video: HTMLVideoElement | null = null;
@@ -196,9 +221,10 @@ export async function cropVideoBottomBand(
         // 每一条都要过 `playableRecorded` 体检 —— 只看字节数不够：坏文件照样几百 KB，
         // 播出来却是花屏/只有一帧（用户 2026-10-25「现在生成的视频直接花掉了」）。
         for (const mime of mimes) {
-            const out = await recordBand(video, width, height, targetHeight, mime, options?.timeoutMs || 180000);
+            const out = await recordBand(video, width, height, targetHeight, mime, options?.timeoutMs || 180000, mode);
             if (out && (await playableRecorded(out))) {
-                return { blob: out, mimeType: out.type || mime.split(";")[0] || "video/webm", width, height: targetHeight };
+                // 只有 `crop` 会变矮；`fill` / `blur` 的输出尺寸与原片一致。
+                return { blob: out, mimeType: out.type || mime.split(";")[0] || "video/webm", width, height: mode === "crop" ? targetHeight : height };
             }
             console.info(`[video] 裁字幕带：容器 ${mime} 的产物不合格${out ? `（${out.size} 字节但解不出来）` : "（没吐字节）"}，换下一个`);
             // 换容器重录前把元素倒回开头（上一轮可能已经播到结尾）。
@@ -245,7 +271,69 @@ export function subtitleCropDrawRect(width: number, height: number, targetHeight
 }
 
 /**
- * 把源元素的上半部分录一遍，返回重编码后的字节。
+ * `fill` 模式的矩形：切掉底部那条之后，**等比**放大铺满原尺寸。
+ *
+ * ⚠️ 只能等比（scale = height / keep，宽度同比放大、左右对称各切一点），
+ * **绝不能只把高度拉回原高** —— 那是纵向拉伸 ~14%，人脸会被拉长，比降精度更难看。
+ * 纯函数，给探针用。
+ */
+export function subtitleFillDrawRect(width: number, height: number, targetHeight: number) {
+    const sourceWidth = Math.max(0, Math.round(width) || 0);
+    const sourceHeight = Math.max(0, Math.round(height) || 0);
+    const keep = Math.max(0, Math.min(Math.round(targetHeight) || 0, sourceHeight));
+    const scale = keep > 0 ? sourceHeight / keep : 1;
+    const dw = Math.round(sourceWidth * scale);
+    return {
+        sx: 0,
+        sy: 0,
+        sw: sourceWidth,
+        sh: keep,
+        // 左右对称裁掉溢出的那一截（可能为负，drawImage 允许画到画布外）
+        dx: Math.round((sourceWidth - dw) / 2),
+        dy: 0,
+        dw,
+        dh: sourceHeight,
+    };
+}
+
+/**
+ * 一帧到底怎么画 —— 三种模式集中在这里。抽成独立函数是为了：探针能直接验几何、
+ * 注释能把每种模式的取舍写清楚，而不是散落在录制循环里。
+ *
+ * ⚠️ `fill` 必须**等比**放大（见 `subtitleFillDrawRect`），只拉高度会把人脸拉长。
+ * ⚠️ `blur` 先把整帧 1:1 画上去，再用**上方同宽画面**盖住字幕那一条 —— 字幕像素从头到尾不参与绘制，
+ * 所以不会「模糊后还能认出字」。
+ */
+export function drawSubtitleCropFrame(
+    context: CanvasRenderingContext2D,
+    video: CanvasImageSource,
+    width: number,
+    height: number,
+    targetHeight: number,
+    mode: SubtitleCropMode,
+) {
+    if (mode === "blur") {
+        context.filter = "none";
+        context.drawImage(video, 0, 0, width, height);
+        const band = Math.max(1, height - targetHeight);
+        const bleed = Math.max(6, Math.round(band / 3));
+        // ⚠️ 取样区必须**完全落在字幕带上方**：曾写成 `sh = height - srcTop`（972→1280），
+        // 把带字幕的那 154 行也圈进取样范围 —— 糊出来的仍是字幕，等于没处理。
+        // 现在取「带上方的 band + 2×bleed 行」，1:1 搬到字幕带上（不拉伸）。
+        const sh = Math.min(Math.max(0, height - band), band + bleed * 2);
+        const sy = Math.max(0, height - band - sh);
+        context.filter = `blur(${bleed}px)`;
+        // 目标矩形向外扩 bleed：模糊会采样到矩形外，不扩就是一圈黑边。
+        context.drawImage(video, 0, sy, width, sh, -bleed, height - band - bleed, width + bleed * 2, sh);
+        context.filter = "none";
+        return;
+    }
+    const rect = mode === "crop" ? subtitleCropDrawRect(width, height, targetHeight) : subtitleFillDrawRect(width, height, targetHeight);
+    context.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, rect.dx, rect.dy, rect.dw, rect.dh);
+}
+
+/**
+ * 把源元素重画一遍，返回重编码后的字节。
  *
  * 单独抽出来是为了**换容器重试**（`isTypeSupported` 会撒谎、mp4 会花屏），调用方逐个候选调用它，
  * 并对产物再做一次可解码体检（`playableRecorded`）。
@@ -259,10 +347,12 @@ async function recordBand(
     targetHeight: number,
     mimeType: string,
     timeoutMs: number,
+    mode: SubtitleCropMode = "fill",
 ): Promise<Blob | null> {
     const canvas = document.createElement("canvas");
     canvas.width = width;
-    canvas.height = targetHeight;
+    // `crop` 会变矮；`fill` / `blur` 输出尺寸与原片一致（用户 2026-10-25 要不降精度）。
+    canvas.height = mode === "crop" ? targetHeight : height;
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) return null;
 
@@ -278,8 +368,11 @@ async function recordBand(
     }
 
     const chunks: BlobPart[] = [];
-    // 码率按像素给：6 Mbps 起、12 Mbps 封顶。给低了 1080p 会糊成一块块，看起来同样像「花掉」。
-    const bitrate = Math.min(12_000_000, Math.max(6_000_000, Math.round(width * targetHeight * 4)));
+    // 码率按像素给：12 Mbps 起、24 Mbps 封顶（≈ 8 bit/px）。
+    // 用户 2026-10-25「能不能不降低画面精度」：重编码这一步免不掉（裁切必须解码重画），
+    // 但给足码率后 VP9 在这条管线里基本视觉无损。原来是 6 Mbps 封底 / 12 Mbps 封顶，
+    // 1080p 会被压出肉眼可见的软化 —— 那才是「精度下降」的主因。
+    const bitrate = Math.min(24_000_000, Math.max(12_000_000, Math.round(width * canvas.height * 8)));
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
     let drawing = true;
     try {
@@ -291,13 +384,13 @@ async function recordBand(
         });
         recorder.start(250);
 
-        // ⚠️ 几何必须走 `subtitleCropDrawRect`：这里曾经写死 `height - targetHeight`（=88）当源高，
-        // 结果只取顶部 88 行、纵向拉伸 7 倍，整片糊成拖影 —— 用户「视频直接花掉了」的真根因。
-        const rect = subtitleCropDrawRect(width, height, targetHeight);
+        // ⚠️ 几何必须走 `drawSubtitleCropFrame` / `subtitleCropDrawRect`：这里曾经写死
+        // `height - targetHeight`（=88）当源高，结果只取顶部 88 行、纵向拉伸 7 倍，整片糊成拖影 ——
+        // 用户「视频直接花掉了」的真根因。
         const draw = () => {
             if (!drawing) return;
             try {
-                context.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, rect.dx, rect.dy, rect.dw, rect.dh);
+                drawSubtitleCropFrame(context, video, width, height, targetHeight, mode);
             } catch {
                 // 个别帧还没解码好，跳过这一帧。
             }

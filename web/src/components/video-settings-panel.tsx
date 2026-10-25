@@ -14,6 +14,7 @@ import {
     normalizeAutodlH3Resolution,
 } from "@/lib/autodl-h3-comfy";
 import { type CanvasTheme } from "@/lib/canvas-theme";
+import { normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import {
     FISHER_LORA_STRENGTH_OPTIONS,
@@ -382,10 +383,16 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         >
                             <span>{t("settingsPanels.video.cropSubtitles")}</span>
                             <div className="flex shrink-0 gap-2">
-                                <OptionPill selected={config.videoCropSubtitles !== "false"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "true")}>
-                                    {t("settingsPanels.video.cropSubtitlesOn")}
+                                <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === "fill"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "fill")}>
+                                    {t("settingsPanels.video.cropSubtitlesFill")}
                                 </OptionPill>
-                                <OptionPill selected={config.videoCropSubtitles === "false"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "false")}>
+                                <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === "crop"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "crop")}>
+                                    {t("settingsPanels.video.cropSubtitlesCrop")}
+                                </OptionPill>
+                                <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === "blur"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "blur")}>
+                                    {t("settingsPanels.video.cropSubtitlesBlur")}
+                                </OptionPill>
+                                <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === null} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "false")}>
                                     {t("settingsPanels.video.cropSubtitlesOff")}
                                 </OptionPill>
                             </div>
