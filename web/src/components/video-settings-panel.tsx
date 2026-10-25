@@ -16,10 +16,12 @@ import {
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import {
+    FISHER_LORA_STRENGTH_OPTIONS,
     isMinimaxH3FisherWorkflowId,
     isMinimaxH3HdDynamicWorkflowId,
     isMinimaxH3SingularityWorkflowId,
     isMinimaxH3YzjinyuWorkflowId,
+    normalizeFisherLoraStrength,
     normalizeFisherPipelineMode,
     type FisherPipelineMode,
 } from "@/lib/runninghub-workflow";
@@ -207,7 +209,8 @@ type VideoSettingsPanelProps = {
             | "videoSeedMode"
             | "videoSeed"
             | "videoAudioMode"
-            | "videoFisherMode",
+            | "videoFisherMode"
+            | "videoFisherLoraStrength",
         value: string,
     ) => void;
     theme: CanvasTheme;
@@ -226,6 +229,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const fisherRh = !h3Comfy && isMinimaxH3FisherWorkflowId(model);
     const yzjinyuRh = !h3Comfy && isMinimaxH3YzjinyuWorkflowId(model);
     const fisherMode = normalizeFisherPipelineMode(config.videoFisherMode);
+    const fisherLoraStrength = normalizeFisherLoraStrength(config.videoFisherLoraStrength);
     const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
     const qualityChoices = useMemo(() => {
@@ -349,6 +353,26 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         {/* 音色参考的口径：3 条上限、必须配图、台词写在提示词里（音频只给音色）。 */}
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                             {t("settingsPanels.video.fisherAudioHint")}
+                        </div>
+                        {/* 风格 LoRA（279 `MysticXXX_MMH3-V1`）：韩语人声 / 硬字幕 / 自编台词的共同源头。
+                            默认 0 = 关，纯官方 H3；想保留韩剧质感再往上拖。 */}
+                        <div className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-[11px]" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            <span>{t("settingsPanels.video.fisherLora")}</span>
+                            <div className="flex shrink-0 gap-1.5">
+                                {FISHER_LORA_STRENGTH_OPTIONS.map((option) => (
+                                    <OptionPill
+                                        key={option}
+                                        selected={fisherLoraStrength === option}
+                                        theme={theme}
+                                        onClick={() => onConfigChange("videoFisherLoraStrength", String(option))}
+                                    >
+                                        {option === 0 ? t("settingsPanels.video.fisherLoraOff") : String(option)}
+                                    </OptionPill>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.fisherLoraHint")}
                         </div>
                         {/* 字幕：H3 把硬字幕烧进画面（图里没有字幕节点、节点也没有开关，静音镜照样出字），
                             唯一可靠的办法是生成后把底部那一条切掉。 */}

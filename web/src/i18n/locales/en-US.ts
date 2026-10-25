@@ -107,6 +107,10 @@ export default {
             cropSubtitles: "Remove subtitles",
             cropSubtitlesOn: "On",
             cropSubtitlesOff: "Off",
+            fisherLora: "Style LoRA",
+            fisherLoraOff: "Off",
+            fisherLoraHint:
+                "This is the single root cause of the Korean voice, baked-in subtitles and lines you never wrote: the author's MysticXXX_MMH3-V1 is trained on live-action K-drama footage, so it carries a Korean accent, burned subtitles and uninvited dialogue, and at strength 0.5 it overrides your prompt. Off (0) by default = plain official H3: Chinese, no burned text, and it says exactly what you wrote. Raise it if you want that K-drama look — the difference shows from 0.2, but the accent and subtitles come back with it.",
             cropSubtitlesHint:
                 "H3 burns hard subtitles into the picture — the graph has no subtitle node and the node has no subtitle switch, and even a silent shot comes back with text (it is baked into the author's live-action-style LoRA). So by default the bottom 12% band is cut off after generation: the clip ships without subtitles, at the cost of a slightly tighter frame and one local re-encode. If any step fails the original clip is kept, so you never lose a render.",
             fisherModes: {

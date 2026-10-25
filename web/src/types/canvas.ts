@@ -264,6 +264,8 @@ export type CanvasNodeMetadata = {
     audioMode?: string;
     /** Work-Fisher RH pipeline mode: `video` | `character` | `scene` | `multiview`. */
     fisherMode?: string;
+    /** Work-Fisher 风格 LoRA（279）权重：`0` = 关（默认），去掉韩语人声/硬字幕/自编台词。 */
+    fisherLoraStrength?: string;
     /** MJ 风格 V2.0 LoRA 味型：`strong` | `standard` | `light` | `off`. */
     mjFlavor?: string;
     /** Native H3 client FIFO: 1-based queue position while waiting/running. */

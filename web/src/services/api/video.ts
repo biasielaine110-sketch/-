@@ -361,6 +361,9 @@ async function createRunningHubVideoTask(
             ? { resolution: config.vquality }
             : {}),
         ...(isMinimaxH3FisherWorkflowId(model) ? { fisherMode: config.videoFisherMode } : {}),
+        // 韩语人声 / 硬字幕 / 多余台词的共同源头就是 279 号 `MysticXXX_MMH3-V1` LoRA，
+        // 默认 0 = 关（纯官方 H3，中文、不烧字、不自己加台词）。要韩剧质感再从面板拖回去。
+        ...(isMinimaxH3FisherWorkflowId(model) ? { fisherLoraStrength: config.videoFisherLoraStrength || "0" } : {}),
         media: "video",
         referenceDataUrls: refs.filter(Boolean),
         // Timbre / voice reference: uploaded and written into `ref_audios.ref_audio_*` by the

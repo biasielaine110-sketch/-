@@ -2670,6 +2670,26 @@ export function resolveFisherWorkflowFromScript(script: string | undefined | nul
     return null;
 }
 
+/**
+ * Fisher 风格 LoRA（`MysticXXX_MMH3-V1`）权重档位。
+ *
+ * 2026-10-25 用户第三次报「还是有韩语、字幕、多余的乱台词」后的结论：
+ * 前三轮回合全在提示词上加约束（旁白镜 / 口型约定 / 删掉声音说明），一条都没用 ——
+ * 因为这三件事**不是提示词能管住的**：节点 136 `MiniMaxH3ReferenceToVideo` 没有字幕/语言开关，
+ * 图里也没有任何字幕节点，字是模型「画」进画面的；而这支 LoRA 训练在真人韩剧素材上，
+ * 自带韩语人声 + 硬字幕 + 顺口溜对白的先验，强度 0.5 时它会盖过提示词。
+ * 所以把它做成档位，默认 0（纯官方 H3 底模 = 中文、无字幕、不自己加台词）。
+ */
+export const FISHER_LORA_STRENGTH_DEFAULT = 0;
+export const FISHER_LORA_STRENGTH_OPTIONS = [0, 0.2, 0.35, 0.5] as const;
+
+/** `""`/非法值一律落到默认档（0 = 关），把 1 以上夹到 1。 */
+export function normalizeFisherLoraStrength(value?: string | number | null): number {
+    const raw = Number(String(value ?? "").trim());
+    if (!Number.isFinite(raw)) return FISHER_LORA_STRENGTH_DEFAULT;
+    return Math.min(1, Math.max(0, raw));
+}
+
 function applyMinimaxH3FisherSettings(
     workflow: ComfyWorkflow,
     prompt: string,
@@ -2677,6 +2697,7 @@ function applyMinimaxH3FisherSettings(
     seconds?: string,
     aspect = "",
     megapixels = "",
+    loraStrength: string | number = "",
 ): { workflow: ComfyWorkflow; structuralRepair: boolean } {
     const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
     let structuralRepair = false;
@@ -2758,8 +2779,27 @@ function applyMinimaxH3FisherSettings(
     // `【旁白镜】…人物全程闭口…声音是画外旁白与环境音`（见 `withH3NarrationShotNote`），
     // 声音就落到画外。所以：
     //   - 音轨照旧（用户要环境音效，`84f8517` 摘过，已撤回）；
-    //   - 风格 LoRA 照旧用作者写的强度（有声镜/静音镜质感一致，`405ab7c` 归零过，已撤回）；
     //   - 画面/采样/解码链路一个字节不动。
+    //
+    // ⚠️ 风格 LoRA 例外：`405ab7c` 把它归零过一次，后来为了「有声镜/静音镜质感一致」又撤回了
+    // （`84f8517`）。但撤回之后用户第三次报「有韩语 / 有字幕 / 有多余台词」，说明这三点压根不是
+    // 音轨和提示词的事 —— 是这支 LoRA 自带的先验。于是改成**可控档位、默认 0**（见上面
+    // `FISHER_LORA_STRENGTH_OPTIONS`），要韩剧质感就把滑块拖回去，不拖就是干净的中文 H3。
+    {
+        const strength = normalizeFisherLoraStrength(loraStrength);
+        const loraNode =
+            next["279"] ||
+            findComfyNode(
+                next,
+                (node) => /LoraLoader/i.test(String(node.class_type || "")) && /Mystic/i.test(String(node.inputs?.lora_name || "")),
+            );
+        if (loraNode?.inputs) {
+            // 0 在 ComfyUI 里是短路（直接返回底模权重），比改 class_type 更稳：
+            // 不动图结构，任何 worker 都认得这个分支。
+            loraNode.inputs.strength_model = strength;
+            if (typeof loraNode.inputs.strength_clip === "number") loraNode.inputs.strength_clip = strength;
+        }
+    }
 
     // ⚠️ 空提示词也要写。作者导出里那个 prompt 节点（138）塞着一段示例台词，
     // 「prompt 为空就不写」等于把作者的示例台词原样念出来 —— 用户「总是出现我没写过的台词」
@@ -4349,7 +4389,7 @@ export function workflowNodeInfoList(before: ComfyWorkflow, after: ComfyWorkflow
 
 // Exported for the workflow-diagnostics path and tests: the transformation is the risky part, so it
 // is exercised directly instead of only through a live task submission.
-export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string, megapixels = "", mjFlavor = ""): RunningHubWorkflowPatch {
+export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string, megapixels = "", mjFlavor = "", fisherLoraStrength = ""): RunningHubWorkflowPatch {
     let patched = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
     // The 四视图 asset-card graph opts out of the generic writers entirely (see
     // applyMinimaxH3FourViewSettings for what each of them would break here). Its own adapter
@@ -4406,7 +4446,7 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
     // Work-Fisher 全流程 opts out (see applyMinimaxH3FisherSettings): multi-ref H3 + Duration
     // Float + ResolutionSelector; baked hash refs. Always ship `graph`.
     if (isMinimaxH3FisherWorkflow(workflowId)) {
-        const fisher = applyMinimaxH3FisherSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
+        const fisher = applyMinimaxH3FisherSettings(workflow, prompt, imageValues, seconds, aspect, megapixels, fisherLoraStrength);
         const list = workflowNodeInfoList(workflow, fisher.workflow);
         return { nodeInfoList: list, graph: fisher.workflow };
     }
@@ -5173,6 +5213,8 @@ export async function runRunningHubWorkflow(args: {
     resolution?: string;
     /** MJ 风格 V2.0 LoRA 味型 (`strong` | `standard` | `light` | `off`) — that pair only. */
     mjFlavor?: string;
+    /** Work-Fisher 风格 LoRA（279 `MysticXXX_MMH3-V1`）权重：`0` = 关（默认），0.2/0.35/0.5 为档位。 */
+    fisherLoraStrength?: string;
     /** Work-Fisher pipeline mode (video / character / scene / multiview). */
     fisherMode?: string;
     media?: "image" | "video";
@@ -5247,6 +5289,8 @@ async function runRunningHubWorkflowWithKey(args: {
         resolution?: string;
         /** MJ 风格 V2.0 LoRA 味型 (`strong` | `standard` | `light` | `off`) — that pair only. */
         mjFlavor?: string;
+        /** Work-Fisher 风格 LoRA（279）权重，`0` = 关（默认）。 */
+        fisherLoraStrength?: string;
         fisherMode?: string;
         media?: "image" | "video";
         referenceDataUrls?: string[];
@@ -5362,11 +5406,19 @@ async function runRunningHubWorkflowWithKey(args: {
     // 用户最终口径（2026-10-25）：「把乱讲的台词直接换成旁白音，不让人物动嘴，只有我提示词里
     // 写的台词才动嘴」—— 于是**不去消灭声音**，而是让声音落画外：适配器在无 `<d>` 的正文末尾
     // 追加 `【旁白镜】人物全程闭口…声音是画外旁白与环境音`（`withH3NarrationShotNote`）。
-    // 所以这里既**不摘音轨**（`84f8517` 摘过，已撤回）、也**不动风格 LoRA**（`405ab7c` 归零过，已撤回）。
+    // 所以这里既**不摘音轨**（`84f8517` 摘过，已撤回）。
+    // ⚠️ 风格 LoRA 例外（2026-10-25 第三次报障后改的）：那支 LoRA 自带韩语/硬字幕/自编台词，
+    // 现在归到 `videoFisherLoraStrength` 档位、默认 0 = 关（见 `applyMinimaxH3FisherSettings`）。
     const fisherDialogueFree = isMinimaxH3FisherSilentShot(workflowId, request.prompt);
     // 混合镜（有台词 + 有 `- **对白**：无`）：贴的是「口型约定」而非「全片旁白」，日志要能分开看，
     // 否则排查时会把「该念的没念」误判成旁白镜规则串了。
     const fisherMixedShots = isMinimaxH3FisherWorkflow(workflowId) && !fisherDialogueFree && declaresH3SilentDialogue(request.prompt);
+    // 「韩语还没走」的第一条排查线索：实际提交的风格 LoRA 权重。用户报障时复制这一行就够。
+    if (isMinimaxH3FisherWorkflow(workflowId)) {
+        console.info(
+            `[runninghub] ${workflowId}: fisherLoRA=${normalizeFisherLoraStrength(request.fisherLoraStrength)} (0 = off, Korean voice / burned subtitles / invented lines come from this LoRA)`,
+        );
+    }
     const audioSources = fisherDialogueFree ? [] : (request.referenceAudioDataUrls || []).filter(Boolean).slice(0, 3);
     // 文武双全 only: its clips are big *and* it uploads audio/video through the same endpoint, so let
     // the browser reach RunningHub first and keep the edge out of the byte path. Other families keep
@@ -5416,7 +5468,7 @@ async function runRunningHubWorkflowWithKey(args: {
         console.info(`[runninghub] h3 prompt (${workflowId}) audio=${uploadedAudios.length}:\n${effectivePrompt}`);
     }
     const patch: RunningHubWorkflowPatch = prepared
-        ? buildWorkflowPatch(prepared, effectivePrompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "")
+        ? buildWorkflowPatch(prepared, effectivePrompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "", request.fisherLoraStrength || "")
         : { nodeInfoList: [] };
     const overrides = [...patch.nodeInfoList, ...audioOverrides];
     // Planted `LoadAudio` nodes only exist in our copy, and `nodeInfoList` cannot create links —

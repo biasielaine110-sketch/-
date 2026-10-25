@@ -124,6 +124,12 @@ export type AiConfig = {
      */
     videoFisherMode: string;
     /**
+     * Work-Fisher 风格 LoRA（279 `MysticXXX_MMH3-V1`）权重：`"0"` = 关（默认）。
+     * 这支 LoRA 带韩剧素材先验（韩语人声、硬字幕、自编台词），归零后才是干净的中文 H3。
+     * Only the Fisher id pair reads it.
+     */
+    videoFisherLoraStrength: string;
+    /**
      * MJ 风格工作流 V2.0 LoRA 味型：`strong` | `standard` | `light` | `off`.
      * Only the 2112477095216926722 / 2112477039575003138 id pair reads it (it scales the two
      * MJ LoRAs); every other model ignores the field.
@@ -225,6 +231,7 @@ export const defaultConfig: AiConfig = {
     videoSeed: "19960422",
     videoAudioMode: "lock_source",
     videoFisherMode: "video",
+    videoFisherLoraStrength: "0",
     mjFlavor: "standard",
     systemPrompt: "",
     reasoningEffort: "auto",
@@ -531,6 +538,10 @@ export const useConfigStore = create<ConfigStore>()(
                         videoFisherMode: /^(character|scene|multiview|video)$/i.test(String(config.videoFisherMode || ""))
                             ? String(config.videoFisherMode).toLowerCase()
                             : "video",
+                        // 只认四档；脏值/旧存档一律落回 0（关），别让旧数据把韩语 LoRA 又打开。
+                        videoFisherLoraStrength: ["0", "0.2", "0.35", "0.5"].includes(String(config.videoFisherLoraStrength ?? ""))
+                            ? String(config.videoFisherLoraStrength)
+                            : "0",
                         mjFlavor: /^(strong|standard|light|off)$/i.test(String(config.mjFlavor || ""))
                             ? String(config.mjFlavor).toLowerCase()
                             : "standard",

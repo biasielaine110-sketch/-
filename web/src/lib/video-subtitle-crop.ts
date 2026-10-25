@@ -16,6 +16,7 @@
  * ⚠️ 保留音轨（用户 2026-10-25 明确「我需要保持环境音效啊」）：从源元素 `captureStream()` 取音频轨
  *    混进 canvas 流；拿不到就退化成无声裁切，但仍然交出画面。
  */
+import { forceProxyMediaUrl, proxyMediaUrl } from "@/lib/api-proxy";
 
 /** 字幕带默认比例：底部 12%（H3 烧字的典型位置）。 */
 export const VIDEO_SUBTITLE_BAND_RATIO = 0.12;
@@ -73,6 +74,30 @@ function waitFor(target: EventTarget, event: string, timeoutMs: number) {
 }
 
 /**
+ * 取成片字节。⚠️ 先直连、失败再**强制**走站点代理。
+ *
+ * RunningHub 的成片在 `*.xiaoyaoyou.com`（TOS）。这个域在 `DIRECT_CORS_HOSTS` 名单里 ——
+ * 但那份名单是为「带 Authorization 的 POST」核过的，`proxyMediaUrl` 见到它就会**原样返回直连地址**，
+ * 等于没有回退（用户 2026-10-25「还是有字幕」的第二种可能）。所以这里用 `forceProxyMediaUrl`：
+ * 它专门为「plain GET 的媒体下载」设计，无条件拼 `/api/proxy?target=…`。
+ */
+async function fetchVideoBlob(url: string): Promise<Blob> {
+    try {
+        const direct = await fetch(url);
+        if (!direct.ok) throw new Error(`direct HTTP ${direct.status}`);
+        return await direct.blob();
+    } catch (directError) {
+        if (!/^https?:/i.test(url)) throw directError;
+        const proxied = forceProxyMediaUrl(url) || proxyMediaUrl(url);
+        if (!proxied || proxied === url) throw directError;
+        console.info("[video] 直连取成片失败，改走站点代理", directError);
+        const viaProxy = await fetch(proxied);
+        if (!viaProxy.ok) throw new Error(`proxy HTTP ${viaProxy.status}`);
+        return await viaProxy.blob();
+    }
+}
+
+/**
  * 把视频底部 `ratio` 切掉，返回重编码后的 blob。
  *
  * @param source  远端 URL 或已拿到的 blob（二选一）
@@ -82,19 +107,26 @@ export async function cropVideoBottomBand(
     source: { url?: string; blob?: Blob },
     options?: { ratio?: number; timeoutMs?: number },
 ): Promise<CroppedVideo | null> {
-    if (typeof document === "undefined") return null;
+    // 每一条「静默放弃」都留一句原因：用户下次说「还是有字幕」时，控制台能直接指出卡在哪一步
+    // （没录制器 / 取不到字节 / 尺寸读不出来 / 编码抛错），不用再靠猜。
+    const bail = (reason: string) => {
+        console.info(`[video] 裁字幕带跳过：${reason}`);
+        return null;
+    };
+
+    if (typeof document === "undefined") return bail("当前环境没有 document");
     const mimeType = pickVideoRecorderMime();
-    if (!mimeType) return null;
+    if (!mimeType) return bail("浏览器不支持 MediaRecorder 录制");
 
     const ratio = Math.min(0.4, Math.max(0, Number(options?.ratio ?? VIDEO_SUBTITLE_BAND_RATIO) || 0));
-    if (ratio <= 0) return null;
+    if (ratio <= 0) return bail("裁切比例为 0");
 
     let objectUrl = "";
     let video: HTMLVideoElement | null = null;
     let recorder: MediaRecorder | null = null;
     try {
-        const blob = source.blob || (source.url ? await (await fetch(source.url)).blob() : null);
-        if (!blob || blob.size === 0) return null;
+        const blob = source.blob || (source.url ? await fetchVideoBlob(source.url) : null);
+        if (!blob || blob.size === 0) return bail("取不到成片字节（直连与代理都失败）");
         objectUrl = URL.createObjectURL(blob);
 
         video = document.createElement("video");
@@ -110,13 +142,13 @@ export async function cropVideoBottomBand(
         const width = Math.round(video.videoWidth || 0);
         const height = Math.round(video.videoHeight || 0);
         const targetHeight = croppedVideoHeight(height, ratio);
-        if (!width || !targetHeight || targetHeight >= height) return null;
+        if (!width || !targetHeight || targetHeight >= height) return bail(`尺寸读不出来（${width}x${height} → ${targetHeight}）`);
 
         const canvas = document.createElement("canvas");
         canvas.width = width;
         canvas.height = targetHeight;
         const context = canvas.getContext("2d", { alpha: false });
-        if (!context) return null;
+        if (!context) return bail("拿不到 2d 画布上下文");
 
         // 帧率跟着源走，取不到就 30；canvas.captureStream(fps) 会自动按这时钟抓帧。
         const fps = 30;
@@ -172,7 +204,7 @@ export async function cropVideoBottomBand(
         stream.getTracks().forEach((track) => track.stop());
 
         const out = new Blob(chunks, { type: mimeType.split(";")[0] });
-        if (!out.size) return null;
+        if (!out.size) return bail("录制器没吐出任何数据");
         return { blob: out, mimeType: out.type || "video/webm", width, height: targetHeight };
     } catch (error) {
         console.warn("[video] 裁字幕带失败，保持原片", error);
