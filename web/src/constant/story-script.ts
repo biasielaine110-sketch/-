@@ -1194,7 +1194,7 @@ export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; video
     if (!kept.length) return "";
     if (kept.length === 1) return kept[0].body;
     const merged = [`多镜头连续片段（共 ${kept.length} 镜）：`, ...kept.map((item) => `第${item.no}镜\n${item.body}`)].join("\n\n");
-    // 第四套每镜的提示词末尾都带一句「不要出现字幕和音乐…」：4 镜合并会重复 4 遍。
+    // 第四套每镜的提示词末尾都带一句「不要出现字幕和文字…」：4 镜合并会重复 4 遍。
     // 它是**整段**的总要求，所以只留一条、放到最末（没有这句时原样返回，其它套不受影响）。
     const collapsed = collapseDirectorSoundNotes(merged);
     // 同一场戏各镜的风格提示词通常一模一样：逐镜重复 N 遍只会把提示词撑长、稀释画面描述。同文只留一条。
@@ -1202,13 +1202,13 @@ export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; video
 }
 
 /**
- * 多镜合并时把「不要出现字幕和音乐…」收敛成一条（放最末）。
+ * 多镜合并时把「不要出现字幕和文字…」收敛成一条（放最末）。
  * 一句都没有时**原样返回**，所以第一/二/三套的合并结果一个字节都不变。
  */
 function collapseDirectorSoundNotes(text: string): string {
     const value = String(text || "");
-    if (!value.includes("不要出现字幕和音乐")) return value;
-    const lines = value.split("\n").filter((line) => !line.includes("不要出现字幕和音乐"));
+    if (!value.split("\n").some((line) => isStoryScriptDirectorSoundNoteLine(line))) return value;
+    const lines = value.split("\n").filter((line) => !isStoryScriptDirectorSoundNoteLine(line));
     return withDirectorSoundNote(lines.join("\n").replace(/\n{3,}/g, "\n\n"));
 }
 
@@ -3617,13 +3617,33 @@ export function applyStoryScriptTemplateOverlayToShot(
 export const STORY_SCRIPT_DIRECTOR_VIDEO_LABELS = ["时长", "景别／机位", "运镜", "人物站位与构图", "主体与动作", "光影与色调", "转场建议", "对白"] as const;
 
 /**
- * 第四套：`video_motion_prompt` 末尾**默认追加**的一句声音要求（用户 2026-10-24 给的原话，一个字不改）。
+ * 第四套：`video_motion_prompt` 末尾**默认追加**的一句声音要求。
+ *
+ * 2026-10-25 用户改口径：「不要出现字幕和文字，不要音乐，只要对白和环境音效。」
+ * —— 比原来那句多了「文字」（画面里的招牌/标题/水印也算）、把「只要台词」换成「只要对白」。
  *
  * 为什么是后置追加而不是让模型自己写：用户要的是「每一镜的输出里都有这一行」，
  * 这种「每条都必须带」的东西靠提示词会漏，靠 `normalizeStoryScriptDirectorRows` 才能 100% 保证。
- * 提示词里也照样写一遍（模型自己写了就按 `includes` 去重，不会出现两行）。
+ * 提示词里也照样写一遍（模型自己写了就按下面的判据去重，不会出现两行）。
  */
-export const STORY_SCRIPT_DIRECTOR_SOUND_NOTE = "不要出现字幕和音乐，只要台词和环境音效。";
+export const STORY_SCRIPT_DIRECTOR_SOUND_NOTE = "不要出现字幕和文字，不要音乐，只要对白和环境音效。";
+
+/**
+ * 声音约定行的**判据**（新旧两版共用）。
+ *
+ * ⚠️ 别整句比对：新旧两版只差后半句（老版「只要台词」、新版「只要对白」），而且模型可能不写句号、
+ * 顺手加个 `- `；节点里已存的旧文案也必须照样认出来（否则合并时会叠成两行、静音镜也剥不掉）。
+ * 两版都以「不要出现字幕」开头，用它当指纹。
+ */
+export const STORY_SCRIPT_DIRECTOR_SOUND_NOTE_MARK = "不要出现字幕";
+
+/** 这一行是不是那句声音约定（去前导 `- ` / `* ` / 空白后按键词判）。 */
+export function isStoryScriptDirectorSoundNoteLine(line: unknown): boolean {
+    return String(line ?? "")
+        .trim()
+        .replace(/^[-*·•\s]+/, "")
+        .startsWith(STORY_SCRIPT_DIRECTOR_SOUND_NOTE_MARK);
+}
 
 /**
  * 第四套 `video_motion_prompt` 的**唯一合法格式**说明（用户 2026-10-24 给的实样）。
@@ -3821,8 +3841,8 @@ function stripDirectorAppearanceFromPrompt(value: unknown, names: readonly strin
 function withDirectorSoundNote(text: string): string {
     const value = String(text || "");
     if (!value.trim()) return value;
-    // 按键词判，不整句比对：模型可能写成「不要出现字幕和音乐」不带句号，或顺手加个 `- `。
-    if (value.includes("不要出现字幕和音乐")) return value;
+    // 按键词判（`isStoryScriptDirectorSoundNoteLine`）：新旧两版文案、不带句号、带 `- ` 前缀都认。
+    if (value.split("\n").some((line) => isStoryScriptDirectorSoundNoteLine(line))) return value;
     return `${value.replace(/\s+$/, "")}\n\n${STORY_SCRIPT_DIRECTOR_SOUND_NOTE}`;
 }
 
@@ -3920,7 +3940,7 @@ function ensureDirectorDialogueSpeakers(value: unknown, names: readonly string[]
  * 值可能折行（`- **对白**：` 空值 + 下一行台词），所以从标签行一直收到下一个 `- **标签**` /
  * 标题 / 末尾那句声音要求为止。收完交给 `ensureDirectorDialogueSpeakers` 补说话人。
  *
- * ⚠️ 必须停在那句 `不要出现字幕和音乐…`（它在八行之后、不带标签），否则会被当成台词补上人名。
+ * ⚠️ 必须停在那句 `不要出现字幕和文字，不要音乐，只要对白和环境音效。`（它在八行之后、不带标签），否则会被当成台词补上人名。
  * ⚠️ 幂等：合规的台词（已带说话人）收完与原文逐字相同 → 原样吐回。
  */
 function rewriteDirectorDialogueBlock(blockText: string, names: readonly string[]): string {
@@ -3938,7 +3958,7 @@ function rewriteDirectorDialogueBlock(blockText: string, names: readonly string[
         while (cursor < lines.length) {
             const next = lines[cursor];
             if (/^\s*-\s*\*\*/.test(next) || /^\s*#{1,6}\s/.test(next)) break;
-            if (next.trim().startsWith("不要出现字幕和音乐")) break;
+            if (isStoryScriptDirectorSoundNoteLine(next)) break;
             collected.push(next);
             cursor += 1;
         }
