@@ -3962,6 +3962,22 @@ const H3_FIELD_LABEL =
     /^(时长|时间|秒数|景别|机位|景别／机位|运镜|运镜方式|人物站位|人物站位与构图|人物动作与表演|主体与动作|光影|光影与色调|转场|转场建议|对白|台词|声音|音效|台词与声音|负面|画面|画面内容|画面风格|视觉风格|镜头语言|构图方式|摄影机参数|摄影机|风格|镜头|镜号|镜头编号|镜头时长|场景|道具|情绪|角色|角色1|角色2|出场人物|风格提示词|画面描述)$/;
 
 /**
+ * 台词行里**内联**跟出来的分镜表字段 —— 从它开始整段砍掉。
+ *
+ * `H3_DIALOGUE_BOUNDARY` 只管**行首**：`- **对白**：` 下面那一行如果写成
+ * `苏晚说：你终于来了。视觉风格：七十五毫米镜头，浅景深。`（对白和风格挤在同一行，
+ * 或者用户手改时把风格接在台词后面），整行会被认成一句台词，**连风格一起包进 `<d>` 念出来**。
+ * 用户 2026-10-25 第八次报障的原话「还把视觉风格：后面的提示词念出来了」就是这一种。
+ * 所以台词正文在收口进 `<d>` 之前，再按字段名切一刀。
+ */
+const H3_INLINE_FIELD_CUT =
+    /\s*(?:视觉风格|画面风格|影像风格|风格提示词|风格|景别／机位|景别|机位|运镜|时长|音效|声音|转场建议|光影与色调|光影|构图方式|摄影机参数|镜头语言|资产|参考图)\s*[：:]/;
+function cutH3InlineFieldLabel(text: string) {
+    const hit = String(text || "").search(H3_INLINE_FIELD_CUT);
+    return (hit < 0 ? String(text || "") : String(text).slice(0, hit)).trim();
+}
+
+/**
  * 第四套 `video_motion_prompt` 末尾那句是**我们自动追加**的：
  * `不要出现字幕和文字，不要音乐，只要对白和环境音效。`（2026-10-25 前的旧版是「只要台词」）
  * —— 「只要对白」等于明确邀请模型说话。这一镜没有对白时，把它改成「只要环境音效」。
@@ -4025,13 +4041,51 @@ const H3_SCAFFOLD_ALWAYS_DROP = new Set(["时长", "镜头时长", "镜头编号
  */
 const H3_SCAFFOLD_SOUND_LABELS = new Set(["音效", "声音", "环境音", "台词与声音", "声音设计"]);
 const H3_SCAFFOLD_DIALOGUE_LABELS = new Set(["对白", "台词"]);
+/**
+ * 风格类字段：**整行丢掉**（连值一起），clean mode 专有。
+ *
+ * 用户 2026-10-25 第八次报障：「还把 **视觉风格：后面的提示词**念出来了，之前不是改过，
+ * 这两个模型的对话提示词锁定到视觉风格：的前面吗？」
+ *
+ * 先说清机制：`H3_DIALOGUE_BOUNDARY` 那一层只保证**台词 `<d>` 收集到 `视觉风格：` 之前**（这个没坏，
+ * 台词没被吞）。坏的是下一层 —— `stripH3Scaffolding` 把 `视觉风格：七十五毫米镜头，光圈二点八…`
+ * **只去掉字段名、把值原样留在正文**，于是那句「七十五毫米镜头，光圈二点八，浅景深，胶片颗粒，冷调」
+ * 变成一条独立成段的裸中文，紧跟在该镜 `<d>` 之后。H3 把它当「接着要念的一行」读了出来。
+ *
+ * 为什么这一版是**删掉**而不是「挪到别处 / 换个写法」：项目里已经用七轮验证过同一件事 ——
+ * H3 只认「删掉内容 / `<d>` 定界 / `<Audio N>` 声明 / 不挂参考音频」这四个杠杆，任何「换个说法再发一次」
+ * （套槽位、加否定式、改英文、加【静场】）都被它念出来。风格词是纯画面参数、又天然长得像一句旁白，
+ * 是这套模型最容易念的东西。画风交给参考图 + 279 风格 LoRA 档位（`videoFisherLoraStrength`）承担。
+ *
+ * ⚠️ 只有 Fisher（`audioNegation`）走这里。别的族继续保留字段值 —— 它们吃自然语言，风格词有用。
+ * ⚠️ 想撤回只需要把这一组清空（`new Set()`），`stripH3Scaffolding` 其余逻辑不用动。
+ */
+const H3_SCAFFOLD_STYLE_LABELS = new Set(["视觉风格", "画面风格", "影像风格", "风格提示词", "风格"]);
 const H3_SCAFFOLD_KEEP_VALUE = new Set([
-    "画面", "视觉风格", "风格", "主体与动作", "动作", "景别", "景别／机位", "景别/机位", "机位",
+    "画面", "主体与动作", "动作", "景别", "景别／机位", "景别/机位", "机位",
     "运镜", "镜头运动", "人物站位与构图", "站位与构图", "构图", "光影与色调", "光线与色调",
     "光影", "光线", "色调", "氛围", "首帧提示词", "静帧提示词", "资产", "引用资产", "参考图",
 ]);
 /** `无` / `none` / `—` 这类「没有」写法。 */
 const H3_EMPTY_VALUE = /^(?:无|没有|none|n\/?a|—+|–|-|（无）|\(无\))\s*[。.]?$/i;
+
+/**
+ * 画布里的参考图 chip 名（`图片1` / `图1` / `image 1`）→ 官方方言 `<Picture 1>`。
+ *
+ * 用户 2026-10-25：「现在这两个模型**连场景图都参考不上了**」。
+ * 图确实传上去了（`ref_images.ref_image_0…` 一一对应，见 `applyMinimaxH3FisherSettings`），
+ * 但**正文里没有任何模型认得的绑定记号**：铺链写进去的是中文 chip 名「图片1（苏晚）」，
+ * 而 H3 的参考绑定方言是 `<Picture N>`（作者导出里的示例就是 `<Subject 1>` / `<Picture N>` 那一套，
+ * 这也是 `comfyui-native.ts` 里反复提到的「`ref_image_N` ↔ `<Picture N+1>`」）。
+ * 一串中文「图片1」对模型既是**无意义字符串**、又是一句**可念的中文**，两头不讨好。
+ *
+ * 所以 clean mode 出站前把它换成官方记号：绑定更硬，且 `<Picture 1>` 是结构 token、不是记叙文。
+ * ⚠️ 只作用于正文；`<d>` 台词行不碰（台词里真提到「图片1」是用户的原话）。
+ */
+const H3_PICTURE_REFERENCE = /(?:参考图|图片|图)\s*([1-9]\d?)|image\s*([1-9]\d?)/gi;
+function toH3PictureReferences(text: string) {
+    return String(text || "").replace(H3_PICTURE_REFERENCE, (_match, zh: string, en: string) => `<Picture ${zh || en}>`);
+}
 
 function stripH3Scaffolding(text: string) {
     const out: string[] = [];
@@ -4059,22 +4113,33 @@ function stripH3Scaffolding(text: string) {
             const label = labelled[1].trim();
             const value = labelled[2].trim();
             if (H3_SCAFFOLD_ALWAYS_DROP.has(label)) continue;
+            // 风格类：**连值一起丢**（只有 Fisher 走这里，见 `H3_SCAFFOLD_STYLE_LABELS` 的注释）
+            if (H3_SCAFFOLD_STYLE_LABELS.has(label)) continue;
+            // 我们自己的「参考图片编号：图片1、图片2。请按这些编号理解提示词中的图片引用。」也是说明文，
+            // 整行不许念（值里的「请按这些编号理解…」就是一句招人声的中文）
+            if (/^(?:参考图片编号|参考图编号|图片编号|图编号|编号)$/.test(label)) continue;
             if (H3_SCAFFOLD_SOUND_LABELS.has(label)) {
-                if (value && !H3_EMPTY_VALUE.test(value)) out.push(value);
+                if (value && !H3_EMPTY_VALUE.test(value)) out.push(toH3PictureReferences(value));
                 continue;
             }
             if (H3_SCAFFOLD_DIALOGUE_LABELS.has(label)) {
                 if (!value || H3_EMPTY_VALUE.test(value)) continue;
-                out.push(value);
+                out.push(toH3PictureReferences(value));
                 continue;
             }
             if (H3_SCAFFOLD_KEEP_VALUE.has(label)) {
-                if (value && !H3_EMPTY_VALUE.test(value)) out.push(value);
+                if (value && !H3_EMPTY_VALUE.test(value)) out.push(toH3PictureReferences(value));
                 continue;
             }
+            // ⚠️ 兜底：**任何** `标签：值` 都只留值（2026-10-25 第八次报障）。
+            // 之前只有白名单里的标签才剥名字，`- **场景**：咖啡馆` / `出场人物：…` 这类会把
+            // 「- **场景**：」连同星号一起发出去 —— 星号念不出来，但「场景」两个字念得出来，
+            // 而且 `**` 会打断模型对整段的解析。未知字段一律降级成裸值。
+            if (value && !H3_EMPTY_VALUE.test(value)) out.push(toH3PictureReferences(value));
+            continue;
         }
         // 普通散文：去掉列表符号（`- xxx` → `xxx`），让整段读起来是描述而不是清单
-        out.push(trimmed.replace(/^[-*·•]\s+/, ""));
+        out.push(toH3PictureReferences(trimmed.replace(/^[-*·•]\s+/, "")));
     }
     return out
         .join("\n")
@@ -4609,7 +4674,9 @@ export function adaptMinimaxH3ReferencePrompt(
             // 剥掉动词尾之后，正文从冒号后开始（`张景惠说：` 整段都是前缀）。
             const body = rawSpeaker ? value.slice(match![0].length).trim() : value.trim();
             // `苏晚：“台词”` → `<d>台词</d>`：`<d>` 本身就是台词的边界，引号留在里面会被一起念出来。
-            const spokenBody = body
+            // ⚠️ 先切内联字段（对白和 `视觉风格：`/`音效：` 挤在同一行时），再剥引号 ——
+            // 顺序反了会把「风格」那半句留在 `<d>` 里（2026-10-25 第八次报障）。
+            const spokenBody = cutH3InlineFieldLabel(body)
                 .replace(/^[「『“"']+/, "")
                 .replace(/[」』”"']+$/, "")
                 .trim();
