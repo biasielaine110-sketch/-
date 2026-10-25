@@ -3875,6 +3875,32 @@ function withH3NarrationShotNote(text: string) {
     return `${body}\n\n${H3_NARRATION_SHOT_NOTE}`;
 }
 
+/**
+ * 混合镜的「口型约定」—— 用户 2026-10-25 的第四个诉求：
+ * 「遇到一个视频的提示词里多个镜头，一个镜头有台词、一个镜头无台词，是否也能把无台词自己产生的乱话
+ *  变成不动嘴的画外音，有台词的按我的台词正常动嘴」。
+ *
+ * 这就是 H3 的原生特性：**唇动只由 `<d>` 驱动**。一个镜头写了 `<d>` 就开口，没写就闭嘴。
+ * 但模型不知道我们这套约定，它会把「没写台词」理解成「自由发挥」。所以要给它一句**按镜头的映射**：
+ * 有 `<d>` 的镜头正常开口，其余镜头闭口 + 声音落画外。
+ *
+ * ⚠️ 和 `【旁白镜】` 是**互斥**的两件事，别混用：
+ *   - 整段一句话都没有台词 → `【旁白镜】`（全片闭嘴、全片画外音）；
+ *   - 有台词也有静音镜 → `【口型约定】`（分镜处理）。写成「全片闭嘴」会把该念的台词也一起闭掉。
+ * ⚠️ 这段文字里**不许出现 `<d>` 字面量**：H3 的台词方言是成对的 `<d>…</d>`，单独露一个开标签
+ * 可能把后面整段（含台词锁定）都算进台词里。改用「标了台词的镜头」这种自然语言指代。
+ * ⚠️ 还是要短：H3 不是听指令的 LLM，堆禁止清单等于把「台词/人声」喂给它。
+ */
+const H3_MIXED_LIPSYNC_NOTE =
+    "【口型约定】本次包含多个镜头：标了台词的镜头，人物按台词正常开口说话；没有标台词的镜头，人物全程闭口，唇形与下颌静止，声音是画外旁白与环境音，人物不在画面里开口。";
+
+/** 幂等：正文里已经有这句就不再追加。 */
+function withH3MixedLipsyncNote(text: string) {
+    const body = text.replace(/\s+$/, "");
+    if (body.includes("【口型约定】")) return body;
+    return `${body}\n\n${H3_MIXED_LIPSYNC_NOTE}`;
+}
+
 /** 台词锁定的幂等标记：提示词里已经有这段就不再追加。 */
 const H3_DIALOGUE_LOCK_MARK = "【台词锁定】";
 
@@ -4008,10 +4034,18 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
     const audioCount = Math.max(0, Math.min(3, Math.round(Number(options?.audioCount) || 0)));
     /** Fisher 两个 id：这一镜没有 `<d>` 台词时，连我们自动追加的那句声音说明也不给（见 `stripH3SoundNote`）。 */
     const dropSoundNote = Boolean(options?.dropSoundNote);
+    /**
+     * **混合镜**：这段提示词里既有要念的台词，又有明说 `- **对白**：无` 的镜头。
+     * 命中就贴「按镜头的口型约定」而不是「全片旁白」（`withH3MixedLipsyncNote`）。
+     * 只看用户的**声明**（`- **对白**：无`），不看转换结果 —— 和 `isMinimaxH3FisherSilentShot` 分工。
+     */
+    const mixedShots = dropSoundNote && declaresH3SilentDialogue(text);
 
     // 作者/用户自己写的 H3 台词标记 → 正文不动，只补契约（不补就照样会念参考音轨里的内容）。
     if (/<\s*d\s*>/i.test(text)) {
-        return withH3VoiceContract(text, audioCount, countH3DialogueLines(text), extractH3Speakers(text));
+        // 已带 `<d>` 又声明了静音镜 = 一镜说、一镜不说：正文不动，尾部补一句口型约定。
+        const body = mixedShots ? withH3MixedLipsyncNote(text) : text;
+        return withH3VoiceContract(body, audioCount, countH3DialogueLines(text), extractH3Speakers(text));
     }
 
     const lines = text.split("\n");
@@ -4121,7 +4155,10 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         const quiet = dropSoundNote ? withH3NarrationShotNote(stripH3SoundNote(base)) : base;
         return withH3VoiceContract(quiet, audioCount, 0, speakers);
     }
-    return withH3VoiceContract(out.join("\n"), audioCount, lineCount, speakers);
+    // 至少一镜转成了 `<d>`：如果同时还有 `- **对白**：无` 的镜头，补「按镜头的口型约定」——
+    // 否则那几镜没有任何约束，模型会把它们填成人声噪杂（用户 2026-10-25 的混合镜诉求）。
+    const joined = out.join("\n");
+    return withH3VoiceContract(mixedShots ? withH3MixedLipsyncNote(joined) : joined, audioCount, lineCount, speakers);
 }
 
 /**
@@ -5327,7 +5364,9 @@ async function runRunningHubWorkflowWithKey(args: {
     // 追加 `【旁白镜】人物全程闭口…声音是画外旁白与环境音`（`withH3NarrationShotNote`）。
     // 所以这里既**不摘音轨**（`84f8517` 摘过，已撤回）、也**不动风格 LoRA**（`405ab7c` 归零过，已撤回）。
     const fisherDialogueFree = isMinimaxH3FisherSilentShot(workflowId, request.prompt);
-    const fisherSilentDeclared = isMinimaxH3FisherWorkflow(workflowId) && declaresH3SilentDialogue(request.prompt);
+    // 混合镜（有台词 + 有 `- **对白**：无`）：贴的是「口型约定」而非「全片旁白」，日志要能分开看，
+    // 否则排查时会把「该念的没念」误判成旁白镜规则串了。
+    const fisherMixedShots = isMinimaxH3FisherWorkflow(workflowId) && !fisherDialogueFree && declaresH3SilentDialogue(request.prompt);
     const audioSources = fisherDialogueFree ? [] : (request.referenceAudioDataUrls || []).filter(Boolean).slice(0, 3);
     // 文武双全 only: its clips are big *and* it uploads audio/video through the same endpoint, so let
     // the browser reach RunningHub first and keep the edge out of the byte path. Other families keep
@@ -5393,7 +5432,7 @@ async function runRunningHubWorkflowWithKey(args: {
     const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
     if (referenceCount) {
         console.info(
-            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1" : ""}${fisherSilentDeclared ? " narrationShot=1" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1 narrationShot=1" : ""}${fisherMixedShots ? " lipsyncMixed=1" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
         );
     }
     let task: RunningHubTaskView;
