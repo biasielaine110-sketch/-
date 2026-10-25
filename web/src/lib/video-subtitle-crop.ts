@@ -220,6 +220,31 @@ export async function cropVideoBottomBand(
 }
 
 /**
+ * 每一帧要画的**源矩形与目标矩形**。纯函数，给探针用。
+ *
+ * ⚠️ `drawImage` 的签名是 `(src, sx, sy, sw, sh, dx, dy, dw, dh)`，第 4 个参数是**源画面要取的高度**。
+ * `dfba0e8` 在这里写成了 `sh = height - targetHeight`（720−632 = **88**）—— 那不是「留下的高度」，
+ * 而是「被切掉的高度」。等于只取顶部 88 行、纵向拉伸 ~7 倍铺满 632 行：整幅画面糊成一条竖着的拖影，
+ * 就是用户 2026-10-25 说的「生成的视频直接花掉了」。
+ * 正确写法：取顶部 `targetHeight` 行（= height×(1-ratio)）**原样 1:1** 铺进同高的 canvas，不缩放。
+ */
+export function subtitleCropDrawRect(width: number, height: number, targetHeight: number) {
+    const keep = Math.max(0, Math.min(Math.round(targetHeight) || 0, Math.round(height) || 0));
+    return {
+        sx: 0,
+        sy: 0,
+        // 源：顶部 keep 行（切掉底部那一条）。⚠️ 是 keep，不是 height - keep。
+        sw: width,
+        sh: keep,
+        // 目标：铺满 canvas（宽高与源区域一致 → 1:1，不放大不拉伸）
+        dx: 0,
+        dy: 0,
+        dw: width,
+        dh: keep,
+    };
+}
+
+/**
  * 把源元素的上半部分录一遍，返回重编码后的字节。
  *
  * 单独抽出来是为了**换容器重试**（`isTypeSupported` 会撒谎、mp4 会花屏），调用方逐个候选调用它，
@@ -266,11 +291,13 @@ async function recordBand(
         });
         recorder.start(250);
 
-        // 逐帧只画上半部分：源 (0,0,width,height-targetHeight) → 目标铺满整个 canvas。
+        // ⚠️ 几何必须走 `subtitleCropDrawRect`：这里曾经写死 `height - targetHeight`（=88）当源高，
+        // 结果只取顶部 88 行、纵向拉伸 7 倍，整片糊成拖影 —— 用户「视频直接花掉了」的真根因。
+        const rect = subtitleCropDrawRect(width, height, targetHeight);
         const draw = () => {
             if (!drawing) return;
             try {
-                context.drawImage(video, 0, 0, width, height - targetHeight, 0, 0, width, targetHeight);
+                context.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, rect.dx, rect.dy, rect.dw, rect.dh);
             } catch {
                 // 个别帧还没解码好，跳过这一帧。
             }
