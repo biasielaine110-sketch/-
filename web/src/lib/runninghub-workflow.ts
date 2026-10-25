@@ -3960,7 +3960,55 @@ function stripH3SoundNote(text: string) {
  * 字幕不在提示词里跟模型抢（抢不过，见上面的机制），交给生成后的底部裁切
  * （`lib/video-subtitle-crop.ts`）兜底。
  */
-const H3_NARRATION_SHOT_NOTE = "【静场】画面内人物全程闭口，唇形与下颌静止，没有开口动作；本镜只有环境音。";
+const H3_NARRATION_SHOT_NOTE = "【静场】画面内人物全程闭口，唇形与下颌静止，没有开口动作。";
+
+/**
+ * 官方 AV 三字段契约 —— 2026-10-25 第四次报障（「现在还是在乱说话」）的根因。
+ *
+ * 翻 MiniMax H3 官方提示词指南才明白：H3 的提示词**不是段落，是三个具名槽位**
+ * （R2V/FL2VA 的 `integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music`），
+ * 官方原话是「**把对白、房间声、配乐都写出来，否则 H3 会自己编**」。
+ *
+ * 我们前三轮全在改「中文描述正文」，三个槽位里**一个都没填** —— 尤其没有 `overall_soundscape`。
+ * 空槽位不会被当成「没有声音」，而是被模型**补全**：它手里是一段中文剧集分镜、人物正对镜头，
+ * 补出来的自然是中文人声。所以「不写台词」在 H3 眼里等于「声音随你发挥」。
+ * 这也解释了为什么每加一条中文限制（旁白镜/静场/口型约定）都不见效：正文里多一句中文，
+ * 只是给「补全」多一个素材，槽位仍然是空的。
+ *
+ * 所以静音镜的正确做法是**把声音槽位填满、并把「无人声」写进槽位里**（官方同类写法：
+ * 「No dialogue, no music, no text.」），而不是在正文里劝它别说话。
+ * 官方对「完全无对话的镜头」的指导意见也一致：删掉对白 + 明确写闭嘴 + **给持续安静的具体背景声**。
+ *
+ * ⚠️ 幂等：正文里已经有 `overall_soundscape:`（用户或作者自己按官方格式写过）就一个字节都不加。
+ * ⚠️ 只加这两个槽位，不动正文一个字 —— 正文是用户的分镜表，我们无权改写。
+ */
+const H3_SOUNDSCAPE_MARK = /overall_soundscape\s*:/i;
+/** 正文里「有要念的台词」的唯一判据：官方 `<d>…</d>`。 */
+const H3_SCRIPT_DIALOGUE_MARK = /<\s*d\s*>/i;
+
+/** 分镜表里的环境音来源：`- **音效**：…` / `声音：…` / `环境音：…`。 */
+const H3_SOUND_FIELD = /^[^\S\r\n]*[-*]?\s*\*{0,2}\s*(?:音效|声音|环境音|台词与声音|声音设计)\s*\*{0,2}\s*[：:]\s*(.*)$/m;
+/** 没写环境音时的兜底描述：具体、安静、只有场景底噪（官方要求「给持续安静的具体背景声」）。 */
+const H3_SOUNDSCAPE_FALLBACK = "Quiet, continuous ambient sound of the location itself (room tone or outdoor background).";
+
+function h3SoundscapeOf(text: string) {
+    const match = String(text || "").match(H3_SOUND_FIELD);
+    const value = match ? match[1].trim().replace(/[。.；;]\s*$/, "") : "";
+    if (!value || /^(无|无音效|none|n\/?a|—+|–|-)$/i.test(value)) return H3_SOUNDSCAPE_FALLBACK;
+    return value;
+}
+
+/**
+ * 补官方声音槽位。`silent` 由「正文里有没有 `<d>`」决定 —— 和 `isMinimaxH3FisherSilentShot` 同一条判据：
+ * 没有 `<d>` 就没有台词，人声必须显式排除；有 `<d>` 时只给环境音，别去碰台词。
+ */
+function withH3AudioStatement(text: string) {
+    if (H3_SOUNDSCAPE_MARK.test(text)) return text;
+    const hasDialogue = H3_SCRIPT_DIALOGUE_MARK.test(text);
+    const ambience = h3SoundscapeOf(text);
+    const soundscape = hasDialogue ? ambience : `${ambience} No dialogue, no voices.`;
+    return `${String(text || "").replace(/\s+$/, "")}\n\noverall_soundscape: ${soundscape}\nnon_diegetic_music: N/A`;
+}
 
 /**
  * 幂等：正文里已经有 `【静场】` 就不再追加。
@@ -4003,6 +4051,16 @@ const H3_MIXED_LIPSYNC_NOTE =
  * ⚠️ 旧版尾巴是「声音是画外旁白与环境音，人物不在画面里开口」—— 含「旁白」的旧行整行摘掉再贴新版。
  */
 function withH3MixedLipsyncNote(text: string) {
+    // ⚠️ 判重必须在**过滤之前**：老写法先滤掉含【口型约定】的行、再检查 `body.includes`，
+    // 那个检查永远为假 → 每次适配都把这句话挪到末尾。加上官方声音槽位之后，
+    // 「挪位」会让「适配两次 == 适配一次」失败（幂等探针 M5 抓到）。
+    if (text.includes("【口型约定】")) {
+        return text
+            .split("\n")
+            .filter((line) => !line.includes("画外旁白"))
+            .join("\n")
+            .replace(/\s+$/, "");
+    }
     const body = text
         .split("\n")
         .filter((line) => !line.includes("【口型约定】") && !line.includes("画外旁白"))
@@ -4156,7 +4214,7 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
     if (/<\s*d\s*>/i.test(text)) {
         // 已带 `<d>` 又声明了静音镜 = 一镜说、一镜不说：正文不动，尾部补一句口型约定。
         const body = mixedShots ? withH3MixedLipsyncNote(text) : text;
-        return withH3VoiceContract(body, audioCount, countH3DialogueLines(text), extractH3Speakers(text));
+        return withH3AudioStatement(withH3VoiceContract(body, audioCount, countH3DialogueLines(text), extractH3Speakers(text)));
     }
 
     const lines = text.split("\n");
@@ -4171,7 +4229,7 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         const base = dropDialogueInvitation(text);
         // Fisher（静音镜）：没有 `<d>` → 人物闭嘴、声音落画外，音轨照旧保留。
         const quiet = dropSoundNote ? withH3NarrationShotNote(stripH3SoundNote(base)) : base;
-        return withH3VoiceContract(quiet, audioCount, 0, []);
+        return withH3AudioStatement(withH3VoiceContract(quiet, audioCount, 0, []));
     }
 
     // ⚠️ 多镜合并（每 2/3/4/5 镜一段）的提示词里有**多个** `- **对白**：` 块，
@@ -4264,12 +4322,14 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         const base = dropDialogueInvitation(text);
         // 同上：全段一个能认的台词都没有 → 静场（闭嘴 + 只有环境音），音轨照旧。
         const quiet = dropSoundNote ? withH3NarrationShotNote(stripH3SoundNote(base)) : base;
-        return withH3VoiceContract(quiet, audioCount, 0, speakers);
+        return withH3AudioStatement(withH3VoiceContract(quiet, audioCount, 0, speakers));
     }
     // 至少一镜转成了 `<d>`：如果同时还有 `- **对白**：无` 的镜头，补「按镜头的口型约定」——
     // 否则那几镜没有任何约束，模型会把它们填成人声噪杂（用户 2026-10-25 的混合镜诉求）。
     const joined = out.join("\n");
-    return withH3VoiceContract(mixedShots ? withH3MixedLipsyncNote(joined) : joined, audioCount, lineCount, speakers);
+    return withH3AudioStatement(
+        withH3VoiceContract(mixedShots ? withH3MixedLipsyncNote(joined) : joined, audioCount, lineCount, speakers),
+    );
 }
 
 /**
