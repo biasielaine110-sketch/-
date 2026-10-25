@@ -3998,6 +3998,61 @@ function h3SoundscapeOf(text: string) {
     return value;
 }
 
+/** 镜号标题：`【镜头 1】` / `[镜头1]` / `## 镜头 2` / `**镜头 1**` / `镜头 3：` / `第 2 镜`。 */
+const H3_SHOT_HEADING =
+    /^\s*(?:[-*]\s*)?\*{0,2}\s*(?:#{1,6}\s*)?(?:【[^】]{0,10}镜头[^】]{0,10}】|\[[^\]]{0,10}镜头[^\]]{0,10}\]|镜头\s*[0-9０-９一二三四五六七八九十]+|第\s*[0-9０-９一二三四五六七八九十]+\s*镜)/;
+
+/** 按镜号标题把一段提示词切成镜头块（没有标题行就是 1 块）。 */
+function splitH3ShotBlocks(text: string): string[] {
+    const blocks: string[][] = [];
+    for (const line of String(text || "").split("\n")) {
+        if (!blocks.length || H3_SHOT_HEADING.test(line)) blocks.push([line]);
+        else blocks[blocks.length - 1].push(line);
+    }
+    return blocks.map((lines) => lines.join("\n")).filter((block) => block.trim());
+}
+
+/**
+ * 没有镜号标题时的兜底切法：按 `- **对白**：` 出现的位置切段。
+ * 合并段（每 2/3/4/5 镜一段）在个别脚本里只剩多个对白块、没有 `【镜头 N】` 标题，
+ * 那时也得分段判断「这镜要不要说话」，否则又退回「一句槽位配多镜」。
+ */
+function splitH3ByDialogueLabels(text: string): string[] {
+    const lines = String(text || "").split("\n");
+    const starts = lines.reduce<number[]>((acc, line, index) => (H3_DIALOGUE_LABEL.test(line) ? [...acc, index] : acc), []);
+    if (starts.length < 2) return [];
+    return starts.map((start, position) => lines.slice(start, starts[position + 1] ?? lines.length).join("\n"));
+}
+
+/**
+ * 多镜提示词的**逐镜**声音槽位 —— 2026-10-25 第五次报障（用户：整张分镜表 + LoRA 0 仍在乱说话，
+ * 「静音镜有人说话」和「有声镜多出没写过的台词」同时出现）。
+ *
+ * 前几版只有**一句全局** `overall_soundscape`，混排时它必然自相矛盾：
+ * 有 `<d>` → 不敢写「无人声」（怕把该念的也否掉），于是整段只有环境音几个字；
+ * 可 H3 是音视频联合模型，一个槽位配不上多镜，它会自己把剩下的填满 ——
+ *   - 静音镜被填出人声（症状一）；
+ *   - 有声镜除了台词还多念几句（症状二，槽位没说「只念这些」）。
+ * 官方槽位本来就是一整段声音描述，所以多镜就**逐镜写**：每镜一行，静音镜显式排除人声，
+ * 有声镜显式限定「只念本镜标出的台词」。这也是唯一能同时压住两个症状的位置（正文里劝没用，见前四轮）。
+ */
+function h3PerShotSoundscape(text: string): string {
+    const byHeading = splitH3ShotBlocks(text);
+    const blocks = byHeading.length >= 2 ? byHeading : splitH3ByDialogueLabels(text);
+    if (blocks.length < 2) return "";
+    // 某一镜没写 `- **音效**：` 时，退回整段那条（分镜表常见：只在第一镜写了环境音）。
+    const global = h3SoundscapeOf(text);
+    return blocks
+        .map((block, index) => {
+            const own = h3SoundscapeOf(block);
+            const ambience = own === H3_SOUNDSCAPE_FALLBACK ? global : own;
+            return H3_SCRIPT_DIALOGUE_MARK.test(block)
+                ? `Shot ${index + 1}: ${ambience} Only the lines written for this shot are spoken; no other voices, no narration.`
+                : `Shot ${index + 1}: ${ambience} No dialogue, no voices.`;
+        })
+        .join("\n");
+}
+
 /**
  * 补官方声音槽位。`silent` 由「正文里有没有 `<d>`」决定 —— 和 `isMinimaxH3FisherSilentShot` 同一条判据。
  *
@@ -4014,7 +4069,13 @@ function withH3AudioStatement(text: string, negate = false) {
     const ambience = h3SoundscapeOf(text);
     const body = String(text || "").replace(/\s+$/, "");
     if (!negate) return `${body}\n\noverall_soundscape: ${ambience}`;
-    const soundscape = hasDialogue ? ambience : `${ambience} No dialogue, no voices.`;
+    // 多镜（整张分镜表 / 合并段）→ 逐镜写；单镜 → 一句写全。两种都只能落在槽位里。
+    const perShot = h3PerShotSoundscape(text);
+    if (perShot) return `${body}\n\noverall_soundscape:\n${perShot}\nnon_diegetic_music: N/A`;
+    const soundscape = hasDialogue
+        // 有台词也要说清楚「只念这些」——否则 H3 除了台词还会自己再编几句（症状：多出没写过的台词）。
+        ? `${ambience} Only the lines written above are spoken; no other voices, no narration.`
+        : `${ambience} No dialogue, no voices.`;
     return `${body}\n\noverall_soundscape: ${soundscape}\nnon_diegetic_music: N/A`;
 }
 
