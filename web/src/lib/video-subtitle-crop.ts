@@ -37,8 +37,20 @@ export function croppedVideoHeight(height: number, ratio: number = VIDEO_SUBTITL
 
 /** 选一个当前浏览器真的能录的容器。mp4 优先（体积小、剪辑软件直接吃），再退 webm。 */
 export function pickVideoRecorderMime(): string {
+    return pickVideoRecorderMimes()[0] || "";
+}
+
+/**
+ * 同上，但返回**整条候选链**。
+ *
+ * ⚠️ `MediaRecorder.isTypeSupported()` 会撒谎：个别内核（含部分 Chromium 构建）声称支持
+ * `video/mp4;codecs=avc1…`，实际 `start()` 之后一个字节都不吐。这时只试第一个候选就等于
+ * **整体放弃裁切、原片带字幕交给用户**（用户 2026-10-25「还是有字幕」的一种可能）。
+ * 所以调用方要能在「0 字节」时换下一个容器重录一次。
+ */
+export function pickVideoRecorderMimes(): string[] {
     const recorder = (globalThis as { MediaRecorder?: typeof MediaRecorder }).MediaRecorder;
-    if (!recorder || typeof recorder.isTypeSupported !== "function") return "";
+    if (!recorder || typeof recorder.isTypeSupported !== "function") return [];
     const candidates = [
         "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
         "video/mp4",
@@ -46,14 +58,15 @@ export function pickVideoRecorderMime(): string {
         "video/webm;codecs=vp8,opus",
         "video/webm",
     ];
+    const supported: string[] = [];
     for (const mime of candidates) {
         try {
-            if (recorder.isTypeSupported(mime)) return mime;
+            if (recorder.isTypeSupported(mime)) supported.push(mime);
         } catch {
             // isTypeSupported 在个别内核上会抛，忽略这一个候选。
         }
     }
-    return "";
+    return supported;
 }
 
 export type CroppedVideo = { blob: Blob; mimeType: string; width: number; height: number };
@@ -115,15 +128,15 @@ export async function cropVideoBottomBand(
     };
 
     if (typeof document === "undefined") return bail("当前环境没有 document");
-    const mimeType = pickVideoRecorderMime();
-    if (!mimeType) return bail("浏览器不支持 MediaRecorder 录制");
+    // 最多试两个容器：首选容器 0 字节时换下一个重录一次（`isTypeSupported` 会撒谎）。
+    const mimes = pickVideoRecorderMimes().slice(0, 2);
+    if (!mimes.length) return bail("浏览器不支持 MediaRecorder 录制");
 
     const ratio = Math.min(0.4, Math.max(0, Number(options?.ratio ?? VIDEO_SUBTITLE_BAND_RATIO) || 0));
     if (ratio <= 0) return bail("裁切比例为 0");
 
     let objectUrl = "";
     let video: HTMLVideoElement | null = null;
-    let recorder: MediaRecorder | null = null;
     try {
         const blob = source.blob || (source.url ? await fetchVideoBlob(source.url) : null);
         if (!blob || blob.size === 0) return bail("取不到成片字节（直连与代理都失败）");
@@ -144,38 +157,78 @@ export async function cropVideoBottomBand(
         const targetHeight = croppedVideoHeight(height, ratio);
         if (!width || !targetHeight || targetHeight >= height) return bail(`尺寸读不出来（${width}x${height} → ${targetHeight}）`);
 
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = targetHeight;
-        const context = canvas.getContext("2d", { alpha: false });
-        if (!context) return bail("拿不到 2d 画布上下文");
-
-        // 帧率跟着源走，取不到就 30；canvas.captureStream(fps) 会自动按这时钟抓帧。
-        const fps = 30;
-        const stream = canvas.captureStream(fps);
-        try {
-            // `captureStream()` 在 lib.dom 里没上 HTMLVideoElement（Chrome/Safari 都有），用结构化断言取。
-            const capturable = video as HTMLVideoElement & { captureStream?: () => MediaStream };
-            const captured = typeof capturable.captureStream === "function" ? capturable.captureStream() : null;
-            captured?.getAudioTracks().forEach((track: MediaStreamTrack) => stream.addTrack(track));
-        } catch {
-            // 拿不到音轨就录无声 —— 画面无字幕优先，音轨下不为例。
+        // 容器候选逐个试：首选容器 0 字节时换下一个重录一次（`isTypeSupported` 会撒谎 ——
+        // 声称支持 `video/mp4;codecs=avc1…`，实际 `start()` 之后一个字节都不吐）。
+        // 只试首发容器就等于「裁切整体放弃、原片带字幕交给用户」，这正是「还是有字幕」的一种可能。
+        for (const mime of mimes) {
+            const out = await recordBand(video, width, height, targetHeight, mime, options?.timeoutMs || 180000);
+            if (out) return { blob: out, mimeType: out.type || mime.split(";")[0] || "video/webm", width, height: targetHeight };
+            // 换容器重录前把元素倒回开头（上一轮可能已经播到结尾）。
+            try {
+                video.pause();
+                video.currentTime = 0;
+            } catch {
+                /* 倒不回去就只能放弃后面这些容器 */
+            }
         }
+        return bail(`录制器没吐出任何数据（试过 ${mimes.join(" / ")}）`);
+    } catch (error) {
+        console.warn("[video] 裁字幕带失败，保持原片", error);
+        return null;
+    } finally {
+        video?.pause();
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+    }
+}
 
-        const chunks: BlobPart[] = [];
-        recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6_000_000 });
+/**
+ * 把源元素的上半部分录一遍，返回重编码后的字节。
+ *
+ * 单独抽出来是为了**换容器重试**：`MediaRecorder.isTypeSupported()` 会撒谎，首选 mp4 在部分
+ * Chromium 构建上 `start()` 之后一个字节都不吐，这时必须能拿一个干净的 recorder 再来一次 webm。
+ *
+ * 返回 `null` = 这个容器没吐出可用字节 / 播放或编码抛错（调用方换下一个候选）。
+ */
+async function recordBand(
+    video: HTMLVideoElement,
+    width: number,
+    height: number,
+    targetHeight: number,
+    mimeType: string,
+    timeoutMs: number,
+): Promise<Blob | null> {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = targetHeight;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return null;
+
+    // 帧率跟着源走，取不到就 30；canvas.captureStream(fps) 会自动按这时钟抓帧。
+    const stream = canvas.captureStream(30);
+    try {
+        // `captureStream()` 在 lib.dom 里没上 HTMLVideoElement（Chrome/Safari 都有），用结构化断言取。
+        const capturable = video as HTMLVideoElement & { captureStream?: () => MediaStream };
+        const captured = typeof capturable.captureStream === "function" ? capturable.captureStream() : null;
+        captured?.getAudioTracks().forEach((track: MediaStreamTrack) => stream.addTrack(track));
+    } catch {
+        // 拿不到音轨就录无声 —— 画面无字幕优先，音轨下不为例。
+    }
+
+    const chunks: BlobPart[] = [];
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6_000_000 });
+    let drawing = true;
+    try {
         recorder.ondataavailable = (event) => {
             if (event.data && event.data.size) chunks.push(event.data);
         };
         const stopped = new Promise<void>((resolve) => {
-            recorder!.onstop = () => resolve();
+            recorder.onstop = () => resolve();
         });
         recorder.start(250);
 
         // 逐帧只画上半部分：源 (0,0,width,height-targetHeight) → 目标铺满整个 canvas。
-        let drawing = true;
         const draw = () => {
-            if (!drawing || !video) return;
+            if (!drawing) return;
             try {
                 context.drawImage(video, 0, 0, width, height - targetHeight, 0, 0, width, targetHeight);
             } catch {
@@ -197,25 +250,23 @@ export async function cropVideoBottomBand(
             await video.play();
         }
         draw();
-        await waitFor(video, "ended", options?.timeoutMs || 180000);
+        await waitFor(video, "ended", timeoutMs);
         drawing = false;
         recorder.stop();
         await stopped;
-        stream.getTracks().forEach((track) => track.stop());
 
         const out = new Blob(chunks, { type: mimeType.split(";")[0] });
-        if (!out.size) return bail("录制器没吐出任何数据");
-        return { blob: out, mimeType: out.type || "video/webm", width, height: targetHeight };
+        return out.size ? out : null;
     } catch (error) {
-        console.warn("[video] 裁字幕带失败，保持原片", error);
+        console.warn(`[video] 裁字幕带（${mimeType}）失败`, error);
         return null;
     } finally {
+        drawing = false;
         try {
-            recorder?.state !== "inactive" && recorder?.stop();
+            if (recorder.state !== "inactive") recorder.stop();
         } catch {
             /* ignore */
         }
-        video?.pause();
-        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        stream.getTracks().forEach((track) => track.stop());
     }
 }

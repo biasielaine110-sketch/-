@@ -1836,15 +1836,27 @@ function applyMinimaxH3VibeShortSettings(
             findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
         if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
 
-        // 兜底清扫：同图里其它还带 `<d>` 台词标记的文本节点（作者示例）一律清空，
+        // 兜底清扫：同图里其它**文本节点**上的作者示例一律清空，
         // 万一上面挑错了节点，也不会把别人的台词当成本片台词念出来。
+        // ⚠️ 2026-10-25 第二次返工：判据原来是「只有带 `<d>` 才清」，可作者那份示例不一定是 `<d>` 写法
+        // （也可能就是 `苏晚：你终于来了` 这种自然语言），漏网的示例照样会被念成「没说过的台词」。
+        // 现在改成「像台词/示例就清」：带 `<d>`、带 `(S1)`、带 `says:`、或「名字＋说/道/问/喊：」开头；
+        // 另外 `138` 是作者写死示例台词的固定落点（见 `4967cc2`），只要它不是本次提示词落点就无条件清空 ——
+        // 用户 2026-10-25「还是自动乱说话…这次是乱说中文」，头号嫌疑就是这类没带标记的示例。
         const promptNodeId = promptNode ? Object.keys(next).find((id) => next[id] === promptNode) || "" : "";
         for (const [id, node] of Object.entries(next)) {
             if (id === promptNodeId) continue;
             if (!/PrimitiveString|CLIPTextEncode|^Text$|String/i.test(String(node?.class_type || ""))) continue;
             const inputs = (node?.inputs || {}) as Record<string, unknown>;
             const value = inputs.value ?? inputs.text;
-            if (typeof value !== "string" || !/<\s*d\s*>/i.test(value)) continue;
+            if (typeof value !== "string" || !value.trim()) continue;
+            const looksLikeExampleDialogue =
+                id === "138" ||
+                /<\s*d\s*>/i.test(value) ||
+                /\(\s*S\d+\s*\)/.test(value) ||
+                /\bsays\s*[:：]/i.test(value) ||
+                /(?:^|\n)\s*[^：:\n]{1,12}\s*(?:说|道|问|喊)\s*[：:]/.test(value);
+            if (!looksLikeExampleDialogue) continue;
             if ("value" in inputs) inputs.value = "";
             else if ("text" in inputs) inputs.text = "";
         }
@@ -1991,15 +2003,27 @@ function applyMinimaxH3SelfLiftSettings(
             findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
         if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
 
-        // 兜底清扫：同图里其它还带 `<d>` 台词标记的文本节点（作者示例）一律清空，
+        // 兜底清扫：同图里其它**文本节点**上的作者示例一律清空，
         // 万一上面挑错了节点，也不会把别人的台词当成本片台词念出来。
+        // ⚠️ 2026-10-25 第二次返工：判据原来是「只有带 `<d>` 才清」，可作者那份示例不一定是 `<d>` 写法
+        // （也可能就是 `苏晚：你终于来了` 这种自然语言），漏网的示例照样会被念成「没说过的台词」。
+        // 现在改成「像台词/示例就清」：带 `<d>`、带 `(S1)`、带 `says:`、或「名字＋说/道/问/喊：」开头；
+        // 另外 `138` 是作者写死示例台词的固定落点（见 `4967cc2`），只要它不是本次提示词落点就无条件清空 ——
+        // 用户 2026-10-25「还是自动乱说话…这次是乱说中文」，头号嫌疑就是这类没带标记的示例。
         const promptNodeId = promptNode ? Object.keys(next).find((id) => next[id] === promptNode) || "" : "";
         for (const [id, node] of Object.entries(next)) {
             if (id === promptNodeId) continue;
             if (!/PrimitiveString|CLIPTextEncode|^Text$|String/i.test(String(node?.class_type || ""))) continue;
             const inputs = (node?.inputs || {}) as Record<string, unknown>;
             const value = inputs.value ?? inputs.text;
-            if (typeof value !== "string" || !/<\s*d\s*>/i.test(value)) continue;
+            if (typeof value !== "string" || !value.trim()) continue;
+            const looksLikeExampleDialogue =
+                id === "138" ||
+                /<\s*d\s*>/i.test(value) ||
+                /\(\s*S\d+\s*\)/.test(value) ||
+                /\bsays\s*[:：]/i.test(value) ||
+                /(?:^|\n)\s*[^：:\n]{1,12}\s*(?:说|道|问|喊)\s*[：:]/.test(value);
+            if (!looksLikeExampleDialogue) continue;
             if ("value" in inputs) inputs.value = "";
             else if ("text" in inputs) inputs.text = "";
         }
@@ -2553,15 +2577,27 @@ function applyMinimaxH3HdDynamicSettings(
             findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
         if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
 
-        // 兜底清扫：同图里其它还带 `<d>` 台词标记的文本节点（作者示例）一律清空，
+        // 兜底清扫：同图里其它**文本节点**上的作者示例一律清空，
         // 万一上面挑错了节点，也不会把别人的台词当成本片台词念出来。
+        // ⚠️ 2026-10-25 第二次返工：判据原来是「只有带 `<d>` 才清」，可作者那份示例不一定是 `<d>` 写法
+        // （也可能就是 `苏晚：你终于来了` 这种自然语言），漏网的示例照样会被念成「没说过的台词」。
+        // 现在改成「像台词/示例就清」：带 `<d>`、带 `(S1)`、带 `says:`、或「名字＋说/道/问/喊：」开头；
+        // 另外 `138` 是作者写死示例台词的固定落点（见 `4967cc2`），只要它不是本次提示词落点就无条件清空 ——
+        // 用户 2026-10-25「还是自动乱说话…这次是乱说中文」，头号嫌疑就是这类没带标记的示例。
         const promptNodeId = promptNode ? Object.keys(next).find((id) => next[id] === promptNode) || "" : "";
         for (const [id, node] of Object.entries(next)) {
             if (id === promptNodeId) continue;
             if (!/PrimitiveString|CLIPTextEncode|^Text$|String/i.test(String(node?.class_type || ""))) continue;
             const inputs = (node?.inputs || {}) as Record<string, unknown>;
             const value = inputs.value ?? inputs.text;
-            if (typeof value !== "string" || !/<\s*d\s*>/i.test(value)) continue;
+            if (typeof value !== "string" || !value.trim()) continue;
+            const looksLikeExampleDialogue =
+                id === "138" ||
+                /<\s*d\s*>/i.test(value) ||
+                /\(\s*S\d+\s*\)/.test(value) ||
+                /\bsays\s*[:：]/i.test(value) ||
+                /(?:^|\n)\s*[^：:\n]{1,12}\s*(?:说|道|问|喊)\s*[：:]/.test(value);
+            if (!looksLikeExampleDialogue) continue;
             if ("value" in inputs) inputs.value = "";
             else if ("text" in inputs) inputs.text = "";
         }
@@ -2773,13 +2809,13 @@ function applyMinimaxH3FisherSettings(
 
     // Keep ref_image_size on the authored "match" contract from Export (node 136).
 
-    // ⚠️ 静音镜这里**什么都不用改图** —— 用户 2026-10-25 的最终口径是
-    // 「把乱讲的台词直接换成旁白音，不让人物动嘴，只有我提示词里写的台词才动嘴」：
+    // ⚠️ 静音镜这里**什么都不用改图**：
     // 唇动是 `<d>` 驱动的，没有 `<d>` 就已经不会对口型；再由适配器在正文末尾追加一句
-    // `【旁白镜】…人物全程闭口…声音是画外旁白与环境音`（见 `withH3NarrationShotNote`），
-    // 声音就落到画外。所以：
+    // `【静场】人物全程闭口…本镜只有环境音`（见 `withH3NarrationShotNote`）。所以：
     //   - 音轨照旧（用户要环境音效，`84f8517` 摘过，已撤回）；
     //   - 画面/采样/解码链路一个字节不动。
+    // ⚠️ 这一句**绝不能再写成「声音是画外旁白」**（`e86f9dd` 那版）：那是给 H3 正向下单一条旁白，
+    // 成片里就真有一条中文旁白 + 为它烧进画面的字幕（用户 2026-10-25「乱说中文 + 带字幕」）。
     //
     // ⚠️ 风格 LoRA 例外：`405ab7c` 把它归零过一次，后来为了「有声镜/静音镜质感一致」又撤回了
     // （`84f8517`）。但撤回之后用户第三次报「有韩语 / 有字幕 / 有多余台词」，说明这三点压根不是
@@ -2813,15 +2849,27 @@ function applyMinimaxH3FisherSettings(
             findComfyNode(next, (node) => node.class_type === "PrimitiveStringMultiline" && typeof node.inputs?.value === "string");
         if (promptNode?.inputs && typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
 
-        // 兜底清扫：同图里其它还带 `<d>` 台词标记的文本节点（作者示例）一律清空，
+        // 兜底清扫：同图里其它**文本节点**上的作者示例一律清空，
         // 万一上面挑错了节点，也不会把别人的台词当成本片台词念出来。
+        // ⚠️ 2026-10-25 第二次返工：判据原来是「只有带 `<d>` 才清」，可作者那份示例不一定是 `<d>` 写法
+        // （也可能就是 `苏晚：你终于来了` 这种自然语言），漏网的示例照样会被念成「没说过的台词」。
+        // 现在改成「像台词/示例就清」：带 `<d>`、带 `(S1)`、带 `says:`、或「名字＋说/道/问/喊：」开头；
+        // 另外 `138` 是作者写死示例台词的固定落点（见 `4967cc2`），只要它不是本次提示词落点就无条件清空 ——
+        // 用户 2026-10-25「还是自动乱说话…这次是乱说中文」，头号嫌疑就是这类没带标记的示例。
         const promptNodeId = promptNode ? Object.keys(next).find((id) => next[id] === promptNode) || "" : "";
         for (const [id, node] of Object.entries(next)) {
             if (id === promptNodeId) continue;
             if (!/PrimitiveString|CLIPTextEncode|^Text$|String/i.test(String(node?.class_type || ""))) continue;
             const inputs = (node?.inputs || {}) as Record<string, unknown>;
             const value = inputs.value ?? inputs.text;
-            if (typeof value !== "string" || !/<\s*d\s*>/i.test(value)) continue;
+            if (typeof value !== "string" || !value.trim()) continue;
+            const looksLikeExampleDialogue =
+                id === "138" ||
+                /<\s*d\s*>/i.test(value) ||
+                /\(\s*S\d+\s*\)/.test(value) ||
+                /\bsays\s*[:：]/i.test(value) ||
+                /(?:^|\n)\s*[^：:\n]{1,12}\s*(?:说|道|问|喊)\s*[：:]/.test(value);
+            if (!looksLikeExampleDialogue) continue;
             if ("value" in inputs) inputs.value = "";
             else if ("text" in inputs) inputs.text = "";
         }
@@ -3896,24 +3944,36 @@ function stripH3SoundNote(text: string) {
 }
 
 /**
- * 静音镜的「旁白镜」声明 —— 用户 2026-10-25 的第三条思路：
- * 「把乱讲的台词，直接换成旁白音，不让人物动嘴，只有我提示词里写的台词才动嘴」。
+ * 静音镜的「静场」声明 —— 2026-10-25 第二次返工（上一版是「旁白镜」，已被证明是返效果）。
  *
- * 关键事实：H3 的**唇动是 `<d>` 驱动的**。这一镜没有 `<d>`（`- **对白**：无`），
- * 所以只要再明确一句「人物闭口」，长出来的声音就落在画外，成了旁白 —— 不用去跟模型抢
- * 「有没有声音」（那条路已经证明抢不赢：`对白：无` 写在正文里它照样开口，见 `84f8517`/`405ab7c`）。
- * 音轨照旧保留（用户要环境音效），风格 LoRA 也照旧用作者的强度（有声镜/静音镜质感一致）。
+ * ⚠️ 上一版写的是：`【旁白镜】…声音是画外旁白与环境音，旁白不出现在画面里。`
+ * 那句话在当时看是「顺水推舟」（用户诉求：把乱讲的台词变成不动嘴的画外音），但对 H3 是**正向下单**：
+ * H3 是音视频联合模型，文本编码器是 Qwen3-VL，**不听否定、只顺着名词往下生成** ——
+ * 你要一条「画外旁白」，它就真的配一条旁白音轨，而旁白念的自然就是提示词本身的语言。
+ * 用户 2026-10-25 的实样完全对得上：「这次不是乱说韩语了，是乱说中文」——
+ * `6ce1a6f` 把风格 LoRA 归零，韩语人声（LoRA 先验）消失了；剩下这条**中文旁白**正是这句话招来的；
+ * 而**一旦有了人声，H3 就顺手把字幕烧进画面**（它训练数据里的剧集画面就是带字幕的），
+ * 所以「乱说话」和「带字幕」是同一个根因，不是两件事。
  *
- * 写法跟着作者导出里那套方言走：句末用【】标题 + 正向的画面描述，别写成一大段禁止清单
- * （堆「禁止旁白/画外音/内心独白…」等于把「人声」这些词喂给它）。
+ * 这一版的口径：一个「旁白 / 画外音 / 人声 / 台词 / 对白 / 字幕 / 文字」都不许出现。
+ * 只留两句正向事实 —— 人物闭口（唇动只由 `<d>` 驱动，这一镜没有 `<d>`）、本镜只有环境音。
+ * 字幕不在提示词里跟模型抢（抢不过，见上面的机制），交给生成后的底部裁切
+ * （`lib/video-subtitle-crop.ts`）兜底。
  */
-const H3_NARRATION_SHOT_NOTE =
-    "【旁白镜】画面内人物全程闭口，唇形与下颌静止，没有开口说话的动作；声音是画外旁白与环境音，旁白不出现在画面里。";
+const H3_NARRATION_SHOT_NOTE = "【静场】画面内人物全程闭口，唇形与下颌静止，没有开口动作；本镜只有环境音。";
 
-/** 幂等：正文里已经有这句就不再追加。 */
+/**
+ * 幂等：正文里已经有 `【静场】` 就不再追加。
+ * ⚠️ 顺手摘掉旧版的 `【旁白镜】…` 行（招人声的那句）—— 老提示词/用户手抄的脚本里可能还留着，
+ * 不清掉就等于仍然在下单旁白。
+ */
 function withH3NarrationShotNote(text: string) {
-    const body = text.replace(/\s+$/, "");
-    if (body.includes("【旁白镜】")) return body;
+    const body = text
+        .split("\n")
+        .filter((line) => !line.includes("【旁白镜】"))
+        .join("\n")
+        .replace(/\s+$/, "");
+    if (body.includes("【静场】")) return body;
     return `${body}\n\n${H3_NARRATION_SHOT_NOTE}`;
 }
 
@@ -3924,21 +3984,30 @@ function withH3NarrationShotNote(text: string) {
  *
  * 这就是 H3 的原生特性：**唇动只由 `<d>` 驱动**。一个镜头写了 `<d>` 就开口，没写就闭嘴。
  * 但模型不知道我们这套约定，它会把「没写台词」理解成「自由发挥」。所以要给它一句**按镜头的映射**：
- * 有 `<d>` 的镜头正常开口，其余镜头闭口 + 声音落画外。
+ * 有 `<d>` 的镜头正常开口，其余镜头闭口 + 只有环境音。
  *
- * ⚠️ 和 `【旁白镜】` 是**互斥**的两件事，别混用：
- *   - 整段一句话都没有台词 → `【旁白镜】`（全片闭嘴、全片画外音）；
+ * ⚠️ 和 `【静场】` 是**互斥**的两件事，别混用：
+ *   - 整段一句话都没有台词 → `【静场】`（全片闭嘴、只有环境音）；
  *   - 有台词也有静音镜 → `【口型约定】`（分镜处理）。写成「全片闭嘴」会把该念的台词也一起闭掉。
  * ⚠️ 这段文字里**不许出现 `<d>` 字面量**：H3 的台词方言是成对的 `<d>…</d>`，单独露一个开标签
  * 可能把后面整段（含台词锁定）都算进台词里。改用「标了台词的镜头」这种自然语言指代。
+ * ⚠️ 也**不许出现「画外旁白」**（2026-10-25 第二次返工的教训，见 `H3_NARRATION_SHOT_NOTE`）：
+ * 静音镜那半句「声音是画外旁白」等于给模型下单一条中文旁白，连带把字幕烧进画面。
  * ⚠️ 还是要短：H3 不是听指令的 LLM，堆禁止清单等于把「台词/人声」喂给它。
  */
 const H3_MIXED_LIPSYNC_NOTE =
-    "【口型约定】本次包含多个镜头：标了台词的镜头，人物按台词正常开口说话；没有标台词的镜头，人物全程闭口，唇形与下颌静止，声音是画外旁白与环境音，人物不在画面里开口。";
+    "【口型约定】本次包含多个镜头：标了台词的镜头，人物按台词正常开口说话；没有标台词的镜头，人物全程闭口，唇形与下颌静止，只有环境音。";
 
-/** 幂等：正文里已经有这句就不再追加。 */
+/**
+ * 幂等：正文里已经有这句就不再追加。
+ * ⚠️ 旧版尾巴是「声音是画外旁白与环境音，人物不在画面里开口」—— 含「旁白」的旧行整行摘掉再贴新版。
+ */
 function withH3MixedLipsyncNote(text: string) {
-    const body = text.replace(/\s+$/, "");
+    const body = text
+        .split("\n")
+        .filter((line) => !line.includes("【口型约定】") && !line.includes("画外旁白"))
+        .join("\n")
+        .replace(/\s+$/, "");
     if (body.includes("【口型约定】")) return body;
     return `${body}\n\n${H3_MIXED_LIPSYNC_NOTE}`;
 }
@@ -4193,7 +4262,7 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
     // 一个能认的台词都没有（全是 `无` / 全被守住）→ 有音频时只加一行「本段没有台词」，否则原样交出去。
     if (!converted) {
         const base = dropDialogueInvitation(text);
-        // 同上：全段一个能认的台词都没有 → 旁白镜（闭嘴 + 画外音），音轨照旧。
+        // 同上：全段一个能认的台词都没有 → 静场（闭嘴 + 只有环境音），音轨照旧。
         const quiet = dropSoundNote ? withH3NarrationShotNote(stripH3SoundNote(base)) : base;
         return withH3VoiceContract(quiet, audioCount, 0, speakers);
     }
@@ -5405,15 +5474,17 @@ async function runRunningHubWorkflowWithKey(args: {
     // 曾经试过整块删掉，已回滚 —— 分镜表的写法不归我们改。
     // ⚠️ 光「不挂参考音频」还不够：用户随后仍报「还是在说韩文」，日志证明提示词干净（audio=0、
     // noDialogue=1）。根因在作者焊死的韩语味风格 LoRA，文本压不住。
-    // 用户最终口径（2026-10-25）：「把乱讲的台词直接换成旁白音，不让人物动嘴，只有我提示词里
-    // 写的台词才动嘴」—— 于是**不去消灭声音**，而是让声音落画外：适配器在无 `<d>` 的正文末尾
-    // 追加 `【旁白镜】人物全程闭口…声音是画外旁白与环境音`（`withH3NarrationShotNote`）。
+    // ⚠️ 2026-10-25 第二次返工：`e86f9dd` 曾经在无 `<d>` 的正文末尾追加
+    // `【旁白镜】…声音是画外旁白与环境音` —— 那是**正向下单一条旁白**，LoRA 归零后韩语没了，
+    // 剩下的就是这条中文旁白 + 为它烧进画面的字幕（「这次不是乱说韩语了，是乱说中文」）。
+    // 现在改成 `【静场】人物全程闭口…本镜只有环境音`（`withH3NarrationShotNote`），
+    // 提示词里不再出现「旁白/画外音/人声/字幕/文字」任何一个词。
     // 所以这里既**不摘音轨**（`84f8517` 摘过，已撤回）。
     // ⚠️ 风格 LoRA 例外（2026-10-25 第三次报障后改的）：那支 LoRA 自带韩语/硬字幕/自编台词，
     // 现在归到 `videoFisherLoraStrength` 档位、默认 0 = 关（见 `applyMinimaxH3FisherSettings`）。
     const fisherDialogueFree = isMinimaxH3FisherSilentShot(workflowId, request.prompt);
-    // 混合镜（有台词 + 有 `- **对白**：无`）：贴的是「口型约定」而非「全片旁白」，日志要能分开看，
-    // 否则排查时会把「该念的没念」误判成旁白镜规则串了。
+    // 混合镜（有台词 + 有 `- **对白**：无`）：贴的是「口型约定」而非「全片静场」，日志要能分开看，
+    // 否则排查时会把「该念的没念」误判成静场规则串了。
     const fisherMixedShots = isMinimaxH3FisherWorkflow(workflowId) && !fisherDialogueFree && declaresH3SilentDialogue(request.prompt);
     // 「韩语还没走」的第一条排查线索：实际提交的风格 LoRA 权重。用户报障时复制这一行就够。
     if (isMinimaxH3FisherWorkflow(workflowId)) {
@@ -5486,7 +5557,7 @@ async function runRunningHubWorkflowWithKey(args: {
     const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
     if (referenceCount) {
         console.info(
-            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1 narrationShot=1" : ""}${fisherMixedShots ? " lipsyncMixed=1" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1 silentShot=1" : ""}${fisherMixedShots ? " lipsyncMixed=1" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
         );
     }
     let task: RunningHubTaskView;
