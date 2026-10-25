@@ -1194,7 +1194,7 @@ export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; video
     if (!kept.length) return "";
     if (kept.length === 1) return kept[0].body;
     const merged = [`多镜头连续片段（共 ${kept.length} 镜）：`, ...kept.map((item) => `第${item.no}镜\n${item.body}`)].join("\n\n");
-    // 第四套每镜的提示词末尾都带一句「不要出现字幕和文字…」：4 镜合并会重复 4 遍。
+    // 第四套每镜的提示词末尾都带一块尾巴（【禁止项】/【强制声明】四行）：4 镜合并会重复 4 遍。
     // 它是**整段**的总要求，所以只留一条、放到最末（没有这句时原样返回，其它套不受影响）。
     const collapsed = collapseDirectorSoundNotes(merged);
     // 同一场戏各镜的风格提示词通常一模一样：逐镜重复 N 遍只会把提示词撑长、稀释画面描述。同文只留一条。
@@ -1202,7 +1202,7 @@ export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; video
 }
 
 /**
- * 多镜合并时把「不要出现字幕和文字…」收敛成一条（放最末）。
+ * 多镜合并时把尾巴块（【禁止项】/【强制声明】四行）收敛成一块（放最末）。
  * 一句都没有时**原样返回**，所以第一/二/三套的合并结果一个字节都不变。
  */
 function collapseDirectorSoundNotes(text: string): string {
@@ -3617,32 +3617,61 @@ export function applyStoryScriptTemplateOverlayToShot(
 export const STORY_SCRIPT_DIRECTOR_VIDEO_LABELS = ["时长", "景别／机位", "运镜", "人物站位与构图", "主体与动作", "光影与色调", "转场建议", "对白"] as const;
 
 /**
- * 第四套：`video_motion_prompt` 末尾**默认追加**的一句声音要求。
+ * 第四套：`video_motion_prompt` 末尾**默认追加**的一块固定尾巴。
  *
- * 2026-10-25 用户改口径：「不要出现字幕和文字，不要音乐，只要对白和环境音效。」
- * —— 比原来那句多了「文字」（画面里的招牌/标题/水印也算）、把「只要台词」换成「只要对白」。
+ * 2026-10-26 用户改口径（原话「第4套执行方案在出 视频运动提示词 时，最后的添加内容修改为如下」）：
+ * ```
+ * 【禁止项】
+ * 文字/UI/水印/Logo/角标/可读文字/真实UI
+ * 【强制声明】
+ * 无背景音乐,仅保留环境音与人声和音效;画面禁字幕/文字/水印/Logo;禁止可读文字(指画面字幕文字,不含人声台词)
+ * ```
+ * ⚠️ **逐字照抄，连半角标点都不要「美化」**（用户原文就是半角 `,` `;` `(）`）—— 这块是给视频模型的
+ * 负向约束，格式由用户指定，不是我们发挥的地方。改它之前先问。
  *
- * 为什么是后置追加而不是让模型自己写：用户要的是「每一镜的输出里都有这一行」，
+ * 为什么是后置追加而不是让模型自己写：用户要的是「每一镜的输出里都有这一块」，
  * 这种「每条都必须带」的东西靠提示词会漏，靠 `normalizeStoryScriptDirectorRows` 才能 100% 保证。
- * 提示词里也照样写一遍（模型自己写了就按下面的判据去重，不会出现两行）。
+ * 提示词里也照样写一遍（模型自己写了就按下面的判据去重，不会出现两份）。
  */
-export const STORY_SCRIPT_DIRECTOR_SOUND_NOTE = "不要出现字幕和文字，不要音乐，只要对白和环境音效。";
+export const STORY_SCRIPT_DIRECTOR_SOUND_NOTE_LINES = [
+    "【禁止项】",
+    "文字/UI/水印/Logo/角标/可读文字/真实UI",
+    "【强制声明】",
+    "无背景音乐,仅保留环境音与人声和音效;画面禁字幕/文字/水印/Logo;禁止可读文字(指画面字幕文字,不含人声台词)",
+] as const;
+
+/** 整块（四行，行间无空行）。判重 / 收敛 / 生成提示词都用这个字符串。 */
+export const STORY_SCRIPT_DIRECTOR_SOUND_NOTE = STORY_SCRIPT_DIRECTOR_SOUND_NOTE_LINES.join("\n");
 
 /**
- * 声音约定行的**判据**（新旧两版共用）。
+ * **旧版**那一句的指纹（≤2026-10-25）：`不要出现字幕和文字，不要音乐，只要对白和环境音效。`
  *
- * ⚠️ 别整句比对：新旧两版只差后半句（老版「只要台词」、新版「只要对白」），而且模型可能不写句号、
- * 顺手加个 `- `；节点里已存的旧文案也必须照样认出来（否则合并时会叠成两行、静音镜也剥不掉）。
- * 两版都以「不要出现字幕」开头，用它当指纹。
+ * 节点里已存的旧文案必须照样认出来，否则合并时会叠成两段、干净模式也剥不掉。
+ * ⚠️ 别整句比对：旧版还分「只要台词」/「只要对白」两代，只有「不要出现字幕」是共有的。
  */
 export const STORY_SCRIPT_DIRECTOR_SOUND_NOTE_MARK = "不要出现字幕";
 
-/** 这一行是不是那句声音约定（去前导 `- ` / `* ` / 空白后按键词判）。 */
+/**
+ * 尾巴块的**行首指纹**（新旧两代共用）。命中任意一条即视为「这行属于我们追加的尾巴」。
+ *
+ * 新版是四行、不再以「不要出现字幕」开头，所以从「整句前缀」升级成「一组行首指纹」；
+ * 旧版那句是单行，仍然以 `不要出现字幕` 开头 → 老节点照样认。
+ */
+const STORY_SCRIPT_DIRECTOR_SOUND_NOTE_PREFIXES = [
+    STORY_SCRIPT_DIRECTOR_SOUND_NOTE_MARK,
+    "【禁止项】",
+    "【强制声明】",
+    "文字/UI/水印/Logo",
+    "无背景音乐",
+];
+
+/** 这一行是不是那句声音约定 / 尾巴块的一部分（去前导 `- ` / `* ` / 空白后按行首指纹判）。 */
 export function isStoryScriptDirectorSoundNoteLine(line: unknown): boolean {
-    return String(line ?? "")
+    const value = String(line ?? "")
         .trim()
-        .replace(/^[-*·•\s]+/, "")
-        .startsWith(STORY_SCRIPT_DIRECTOR_SOUND_NOTE_MARK);
+        .replace(/^[-*·•\s]+/, "");
+    if (!value) return false;
+    return STORY_SCRIPT_DIRECTOR_SOUND_NOTE_PREFIXES.some((prefix) => value.startsWith(prefix));
 }
 
 /**
@@ -3678,7 +3707,8 @@ export const STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT = [
     "- `- **对白**：` 单独占一行，台词写在**下一行**（不加引号也行）；这一镜没有对白就写 `- **对白**：无`。",
     "- **台词必须标注说话人**：每一行台词都以 `角色名：` 开头，名字用 `角色1` / `角色2` 列里的原名（`苏晚：“……”`）。一镜里有两个人说话就一行一个说话人（`苏晚：“……”` 换行 `陈默：“……”`），**禁止**写成没有主语的裸台词（`“……”`）—— 视频模型要据此判断谁在第几秒开口，缺主语时双人对白会串音或干脆不出声。",
     "- 八行都要有，不许合并成一段，也不许省成一句概括。",
-    `- 八行之后**另起一行**、原样写上这一句（不带标签、不要并进对白）：\`${STORY_SCRIPT_DIRECTOR_SOUND_NOTE}\``,
+    "- 八行之后**另起一段**，把下面这一整块（四行）**原样照抄**：不加任何标签、不加代码框、不要并进对白、不要改写其中的标点：",
+    STORY_SCRIPT_DIRECTOR_SOUND_NOTE,
     // 图像段（`shot_prompt`）同样不许写角色外貌 —— 用户 2026-10-24 晚追加要求。
     // 放在同一个常量里，是因为它跟上面一样「只在第四套生效、且必须 system + 任务书两处都挂」。
     "",
@@ -3837,7 +3867,7 @@ function stripDirectorAppearanceFromPrompt(value: unknown, names: readonly strin
     return result || names.join("、");
 }
 
-/** 第四套：给视频运动提示词补上「不要字幕和音乐」那一行（已经有就一个字不动）。 */
+/** 第四套：给视频运动提示词补上尾巴块（【禁止项】/【强制声明】四行，已经有一块就一个字不动）。 */
 function withDirectorSoundNote(text: string): string {
     const value = String(text || "");
     if (!value.trim()) return value;
@@ -3940,7 +3970,8 @@ function ensureDirectorDialogueSpeakers(value: unknown, names: readonly string[]
  * 值可能折行（`- **对白**：` 空值 + 下一行台词），所以从标签行一直收到下一个 `- **标签**` /
  * 标题 / 末尾那句声音要求为止。收完交给 `ensureDirectorDialogueSpeakers` 补说话人。
  *
- * ⚠️ 必须停在那句 `不要出现字幕和文字，不要音乐，只要对白和环境音效。`（它在八行之后、不带标签），否则会被当成台词补上人名。
+ * ⚠️ 必须停在尾巴块（`【禁止项】` / `【强制声明】` 四行，旧版是「不要出现字幕和文字…」那一句；
+ * 它在八行之后、不带标签），否则会被当成台词补上人名。
  * ⚠️ 幂等：合规的台词（已带说话人）收完与原文逐字相同 → 原样吐回。
  */
 function rewriteDirectorDialogueBlock(blockText: string, names: readonly string[]): string {

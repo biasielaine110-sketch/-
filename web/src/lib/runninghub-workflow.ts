@@ -6,6 +6,10 @@
 
 import axios from "axios";
 
+// 第四套 `video_motion_prompt` 末尾那块固定尾巴（`【禁止项】` / `【强制声明】`）的**唯一判据**。
+// 全项目只有 `constant/story-script.ts` 一处定义文案与指纹，这里只借用「这一行是不是我们追加的尾巴」，
+// 绝不在这里抄一份字符串 —— 文案改过一次了（`不要出现字幕…` → 四行块），抄一份就会漂。
+import { isStoryScriptDirectorSoundNoteLine } from "@/constant/story-script";
 import i18n from "@/i18n";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import {
@@ -4168,19 +4172,21 @@ function stripH3Scaffolding(text: string, options?: { keepStyleFields?: boolean 
 }
 
 /**
- * 静音镜（Fisher 两个 id）连**我们自动追加的那句声音说明**也一起拿掉。
+ * 干净模式（Fisher 两个 id + 独立模型）连**我们自动追加的那块尾巴**也一起拿掉。
  *
- * `不要出现字幕和文字，不要音乐，只要对白和环境音效。`（旧版「只要台词…」）是第四套方案自动补的
- * （用户脚本里没有），对 `- **对白**：无` 的镜头来说它仍然在要一条「有音效的音轨」—— 会议室、街头
- * 这类场景，H3 会把它填成一片人声噪杂，听起来就是「没说台词却在说话」。
+ * 第四套会给每条 `video_motion_prompt` 末尾补一块固定尾巴（2026-10-26 起是四行
+ * `【禁止项】` / `【强制声明】`；更早是单行 `不要出现字幕和文字，不要音乐，只要对白和环境音效。`）。
+ * 那是**我们写的、用户脚本里没有的**说明文：H3 不解析它、只会当素材念，而且它明确在要一条
+ * 「有音效 / 有人声」的音轨 —— 静音镜（`- **对白**：无`）会被填成一片人声噪杂。
  * 用户 2026-10-25：「静音镜正常是这样的，`- **对白**：无`」—— 那一行是分镜表本身，不能动；
- * 能动的是这句我们自己的模板句，静音镜就整句不给。
- * ⚠️ 判据用 `不要出现字幕` 这个两版共有的前缀，别整句比对（旧文案还在老节点里）。
+ * 能动的是我们追加的尾巴，干净模式整块不给。
+ * ⚠️ 判据**只走** `isStoryScriptDirectorSoundNoteLine`（唯一来源在 `constant/story-script.ts`）：
+ * 它同时认新版四行的行首指纹与旧版「不要出现字幕…」前缀，别在这里再抄一份字符串。
  */
 function stripH3SoundNote(text: string) {
     return text
         .split("\n")
-        .filter((line) => !line.trim().replace(/^[-*·•\s]+/, "").startsWith("不要出现字幕"))
+        .filter((line) => !isStoryScriptDirectorSoundNoteLine(line))
         .join("\n");
 }
 
@@ -4698,8 +4704,9 @@ export function adaptMinimaxH3ReferencePrompt(
         while (cursor < lines.length) {
             const next = lines[cursor];
             if (/^\s*-\s*\*\*/.test(next) || /^\s*#{1,6}\s/.test(next)) break;
-            // 八行之后那句「不要出现字幕和文字…」（旧版「不要出现字幕和音乐…」）不是台词，别把它补上人名。
-            if (next.trim().replace(/^[-*·•\s]+/, "").startsWith("不要出现字幕")) break;
+            // 八行之后那块尾巴（`【禁止项】` / `【强制声明】` 四行；旧版是「不要出现字幕…」一句）
+            // 不是台词，别把它补上人名 —— 判据统一走 `isStoryScriptDirectorSoundNoteLine`。
+            if (isStoryScriptDirectorSoundNoteLine(next)) break;
             // ⚠️ 用户 2026-10-25：`- **对白**：` 的内容**只收录到 `视觉风格：` 之前** ——
             // 那一行是画面风格不是台词；同理任何新字段行、下一镜的镜号标题都是边界。
             if (H3_DIALOGUE_BOUNDARY.test(next)) break;
