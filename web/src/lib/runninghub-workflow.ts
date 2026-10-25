@@ -2752,6 +2752,25 @@ function applyMinimaxH3FisherSettings(
 
     // Keep ref_image_size on the authored "match" contract from Export (node 136).
 
+    // ⚠️ 静音镜（`- **对白**：无`）**不挂音轨** —— 用户 2026-10-25「还是在说韩文」。
+    // 真实提交日志已经证明提示词这条线是干净的：`audio=0`（没挂参考音频）、`noDialogue=1`、
+    // 正文是我们自己的中文、作者写死在节点 138 的韩文示例也被无条件覆盖了 —— 模型照样开口说韩语。
+    // 原因是 H3 是音视频联合模型，而作者焊死的节点 279 `MysticXXX_MMH3-V1`（强度 0.5）是
+    // 真人实拍短片连声音一起训出来的 LoRA，音频分支被带成韩语腔：纯文本约束压不住它
+    // （`对白：无` 就写在提示词里也没用），图里也没有任何音频输入可以摘（无 LoadAudio / ref_audios）。
+    // 唯一确定性手段是把成片 sink 的 `audio` 输入断掉：画面 / LoRA / 提示词一个字节都不动，
+    // 环境音效交给用户后期 —— 这一镜本来就没有台词。
+    // ⚠️ 判据是「用户明写了 `- **对白**：无`」，不是「没有 <d>」：后者会把「台词写歪了没转成
+    // <d>」的有声镜静悄悄变成无声片，那种情况宁可出声也不该悄悄静音。
+    if (shouldMuteH3AudioSink(prompt)) {
+        for (const node of Object.values(next)) {
+            if (!/^(VHS_VideoCombine|SaveVideo|SaveWEBM)$/i.test(String(node?.class_type || ""))) continue;
+            const sink = node?.inputs as Record<string, unknown> | undefined;
+            if (!sink || !("audio" in sink)) continue;
+            delete sink.audio;
+        }
+    }
+
     // ⚠️ 空提示词也要写。作者导出里那个 prompt 节点（138）塞着一段示例台词，
     // 「prompt 为空就不写」等于把作者的示例台词原样念出来 —— 用户「总是出现我没写过的台词」
     // 最像这个（示例台词是作者写死的，所以每次都是同一批句子）。
@@ -4104,6 +4123,30 @@ export function isMinimaxH3FisherSilentShot(workflowId: string | null | undefine
 }
 
 /**
+ * 分镜表里「这一镜没有台词」的**明确写法**：`- **对白**：无`（用户 2026-10-25：
+ * 「静音镜正常是这样的，`- **对白**：无`」）。
+ *
+ * ⚠️ 只用来决定「要不要挂音轨」，**绝不改写这一行**。故意比 `isMinimaxH3FisherSilentShot`
+ * 更严：那个只问「有没有 `<d>`」（台词转换失败也算静音），这个问「用户是不是明说了没有台词」。
+ * 用严的那个做静音判据，才不会把「台词写歪了没转成 `<d>`」的有声镜静悄悄变成无声片。
+ */
+export function declaresH3SilentDialogue(prompt: string) {
+    return /^[^\S\r\n]*[-*]?\s*\*\*对白\*\*\s*[：:]\s*(?:无|none|n\/a|（无）|\(无\)|—+|–|-)\s*[。.]?\s*$/im.test(String(prompt || ""));
+}
+
+/**
+ * 静音镜要不要**把成片音轨摘掉**（只给 Fisher 的 sink 用）。
+ *
+ * 两个条件同时成立才摘：① 用户明写了 `- **对白**：无`；② 整段提示词里**没有**任何 `<d>`。
+ * ② 是给「多镜合并」留的：一条提示词里既有 `对白：无` 又有别人说话时，`<d>` 在 → 不能摘，
+ * 否则会把该念的台词一起变成无声片。
+ */
+export function shouldMuteH3AudioSink(prompt: string) {
+    const text = String(prompt || "");
+    return declaresH3SilentDialogue(text) && !/<\s*d\s*>/i.test(text);
+}
+
+/**
  * 所有 MiniMax H3 视频家族 —— 台词方言（`<d>[语言]` + `(S1) says:`）统一在这里收口。
  *
  * 只在 H3 上写方言：别的模型（Seedance / Kling / mj 等）吃自然语言，改了就是破坏。
@@ -5274,7 +5317,11 @@ async function runRunningHubWorkflowWithKey(args: {
     // 这一镜本来就没台词，音色参考没有任何用处，却正好是「自己乱说话」的燃料。
     // ⚠️ 提示词里那行 `- **对白**：无` **保持原样**（用户 2026-10-25：「静音镜正常是这样的」），
     // 曾经试过整块删掉，已回滚 —— 分镜表的写法不归我们改。
+    // ⚠️ 光「不挂参考音频」还不够：用户随后仍报「还是在说韩文」，日志证明提示词干净（audio=0、
+    // noDialogue=1）。根因在作者焊死的韩语味 LoRA，文本压不住 —— 所以静音镜再来一步
+    // 「成片 sink 不接音轨」（在 `applyMinimaxH3FisherSettings` 里做，画面/提示词不动）。
     const fisherDialogueFree = isMinimaxH3FisherSilentShot(workflowId, request.prompt);
+    const fisherSilentDeclared = isMinimaxH3FisherWorkflow(workflowId) && shouldMuteH3AudioSink(request.prompt);
     const audioSources = fisherDialogueFree ? [] : (request.referenceAudioDataUrls || []).filter(Boolean).slice(0, 3);
     // 文武双全 only: its clips are big *and* it uploads audio/video through the same endpoint, so let
     // the browser reach RunningHub first and keep the edge out of the byte path. Other families keep
@@ -5340,7 +5387,7 @@ async function runRunningHubWorkflowWithKey(args: {
     const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
     if (referenceCount) {
         console.info(
-            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1" : ""}${fisherSilentDeclared ? " audioMuted=1" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
         );
     }
     let task: RunningHubTaskView;
