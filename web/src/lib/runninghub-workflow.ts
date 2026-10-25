@@ -3954,11 +3954,20 @@ function extractH3Speakers(text: string) {
  *   乱说话」—— 追加的「台词/人声/对白」说明文字本身会被音视频模型当成内容。
  * ⚠️ 只在 H3 家族调用（见 `isMinimaxH3FamilyWorkflow`），别的模型一个字节不变。
  */
-export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioCount?: number }): string {
+export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioCount?: number; dropSilentDialogue?: boolean }): string {
     // ⚠️ 空提示词不能原样交给 H3：它是**音视频联合生成**的模型，空提示词 + 参考图会让它自己编一段戏。
     // 先垫一句纯画面描述（不加任何「台词」相关的说明）。
     const text = String(prompt || "").trim() ? String(prompt) : H3_SILENT_FALLBACK_PROMPT;
     const audioCount = Math.max(0, Math.min(3, Math.round(Number(options?.audioCount) || 0)));
+    /**
+     * ⚠️ Fisher 那两个 id 专用（`isMinimaxH3FisherWorkflow`）：`- **对白**：无` 连**字段名都不给**。
+     *
+     * 用户 2026-10-25：「`- **对白**：无` 的情况还是会自己乱说话」。H3 是音视频联合模型
+     * （文本编码器 Qwen3-VL），不是听指令的 LLM —— 对一整段 `- **对白**：无` 它只看到「对白」
+     * 这个字段名，倾向就是开口；把它整块拿掉、提示词里一个「对白/台词」都不出现，才是真的没有。
+     * 只删「值只有 `无` / 空」的块（`spoken.length === 0`），块里还夹着画面描述的保持原样。
+     */
+    const dropSilentDialogue = Boolean(options?.dropSilentDialogue);
 
     // 作者/用户自己写的 H3 台词标记 → 正文不动，只补契约（不补就照样会念参考音轨里的内容）。
     if (/<\s*d\s*>/i.test(text)) {
@@ -4051,6 +4060,11 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         }
         if (!blocks.length) {
             // 默镜 / 只有 `无`：原样保留（不补人名、不生成空 <d>）。
+            // Fisher 两个 id：连 `- **对白**：无` 这一整行都不给（见 `dropSilentDialogue`）。
+            if (dropSilentDialogue && spoken.length === 0) {
+                index = cursor;
+                continue;
+            }
             out.push(...lines.slice(index, cursor));
             index = cursor;
             continue;
@@ -4061,8 +4075,21 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         index = cursor;
     }
     // 一个能认的台词都没有（全是 `无` / 全被守住）→ 有音频时只加一行「本段没有台词」，否则原样交出去。
-    if (!converted) return withH3VoiceContract(dropDialogueInvitation(text), audioCount, 0, speakers);
+    if (!converted) return withH3VoiceContract(dropDialogueInvitation(out.join("\n")), audioCount, 0, speakers);
     return withH3VoiceContract(out.join("\n"), audioCount, lineCount, speakers);
+}
+
+/**
+ * Work-Fisher（两个 id）这一镜**有没有要念的台词**。
+ *
+ * 没有 → 提交时（a）`- **对白**：无` 整行拿掉，（b）参考音频整条不提交。
+ * 用户 2026-10-25：「`- **对白**：无` 的情况还是会自己乱说话」——H3 是音视频联合模型，
+ * 给它一条人声参考等于递了一条「待续写的人声轨」，而这一镜本来没有台词。
+ * 判断复用适配器（纯函数，`audioCount: 0` 时不会追加任何契约），只认 `<d>`。
+ */
+export function isMinimaxH3FisherSilentShot(workflowId: string | null | undefined, prompt: string) {
+    if (!isMinimaxH3FisherWorkflow(workflowId)) return false;
+    return !/<\s*d\s*>/i.test(adaptMinimaxH3ReferencePrompt(prompt, { audioCount: 0, dropSilentDialogue: true }));
 }
 
 /**
@@ -5231,7 +5258,12 @@ async function runRunningHubWorkflowWithKey(args: {
     // Audio references: upload first, then write them into the graph *before* the per-workflow
     // patch. Singularity's patch deletes `LoadAudio("None")` slots as invalid; filling them first is
     // what keeps the slot, and the author's node ids, alive.
-    const audioSources = (request.referenceAudioDataUrls || []).filter(Boolean).slice(0, 3);
+    // ⚠️ 用户 2026-10-25（只针对 Fisher 两个 id）：`- **对白**：无` 的镜头**连参考音频都不要挂**。
+    // 挂了音色参考 = 给它一条「待续写的人声轨」，H3 是音视频联合模型，会顺着音频把人声续出来 ——
+    // 这一镜本来就没台词，音色参考没有任何用处，却正好是「自己乱说话」的燃料。
+    // 判断靠适配器本身（纯函数）：没有 `<d>` 就是没有要念的台词。
+    const fisherDialogueFree = isMinimaxH3FisherSilentShot(workflowId, request.prompt);
+    const audioSources = fisherDialogueFree ? [] : (request.referenceAudioDataUrls || []).filter(Boolean).slice(0, 3);
     // 文武双全 only: its clips are big *and* it uploads audio/video through the same endpoint, so let
     // the browser reach RunningHub first and keep the edge out of the byte path. Other families keep
     // the previous proxy-only behaviour (no behaviour change for them).
@@ -5268,7 +5300,11 @@ async function runRunningHubWorkflowWithKey(args: {
     // 再叠一条音色参考，模型就把片子当氛围片生成（用户 2026-10-24 的「没有台词对话」）。
     // `audioCount` 决定要不要补 `<Audio N> is the voice-timbre reference …` 绑定声明。
     const effectivePrompt = isMinimaxH3FamilyWorkflow(workflowId)
-        ? adaptMinimaxH3ReferencePrompt(request.prompt, { audioCount: uploadedAudios.length })
+        ? adaptMinimaxH3ReferencePrompt(request.prompt, {
+              audioCount: uploadedAudios.length,
+              // Fisher：`- **对白**：无` 整行拿掉（用户 2026-10-25：连「对白」这个字段名都在招它说话）。
+              dropSilentDialogue: isMinimaxH3FisherWorkflow(workflowId),
+          })
         : request.prompt;
     const patch: RunningHubWorkflowPatch = prepared
         ? buildWorkflowPatch(prepared, effectivePrompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "")
@@ -5287,7 +5323,7 @@ async function runRunningHubWorkflowWithKey(args: {
     const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
     if (referenceCount) {
         console.info(
-            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
         );
     }
     let task: RunningHubTaskView;
