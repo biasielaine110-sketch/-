@@ -3794,7 +3794,21 @@ const H3_DIALOGUE_LABEL = /^(\s*-\s*\*\*\s*对白\s*\*\*\s*[：:]\s*)([\s\S]*)$/
 const H3_DIALOGUE_SILENT = /^(无|无台词|无对白|（无）|\(无\)|none)$/i;
 const H3_DIALOGUE_SPEAKER = /^([^：:，,。；;、「」“”"'（）()\s]{1,12})\s*[：:]\s*/;
 /** `他低声说：` / `苏晚问：` 是舞台提示，不是说话人。 */
-const H3_DIALOGUE_STAGE_VERB = /(说|道|问|答|喊|叫|念|读|笑|叹|应|嘟囔|开口|低语|自语)$/;
+/**
+ * 说话人动词尾：`张景惠说：…` / `苏晚低声说：…` / `他问道：…` 里的那一截，转写时要剥掉，
+ * 剩下的才是说话人名字（用户 2026-10-25 给的真实写法就是 `张景惠说：`）。
+ */
+const H3_SPEAKER_VERB_TAIL = /(?:低声|轻声|大声|沉声|柔声|喃喃|自语|开口|嘟囔|继续|接着)?(?:说道|问道|答道|喊道|开口说|说|道|问|答|喊|叫|念|读)$/;
+
+/**
+ * `- **对白**：` 的收集边界 —— 碰到这些行就停，它们都不是台词。
+ *
+ * ⚠️ 用户 2026-10-25 的实样：对白下面紧跟 `视觉风格：七十五毫米镜头，光圈二点八…`，
+ * 那行是**画面风格**，只收录到它之前。同理任何字段行、镜号标题、`【镜头 N】` 都是边界 ——
+ * 多镜合并（一镜有对白、一镜没对白）时全靠这个不串味。
+ */
+const H3_DIALOGUE_BOUNDARY =
+    /^\s*(?:[-*]\s*\*\*|#{1,6}\s|\[[^\]]*镜头|【[^】]*镜头|镜头\s*\d|镜号|(?:时长|景别|机位|运镜|人物站位|人物站位与构图|主体与动作|人物动作与表演|光影|光影与色调|转场|转场建议|音效|声音|台词与声音|负面|视觉风格|画面风格|画面内容|构图方式|摄影机参数|摄影机|镜头语言|风格|时间)\s*[：:])/;
 const H3_PRONOUN_SPEAKER = /^(他|她|我|你|俺|咱)$/;
 
 /**
@@ -3803,7 +3817,7 @@ const H3_PRONOUN_SPEAKER = /^(他|她|我|你|俺|咱)$/;
  * 用户 2026-10-25 怀疑的「把我的提示词都当成对话台词」。命中的一律不当说话人。
  */
 const H3_FIELD_LABEL =
-    /^(时长|时间|秒数|景别|机位|景别／机位|运镜|运镜方式|人物站位|人物站位与构图|人物动作与表演|主体与动作|光影|光影与色调|转场|转场建议|对白|台词|声音|音效|台词与声音|负面|画面|画面内容|构图方式|摄影机参数|摄影机|风格|镜头|镜号|镜头编号|镜头时长|场景|道具|情绪|角色|角色1|角色2|出场人物|风格提示词|画面描述)$/;
+    /^(时长|时间|秒数|景别|机位|景别／机位|运镜|运镜方式|人物站位|人物站位与构图|人物动作与表演|主体与动作|光影|光影与色调|转场|转场建议|对白|台词|声音|音效|台词与声音|负面|画面|画面内容|画面风格|视觉风格|镜头语言|构图方式|摄影机参数|摄影机|风格|镜头|镜号|镜头编号|镜头时长|场景|道具|情绪|角色|角色1|角色2|出场人物|风格提示词|画面描述)$/;
 
 /**
  * 第四套 `video_motion_prompt` 末尾那句是**我们自动追加**的：
@@ -3985,6 +3999,9 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
             if (/^\s*-\s*\*\*/.test(next) || /^\s*#{1,6}\s/.test(next)) break;
             // 八行之后那句「不要出现字幕和音乐…」不是台词，别把它补上人名。
             if (next.trim().startsWith("不要出现字幕和音乐")) break;
+            // ⚠️ 用户 2026-10-25：`- **对白**：` 的内容**只收录到 `视觉风格：` 之前** ——
+            // 那一行是画面风格不是台词；同理任何新字段行、下一镜的镜号标题都是边界。
+            if (H3_DIALOGUE_BOUNDARY.test(next)) break;
             collected.push(next);
             cursor += 1;
         }
@@ -4001,17 +4018,19 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         const kept: string[] = [];
         for (const value of spoken) {
             const match = value.match(H3_DIALOGUE_SPEAKER);
-            const candidate = match ? match[1].trim() : "";
             const quoted = /^[「『“"']/.test(value);
-            // ⚠️ 只有两种行算台词：`说话人：台词`（说话人还不能是字段名）、或整行带引号。
+            const candidate = match ? match[1].trim() : "";
+            // `张景惠说：打算…` → 说话人 `张景惠`（动词尾剥掉）；`他低声说：…` → 代词，交给下面的映射。
+            const named = candidate.replace(H3_SPEAKER_VERB_TAIL, "").trim();
+            // ⚠️ 只有两种行算台词：`说话人[说]：台词`（说话人还不能是分镜表字段名）、或整行带引号。
             // 其余（下一镜的字段、画面描述、声音要求）一律不动 —— 用户 2026-10-25 怀疑的
             // 「把我的提示词都当成对话台词」，就是这些行被误包进 `<d>` 造成的。
-            const rawSpeaker =
-                candidate && !H3_FIELD_LABEL.test(candidate) && !H3_DIALOGUE_STAGE_VERB.test(candidate) ? candidate : "";
+            const rawSpeaker = candidate && !H3_FIELD_LABEL.test(candidate) && named ? named : "";
             if (!rawSpeaker && !quoted) {
                 kept.push(value);
                 continue;
             }
+            // 剥掉动词尾之后，正文从冒号后开始（`张景惠说：` 整段都是前缀）。
             const body = rawSpeaker ? value.slice(match![0].length).trim() : value.trim();
             // `苏晚：“台词”` → `<d>台词</d>`：`<d>` 本身就是台词的边界，引号留在里面会被一起念出来。
             const spokenBody = body
