@@ -3999,15 +3999,23 @@ function h3SoundscapeOf(text: string) {
 }
 
 /**
- * 补官方声音槽位。`silent` 由「正文里有没有 `<d>`」决定 —— 和 `isMinimaxH3FisherSilentShot` 同一条判据：
- * 没有 `<d>` 就没有台词，人声必须显式排除；有 `<d>` 时只给环境音，别去碰台词。
+ * 补官方声音槽位。`silent` 由「正文里有没有 `<d>`」决定 —— 和 `isMinimaxH3FisherSilentShot` 同一条判据。
+ *
+ * ⚠️ **两级作用域**（2026-10-25 用户明确要求「改动都只针对这两个模型」）：
+ *  - **槽位本身**给 H3 全族（`overall_soundscape` 是官方格式，填上永远比空着对）；
+ *  - **两句否定式**（`No dialogue, no voices.` / `non_diegetic_music: N/A`）**只给 Fisher 两个 id**
+ *    （`negate` = `isMinimaxH3FisherWorkflow`）。原因：别的族提示词里的台词若没被转成 `<d>`，
+ *    加这句会把该念的话也否掉；`non_diegetic_music: N/A` 还会压掉本来要 BGM 的族。
+ *    所以**别把 `dropSoundNote` 兼作这个判据** —— 那是「撤掉模板声音说明」，两件事。
  */
-function withH3AudioStatement(text: string) {
+function withH3AudioStatement(text: string, negate = false) {
     if (H3_SOUNDSCAPE_MARK.test(text)) return text;
     const hasDialogue = H3_SCRIPT_DIALOGUE_MARK.test(text);
     const ambience = h3SoundscapeOf(text);
+    const body = String(text || "").replace(/\s+$/, "");
+    if (!negate) return `${body}\n\noverall_soundscape: ${ambience}`;
     const soundscape = hasDialogue ? ambience : `${ambience} No dialogue, no voices.`;
-    return `${String(text || "").replace(/\s+$/, "")}\n\noverall_soundscape: ${soundscape}\nnon_diegetic_music: N/A`;
+    return `${body}\n\noverall_soundscape: ${soundscape}\nnon_diegetic_music: N/A`;
 }
 
 /**
@@ -4196,13 +4204,21 @@ function extractH3Speakers(text: string) {
  *   乱说话」—— 追加的「台词/人声/对白」说明文字本身会被音视频模型当成内容。
  * ⚠️ 只在 H3 家族调用（见 `isMinimaxH3FamilyWorkflow`），别的模型一个字节不变。
  */
-export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioCount?: number; dropSoundNote?: boolean }): string {
+export function adaptMinimaxH3ReferencePrompt(
+    prompt: string,
+    options?: { audioCount?: number; dropSoundNote?: boolean; audioNegation?: boolean },
+): string {
     // ⚠️ 空提示词不能原样交给 H3：它是**音视频联合生成**的模型，空提示词 + 参考图会让它自己编一段戏。
     // 先垫一句纯画面描述（不加任何「台词」相关的说明）。
     const text = String(prompt || "").trim() ? String(prompt) : H3_SILENT_FALLBACK_PROMPT;
     const audioCount = Math.max(0, Math.min(3, Math.round(Number(options?.audioCount) || 0)));
     /** Fisher 两个 id：这一镜没有 `<d>` 台词时，连我们自动追加的那句声音说明也不给（见 `stripH3SoundNote`）。 */
     const dropSoundNote = Boolean(options?.dropSoundNote);
+    /**
+     * **只给 Fisher 两个 id** 的一句否定式（`No dialogue, no voices.` / `non_diegetic_music: N/A`）。
+     * 和 `dropSoundNote` 是两件事，故意分开传 —— 见 `withH3AudioStatement` 的注释。
+     */
+    const audioNegation = Boolean(options?.audioNegation);
     /**
      * **混合镜**：这段提示词里既有要念的台词，又有明说 `- **对白**：无` 的镜头。
      * 命中就贴「按镜头的口型约定」而不是「全片旁白」（`withH3MixedLipsyncNote`）。
@@ -4214,7 +4230,7 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
     if (/<\s*d\s*>/i.test(text)) {
         // 已带 `<d>` 又声明了静音镜 = 一镜说、一镜不说：正文不动，尾部补一句口型约定。
         const body = mixedShots ? withH3MixedLipsyncNote(text) : text;
-        return withH3AudioStatement(withH3VoiceContract(body, audioCount, countH3DialogueLines(text), extractH3Speakers(text)));
+        return withH3AudioStatement(withH3VoiceContract(body, audioCount, countH3DialogueLines(text), extractH3Speakers(text)), audioNegation);
     }
 
     const lines = text.split("\n");
@@ -4229,7 +4245,7 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         const base = dropDialogueInvitation(text);
         // Fisher（静音镜）：没有 `<d>` → 人物闭嘴、声音落画外，音轨照旧保留。
         const quiet = dropSoundNote ? withH3NarrationShotNote(stripH3SoundNote(base)) : base;
-        return withH3AudioStatement(withH3VoiceContract(quiet, audioCount, 0, []));
+        return withH3AudioStatement(withH3VoiceContract(quiet, audioCount, 0, []), audioNegation);
     }
 
     // ⚠️ 多镜合并（每 2/3/4/5 镜一段）的提示词里有**多个** `- **对白**：` 块，
@@ -4322,13 +4338,14 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         const base = dropDialogueInvitation(text);
         // 同上：全段一个能认的台词都没有 → 静场（闭嘴 + 只有环境音），音轨照旧。
         const quiet = dropSoundNote ? withH3NarrationShotNote(stripH3SoundNote(base)) : base;
-        return withH3AudioStatement(withH3VoiceContract(quiet, audioCount, 0, speakers));
+        return withH3AudioStatement(withH3VoiceContract(quiet, audioCount, 0, speakers), audioNegation);
     }
     // 至少一镜转成了 `<d>`：如果同时还有 `- **对白**：无` 的镜头，补「按镜头的口型约定」——
     // 否则那几镜没有任何约束，模型会把它们填成人声噪杂（用户 2026-10-25 的混合镜诉求）。
     const joined = out.join("\n");
     return withH3AudioStatement(
         withH3VoiceContract(mixedShots ? withH3MixedLipsyncNote(joined) : joined, audioCount, lineCount, speakers),
+        audioNegation,
     );
 }
 
@@ -5593,6 +5610,9 @@ async function runRunningHubWorkflowWithKey(args: {
               audioCount: uploadedAudios.length,
               // Fisher：静音镜连「只要环境音效」那句模板声音说明都不给（用户 2026-10-25）。
               dropSoundNote: isMinimaxH3FisherWorkflow(workflowId),
+              // 官方声音槽位给 H3 全族，但两句否定式（No dialogue / non_diegetic_music: N/A）
+              // **只给这两个 id** —— 别的族提示词里没转成 `<d>` 的台词、或本来要的 BGM 会被一起压掉。
+              audioNegation: isMinimaxH3FisherWorkflow(workflowId),
           })
         : request.prompt;
     // 排查「模型说了我没写过的话」时最缺的就是这一行 —— 实际提交给 H3 的正文原样打出来，
