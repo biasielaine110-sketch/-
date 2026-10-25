@@ -19,6 +19,9 @@ import { compressReferenceDataUrl, dataUrlToFile, getDataUrlByteSize } from "@/l
 // Vendored Export (API) copy of 全能生图王 — see bundledRunningHubGraph. Baked preview artifacts
 // (the author's local /view URLs) are blanked; both nodes are pruned before submission anyway.
 import workfisherMossWorkflow from "./runninghub-workflows/workfisher-moss-image.json";
+// 【Work-Fisher】AI短剧制作全流程 —— runninghub.ai `2114341115852099586` 的 Export (API) 副本。
+// 作者 138 节点里写死的韩语示例台词已清空（内置图是「没有脚本时的地板」，绝不能带着示例上台词）。
+import workfisherShortDramaAiWorkflow from "./runninghub-workflows/workfisher-short-drama-ai.json";
 
 type RequestOptions = { signal?: AbortSignal };
 
@@ -2627,7 +2630,16 @@ function applyMinimaxH3HdDynamicSettings(
 //   - optional script bag `{ "video": {...}, "character": {...}, "scene": {...}, "multiview": {...} }`
 //     selects the subgraph for the canvas mode pill.
 // Scoped to these two ids only.
-const MINIMAX_H3_FISHER_WORKFLOW_IDS = new Set(["2110621324220567554", "2110621014144147458"]);
+const MINIMAX_H3_FISHER_WORKFLOW_IDS = new Set([
+    "2110621324220567554",
+    "2110621014144147458",
+    // 2026-10-25：runninghub.ai 上的另一份【Work-Fisher】短剧图（用户导出
+    // `【Work-Fisher】AI短剧制作全流程_api.json`）。逐节点比对过：31 个节点 id、class_type、
+    // 每个 input 都相同，**只有 RandomNoise(129) 的烘焙种子不同** —— 就是同一张图的另一个发布 id，
+    // 所以直接吃同一套 Fisher 适配（0.8MP 天花板 / 279 LoRA 档位 / 静音镜不挂音色 / 干净模式提示词）。
+    // ⚠️ 仍然只按 id 认，绝不因为「图形状像」放宽 gate。
+    "2114341115852099586",
+]);
 /** Export author bake is 10s; longer multi-ref clips OOM SamplerCustomAdvanced on RH. */
 const MINIMAX_H3_FISHER_SECONDS = { min: 2, max: 12 };
 /** Export bake ceiling — selector MP is the sampler latent on this single-pass graph. */
@@ -2659,6 +2671,34 @@ function isMinimaxH3FisherWorkflow(workflowId?: string | null) {
 /** Public gate for the Work-Fisher short-drama pipeline on RunningHub. */
 export function isMinimaxH3FisherWorkflowId(workflowId?: string | null) {
     return isMinimaxH3FisherWorkflow(workflowId);
+}
+
+/**
+ * 内置 Export 图的作用域：**只有 runninghub.ai `2114341115852099586`** 这一份。
+ *
+ * 另外两个 Fisher id（`2110621324220567554` / `2110621014144147458`）历史上靠用户在模型脚本里贴
+ * Export JSON，行为保持不变 —— 用户 2026-10-25 的要求是「仅修复该渠道下的该模型」。
+ * 单独一个函数而不是内联字符串：探针要能分别断言「新 id 有内置图」「老 id 仍然没有」。
+ */
+const MINIMAX_H3_FISHER_AI_SHORT_DRAMA_WORKFLOW_IDS = new Set(["2114341115852099586"]);
+
+function isMinimaxH3FisherAiShortDramaWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return MINIMAX_H3_FISHER_AI_SHORT_DRAMA_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate: 这个 id 是否吃内置的【Work-Fisher】短剧 Export 图（只有 .ai 那份）。 */
+export function isMinimaxH3FisherAiShortDramaWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3FisherAiShortDramaWorkflow(workflowId);
 }
 
 export function normalizeFisherPipelineMode(value?: string | null): FisherPipelineMode {
@@ -3303,6 +3343,11 @@ export function isWorkFisherMossWorkflowId(workflowId?: string | null) {
  */
 function bundledRunningHubGraph(workflowId: string): ComfyWorkflow | null {
     if (isWorkFisherMossWorkflow(workflowId)) return JSON.parse(JSON.stringify(workfisherMossWorkflow)) as unknown as ComfyWorkflow;
+    // 只给 runninghub.ai 这一个 id 兜底：另外两个 Fisher id 走「模型脚本里贴 Export」的老路，
+    // 行为一个字节都不变（用户明确：只修这一个模型，不影响别的）。
+    if (isMinimaxH3FisherAiShortDramaWorkflow(workflowId)) {
+        return JSON.parse(JSON.stringify(workfisherShortDramaAiWorkflow)) as unknown as ComfyWorkflow;
+    }
     return null;
 }
 
@@ -5720,7 +5765,11 @@ async function runRunningHubWorkflowWithKey(args: {
     const localExportGraph = !usesRunningHubLocalExportGraph(workflowId)
         ? null
         : isMinimaxH3FisherWorkflow(workflowId)
-          ? resolveFisherWorkflowFromScript(request.script, fisherMode)
+          ? // 模型脚本（用户覆盖层）优先；没有脚本时只有 .ai 那份 id 有内置图兜底，
+            // 另外两个 Fisher id 照旧返回 null → 走下面的「把 Export 贴进脚本」报错，行为不变。
+            // ⚠️ 内置图只有「多参生视频」那一张：角色 / 场景 / 多视角模式没有内置图，
+            // 必须继续走「脚本里缺该模式 Export」的报错 —— 拿视频图冒充错管线等于白烧一次渲染。
+            resolveFisherWorkflowFromScript(request.script, fisherMode) || (fisherMode === "video" ? bundledRunningHubGraph(workflowId) : null)
           : parseComfyApiWorkflow(request.script) || bundledRunningHubGraph(workflowId);
     let workflow = localExportGraph;
     let fetchPermissionDenied = false;
