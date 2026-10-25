@@ -3828,6 +3828,22 @@ function dropDialogueInvitation(text: string) {
     return text.replace(/只要台词([和与])环境音效/g, "只要环境音效");
 }
 
+/**
+ * 静音镜（Fisher 两个 id）连**我们自动追加的那句声音说明**也一起拿掉。
+ *
+ * `不要出现字幕和音乐，只要台词和环境音效。` 是第四套方案自动补的（用户脚本里没有），
+ * 对 `- **对白**：无` 的镜头来说它仍然在要一条「有音效的音轨」—— 会议室、街头这类场景，
+ * H3 会把它填成一片人声噪杂，听起来就是「没说台词却在说话」。
+ * 用户 2026-10-25：「静音镜正常是这样的，`- **对白**：无`」—— 那一行是分镜表本身，不能动；
+ * 能动的是这句我们自己的模板句，静音镜就整句不给。
+ */
+function stripH3SoundNote(text: string) {
+    return text
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("不要出现字幕和音乐"))
+        .join("\n");
+}
+
 /** 台词锁定的幂等标记：提示词里已经有这段就不再追加。 */
 const H3_DIALOGUE_LOCK_MARK = "【台词锁定】";
 
@@ -3954,20 +3970,13 @@ function extractH3Speakers(text: string) {
  *   乱说话」—— 追加的「台词/人声/对白」说明文字本身会被音视频模型当成内容。
  * ⚠️ 只在 H3 家族调用（见 `isMinimaxH3FamilyWorkflow`），别的模型一个字节不变。
  */
-export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioCount?: number; dropSilentDialogue?: boolean }): string {
+export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioCount?: number; dropSoundNote?: boolean }): string {
     // ⚠️ 空提示词不能原样交给 H3：它是**音视频联合生成**的模型，空提示词 + 参考图会让它自己编一段戏。
     // 先垫一句纯画面描述（不加任何「台词」相关的说明）。
     const text = String(prompt || "").trim() ? String(prompt) : H3_SILENT_FALLBACK_PROMPT;
     const audioCount = Math.max(0, Math.min(3, Math.round(Number(options?.audioCount) || 0)));
-    /**
-     * ⚠️ Fisher 那两个 id 专用（`isMinimaxH3FisherWorkflow`）：`- **对白**：无` 连**字段名都不给**。
-     *
-     * 用户 2026-10-25：「`- **对白**：无` 的情况还是会自己乱说话」。H3 是音视频联合模型
-     * （文本编码器 Qwen3-VL），不是听指令的 LLM —— 对一整段 `- **对白**：无` 它只看到「对白」
-     * 这个字段名，倾向就是开口；把它整块拿掉、提示词里一个「对白/台词」都不出现，才是真的没有。
-     * 只删「值只有 `无` / 空」的块（`spoken.length === 0`），块里还夹着画面描述的保持原样。
-     */
-    const dropSilentDialogue = Boolean(options?.dropSilentDialogue);
+    /** Fisher 两个 id：这一镜没有 `<d>` 台词时，连我们自动追加的那句声音说明也不给（见 `stripH3SoundNote`）。 */
+    const dropSoundNote = Boolean(options?.dropSoundNote);
 
     // 作者/用户自己写的 H3 台词标记 → 正文不动，只补契约（不补就照样会念参考音轨里的内容）。
     if (/<\s*d\s*>/i.test(text)) {
@@ -3983,7 +3992,8 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         // 只做一件有实际作用的事：把第四套自动追加的「只要台词和环境音效」改成「只要环境音效」——
         // 那句本身就在邀请模型说话，是「没写台词也在说话」的直接来源。
         // `lineCount = 0` 只会在**真的挂了参考音频**时落成一行「本段没有台词」。
-        return withH3VoiceContract(dropDialogueInvitation(text), audioCount, 0, []);
+        const base = dropDialogueInvitation(text);
+        return withH3VoiceContract(dropSoundNote ? stripH3SoundNote(base) : base, audioCount, 0, []);
     }
 
     // ⚠️ 多镜合并（每 2/3/4/5 镜一段）的提示词里有**多个** `- **对白**：` 块，
@@ -4059,12 +4069,9 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
             blocks.push(`${who} says:`, `<d>[${h3DialogueLanguage(spokenBody)}]${spokenBody}</d>`);
         }
         if (!blocks.length) {
-            // 默镜 / 只有 `无`：原样保留（不补人名、不生成空 <d>）。
-            // Fisher 两个 id：连 `- **对白**：无` 这一整行都不给（见 `dropSilentDialogue`）。
-            if (dropSilentDialogue && spoken.length === 0) {
-                index = cursor;
-                continue;
-            }
+            // 默镜 / 只有 `无`：**原样保留**（不补人名、不生成空 <d>）。
+            // ⚠️ 用户 2026-10-25 明确：静音镜的正常写法就是 `- **对白**：无`，
+            // 这一行属于分镜表本身，不能被我们改写或删掉（曾试过整块删除，已回滚）。
             out.push(...lines.slice(index, cursor));
             index = cursor;
             continue;
@@ -4075,21 +4082,25 @@ export function adaptMinimaxH3ReferencePrompt(prompt: string, options?: { audioC
         index = cursor;
     }
     // 一个能认的台词都没有（全是 `无` / 全被守住）→ 有音频时只加一行「本段没有台词」，否则原样交出去。
-    if (!converted) return withH3VoiceContract(dropDialogueInvitation(out.join("\n")), audioCount, 0, speakers);
+    if (!converted) {
+        const base = dropDialogueInvitation(text);
+        return withH3VoiceContract(dropSoundNote ? stripH3SoundNote(base) : base, audioCount, 0, speakers);
+    }
     return withH3VoiceContract(out.join("\n"), audioCount, lineCount, speakers);
 }
 
 /**
  * Work-Fisher（两个 id）这一镜**有没有要念的台词**。
  *
- * 没有 → 提交时（a）`- **对白**：无` 整行拿掉，（b）参考音频整条不提交。
- * 用户 2026-10-25：「`- **对白**：无` 的情况还是会自己乱说话」——H3 是音视频联合模型，
+ * 没有 → 提交时**参考音频整条不提交**（`- **对白**：无` 那一行原样保留，不动用户的脚本）。
+ * 用户 2026-10-25：「`- **对白**：无` 的情况还是会自己乱说话」+「静音镜正常是这样的，
+ * `- **对白**：无`」—— 提示词本身是对的，问题在外部那条人声参考：H3 是音视频联合模型，
  * 给它一条人声参考等于递了一条「待续写的人声轨」，而这一镜本来没有台词。
- * 判断复用适配器（纯函数，`audioCount: 0` 时不会追加任何契约），只认 `<d>`。
+ * 判断复用适配器（纯函数，`audioCount: 0` 时不追加任何契约），只认 `<d>`。
  */
 export function isMinimaxH3FisherSilentShot(workflowId: string | null | undefined, prompt: string) {
     if (!isMinimaxH3FisherWorkflow(workflowId)) return false;
-    return !/<\s*d\s*>/i.test(adaptMinimaxH3ReferencePrompt(prompt, { audioCount: 0, dropSilentDialogue: true }));
+    return !/<\s*d\s*>/i.test(adaptMinimaxH3ReferencePrompt(prompt, { audioCount: 0 }));
 }
 
 /**
@@ -5258,10 +5269,11 @@ async function runRunningHubWorkflowWithKey(args: {
     // Audio references: upload first, then write them into the graph *before* the per-workflow
     // patch. Singularity's patch deletes `LoadAudio("None")` slots as invalid; filling them first is
     // what keeps the slot, and the author's node ids, alive.
-    // ⚠️ 用户 2026-10-25（只针对 Fisher 两个 id）：`- **对白**：无` 的镜头**连参考音频都不要挂**。
+    // ⚠️ 用户 2026-10-25（只针对 Fisher 两个 id）：`- **对白**：无` 的镜头**连参考音频都不挂**。
     // 挂了音色参考 = 给它一条「待续写的人声轨」，H3 是音视频联合模型，会顺着音频把人声续出来 ——
     // 这一镜本来就没台词，音色参考没有任何用处，却正好是「自己乱说话」的燃料。
-    // 判断靠适配器本身（纯函数）：没有 `<d>` 就是没有要念的台词。
+    // ⚠️ 提示词里那行 `- **对白**：无` **保持原样**（用户 2026-10-25：「静音镜正常是这样的」），
+    // 曾经试过整块删掉，已回滚 —— 分镜表的写法不归我们改。
     const fisherDialogueFree = isMinimaxH3FisherSilentShot(workflowId, request.prompt);
     const audioSources = fisherDialogueFree ? [] : (request.referenceAudioDataUrls || []).filter(Boolean).slice(0, 3);
     // 文武双全 only: its clips are big *and* it uploads audio/video through the same endpoint, so let
@@ -5302,10 +5314,15 @@ async function runRunningHubWorkflowWithKey(args: {
     const effectivePrompt = isMinimaxH3FamilyWorkflow(workflowId)
         ? adaptMinimaxH3ReferencePrompt(request.prompt, {
               audioCount: uploadedAudios.length,
-              // Fisher：`- **对白**：无` 整行拿掉（用户 2026-10-25：连「对白」这个字段名都在招它说话）。
-              dropSilentDialogue: isMinimaxH3FisherWorkflow(workflowId),
+              // Fisher：静音镜连「只要环境音效」那句模板声音说明都不给（用户 2026-10-25）。
+              dropSoundNote: isMinimaxH3FisherWorkflow(workflowId),
           })
         : request.prompt;
+    // 排查「模型说了我没写过的话」时最缺的就是这一行 —— 实际提交给 H3 的正文原样打出来，
+    // 用户直接复制给我们就能定位（是不是有多余的 <d>、是不是还有别的字段在招它开口）。
+    if (isMinimaxH3FamilyWorkflow(workflowId)) {
+        console.info(`[runninghub] h3 prompt (${workflowId}) audio=${uploadedAudios.length}:\n${effectivePrompt}`);
+    }
     const patch: RunningHubWorkflowPatch = prepared
         ? buildWorkflowPatch(prepared, effectivePrompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "")
         : { nodeInfoList: [] };
