@@ -35,7 +35,7 @@ export function croppedVideoHeight(height: number, ratio: number = VIDEO_SUBTITL
     return next >= 2 ? next : source;
 }
 
-/** 选一个当前浏览器真的能录的容器。mp4 优先（体积小、剪辑软件直接吃），再退 webm。 */
+/** 选一个当前浏览器真的能录的容器（首选 webm，见 `pickVideoRecorderMimes`）。 */
 export function pickVideoRecorderMime(): string {
     return pickVideoRecorderMimes()[0] || "";
 }
@@ -43,20 +43,24 @@ export function pickVideoRecorderMime(): string {
 /**
  * 同上，但返回**整条候选链**。
  *
- * ⚠️ `MediaRecorder.isTypeSupported()` 会撒谎：个别内核（含部分 Chromium 构建）声称支持
- * `video/mp4;codecs=avc1…`，实际 `start()` 之后一个字节都不吐。这时只试第一个候选就等于
- * **整体放弃裁切、原片带字幕交给用户**（用户 2026-10-25「还是有字幕」的一种可能）。
- * 所以调用方要能在「0 字节」时换下一个容器重录一次。
+ * ⚠️ **webm 优先，mp4 只当兜底**（2026-10-25 第二次返工，用户「现在生成的视频直接花掉了」）：
+ * `canvas.captureStream()` + `MediaRecorder` 这条路上，Chrome 的 **mp4 容器不可靠** ——
+ * 它录的是 fragmented mp4，常见结果是花屏/坏帧/拖不动；文件非 0 字节，所以「0 字节就换下一个」
+ * 那套判据根本拦不住它。webm（vp9/vp8 + opus）才是这条管线里稳的那个。
+ * 剪辑软件（PR/达芬奇/剪映）都吃 webm，真需要 mp4 转一道就行 —— 花屏的 mp4 等于没片子。
+ *
+ * ⚠️ `isTypeSupported()` 还会撒谎：声称支持某个候选、`start()` 之后一个字节都不吐。
+ * 所以调用方要能拿整条链逐个重试，并对产物做一次「能不能真的解码」的体检（`playableRecorded`）。
  */
 export function pickVideoRecorderMimes(): string[] {
     const recorder = (globalThis as { MediaRecorder?: typeof MediaRecorder }).MediaRecorder;
     if (!recorder || typeof recorder.isTypeSupported !== "function") return [];
     const candidates = [
-        "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
-        "video/mp4",
         "video/webm;codecs=vp9,opus",
         "video/webm;codecs=vp8,opus",
         "video/webm",
+        "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+        "video/mp4",
     ];
     const supported: string[] = [];
     for (const mime of candidates) {
@@ -67,6 +71,37 @@ export function pickVideoRecorderMimes(): string[] {
         }
     }
     return supported;
+}
+
+/**
+ * 录出来的字节**能不能真的解码**。
+ *
+ * 只看 `blob.size > 0` 不够：坏掉的 mp4/webm 照样有几百 KB，只是播出来花屏或者只有一帧。
+ * 这里把它挂到一个离屏 `<video>` 上等元数据：拿得到宽高、`readyState` 至少到了元数据，
+ * 才算「片子还在」。任何一步超时/抛错都判不合格 → 调用方换下一个容器；全都不合格就保留原片
+ * （宁可带字幕，也不能给一条花屏的片子）。
+ */
+async function playableRecorded(blob: Blob, timeoutMs = 6000): Promise<boolean> {
+    if (!blob.size) return false;
+    const url = URL.createObjectURL(blob);
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    probe.muted = true;
+    probe.src = url;
+    try {
+        await waitFor(probe, "loadedmetadata", timeoutMs);
+        return Boolean(Math.round(probe.videoWidth || 0)) && Boolean(Math.round(probe.videoHeight || 0));
+    } catch {
+        return false;
+    } finally {
+        probe.removeAttribute("src");
+        try {
+            probe.load();
+        } catch {
+            /* ignore */
+        }
+        URL.revokeObjectURL(url);
+    }
 }
 
 export type CroppedVideo = { blob: Blob; mimeType: string; width: number; height: number };
@@ -157,12 +192,15 @@ export async function cropVideoBottomBand(
         const targetHeight = croppedVideoHeight(height, ratio);
         if (!width || !targetHeight || targetHeight >= height) return bail(`尺寸读不出来（${width}x${height} → ${targetHeight}）`);
 
-        // 容器候选逐个试：首选容器 0 字节时换下一个重录一次（`isTypeSupported` 会撒谎 ——
-        // 声称支持 `video/mp4;codecs=avc1…`，实际 `start()` 之后一个字节都不吐）。
-        // 只试首发容器就等于「裁切整体放弃、原片带字幕交给用户」，这正是「还是有字幕」的一种可能。
+        // 容器候选逐个试：webm 先（稳），mp4 垫底（Chrome 的 fragmented mp4 会花屏）。
+        // 每一条都要过 `playableRecorded` 体检 —— 只看字节数不够：坏文件照样几百 KB，
+        // 播出来却是花屏/只有一帧（用户 2026-10-25「现在生成的视频直接花掉了」）。
         for (const mime of mimes) {
             const out = await recordBand(video, width, height, targetHeight, mime, options?.timeoutMs || 180000);
-            if (out) return { blob: out, mimeType: out.type || mime.split(";")[0] || "video/webm", width, height: targetHeight };
+            if (out && (await playableRecorded(out))) {
+                return { blob: out, mimeType: out.type || mime.split(";")[0] || "video/webm", width, height: targetHeight };
+            }
+            console.info(`[video] 裁字幕带：容器 ${mime} 的产物不合格${out ? `（${out.size} 字节但解不出来）` : "（没吐字节）"}，换下一个`);
             // 换容器重录前把元素倒回开头（上一轮可能已经播到结尾）。
             try {
                 video.pause();
@@ -171,7 +209,7 @@ export async function cropVideoBottomBand(
                 /* 倒不回去就只能放弃后面这些容器 */
             }
         }
-        return bail(`录制器没吐出任何数据（试过 ${mimes.join(" / ")}）`);
+        return bail(`没有可用的录制容器（试过 ${mimes.join(" / ")}）`);
     } catch (error) {
         console.warn("[video] 裁字幕带失败，保持原片", error);
         return null;
@@ -184,10 +222,10 @@ export async function cropVideoBottomBand(
 /**
  * 把源元素的上半部分录一遍，返回重编码后的字节。
  *
- * 单独抽出来是为了**换容器重试**：`MediaRecorder.isTypeSupported()` 会撒谎，首选 mp4 在部分
- * Chromium 构建上 `start()` 之后一个字节都不吐，这时必须能拿一个干净的 recorder 再来一次 webm。
+ * 单独抽出来是为了**换容器重试**（`isTypeSupported` 会撒谎、mp4 会花屏），调用方逐个候选调用它，
+ * 并对产物再做一次可解码体检（`playableRecorded`）。
  *
- * 返回 `null` = 这个容器没吐出可用字节 / 播放或编码抛错（调用方换下一个候选）。
+ * 返回 `null` = 这个容器没吐出字节 / 播放或编码抛错（调用方换下一个候选）。
  */
 async function recordBand(
     video: HTMLVideoElement,
@@ -215,7 +253,9 @@ async function recordBand(
     }
 
     const chunks: BlobPart[] = [];
-    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6_000_000 });
+    // 码率按像素给：6 Mbps 起、12 Mbps 封顶。给低了 1080p 会糊成一块块，看起来同样像「花掉」。
+    const bitrate = Math.min(12_000_000, Math.max(6_000_000, Math.round(width * targetHeight * 4)));
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
     let drawing = true;
     try {
         recorder.ondataavailable = (event) => {
