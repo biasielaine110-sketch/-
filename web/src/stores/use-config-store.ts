@@ -230,7 +230,9 @@ export const defaultConfig: AiConfig = {
     vquality: "720",
     videoGenerateAudio: "true",
     videoWatermark: "false",
-    videoCropSubtitles: "true",
+    // 2026-10-26 用户要求：去字幕默认**关**（原来 `"true"` = fill，等于所有人都被默认裁了一刀）。
+    // 具体档位见 `normalizeSubtitleCropMode`：fill / crop / blur / false。
+    videoCropSubtitles: "false",
     videoSteps: "40",
     videoRefImageSize: "max",
     videoSamplerName: "dpmpp_2m",
@@ -529,7 +531,13 @@ export const useConfigStore = create<ConfigStore>()(
                         vquality: config.vquality || "720",
                         videoGenerateAudio: config.videoGenerateAudio || "true",
                         videoWatermark: config.videoWatermark || "false",
-                        videoCropSubtitles: config.videoCropSubtitles || "true",
+                        // 2026-10-26 默认改「关」：面板写入的永远是 fill / crop / blur / false，
+                        // 所以老存档里的 `"true"` **只可能**来自旧默认（不是用户的显式选择）→ 一次性降级成关。
+                        // 想恢复自动去字幕：面板点「原尺寸 / 切掉 / 模糊」任意一档即可。
+                        videoCropSubtitles:
+                            config.videoCropSubtitles === "true"
+                                ? "false"
+                                : config.videoCropSubtitles || defaultConfig.videoCropSubtitles,
                         videoSteps: config.videoSteps || defaultConfig.videoSteps,
                         videoRefImageSize: config.videoRefImageSize || defaultConfig.videoRefImageSize,
                         videoSamplerName: config.videoSamplerName || defaultConfig.videoSamplerName,

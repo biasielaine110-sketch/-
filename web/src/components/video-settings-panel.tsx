@@ -404,31 +404,6 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                             {t("settingsPanels.video.fisherStyleFieldsHint")}
                         </div>
-                        {/* 字幕：H3 把硬字幕烧进画面（图里没有字幕节点、节点也没有开关，静音镜照样出字），
-                            唯一可靠的办法是生成后把底部那一条切掉。 */}
-                        <div
-                            className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-[11px]"
-                            style={{ borderColor: theme.node.stroke, color: theme.node.muted }}
-                        >
-                            <span>{t("settingsPanels.video.cropSubtitles")}</span>
-                            <div className="flex shrink-0 gap-2">
-                                <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === "fill"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "fill")}>
-                                    {t("settingsPanels.video.cropSubtitlesFill")}
-                                </OptionPill>
-                                <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === "crop"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "crop")}>
-                                    {t("settingsPanels.video.cropSubtitlesCrop")}
-                                </OptionPill>
-                                <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === "blur"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "blur")}>
-                                    {t("settingsPanels.video.cropSubtitlesBlur")}
-                                </OptionPill>
-                                <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === null} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "false")}>
-                                    {t("settingsPanels.video.cropSubtitlesOff")}
-                                </OptionPill>
-                            </div>
-                        </div>
-                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
-                            {t("settingsPanels.video.cropSubtitlesHint")}
-                        </div>
                     </SettingGroup>
                 ) : null}
                 {wenxiLoraRh ? (
@@ -456,6 +431,34 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         </div>
                     </SettingGroup>
                 ) : null}
+                {/* 字幕：H3 会把硬字幕烧进画面（图里没有字幕节点、节点也没有字幕开关，连静音镜都照样出字）。
+                    2026-10-26 用户要求：从 Fisher 专属组提到通用视频设置，且默认**关**（谁要谁开）。
+                    仍然只在 RunningHub 渠道生成的视频上生效（裁切重编码那段代码只在 makeRunningHub 里）。 */}
+                <SettingGroup title={t("settingsPanels.video.cropSubtitlesGroup")} color={theme.node.muted}>
+                    <div
+                        className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-[11px]"
+                        style={{ borderColor: theme.node.stroke, color: theme.node.muted }}
+                    >
+                        <span>{t("settingsPanels.video.cropSubtitles")}</span>
+                        <div className="flex shrink-0 gap-2">
+                            <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === "fill"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "fill")}>
+                                {t("settingsPanels.video.cropSubtitlesFill")}
+                            </OptionPill>
+                            <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === "crop"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "crop")}>
+                                {t("settingsPanels.video.cropSubtitlesCrop")}
+                            </OptionPill>
+                            <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === "blur"} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "blur")}>
+                                {t("settingsPanels.video.cropSubtitlesBlur")}
+                            </OptionPill>
+                            <OptionPill selected={normalizeSubtitleCropMode(config.videoCropSubtitles) === null} theme={theme} onClick={() => onConfigChange("videoCropSubtitles", "false")}>
+                                {t("settingsPanels.video.cropSubtitlesOff")}
+                            </OptionPill>
+                        </div>
+                    </div>
+                    <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                        {t("settingsPanels.video.cropSubtitlesHint")}
+                    </div>
+                </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.quality")} color={theme.node.muted}>
                     {nativeFamily === "u06" ? (
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>

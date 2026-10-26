@@ -385,15 +385,16 @@ async function createRunningHubVideoTask(
     if (!videoUrl) throw new Error(apiText("runningHubNoVideo"));
     const id = nanoid();
     /**
-     * 去字幕：H3 把硬字幕烧进画面（图里没有字幕节点、节点也没有字幕开关，连静音镜都照样出字），
-     * 唯一可靠的办法是生成后重画一遍。范围只开 Fisher（用户 2026-10-25 报的就是它），
-     * 开关在视频设置面板里。三种模式见 `SubtitleCropMode`：默认 `fill`（切完放大回原尺寸，
-     * 分辨率/码率都不降）。裁切是「尽力而为」：拿不到字节 / 浏览器不支持录制 / 超时
-     * 一律保持原片 —— 带字幕的片子也比没有片子强。
+     * 去字幕：H3 会把硬字幕烧进画面（图里没有字幕节点、节点也没有字幕开关，连静音镜都照样出字），
+     * 唯一可靠的办法是生成后重画一遍。
+     *
+     * 2026-10-26 用户要求：开关从 Fisher 专属组提到**通用视频设置**，默认**关**。所以这里的门
+     * 不再是「模型是 Fisher」，而是「用户在这个节点/全局上开了一档」—— 谁开谁生效，默认一个字节不动。
+     * 三档见 `SubtitleCropMode`（fill 切完放大回原尺寸 / crop 只切 / blur 模糊盖住）。
+     * 裁切是「尽力而为」：拿不到字节 / 浏览器不支持录制 / 超时一律保持原片 —— 带字幕的片子也比没有片子强。
      */
     const cropMode = normalizeSubtitleCropMode(config.videoCropSubtitles);
-    const cropped =
-        isMinimaxH3FisherWorkflowId(model) && cropMode
+    const cropped = cropMode
             ? await cropVideoBottomBand(
                   { url: videoUrl },
                   // 实时播放一遍才能保住音轨，所以超时按片长放宽，再留 30 秒余量。
