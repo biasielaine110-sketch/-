@@ -23,6 +23,10 @@ import { compressReferenceDataUrl, dataUrlToFile, getDataUrlByteSize } from "@/l
 // Vendored Export (API) copy of 全能生图王 — see bundledRunningHubGraph. Baked preview artifacts
 // (the author's local /view URLs) are blanked; both nodes are pruned before submission anyway.
 import workfisherMossWorkflow from "./runninghub-workflows/workfisher-moss-image.json";
+// 【MINIMAX-H3】八月最强文戏 低配 / 高配 —— 见 `bundledRunningHubGraph`。两位作者的图都是第三方
+// 发布 id，`getJsonApiFormat` 对普通 key 常是 ACL 拒绝，这两份内置图是「开箱能跑」的底线。
+import minimaxH3WenxiLowWorkflow from "./runninghub-workflows/minimax-h3-wenxi-low.json";
+import minimaxH3WenxiHighWorkflow from "./runninghub-workflows/minimax-h3-wenxi-high.json";
 
 type RequestOptions = { signal?: AbortSignal };
 
@@ -3153,6 +3157,398 @@ function applyMinimaxH3YzjinyuSettings(
     return { workflow: next, structuralRepair };
 }
 
+// 【MINIMAX-H3】八月最强文戏（低配 / 高配）— runninghub.ai
+//   低配 `2114557183900192769`  Export: 【MINIMAX-H3】八月最强文戏-低配版 _api.json
+//   高配 `2114552017984241666`  Export: 【MINIMAX-H3】八月最强文戏-高配版_api.json
+//
+// 两张图都是 MiniMax H3 **Ref2VA 文戏片**：3 张参考图 + 2 条音色参考 + 0.5MP 草稿 + 1.5× latent
+// 放大；提示词落在 `CR Prompt Text`（字段 `prompt`，既不是 `value` 也不是 `text`），时长是
+// `PrimitiveFloat`「Float (duration)」→ `ComfyMathExpression` 的 17n+5 帧数链路。
+// 通用写法在这里每一条都会出事，而且都不是观感问题，是「白烧一次渲染」：
+//   - `writeRunningHubPrompt` 不认 `CR Prompt Text` → 作者写死的示例台词（Gu Yan / Xiao Yu /
+//     私人飞机停机坪）原样进片。那是**作者的角色**，跟用户的镜头毫无关系；
+//   - `writeRunningHubSize` 造不出 `ResolutionSelector.aspect_ratio` 的标签枚举
+//     （`"16:9 (Widescreen)"`），`writeRunningHubTier` 又把 megapixels 硬映射到 1/2/4 ——
+//     作者的 0.5MP 草稿被抬成 1MP，再乘 1.5² 就是 2.25MP 交付，RH 直接显存告警；
+//   - `writeRunningHubSeconds` 够不到 `PrimitiveFloat`；而 `length` 是 17n+5 的**链接**，绝不能改；
+//   - 参考图槽是 `ref_images.ref_image_N` → `LayerUtility: ImageScaleByAspectRatio V2` → `LoadImage`
+//     三级链，槽目标**不是** LoadImage —— 只写槽目标等于没写，必须沿 `image` 链走到 LoadImage；
+//   - 作者的 `LoadImage`（低配 525/526/527 · 高配 230/237/238）、`LoadAudio`（低配 522/523 ·
+//     高配 223/225）都烧着他自己 input 目录里的哈希文件名。不摘掉就提交，轻则 worker 找不到
+//     文件失败，重则把作者那张 demo 人像当参考图渲染出来；
+//   - 低配图有两个 `VHS_VideoCombine`（521 首轮草稿 / 563 二轮放大交付）+ 3 个参考图预览，
+//     高配图 1 个 VHS（226）+ 3 个预览 —— 不收敛就一次生成回来好几条片子和几张图。
+//
+// 两张图只有采样骨架不同（低配 `MiniMaxH3ReferenceToVideo`(338) 单次 + `SamplerCustomAdvanced`；
+// 高配 `MiniMaxH3AudioConditioningT8`(7 LOW / 14 HIGH) + `MiniMaxH3DualClockSamplerT8`(8) 双通道），
+// 而提示词 / 参考图 / 音轨 / 时长 / 画幅 / 输出**完全同构**，所以共用一个适配器。按 id 只分两处：
+// 低配那支 `MysticXXX_MMH3-V1` 风格 LoRA 走档位（默认 0，理由见 Fisher 那段长注释）、
+// 以及"是否内置 Export 图"的兜底（两张图都内置，见 `bundledRunningHubGraph`）。
+// Scoped to these two ids only — 其它族一个字节都不变。
+const MINIMAX_H3_WENXI_WORKFLOW_IDS = new Set(["2114557183900192769", "2114552017984241666"]);
+/** 只有低配图挂着 `MysticXXX_MMH3-V1`（548 @0.5）；高配图是 `FeiHou_MiniMax-H3_Remix` + 8step turbo。 */
+const MINIMAX_H3_WENXI_LOW_WORKFLOW_IDS = new Set(["2114557183900192769"]);
+/** 高配节点 7/14 写死 `reference_video_policy: official_2_to_15s` → 时长按官方区间夹。 */
+const MINIMAX_H3_WENXI_SECONDS = { min: 2, max: 15 };
+/**
+ * 交付天花板取 1080 档（2.07MP）：草稿 = 交付 / 1.5²，1080 档草稿 0.92MP 已比作者 bake（0.5）
+ * 高 84%，再往上这两张 8/15 秒双通道图在 RH 上就是显存告警。
+ */
+const MINIMAX_H3_WENXI_MAX_DELIVERED_MP = 2.07;
+
+function isMinimaxH3WenxiWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return MINIMAX_H3_WENXI_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate for the 【MINIMAX-H3】八月最强文戏 pair (低配 / 高配). */
+export function isMinimaxH3WenxiWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3WenxiWorkflow(workflowId);
+}
+
+function isMinimaxH3WenxiLowWorkflow(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return MINIMAX_H3_WENXI_LOW_WORKFLOW_IDS.has(id);
+    });
+}
+
+/** Public gate for the 低配 graph only (it is the one carrying the Mystic style LoRA). */
+export function isMinimaxH3WenxiLowWorkflowId(workflowId?: string | null) {
+    return isMinimaxH3WenxiLowWorkflow(workflowId);
+}
+
+/**
+ * Reference/audio slot consumers for the 文戏 pair.
+ *
+ * 低配是 `MiniMaxH3ReferenceToVideo`(338) 一个；高配是 `MiniMaxH3AudioConditioningT8` **两个**
+ * （7 = LOW 草稿通道 / 14 = HIGH 放大通道），两边指向**同一批** scaler（236/231/232）和
+ * 同一批 `LoadAudio`（225/223）。所以 slots 只从第一个 consumer 取（两边槽序一致），
+ * 但增删链接必须**遍历每一个** consumer，否则高配只改了半张图。
+ */
+function minimaxH3WenxiRefConsumers(workflow: ComfyWorkflow) {
+    const out: Array<{ id: string; node: ComfyNode; slots: Array<{ index: number; key: string; sourceId: string }> }> = [];
+    for (const [id, node] of Object.entries(workflow)) {
+        const type = String(node?.class_type || "");
+        if (!/MiniMaxH3ReferenceToVideo|MiniMaxH3AudioConditioning/i.test(type)) continue;
+        const slots: Array<{ index: number; key: string; sourceId: string }> = [];
+        for (const [key, value] of Object.entries(node.inputs || {})) {
+            const match = /^ref_images\.ref_image_(\d+)$/.exec(key);
+            if (!match) continue;
+            const sourceId = Array.isArray(value) ? String(value[0]) : "";
+            if (sourceId) slots.push({ index: Number(match[1]), key, sourceId });
+        }
+        if (!slots.length) continue;
+        slots.sort((a, b) => a.index - b.index);
+        out.push({ id, node, slots });
+    }
+    return out;
+}
+
+/** Latent upscale multiplier (低配 `MinimaxH3LatentUpscaler3D` / 高配 `MiniMaxH3LearnedLatentUpscaleT8`). */
+function minimaxH3WenxiUpscaleFactor(workflow: ComfyWorkflow) {
+    for (const node of Object.values(workflow)) {
+        if (!/LatentUpscal/i.test(String(node?.class_type || ""))) continue;
+        for (const key of ["scale_by", "mode.scale", "scale"]) {
+            const value = Number(node.inputs?.[key]);
+            if (Number.isFinite(value) && value > 1) return value;
+        }
+    }
+    return 1.5;
+}
+
+/** Strict upstream walk (links only, never consumers) — used to tell the draft sink from the final one. */
+function comfyUpstreamIds(workflow: ComfyWorkflow, startId: string, limit = 500) {
+    const seen = new Set<string>();
+    const queue = [startId];
+    while (queue.length && seen.size < limit) {
+        const id = queue.pop() as string;
+        if (!id || seen.has(id) || !workflow[id]) continue;
+        seen.add(id);
+        for (const value of Object.values(workflow[id]?.inputs || {})) {
+            if (!Array.isArray(value) || value.length !== 2 || typeof value[0] !== "string") continue;
+            queue.push(value[0]);
+        }
+    }
+    return seen;
+}
+
+/**
+ * 摘掉一条**空的**参考图槽：scaler（可能多级）→ `LoadImage` 一起删。
+ *
+ * `pruneOrphanedReferenceChain` 在这里不够用：它只把 `LoadImage / Resize / PreviewImage` 这些类名
+ * 当候选，而这两张文的槽目标是 `LayerUtility: ImageScaleByAspectRatio V2` —— 它既不是候选、
+ * 又一直消费着下游 `LoadImage`，于是整条链原地留着，作者烧死的哈希文件名继续进负载。
+ * 判定口径：链上每个节点「是否还有别的消费者」，没有就删；从槽端往下走，天然是拓扑序。
+ */
+function pruneMinimaxH3WenxiEmptySlot(workflow: ComfyWorkflow, startId: string) {
+    const chain: string[] = [];
+    let current = startId;
+    for (let depth = 0; depth < 8 && current && workflow[current]; depth += 1) {
+        const node = workflow[current];
+        chain.push(current);
+        if (/LoadImage/i.test(String(node.class_type || ""))) break;
+        const link = Object.values(node.inputs || {}).find(
+            (value) => Array.isArray(value) && value.length === 2 && typeof value[0] === "string",
+        ) as [string, number] | undefined;
+        current = link ? link[0] : "";
+    }
+    let changed = false;
+    for (const id of chain) {
+        if (!workflow[id]) continue;
+        // 高配的两条 conditioning 共用同一批 scaler：只要还有别的消费者连着，这一条就不能删。
+        if (comfyConsumedIds(workflow).has(id)) continue;
+        delete workflow[id];
+        changed = true;
+    }
+    return changed;
+}
+
+/**
+ * One clip out, no stills.
+ *
+ * 低配图留了两个 `VHS_VideoCombine`：521 喂的是首轮 `VAEDecode`（草稿分辨率），563 喂的是
+ * 1.5× 放大后二轮采样的 `VAEDecode`（交付分辨率）。用「上游能不能走到 latent 放大器」判定谁是
+ * 交付端，而不是写死 id —— 作者换个 id 重新导出也不会挑错。三个 `PreviewImage` 预览的是参考图
+ * 本身（scaler 输出），留着会让一次生成回来三张图。
+ */
+function pruneMinimaxH3WenxiOutputs(workflow: ComfyWorkflow) {
+    let changed = false;
+    for (const [id, node] of Object.entries(workflow)) {
+        if (/^PreviewImage$/i.test(String(node?.class_type || ""))) {
+            delete workflow[id];
+            changed = true;
+        }
+    }
+    const sinks = Object.entries(workflow).filter(([, node]) => /VHS_VideoCombine/i.test(String(node?.class_type || "")));
+    if (sinks.length <= 1) return changed;
+    const upscaled = new Set(
+        Object.entries(workflow)
+            .filter(([, node]) => /LatentUpscal/i.test(String(node?.class_type || "")))
+            .map(([id]) => id),
+    );
+    const finals = sinks.filter(([id]) => {
+        const chain = comfyUpstreamIds(workflow, id);
+        for (const upstreamId of chain) if (upscaled.has(upstreamId)) return true;
+        return false;
+    });
+    // 判定不出来（图里没有放大器）时保留**最后一个** sink，总比一条片子都不回强。
+    const keep = new Set((finals.length ? finals : sinks.slice(-1)).map(([id]) => id));
+    for (const [id] of sinks) {
+        if (keep.has(id)) continue;
+        delete workflow[id];
+        changed = true;
+    }
+    return changed;
+}
+
+function applyMinimaxH3WenxiSettings(
+    workflow: ComfyWorkflow,
+    prompt: string,
+    imageValues: string[],
+    seconds?: string,
+    aspect = "",
+    megapixels = "",
+    loraStrength: string | number = "",
+    audioCount = 0,
+    lowConfig = false,
+): { workflow: ComfyWorkflow; structuralRepair: boolean } {
+    const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
+    let structuralRepair = false;
+
+    // 1) 作者的占位节点（`忽略多组 孤海`）：不进采样链，纯负载。
+    for (const [id, node] of Object.entries(next)) {
+        if (/忽略多组|孤海/.test(String(node?.class_type || ""))) {
+            delete next[id];
+            structuralRepair = true;
+        }
+    }
+
+    // 2) 输出收敛**先做**：那三个 `PreviewImage` 就挂在 ref 缩放链上，先删掉它们，
+    //    下面摘参考图槽时 `pruneOrphanedReferenceChain` 才能把整条 scaler→LoadImage 剪干净。
+    if (pruneMinimaxH3WenxiOutputs(next)) structuralRepair = true;
+
+    // 3) 参考图 → `ref_images.ref_image_N` 槽序（不是 LoadImage id 序）。
+    const consumers = minimaxH3WenxiRefConsumers(next);
+    if (!consumers.length) throw new Error(apiText("runningHubReferenceNotApplied"));
+    // Ref2VA 图没有参考图就没有可绑的演员 —— 宁可报错，也不要拿作者的 demo 人像去渲染。
+    if (!imageValues.length) throw new Error(apiText("runningHubReferenceNotApplied"));
+
+    const primary = consumers[0];
+    let writtenReferences = 0;
+    const disconnected: string[] = [];
+    primary.slots.forEach((slot, position) => {
+        const value = imageValues[position] || "";
+        // 同一个槽在不同 consumer 上指向同一批 scaler，但都要各自走到 LoadImage。
+        const loaderIds = new Set<string>();
+        for (const consumer of consumers) {
+            const peer = consumer.slots.find((item) => item.key === slot.key);
+            if (!peer) continue;
+            const loaderId = minimaxH3FourViewLoader(next, peer.sourceId);
+            if (loaderId) loaderIds.add(loaderId);
+        }
+        if (value) {
+            let wrote = false;
+            for (const loaderId of loaderIds) {
+                const loader = next[loaderId];
+                const field = loader ? imageFieldName(loader) : "";
+                if (!field || !loader?.inputs) continue;
+                loader.inputs[field] = value;
+                wrote = true;
+            }
+            if (wrote) {
+                writtenReferences += 1;
+                return;
+            }
+        }
+        // 未填：每个 consumer 上都必须摘掉这条链接，否则作者的 demo 人像照样进片。
+        for (const consumer of consumers) {
+            if (consumer.node.inputs && slot.key in consumer.node.inputs) {
+                delete consumer.node.inputs[slot.key];
+                structuralRepair = true;
+            }
+            const peer = consumer.slots.find((item) => item.key === slot.key);
+            if (peer) disconnected.push(peer.sourceId);
+        }
+    });
+    if (imageValues.length && !writtenReferences) throw new Error(apiText("runningHubReferenceNotApplied"));
+
+    // 4) 音轨：用户没带音色参考 → 作者那两条 demo mp3 必须整条摘掉。
+    //    H3 会顺着参考音轨往下说，这是「冒出我没写过的台词」的头号来源（见
+    //    `applyRunningHubReferenceAudios` 的注释）。带了的情况已经在本函数**之前**由
+    //    `applyRunningHubReferenceAudios` 写进低配 522/523 · 高配 225/223 的 `LoadAudio` 里，
+    //    这里只补「没带」这一半；槽数与上传数不一致时，超出的槽同样按未带处理。
+    for (const consumer of consumers) {
+        for (const key of Object.keys(consumer.node.inputs || {})) {
+            const audioMatch = /^ref_audios\.ref_audio_(\d+)$/.exec(key);
+            const isVideoSlot = /^ref_videos\./.test(key);
+            if (!audioMatch && !isVideoSlot) continue;
+            const link = consumer.node.inputs?.[key];
+            const sourceId = Array.isArray(link) ? String(link[0]) : "";
+            const media = sourceId ? next[sourceId] : undefined;
+            const index = audioMatch ? Number(audioMatch[1]) : -1;
+            const keep = !isVideoSlot && index >= 0 && index < audioCount && Boolean(media?.inputs);
+            if (keep) continue;
+            delete consumer.node.inputs![key];
+            if (sourceId) disconnected.push(sourceId);
+            structuralRepair = true;
+        }
+    }
+
+    if (disconnected.length) {
+        // `pruneOrphanedReferenceChain` 只认图片链；`LoadAudio` / 视频加载器要自己删。
+        for (const id of new Set(disconnected)) {
+            if (!next[id]) continue;
+            if (/LoadAudio|VHS_LoadVideo|LoadVideo/i.test(String(next[id]?.class_type || ""))) {
+                delete next[id];
+                structuralRepair = true;
+                continue;
+            }
+            // 参考图槽：scaler → LoadImage 这条链按「还有没有别的消费者」逐级剪。
+            if (pruneMinimaxH3WenxiEmptySlot(next, id)) structuralRepair = true;
+        }
+        if (pruneOrphanedReferenceChain(next, [...new Set(disconnected)])) structuralRepair = true;
+    }
+
+    // 5) 时长 → `PrimitiveFloat`「Float (duration)」（低配 529 / 高配 163）。
+    //    只写秒数：`ComfyMathExpression` 负责把它变成 `max(5, round(a*24))` 的 17n+5 帧数，
+    //    动 `length` 那个链接就等于破坏 H3 的长度约束。
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_WENXI_SECONDS.max, Math.max(MINIMAX_H3_WENXI_SECONDS.min, duration));
+        const durationNode =
+            next["529"] ||
+            next["163"] ||
+            findComfyNode(next, (node) => /Primitive(Float|Int)/i.test(String(node.class_type || "")) && /时长|duration|长度/i.test(String(node._meta?.title || "")));
+        if (durationNode?.inputs && typeof durationNode.inputs.value === "number") durationNode.inputs.value = clamped;
+    }
+
+    // 6) 画幅 → `ResolutionSelector`（低配 456 / 高配 164），它是**草稿**尺寸：
+    //    aspect_ratio 是标签枚举，megapixels 按「交付 / 1.5²」回推，且只在高于作者 bake 时才抬
+    //    （选 720p 不许把作者 0.5MP 的图压小）。
+    const selector = next["456"] || next["164"] || findComfyNode(next, (node) => node.class_type === "ResolutionSelector" && "aspect_ratio" in (node.inputs || {}));
+    if (selector?.inputs) {
+        if (aspect && typeof selector.inputs.aspect_ratio === "string") {
+            selector.inputs.aspect_ratio = resolutionSelectorAspectLabel(aspect);
+        }
+        const delivered = singularityDeliveredMegapixels(megapixels);
+        if (delivered > 0 && typeof selector.inputs.megapixels === "number") {
+            const scale = minimaxH3WenxiUpscaleFactor(next) || 1.5;
+            const authored = Number(selector.inputs.megapixels) || 0;
+            const budget = Math.min(delivered, MINIMAX_H3_WENXI_MAX_DELIVERED_MP);
+            const draft = Math.max(0.1, Math.round((budget / (scale * scale)) * 100) / 100);
+            selector.inputs.megapixels = authored > 0 ? Math.max(authored, draft) : draft;
+        }
+    }
+
+    // 7) 提示词 → 采样节点 `prompt` 链接解析出来的那个文本节点（`CR Prompt Text`，字段 `prompt`）。
+    //    ⚠️ **空提示词也要写**：作者在这个节点里写死了一整段示例台词（Gu Yan / Xiao Yu / 私人飞机），
+    //    「空就不写」= 把别人的角色原样念出来。这是用户「总是出现我没写过的台词」最像的一条。
+    {
+        const link = consumers[0]?.node?.inputs?.prompt;
+        const sourceId = Array.isArray(link) ? String(link[0]) : "";
+        const candidates = [sourceId ? next[sourceId] : undefined, next["528"], next["167"]];
+        let promptNode = candidates.find(
+            (node) =>
+                node?.inputs &&
+                (typeof node.inputs.prompt === "string" || typeof node.inputs.text === "string" || typeof node.inputs.value === "string"),
+        );
+        if (!promptNode) {
+            promptNode = findComfyNode(
+                next,
+                (node) => /CR Prompt Text|PrimitiveString|^Text$/i.test(String(node.class_type || "")) && typeof node.inputs?.prompt === "string",
+            );
+        }
+        if (promptNode?.inputs) {
+            if (typeof promptNode.inputs.prompt === "string") promptNode.inputs.prompt = prompt;
+            else if (typeof promptNode.inputs.text === "string") promptNode.inputs.text = prompt;
+            else if (typeof promptNode.inputs.value === "string") promptNode.inputs.value = prompt;
+        }
+    }
+
+    // 8) 低配那支 `MysticXXX_MMH3-V1`（548）：韩语人声 / 硬字幕 / 自编台词的共同源头，归到档位
+    //    （默认 0 = 短路成官方底模，见 `FISHER_LORA_STRENGTH_OPTIONS`）。高配图没有这支，
+    //    `minimax_h3_fl2v_turbo_8step` 是 8 步采样必需的 turbo，**任何档位都不许动它**。
+    if (lowConfig) {
+        const strength = normalizeFisherLoraStrength(loraStrength);
+        const loraNode =
+            next["548"] ||
+            findComfyNode(
+                next,
+                (node) => /LoraLoader/i.test(String(node.class_type || "")) && /Mystic/i.test(String(node.inputs?.lora_name || "")),
+            );
+        if (loraNode?.inputs) {
+            loraNode.inputs.strength_model = strength;
+            if (typeof loraNode.inputs.strength_clip === "number") loraNode.inputs.strength_clip = strength;
+        }
+    }
+
+    // 9) 固定种子 → 每次跑都重放同一条片（`RandomNoise` 是这族的唯一种子源）。
+    for (const node of Object.values(next)) {
+        if (/RandomNoise/i.test(String(node.class_type || "")) && typeof node.inputs?.noise_seed === "number") {
+            node.inputs.noise_seed = randomComfySeed();
+        }
+    }
+
+    return { workflow: next, structuralRepair: true };
+}
+
 // Qwen Image 2.1 + Flux2 Klein 皮肤肌理 T2I (runninghub.ai U2108554415855054850 /
 // runninghub.cn 2108554405246226433). Two-stage graph: KSampler (161) drafts from CLIPTextEncode
 // (5)/(7), then SamplerCustomAdvanced + RandomNoise (50) refines with a fixed Klein enhance prompt
@@ -3368,6 +3764,11 @@ export function isWorkFisherMossWorkflowId(workflowId?: string | null) {
  */
 function bundledRunningHubGraph(workflowId: string): ComfyWorkflow | null {
     if (isWorkFisherMossWorkflow(workflowId)) return JSON.parse(JSON.stringify(workfisherMossWorkflow)) as unknown as ComfyWorkflow;
+    // 【MINIMAX-H3】八月最强文戏：两张图各内置一份，按 id 二选一（低配不会拿到高配的图）。
+    if (isMinimaxH3WenxiWorkflow(workflowId)) {
+        const graph = isMinimaxH3WenxiLowWorkflow(workflowId) ? minimaxH3WenxiLowWorkflow : minimaxH3WenxiHighWorkflow;
+        return JSON.parse(JSON.stringify(graph)) as unknown as ComfyWorkflow;
+    }
     return null;
 }
 
@@ -3664,7 +4065,9 @@ function usesRunningHubLocalExportGraph(workflowId?: string | null) {
         // 所以保留「脚本里贴 Export」这条**通用**兜底 —— 否则它连提交都提交不了。
         isStandaloneH3ExportWorkflow(workflowId) ||
         isKrea2AidenLoraWorkflow(workflowId) ||
-        isWorkFisherMossWorkflow(workflowId)
+        isWorkFisherMossWorkflow(workflowId) ||
+        // 【MINIMAX-H3】八月最强文戏：两张内置图 + `comfy/run`，不走远端 getJsonApiFormat。
+        isMinimaxH3WenxiWorkflow(workflowId)
     );
 }
 
@@ -3674,7 +4077,9 @@ function prefersRunningHubDirectSubmit(workflowId?: string | null) {
         isMinimaxH3SingularityWorkflow(workflowId) ||
         isMinimaxH3HdDynamicWorkflow(workflowId) ||
         isMinimaxH3FisherWorkflow(workflowId) ||
-        isMinimaxH3YzjinyuWorkflow(workflowId)
+        isMinimaxH3YzjinyuWorkflow(workflowId) ||
+        // 文戏 pair：3 图 + 2 音色一起上传，走 Pages 代理会 ERR_CONNECTION_CLOSED（同 Fisher/文武双全）。
+        isMinimaxH3WenxiWorkflow(workflowId)
     );
 }
 
@@ -4817,7 +5222,12 @@ function isMinimaxH3FamilyWorkflow(workflowId?: string | null) {
         isMinimaxH3SingularityWorkflow(workflowId) ||
         isMinimaxH3HdDynamicWorkflow(workflowId) ||
         isMinimaxH3FisherWorkflow(workflowId) ||
-        isMinimaxH3YzjinyuWorkflow(workflowId)
+        isMinimaxH3YzjinyuWorkflow(workflowId) ||
+        // 【MINIMAX-H3】八月最强文戏 pair：作者示例提示词本身就是 `<Subject 1> (S1) says:` +
+        // `<d>[Chinese]…</d>` 写法 —— 跟方言层吐出来的口径完全一致，所以它们吃 H3 全族的
+        // **台词方言层**（转写 `<d>` / 补 `<Audio N>` 音色绑定 / 分镜表骨架处理），
+        // 但**不吃** Fisher 那套（干净模式 / 撤尾巴 / 风格字段 / 静音镜不挂音色 / 0.8MP / 2–12s）。
+        isMinimaxH3WenxiWorkflow(workflowId)
     );
 }
 
@@ -4973,7 +5383,7 @@ export function workflowNodeInfoList(before: ComfyWorkflow, after: ComfyWorkflow
 
 // Exported for the workflow-diagnostics path and tests: the transformation is the risky part, so it
 // is exercised directly instead of only through a live task submission.
-export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string, megapixels = "", mjFlavor = "", fisherLoraStrength = ""): RunningHubWorkflowPatch {
+export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imageValues: string[], size?: { width: number; height: number } | null, seconds?: string, aspect = "", rawSize = "", workflowId?: string, megapixels = "", mjFlavor = "", fisherLoraStrength = "", audioCount = 0): RunningHubWorkflowPatch {
     let patched = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
     // The 四视图 asset-card graph opts out of the generic writers entirely (see
     // applyMinimaxH3FourViewSettings for what each of them would break here). Its own adapter
@@ -5041,6 +5451,26 @@ export function buildWorkflowPatch(workflow: ComfyWorkflow, prompt: string, imag
         const yzjinyu = applyMinimaxH3YzjinyuSettings(workflow, prompt, imageValues, seconds, aspect, megapixels);
         const list = workflowNodeInfoList(workflow, yzjinyu.workflow);
         return { nodeInfoList: list, graph: yzjinyu.workflow };
+    }
+    // 【MINIMAX-H3】八月最强文戏 低配 / 高配 opts out (see applyMinimaxH3WenxiSettings): prompt lives
+    // on `CR Prompt Text` (field `prompt`), refs sit behind a scaler chain, duration is a Float behind
+    // the 17n+5 math link, the selector wants a label enum + a *draft* megapixels, and the author ships
+    // baked demo portraits / voices plus two video sinks. `audioCount` tells the adapter whether the
+    // canvas actually brought timbre references (0 → the author's demo mp3s are unlinked and pruned).
+    if (isMinimaxH3WenxiWorkflow(workflowId)) {
+        const wenxi = applyMinimaxH3WenxiSettings(
+            workflow,
+            prompt,
+            imageValues,
+            seconds,
+            aspect,
+            megapixels,
+            fisherLoraStrength,
+            audioCount,
+            isMinimaxH3WenxiLowWorkflow(workflowId),
+        );
+        const list = workflowNodeInfoList(workflow, wenxi.workflow);
+        return { nodeInfoList: list, graph: wenxi.workflow };
     }
     // Qwen+Klein 皮肤肌理 T2I opts out for the same class of reasons (see applyQwenKleinSkinSettings):
     // the generic prompt scorer would overwrite the negative and Klein enhance CLIP slots, the size
@@ -6028,9 +6458,11 @@ async function runRunningHubWorkflowWithKey(args: {
     // the browser reach RunningHub first and keep the edge out of the byte path. Other families keep
     // the previous proxy-only behaviour (no behaviour change for them).
     const yzjinyuRefs = isMinimaxH3YzjinyuWorkflow(workflowId);
+    // 【MINIMAX-H3】八月最强文戏 pair：同样「大图 + 音色」一起上传，音轨也走浏览器直传。
+    const wenxiRefs = isMinimaxH3WenxiWorkflow(workflowId);
     const uploadedAudios: string[] = [];
     for (let index = 0; index < audioSources.length; index += 1) {
-        uploadedAudios.push(await uploadAudioFile(origin, apiKey, audioSources[index], `ref-audio-${index + 1}${audioFileExtension(audioSources[index])}`, request.signal, yzjinyuRefs));
+        uploadedAudios.push(await uploadAudioFile(origin, apiKey, audioSources[index], `ref-audio-${index + 1}${audioFileExtension(audioSources[index])}`, request.signal, yzjinyuRefs || wenxiRefs));
     }
     const audioPatch = workflow && uploadedAudios.length ? applyRunningHubReferenceAudios(workflow, uploadedAudios) : null;
     // Silence is the bug we are fixing: audio that cannot be placed must fail loudly instead of
@@ -6082,7 +6514,7 @@ async function runRunningHubWorkflowWithKey(args: {
         console.info(`[runninghub] h3 prompt (${workflowId}) mode=${mode} audio=${uploadedAudios.length} styleFields=${styleFieldsOn ? "on" : "off"}:\n${effectivePrompt}`);
     }
     const patch: RunningHubWorkflowPatch = prepared
-        ? buildWorkflowPatch(prepared, effectivePrompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "", request.fisherLoraStrength || "")
+        ? buildWorkflowPatch(prepared, effectivePrompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "", request.fisherLoraStrength || "", uploadedAudios.length)
         : { nodeInfoList: [] };
     const overrides = [...patch.nodeInfoList, ...audioOverrides];
     // Planted `LoadAudio` nodes only exist in our copy, and `nodeInfoList` cannot create links —
