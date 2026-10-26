@@ -379,7 +379,7 @@ export default {
         runningHubTaskFailed: "RunningHub 任务失败",
         runningHubNoImage: "RunningHub 任务完成但没有图片。若工作流输出的是视频，请在视频节点里生成。",
         runningHubReferenceNotApplied: "参考图已上传，但未能写入这个工作流（节点结构与预期不符）。已停止提交以避免生成与参考图无关的结果；请在 RunningHub 网站确认该工作流已保存后重试。",
-        runningHubAudioNotApplied: "参考音频已上传，但这个工作流没有接收音频参考的入口（找不到 ref_audios 槽位，也没有 LoadAudio 节点）。已停止提交，避免生成一段与你的音频无关的成片。请改用带音频参考的 MiniMax H3 工作流，或移除音频节点。",
+        runningHubAudioNotApplied: "参考音频已上传，但这个工作流没有接收音频参考的入口（找不到 ref_audios / drive_audio / LoadAudio，AI App 也没有音频字段）。已停止提交，避免生成一段与你的音频无关的成片。请改用带音频参考的 MiniMax H3 工作流，或移除音频节点。",
         runningHubVideoNotApplied: "参考视频已上传，但没有写进这个工作流的视频槽位（找不到 ref_videos 槽位，也没有 VHS_LoadVideo / LoadVideo 节点）。已停止提交，避免生成一段与你的视频无关的成片。请改用支持参考视频的 MiniMax H3 工作流，或断开视频节点。",
         runningHubNoVideo: "RunningHub 任务完成但没有视频。若工作流输出的是图片，请在生图节点里生成。",
         runningHubNoBalance: "RunningHub 账户余额不足（NOT_ENOUGH_BALANCE），无法生成。请到 RunningHub 网站充值后再试。",

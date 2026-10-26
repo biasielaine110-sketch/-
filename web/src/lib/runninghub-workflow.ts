@@ -4176,7 +4176,26 @@ async function fetchWebappNodes(origin: string, apiKey: string, webappId: string
     });
 }
 
-function buildWebappNodeInfoList(nodes: WebappNode[], prompt: string, imageValues: string[], size = "", seconds = "", media: "image" | "video" = "image") {
+/** AI App (`apiCallDemo`) fields that accept an uploaded audio filename. */
+function isWebappAudioNode(node: WebappNode) {
+    if (/AUDIO/i.test(node.fieldType || "")) return true;
+    if (/^(audio|audio_file|audio_path|voice|timbre|ref_audio)$/i.test(node.fieldName)) return true;
+    return /音色|参考音频|参考音|\baudio\b/i.test(`${node.nodeName || ""} ${node.description || ""}`);
+}
+
+function webappNodesAcceptAudio(nodes: WebappNode[]) {
+    return nodes.some(isWebappAudioNode);
+}
+
+function buildWebappNodeInfoList(
+    nodes: WebappNode[],
+    prompt: string,
+    imageValues: string[],
+    size = "",
+    seconds = "",
+    media: "image" | "video" = "image",
+    audioValues: string[] = [],
+) {
     const list = nodes.map((node) => ({ nodeId: node.nodeId, fieldName: node.fieldName, fieldValue: node.fieldValue }));
     const setField = (node: WebappNode, value: string) => {
         const item = list.find((entry) => entry.nodeId === node.nodeId && entry.fieldName === node.fieldName);
@@ -4215,6 +4234,14 @@ function buildWebappNodeInfoList(nodes: WebappNode[], prompt: string, imageValue
     const imageNodes = nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName));
     imageValues.forEach((value, index) => {
         const node = imageNodes[index];
+        if (!node || !value) return;
+        setField(node, value);
+    });
+    // AI App audio slots (LoadAudio.audio / fieldType AUDIO / 音色参考). Without this, canvas
+    // audio was uploaded then rejected as "no place for audio" even when apiCallDemo exposes slots.
+    const audioNodes = nodes.filter(isWebappAudioNode);
+    audioValues.filter(Boolean).forEach((value, index) => {
+        const node = audioNodes[index];
         if (!node || !value) return;
         setField(node, value);
     });
@@ -4277,12 +4304,17 @@ export function applyRunningHubReferenceAudios(workflow: ComfyWorkflow, fileName
     if (!names.length) return { workflow, applied: 0, planted: 0 };
     const next = JSON.parse(JSON.stringify(workflow)) as ComfyWorkflow;
 
-    // Conditioning consumers: authored audio slots, or the reference-to-video class paired with image
-    // slots (a text-to-video node has no `ref_images.*` and must not be touched).
+    // Conditioning consumers:
+    //  - authored `ref_audios.ref_audio_*`
+    //  - authored `drive_audio` (MiniMaxH3AudioConditioning* / DualClock-style)
+    //  - `MiniMaxH3ReferenceToVideo` paired with image slots (pure T2V has no `ref_images.*` and
+    //    must not be touched — inventing `drive_audio` there can reject the prompt)
     const consumers = Object.entries(next).filter(([, node]) => {
         const keys = Object.keys(node?.inputs || {});
         if (!keys.length) return false;
         if (keys.some((key) => RH_REF_AUDIO_SLOT.test(key))) return true;
+        if (keys.some((key) => /^drive_audio$/i.test(key))) return true;
+        if (/MiniMaxH3AudioConditioning/i.test(String(node?.class_type || ""))) return true;
         return /MiniMaxH3ReferenceToVideo/i.test(String(node?.class_type || "")) && keys.some((key) => key.startsWith("ref_images."));
     });
 
@@ -4302,21 +4334,52 @@ export function applyRunningHubReferenceAudios(workflow: ComfyWorkflow, fileName
     let planted = 0;
     for (const [, consumer] of consumers) {
         const inputs = consumer.inputs!;
+        const type = String(consumer.class_type || "");
+        const keys = Object.keys(inputs);
+        const authoredRefSlots = keys.some((key) => RH_REF_AUDIO_SLOT.test(key));
+        const canDrive = "drive_audio" in inputs || /MiniMaxH3AudioConditioning/i.test(type);
+        const writeRefSlots = authoredRefSlots || /MiniMaxH3ReferenceToVideo/i.test(type);
         names.forEach((name, position) => {
-            const key = `ref_audios.ref_audio_${position}`;
-            const link = inputs[key];
-            const sourceId = Array.isArray(link) ? String(link[0]) : "";
-            const loader = sourceId ? next[sourceId] : undefined;
-            if (loader && isComfyAudioLoaderNode(loader)) {
-                loader.inputs![audioFieldName(loader)] = name;
-                applied += 1;
-                return;
+            let loaderId = "";
+            if (writeRefSlots) {
+                const key = `ref_audios.ref_audio_${position}`;
+                const link = inputs[key];
+                const sourceId = Array.isArray(link) ? String(link[0]) : "";
+                const loader = sourceId ? next[sourceId] : undefined;
+                if (loader && isComfyAudioLoaderNode(loader)) {
+                    loader.inputs![audioFieldName(loader)] = name;
+                    loaderId = sourceId;
+                    applied += 1;
+                } else {
+                    const id = takeId();
+                    next[id] = { class_type: "LoadAudio", inputs: { audio: name }, _meta: { title: `Canvas Ref Audio ${position + 1}` } };
+                    inputs[key] = [id, 0];
+                    loaderId = id;
+                    applied += 1;
+                    planted += 1;
+                }
             }
-            const id = takeId();
-            next[id] = { class_type: "LoadAudio", inputs: { audio: name }, _meta: { title: `Canvas Ref Audio ${position + 1}` } };
-            inputs[key] = [id, 0];
-            applied += 1;
-            planted += 1;
+            // Only touch `drive_audio` when the export already declares it (or AudioConditioning).
+            // Never invent it on plain ReferenceToVideo — RH rejects unexpected kwargs.
+            if (position === 0 && canDrive) {
+                if (!loaderId) {
+                    const driveLink = inputs.drive_audio;
+                    const driveSourceId = Array.isArray(driveLink) ? String(driveLink[0]) : "";
+                    const driveLoader = driveSourceId ? next[driveSourceId] : undefined;
+                    if (driveLoader && isComfyAudioLoaderNode(driveLoader)) {
+                        driveLoader.inputs![audioFieldName(driveLoader)] = name;
+                        loaderId = driveSourceId;
+                        applied += 1;
+                    } else {
+                        const id = takeId();
+                        next[id] = { class_type: "LoadAudio", inputs: { audio: name }, _meta: { title: "Canvas Drive Audio" } };
+                        loaderId = id;
+                        planted += 1;
+                        applied += 1;
+                    }
+                }
+                inputs.drive_audio = [loaderId, 0];
+            }
         });
     }
     if (applied) return { workflow: next, applied, planted };
@@ -6507,9 +6570,21 @@ async function runRunningHubWorkflowWithKey(args: {
         uploadedAudios.push(await uploadAudioFile(origin, apiKey, audioSources[index], `ref-audio-${index + 1}${audioFileExtension(audioSources[index])}`, request.signal, yzjinyuRefs || wenxiRefs));
     }
     const audioPatch = workflow && uploadedAudios.length ? applyRunningHubReferenceAudios(workflow, uploadedAudios) : null;
-    // Silence is the bug we are fixing: audio that cannot be placed must fail loudly instead of
-    // billing a render that ignores it (also covers the webapp/nodeInfo path, which has no graph).
-    if (audioSources.length && !audioPatch?.applied) throw new Error(apiText("runningHubAudioNotApplied"));
+    const audioAppliedToGraph = Boolean(audioPatch?.applied);
+    // AI Apps (e.g. MiniMax H3生成视频 `2114402574865616897`) often expose audio only via
+    // `/api/webapp/apiCallDemo` + `ai-app/run`, not via a fetchable Comfy graph. Do not fail yet —
+    // try that path before claiming "no place for audio". Still never bill a graph render that
+    // silently drops the user's audio.
+    let webappNodesForAudio: WebappNode[] | null = null;
+    if (audioSources.length && !audioAppliedToGraph) {
+        webappNodesForAudio = await fetchWebappNodes(origin, apiKey, workflowId, request.signal).catch((webappError: unknown) => {
+            if (isAuthMessage(errorText(webappError))) throw webappError;
+            return [] as WebappNode[];
+        });
+        if (!webappNodesAcceptAudio(webappNodesForAudio)) {
+            throw new Error(apiText("runningHubAudioNotApplied"));
+        }
+    }
     const audioOverrides = audioPatch?.applied ? workflowNodeInfoList(workflow!, audioPatch.workflow) : [];
     // Reference clip: only the 文武双全 family has an adapter that understands `ref_videos.*`
     // (everywhere else the slot, if any, is pruned or means something else). Uploaded and written
@@ -6564,11 +6639,22 @@ async function runRunningHubWorkflowWithKey(args: {
     const imageOverrides = overrides.filter((item) => /image|url/i.test(item.fieldName));
     if (referenceCount) {
         console.info(
-            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1 silentShot=1" : ""}${fisherMixedShots ? " lipsyncMixed=1" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
+            `[runninghub] ${workflowId}: refs=${referenceCount} uploaded=${uploaded.length} imageOverrides=${imageOverrides.length} (${imageOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "none"}) audio=${uploadedAudios.length} audioApplied=${audioPatch?.applied || 0} audioPlanted=${audioPatch?.planted || 0} webappAudio=${Boolean(webappNodesForAudio && webappNodesAcceptAudio(webappNodesForAudio))}${uploadedAudios.length ? ` (${audioOverrides.map((item) => `${item.nodeId}.${item.fieldName}`).join(", ") || "graph-only"})` : ""}${fisherDialogueFree ? " noDialogue=1 audioDropped=1 silentShot=1" : ""}${fisherMixedShots ? " lipsyncMixed=1" : ""} video=${uploadedVideos.length} videoApplied=${videoApplied} graph=${Boolean(repairedGraph)} overrides=${overrides.length} localScript=${Boolean(localExportGraph)}`,
         );
     }
     let task: RunningHubTaskView;
-    try {
+    // Prefer AI App / webapp when the Comfy graph cannot host the user's audio (ACL-denied Export,
+    // or a graph with no LoadAudio / ref_audios). nodeInfoList can still write AUDIO fields.
+    if (audioSources.length && !audioAppliedToGraph && webappNodesForAudio?.length) {
+        console.info(`[runninghub] ${workflowId}: graph has no audio surface; submitting via ai-app/run with ${uploadedAudios.length} audio file(s)`);
+        task = await submitWebappTask(
+            origin,
+            apiKey,
+            workflowId,
+            buildWebappNodeInfoList(webappNodesForAudio, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios),
+            request.signal,
+        );
+    } else try {
         // Aiden / Pastoral MJ / 全能生图王 / Singularity / HD Dynamic / Fisher: submit Export via
         // create+workflow (not comfy/run — RH often returns NOT_FOUND). Prefer browser-direct create
         // for multi-ref full graphs (Pages proxy ERR_CONNECTION_CLOSED).
@@ -6634,12 +6720,24 @@ async function runRunningHubWorkflowWithKey(args: {
                     });
                 });
             } else {
-                const nodes = await fetchWebappNodes(origin, apiKey, workflowId, request.signal).catch((webappError: unknown) => {
-                    if (isAuthMessage(errorText(webappError))) throw webappError;
-                    return [] as WebappNode[];
-                });
+                const nodes =
+                    webappNodesForAudio ||
+                    (await fetchWebappNodes(origin, apiKey, workflowId, request.signal).catch((webappError: unknown) => {
+                        if (isAuthMessage(errorText(webappError))) throw webappError;
+                        return [] as WebappNode[];
+                    }));
                 if (nodes.length) {
-                    task = await submitWebappTask(origin, apiKey, workflowId, buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media), request.signal);
+                    // Never fall through to a webapp submit that drops the user's audio.
+                    if (audioSources.length && !audioAppliedToGraph && !webappNodesAcceptAudio(nodes)) {
+                        throw new Error(apiText("runningHubAudioNotApplied"));
+                    }
+                    task = await submitWebappTask(
+                        origin,
+                        apiKey,
+                        workflowId,
+                        buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios),
+                        request.signal,
+                    );
                 } else if (!workflow) {
                     task = await submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((retryError: unknown) => {
                         throw explainRunningHubError(retryError, workflowId);
