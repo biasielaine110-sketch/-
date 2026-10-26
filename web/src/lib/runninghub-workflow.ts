@@ -5224,9 +5224,10 @@ function isMinimaxH3FamilyWorkflow(workflowId?: string | null) {
         isMinimaxH3FisherWorkflow(workflowId) ||
         isMinimaxH3YzjinyuWorkflow(workflowId) ||
         // 【MINIMAX-H3】八月最强文戏 pair：作者示例提示词本身就是 `<Subject 1> (S1) says:` +
-        // `<d>[Chinese]…</d>` 写法 —— 跟方言层吐出来的口径完全一致，所以它们吃 H3 全族的
-        // **台词方言层**（转写 `<d>` / 补 `<Audio N>` 音色绑定 / 分镜表骨架处理），
-        // 但**不吃** Fisher 那套（干净模式 / 撤尾巴 / 风格字段 / 静音镜不挂音色 / 0.8MP / 2–12s）。
+        // `<d>[Chinese]…</d>` 写法 —— 跟方言层吐出来的口径完全一致，所以它们进这张名单（为了
+        // `<d>` 转写 / 补 `<Audio N>` 音色绑定），但走的是 `h3PromptForWorkflow` 的**最小形态**：
+        // 不加【台词锁定】、不加 `overall_soundscape:`，也**不吃** Fisher 那套（干净模式以外的
+        // 静音镜分流 / 撤尾巴 / 风格字段开关 / 0.8MP / 2–12s）。用户 2026-10-26 选定。
         isMinimaxH3WenxiWorkflow(workflowId)
     );
 }
@@ -5238,6 +5239,47 @@ function isMinimaxH3FamilyWorkflow(workflowId?: string | null) {
  */
 export function isMinimaxH3FamilyWorkflowId(workflowId?: string | null) {
     return isMinimaxH3FamilyWorkflow(workflowId);
+}
+
+/**
+ * 提交前把用户提示词转成「这一族该用的口径」—— **唯一入口**（探针必须调这个，别自己抄一份配置）。
+ *
+ * 三档口径：
+ *  - **不在 H3 名单**（含独立模型 `2114341115852099586`）：原文一个字不改；
+ *  - **最小形态**（`audioNegation` = Fisher 两个 id + 文戏两个 id）：只留「正文 + `<d>` + 一句
+ *    `<Audio N> is the voice-timbre reference …`」。不加【台词锁定】、不加 `overall_soundscape:`、
+ *    不套描述槽位 —— 这些散文会被 H3 当稿子念出来（2026-10-25 第七次报障的定论）。
+ *    2026-10-26 用户选定：「文戏这两个也走最小形态」。
+ *  - **其余 H3 族**：全量说明文（音色声明 + 台词锁定 + `overall_soundscape:` 槽位）。
+ *
+ * ⚠️ `keepStyleFields`（提交视觉风格字段）：只有 Fisher 有面板开关（默认关）；文戏固定「只丢字段名、
+ * 值照发」，不静默删掉用户写的风格；其余族不走 `finish` 的剥骨架分支，这一项无意义。
+ */
+export function h3PromptForWorkflow(
+    workflowId: string | null | undefined,
+    prompt: string,
+    options?: { audioCount?: number; styleFields?: string },
+): string {
+    if (!isMinimaxH3FamilyWorkflow(workflowId)) return prompt;
+    const fisher = isMinimaxH3FisherWorkflow(workflowId);
+    return adaptMinimaxH3ReferencePrompt(prompt, {
+        audioCount: options?.audioCount,
+        // 静音镜连「只要环境音效」那句模板说明也不给 —— 只 Fisher（文戏没有静音镜分流）。
+        dropSoundNote: fisher,
+        // ⚠️ 参数名是历史包袱：它的实际作用是「干净模式 / 最小形态」（见函数内 `minimal`）。
+        audioNegation: fisher || isMinimaxH3WenxiWorkflow(workflowId),
+        // 「提交视觉风格字段」：Fisher 有面板开关（默认关，因为那段裸中文会被念）；文戏没有开关，
+        // 固定**保留值、只丢字段名** —— 用户要的是「去掉散文」，不是「把视觉风格整行删掉」。
+        keepStyleFields: fisher ? String(options?.styleFields || "") === "on" : isMinimaxH3WenxiWorkflow(workflowId),
+    });
+}
+
+/** 日志用：这一族走哪一档口径。 */
+export function h3PromptMode(workflowId?: string | null) {
+    if (!isMinimaxH3FamilyWorkflow(workflowId)) return "verbatim";
+    if (isMinimaxH3FisherWorkflow(workflowId)) return "fisher";
+    if (isMinimaxH3WenxiWorkflow(workflowId)) return "minimal";
+    return "plain";
 }
 
 /**
@@ -6493,25 +6535,17 @@ async function runRunningHubWorkflowWithKey(args: {
     // `audioCount` 决定要不要补 `<Audio N> is the voice-timbre reference …` 绑定声明。
     // 独立模型 `2114341115852099586` **不在这个名单里**（2026-10-26）→ 提示词**逐字原样**提交：
     // 不做 `<d>` 转写、不剥分镜表骨架、不撤尾巴块，由作者工作流原本的对话输出逻辑处理。
-    const effectivePrompt = isMinimaxH3FamilyWorkflow(workflowId)
-        ? adaptMinimaxH3ReferencePrompt(request.prompt, {
-              audioCount: uploadedAudios.length,
-              // 静音镜连「只要环境音效」那句模板声音说明都不给（用户 2026-10-25，只 Fisher 两个 id）。
-              dropSoundNote: isMinimaxH3FisherWorkflow(workflowId),
-              // 官方声音槽位给 H3 全族，但两句否定式（No dialogue / non_diegetic_music: N/A）
-              // **只给这两个 id** —— 别的族提示词里没转成 `<d>` 的台词、或本来要的 BGM 会被一起压掉。
-              audioNegation: isMinimaxH3FisherWorkflow(workflowId),
-              // 「提交视觉风格字段」开关（Fisher 两个 id 的设置面板，默认关）。
-              // 关 = `视觉风格 / 画面风格 / …` 整行不发（连值一起丢）；开 = 只丢字段名、值照发。
-              keepStyleFields: isMinimaxH3FisherWorkflow(workflowId) && String(request.fisherStyleFields || "") === "on",
-          })
-        : request.prompt;
+    // 文戏两个 id 走**最小形态**（`h3PromptForWorkflow` 里的 `audioNegation` 分支）：转 `<d>` +
+    // 一句音色声明，其余说明文一概不发 —— 用户 2026-10-26 选定。
+    const effectivePrompt = h3PromptForWorkflow(workflowId, request.prompt, {
+        audioCount: uploadedAudios.length,
+        styleFields: request.fisherStyleFields,
+    });
     // 排查「模型说了我没写过的话」时最缺的就是这一行 —— 实际提交给 H3 的正文原样打出来，
     // 用户直接复制给我们就能定位（是不是有多余的 <d>、是不是还有别的字段在招它开口）。
     if (isMinimaxH3FamilyWorkflow(workflowId)) {
         const styleFieldsOn = isMinimaxH3FisherWorkflow(workflowId) && String(request.fisherStyleFields || "") === "on";
-        const mode = isMinimaxH3FisherWorkflow(workflowId) ? "fisher" : "plain";
-        console.info(`[runninghub] h3 prompt (${workflowId}) mode=${mode} audio=${uploadedAudios.length} styleFields=${styleFieldsOn ? "on" : "off"}:\n${effectivePrompt}`);
+        console.info(`[runninghub] h3 prompt (${workflowId}) mode=${h3PromptMode(workflowId)} audio=${uploadedAudios.length} styleFields=${styleFieldsOn ? "on" : "off"}:\n${effectivePrompt}`);
     }
     const patch: RunningHubWorkflowPatch = prepared
         ? buildWorkflowPatch(prepared, effectivePrompt, uploaded, pixels, request.seconds, aspect, request.media === "video" ? "" : request.size || "", workflowId, request.resolution || "", request.mjFlavor || "", request.fisherLoraStrength || "", uploadedAudios.length)
