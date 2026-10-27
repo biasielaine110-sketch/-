@@ -155,7 +155,10 @@ export function CanvasNodeHoverToolbar({
 
     const activeNode = node;
     const left = viewport.x + (node.position.x + node.width / 2) * viewport.k;
-    const top = viewport.y + node.position.y * viewport.k - 9;
+    // 节点标题在节点上方约 28px（canvas-node 的 top-[-28px]），工具栏再往上留一点空隙，避免挡住标题。
+    const titleClearance = 28;
+    const toolbarGap = 10;
+    const top = viewport.y + (node.position.y - titleClearance - toolbarGap) * viewport.k;
     const isImage = node.type === CanvasNodeType.Image;
     const isAnnotate = node.type === CanvasNodeType.Annotate;
     const isVideo = node.type === CanvasNodeType.Video;
