@@ -5,9 +5,11 @@ import i18n from "@/i18n";
 import { createZip, readZipStreaming } from "@/lib/zip";
 import { setImageBlob } from "@/services/image-storage";
 import { setMediaBlob } from "@/services/file-storage";
+import type { CanvasAgentDefinition } from "@/constant/canvas-agents";
 import type { LocalSkillPack } from "@/lib/chat-skill-pack";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useAssetStore, type Asset } from "@/stores/use-asset-store";
+import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
 
@@ -26,6 +28,8 @@ type AppBackupFile = {
     files: BackupItem[];
     /** 用户安装的本地技能；旧版备份可能没有该字段 */
     chatSkillPacks?: LocalSkillPack[];
+    /** 用户导入的本地 agent；旧版备份可能没有该字段 */
+    canvasAgents?: CanvasAgentDefinition[];
 };
 
 // Export every canvas project, asset, media file, and configuration as a single zip that can be restored later.
@@ -34,6 +38,7 @@ export async function exportAppBackup() {
     const { assets } = useAssetStore.getState();
     const { config } = useConfigStore.getState();
     const chatSkillPacks = useChatSkillPacksStore.getState().packs;
+    const canvasAgents = useCanvasAgentsStore.getState().agents;
     const files: BackupItem[] = [];
     const zipFiles: { name: string; data: BlobPart }[] = [];
     await Promise.all([collectStoreFiles(imageStore, files, zipFiles), collectStoreFiles(mediaStore, files, zipFiles)]);
@@ -46,6 +51,7 @@ export async function exportAppBackup() {
         config,
         files,
         chatSkillPacks,
+        canvasAgents,
     };
     zipFiles.push({ name: "backup.json", data: new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }) });
     const zip = await createZip(zipFiles);
@@ -93,6 +99,9 @@ export async function importAppBackup(file: File) {
     useAssetStore.getState().replaceAssets(data.assets);
     if (Array.isArray(data.chatSkillPacks)) {
         useChatSkillPacksStore.getState().replacePacks(data.chatSkillPacks);
+    }
+    if (Array.isArray(data.canvasAgents)) {
+        useCanvasAgentsStore.getState().replaceAgents(data.canvasAgents);
     }
 }
 

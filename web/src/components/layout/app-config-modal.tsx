@@ -23,8 +23,10 @@ import {
     type LocalMediaMigrateProgress,
 } from "@/services/local-media-library";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
+import { parseCanvasAgentSources } from "@/constant/canvas-agents";
 import { parseSkillSources } from "@/lib/chat-skill-pack";
 import { defaultTextPrompts, isTextPromptEnabled } from "@/constant/text-prompt-library";
+import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import {
     channelProtocolSummary,
@@ -46,6 +48,8 @@ import {
 
 const SKILL_IMPORT_READABLE_RE = /\.(json|md|markdown|txt)$/i;
 const SKILL_IMPORT_STANDALONE_RE = /\.(json|md|markdown)$/i;
+const AGENT_IMPORT_READABLE_RE = /\.(json|md|markdown|txt)$/i;
+const AGENT_IMPORT_STANDALONE_RE = /\.(json|md|markdown)$/i;
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -362,6 +366,11 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                         key: "skills",
                         label: t("config.tabs.skills"),
                         children: <ConfigSkillsTab />,
+                    },
+                    {
+                        key: "agents",
+                        label: t("config.tabs.agents"),
+                        children: <ConfigAgentsTab />,
                     },
                     {
                         key: "backup",
@@ -714,6 +723,129 @@ function ConfigSkillsTab() {
                     {t("config.skills.empty")}
                 </div>
             )}
+            <div className="mt-4 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900/40 dark:text-stone-400">
+                <div className="font-semibold text-stone-700 dark:text-stone-300">{t("config.skills.howtoTitle")}</div>
+                <div className="mt-1">{t("config.skills.howto")}</div>
+            </div>
+        </div>
+    );
+}
+
+function ConfigAgentsTab() {
+    const { message, modal } = App.useApp();
+    const { t } = useTranslation();
+    const agents = useCanvasAgentsStore((state) => state.agents);
+    const upsertAgent = useCanvasAgentsStore((state) => state.upsert);
+    const uninstallAgent = useCanvasAgentsStore((state) => state.uninstall);
+    const agentInputRef = useRef<HTMLInputElement>(null);
+    const agentFolderInputRef = useRef<HTMLInputElement>(null);
+
+    const importAgents = async (fileList: FileList | File[] | null | undefined) => {
+        const files = Array.from(fileList || []).filter((file) => AGENT_IMPORT_READABLE_RE.test(file.webkitRelativePath || file.name));
+        if (!files.length) {
+            message.error(t("config.agents.noReadableFile"));
+            return;
+        }
+        try {
+            const sources = await Promise.all(
+                files.map(async (file) => ({ path: file.webkitRelativePath || file.name, text: await file.text() })),
+            );
+            const standalone = sources.length > 1 && sources.every((source) => !source.path.includes("/") && AGENT_IMPORT_STANDALONE_RE.test(source.path));
+            const installed = (standalone ? sources.map((source) => parseCanvasAgentSources([source])) : [parseCanvasAgentSources(sources)]).map((agent) =>
+                upsertAgent(agent),
+            );
+            message.success(
+                installed.length > 1
+                    ? t("config.agents.installedMany", { count: installed.length, names: installed.map((agent) => agent.name).join("、") })
+                    : t("config.agents.installed", { name: installed[0].name }),
+            );
+        } catch (error) {
+            message.error(t("config.agents.installFailed", { error: error instanceof Error ? error.message : String(error) }));
+        } finally {
+            if (agentInputRef.current) agentInputRef.current.value = "";
+            if (agentFolderInputRef.current) agentFolderInputRef.current.value = "";
+        }
+    };
+
+    const removeAgent = (agentId: string) => {
+        modal.confirm({
+            title: t("config.agents.uninstallConfirmTitle"),
+            content: t("config.agents.uninstallConfirm"),
+            okText: t("config.agents.uninstall"),
+            cancelText: t("common.cancel"),
+            okButtonProps: { danger: true },
+            onOk: () => {
+                uninstallAgent(agentId);
+                message.success(t("config.agents.removed"));
+            },
+        });
+    };
+
+    return (
+        <div>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                    <div className="text-sm font-semibold">{t("config.agents.title")}</div>
+                    <div className="mt-1 text-xs text-stone-500">{t("config.agents.description")}</div>
+                    <div className="mt-1 text-xs text-stone-500">{t("config.agents.importHint")}</div>
+                </div>
+                <div className="flex shrink-0 flex-wrap gap-2">
+                    <Button icon={<Upload className="size-4" />} onClick={() => agentInputRef.current?.click()}>
+                        {t("config.agents.import")}
+                    </Button>
+                    <Button icon={<FolderOpen className="size-4" />} onClick={() => agentFolderInputRef.current?.click()}>
+                        {t("config.agents.importFolder")}
+                    </Button>
+                    <input
+                        ref={agentInputRef}
+                        type="file"
+                        multiple
+                        accept="application/json,.json,.agent.json,.md,.markdown,text/markdown"
+                        className="hidden"
+                        onChange={(event) => void importAgents(event.target.files)}
+                    />
+                    <input
+                        ref={agentFolderInputRef}
+                        type="file"
+                        multiple
+                        {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                        className="hidden"
+                        onChange={(event) => void importAgents(event.target.files)}
+                    />
+                </div>
+            </div>
+            {agents.length ? (
+                <div className="space-y-2">
+                    {agents.map((agent) => (
+                        <div key={agent.id} className="flex items-start justify-between gap-3 rounded-lg border border-stone-200 px-3 py-3 dark:border-stone-800">
+                            <div className="min-w-0">
+                                <div className="truncate text-sm font-semibold">
+                                    <span className="mr-1.5">{agent.emoji || "🤖"}</span>
+                                    {agent.name}
+                                </div>
+                                {agent.description ? <div className="mt-1 truncate text-xs text-stone-500">{agent.description}</div> : null}
+                                <div className="mt-1 text-xs text-stone-400">
+                                    {agent.id}
+                                    {` · ${t("config.agents.skillsCount", { count: agent.skillIds.length })}`}
+                                    {` · ${t("config.agents.roundsCount", { count: agent.maxToolRounds })}`}
+                                </div>
+                            </div>
+                            <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removeAgent(agent.id)}>
+                                {t("config.agents.uninstall")}
+                            </Button>
+                        </div>
+                    ))}
+                </div>
+            ) : (
+                <div className="rounded-lg border border-dashed border-stone-200 px-3 py-8 text-center text-sm text-stone-500 dark:border-stone-800">
+                    <div>{t("config.agents.empty")}</div>
+                    <div className="mt-1 text-xs">{t("config.agents.builtinHint")}</div>
+                </div>
+            )}
+            <div className="mt-4 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2.5 text-xs leading-5 text-stone-600 dark:border-stone-800 dark:bg-stone-900/40 dark:text-stone-400">
+                <div className="font-semibold text-stone-700 dark:text-stone-300">{t("config.agents.howtoTitle")}</div>
+                <div className="mt-1">{t("config.agents.howto")}</div>
+            </div>
         </div>
     );
 }

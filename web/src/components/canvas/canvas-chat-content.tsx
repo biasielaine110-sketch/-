@@ -12,7 +12,7 @@ import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-refer
 import { resolveChatSendOptions, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { getChatSkillDisplayDescription, getChatSkillDisplayName, listChatSkills, resolveChatSkillIds } from "@/lib/chat-skills";
 import { parseSkillSources } from "@/lib/chat-skill-pack";
-import { listCanvasAgents, resolveCanvasAgent } from "@/constant/canvas-agents";
+import { listCanvasAgents, parseCanvasAgentSources, resolveCanvasAgent } from "@/constant/canvas-agents";
 import { DEFAULT_CANVAS_FONT_SIZE, DEFAULT_CHAT_FONT_SIZE } from "@/constant/canvas";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
@@ -27,6 +27,9 @@ const CHAT_SCROLL_POSITION_KEY = "infinite-atelier:canvas-chat-scroll-position";
 const SKILL_IMPORT_READABLE_RE = /\.(json|md|markdown|txt)$/i;
 /** 能单独成一份技能的文件（.txt 只能在文件夹里当参考文件，不能单独装） */
 const SKILL_IMPORT_STANDALONE_RE = /\.(json|md|markdown)$/i;
+/** Agent 导入与技能同一套可读后缀；.txt 只在文件夹里当参考文件 */
+const AGENT_IMPORT_READABLE_RE = /\.(json|md|markdown|txt)$/i;
+const AGENT_IMPORT_STANDALONE_RE = /\.(json|md|markdown)$/i;
 
 type CanvasChatContentProps = {
     node: CanvasNodeData;
@@ -99,8 +102,9 @@ export function CanvasChatContent({
     const skills = useMemo(() => listChatSkills(), [installedPacks]);
     const [skillsOpen, setSkillsOpen] = useState(false);
     const customAgents = useCanvasAgentsStore((state) => state.agents);
-    const installAgent = useCanvasAgentsStore((state) => state.installFromJson);
+    const upsertAgent = useCanvasAgentsStore((state) => state.upsert);
     const uninstallAgent = useCanvasAgentsStore((state) => state.uninstall);
+    const agentFolderInputRef = useRef<HTMLInputElement>(null);
     const agentInputRef = useRef<HTMLInputElement>(null);
     const skillsRootRef = useRef<HTMLDivElement>(null);
     const agentRootRef = useRef<HTMLDivElement>(null);
@@ -458,18 +462,36 @@ export function CanvasChatContent({
         setAgentOpen(false);
     };
 
-    const importAgent = async (file: File | null) => {
-        if (!file) return;
+    /**
+     * Agent 导入：一个 .json、一个 .md（人设正文），或整个 agent 文件夹。
+     * 判型集中在 parseCanvasAgentSources，UI 只负责收文件。
+     */
+    const importAgent = async (fileList: FileList | File[] | null | undefined) => {
+        const files = Array.from(fileList || []).filter((file) => AGENT_IMPORT_READABLE_RE.test(file.webkitRelativePath || file.name));
+        if (!files.length) {
+            message.error(t("canvas.chat.agentNoReadableFile"));
+            return;
+        }
         try {
-            const raw = await file.text();
-            const agent = installAgent(raw);
-            onAgentChange?.(node.id, agent.id);
+            const sources = await Promise.all(
+                files.map(async (file) => ({ path: file.webkitRelativePath || file.name, text: await file.text() })),
+            );
+            const standalone = sources.length > 1 && sources.every((source) => !source.path.includes("/") && AGENT_IMPORT_STANDALONE_RE.test(source.path));
+            const agents = (standalone ? sources.map((source) => parseCanvasAgentSources([source])) : [parseCanvasAgentSources(sources)]).map((agent) =>
+                upsertAgent(agent),
+            );
+            onAgentChange?.(node.id, agents[0].id);
             setAgentOpen(false);
-            message.success(t("canvas.chat.agentInstalled", { name: agent.name }));
+            message.success(
+                agents.length > 1
+                    ? t("canvas.chat.agentInstalledMany", { count: agents.length, names: agents.map((agent) => agent.name).join("、") })
+                    : t("canvas.chat.agentInstalled", { name: agents[0].name }),
+            );
         } catch (error) {
             message.error(t("canvas.chat.agentInstallFailed", { error: error instanceof Error ? error.message : String(error) }));
         } finally {
             if (agentInputRef.current) agentInputRef.current.value = "";
+            if (agentFolderInputRef.current) agentFolderInputRef.current.value = "";
         }
     };
 
@@ -828,36 +850,57 @@ export function CanvasChatContent({
                                     onWheel={(event) => event.stopPropagation()}
                                 >
                                     <div className="mb-2 flex items-center justify-between gap-2">
-                                        <div className="text-[20px] font-semibold uppercase opacity-55">{t("canvas.chat.agentTitle")}</div>
-                                        <button
-                                            type="button"
-                                            className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[20px] opacity-80 transition hover:opacity-100"
-                                            style={{ borderColor: theme.node.stroke }}
-                                            onClick={() => agentInputRef.current?.click()}
-                                            title={t("canvas.chat.agentImportHint")}
-                                        >
-                                            <Upload className="size-3.5" />
-                                            {t("canvas.chat.agentImport")}
-                                        </button>
-                                        <input
-                                            ref={agentInputRef}
-                                            type="file"
-                                            accept="application/json,.json,.agent.json"
-                                            className="hidden"
-                                            onChange={(event) => void importAgent(event.target.files?.[0] || null)}
-                                        />
-                                        <button
-                                            type="button"
-                                            className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
-                                            style={{ color: theme.node.text }}
-                                            title={t("common.close")}
-                                            aria-label={t("common.close")}
-                                            onClick={() => setAgentOpen(false)}
-                                        >
-                                            <X className="size-3.5" />
-                                        </button>
+                                        <div className="min-w-0 truncate text-[20px] font-semibold uppercase opacity-55">{t("canvas.chat.agentTitle")}</div>
+                                        <div className="flex shrink-0 items-center gap-1">
+                                            <button
+                                                type="button"
+                                                className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border px-2 py-1 text-[20px] opacity-80 transition hover:opacity-100"
+                                                style={{ borderColor: theme.node.stroke }}
+                                                onClick={() => agentInputRef.current?.click()}
+                                                title={t("canvas.chat.agentImportHint")}
+                                            >
+                                                <Upload className="size-3.5" />
+                                                {t("canvas.chat.agentImport")}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="grid size-6 shrink-0 place-items-center rounded-md border opacity-80 transition hover:opacity-100"
+                                                style={{ borderColor: theme.node.stroke, color: theme.node.text }}
+                                                onClick={() => agentFolderInputRef.current?.click()}
+                                                title={t("canvas.chat.agentImportFolderHint")}
+                                                aria-label={t("canvas.chat.agentImportFolder")}
+                                            >
+                                                <FolderOpen className="size-3.5" />
+                                            </button>
+                                            <input
+                                                ref={agentInputRef}
+                                                type="file"
+                                                multiple
+                                                accept="application/json,.json,.agent.json,.md,.markdown,text/markdown"
+                                                className="hidden"
+                                                onChange={(event) => void importAgent(event.target.files)}
+                                            />
+                                            <input
+                                                ref={agentFolderInputRef}
+                                                type="file"
+                                                multiple
+                                                {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                                                className="hidden"
+                                                onChange={(event) => void importAgent(event.target.files)}
+                                            />
+                                            <button
+                                                type="button"
+                                                className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
+                                                style={{ color: theme.node.text }}
+                                                title={t("common.close")}
+                                                aria-label={t("common.close")}
+                                                onClick={() => setAgentOpen(false)}
+                                            >
+                                                <X className="size-3.5" />
+                                            </button>
+                                        </div>
                                     </div>
-                                    <div className="mb-2 text-[20px] leading-snug opacity-50">{t("canvas.chat.agentHint")}</div>
+                                    <div className="mb-2 text-[20px] leading-snug opacity-50">{t("canvas.chat.agentImportHint")}</div>
                                     <div className="thin-scrollbar max-h-72 space-y-1 overflow-y-auto overscroll-contain">
                                         <button
                                             type="button"

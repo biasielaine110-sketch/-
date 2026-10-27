@@ -202,34 +202,266 @@ export function isBuiltinCanvasAgent(agentId: string) {
 }
 
 const AGENT_ID_RE = /^[a-zA-Z][a-zA-Z0-9_-]{1,63}$/;
+const MAX_AGENT_FILE_CHARS = 200_000;
+const MAX_AGENT_PROMPT_CHARS = 12_000;
+const AGENT_MARKDOWN_RE = /\.(md|markdown)$/i;
+const AGENT_READABLE_RE = /\.(md|markdown|txt|json)$/i;
+const AGENT_SKIP_DIR_RE = /(^|\/)(node_modules|\.git|\.next|dist|build|__pycache__|\.venv|\.idea)(\/|$)/i;
+
+/** 导入侧统一形状：一个文件 = { path, text }。文件夹导入时 path 含相对路径。 */
+export type CanvasAgentSourceFile = { path: string; text: string };
 
 /**
  * 解析导入的 agent JSON。字段少、校验严 —— 这段提示词是直接进 system 的，
  * 宁可报错让用户改，也不要塞半截配置进去跑一次奇怪的对话。
  */
 export function parseCanvasAgentJson(raw: string): CanvasAgentDefinition {
+    if (String(raw || "").length > MAX_AGENT_FILE_CHARS) throw new Error("agent JSON 太大（>200KB）");
     let data: unknown;
     try {
         data = JSON.parse(raw);
     } catch {
         throw new Error("不是合法的 JSON");
     }
-    if (!data || typeof data !== "object") throw new Error("顶层必须是对象");
+    return normalizePersistedCanvasAgent(data);
+}
+
+/**
+ * 导入统一入口：一个 `.json` / 一个 `.md` / 一整个文件夹，都走这里。
+ *  - 单个文件：`.md` → 文档式 agent；其余（.json）→ JSON agent。
+ *  - 多个文件（选目录或一次多选）→ 按文件夹处理。
+ */
+export function parseCanvasAgentSources(files: CanvasAgentSourceFile[]): CanvasAgentDefinition {
+    const list = files.filter((file) => typeof file?.text === "string" && file.path);
+    if (!list.length) throw new Error("没有可读的文件");
+    if (list.length === 1) {
+        const only = list[0];
+        return AGENT_MARKDOWN_RE.test(only.path) ? parseCanvasAgentMarkdown(only.text, only.path) : parseCanvasAgentJson(only.text);
+    }
+    return parseCanvasAgentFolderFiles(list);
+}
+
+/**
+ * AGENT.md / 任意 .md → agent：frontmatter 取 id/name/emoji/skillIds/maxToolRounds，
+ * 正文整段当 systemPrompt（可附同目录其它 .md 作参考）。
+ */
+export function parseCanvasAgentMarkdown(raw: string, fileName = "AGENT.md"): CanvasAgentDefinition {
+    if (String(raw || "").length > MAX_AGENT_FILE_CHARS) throw new Error("markdown 太大（>200KB）");
+    const { data, body } = splitAgentFrontmatter(raw);
+    const heading = /^\s{0,3}#\s+(.+?)\s*$/m.exec(body)?.[1]?.trim() || "";
+    const name = (data.name || data.title || heading || parentFolderName(fileName) || "agent").slice(0, 80);
+    const description = (data.description || firstAgentParagraph(body) || name).slice(0, 300);
+    const systemPrompt = composeAgentPrompt(body, []);
+    if (systemPrompt.length < 8) throw new Error("systemPrompt 太短（至少要写清它是谁、怎么干活）");
+    return normalizePersistedCanvasAgent({
+        id: data.id || name,
+        name,
+        description,
+        emoji: data.emoji,
+        skillIds: parseAgentSkillIds(data.skillids || data.skills),
+        maxToolRounds: data.maxtoolrounds || data.rounds,
+        systemPrompt,
+    });
+}
+
+/**
+ * 文件夹 → agent。识别顺序：
+ *  1. `agent.json` / `*.agent.json`（浅的优先）→ JSON；若缺 systemPrompt 且旁边有 AGENT.md，用正文补上。
+ *  2. `AGENT.md` / `agent.md`（浅的优先）→ 文档式 agent，正文 + 同目录其它 `.md` 作参考。
+ *  3. 都没有 → 报错。
+ */
+export function parseCanvasAgentFolderFiles(files: CanvasAgentSourceFile[]): CanvasAgentDefinition {
+    const readable = files
+        .map((file) => ({ path: normalizeAgentPath(file.path), text: String(file.text ?? "") }))
+        .filter((file) => file.path && !AGENT_SKIP_DIR_RE.test(file.path) && AGENT_READABLE_RE.test(file.path) && file.text.length <= MAX_AGENT_FILE_CHARS);
+    const jsonFiles = readable.filter((file) => isAgentJsonPath(file.path)).sort(byShallowDepth);
+    const mdFiles = readable.filter((file) => isAgentMarkdownPath(file.path)).sort(byShallowDepth);
+
+    const useJson = Boolean(jsonFiles.length) && (!mdFiles.length || depthOf(jsonFiles[0].path) <= depthOf(mdFiles[0].path));
+    if (useJson) {
+        const agent = parseCanvasAgentJson(jsonFiles[0].text);
+        if (agent.systemPrompt.length >= 8) return agent;
+        const doc = mdFiles[0] ? splitAgentFrontmatter(mdFiles[0].text).body : "";
+        if (!doc.trim()) return agent;
+        return normalizePersistedCanvasAgent({
+            ...agent,
+            systemPrompt: composeAgentPrompt(doc, []),
+        });
+    }
+    if (mdFiles.length) {
+        const main = mdFiles[0];
+        const { data, body } = splitAgentFrontmatter(main.text);
+        const agent = parseCanvasAgentMarkdown(main.text, main.path);
+        const extras = readable
+            .filter((file) => file.path !== main.path && AGENT_MARKDOWN_RE.test(file.path))
+            .sort(byShallowDepth)
+            .map((file) => ({ name: file.path, text: splitAgentFrontmatter(file.text).body }));
+        return normalizePersistedCanvasAgent({
+            ...agent,
+            name: (data.name || data.title || agent.name).slice(0, 80),
+            systemPrompt: composeAgentPrompt(body, extras),
+        });
+    }
+    throw new Error("文件夹里既没有 AGENT.md / agent.md，也没有 agent.json");
+}
+
+/**
+ * 配置 / 备份往返用的校验：接受已解析对象（不必再 JSON.stringify 一遍）。
+ * 校验失败抛错；批量导入时由调用方 catch 跳过坏条目。
+ */
+export function normalizePersistedCanvasAgent(data: unknown): CanvasAgentDefinition {
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("顶层必须是对象");
     const record = data as Record<string, unknown>;
-    const id = typeof record.id === "string" ? record.id.trim() : "";
-    if (!AGENT_ID_RE.test(id)) throw new Error("id 必须是 2~64 位字母 / 数字 / - / _，且以字母开头");
+    const rawId = typeof record.id === "string" ? record.id.trim() : "";
     const name = typeof record.name === "string" ? record.name.trim() : "";
     if (!name) throw new Error("缺少 name");
+    const id = AGENT_ID_RE.test(rawId) ? rawId : normalizeAgentId(rawId || name);
+    if (!AGENT_ID_RE.test(id)) throw new Error("id 必须是 2~64 位字母 / 数字 / - / _，且以字母开头");
     const systemPrompt = typeof record.systemPrompt === "string" ? record.systemPrompt.trim() : "";
     if (systemPrompt.length < 8) throw new Error("systemPrompt 太短（至少要写清它是谁、怎么干活）");
     const skillIds = Array.isArray(record.skillIds)
         ? record.skillIds.map((item) => String(item).trim()).filter(Boolean)
-        : ["canvas"];
+        : typeof record.skillIds === "string"
+          ? parseAgentSkillIds(record.skillIds)
+          : ["canvas"];
     const roundsRaw = Number(record.maxToolRounds);
     const maxToolRounds = Number.isFinite(roundsRaw)
         ? Math.max(1, Math.min(CANVAS_AGENT_MAX_TOOL_ROUNDS, Math.round(roundsRaw)))
         : 8;
     const emoji = typeof record.emoji === "string" && record.emoji.trim() ? record.emoji.trim().slice(0, 4) : "🤖";
     const description = typeof record.description === "string" ? record.description.trim() : "";
-    return { id, name, emoji, description, systemPrompt, skillIds, maxToolRounds };
+    return {
+        id,
+        name,
+        emoji,
+        description,
+        systemPrompt: systemPrompt.slice(0, MAX_AGENT_PROMPT_CHARS),
+        skillIds: skillIds.length ? skillIds : ["canvas"],
+        maxToolRounds,
+        builtin: false,
+    };
+}
+
+export function normalizePersistedCanvasAgents(raw: unknown): CanvasAgentDefinition[] {
+    if (!Array.isArray(raw)) return [];
+    const agents: CanvasAgentDefinition[] = [];
+    for (const item of raw) {
+        try {
+            agents.push(normalizePersistedCanvasAgent(item));
+        } catch {
+            // skip corrupt entries
+        }
+    }
+    return agents;
+}
+
+function parseAgentSkillIds(raw: unknown): string[] {
+    if (Array.isArray(raw)) return raw.map((item) => String(item).trim()).filter(Boolean);
+    const text = String(raw || "").trim();
+    if (!text) return ["canvas"];
+    return text
+        .split(/[,，、\s]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+function composeAgentPrompt(body: string, extras: Array<{ name: string; text: string }>) {
+    const parts = [body.trim()];
+    for (const extra of extras) {
+        const text = extra.text.trim();
+        if (!text) continue;
+        parts.push(`## 参考文件：${extra.name}\n${text}`);
+    }
+    const joined = parts.filter(Boolean).join("\n\n---\n\n");
+    if (joined.length <= MAX_AGENT_PROMPT_CHARS) return joined;
+    return `${joined.slice(0, MAX_AGENT_PROMPT_CHARS)}\n\n…（内容超长已截断）`;
+}
+
+function splitAgentFrontmatter(raw: string): { data: Record<string, string>; body: string } {
+    const text = String(raw || "").replace(/^\uFEFF/, "");
+    const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+    if (!match) return { data: {}, body: text.trim() };
+    const data: Record<string, string> = {};
+    for (const line of match[1].split(/\r?\n/)) {
+        const index = line.indexOf(":");
+        if (index <= 0) continue;
+        const key = line.slice(0, index).trim().toLowerCase();
+        let value = line.slice(index + 1).trim();
+        if (!key || !value) continue;
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+        }
+        data[key] = value;
+    }
+    return { data, body: text.slice(match[0].length).trim() };
+}
+
+function firstAgentParagraph(body: string) {
+    const buffer: string[] = [];
+    for (const rawLine of body.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) {
+            if (buffer.length) break;
+            continue;
+        }
+        if (/^#{1,6}\s/.test(line) || /^[-*+]\s/.test(line) || line.startsWith("```") || line.startsWith("---")) {
+            if (buffer.length) break;
+            continue;
+        }
+        buffer.push(line);
+        if (buffer.join(" ").length > 140) break;
+    }
+    return buffer.join(" ").slice(0, 200);
+}
+
+function normalizeAgentId(candidate: string) {
+    const slug = String(candidate || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^[_-]+|[_-]+$/g, "")
+        .slice(0, 60);
+    if (AGENT_ID_RE.test(slug)) return slug;
+    return `agent_${hash36(String(candidate || "doc"))}`;
+}
+
+function hash36(value: string) {
+    let hash = 5381;
+    for (let index = 0; index < value.length; index += 1) hash = ((hash << 5) + hash + value.charCodeAt(index)) >>> 0;
+    return hash.toString(36);
+}
+
+function normalizeAgentPath(path: string) {
+    return String(path || "")
+        .replace(/\\/g, "/")
+        .replace(/^\.\//, "")
+        .replace(/^\/+/, "");
+}
+
+function baseName(path: string) {
+    const parts = normalizeAgentPath(path).split("/");
+    return parts[parts.length - 1] || "";
+}
+
+function parentFolderName(path: string) {
+    const parts = normalizeAgentPath(path).split("/").filter(Boolean);
+    return parts.length > 1 ? parts[parts.length - 2] : "";
+}
+
+function depthOf(path: string) {
+    return normalizeAgentPath(path).split("/").filter(Boolean).length;
+}
+
+function byShallowDepth(a: { path: string }, b: { path: string }) {
+    return depthOf(a.path) - depthOf(b.path);
+}
+
+function isAgentJsonPath(path: string) {
+    const base = baseName(path).toLowerCase();
+    return base === "agent.json" || base.endsWith(".agent.json");
+}
+
+function isAgentMarkdownPath(path: string) {
+    const base = baseName(path).toLowerCase();
+    return base === "agent.md" || base === "agents.md";
 }
