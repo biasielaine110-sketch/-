@@ -965,6 +965,7 @@ export default {
             linkedMediaLabel: "链接媒体",
             reorderHint: "拖动手柄可调整引用图顺序",
             linkedVideoNote: "已附带 {{count}} 个链接视频的画面帧（{{titles}}）供理解内容。",
+            linkedVideoNativeNote: "已附带 {{count}} 个链接视频原片（{{titles}}），请按完整视频理解，不要只看单帧。",
             defaultMediaPrompt: "请结合链接的图片或视频内容进行说明。",
             selectModel: "选择模型",
             selectTextModel: "对话模型",

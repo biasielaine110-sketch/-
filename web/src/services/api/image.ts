@@ -11,16 +11,76 @@ import { compressBodyImagesForProxy, compressReferenceDataUrl, dataUrlToFile } f
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { isMioraQueueBaseUrl, mediaUrlToDataUrl, runMioraGeneration } from "@/lib/miora-queue";
 import { isMioraImageFamilyModel, isUnsupportedImageSizeError, resolveMioraImageSize } from "@/constant/image-size-presets";
-import { uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
+import { uploadTemporaryPublicImage, uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
 import { fetchRemoteImageBlob, imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
+export type AiTextContentPart =
+    | { type: "text"; text: string }
+    | { type: "image_url"; image_url: { url: string } }
+    | { type: "video_url"; video_url: { url: string } };
+
 export type AiTextMessage = {
     role: "system" | "user" | "assistant";
-    content: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+    content: string | AiTextContentPart[];
 };
+
+/**
+ * 对话侧是否按「原样 video_url」传视频，而不是抽成单帧图。
+ * Gemini 原生格式一律支持；OpenAI 兼容格式按模型名认常见多模态 / 视频理解型号。
+ */
+export function modelSupportsNativeChatVideo(config: Pick<AiConfig, "model" | "textModel" | "apiFormat"> | null | undefined) {
+    if (!config) return false;
+    if (config.apiFormat === "gemini") return true;
+    const model = String(config.model || config.textModel || "").toLowerCase();
+    if (!model) return false;
+    return /gemini|qwen[^\n]*vl|qwen2\.5-vl|qwen3-vl|gpt-4o|gpt-4\.1|gpt-5|o4-mini|o3(?!\.)|claude-3|claude-4|claude-sonnet-4|claude-opus-4|glm-4[.\-]?v|internvl|minicpm-v|step-1v|yi-vision|doubao[^\n]*(vision|seed)|seed-1[.\-]?6|seedance|video-preview|omni|multimodal/.test(
+        model,
+    );
+}
+
+/** 把本地 blob:/data:video 视频变成模型可拉的公开 https URL；已经是 http(s) 则原样返回。 */
+export async function resolvePublicChatVideoUrl(url: string, signal?: AbortSignal): Promise<string> {
+    const value = String(url || "").trim();
+    if (!value) return "";
+    if (/^https?:\/\//i.test(value)) return value;
+    if (!(value.startsWith("blob:") || value.startsWith("data:video") || value.startsWith("data:application/octet-stream"))) {
+        // file: / 其它协议：尝试当普通地址用；不行就空
+        return /^https?:\/\//i.test(value) ? value : "";
+    }
+    const response = await fetch(value, { signal });
+    const blob = await response.blob();
+    const filename = guessVideoFilename(blob.type || "", value);
+    return uploadTemporaryPublicImage(blob, filename, signal);
+}
+
+function guessVideoFilename(mimeType: string, url: string) {
+    const path = url.split("?")[0].toLowerCase();
+    if (mimeType.includes("webm") || path.endsWith(".webm")) return "reference.webm";
+    if (mimeType.includes("quicktime") || path.endsWith(".mov")) return "reference.mov";
+    return "reference.mp4";
+}
+
+function guessVideoMimeType(url: string) {
+    const path = url.split("?")[0].toLowerCase();
+    if (path.endsWith(".webm")) return "video/webm";
+    if (path.endsWith(".mov")) return "video/quicktime";
+    if (path.endsWith(".mkv")) return "video/x-matroska";
+    if (url.startsWith("data:")) {
+        const match = url.match(/^data:([^;,]+)/i);
+        if (match?.[1]) return match[1];
+    }
+    return "video/mp4";
+}
+
+function messagesContainNativeVideo(messages: ResponseInputMessage[]) {
+    return messages.some((message) => {
+        if ("type" in message || message.role === "tool") return false;
+        return Array.isArray(message.content) && message.content.some((part) => typeof part === "object" && part && "type" in part && part.type === "video_url");
+    });
+}
 
 type ResponseToolCall = {
     id: string;
@@ -1928,8 +1988,14 @@ function extractComfyTextInputs(messages: AiTextMessage[]) {
             .join("\n");
         if (text) prompt = text;
         for (const part of parts) {
-            const url = part.type === "image_url" ? part.image_url?.url : "";
-            if (typeof url === "string" && url) referenceDataUrls.push(url);
+            if (part.type === "image_url") {
+                const url = part.image_url?.url;
+                if (typeof url === "string" && url) referenceDataUrls.push(url);
+            }
+            // Comfy 文本工作流没有原生视频槽：把 video_url 并进提示词，避免静默丢参考。
+            if (part.type === "video_url" && part.video_url?.url) {
+                prompt = `${prompt}\n[video] ${part.video_url.url}`.trim();
+            }
         }
     }
     return { prompt, referenceDataUrls };
@@ -2418,7 +2484,12 @@ function toResponseInput(messages: ResponseInputMessage[]): ResponseInputItem[] 
 
 function toResponseContent(content: ResponseMessageContent): string | ResponseInputContent[] {
     if (!Array.isArray(content)) return String(content || "");
-    return content.map((item) => (item.type === "text" ? { type: "input_text" as const, text: item.text } : { type: "input_image" as const, image_url: item.image_url.url }));
+    // Responses API 没有稳定的 video 部件：视频改写成文字 URL，真正的 video_url 走 Chat Completions / Gemini。
+    return content.flatMap((item) => {
+        if (item.type === "text") return [{ type: "input_text" as const, text: item.text }];
+        if (item.type === "video_url") return [{ type: "input_text" as const, text: `[video] ${item.video_url.url}` }];
+        return [{ type: "input_image" as const, image_url: item.image_url.url }];
+    });
 }
 
 function toResponseTool(tool: ResponseFunctionTool): ResponseApiToolDefinition {
@@ -2633,6 +2704,10 @@ async function toGeminiParts(content: ResponseMessageContent, usePublicUrls: boo
             parts.push({ text: item.text });
             continue;
         }
+        if (item.type === "video_url") {
+            parts.push(await toGeminiVideoPart(item.video_url.url, usePublicUrls));
+            continue;
+        }
         parts.push(await toGeminiImagePart(item.image_url.url, usePublicUrls));
     }
     return parts;
@@ -2652,6 +2727,23 @@ async function toGeminiImagePart(url: string, usePublicUrls = false): Promise<Ge
     return { fileData: { fileUri: url, mimeType: guessImageMimeType(url) } };
 }
 
+async function toGeminiVideoPart(url: string, usePublicUrls = false): Promise<GeminiPart> {
+    const match = url.match(/^data:([^;,]+);base64,(.+)$/);
+    if (match) {
+        if (usePublicUrls) {
+            const publicUrl = await resolvePublicChatVideoUrl(url);
+            if (publicUrl) return { fileData: { fileUri: publicUrl, mimeType: match[1] || guessVideoMimeType(url) } };
+        }
+        return { inlineData: { mimeType: match[1] || "video/mp4", data: match[2] } };
+    }
+    if (url.startsWith("blob:")) {
+        const publicUrl = await resolvePublicChatVideoUrl(url);
+        if (!publicUrl) throw new Error(apiText("requestFailed"));
+        return { fileData: { fileUri: publicUrl, mimeType: guessVideoMimeType(publicUrl) } };
+    }
+    return { fileData: { fileUri: url, mimeType: guessVideoMimeType(url) } };
+}
+
 function guessImageMimeType(url: string) {
     const path = url.split("?")[0].toLowerCase();
     if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
@@ -2667,7 +2759,13 @@ function prefersGeminiPublicImageUrls(baseUrl: string) {
 
 function geminiTextContent(content: ResponseMessageContent) {
     if (!Array.isArray(content)) return String(content || "");
-    return content.map((item) => (item.type === "text" ? item.text : item.image_url.url)).join("\n");
+    return content
+        .map((item) => {
+            if (item.type === "text") return item.text;
+            if (item.type === "video_url") return item.video_url.url;
+            return item.image_url.url;
+        })
+        .join("\n");
 }
 
 function jsonObject(value: string): Record<string, unknown> {
@@ -3482,7 +3580,8 @@ async function requestChatTurn(
 
     const capabilityKey = chatCapabilityKey(config);
     const chatOnly = chatOnlyBaseUrls.has(capabilityKey);
-    const preferChatCompletions = chatOnly || isVolcengineArkBaseUrl(config.baseUrl);
+    // 带原生 video_url 的多模态消息优先走 Chat Completions（Responses 没有稳定 video 部件）。
+    const preferChatCompletions = chatOnly || isVolcengineArkBaseUrl(config.baseUrl) || messagesContainNativeVideo(messages);
     if (preferChatCompletions) {
         try {
             return await requestChatCompletionsTurn(config, messages, onDelta, options);

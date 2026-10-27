@@ -4,7 +4,18 @@ import { useNavigate, useParams } from "react-router-dom";
 import { Group, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { isMidjourneyModel, requestEdit, requestGeneration, requestImageQuestion, requestMidjourneyUpscale, type AiTextMessage, type GeneratedImageResult } from "@/services/api/image";
+import {
+    isMidjourneyModel,
+    modelSupportsNativeChatVideo,
+    requestEdit,
+    requestGeneration,
+    requestImageQuestion,
+    requestMidjourneyUpscale,
+    resolvePublicChatVideoUrl,
+    type AiTextContentPart,
+    type AiTextMessage,
+    type GeneratedImageResult,
+} from "@/services/api/image";
 import { chatSkillsSystemHint, executeChatSkillTool, resolveChatSkillIds, resolveChatSkillTools } from "@/lib/chat-skills";
 import { buildCanvasAgentSystemPrompt, resolveCanvasAgent } from "@/constant/canvas-agents";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
@@ -6069,20 +6080,46 @@ function AtelierCanvasPage() {
                         .filter((item): item is { id: string; title: string; url: string } => Boolean(item)),
                 ];
                 const uniqueVideos = Array.from(new Map(videoSources.map((item) => [item.id, item])).values());
-                const videoFrames = (
-                    await Promise.all(
-                        uniqueVideos.map(async (video) => {
-                            const frame = await captureVideoFrameDataUrl(video.url);
-                            if (!frame) return null;
-                            return {
-                                id: `video-frame:${video.id}`,
-                                name: `${video.title}.jpg`,
-                                type: "image/jpeg",
-                                dataUrl: frame,
-                            } satisfies ReferenceImage;
-                        }),
-                    )
-                ).filter((item): item is ReferenceImage => Boolean(item));
+                const nativeChatVideo = modelSupportsNativeChatVideo(textConfig);
+                const videoParts: Extract<AiTextContentPart, { type: "video_url" }>[] = [];
+                let videoFrames: ReferenceImage[] = [];
+                if (uniqueVideos.length) {
+                    if (nativeChatVideo) {
+                        // 支持 video_url 的模型：原样传视频（本地 blob 先转成临时公开 URL）。
+                        for (const video of uniqueVideos) {
+                            try {
+                                const url = await resolvePublicChatVideoUrl(video.url, controller.signal);
+                                if (url) videoParts.push({ type: "video_url", video_url: { url } });
+                            } catch {
+                                // 单个视频上传失败时退回抽帧，不拖垮整次对话。
+                                const frame = await captureVideoFrameDataUrl(video.url);
+                                if (frame) {
+                                    videoFrames.push({
+                                        id: `video-frame:${video.id}`,
+                                        name: `${video.title}.jpg`,
+                                        type: "image/jpeg",
+                                        dataUrl: frame,
+                                    });
+                                }
+                            }
+                        }
+                    } else {
+                        videoFrames = (
+                            await Promise.all(
+                                uniqueVideos.map(async (video) => {
+                                    const frame = await captureVideoFrameDataUrl(video.url);
+                                    if (!frame) return null;
+                                    return {
+                                        id: `video-frame:${video.id}`,
+                                        name: `${video.title}.jpg`,
+                                        type: "image/jpeg",
+                                        dataUrl: frame,
+                                    } satisfies ReferenceImage;
+                                }),
+                            )
+                        ).filter((item): item is ReferenceImage => Boolean(item));
+                    }
+                }
 
                 const referenceImages = Array.from(
                     new Map(
@@ -6092,12 +6129,21 @@ function AtelierCanvasPage() {
                     ).values(),
                 );
 
+                const videoTitles = uniqueVideos.map((item) => item.title).join("、");
                 const videoNote = uniqueVideos.length
-                    ? `\n\n${t("canvas.chat.linkedVideoNote", { count: uniqueVideos.length, titles: uniqueVideos.map((item) => item.title).join("ã") })}`
+                    ? `\n\n${
+                          videoParts.length
+                              ? t("canvas.chat.linkedVideoNativeNote", { count: videoParts.length, titles: videoTitles })
+                              : t("canvas.chat.linkedVideoNote", { count: uniqueVideos.length, titles: videoTitles })
+                      }`
                     : "";
                 const promptText = `${userText}${videoNote}`;
-                const userContent: AiTextMessage["content"] = referenceImages.length
-                    ? [{ type: "text" as const, text: promptText }, ...referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
+                const mediaParts: AiTextContentPart[] = [
+                    ...referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } })),
+                    ...videoParts,
+                ];
+                const userContent: AiTextMessage["content"] = mediaParts.length
+                    ? [{ type: "text" as const, text: promptText }, ...mediaParts]
                     : promptText;
 
                 const requestMessages: AiTextMessage[] = [

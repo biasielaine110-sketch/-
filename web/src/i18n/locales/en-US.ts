@@ -965,6 +965,7 @@ export default {
             linkedMediaLabel: "Linked media",
             reorderHint: "Drag the handle to reorder references",
             linkedVideoNote: "Attached {{count}} linked video frame(s) ({{titles}}) for understanding.",
+            linkedVideoNativeNote: "Attached {{count}} linked video(s) as native video ({{titles}}). Analyze the full clip, not a single frame.",
             defaultMediaPrompt: "Please analyze the linked image or video content.",
             selectModel: "Select model",
             selectTextModel: "Text model",
