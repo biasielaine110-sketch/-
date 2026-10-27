@@ -126,8 +126,15 @@ export type StoryScriptPreset = {
      *
      * `extras` 是「新建列」：风格提示词也可以活在自建列里（列名带「风格」），
      * 所以铺链必须把它一路传进来，否则那条列填了也白填。
+     *
+     * `options.directorScheme`：第四套铺链路时，末尾追加的风格行写成 `- **视觉风格：**…`
+     *（与同套其它字段同一口径）；其它套仍是 `视觉风格：…`。
      */
-    buildShotPrompts: (row: StoryScriptRow, extras?: readonly StoryScriptExtraColumn[] | null) => StoryScriptShotPrompts;
+    buildShotPrompts: (
+        row: StoryScriptRow,
+        extras?: readonly StoryScriptExtraColumn[] | null,
+        options?: { directorScheme?: boolean },
+    ) => StoryScriptShotPrompts;
     /**
      * 行内哪几列是「角色 / 资产名」：铺链路时拿这些值去和上游图片节点的标题匹配，只把命中的
      * 资产图连到该镜的图片节点上。留空表示「这一行不区分角色」，把全部素材图都连上。
@@ -811,6 +818,14 @@ function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, character
     return parts.join("\n\n");
 }
 
+/** 第四套铺链路追加风格时的行首（冒号在加粗里面，与同套其它字段一致）。 */
+export const STORY_SCRIPT_DIRECTOR_STYLE_LINE_PREFIX = "- **视觉风格：**";
+
+/** 这一行是不是「视觉风格」字段（含老写法 `视觉风格：` 与第四套 `- **视觉风格：**`）。 */
+export function isStoryScriptStyleLine(line: unknown): boolean {
+    return /^\s*(?:-\s*)?\*{0,2}\s*视觉风格\s*\*{0,2}\s*[：:]/.test(String(line ?? "").trim());
+}
+
 /**
  * 把这一镜的「风格提示词」拼进图片 / 视频提示词。
  *
@@ -818,14 +833,17 @@ function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, character
  * 去改它的内部结构风险太大；追加一行最直观，用户在图片节点的输入框里一眼能看到风格是什么。
  * 三个不写的情况：风格为空 / 风格是 `无` / 提示词里本来就含这段文字（避免重复两遍）。
  * 只认字符串：这一列是自由文本，数字 / 对象出现在这里只能是模型的脏数据，拼成「视觉风格：123」纯属污染。
+ *
+ * `options.directorFormat`（第四套）：写成 `- **视觉风格：**…`（用户 2026-10-27）。
  */
-export function withStoryScriptStyle(prompt: string, style?: unknown): string {
+export function withStoryScriptStyle(prompt: string, style?: unknown, options?: { directorFormat?: boolean }): string {
     const base = (prompt || "").trim();
     const styleText = typeof style === "string" ? storyScriptCellText(style) : "";
     if (!styleText) return base;
-    if (!base) return `视觉风格：${styleText}`;
+    const line = options?.directorFormat ? `${STORY_SCRIPT_DIRECTOR_STYLE_LINE_PREFIX}${styleText}` : `视觉风格：${styleText}`;
+    if (!base) return line;
     if (base.includes(styleText)) return base;
-    return `${base}\n视觉风格：${styleText}`;
+    return `${base}\n${line}`;
 }
 
 /**
@@ -850,7 +868,11 @@ export function resolveStoryScriptStyleText(row: StoryScriptRow, extras?: readon
  * 有就直接用；模型偶尔漏列，此时用可见描述兜底拼一条，避免这一行铺不出链路。
  * 两条提示词最后都拼上「风格提示词」列（见 `withStoryScriptStyle`）。
  */
-function buildClassicShotPrompts(row: StoryScriptRow, extras?: readonly StoryScriptExtraColumn[] | null): StoryScriptShotPrompts {
+function buildClassicShotPrompts(
+    row: StoryScriptRow,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+    options?: { directorScheme?: boolean },
+): StoryScriptShotPrompts {
     const imagePrompt =
         storyScriptCellText(row.shot_prompt) ||
         joinStoryScriptPromptParts([row.visual_description, row.shot, row.emotion, row.scene_tags, row.lighting_mood]);
@@ -858,18 +880,24 @@ function buildClassicShotPrompts(row: StoryScriptRow, extras?: readonly StoryScr
         storyScriptCellText(row.video_motion_prompt) ||
         joinStoryScriptPromptParts([row.character_action, row.visual_description, row.shot, row.emotion]);
     const style = resolveStoryScriptStyleText(row, extras);
+    const styleOpts = options?.directorScheme ? { directorFormat: true } : undefined;
     return {
-        imagePrompt: withStoryScriptStyle(imagePrompt, style),
-        videoPrompt: withStoryScriptStyle(videoPrompt, style),
+        imagePrompt: withStoryScriptStyle(imagePrompt, style, styleOpts),
+        videoPrompt: withStoryScriptStyle(videoPrompt, style, styleOpts),
     };
 }
 
 /** 视频分镜脚本预设：没有独立的「生成提示词」列，按 recipe 对该列的语义（可直接当 prompt）现拼。 */
-function buildStoryboardShotPrompts(row: StoryScriptRow, extras?: readonly StoryScriptExtraColumn[] | null): StoryScriptShotPrompts {
+function buildStoryboardShotPrompts(
+    row: StoryScriptRow,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+    options?: { directorScheme?: boolean },
+): StoryScriptShotPrompts {
     const style = resolveStoryScriptStyleText(row, extras);
+    const styleOpts = options?.directorScheme ? { directorFormat: true } : undefined;
     return {
-        imagePrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.visual_description, row.key_visual]), style),
-        videoPrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.camera_movement, row.character_action, row.visual_description, row.emotion]), style),
+        imagePrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.visual_description, row.key_visual]), style, styleOpts),
+        videoPrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.camera_movement, row.character_action, row.visual_description, row.emotion]), style, styleOpts),
     };
 }
 
@@ -1213,14 +1241,14 @@ function collapseDirectorSoundNotes(text: string): string {
     return withDirectorSoundNote(lines.join("\n").replace(/\n{3,}/g, "\n\n"));
 }
 
-/** 合并后的视频提示词里，重复的「视觉风格：…」只保留第一次出现的那条。 */
+/** 合并后的视频提示词里，重复的「视觉风格」行（含 `- **视觉风格：**`）只保留第一次出现的那条。 */
 function dedupeStoryScriptStyleLines(text: string): string {
     const seen = new Set<string>();
     return text
         .split("\n")
         .filter((line) => {
             const trimmed = line.trim();
-            if (!trimmed.startsWith("视觉风格：")) return true;
+            if (!isStoryScriptStyleLine(trimmed)) return true;
             if (seen.has(trimmed)) return false;
             seen.add(trimmed);
             return true;
@@ -3656,6 +3684,13 @@ const STORY_SCRIPT_DIRECTOR_LABEL_ALIASES = new Set<string>([
     "声音",
     // 半角斜杠的写法（用户 2026-10-27 的示例就是这么打的）与全角视为同一个标签。
     "景别/机位",
+    // 铺链路后追加 / 模版里抄进来的风格行，也统一成 `- **视觉风格：**`。
+    "视觉风格",
+    "风格提示词",
+    "独立风格提示词",
+    "画面风格",
+    "影像风格",
+    "风格",
 ]);
 
 /**
@@ -3667,6 +3702,7 @@ const STORY_SCRIPT_DIRECTOR_LABEL_ALIASES = new Set<string>([
  *
  * ⚠️ 只认 `STORY_SCRIPT_DIRECTOR_LABEL_ALIASES` 里的标签；只挪冒号位置，值一个字不动。
  * ⚠️ 幂等：已经是 `- **标签：**` 的行原样返回（第二遍归一化不会多出冒号）。
+ * ⚠️ 裸写的 `视觉风格：…`（铺链路老写法）也会收成 `- **视觉风格：**…`。
  */
 export function reformatStoryScriptDirectorLabels(text: string): string {
     const value = String(text || "");
@@ -3676,11 +3712,16 @@ export function reformatStoryScriptDirectorLabels(text: string): string {
         .map((line) => {
             // ① 冒号在加粗外面（老写法 / 用户原模版）；② 冒号在加粗里面（新写法）。
             const match = line.match(/^(\s*-\s*)\*\*\s*([^*\n]{1,24}?)\s*[：:]?\s*\*\*\s*[：:]?\s*([\s\S]*)$/);
-            if (!match) return line;
-            const label = match[2].trim();
-            if (!STORY_SCRIPT_DIRECTOR_LABEL_ALIASES.has(label)) return line;
-            const rest = match[3].replace(/^\s+/, "");
-            return `${match[1]}**${label}：**${rest}`;
+            if (match) {
+                const label = match[2].trim();
+                if (!STORY_SCRIPT_DIRECTOR_LABEL_ALIASES.has(label)) return line;
+                const rest = match[3].replace(/^\s+/, "");
+                return `${match[1]}**${label}：**${rest}`;
+            }
+            // 裸字段：`视觉风格：七十五毫米…` → `- **视觉风格：**七十五毫米…`（用户 2026-10-27）。
+            const bare = line.match(/^\s*(视觉风格|风格提示词|独立风格提示词|画面风格|影像风格|风格)\s*[：:]\s*([\s\S]*)$/);
+            if (!bare) return line;
+            return `- **${bare[1]}：**${bare[2].replace(/^\s+/, "")}`;
         })
         .join("\n");
 }

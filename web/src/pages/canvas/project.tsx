@@ -7696,7 +7696,8 @@ function AtelierCanvasPage() {
             // 资产文案的两种写法（用户 2026-10-27 第 02 条）：
             //   第四套（影视分镜导演）→ 多行「资产锁定」块：`@图片1：李曼人物参考，锁定面容、发型、服装、体型。`
             //   其余三套 → 老的单行 `资产绑定：李曼@图片1、林舟@图片2`，一个字节不动。
-            const assetBindingOf = resolveScriptSchemeId(source.metadata?.scriptScheme) === "director" ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
+            const directorScheme = resolveScriptSchemeId(source.metadata?.scriptScheme) === "director";
+            const assetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
             const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
                 .map((id) => nodesRef.current.find((node) => node.id === id))
                 .filter((node): node is CanvasNodeData => Boolean(node));
@@ -7726,8 +7727,9 @@ function AtelierCanvasPage() {
 
             // 先摘掉「一行连图片提示词都凑不出来」的空行，再按分段方式切组——否则空行会把合并的镜数算歪。
             // `scriptExtras` 必须传进去：风格提示词也可能活在自建列（列名带「风格」）里。
+            // 第四套：末尾追加的风格行写成 `- **视觉风格：**…`。
             const renderable = rows
-                .map((row, index) => ({ row, index, prompts: preset.buildShotPrompts(row, scriptExtras) }))
+                .map((row, index) => ({ row, index, prompts: preset.buildShotPrompts(row, scriptExtras, { directorScheme }) }))
                 .filter((item) => Boolean(item.prompts.imagePrompt));
             if (!renderable.length) {
                 message.warning(t("canvas.scriptNode.pipelineEmpty"));
@@ -7919,9 +7921,10 @@ function AtelierCanvasPage() {
             if (!row) return;
             const presetId = resolveStoryScriptPresetId(source.metadata?.scriptPreset);
             const preset = getStoryScriptPreset(presetId);
+            const directorScheme = resolveScriptSchemeId(source.metadata?.scriptScheme) === "director";
             // 与「一键铺链」同口径：风格提示词可能来自自建列（列名带「风格」），所以 extras 必须一起传。
             const shotExtras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
-            const prompts = preset.buildShotPrompts(row, shotExtras);
+            const prompts = preset.buildShotPrompts(row, shotExtras, { directorScheme });
             const shotNo = row.shot_no || rowIndex + 1;
             // 与「一键铺链」同口径：单镜时长档位（10/15 锁定、5 是上限、none 按表里）。
             const seconds = resolveStoryScriptShotSeconds(row.duration, source.metadata?.scriptSegmentSeconds);
@@ -7960,7 +7963,7 @@ function AtelierCanvasPage() {
                 return undefined;
             };
             // 第四套用多行「资产锁定」块，其余三套保持老的单行「资产绑定」（与整条铺链路同口径）。
-            const assetBindingOf = resolveScriptSchemeId(source.metadata?.scriptScheme) === "director" ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
+            const assetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
             const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId, shotExtras);
             const coveredRoles = new Set(preciseRefs.map((ref) => ref.role));
             const cellAssetRefs = preciseRefs.flatMap((ref) => ref.ids).filter((id) => nodesRef.current.some((node) => node.id === id));

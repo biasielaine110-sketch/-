@@ -2749,7 +2749,11 @@ export function CanvasScriptNodeContent({
             rowMode={{
                 no: rowAssetTarget.shotNo,
                 selectedIds: rowAssetTarget.ids,
-                prompt: preset.buildShotPrompts(rows.find((row) => (row.shot_no || 0) === rowAssetTarget.shotNo) || { shot_no: rowAssetTarget.shotNo, duration: 0 }, extraColumns).imagePrompt,
+                prompt: preset.buildShotPrompts(
+                    rows.find((row) => (row.shot_no || 0) === rowAssetTarget.shotNo) || { shot_no: rowAssetTarget.shotNo, duration: 0 },
+                    extraColumns,
+                    { directorScheme: schemeId === "director" },
+                ).imagePrompt,
                 title: t("canvas.scriptNode.pipelineImage", { no: rowAssetTarget.shotNo }),
                 onLink: (nodeIds) => onRowAssetsChange?.(node.id, rowAssetTarget.shotNo, nodeIds),
                 onImport: (files) => onRowAssetImport?.(node.id, rowAssetTarget.shotNo, files),
