@@ -1,5 +1,7 @@
 import i18n from "@/i18n";
 import { resolveCanvasProjectIdFromLocation, saveBlobAs } from "@/lib/fs/save-blob";
+import type { LocalSkillPack } from "@/lib/chat-skill-pack";
+import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
 
 type AppConfigFile = {
@@ -7,24 +9,35 @@ type AppConfigFile = {
     version: 1;
     exportedAt: string;
     config: AiConfig | Omit<AiConfig, "textPrompts">;
+    /** 用户安装的本地技能（工具包 / 文档技能）；旧版配置文件可能没有该字段 */
+    chatSkillPacks?: LocalSkillPack[];
 };
 
 export type ExportAppConfigOptions = {
     projectId?: string | null;
     /** When false, omit the text prompt library from the exported JSON. Default true. */
     includeTextPrompts?: boolean;
+    /** When false, omit local chat skill packs. Default true. */
+    includeChatSkillPacks?: boolean;
 };
 
 export async function exportAppConfig(options?: ExportAppConfigOptions) {
     const { config } = useConfigStore.getState();
     const includeTextPrompts = options?.includeTextPrompts !== false;
+    const includeChatSkillPacks = options?.includeChatSkillPacks !== false;
     const exportConfig = includeTextPrompts
         ? config
         : (() => {
               const { textPrompts: _textPrompts, ...rest } = config;
               return rest;
           })();
-    const data: AppConfigFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), config: exportConfig };
+    const data: AppConfigFile = {
+        app: "infinite-canvas",
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        config: exportConfig,
+        ...(includeChatSkillPacks ? { chatSkillPacks: useChatSkillPacksStore.getState().packs } : {}),
+    };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
     return saveBlobAs(blob, "infinite-canvas-config.json", {
         projectId: options?.projectId ?? resolveCanvasProjectIdFromLocation(),
@@ -52,4 +65,8 @@ export async function importAppConfig(file: File) {
             imageContextMenuOrder: Array.isArray(imported.imageContextMenuOrder) ? imported.imageContextMenuOrder : current.imageContextMenuOrder,
         } as AiConfig,
     });
+    // 旧版配置没有 chatSkillPacks 字段时保留本地技能；有字段则按 id 合并写入。
+    if (Array.isArray(data.chatSkillPacks)) {
+        useChatSkillPacksStore.getState().importPacks(data.chatSkillPacks);
+    }
 }

@@ -92,7 +92,7 @@ import { DirectorPanel } from "@/components/canvas/director-panel";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores/canvas/use-generation-history-store";
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
-import { buildScriptAssetBindingPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
+import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
@@ -6663,7 +6663,7 @@ function AtelierCanvasPage() {
                  * 第四套方案：把 `video_motion_prompt` 确定性收敛成八段标签块。
                  * 模版在场时上面那层覆盖已经给了逐字原文（本函数幂等，合规就一个字都不动）；
                  * 模版不在场（用户只贴剧本）时，模型经常把图像段塞进视频列 → 这里按行内各列重新组装，
-                 * 保证表格里看到的永远是 `- **时长**：…` 那种八行块，而不是「像拼出来的」一段话。
+                 * 保证表格里看到的永远是 `- **时长：**…` 那种八行块，而不是「像拼出来的」一段话。
                  */
                 const finalRows = directorScheme ? normalizeStoryScriptDirectorRows(dedupedRows, presetId) : dedupedRows;
                 /**
@@ -7693,6 +7693,10 @@ function AtelierCanvasPage() {
             //   角色 → 按分镜里的角色名逐镜匹配；场景 / 道具 / 站位图 → 每一镜都连。
             // 音频素材单独拎出来：它不能参与生图，只连到视频节点（每段视频都连）。
             const assetRoleOf = (assetNodeId: string) => resolveScriptAssetRole(source.metadata?.scriptAssetRoles?.[assetNodeId]);
+            // 资产文案的两种写法（用户 2026-10-27 第 02 条）：
+            //   第四套（影视分镜导演）→ 多行「资产锁定」块：`@图片1：李曼人物参考，锁定面容、发型、服装、体型。`
+            //   其余三套 → 老的单行 `资产绑定：李曼@图片1、林舟@图片2`，一个字节不动。
+            const assetBindingOf = resolveScriptSchemeId(source.metadata?.scriptScheme) === "director" ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
             const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
                 .map((id) => nodesRef.current.find((node) => node.id === id))
                 .filter((node): node is CanvasNodeData => Boolean(node));
@@ -7817,10 +7821,11 @@ function AtelierCanvasPage() {
                         groupAssetIds.add(rowAssetId);
                         assetLinkCount += 1;
                     }
-                    // 资产绑定：把这一镜连进图片节点的图片资产写成「资产名@图片N」追加进提示词 ——
-                    // 文本输入框里就能看到每张参考图分别是什么资产，且 @图片N 会渲染成缩略图 chip。
+                    // 资产文案：第四套写多行「资产锁定」块（`@图片1：李曼人物参考，锁定…`），
+                    // 其余三套写单行「资产名@图片N」。两种都在输入框里能看到每张参考图是什么资产，
+                    // 且 `@图片N` 会渲染成缩略图 chip。
                     // `linkedIntoImage` 是 Set、保序，正好就是刚才写连线的顺序（= 编号顺序），对得上输入框里的 chip。
-                    const imageBinding = buildScriptAssetBindingPrompt(Array.from(linkedIntoImage), nodesRef.current, assetNameOf, assetRoleOf);
+                    const imageBinding = assetBindingOf(Array.from(linkedIntoImage), nodesRef.current, assetNameOf, assetRoleOf);
                     imageNode.metadata = { ...imageNode.metadata, prompt: withScriptAssetBinding(imageNode.metadata?.prompt, imageBinding) };
                     // 这一镜在表里「声音」列挂的音频：只属于这一镜，等下直连本组的视频节点。
                     for (const audioId of scriptRowAudioIds(source.metadata?.scriptRowAudios, shotNo)) {
@@ -7837,9 +7842,9 @@ function AtelierCanvasPage() {
                     // 分镜提示词已经在本镜的文本 / 图片节点上，视频节点拿的是它的关键帧首帧。
                     videoPrompt: member.prompts.videoPrompt,
                 }));
-                // 视频节点的「资产绑定」：本段所有资产图都是直连视频节点的，顺序与写连线时一致 ——
-                // groupAssetIds（Set 保序）→ 音频（音频只连视频、但不进「图片资产」绑定，拼装时按 kind 过滤掉）。
-                const videoBinding = buildScriptAssetBindingPrompt([...groupAssetIds, ...audioRefs.map((asset) => asset.id)], nodesRef.current, assetNameOf, assetRoleOf);
+                // 视频节点的资产文案（第四套=资产锁定块，其余=资产绑定行）：本段所有资产图都是直连视频节点的，
+                // 顺序与写连线时一致 —— groupAssetIds（Set 保序）→ 音频（音频只连视频、但不进「图片资产」文案，拼装时按 kind 过滤掉）。
+                const videoBinding = assetBindingOf([...groupAssetIds, ...audioRefs.map((asset) => asset.id)], nodesRef.current, assetNameOf, assetRoleOf);
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
                 const videoPrompt = withScriptAssetBinding(baseVideoPrompt, videoBinding);
                 // 单镜模式：10/15 秒 = 锁定成片秒数（不抄表里旧值，否则「选了 10 秒铺出来还是 3 秒」）；
@@ -7954,6 +7959,8 @@ function AtelierCanvasPage() {
                 }
                 return undefined;
             };
+            // 第四套用多行「资产锁定」块，其余三套保持老的单行「资产绑定」（与整条铺链路同口径）。
+            const assetBindingOf = resolveScriptSchemeId(source.metadata?.scriptScheme) === "director" ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
             const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId, shotExtras);
             const coveredRoles = new Set(preciseRefs.map((ref) => ref.role));
             const cellAssetRefs = preciseRefs.flatMap((ref) => ref.ids).filter((id) => nodesRef.current.some((node) => node.id === id));
@@ -7972,9 +7979,9 @@ function AtelierCanvasPage() {
             // 去重：同一张图可能同时是「图位 / 锁的图」和「镜头图」，别连出两条并行线。
             const linkIds = Array.from(new Set([...assets.map((asset) => asset.id), ...audioRefs.map((asset) => asset.id), ...rowAudioRefs, ...rowAssetRefs, ...cellAssetRefs]));
             const links = linkIds.map((id) => ({ id: nanoid(), fromNodeId: id, toNodeId: videoNode.id }));
-            // 资产绑定：本镜连进视频节点的图片资产 → 「资产名@图片N」追加进提示词
+            // 资产文案：本镜连进视频节点的图片资产 → 第四套写多行「资产锁定」块、其余三套写「资产名@图片N」
             //（编号顺序 = linkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
-            const videoBinding = buildScriptAssetBindingPrompt(linkIds, nodesRef.current, assetNameOf, assetRoleOf);
+            const videoBinding = assetBindingOf(linkIds, nodesRef.current, assetNameOf, assetRoleOf);
             videoNode.metadata = { ...videoNode.metadata, prompt: withScriptAssetBinding(videoNode.metadata?.prompt, videoBinding) };
             nodesRef.current = [...nodesRef.current, videoNode];
             setNodes((prev) => [...prev, videoNode]);

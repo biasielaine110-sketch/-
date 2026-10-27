@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App } from "antd";
 import copy from "copy-to-clipboard";
-import { Bot, Check, Copy, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Sparkles, Square, Trash2, Upload, Video, Wrench, X } from "lucide-react";
+import { Bot, Check, Copy, FolderOpen, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Sparkles, Square, Trash2, Upload, Video, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -11,6 +11,7 @@ import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { resolveChatSendOptions, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { getChatSkillDisplayDescription, getChatSkillDisplayName, listChatSkills, resolveChatSkillIds } from "@/lib/chat-skills";
+import { parseSkillSources } from "@/lib/chat-skill-pack";
 import { listCanvasAgents, resolveCanvasAgent } from "@/constant/canvas-agents";
 import { DEFAULT_CANVAS_FONT_SIZE, DEFAULT_CHAT_FONT_SIZE } from "@/constant/canvas";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
@@ -22,6 +23,10 @@ const MIN_CHAT_FONT_SIZE = 10;
 const MAX_CHAT_FONT_SIZE = 48;
 const CHAT_FONT_SIZE_STEP = 2;
 const CHAT_SCROLL_POSITION_KEY = "infinite-atelier:canvas-chat-scroll-position";
+/** 技能导入时只读这些后缀的文件（文件夹导入会连带一堆图片/字体，别去读） */
+const SKILL_IMPORT_READABLE_RE = /\.(json|md|markdown|txt)$/i;
+/** 能单独成一份技能的文件（.txt 只能在文件夹里当参考文件，不能单独装） */
+const SKILL_IMPORT_STANDALONE_RE = /\.(json|md|markdown)$/i;
 
 type CanvasChatContentProps = {
     node: CanvasNodeData;
@@ -67,9 +72,10 @@ export function CanvasChatContent({
     const globalConfig = useConfigStore((state) => state.config);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const installedPacks = useChatSkillPacksStore((state) => state.packs);
-    const installFromJson = useChatSkillPacksStore((state) => state.installFromJson);
+    const upsertPack = useChatSkillPacksStore((state) => state.upsert);
     const uninstallPack = useChatSkillPacksStore((state) => state.uninstall);
     const skillPackInputRef = useRef<HTMLInputElement>(null);
+    const skillFolderInputRef = useRef<HTMLInputElement>(null);
     const [draft, setDraft] = useState("");
     const [draftEditorOpen, setDraftEditorOpen] = useState(false);
     const [previewMessageId, setPreviewMessageId] = useState<string | null>(null);
@@ -400,19 +406,41 @@ export function CanvasChatContent({
         onSkillsChange?.(node.id, Array.from(selected));
     };
 
-    const importSkillPack = async (file: File | null) => {
-        if (!file) return;
+    /**
+     * 技能导入：一个 .json 工具包、一个 .md 文档技能，或者整个技能文件夹（选目录）。
+     * 三种都先收成 `{ path, text }[]` 再交给 parseSkillSources 判型 ——
+     * 判型只写在一处，UI 这边不重复一套规则，免得两边慢慢走偏。
+     */
+    const importSkillPack = async (fileList: FileList | File[] | null | undefined) => {
+        // 文件夹里往往混着图片/字体，只读文本类：读二进制既没意义又容易撑爆内存。
+        const files = Array.from(fileList || []).filter((file) => SKILL_IMPORT_READABLE_RE.test(file.webkitRelativePath || file.name));
+        if (!files.length) {
+            message.error(t("canvas.chat.skillsNoReadableFile"));
+            return;
+        }
         try {
-            const raw = await file.text();
-            const pack = installFromJson(raw);
-            if (!enabledSkillIds.includes(pack.id)) {
-                onSkillsChange?.(node.id, [...enabledSkillIds, pack.id]);
-            }
-            message.success(t("canvas.chat.skillsPackInstalled", { name: pack.name }));
+            const sources = await Promise.all(
+                files.map(async (file) => ({ path: file.webkitRelativePath || file.name, text: await file.text() })),
+            );
+            /*
+             * 两种选法要分开处理，否则会误报「文件夹里没有 SKILL.md」：
+             *  - 选目录（路径里带 /）或一组文件合起来是一个技能 → 只装一个；
+             *  - 平铺多选几个 .json/.md → 每个都是独立技能，逐个装。
+             */
+            const standalone = sources.length > 1 && sources.every((source) => !source.path.includes("/") && SKILL_IMPORT_STANDALONE_RE.test(source.path));
+            const packs = (standalone ? sources.map((source) => parseSkillSources([source])) : [parseSkillSources(sources)]).map((pack) => upsertPack(pack));
+            const nextIds = Array.from(new Set([...enabledSkillIds, ...packs.map((pack) => pack.id)]));
+            onSkillsChange?.(node.id, nextIds);
+            message.success(
+                packs.length > 1
+                    ? t("canvas.chat.skillsPackInstalledMany", { count: packs.length, names: packs.map((pack) => pack.name).join("、") })
+                    : t("canvas.chat.skillsPackInstalled", { name: packs[0].name }),
+            );
         } catch (error) {
             message.error(t("canvas.chat.skillsPackInstallFailed", { error: error instanceof Error ? error.message : String(error) }));
         } finally {
             if (skillPackInputRef.current) skillPackInputRef.current.value = "";
+            if (skillFolderInputRef.current) skillFolderInputRef.current.value = "";
         }
     };
 
@@ -657,7 +685,7 @@ export function CanvasChatContent({
                             {skillsOpen ? (
                                 <div
                                     data-canvas-no-zoom
-                                    className="absolute bottom-full left-0 z-30 mb-1 w-72 rounded-xl border p-2.5 shadow-lg text-[20px]"
+                                    className="absolute bottom-full left-0 z-30 mb-1 w-80 rounded-xl border p-2.5 shadow-lg text-[20px]"
                                     style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
                                     onMouseDown={(event) => event.stopPropagation()}
                                     onPointerDown={(event) => event.stopPropagation()}
@@ -670,34 +698,58 @@ export function CanvasChatContent({
                                     onWheel={(event) => event.stopPropagation()}
                                 >
                                     <div className="mb-2 flex items-center justify-between gap-2">
-                                        <div className="text-[20px] font-semibold uppercase opacity-55">{t("canvas.chat.skillsTitle")}</div>
-                                        <button
-                                            type="button"
-                                            className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[20px] opacity-80 transition hover:opacity-100"
-                                            style={{ borderColor: theme.node.stroke }}
-                                            onClick={() => skillPackInputRef.current?.click()}
-                                            title={t("canvas.chat.skillsImportHint")}
-                                        >
-                                            <Upload className="size-3.5" />
-                                            {t("canvas.chat.skillsImport")}
-                                        </button>
-                                        <input
-                                            ref={skillPackInputRef}
-                                            type="file"
-                                            accept="application/json,.json,.skill.json"
-                                            className="hidden"
-                                            onChange={(event) => void importSkillPack(event.target.files?.[0] || null)}
-                                        />
-                                        <button
-                                            type="button"
-                                            className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
-                                            style={{ color: theme.node.text }}
-                                            title={t("common.close")}
-                                            aria-label={t("common.close")}
-                                            onClick={() => setSkillsOpen(false)}
-                                        >
-                                            <X className="size-3.5" />
-                                        </button>
+                                        <div className="min-w-0 truncate text-[20px] font-semibold uppercase opacity-55">{t("canvas.chat.skillsTitle")}</div>
+                                        <div className="flex shrink-0 items-center gap-1">
+                                            <button
+                                                type="button"
+                                                className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border px-2 py-1 text-[20px] opacity-80 transition hover:opacity-100"
+                                                style={{ borderColor: theme.node.stroke }}
+                                                onClick={() => skillPackInputRef.current?.click()}
+                                                title={t("canvas.chat.skillsImportHint")}
+                                            >
+                                                <Upload className="size-3.5" />
+                                                {t("canvas.chat.skillsImport")}
+                                            </button>
+                                            {/* 一个 input 不能既选文件又选目录，所以文件夹单独一个隐藏 input + 一个按钮。
+                                                图标按钮而不是文字：中英文按钮并排会把这一行撑破（面板是定宽）。 */}
+                                            <button
+                                                type="button"
+                                                className="grid size-6 shrink-0 place-items-center rounded-md border opacity-80 transition hover:opacity-100"
+                                                style={{ borderColor: theme.node.stroke, color: theme.node.text }}
+                                                onClick={() => skillFolderInputRef.current?.click()}
+                                                title={t("canvas.chat.skillsImportFolderHint")}
+                                                aria-label={t("canvas.chat.skillsImportFolder")}
+                                            >
+                                                <FolderOpen className="size-3.5" />
+                                            </button>
+                                            <input
+                                                ref={skillPackInputRef}
+                                                type="file"
+                                                multiple
+                                                accept="application/json,.json,.skill.json,.md,.markdown,text/markdown"
+                                                className="hidden"
+                                                onChange={(event) => void importSkillPack(event.target.files)}
+                                            />
+                                            <input
+                                                ref={skillFolderInputRef}
+                                                type="file"
+                                                multiple
+                                                // webkitdirectory 是 Chromium 的目录选择开关，React 的类型里没有，只能展开塞进去。
+                                                {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                                                className="hidden"
+                                                onChange={(event) => void importSkillPack(event.target.files)}
+                                            />
+                                            <button
+                                                type="button"
+                                                className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
+                                                style={{ color: theme.node.text }}
+                                                title={t("common.close")}
+                                                aria-label={t("common.close")}
+                                                onClick={() => setSkillsOpen(false)}
+                                            >
+                                                <X className="size-3.5" />
+                                            </button>
+                                        </div>
                                     </div>
                                     <div className="mb-2 text-[20px] leading-snug opacity-50">{t("canvas.chat.skillsImportHint")}</div>
                                     <div className="thin-scrollbar max-h-64 space-y-1 overflow-y-auto overscroll-contain">
@@ -724,7 +776,11 @@ export function CanvasChatContent({
                                                         <span className="min-w-0">
                                                             <span className="block text-[20px] font-medium">
                                                                 {skillName}
-                                                                {skill.source === "local" ? <span className="ml-1 text-[20px] font-normal opacity-50">{t("canvas.chat.skillsLocalBadge")}</span> : null}
+                                                                {skill.source === "local" ? (
+                                                                    <span className="ml-1 text-[20px] font-normal opacity-50">
+                                                                        {skill.kind === "doc" ? t("canvas.chat.skillsDocBadge") : t("canvas.chat.skillsLocalBadge")}
+                                                                    </span>
+                                                                ) : null}
                                                             </span>
                                                             <span className="block text-[20px] opacity-60">{skillDesc}</span>
                                                         </span>

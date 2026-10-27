@@ -11,8 +11,8 @@ import type { TextPromptEntry } from "@/constant/text-prompt-library";
  * - `director`：第四套 · 影视分镜导演 —— 自定义提示词与分镜提示词都填
  *   「***********# Role: 影视分镜导演 ****************************」，资产提示词同上（资产两段三套共用）。
  *   这一套的输出形态与前几套不同（`**主体与动作提示词：**` / `**独立风格提示词：**`、
- *   视频段用 `- **景别／机位**：` 这种字段），解析侧已按同一套标签认（见 `story-script.ts`
- *   的 `STORY_SCRIPT_TEMPLATE_KNOWN_LABELS`）。
+ *   视频段用 `- **景别／机位：**` 这种字段，冒号在加粗里面），解析侧已按同一套标签认
+ *   （见 `story-script.ts` 的 `STORY_SCRIPT_TEMPLATE_KNOWN_LABELS`）。
  *
  * ⚠️ 默认是 **`director`（第四套）**（2026-10-23 用户要求：01 分镜表默认走第四套；词库里没有
  * 影视分镜导演那一条时回落第二套 `library`；都没有则停在内置）。`resolveScriptSchemeId`

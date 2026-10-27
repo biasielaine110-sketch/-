@@ -9,7 +9,7 @@ import axios from "axios";
 // 第四套 `video_motion_prompt` 末尾那块固定尾巴（`【禁止项】` / `【强制声明】`）的**唯一判据**。
 // 全项目只有 `constant/story-script.ts` 一处定义文案与指纹，这里只借用「这一行是不是我们追加的尾巴」，
 // 绝不在这里抄一份字符串 —— 文案改过一次了（`不要出现字幕…` → 四行块），抄一份就会漂。
-import { isStoryScriptDirectorSoundNoteLine } from "@/constant/story-script";
+import { isStoryScriptDirectorSectionSeparator, isStoryScriptDirectorSoundNoteLine } from "@/constant/story-script";
 import i18n from "@/i18n";
 import { proxyApiUrl } from "@/lib/api-proxy";
 import {
@@ -4423,7 +4423,8 @@ function h3DialogueLanguage(text: string) {
     return "Chinese";
 }
 
-const H3_DIALOGUE_LABEL = /^(\s*-\s*\*\*\s*对白\s*\*\*\s*[：:]\s*)([\s\S]*)$/;
+// 2026-10-27 起标签写成 `- **对白：**`（冒号在加粗里面），老写法 `- **对白**：` 也必须照样认。
+const H3_DIALOGUE_LABEL = /^(\s*-\s*\*\*\s*对白\s*[：:]?\s*\*\*\s*[：:]?\s*)([\s\S]*)$/;
 const H3_DIALOGUE_SILENT = /^(无|无台词|无对白|（无）|\(无\)|none)$/i;
 const H3_DIALOGUE_SPEAKER = /^([^：:，,。；;、「」“”"'（）()\s]{1,12})\s*[：:]\s*/;
 /** `他低声说：` / `苏晚问：` 是舞台提示，不是说话人。 */
@@ -4654,10 +4655,16 @@ function stripH3Scaffolding(text: string, options?: { keepStyleFields?: boolean 
  * 它同时认新版四行的行首指纹与旧版「不要出现字幕…」前缀，别在这里再抄一份字符串。
  */
 function stripH3SoundNote(text: string) {
-    return text
+    const lines = String(text || "")
         .split("\n")
-        .filter((line) => !isStoryScriptDirectorSoundNoteLine(line))
-        .join("\n");
+        .filter((line) => !isStoryScriptDirectorSoundNoteLine(line));
+    // 尾巴块前面那条 `---`（2026-10-27 起有）也一起拿掉，否则末尾会留一条孤立的分隔线。
+    while (lines.length) {
+        const last = lines[lines.length - 1];
+        if (!last.trim() || isStoryScriptDirectorSectionSeparator(last)) lines.pop();
+        else break;
+    }
+    return lines.join("\n");
 }
 
 /**
@@ -4999,15 +5006,15 @@ function extractH3Speakers(text: string) {
 }
 
 /**
- * 把画布的 `- **对白**：名字：“台词”` 改写成 H3 的官方台词块。
+ * 把画布的 `- **对白：**名字：“台词”` 改写成 H3 的官方台词块。
  *
  * 输出形态（`audioCount` 决定要不要挂音色绑定）：
  * ```
  * <Audio 1> is the voice-timbre reference for 苏晚 (S1). It provides vocal tone and pacing only;
  * do not copy its original words.
  *
- * - **时长**：…
- * - **对白**：
+ * - **时长：**…
+ * - **对白：**
  * 苏晚 (S1) says:
  * <d>[Chinese]你终于来了。</d>
  *
@@ -5158,6 +5165,8 @@ export function adaptMinimaxH3ReferencePrompt(
             // 八行之后那块尾巴（`【禁止项】` / `【强制声明】` 四行；旧版是「不要出现字幕…」一句）
             // 不是台词，别把它补上人名 —— 判据统一走 `isStoryScriptDirectorSoundNoteLine`。
             if (isStoryScriptDirectorSoundNoteLine(next)) break;
+            // 对白（和声音）后面那条 `---`（2026-10-27 起每镜都带）同样不是台词，别包进 `<d>`。
+            if (isStoryScriptDirectorSectionSeparator(next)) break;
             // ⚠️ 用户 2026-10-25：`- **对白**：` 的内容**只收录到 `视觉风格：` 之前** ——
             // 那一行是画面风格不是台词；同理任何新字段行、下一镜的镜号标题都是边界。
             if (H3_DIALOGUE_BOUNDARY.test(next)) break;
@@ -5264,7 +5273,7 @@ export function isMinimaxH3FisherSilentShot(workflowId: string | null | undefine
  * 那个只问「有没有 `<d>`」（台词没转成 `<d>` 也算静音），这个问「用户是不是明说了没有台词」。
  */
 export function declaresH3SilentDialogue(prompt: string) {
-    return /^[^\S\r\n]*[-*]?\s*\*\*对白\*\*\s*[：:]\s*(?:无|none|n\/a|（无）|\(无\)|—+|–|-)\s*[。.]?\s*$/im.test(String(prompt || ""));
+    return /^[^\S\r\n]*[-*]?\s*\*\*\s*对白\s*[：:]?\s*\*\*\s*[：:]?\s*(?:无|none|n\/a|（无）|\(无\)|—+|–|-)\s*[。.]?\s*$/im.test(String(prompt || ""));
 }
 
 /**

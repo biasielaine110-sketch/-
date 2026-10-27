@@ -1193,7 +1193,8 @@ export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; video
         .filter((item) => Boolean(item.body));
     if (!kept.length) return "";
     if (kept.length === 1) return kept[0].body;
-    const merged = [`多镜头连续片段（共 ${kept.length} 镜）：`, ...kept.map((item) => `第${item.no}镜\n${item.body}`)].join("\n\n");
+    // 每镜的抬头也走同一种排版：`- **第N镜**`（用户 2026-10-27：`第一镜` 这类行也要带 `- **`）。
+    const merged = [`多镜头连续片段（共 ${kept.length} 镜）：`, ...kept.map((item) => `- **第${item.no}镜**\n${item.body}`)].join("\n\n");
     // 第四套每镜的提示词末尾都带一块尾巴（【禁止项】/【强制声明】四行）：4 镜合并会重复 4 遍。
     // 它是**整段**的总要求，所以只留一条、放到最末（没有这句时原样返回，其它套不受影响）。
     const collapsed = collapseDirectorSoundNotes(merged);
@@ -2883,11 +2884,11 @@ const STORY_SCRIPT_TEMPLATE_IMAGE_ONLY_LABELS = new Set(
  * 一行一条，不要揉到一起）：
  *
  * ```
- * - **时长**：6秒，00:04—00:10。
- * - **景别／机位**：近景，平视。
+ * - **时长：**6秒，00:04—00:10。
+ * - **景别／机位：**近景，平视。
  * ...
- * - **对白**：
- * “李曼，……我是没出息。”     ← 值里的续行原样保留（`**对白**：` 空值 + 下一行台词）
+ * - **对白：**
+ * “李曼，……我是没出息。”     ← 值里的续行原样保留（`**对白：**` 空值 + 下一行台词）
  * ```
  *
  * 按块内**原始顺序**、用块里写的**标签原文**，每个字段渲染成 `- **标签**：值`；
@@ -3617,6 +3618,74 @@ export function applyStoryScriptTemplateOverlayToShot(
 export const STORY_SCRIPT_DIRECTOR_VIDEO_LABELS = ["时长", "景别／机位", "运镜", "人物站位与构图", "主体与动作", "光影与色调", "转场建议", "对白"] as const;
 
 /**
+ * 第四套：`对白`（含声音）与后面那块声明 / 下一镜之间的**分隔线**（2026-10-27 用户要求）。
+ *
+ * 用户原话：「相关对话和声音输出完，需要再另起一行增加 `---` 用来隔开与其他环节内容」，
+ * 并选定位置 = **对白之后、声明块（`【禁止项】` / `【强制声明】`）之前**。
+ * 所以整块长这样（`---` 单独一行，前后各空一行）：
+ * ```
+ * - **对白：**
+ * 苏晚：“……算了。总得问一句。”
+ *
+ * ---
+ *
+ * 【禁止项】
+ * 文字/UI/水印/Logo/角标/可读文字/真实UI
+ * 【强制声明】
+ * 无背景音乐,仅保留环境音与人声和音效;…
+ * ```
+ * 多镜合并时每镜都带一条 → 正好把「第 N 镜」的台词段和下一镜隔开（`collapseDirectorSoundNotes`
+ * 只收敛尾巴块，不收敛这条线）。
+ *
+ * ⚠️ 判据只有一处（`isStoryScriptDirectorSectionSeparator`），对白收集 / H3 转写 / 收敛都走它，
+ * 别在各处再抄一份正则 —— `---` 被当成台词补上人名（`苏晚：---`）就是漏了这一步。
+ */
+export const STORY_SCRIPT_DIRECTOR_SECTION_SEPARATOR = "---";
+
+/** 这一行是不是那条分隔线（`---` / `***` / `- - -` 这类 Markdown 水平线都认）。 */
+export function isStoryScriptDirectorSectionSeparator(line: unknown): boolean {
+    return /^\s*(?:-\s*){3,}$|^\s*_{-3,}\s*$|^\s*\*{3,}\s*$/.test(String(line ?? "").trim());
+}
+
+/**
+ * 第四套视频块里**认得的标签**（只有它们会被改写成「冒号进加粗」的形式）。
+ * ⚠️ 不认得的 `**加粗：**` 一律原样留着 —— 正文里的强调句不能被当成字段切碎。
+ */
+const STORY_SCRIPT_DIRECTOR_LABEL_ALIASES = new Set<string>([
+    ...STORY_SCRIPT_DIRECTOR_VIDEO_LABELS,
+    "声音",
+    // 半角斜杠的写法（用户 2026-10-27 的示例就是这么打的）与全角视为同一个标签。
+    "景别/机位",
+]);
+
+/**
+ * 把导演块每一行的标签改写成 **`- **标签：**值`**（冒号在加粗**里面**，用户 2026-10-27 要求）。
+ *
+ * 用户原话：「输出的视频运动提示词中，每一行的类型词均使用 `- **景别：**` 进行隔开」，
+ * 所以 `- **景别／机位**：中景，平视。` → `- **景别／机位：**中景，平视。`
+ * （老节点、模版逐字复制过来的块也一起收敛，整个功能只有这一种形态）。
+ *
+ * ⚠️ 只认 `STORY_SCRIPT_DIRECTOR_LABEL_ALIASES` 里的标签；只挪冒号位置，值一个字不动。
+ * ⚠️ 幂等：已经是 `- **标签：**` 的行原样返回（第二遍归一化不会多出冒号）。
+ */
+export function reformatStoryScriptDirectorLabels(text: string): string {
+    const value = String(text || "");
+    if (!value) return value;
+    return value
+        .split("\n")
+        .map((line) => {
+            // ① 冒号在加粗外面（老写法 / 用户原模版）；② 冒号在加粗里面（新写法）。
+            const match = line.match(/^(\s*-\s*)\*\*\s*([^*\n]{1,24}?)\s*[：:]?\s*\*\*\s*[：:]?\s*([\s\S]*)$/);
+            if (!match) return line;
+            const label = match[2].trim();
+            if (!STORY_SCRIPT_DIRECTOR_LABEL_ALIASES.has(label)) return line;
+            const rest = match[3].replace(/^\s+/, "");
+            return `${match[1]}**${label}：**${rest}`;
+        })
+        .join("\n");
+}
+
+/**
  * 第四套：`video_motion_prompt` 末尾**默认追加**的一块固定尾巴。
  *
  * 2026-10-26 用户改口径（原话「第4套执行方案在出 视频运动提示词 时，最后的添加内容修改为如下」）：
@@ -3690,24 +3759,28 @@ export function isStoryScriptDirectorSoundNoteLine(line: unknown): boolean {
 export const STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT = [
     "## `video_motion_prompt` 的唯一合法格式（第四套 · 影视分镜导演）",
     "`video_motion_prompt` **不是**图像提示词，**不是** `[a] + [b]` 括号链。它必须是一块逐行标签文本：",
-    "一行一个字段，标签原样写成 `- **标签**：`，值紧跟冒号，顺序固定为下面八行（示例只用来说明格式）：",
-    "- **时长**：6秒，00:59—01:05。",
-    "- **景别／机位**：中景，平视。",
-    "- **运镜**：固定镜头。",
-    "- **人物站位与构图**：苏晚位于右侧三分线，两杯茶在胸腹之间；左侧留出后续移动空间。",
-    "- **主体与动作**：苏晚收紧握杯的手，低声说完一句。",
-    "- **光影与色调**：门檐下柔光不变，杯壁凝结水珠清楚。",
-    "- **转场建议**：在“问一句”结束后切行走全景。",
-    "- **对白**：",
+    "一行一个字段，标签写成 `- **标签：**`——**冒号放在两个星号里面**（`- **景别／机位：**中景，平视。`），值紧跟在第二个 `**` 后面、不留空格；顺序固定为下面八行（示例只用来说明格式）：",
+    "- **时长：**6秒，00:59—01:05。",
+    "- **景别／机位：**中景，平视。",
+    "- **运镜：**固定镜头。",
+    "- **人物站位与构图：**苏晚位于右侧三分线，两杯茶在胸腹之间；左侧留出后续移动空间。",
+    "- **主体与动作：**苏晚收紧握杯的手，低声说完一句。",
+    "- **光影与色调：**门檐下柔光不变，杯壁凝结水珠清楚。",
+    "- **转场建议：**在“问一句”结束后切行走全景。",
+    "- **对白：**",
     "苏晚：“……算了。总得问一句。”",
+    "",
+    "---",
+    "",
     "硬约束：",
-    "- 禁止出现 `[时长：4s]` 这类方括号写法；时长只写在 `- **时长**：` 这一行（秒数 + 起止时间码）。",
+    "- 禁止出现 `[时长：4s]` 这类方括号写法；时长只写在 `- **时长：**` 这一行（秒数 + 起止时间码）。",
+    "- **每一行的类型词都必须写成 `- **标签：**`，冒号在两个星号里面**（`- **景别／机位：**中景，平视。`）。写成 `- **景别／机位**：中景，平视。`（冒号在星号外面）不合规。",
     "- 禁止把 `主体与动作提示词` / `独立风格提示词` / `首帧图片提示词` 的**图像段**内容写进 `video_motion_prompt`（图像段归 `shot_prompt`）。",
-    "- `- **主体与动作**` 只写「人名 + 具体动作」，**一个外貌词都不许带**：年龄、面孔、五官、发型、发色、肤色、身材、上衣、裤子、鞋子、配饰全部不写。人名用 `角色1` / `角色2` 列里的名字原样写（`苏晚`），不要写成 `27岁的中国女生苏晚，亚洲面孔、五官…穿米白针织衫` —— 外貌与服装属于 `角色描述1/2` 列和 `shot_prompt` 的图像段，写进视频运动提示词会让视频模型按文字重新捏一个人。",
-    "- `- **对白**：` 单独占一行，台词写在**下一行**（不加引号也行）；这一镜没有对白就写 `- **对白**：无`。",
+    "- `- **主体与动作：**` 只写「人名 + 具体动作」，**一个外貌词都不许带**：年龄、面孔、五官、发型、发色、肤色、身材、上衣、裤子、鞋子、配饰全部不写。人名用 `角色1` / `角色2` 列里的名字原样写（`苏晚`），不要写成 `27岁的中国女生苏晚，亚洲面孔、五官…穿米白针织衫` —— 外貌与服装属于 `角色描述1/2` 列和 `shot_prompt` 的图像段，写进视频运动提示词会让视频模型按文字重新捏一个人。",
+    "- `- **对白：**` 单独占一行，台词写在**下一行**，并且**台词本体必须用中文双引号 `“` 开头、`”` 结尾**（`苏晚：“……算了。总得问一句。”`）；这一镜没有对白就写 `- **对白：**无`。没包引号的台词（`苏晚：算了，总得问一句。`）不合规。",
     "- **台词必须标注说话人**：每一行台词都以 `角色名：` 开头，名字用 `角色1` / `角色2` 列里的原名（`苏晚：“……”`）。一镜里有两个人说话就一行一个说话人（`苏晚：“……”` 换行 `陈默：“……”`），**禁止**写成没有主语的裸台词（`“……”`）—— 视频模型要据此判断谁在第几秒开口，缺主语时双人对白会串音或干脆不出声。",
     "- 八行都要有，不许合并成一段，也不许省成一句概括。",
-    "- 八行之后**另起一段**，把下面这一整块（四行）**原样照抄**：不加任何标签、不加代码框、不要并进对白、不要改写其中的标点：",
+    "- **对白（和声音）写完之后另起一行写一条 `---`**（单独一行，前后各空一行），用来把这一镜的台词段和后面的内容隔开；`---` 之后**另起一段**，把下面这一整块（四行）**原样照抄**：不加任何标签、不加代码框、不要并进对白、不要改写其中的标点：",
     STORY_SCRIPT_DIRECTOR_SOUND_NOTE,
     // 图像段（`shot_prompt`）同样不许写角色外貌 —— 用户 2026-10-24 晚追加要求。
     // 放在同一个常量里，是因为它跟上面一样「只在第四套生效、且必须 system + 任务书两处都挂」。
@@ -3730,9 +3803,10 @@ function isDirectorVideoBlockText(text: unknown): boolean {
     if (!value) return false;
     let hits = 0;
     for (const label of STORY_SCRIPT_DIRECTOR_VIDEO_LABELS) {
-        if (value.includes(`- **${label}**`)) hits += 1;
+        // 两个世代的标签都认：`- **标签**：值`（老写法 / 用户原模版）与 `- **标签：**值`（2026-10-27 起）。
+        if (value.includes(`- **${label}**`) || value.includes(`- **${label}：**`)) hits += 1;
         // `景别/机位`（半角斜杠）也算。
-        else if (label === "景别／机位" && value.includes("- **景别/机位**")) hits += 1;
+        else if (label === "景别／机位" && (value.includes("- **景别/机位**") || value.includes("- **景别/机位：**"))) hits += 1;
     }
     return hits >= 4;
 }
@@ -3867,13 +3941,38 @@ function stripDirectorAppearanceFromPrompt(value: unknown, names: readonly strin
     return result || names.join("、");
 }
 
-/** 第四套：给视频运动提示词补上尾巴块（【禁止项】/【强制声明】四行，已经有一块就一个字不动）。 */
+/** 去掉末尾的空行与重复的分隔线（补 `---` 之前先清干净，保证幂等）。 */
+function trimTrailingSectionSeparator(text: string): string {
+    const lines = String(text || "").split("\n");
+    while (lines.length) {
+        const last = lines[lines.length - 1];
+        if (!last.trim() || isStoryScriptDirectorSectionSeparator(last)) lines.pop();
+        else break;
+    }
+    return lines.join("\n");
+}
+
+/**
+ * 第四套：给视频运动提示词补上尾巴块（【禁止项】/【强制声明】四行，已经有一块就一个字不动）。
+ *
+ * 2026-10-27 起尾巴块**前面多一行 `---`**（用户要求「对白和声音输出完另起一行加 `---`隔开」）：
+ * 已有尾巴块但前面没有那条线的（老节点 / 模型自己照抄的）→ 就地补，块内四行逐字不动。
+ */
 function withDirectorSoundNote(text: string): string {
     const value = String(text || "");
     if (!value.trim()) return value;
     // 按键词判（`isStoryScriptDirectorSoundNoteLine`）：新旧两版文案、不带句号、带 `- ` 前缀都认。
-    if (value.split("\n").some((line) => isStoryScriptDirectorSoundNoteLine(line))) return value;
-    return `${value.replace(/\s+$/, "")}\n\n${STORY_SCRIPT_DIRECTOR_SOUND_NOTE}`;
+    const lines = value.split("\n");
+    const firstNote = lines.findIndex((line) => isStoryScriptDirectorSoundNoteLine(line));
+    if (firstNote < 0) {
+        const body = trimTrailingSectionSeparator(value);
+        return `${body}\n\n${STORY_SCRIPT_DIRECTOR_SECTION_SEPARATOR}\n${STORY_SCRIPT_DIRECTOR_SOUND_NOTE}`;
+    }
+    // 已经有尾巴块：只保证它前面有一条 `---`（已有的原样保留 → 幂等），块内一个字不动。
+    const head = lines.slice(0, firstNote);
+    while (head.length && (!head[head.length - 1].trim() || isStoryScriptDirectorSectionSeparator(head[head.length - 1]))) head.pop();
+    if (!head.length) return value;
+    return [...head, "", STORY_SCRIPT_DIRECTOR_SECTION_SEPARATOR, ...lines.slice(firstNote)].join("\n");
 }
 
 /** 第四套：把**已经合规**的八段块里的 `主体与动作` 那一行就地换掉（其余行一个字不动）。 */
@@ -3882,7 +3981,8 @@ function rewriteDirectorSubjectLine(blockText: string, names: readonly string[])
     const out: string[] = [];
     for (let index = 0; index < lines.length; index += 1) {
         const line = lines[index];
-        const match = line.match(/^(\s*-\s*\*\*主体与动作\*\*\s*[：:]\s*)([\s\S]*)$/);
+        // 两种标签写法都认：`- **主体与动作**：` 与 `- **主体与动作：**`（2026-10-27 起）。
+        const match = line.match(/^(\s*-\s*\*\*\s*主体与动作\s*[：:]?\s*\*\*\s*[：:]?\s*)([\s\S]*)$/);
         if (!match) {
             out.push(line);
             continue;
@@ -3944,6 +4044,8 @@ function ensureDirectorDialogueSpeakers(value: unknown, names: readonly string[]
     for (const raw of text.split(/\n+/)) {
         const line = raw.trim();
         if (!line || DIRECTOR_DIALOGUE_SILENT_PATTERN.test(line)) continue;
+        // 分隔线不是台词（`---` 被补成 `苏晚：---` 就是这里漏判）。
+        if (isStoryScriptDirectorSectionSeparator(line)) continue;
         if (!primary) {
             rows.push(line);
             continue;
@@ -3965,6 +4067,47 @@ function ensureDirectorDialogueSpeakers(value: unknown, names: readonly string[]
 }
 
 /**
+ * 第四套：台词本体**必须用中文双引号 `“…”` 包起来**（用户 2026-10-27 要求）。
+ *
+ * 用户原话：「对白部分人物说的话需要用双引号在开始和结束时标记好」。
+ * 模型经常写成 `苏晚：算了，总得问一句。`（没有引号）或者 `苏晚: "…"`（英文引号），
+ * 视频模型分不清「哪部分是念出来的」。所以统一成：`说话人：` + `“台词”`。
+ *
+ * 幂等：已经包好的原样返回（引号类型统一成中文双引号，其余逐字不动）。
+ * ⚠️ 引号内的内容一个字都不改 —— 包括台词内部本来就有的 `“…”`。
+ */
+function quoteDirectorDialogueLine(line: string): string {
+    const value = line.trim();
+    if (!value) return line;
+    // 分隔线 / `无` 不是台词。
+    if (isStoryScriptDirectorSectionSeparator(value)) return value;
+    if (DIRECTOR_DIALOGUE_SILENT_PATTERN.test(value)) return value;
+    // 说话人前缀：`苏晚：` / `苏晚（低声）：` / `画外音：`（冒号前那段原样保留，含全角括号）。
+    const split = value.match(/^([^：:\n]{1,20}[）)]?)\s*[：:]\s*([\s\S]*)$/);
+    const prefix = split ? `${split[1].trim()}：` : "";
+    const speech = (split ? split[2] : value).trim();
+    if (!speech) return value;
+    // 整行就是一段引号包起来的话 → 只统一引号类型（英文 `""` / `「」` → 中文 `“”`）。
+    const fullyQuoted = speech.match(/^["“「『]([\s\S]*)["”」』]$/);
+    if (fullyQuoted) return `${prefix}“${fullyQuoted[1]}”`;
+    // 台词不在行首（`他低声说：“……”` / `“……”（转身）`）→ 里面已经有完整的引号，别在外面再包一层。
+    if (/[“「『"][^”」』"]*[”」』"]/.test(speech)) return `${prefix}${speech}`;
+    // 只有开引号没有收引号（模型写漏了）→ 去掉开引号重包，避免 `““台词”`。
+    const bare = speech.replace(/^[“"「『]+/, "");
+    return `${prefix}“${bare}”`;
+}
+
+/** 整段对白逐行加引号（`无` 与分隔线原样保留）。 */
+function ensureDirectorDialogueQuotes(value: unknown): string {
+    const text = storyScriptCellText(value);
+    if (!text.trim()) return "";
+    return text
+        .split("\n")
+        .map((line) => (line.trim() ? quoteDirectorDialogueLine(line) : line))
+        .join("\n");
+}
+
+/**
  * 第四套：把**已经合规**的八段块里的 `- **对白**：` 就地修好（其余行一个字不动）。
  *
  * 值可能折行（`- **对白**：` 空值 + 下一行台词），所以从标签行一直收到下一个 `- **标签**` /
@@ -3979,7 +4122,8 @@ function rewriteDirectorDialogueBlock(blockText: string, names: readonly string[
     const out: string[] = [];
     for (let index = 0; index < lines.length; index += 1) {
         const line = lines[index];
-        const match = line.match(/^(\s*-\s*\*\*对白\*\*\s*[：:]\s*)([\s\S]*)$/);
+        // 两种标签写法都认：`- **对白**：` 与 `- **对白：**`（2026-10-27 起）。
+        const match = line.match(/^(\s*-\s*\*\*\s*对白\s*[：:]?\s*\*\*\s*[：:]?\s*)([\s\S]*)$/);
         if (!match) {
             out.push(line);
             continue;
@@ -3990,6 +4134,8 @@ function rewriteDirectorDialogueBlock(blockText: string, names: readonly string[
             const next = lines[cursor];
             if (/^\s*-\s*\*\*/.test(next) || /^\s*#{1,6}\s/.test(next)) break;
             if (isStoryScriptDirectorSoundNoteLine(next)) break;
+            // 对白后面那条 `---` 不是台词（2026-10-27）—— 否则第二遍归一化会把它补成人名（`苏晚：---`）。
+            if (isStoryScriptDirectorSectionSeparator(next)) break;
             collected.push(next);
             cursor += 1;
         }
@@ -3997,7 +4143,7 @@ function rewriteDirectorDialogueBlock(blockText: string, names: readonly string[
         const tail: string[] = [];
         while (collected.length > 1 && !collected[collected.length - 1].trim()) tail.unshift(collected.pop() as string);
         const raw = collected.join("\n");
-        const ensured = ensureDirectorDialogueSpeakers(raw, names);
+        const ensured = ensureDirectorDialogueQuotes(ensureDirectorDialogueSpeakers(raw, names));
         if (ensured === raw.trim()) {
             // 合规 → 原样吐回**原始行**（不能把 match[2] 当成新行再拼一遍，那会凭空多一个空行）。
             out.push(...lines.slice(index, cursor));
@@ -4056,7 +4202,10 @@ export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[]
         //    （模版逐字复制过来的行本来就没有外貌词，剥完逐字相同 → 等于没动）。
         if (isDirectorVideoBlockText(row.video_motion_prompt)) {
             const original = String(row.video_motion_prompt);
-            const rewritten = withDirectorSoundNote(rewriteDirectorDialogueBlock(rewriteDirectorSubjectLine(original, names), names));
+            // 先把标签统一成 `- **标签：**值`（用户 2026-10-27），再修主体行 / 对白行，最后补尾巴块。
+            const rewritten = withDirectorSoundNote(
+                rewriteDirectorDialogueBlock(rewriteDirectorSubjectLine(reformatStoryScriptDirectorLabels(original), names), names),
+            );
             if (rewritten === original && !shotPatch) return row;
             return {
                 ...row,
@@ -4070,17 +4219,20 @@ export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[]
         const move = (blob.match(DIRECTOR_CAMERA_MOVE_PATTERN) || [])[1] || "";
         const transition = ((blob.match(DIRECTOR_TRANSITION_PATTERN) || [])[1] || "").trim();
         const shotSize = cleanDirectorFieldValue(row.shot);
-        // 台词带说话人（`苏晚：“……”`）—— 视频模型据此判断谁开口（用户 2026-10-24 要求）。
-        const dialogue = ensureDirectorDialogueSpeakers(row.dialogue, names);
+        // 台词带说话人（`苏晚：“……”`）—— 视频模型据此判断谁开口（用户 2026-10-24 要求）；
+        // 台词本体一律用中文双引号包起来（用户 2026-10-27 要求）。
+        const dialogue = ensureDirectorDialogueQuotes(ensureDirectorDialogueSpeakers(row.dialogue, names));
         const lines = [
-            `- **时长**：${duration}秒，${formatStoryScriptTimecode(start)}—${formatStoryScriptTimecode(start + duration)}。`,
-            `- **景别／机位**：${[shotSize, angle].filter(Boolean).join("，") || "无"}。`,
-            `- **运镜**：${move || "无"}。`,
-            `- **人物站位与构图**：${cleanDirectorFieldValue(row.blocking) || "无"}。`,
-            `- **主体与动作**：${cleanDirectorSubjectValue(row.character_action, names) || "无"}。`,
-            `- **光影与色调**：${cleanDirectorFieldValue(row.lighting_mood) || "无"}。`,
-            `- **转场建议**：${transition || "无"}。`,
-            dialogue ? `- **对白**：\n${dialogue}` : "- **对白**：无",
+            // 标签统一写成 `- **标签：**值`（冒号在加粗里面，用户 2026-10-27 要求）——
+            // 注意 `景别／机位` 里的斜杠是**全角**，与用户原模版一致。
+            `- **时长：**${duration}秒，${formatStoryScriptTimecode(start)}—${formatStoryScriptTimecode(start + duration)}。`,
+            `- **景别／机位：**${[shotSize, angle].filter(Boolean).join("，") || "无"}。`,
+            `- **运镜：**${move || "无"}。`,
+            `- **人物站位与构图：**${cleanDirectorFieldValue(row.blocking) || "无"}。`,
+            `- **主体与动作：**${cleanDirectorSubjectValue(row.character_action, names) || "无"}。`,
+            `- **光影与色调：**${cleanDirectorFieldValue(row.lighting_mood) || "无"}。`,
+            `- **转场建议：**${transition || "无"}。`,
+            dialogue ? `- **对白：**\n${dialogue}` : "- **对白：**无",
         ];
         return { ...row, video_motion_prompt: withDirectorSoundNote(lines.join("\n")), ...(shotPatch || null) };
     });

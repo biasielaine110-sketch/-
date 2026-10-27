@@ -5,8 +5,10 @@ import i18n from "@/i18n";
 import { createZip, readZipStreaming } from "@/lib/zip";
 import { setImageBlob } from "@/services/image-storage";
 import { setMediaBlob } from "@/services/file-storage";
+import type { LocalSkillPack } from "@/lib/chat-skill-pack";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useAssetStore, type Asset } from "@/stores/use-asset-store";
+import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
 
 const imageStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
@@ -22,6 +24,8 @@ type AppBackupFile = {
     assets: Asset[];
     config: AiConfig;
     files: BackupItem[];
+    /** 用户安装的本地技能；旧版备份可能没有该字段 */
+    chatSkillPacks?: LocalSkillPack[];
 };
 
 // Export every canvas project, asset, media file, and configuration as a single zip that can be restored later.
@@ -29,10 +33,20 @@ export async function exportAppBackup() {
     const { projects } = useCanvasStore.getState();
     const { assets } = useAssetStore.getState();
     const { config } = useConfigStore.getState();
+    const chatSkillPacks = useChatSkillPacksStore.getState().packs;
     const files: BackupItem[] = [];
     const zipFiles: { name: string; data: BlobPart }[] = [];
     await Promise.all([collectStoreFiles(imageStore, files, zipFiles), collectStoreFiles(mediaStore, files, zipFiles)]);
-    const data: AppBackupFile = { app: "infinite-canvas", version: 1, exportedAt: new Date().toISOString(), projects, assets, config, files };
+    const data: AppBackupFile = {
+        app: "infinite-canvas",
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        projects,
+        assets,
+        config,
+        files,
+        chatSkillPacks,
+    };
     zipFiles.push({ name: "backup.json", data: new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }) });
     const zip = await createZip(zipFiles);
     const stamp = new Date().toISOString().slice(0, 10);
@@ -77,6 +91,9 @@ export async function importAppBackup(file: File) {
     useConfigStore.setState({ config: data.config });
     useCanvasStore.getState().replaceProjects(data.projects);
     useAssetStore.getState().replaceAssets(data.assets);
+    if (Array.isArray(data.chatSkillPacks)) {
+        useChatSkillPacksStore.getState().replacePacks(data.chatSkillPacks);
+    }
 }
 
 async function collectStoreFiles(store: LocalForage, files: BackupItem[], zipFiles: { name: string; data: BlobPart }[]) {

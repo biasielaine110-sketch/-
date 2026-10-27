@@ -23,7 +23,9 @@ import {
     type LocalMediaMigrateProgress,
 } from "@/services/local-media-library";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
+import { parseSkillSources } from "@/lib/chat-skill-pack";
 import { defaultTextPrompts, isTextPromptEnabled } from "@/constant/text-prompt-library";
+import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import {
     channelProtocolSummary,
     createModelChannel,
@@ -41,6 +43,9 @@ import {
     type ModelChannel,
     type TextPromptEntry,
 } from "@/stores/use-config-store";
+
+const SKILL_IMPORT_READABLE_RE = /\.(json|md|markdown|txt)$/i;
+const SKILL_IMPORT_STANDALONE_RE = /\.(json|md|markdown)$/i;
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -354,6 +359,11 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                         ),
                     },
                     {
+                        key: "skills",
+                        label: t("config.tabs.skills"),
+                        children: <ConfigSkillsTab />,
+                    },
+                    {
                         key: "backup",
                         label: t("config.tabs.backup"),
                         children: <ConfigBackupTab />,
@@ -591,6 +601,119 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
                     <div className="rounded-lg border border-dashed border-stone-200 px-3 py-6 text-center text-sm text-stone-500 dark:border-stone-800">{t("config.preferences.textPromptEmpty")}</div>
                 )}
             </div>
+        </div>
+    );
+}
+
+function ConfigSkillsTab() {
+    const { message, modal } = App.useApp();
+    const { t } = useTranslation();
+    const packs = useChatSkillPacksStore((state) => state.packs);
+    const upsertPack = useChatSkillPacksStore((state) => state.upsert);
+    const uninstallPack = useChatSkillPacksStore((state) => state.uninstall);
+    const skillPackInputRef = useRef<HTMLInputElement>(null);
+    const skillFolderInputRef = useRef<HTMLInputElement>(null);
+
+    const importSkillPack = async (fileList: FileList | File[] | null | undefined) => {
+        const files = Array.from(fileList || []).filter((file) => SKILL_IMPORT_READABLE_RE.test(file.webkitRelativePath || file.name));
+        if (!files.length) {
+            message.error(t("config.skills.noReadableFile"));
+            return;
+        }
+        try {
+            const sources = await Promise.all(
+                files.map(async (file) => ({ path: file.webkitRelativePath || file.name, text: await file.text() })),
+            );
+            const standalone = sources.length > 1 && sources.every((source) => !source.path.includes("/") && SKILL_IMPORT_STANDALONE_RE.test(source.path));
+            const installed = (standalone ? sources.map((source) => parseSkillSources([source])) : [parseSkillSources(sources)]).map((pack) => upsertPack(pack));
+            message.success(
+                installed.length > 1
+                    ? t("config.skills.installedMany", { count: installed.length, names: installed.map((pack) => pack.name).join("、") })
+                    : t("config.skills.installed", { name: installed[0].name }),
+            );
+        } catch (error) {
+            message.error(t("config.skills.installFailed", { error: error instanceof Error ? error.message : String(error) }));
+        } finally {
+            if (skillPackInputRef.current) skillPackInputRef.current.value = "";
+            if (skillFolderInputRef.current) skillFolderInputRef.current.value = "";
+        }
+    };
+
+    const removeSkillPack = (packId: string) => {
+        modal.confirm({
+            title: t("config.skills.uninstallConfirmTitle"),
+            content: t("config.skills.uninstallConfirm"),
+            okText: t("config.skills.uninstall"),
+            cancelText: t("common.cancel"),
+            okButtonProps: { danger: true },
+            onOk: () => {
+                uninstallPack(packId);
+                message.success(t("config.skills.removed"));
+            },
+        });
+    };
+
+    return (
+        <div>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                    <div className="text-sm font-semibold">{t("config.skills.title")}</div>
+                    <div className="mt-1 text-xs text-stone-500">{t("config.skills.description")}</div>
+                    <div className="mt-1 text-xs text-stone-500">{t("config.skills.importHint")}</div>
+                </div>
+                <div className="flex shrink-0 flex-wrap gap-2">
+                    <Button icon={<Upload className="size-4" />} onClick={() => skillPackInputRef.current?.click()}>
+                        {t("config.skills.import")}
+                    </Button>
+                    <Button icon={<FolderOpen className="size-4" />} onClick={() => skillFolderInputRef.current?.click()}>
+                        {t("config.skills.importFolder")}
+                    </Button>
+                    <input
+                        ref={skillPackInputRef}
+                        type="file"
+                        multiple
+                        accept="application/json,.json,.skill.json,.md,.markdown,text/markdown"
+                        className="hidden"
+                        onChange={(event) => void importSkillPack(event.target.files)}
+                    />
+                    <input
+                        ref={skillFolderInputRef}
+                        type="file"
+                        multiple
+                        {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+                        className="hidden"
+                        onChange={(event) => void importSkillPack(event.target.files)}
+                    />
+                </div>
+            </div>
+            {packs.length ? (
+                <div className="space-y-2">
+                    {packs.map((pack) => (
+                        <div key={pack.id} className="flex items-start justify-between gap-3 rounded-lg border border-stone-200 px-3 py-3 dark:border-stone-800">
+                            <div className="min-w-0">
+                                <div className="truncate text-sm font-semibold">
+                                    {pack.name}
+                                    <span className="ml-2 text-xs font-normal text-stone-500">
+                                        {pack.kind === "doc" ? t("config.skills.docBadge") : t("config.skills.packBadge")}
+                                    </span>
+                                </div>
+                                <div className="mt-1 truncate text-xs text-stone-500">{pack.description}</div>
+                                <div className="mt-1 text-xs text-stone-400">
+                                    {pack.id}
+                                    {pack.kind === "doc" ? null : ` · ${t("config.skills.toolsCount", { count: pack.tools.length })}`}
+                                </div>
+                            </div>
+                            <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removeSkillPack(pack.id)}>
+                                {t("config.skills.uninstall")}
+                            </Button>
+                        </div>
+                    ))}
+                </div>
+            ) : (
+                <div className="rounded-lg border border-dashed border-stone-200 px-3 py-8 text-center text-sm text-stone-500 dark:border-stone-800">
+                    {t("config.skills.empty")}
+                </div>
+            )}
         </div>
     );
 }

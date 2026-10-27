@@ -28,6 +28,8 @@ export type ChatSkillDefinition = {
     name?: string;
     description?: string;
     source: "builtin" | "local";
+    /** local: pack = 带工具的包；doc = 纯说明（SKILL.md），没有工具 */
+    kind?: "pack" | "doc";
     systemHint?: string;
     tools: ChatSkillTool[];
     removable?: boolean;
@@ -210,6 +212,7 @@ function localPackToDefinition(pack: LocalSkillPack): ChatSkillDefinition {
     return {
         id: pack.id,
         source: "local",
+        kind: pack.kind === "doc" ? "doc" : "pack",
         name: pack.name,
         description: pack.description,
         systemHint: pack.systemHint,
@@ -237,18 +240,32 @@ export function resolveChatSkillTools(skillIds: string[] | undefined): ChatSkill
         .flatMap((skill) => skill.tools);
 }
 
+/**
+ * 技能 → system 提示词。
+ *
+ * 三块内容各自可选，**不能再用「没有工具就整段丢掉」这个判断**：
+ * 文档技能（SKILL.md 导入）天生没有工具，它全部的价值就是这段正文，
+ * 一旦被 `!tools.length` 挡掉，用户装了技能却毫无反应。
+ */
 export function chatSkillsSystemHint(skillIds: string[] | undefined) {
     const selected = new Set(resolveChatSkillIds(skillIds));
     const skills = listChatSkills().filter((skill) => selected.has(skill.id));
     const tools = skills.flatMap((skill) => skill.tools);
-    if (!tools.length) return "";
-    const names = tools.map((tool) => tool.function.name).join(", ");
-    const packHints = skills
-        .filter((skill) => skill.source === "local" && skill.systemHint)
-        .map((skill) => `- ${skill.name || skill.id}: ${skill.systemHint}`)
-        .join("\n");
-    const base = chatText("skillsSystemHint", { tools: names });
-    return packHints ? `${base}\n\n${chatText("skillsLocalPackHints")}\n${packHints}` : base;
+    const hints = skills.filter((skill) => skill.source === "local" && skill.systemHint);
+    if (!tools.length && !hints.length) return "";
+
+    const blocks: string[] = [];
+    if (tools.length) {
+        blocks.push(chatText("skillsSystemHint", { tools: tools.map((tool) => tool.function.name).join(", ") }));
+    }
+    if (hints.length) {
+        // 工具包只有一句补充说明，压成一行；文档技能是整篇规程，单独起块。
+        const packLines = hints.filter((skill) => skill.kind !== "doc").map((skill) => `- ${skill.name || skill.id}: ${skill.systemHint}`);
+        const docBlocks = hints.filter((skill) => skill.kind === "doc").map((skill) => `### 技能 · ${skill.name || skill.id}\n${skill.systemHint}`);
+        const body = [...(packLines.length ? [packLines.join("\n")] : []), ...docBlocks].join("\n\n");
+        blocks.push(`${chatText("skillsLocalPackHints")}\n${body}`);
+    }
+    return blocks.join("\n\n");
 }
 
 export function getChatSkillDisplayName(skill: ChatSkillDefinition) {
