@@ -288,60 +288,6 @@ export function validateLocalSkillPack(data: unknown): LocalSkillPack {
 }
 
 /**
- * 配置/备份往返用的宽松校验：同时接受工具包（pack）与文档技能（doc）。
- * 已落库的技能再导出时可能没有 tools，不能走 validateLocalSkillPack。
- */
-export function normalizePersistedSkillPack(data: unknown): LocalSkillPack {
-    if (!data || typeof data !== "object" || Array.isArray(data)) {
-        throw new Error("skill pack must be an object");
-    }
-    const pack = data as Record<string, unknown>;
-    const kind: LocalSkillPackKind = pack.kind === "doc" ? "doc" : "pack";
-    if (kind === "doc") {
-        const id = String(pack.id || "").trim();
-        const name = String(pack.name || "").trim();
-        const description = String(pack.description || name || "").trim();
-        if (!PACK_ID_RE.test(id)) throw new Error("invalid id (use letters/numbers/_/-)");
-        if (RESERVED_PACK_IDS.has(id)) throw new Error(`id "${id}" is reserved`);
-        if (!name) throw new Error("name is required");
-        const systemHint = String(pack.systemHint || "").slice(0, MAX_DOC_HINT_CHARS);
-        if (!systemHint.trim()) throw new Error("doc skill systemHint is required");
-        return {
-            id,
-            name,
-            description: description || name,
-            version: pack.version ? String(pack.version).slice(0, 32) : undefined,
-            systemHint,
-            kind: "doc",
-            fileCount: typeof pack.fileCount === "number" ? pack.fileCount : undefined,
-            tools: [],
-            installedAt: typeof pack.installedAt === "number" ? pack.installedAt : undefined,
-            updatedAt: typeof pack.updatedAt === "number" ? pack.updatedAt : undefined,
-        };
-    }
-    const validated = validateLocalSkillPack(data);
-    return {
-        ...validated,
-        fileCount: typeof pack.fileCount === "number" ? pack.fileCount : undefined,
-        installedAt: typeof pack.installedAt === "number" ? pack.installedAt : undefined,
-        updatedAt: typeof pack.updatedAt === "number" ? pack.updatedAt : undefined,
-    };
-}
-
-export function normalizePersistedSkillPacks(raw: unknown): LocalSkillPack[] {
-    if (!Array.isArray(raw)) return [];
-    const packs: LocalSkillPack[] = [];
-    for (const item of raw) {
-        try {
-            packs.push(normalizePersistedSkillPack(item));
-        } catch {
-            // skip corrupt entries so one bad pack does not block the whole import
-        }
-    }
-    return packs;
-}
-
-/**
  * 配置 / 备份往返用：同时接受工具包（非空 tools）与文档技能（kind=doc / 空 tools）。
  * 比 validateLocalSkillPack 宽松，用于已落库数据的再导入，而不是安装新 .json。
  */
@@ -381,6 +327,19 @@ export function normalizePersistedSkillPack(data: unknown): LocalSkillPack {
         installedAt: typeof pack.installedAt === "number" ? pack.installedAt : undefined,
         updatedAt: typeof pack.updatedAt === "number" ? pack.updatedAt : undefined,
     };
+}
+
+export function normalizePersistedSkillPacks(raw: unknown): LocalSkillPack[] {
+    if (!Array.isArray(raw)) return [];
+    const packs: LocalSkillPack[] = [];
+    for (const item of raw) {
+        try {
+            packs.push(normalizePersistedSkillPack(item));
+        } catch {
+            // skip corrupt entries so one bad pack does not block the whole import
+        }
+    }
+    return packs;
 }
 
 export function renderSkillTemplate(template: string, args: Record<string, unknown>) {
