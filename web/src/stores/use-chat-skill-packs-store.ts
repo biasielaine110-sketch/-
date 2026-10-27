@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import { normalizePersistedSkillPacks, parseLocalSkillPackJson, type LocalSkillPack } from "@/lib/chat-skill-pack";
+import { localSkillPackDisplayName, normalizePersistedSkillPacks, parseLocalSkillPackJson, type LocalSkillPack } from "@/lib/chat-skill-pack";
 
 type ChatSkillPacksStore = {
     packs: LocalSkillPack[];
@@ -12,12 +12,14 @@ type ChatSkillPacksStore = {
     importPacks: (packs: LocalSkillPack[]) => number;
     /** 全量备份恢复：整表替换 */
     replacePacks: (packs: LocalSkillPack[]) => void;
+    /** 只改用户备注名；传空串则清掉备注 */
+    setAlias: (packId: string, alias: string) => void;
     uninstall: (packId: string) => void;
     getPack: (packId: string) => LocalSkillPack | undefined;
 };
 
 function sortPacks(packs: LocalSkillPack[]) {
-    return [...packs].sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+    return [...packs].sort((a, b) => localSkillPackDisplayName(a).localeCompare(localSkillPackDisplayName(b), "zh-CN"));
 }
 
 export const useChatSkillPacksStore = create<ChatSkillPacksStore>()(
@@ -27,8 +29,13 @@ export const useChatSkillPacksStore = create<ChatSkillPacksStore>()(
             upsert: (pack) => {
                 const now = Date.now();
                 const existing = get().packs.find((item) => item.id === pack.id);
+                const nextAlias = String(pack.alias ?? existing?.alias ?? "")
+                    .trim()
+                    .slice(0, 80);
                 const nextPack: LocalSkillPack = {
                     ...pack,
+                    // 重装同一 id 时保留用户备注，除非新包自己带了 alias。
+                    ...(nextAlias ? { alias: nextAlias } : { alias: undefined }),
                     installedAt: existing?.installedAt || pack.installedAt || now,
                     updatedAt: now,
                 };
@@ -45,8 +52,12 @@ export const useChatSkillPacksStore = create<ChatSkillPacksStore>()(
                 const byId = new Map(get().packs.map((pack) => [pack.id, pack] as const));
                 for (const pack of normalized) {
                     const existing = byId.get(pack.id);
+                    const alias = String(pack.alias ?? existing?.alias ?? "")
+                        .trim()
+                        .slice(0, 80);
                     byId.set(pack.id, {
                         ...pack,
+                        ...(alias ? { alias } : { alias: undefined }),
                         installedAt: existing?.installedAt || pack.installedAt || now,
                         updatedAt: now,
                     });
@@ -59,11 +70,35 @@ export const useChatSkillPacksStore = create<ChatSkillPacksStore>()(
                 const now = Date.now();
                 set({
                     packs: sortPacks(
-                        normalized.map((pack) => ({
-                            ...pack,
-                            installedAt: pack.installedAt || now,
-                            updatedAt: pack.updatedAt || now,
-                        })),
+                        normalized.map((pack) => {
+                            const alias = String(pack.alias || "")
+                                .trim()
+                                .slice(0, 80);
+                            return {
+                                ...pack,
+                                ...(alias ? { alias } : { alias: undefined }),
+                                installedAt: pack.installedAt || now,
+                                updatedAt: pack.updatedAt || now,
+                            };
+                        }),
+                    ),
+                });
+            },
+            setAlias: (packId, alias) => {
+                const nextAlias = String(alias || "")
+                    .trim()
+                    .slice(0, 80);
+                set({
+                    packs: sortPacks(
+                        get().packs.map((pack) =>
+                            pack.id === packId
+                                ? {
+                                      ...pack,
+                                      alias: nextAlias || undefined,
+                                      updatedAt: Date.now(),
+                                  }
+                                : pack,
+                        ),
                     ),
                 });
             },

@@ -22,6 +22,11 @@ export type LocalSkillPack = {
     id: string;
     name: string;
     description: string;
+    /**
+     * 用户备注名：只影响列表展示，不改原始 name / id。
+     * 空或缺省时 UI 仍显示 `name`。
+     */
+    alias?: string;
     version?: string;
     systemHint?: string;
     kind?: LocalSkillPackKind;
@@ -31,6 +36,13 @@ export type LocalSkillPack = {
     installedAt?: number;
     updatedAt?: number;
 };
+
+/** 列表展示名：有备注用备注，否则用原始 name。 */
+export function localSkillPackDisplayName(pack: Pick<LocalSkillPack, "name" | "alias" | "id">) {
+    const alias = String(pack.alias || "").trim();
+    if (alias) return alias;
+    return String(pack.name || pack.id || "").trim() || pack.id;
+}
 
 /** 导入侧的统一形状：一个文件 = { path, text }。path 用 `/` 分隔（文件夹导入时含相对路径）。 */
 export type SkillSourceFile = { path: string; text: string };
@@ -298,10 +310,12 @@ export function normalizePersistedSkillPack(data: unknown): LocalSkillPack {
     const pack = data as Record<string, unknown>;
     const toolsRaw = pack.tools;
     const isDoc = pack.kind === "doc" || (Array.isArray(toolsRaw) && toolsRaw.length === 0);
+    const alias = typeof pack.alias === "string" ? pack.alias.trim().slice(0, 80) : undefined;
     if (!isDoc) {
         const validated = validateLocalSkillPack(data);
         return {
             ...validated,
+            ...(alias ? { alias } : {}),
             fileCount: typeof pack.fileCount === "number" ? pack.fileCount : undefined,
             installedAt: typeof pack.installedAt === "number" ? pack.installedAt : undefined,
             updatedAt: typeof pack.updatedAt === "number" ? pack.updatedAt : undefined,
@@ -319,6 +333,7 @@ export function normalizePersistedSkillPack(data: unknown): LocalSkillPack {
         id,
         name,
         description: description || name,
+        ...(alias ? { alias } : {}),
         version: pack.version ? String(pack.version).slice(0, 32) : undefined,
         systemHint: pack.systemHint ? String(pack.systemHint).slice(0, MAX_DOC_HINT_CHARS) : undefined,
         kind: "doc",

@@ -1,6 +1,7 @@
 import i18n from "@/i18n";
 import {
     findPackByNamespacedId,
+    localSkillPackDisplayName,
     mapBuiltinArgs,
     namespacedToolName,
     parseNamespacedToolName,
@@ -26,6 +27,8 @@ export type ChatSkillDefinition = {
     nameKey?: string;
     descriptionKey?: string;
     name?: string;
+    /** 用户备注名（仅本地技能）；展示优先于 name */
+    alias?: string;
     description?: string;
     source: "builtin" | "local";
     /** local: pack = 带工具的包；doc = 纯说明（SKILL.md），没有工具 */
@@ -209,11 +212,13 @@ const BUILTIN_CHAT_SKILLS: ChatSkillDefinition[] = [
 export const CHAT_SKILLS = BUILTIN_CHAT_SKILLS;
 
 function localPackToDefinition(pack: LocalSkillPack): ChatSkillDefinition {
+    const displayName = localSkillPackDisplayName(pack);
     return {
         id: pack.id,
         source: "local",
         kind: pack.kind === "doc" ? "doc" : "pack",
         name: pack.name,
+        alias: pack.alias,
         description: pack.description,
         systemHint: pack.systemHint,
         removable: true,
@@ -221,7 +226,7 @@ function localPackToDefinition(pack: LocalSkillPack): ChatSkillDefinition {
             type: "function" as const,
             function: {
                 name: namespacedToolName(pack.id, tool.name),
-                description: `[${pack.name}] ${tool.description}`,
+                description: `[${displayName}] ${tool.description}`,
                 parameters: tool.parameters || { type: "object", properties: {}, additionalProperties: false },
             },
         })),
@@ -269,9 +274,19 @@ export function chatSkillsSystemHint(skillIds: string[] | undefined) {
 }
 
 export function getChatSkillDisplayName(skill: ChatSkillDefinition) {
+    const alias = String(skill.alias || "").trim();
+    if (alias) return alias;
     if (skill.name) return skill.name;
     if (skill.nameKey) return chatText(skill.nameKey);
     return skill.id;
+}
+
+/** 列表副标题：截断描述，避免长文档把选项撑爆。 */
+export function getChatSkillListHint(skill: ChatSkillDefinition, maxChars = 36) {
+    const raw = getChatSkillDisplayDescription(skill).replace(/\s+/g, " ").trim();
+    if (!raw) return "";
+    if (raw.length <= maxChars) return raw;
+    return `${raw.slice(0, maxChars)}…`;
 }
 
 export function getChatSkillDisplayDescription(skill: ChatSkillDefinition) {

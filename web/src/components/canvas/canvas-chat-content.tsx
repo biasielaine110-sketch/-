@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { App } from "antd";
+import { App, Input } from "antd";
 import copy from "copy-to-clipboard";
-import { Bot, Check, Copy, FolderOpen, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Plus, SendHorizontal, Sparkles, Square, Trash2, Upload, Video, Wrench, X } from "lucide-react";
+import { Bot, Check, Copy, FolderOpen, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Pencil, Plus, SendHorizontal, Sparkles, Square, Trash2, Upload, Video, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -10,8 +10,8 @@ import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialo
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { resolveChatSendOptions, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
-import { getChatSkillDisplayDescription, getChatSkillDisplayName, listChatSkills, resolveChatSkillIds } from "@/lib/chat-skills";
-import { parseSkillSources } from "@/lib/chat-skill-pack";
+import { getChatSkillDisplayName, getChatSkillListHint, listChatSkills, resolveChatSkillIds } from "@/lib/chat-skills";
+import { localSkillPackDisplayName, parseSkillSources } from "@/lib/chat-skill-pack";
 import { listCanvasAgents, parseCanvasAgentSources, resolveCanvasAgent } from "@/constant/canvas-agents";
 import { DEFAULT_CANVAS_FONT_SIZE, DEFAULT_CHAT_FONT_SIZE } from "@/constant/canvas";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
@@ -71,11 +71,12 @@ export function CanvasChatContent({
     onReorderLinkedMedia,
 }: CanvasChatContentProps) {
     const { t } = useTranslation();
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const globalConfig = useConfigStore((state) => state.config);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const installedPacks = useChatSkillPacksStore((state) => state.packs);
     const upsertPack = useChatSkillPacksStore((state) => state.upsert);
+    const setSkillAlias = useChatSkillPacksStore((state) => state.setAlias);
     const uninstallPack = useChatSkillPacksStore((state) => state.uninstall);
     const skillPackInputRef = useRef<HTMLInputElement>(null);
     const skillFolderInputRef = useRef<HTMLInputElement>(null);
@@ -437,8 +438,11 @@ export function CanvasChatContent({
             onSkillsChange?.(node.id, nextIds);
             message.success(
                 packs.length > 1
-                    ? t("canvas.chat.skillsPackInstalledMany", { count: packs.length, names: packs.map((pack) => pack.name).join("、") })
-                    : t("canvas.chat.skillsPackInstalled", { name: packs[0].name }),
+                    ? t("canvas.chat.skillsPackInstalledMany", {
+                          count: packs.length,
+                          names: packs.map((pack) => localSkillPackDisplayName(pack)).join("、"),
+                      })
+                    : t("canvas.chat.skillsPackInstalled", { name: localSkillPackDisplayName(packs[0]) }),
             );
         } catch (error) {
             message.error(t("canvas.chat.skillsPackInstallFailed", { error: error instanceof Error ? error.message : String(error) }));
@@ -455,6 +459,35 @@ export function CanvasChatContent({
             enabledSkillIds.filter((id) => id !== skillId),
         );
         message.success(t("canvas.chat.skillsPackRemoved"));
+    };
+
+    const renameSkillAlias = (skillId: string) => {
+        const pack = installedPacks.find((item) => item.id === skillId);
+        if (!pack) return;
+        let nextAlias = pack.alias || "";
+        modal.confirm({
+            title: t("canvas.chat.skillsAliasTitle"),
+            content: (
+                <div className="space-y-2 pt-1">
+                    <div className="text-xs opacity-60">{t("canvas.chat.skillsAliasHint", { name: pack.name })}</div>
+                    <Input
+                        autoFocus
+                        maxLength={80}
+                        defaultValue={nextAlias}
+                        placeholder={pack.name}
+                        onChange={(event) => {
+                            nextAlias = event.target.value;
+                        }}
+                    />
+                </div>
+            ),
+            okText: t("common.save"),
+            cancelText: t("common.cancel"),
+            onOk: () => {
+                setSkillAlias(skillId, nextAlias);
+                message.success(t("canvas.chat.skillsAliasSaved"));
+            },
+        });
     };
 
     const bindAgent = (agentId: string | undefined) => {
@@ -773,51 +806,58 @@ export function CanvasChatContent({
                                             </button>
                                         </div>
                                     </div>
-                                    <div className="mb-2 text-[20px] leading-snug opacity-50">{t("canvas.chat.skillsImportHint")}</div>
-                                    <div className="thin-scrollbar max-h-64 space-y-1 overflow-y-auto overscroll-contain">
+                                    <div className="thin-scrollbar max-h-72 space-y-0.5 overflow-y-auto overscroll-contain">
                                         {skills.map((skill) => {
                                             const active = enabledSkillIds.includes(skill.id);
                                             const skillName = getChatSkillDisplayName(skill);
-                                            const skillDesc = getChatSkillDisplayDescription(skill);
+                                            const skillHint = getChatSkillListHint(skill, 48);
+                                            const rowTitle = skillHint ? `${skillName}\n${skillHint}` : skillName;
                                             return (
                                                 <div
                                                     key={skill.id}
-                                                    className="flex w-full items-start gap-2 rounded-lg border px-2.5 py-2"
+                                                    className="flex w-full items-center gap-1.5 rounded-lg border px-2 py-1.5"
                                                     style={{
                                                         borderColor: active ? theme.toolbar.activeBg : theme.node.stroke,
                                                         background: active ? `${theme.toolbar.activeBg}22` : "transparent",
                                                     }}
                                                 >
-                                                    <button type="button" className="flex min-w-0 flex-1 items-start gap-2 text-left" onClick={() => toggleSkill(skill.id)} title={skillDesc}>
+                                                    <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => toggleSkill(skill.id)} title={rowTitle}>
                                                         <span
-                                                            className="mt-0.5 grid size-5 shrink-0 place-items-center rounded border text-[20px]"
+                                                            className="grid size-5 shrink-0 place-items-center rounded border text-[20px]"
                                                             style={{ borderColor: active ? theme.toolbar.activeBg : theme.node.stroke, background: active ? theme.toolbar.activeBg : "transparent", color: active ? "#fff" : theme.node.text }}
                                                         >
                                                             {active ? <Check className="size-3" /> : null}
                                                         </span>
-                                                        <span className="min-w-0">
-                                                            <span className="block text-[20px] font-medium">
-                                                                {skillName}
-                                                                {skill.source === "local" ? (
-                                                                    <span className="ml-1 text-[20px] font-normal opacity-50">
-                                                                        {skill.kind === "doc" ? t("canvas.chat.skillsDocBadge") : t("canvas.chat.skillsLocalBadge")}
-                                                                    </span>
-                                                                ) : null}
+                                                        <span className="min-w-0 flex-1 truncate text-[20px] font-medium leading-tight">{skillName}</span>
+                                                        {skill.source === "local" ? (
+                                                            <span className="shrink-0 text-[16px] font-normal opacity-45">
+                                                                {skill.kind === "doc" ? t("canvas.chat.skillsDocBadge") : t("canvas.chat.skillsLocalBadge")}
                                                             </span>
-                                                            <span className="block text-[20px] opacity-60">{skillDesc}</span>
-                                                        </span>
+                                                        ) : null}
                                                     </button>
                                                     {skill.removable ? (
-                                                        <button
-                                                            type="button"
-                                                            className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
-                                                            style={{ color: theme.node.text }}
-                                                            title={t("canvas.chat.skillsUninstall")}
-                                                            aria-label={t("canvas.chat.skillsUninstall")}
-                                                            onClick={() => removeSkillPack(skill.id)}
-                                                        >
-                                                            <Trash2 className="size-3" />
-                                                        </button>
+                                                        <>
+                                                            <button
+                                                                type="button"
+                                                                className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
+                                                                style={{ color: theme.node.text }}
+                                                                title={t("canvas.chat.skillsAlias")}
+                                                                aria-label={t("canvas.chat.skillsAlias")}
+                                                                onClick={() => renameSkillAlias(skill.id)}
+                                                            >
+                                                                <Pencil className="size-3" />
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
+                                                                style={{ color: theme.node.text }}
+                                                                title={t("canvas.chat.skillsUninstall")}
+                                                                aria-label={t("canvas.chat.skillsUninstall")}
+                                                                onClick={() => removeSkillPack(skill.id)}
+                                                            >
+                                                                <Trash2 className="size-3" />
+                                                            </button>
+                                                        </>
                                                     ) : null}
                                                 </div>
                                             );

@@ -24,7 +24,7 @@ import {
 } from "@/services/local-media-library";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
 import { parseCanvasAgentSources } from "@/constant/canvas-agents";
-import { parseSkillSources } from "@/lib/chat-skill-pack";
+import { localSkillPackDisplayName, parseSkillSources } from "@/lib/chat-skill-pack";
 import { defaultTextPrompts, isTextPromptEnabled } from "@/constant/text-prompt-library";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
@@ -619,6 +619,7 @@ function ConfigSkillsTab() {
     const { t } = useTranslation();
     const packs = useChatSkillPacksStore((state) => state.packs);
     const upsertPack = useChatSkillPacksStore((state) => state.upsert);
+    const setSkillAlias = useChatSkillPacksStore((state) => state.setAlias);
     const uninstallPack = useChatSkillPacksStore((state) => state.uninstall);
     const skillPackInputRef = useRef<HTMLInputElement>(null);
     const skillFolderInputRef = useRef<HTMLInputElement>(null);
@@ -637,8 +638,11 @@ function ConfigSkillsTab() {
             const installed = (standalone ? sources.map((source) => parseSkillSources([source])) : [parseSkillSources(sources)]).map((pack) => upsertPack(pack));
             message.success(
                 installed.length > 1
-                    ? t("config.skills.installedMany", { count: installed.length, names: installed.map((pack) => pack.name).join("、") })
-                    : t("config.skills.installed", { name: installed[0].name }),
+                    ? t("config.skills.installedMany", {
+                          count: installed.length,
+                          names: installed.map((pack) => localSkillPackDisplayName(pack)).join("、"),
+                      })
+                    : t("config.skills.installed", { name: localSkillPackDisplayName(installed[0]) }),
             );
         } catch (error) {
             message.error(t("config.skills.installFailed", { error: error instanceof Error ? error.message : String(error) }));
@@ -646,6 +650,35 @@ function ConfigSkillsTab() {
             if (skillPackInputRef.current) skillPackInputRef.current.value = "";
             if (skillFolderInputRef.current) skillFolderInputRef.current.value = "";
         }
+    };
+
+    const editSkillAlias = (packId: string) => {
+        const pack = packs.find((item) => item.id === packId);
+        if (!pack) return;
+        let nextAlias = pack.alias || "";
+        modal.confirm({
+            title: t("config.skills.aliasTitle"),
+            content: (
+                <div className="space-y-2 pt-1">
+                    <div className="text-xs text-stone-500">{t("config.skills.aliasHint", { name: pack.name })}</div>
+                    <Input
+                        autoFocus
+                        maxLength={80}
+                        defaultValue={nextAlias}
+                        placeholder={pack.name}
+                        onChange={(event) => {
+                            nextAlias = event.target.value;
+                        }}
+                    />
+                </div>
+            ),
+            okText: t("common.save"),
+            cancelText: t("common.cancel"),
+            onOk: () => {
+                setSkillAlias(packId, nextAlias);
+                message.success(t("config.skills.aliasSaved"));
+            },
+        });
     };
 
     const removeSkillPack = (packId: string) => {
@@ -697,26 +730,48 @@ function ConfigSkillsTab() {
             </div>
             {packs.length ? (
                 <div className="space-y-2">
-                    {packs.map((pack) => (
-                        <div key={pack.id} className="flex items-start justify-between gap-3 rounded-lg border border-stone-200 px-3 py-3 dark:border-stone-800">
-                            <div className="min-w-0">
-                                <div className="truncate text-sm font-semibold">
-                                    {pack.name}
-                                    <span className="ml-2 text-xs font-normal text-stone-500">
-                                        {pack.kind === "doc" ? t("config.skills.docBadge") : t("config.skills.packBadge")}
-                                    </span>
+                    {packs.map((pack) => {
+                        const displayName = localSkillPackDisplayName(pack);
+                        const desc = String(pack.description || "")
+                            .replace(/\s+/g, " ")
+                            .trim();
+                        return (
+                            <div key={pack.id} className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 px-3 py-2.5 dark:border-stone-800">
+                                <div className="min-w-0 flex-1">
+                                    <div className="flex min-w-0 items-center gap-2">
+                                        <div className="truncate text-sm font-semibold" title={displayName}>
+                                            {displayName}
+                                        </div>
+                                        <span className="shrink-0 text-xs text-stone-500">
+                                            {pack.kind === "doc" ? t("config.skills.docBadge") : t("config.skills.packBadge")}
+                                        </span>
+                                    </div>
+                                    {pack.alias ? (
+                                        <div className="mt-0.5 truncate text-xs text-stone-400" title={pack.name}>
+                                            {t("config.skills.originalName", { name: pack.name })}
+                                        </div>
+                                    ) : null}
+                                    {desc ? (
+                                        <div className="mt-0.5 truncate text-xs text-stone-500" title={desc}>
+                                            {desc}
+                                        </div>
+                                    ) : null}
+                                    <div className="mt-0.5 text-xs text-stone-400">
+                                        {pack.id}
+                                        {pack.kind === "doc" ? null : ` · ${t("config.skills.toolsCount", { count: pack.tools.length })}`}
+                                    </div>
                                 </div>
-                                <div className="mt-1 truncate text-xs text-stone-500">{pack.description}</div>
-                                <div className="mt-1 text-xs text-stone-400">
-                                    {pack.id}
-                                    {pack.kind === "doc" ? null : ` · ${t("config.skills.toolsCount", { count: pack.tools.length })}`}
+                                <div className="flex shrink-0 items-center gap-1.5">
+                                    <Button size="small" icon={<Pencil className="size-3.5" />} onClick={() => editSkillAlias(pack.id)}>
+                                        {t("config.skills.alias")}
+                                    </Button>
+                                    <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removeSkillPack(pack.id)}>
+                                        {t("config.skills.uninstall")}
+                                    </Button>
                                 </div>
                             </div>
-                            <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => removeSkillPack(pack.id)}>
-                                {t("config.skills.uninstall")}
-                            </Button>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
             ) : (
                 <div className="rounded-lg border border-dashed border-stone-200 px-3 py-8 text-center text-sm text-stone-500 dark:border-stone-800">
