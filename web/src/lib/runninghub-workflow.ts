@@ -6461,12 +6461,9 @@ export async function runRunningHubWorkflow(args: {
     }
 
     const canTryNextKey = (error: unknown) => isRunningHubKeyFailoverMessage(errorText(error));
-    // `.ai` 传输失败时整轮改打 `.cn`（同一 task 的 upload/create/poll 必须同源）。
-    // 生视频必先 upload：`.ai` 大文件/代理都不稳，国内用户把 Base 填成 `.ai` 时优先试 `.cn`。
-    const domestic = runningHubDomesticOrigin(origin);
-    const origins = Array.from(
-        new Set((domestic ? [domestic, origin] : [origin]).filter(Boolean)),
-    ) as string[];
+    // 尊重用户配置的 origin：先打 Base URL 指定的站（.ai 就先 .ai）。
+    // 仅当传输层失败（HTTP2/超时/断连）时，才整轮改打 `.cn` 兜底；找不到 workflowId 不跨站乱跳。
+    const origins = Array.from(new Set([origin, runningHubDomesticOrigin(origin)].filter(Boolean))) as string[];
 
     let lastError: unknown = null;
     for (let originIndex = 0; originIndex < origins.length; originIndex += 1) {
@@ -6491,15 +6488,9 @@ export async function runRunningHubWorkflow(args: {
                 lastError = error;
                 // A key-level rejection (balance / auth / no workflow access) moves on to the next key.
                 if (canTryNextKey(error)) continue;
-                const message = errorText(error);
-                // Host dead (HTTP2 / timeout / network): don't burn every key on the same broken origin.
-                // 优先打 `.cn` 时若该站没有这个 workflowId，也要继续试配置里的 `.ai`。
-                if (
-                    hasNextOrigin &&
-                    (isRunningHubTransportFailure(error) || isMissingIdMessage(message) || /找不到这个 ID|cannot find this ID|runningHubWorkflowNotExists/i.test(message))
-                ) {
-                    break;
-                }
+                // Host dead (HTTP2 / timeout / network): don't burn every key on the same broken origin；改试 `.cn`。
+                // 不因「找不到 workflowId」跨站跳转——那通常是模型 ID 本身不对，换站只会更糊。
+                if (isRunningHubTransportFailure(error) && hasNextOrigin) break;
                 // Anything else (bad graph, unknown server error) is surfaced as-is.
                 throw explainRunningHubError(error, workflowId);
             }
