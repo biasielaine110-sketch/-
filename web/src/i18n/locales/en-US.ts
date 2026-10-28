@@ -386,7 +386,7 @@ export default {
         runningHubTimeout: "RunningHub task timed out. Please try again later",
         runningHubUploadTimeout: "Uploading references to RunningHub timed out (slow network or large files). Use fewer / smaller reference images, set Base URL to https://www.runninghub.cn, then retry.",
         runningHubSubmitTimeout: "Submitting the RunningHub task timed out (large workflow JSON or slow network). Retry later; if it keeps failing, run the same workflow successfully once on the RunningHub site first.",
-        runningHubAiUnreachable: "runninghub.ai is unreachable right now (HTTP2 / connection errors on both direct and site proxy). Set this channel's Base URL to https://www.runninghub.cn, use the China-site workflow / ai-detail numeric id as the model name, then retry.",
+        runningHubAiUnreachable: "runninghub.ai upload/API hit an HTTP2 disconnect (the website loading does not mean /task/openapi/upload works). Your channel stays on the .ai site — it will not switch to .cn. Shrink or drop reference images and retry; if it keeps failing, check this machine's upload path to runninghub.ai.",
         runningHubUnknownError: "RunningHub returned UNKNOWN_ERROR. Open this workflow on the site and run it successfully once. If you just edited nodes, save and run again. The canvas will submit the saved parameters.",
         comfyNoImage: "ComfyUI finished but returned no images",
         comfyNoVideo: "ComfyUI finished but returned no video (ensure the workflow outputs mp4/webm)",

@@ -148,21 +148,6 @@ export function runningHubOrigin(baseUrl: string): string | null {
     }
 }
 
-/**
- * 海外站 `.ai` 在国内 / Cloudflare Pages 边缘经常直连与代理双双 `ERR_HTTP2_PROTOCOL_ERROR`。
- * 传输层失败时整轮改打国内站 `.cn`（上传 / 提交 / 轮询必须同一 origin）。
- */
-function runningHubDomesticOrigin(origin: string): string | null {
-    try {
-        const url = new URL(origin);
-        if (!/(^|\.)runninghub\.ai$/i.test(url.hostname)) return null;
-        url.hostname = url.hostname.replace(/runninghub\.ai$/i, "runninghub.cn");
-        return url.origin;
-    } catch {
-        return null;
-    }
-}
-
 function isRunningHubTransportFailure(error: unknown): boolean {
     if (isAxiosTimeoutError(error)) return true;
     const message = errorText(error);
@@ -6051,9 +6036,8 @@ async function postRunningHubWithFallback(
     // 上传/提交超时或边缘掐断时，必须用 forceProxyApiUrl 才能真的改走站点代理。
     const viaProxyApi = proxyApiUrl(direct);
     const forcedProxy = forceProxyApiUrl(direct);
-    // 实测（2026-10-28）：Pages `/api/proxy → runninghub.ai/task/openapi/upload` 对 multipart
-    // 几乎必挂（Failed to fetch / ERR_HTTP2_PROTOCOL_ERROR），而浏览器直连 .ai 小文件可用、大文件不稳，
-    // `.cn` 直连稳定。对 `.ai` 再浪费一轮代理只会拖长时间，上传失败应尽快交给上层改打 `.cn`。
+    // 实测：Pages `/api/proxy → runninghub.ai/…/upload` 对 multipart 经常 ERR_HTTP2；
+    // `.ai` 上传只走浏览器直连（仍留在 `.ai`，绝不改打 `.cn` —— 两站 Key/账号不同）。
     const isAiUpload = /runninghub\.ai$/i.test(new URL(direct).hostname) && /\/upload(?:\/|$)/i.test(path);
     const urls = Array.from(
         new Set(
@@ -6461,39 +6445,22 @@ export async function runRunningHubWorkflow(args: {
     }
 
     const canTryNextKey = (error: unknown) => isRunningHubKeyFailoverMessage(errorText(error));
-    // 尊重用户配置的 origin：先打 Base URL 指定的站（.ai 就先 .ai）。
-    // 仅当传输层失败（HTTP2/超时/断连）时，才整轮改打 `.cn` 兜底；找不到 workflowId 不跨站乱跳。
-    const origins = Array.from(new Set([origin, runningHubDomesticOrigin(origin)].filter(Boolean))) as string[];
 
     let lastError: unknown = null;
-    for (let originIndex = 0; originIndex < origins.length; originIndex += 1) {
-        const tryOrigin = origins[originIndex];
-        const hasNextOrigin = originIndex < origins.length - 1;
-        if (tryOrigin !== origin) {
-            console.warn(`[runninghub] ${origin} transport failed; retrying whole run on ${tryOrigin}`);
-        }
-        for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
-            const apiKey = keys[keyIndex];
-            try {
-                return await runRunningHubWorkflowWithKey({
-                    origin: tryOrigin,
-                    workflowId,
-                    apiKey,
-                    args,
-                    isLastKey: keyIndex === keys.length - 1 && !hasNextOrigin,
-                });
-            } catch (error) {
-                // Cancellation must propagate immediately — never switch keys / origins on a user abort.
-                if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
-                lastError = error;
-                // A key-level rejection (balance / auth / no workflow access) moves on to the next key.
-                if (canTryNextKey(error)) continue;
-                // Host dead (HTTP2 / timeout / network): don't burn every key on the same broken origin；改试 `.cn`。
-                // 不因「找不到 workflowId」跨站跳转——那通常是模型 ID 本身不对，换站只会更糊。
-                if (isRunningHubTransportFailure(error) && hasNextOrigin) break;
-                // Anything else (bad graph, unknown server error) is surfaced as-is.
-                throw explainRunningHubError(error, workflowId);
-            }
+    for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+        const apiKey = keys[keyIndex];
+        try {
+            // 严格使用渠道 Base URL 对应的 origin（.ai / .cn 互不混用，Key 也不互通）。
+            return await runRunningHubWorkflowWithKey({ origin, workflowId, apiKey, args, isLastKey: keyIndex === keys.length - 1 });
+        } catch (error) {
+            // Cancellation must propagate immediately — never switch keys on a user abort.
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+            lastError = error;
+            // A key-level rejection (balance / auth / no workflow access) moves on to the next key.
+            // Anything else (bad graph, unknown server error, transport failure) is surfaced as-is:
+            // retrying it with every key would only multiply the wait.
+            if (!canTryNextKey(error)) throw explainRunningHubError(error, workflowId);
+            // Fall through to the next key; when the last key is refused too, surface that last error.
         }
     }
     throw explainRunningHubError(lastError, workflowId);
