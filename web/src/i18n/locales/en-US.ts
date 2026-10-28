@@ -1776,6 +1776,11 @@ export default {
         invalidFile: "The settings file format is invalid",
         description: "Providers, model selection, sync, and local storage",
         modalDescription: "Providers, default models, sync, and local storage",
+        passwordTitle: "Enter settings password",
+        passwordHint: "A password is required before opening settings.",
+        passwordPlaceholder: "Password",
+        passwordWrong: "Incorrect password. Try again.",
+        passwordConfirm: "Confirm",
         tabs: {
             channels: "Providers",
             preferences: "Preferences",

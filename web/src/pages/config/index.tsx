@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import { AppConfigPanel } from "@/components/layout/app-config-modal";
+import { AppConfigPanel, ConfigPasswordGate } from "@/components/layout/app-config-modal";
 
 export default function ConfigPage() {
     const { t } = useTranslation();
@@ -12,7 +12,9 @@ export default function ConfigPage() {
                     <h1 className="text-xl font-semibold text-stone-950 dark:text-stone-100">{t("config.title")}</h1>
                     <p className="mt-1 text-sm text-stone-500">{t("config.description")}</p>
                 </div>
-                <AppConfigPanel />
+                <ConfigPasswordGate>
+                    <AppConfigPanel />
+                </ConfigPasswordGate>
             </div>
         </main>
     );

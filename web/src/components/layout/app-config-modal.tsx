@@ -1,8 +1,11 @@
 import { App, Button, Checkbox, Form, Input, Modal, Progress, Segmented, Select, Switch, Tabs } from "antd";
 import { Download, FileUp, FolderOpen, GripVertical, HardDrive, Pencil, Plus, Trash2, Upload } from "lucide-react";
-import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
+
+/** 打开配置前的固定口令（仅前端门禁，防误触/随手打开）。 */
+export const CONFIG_GATE_PASSWORD = "zhangbiwen123456";
 
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasFindReplaceTextArea } from "@/components/canvas/canvas-find-replace-textarea";
@@ -395,24 +398,151 @@ export function AppConfigModal() {
     const isConfigOpen = useConfigStore((state) => state.isConfigOpen);
     const configTab = useConfigStore((state) => state.configTab);
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
+    const [unlocked, setUnlocked] = useState(false);
+
+    useEffect(() => {
+        if (!isConfigOpen) setUnlocked(false);
+    }, [isConfigOpen]);
+
+    const closeConfig = () => {
+        setUnlocked(false);
+        setConfigDialogOpen(false);
+    };
+
+    return (
+        <>
+            <ConfigPasswordModal open={isConfigOpen && !unlocked} onCancel={closeConfig} onUnlock={() => setUnlocked(true)} />
+            <Modal
+                title={
+                    <div>
+                        <div className="text-lg font-semibold">{t("config.title")}</div>
+                        <div className="mt-1 text-xs font-normal text-stone-500">{t("config.modalDescription")}</div>
+                    </div>
+                }
+                open={isConfigOpen && unlocked}
+                width={980}
+                centered
+                destroyOnHidden
+                onCancel={closeConfig}
+                styles={{ body: { maxHeight: "72vh", overflowY: "auto", paddingRight: 12 } }}
+                footer={null}
+            >
+                <AppConfigPanel showDoneButton initialTab={configTab} />
+            </Modal>
+        </>
+    );
+}
+
+export function ConfigPasswordModal({ open, onCancel, onUnlock }: { open: boolean; onCancel: () => void; onUnlock: () => void }) {
+    const { t } = useTranslation();
+    const [password, setPassword] = useState("");
+    const [wrong, setWrong] = useState(false);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (!open) {
+            setPassword("");
+            setWrong(false);
+            return;
+        }
+        const timer = window.setTimeout(() => inputRef.current?.focus(), 50);
+        return () => window.clearTimeout(timer);
+    }, [open]);
+
+    const submit = () => {
+        if (password === CONFIG_GATE_PASSWORD) {
+            setWrong(false);
+            onUnlock();
+            return;
+        }
+        setWrong(true);
+        setPassword("");
+        inputRef.current?.focus();
+    };
+
+    const onFormSubmit = (event: FormEvent) => {
+        event.preventDefault();
+        submit();
+    };
+
     return (
         <Modal
-            title={
-                <div>
-                    <div className="text-lg font-semibold">{t("config.title")}</div>
-                    <div className="mt-1 text-xs font-normal text-stone-500">{t("config.modalDescription")}</div>
-                </div>
-            }
-            open={isConfigOpen}
-            width={980}
+            title={t("config.passwordTitle")}
+            open={open}
             centered
             destroyOnHidden
-            onCancel={() => setConfigDialogOpen(false)}
-            styles={{ body: { maxHeight: "72vh", overflowY: "auto", paddingRight: 12 } }}
-            footer={null}
+            onCancel={onCancel}
+            okText={t("config.passwordConfirm")}
+            cancelText={t("common.cancel")}
+            onOk={submit}
         >
-            <AppConfigPanel showDoneButton initialTab={configTab} />
+            <form className="space-y-2 pt-1" onSubmit={onFormSubmit}>
+                <div className="text-xs text-stone-500">{t("config.passwordHint")}</div>
+                <Input.Password
+                    ref={inputRef as never}
+                    value={password}
+                    status={wrong ? "error" : undefined}
+                    placeholder={t("config.passwordPlaceholder")}
+                    autoComplete="current-password"
+                    onChange={(event) => {
+                        setPassword(event.target.value);
+                        if (wrong) setWrong(false);
+                    }}
+                    onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
+                        if (event.key === "Enter") {
+                            event.preventDefault();
+                            submit();
+                        }
+                    }}
+                />
+                {wrong ? <div className="text-xs text-red-500">{t("config.passwordWrong")}</div> : null}
+            </form>
         </Modal>
+    );
+}
+
+/** 独立配置页用的口令门禁：未解锁时只显示密码框。 */
+export function ConfigPasswordGate({ children }: { children: ReactNode }) {
+    const { t } = useTranslation();
+    const [unlocked, setUnlocked] = useState(false);
+    const [password, setPassword] = useState("");
+    const [wrong, setWrong] = useState(false);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    if (unlocked) return <>{children}</>;
+
+    const submit = () => {
+        if (password === CONFIG_GATE_PASSWORD) {
+            setUnlocked(true);
+            setWrong(false);
+            return;
+        }
+        setWrong(true);
+        setPassword("");
+        inputRef.current?.focus();
+    };
+
+    return (
+        <div className="mx-auto flex max-w-md flex-col gap-3 rounded-xl border border-stone-200 bg-white p-6 shadow-sm dark:border-stone-800 dark:bg-stone-950">
+            <div className="text-base font-semibold">{t("config.passwordTitle")}</div>
+            <div className="text-xs text-stone-500">{t("config.passwordHint")}</div>
+            <Input.Password
+                ref={inputRef as never}
+                value={password}
+                status={wrong ? "error" : undefined}
+                placeholder={t("config.passwordPlaceholder")}
+                autoComplete="current-password"
+                onChange={(event) => {
+                    setPassword(event.target.value);
+                    if (wrong) setWrong(false);
+                }}
+                onPressEnter={submit}
+            />
+            {wrong ? <div className="text-xs text-red-500">{t("config.passwordWrong")}</div> : null}
+            <Button type="primary" onClick={submit}>
+                {t("config.passwordConfirm")}
+            </Button>
+        </div>
     );
 }
 

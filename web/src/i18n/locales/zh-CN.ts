@@ -1775,6 +1775,11 @@ export default {
         invalidFile: "配置文件格式不正确",
         description: "渠道聚合、模型选择、同步与本地存储",
         modalDescription: "渠道聚合、默认模型、同步与本地存储",
+        passwordTitle: "输入配置密码",
+        passwordHint: "打开配置前需要验证密码。",
+        passwordPlaceholder: "请输入密码",
+        passwordWrong: "密码不正确，请重试。",
+        passwordConfirm: "确认",
         tabs: {
             channels: "渠道",
             preferences: "偏好设置",
