@@ -384,6 +384,8 @@ export default {
         runningHubNoVideo: "RunningHub 任务完成但没有视频。若工作流输出的是图片，请在生图节点里生成。",
         runningHubNoBalance: "RunningHub 账户余额不足（NOT_ENOUGH_BALANCE），无法生成。请到 RunningHub 网站充值后再试。",
         runningHubTimeout: "RunningHub 任务超时，请稍后重试",
+        runningHubUploadTimeout: "上传参考素材到 RunningHub 超时（网络慢或文件较大）。请减少参考图数量、换更小的图，确认 Base URL 用 https://www.runninghub.cn，然后重试。",
+        runningHubSubmitTimeout: "提交 RunningHub 任务超时（工作流 JSON 较大或网络慢）。请稍后重试；若持续失败，可先在 RunningHub 网站上成功跑通同一工作流。",
         runningHubUnknownError: "RunningHub 返回了 UNKNOWN_ERROR。请先在网站上打开这个工作流并成功运行一次；若刚改过节点，保存后再跑一遍。接口会先按网页上已保存的参数提交。",
         comfyNoImage: "ComfyUI 任务完成但未返回图片",
         comfyNoVideo: "ComfyUI 任务完成但未返回视频（请确认工作流输出 mp4/webm）",

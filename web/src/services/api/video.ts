@@ -1472,6 +1472,12 @@ function readAxiosError(error: unknown, fallback: string) {
         if (!error.response) {
             const url = typeof error.config?.url === "string" ? error.config.url : "";
             const hint = url ? `\n${url}` : "";
+            // axios 客户端超时（如 timeout of 120000ms exceeded）——别把原文甩给用户。
+            if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT" || /timeout of \d+ms exceeded/i.test(String(error.message || ""))) {
+                if (/runninghub\.(cn|ai)/i.test(url) && /\/upload/i.test(url)) return `${apiText("runningHubUploadTimeout")}${hint}`;
+                if (/runninghub\.(cn|ai)/i.test(url)) return `${apiText("runningHubSubmitTimeout")}${hint}`;
+                return `${apiText("videoTaskTimedOut")}${hint}`;
+            }
             // Pages proxy 502 without ACAO used to surface here as a fake CORS/network failure.
             if (/\/api(?:-)?proxy\?target=/i.test(url)) return `${apiText("proxyUnreachable")}${hint}`;
             if (error.code === "ERR_NETWORK" && isKnownDirectCorsUrl(url)) {

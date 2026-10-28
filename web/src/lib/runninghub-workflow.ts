@@ -11,7 +11,7 @@ import axios from "axios";
 // 绝不在这里抄一份字符串 —— 文案改过一次了（`不要出现字幕…` → 四行块），抄一份就会漂。
 import { isStoryScriptDirectorSectionSeparator, isStoryScriptDirectorSoundNoteLine } from "@/constant/story-script";
 import i18n from "@/i18n";
-import { proxyApiUrl } from "@/lib/api-proxy";
+import { forceProxyApiUrl, proxyApiUrl } from "@/lib/api-proxy";
 import {
     applyComfyPrompt,
     parseComfyApiWorkflow,
@@ -45,6 +45,10 @@ export type RunningHubTaskView = {
 
 const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 20 * 60 * 1000;
+/** 参考图/音/视频上传：H3 多参考 + 弱网常超过 2 分钟，原先 120s 会直接 axios 超时。 */
+const RUNNINGHUB_UPLOAD_TIMEOUT_MS = 300_000;
+/** 提交任务（含整图 Export）：Fisher / 文武双全等大 JSON 偶发 >60s。 */
+const RUNNINGHUB_CREATE_TIMEOUT_MS = 120_000;
 
 // `values` feeds i18next interpolation ({{size}} / {{limit}} …). Callers that pass only a key keep
 // the previous behaviour exactly. The call is typed through a narrow signature because i18next's
@@ -277,8 +281,24 @@ function errorText(error: unknown) {
     return error instanceof Error ? error.message : "";
 }
 
+function isAxiosTimeoutError(error: unknown) {
+    if (!axios.isAxiosError(error)) return false;
+    if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") return true;
+    return /timeout of \d+ms exceeded/i.test(String(error.message || ""));
+}
+
 function explainRunningHubError(error: unknown, workflowId: string): Error {
     const message = errorText(error);
+    if (isAxiosTimeoutError(error) || /timeout of \d+ms exceeded/i.test(message)) {
+        const url = axios.isAxiosError(error) && typeof error.config?.url === "string" ? error.config.url : "";
+        if (/\/upload(?:\?|$)/i.test(url) || /openapi\/upload/i.test(url)) {
+            return new Error(apiText("runningHubUploadTimeout"));
+        }
+        if (/\/(?:create|comfy\/run|ai-app\/run)(?:\?|$)/i.test(url)) {
+            return new Error(apiText("runningHubSubmitTimeout"));
+        }
+        return new Error(apiText("runningHubTimeout"));
+    }
     if (isMissingIdMessage(message)) return new Error(i18n.t("apiErrors.runningHubWorkflowNotExists", { id: workflowId }));
     if (/WORKFLOW_NOT_SAVED_OR_NOT_RUNNING/i.test(message)) return new Error(apiText("runningHubWorkflowNotRun"));
     // SelfLift 双采(简易版) is a shared graph: without a local Export (API) JSON in the model
@@ -5988,8 +6008,17 @@ async function postRunningHubWithFallback(
     },
 ) {
     const direct = `${String(origin || "").replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
-    const proxied = proxyApiUrl(direct);
-    const urls = options.preferDirect ? Array.from(new Set([direct, proxied])) : [proxied];
+    // runninghub.cn/.ai 在 DIRECT_CORS_HOSTS 里：`proxyApiUrl` 会直接回直连，等于没有第二跳。
+    // 上传/提交超时或边缘掐断时，必须用 forceProxyApiUrl 才能真的改走站点代理。
+    const viaProxyApi = proxyApiUrl(direct);
+    const forcedProxy = forceProxyApiUrl(direct);
+    const urls = Array.from(
+        new Set(
+            options.preferDirect
+                ? [direct, viaProxyApi, forcedProxy].filter(Boolean)
+                : [viaProxyApi, forcedProxy, direct].filter(Boolean),
+        ),
+    );
     let lastError: unknown;
     for (let index = 0; index < urls.length; index += 1) {
         const url = urls[index];
@@ -6102,7 +6131,7 @@ async function uploadBinary(
     body.append("file", file);
     const response = await postRunningHubWithFallback(origin, "/task/openapi/upload", body, {
         signal,
-        timeout: 120_000,
+        timeout: RUNNINGHUB_UPLOAD_TIMEOUT_MS,
         preferDirect: options?.preferDirect,
         onDirectTransportFallback: options?.onDirectTransportFallback,
     });
@@ -6133,7 +6162,7 @@ async function submitWorkflowTask(
     const response = await postRunningHubWithFallback(origin, "/task/openapi/create", body, {
         headers: bearer(apiKey),
         signal,
-        timeout: 60_000,
+        timeout: RUNNINGHUB_CREATE_TIMEOUT_MS,
         preferDirect,
     });
     assertOk(response.data, apiText("runningHubNoTaskId"));

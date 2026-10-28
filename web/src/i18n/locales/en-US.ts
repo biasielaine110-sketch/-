@@ -384,6 +384,8 @@ export default {
         runningHubNoVideo: "RunningHub finished but returned no video. If the workflow outputs images, generate from an image node.",
         runningHubNoBalance: "RunningHub account balance is insufficient (NOT_ENOUGH_BALANCE). Top up your balance on RunningHub and try again.",
         runningHubTimeout: "RunningHub task timed out. Please try again later",
+        runningHubUploadTimeout: "Uploading references to RunningHub timed out (slow network or large files). Use fewer / smaller reference images, set Base URL to https://www.runninghub.cn, then retry.",
+        runningHubSubmitTimeout: "Submitting the RunningHub task timed out (large workflow JSON or slow network). Retry later; if it keeps failing, run the same workflow successfully once on the RunningHub site first.",
         runningHubUnknownError: "RunningHub returned UNKNOWN_ERROR. Open this workflow on the site and run it successfully once. If you just edited nodes, save and run again. The canvas will submit the saved parameters.",
         comfyNoImage: "ComfyUI finished but returned no images",
         comfyNoVideo: "ComfyUI finished but returned no video (ensure the workflow outputs mp4/webm)",
