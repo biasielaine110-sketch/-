@@ -383,6 +383,7 @@ export default {
         runningHubVideoNotApplied: "The reference clip was uploaded, but it could not be written into this workflow's video slot (no ref_videos slot and no VHS_LoadVideo / LoadVideo node). Submission stopped so you are not billed for a clip that ignores your video. Use a MiniMax H3 workflow that accepts a reference video, or disconnect the video node.",
         runningHubNoVideo: "RunningHub finished but returned no video. If the workflow outputs images, generate from an image node.",
         runningHubNoBalance: "RunningHub account balance is insufficient (NOT_ENOUGH_BALANCE). Top up your balance on RunningHub and try again.",
+        runningHubUnauthorized: "RunningHub API key is invalid or unauthorized (401). Check the channel key and retry with a valid key.",
         runningHubTimeout: "RunningHub task timed out. Please try again later",
         runningHubUploadTimeout: "Uploading references to RunningHub timed out (slow network or large files). Use fewer / smaller reference images, set Base URL to https://www.runninghub.cn, then retry.",
         runningHubSubmitTimeout: "Submitting the RunningHub task timed out (large workflow JSON or slow network). Retry later; if it keeps failing, run the same workflow successfully once on the RunningHub site first.",

@@ -24,6 +24,25 @@ export function isCanvasTextInteractionTarget(target: EventTarget | null) {
     return Boolean(target.closest(`${SELECTABLE_SELECTOR},${EDITABLE_SELECTOR},[data-canvas-shortcuts-ignore]`));
 }
 
+/** 粘贴时应交给输入框/弹窗原生处理，而不是画布落节点。同时看 event.target 与当前焦点。 */
+export function isCanvasTextPasteTarget(target: EventTarget | null) {
+    if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement
+    ) {
+        return true;
+    }
+    if (target instanceof Element) {
+        if (target.closest("[contenteditable],[data-canvas-text-input],[data-canvas-shortcuts-ignore],.ant-modal,.ant-input,.ant-input-textarea,.ant-modal-root,.ant-modal-wrap")) {
+            return true;
+        }
+    }
+    const active = document.activeElement;
+    if (active && active !== target) return isCanvasTextPasteTarget(active);
+    return false;
+}
+
 function isFocusSafeTarget(target: EventTarget | null | undefined) {
     return target instanceof Element && Boolean(target.closest(FOCUS_SAFE_SELECTOR));
 }

@@ -144,7 +144,28 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                 style={mergedStyle}
                 onCopy={(event) => event.stopPropagation()}
                 onCut={(event) => event.stopPropagation()}
-                onPaste={(event) => event.stopPropagation()}
+                onPaste={(event) => {
+                    // 只挡画布级粘贴；文本交给 textarea 原生插入。无 text/plain 时从 html 抽字。
+                    event.stopPropagation();
+                    const text = event.clipboardData?.getData("text/plain");
+                    if (text != null && text !== "") return;
+                    const html = event.clipboardData?.getData("text/html") || "";
+                    if (!html) return;
+                    const fromHtml = html
+                        .replace(/<br\s*\/?>/gi, "\n")
+                        .replace(/<\/(p|div|li|tr)>/gi, "\n")
+                        .replace(/<[^>]+>/g, "")
+                        .replace(/&nbsp;/gi, " ")
+                        .replace(/&lt;/gi, "<")
+                        .replace(/&gt;/gi, ">")
+                        .replace(/&amp;/gi, "&");
+                    if (!fromHtml) return;
+                    event.preventDefault();
+                    const area = event.currentTarget;
+                    const start = area.selectionStart ?? value.length;
+                    const end = area.selectionEnd ?? value.length;
+                    onChange(`${value.slice(0, start)}${fromHtml}${value.slice(end)}`);
+                }}
                 onDoubleClick={(event) => {
                     if (onDoubleClick) {
                         onDoubleClick(event);

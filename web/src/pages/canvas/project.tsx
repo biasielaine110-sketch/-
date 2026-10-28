@@ -78,7 +78,7 @@ import { Minimap } from "@/components/canvas/canvas-mini-map";
 import { CanvasNode, getCanvasMediaToggle } from "@/components/canvas/canvas-node";
 import { CanvasDraftSaveDialog } from "@/components/canvas/canvas-draft-save-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { CanvasTextClipboardMenu, blurActiveCanvasTextInput, isCanvasTextInteractionTarget } from "@/components/canvas/canvas-text-clipboard-menu";
+import { CanvasTextClipboardMenu, blurActiveCanvasTextInput, isCanvasTextInteractionTarget, isCanvasTextPasteTarget } from "@/components/canvas/canvas-text-clipboard-menu";
 import { isImeComposing } from "@/lib/keyboard-event";
 import {
     getCanvasDraftMeta,
@@ -3138,13 +3138,9 @@ function AtelierCanvasPage() {
          * 这里按 图片文件 → 内嵌 data: 图片 → 纯文本 的顺序消费；都没命中才退回异步 API。
          */
         const handlePaste = (event: ClipboardEvent) => {
-            const target = event.target instanceof Element ? event.target : null;
-            if (
-                event.target instanceof HTMLInputElement ||
-                event.target instanceof HTMLTextAreaElement ||
-                event.target instanceof HTMLSelectElement ||
-                target?.closest("[contenteditable],[data-canvas-text-input],[data-canvas-shortcuts-ignore],.ant-modal,.ant-input,.ant-input-textarea")
-            ) {
+            // 生图/生视频提示词、最大化编辑弹窗里粘贴时，绝不能被画布「落成文本节点」抢走。
+            // 同时检查 event.target 与 document.activeElement（弹窗 focus trap 下 target 偶发不准）。
+            if (isCanvasTextPasteTarget(event.target) || isCanvasTextPasteTarget(document.activeElement)) {
                 return;
             }
 

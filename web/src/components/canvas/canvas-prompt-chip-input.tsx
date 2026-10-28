@@ -164,7 +164,16 @@ export const CanvasPromptChipInput = forwardRef<CanvasPromptChipInputHandle, Pro
                 onDoubleClick={onDoubleClick}
                 onCopy={(event) => event.stopPropagation()}
                 onCut={(event) => event.stopPropagation()}
-                onPaste={(event) => event.stopPropagation()}
+                onPaste={(event) => {
+                    // 必须拦掉默认粘贴：剪贴板常带 html/截图，浏览器往 contentEditable 塞 <img>/<div>，
+                    // serialize 后变空串，看起来就像「粘贴不上」。只取 text/plain 插入纯文本。
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const text = event.clipboardData?.getData("text/plain") ?? "";
+                    if (!text) return;
+                    insertPlainTextAtCaret(text);
+                    syncFromEditor();
+                }}
                 onInput={() => {
                     if (!composingRef.current) syncFromEditor();
                 }}
@@ -323,6 +332,23 @@ function createReferenceChip(reference: CanvasResourceReference, theme: (typeof 
         wrapper.appendChild(text);
     }
     return wrapper;
+}
+
+/** 在光标处插入纯文本（避免 contentEditable 默认粘贴 HTML）。 */
+function insertPlainTextAtCaret(text: string) {
+    const selection = window.getSelection();
+    if (selection?.rangeCount) {
+        const range = selection.getRangeAt(0);
+        range.deleteContents();
+        const node = document.createTextNode(text);
+        range.insertNode(node);
+        range.setStartAfter(node);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return;
+    }
+    if (document.execCommand("insertText", false, text)) return;
 }
 
 function serializeEditor(editor: HTMLElement) {

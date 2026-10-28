@@ -383,6 +383,7 @@ export default {
         runningHubVideoNotApplied: "参考视频已上传，但没有写进这个工作流的视频槽位（找不到 ref_videos 槽位，也没有 VHS_LoadVideo / LoadVideo 节点）。已停止提交，避免生成一段与你的视频无关的成片。请改用支持参考视频的 MiniMax H3 工作流，或断开视频节点。",
         runningHubNoVideo: "RunningHub 任务完成但没有视频。若工作流输出的是图片，请在生图节点里生成。",
         runningHubNoBalance: "RunningHub 账户余额不足（NOT_ENOUGH_BALANCE），无法生成。请到 RunningHub 网站充值后再试。",
+        runningHubUnauthorized: "RunningHub API Key 无效或未授权（401）。请到渠道设置检查密钥是否过期，换有效 Key 后重试。",
         runningHubTimeout: "RunningHub 任务超时，请稍后重试",
         runningHubUploadTimeout: "上传参考素材到 RunningHub 超时（网络慢或文件较大）。请减少参考图数量、换更小的图，确认 Base URL 用 https://www.runninghub.cn，然后重试。",
         runningHubSubmitTimeout: "提交 RunningHub 任务超时（工作流 JSON 较大或网络慢）。请稍后重试；若持续失败，可先在 RunningHub 网站上成功跑通同一工作流。",

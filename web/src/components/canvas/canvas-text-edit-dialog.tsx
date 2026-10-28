@@ -34,12 +34,14 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
         ? Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE))
         : localFontSize;
 
+    // 只在「打开瞬间」同步外部 value。打开后若仍监听 value，父级任意一次回写
+    // （底下 contentEditable 误同步、字号回调等）都会把用户正在弹窗里粘贴的内容冲掉。
     useEffect(() => {
-        if (open) {
-            setDraft(value);
-            setLocalFontSize(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE)));
-        }
-    }, [open, value, fontSize]);
+        if (!open) return;
+        setDraft(value);
+        setLocalFontSize(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE)));
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- sync once per open
+    }, [open]);
 
     const findReplace = useTextFindReplace({
         value: draft,
@@ -146,7 +148,44 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                     onChange={readOnly ? undefined : (event) => setDraft(event.target.value)}
                     onCopy={(event) => event.stopPropagation()}
                     onCut={(event) => event.stopPropagation()}
-                    onPaste={(event) => event.stopPropagation()}
+                    onPaste={(event) => {
+                        // 阻止冒泡到画布 window paste（落成文本节点）；纯文本仍走原生插入。
+                        event.stopPropagation();
+                        if (readOnly) {
+                            event.preventDefault();
+                            return;
+                        }
+                        const text = event.clipboardData?.getData("text/plain");
+                        // 剪贴板只有 html/图、没有 text/plain 时，显式从 html 抽字，避免粘出空白。
+                        if (text != null && text !== "") return;
+                        const html = event.clipboardData?.getData("text/html") || "";
+                        const fromHtml = html
+                            ? html
+                                  .replace(/<br\s*\/?>/gi, "\n")
+                                  .replace(/<\/(p|div|li|tr)>/gi, "\n")
+                                  .replace(/<[^>]+>/g, "")
+                                  .replace(/&nbsp;/gi, " ")
+                                  .replace(/&lt;/gi, "<")
+                                  .replace(/&gt;/gi, ">")
+                                  .replace(/&amp;/gi, "&")
+                            : "";
+                        if (!fromHtml) return;
+                        event.preventDefault();
+                        const area = textAreaRef.current?.resizableTextArea?.textArea;
+                        if (!area) {
+                            setDraft((current) => `${current}${fromHtml}`);
+                            return;
+                        }
+                        const start = area.selectionStart ?? draft.length;
+                        const end = area.selectionEnd ?? draft.length;
+                        const next = `${draft.slice(0, start)}${fromHtml}${draft.slice(end)}`;
+                        setDraft(next);
+                        requestAnimationFrame(() => {
+                            const caret = start + fromHtml.length;
+                            area.focus();
+                            area.setSelectionRange(caret, caret);
+                        });
+                    }}
                     className={`font-mono ${readOnly ? "cursor-text" : ""}`}
                     style={{ fontSize: `${resolvedFontSize}px`, lineHeight: `${Math.round(resolvedFontSize * 1.55)}px` }}
                     data-canvas-shortcuts-ignore

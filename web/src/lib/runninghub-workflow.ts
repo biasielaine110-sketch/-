@@ -262,7 +262,9 @@ function isMissingIdMessage(message: string) {
 }
 
 function isAuthMessage(message: string) {
-    return /APIKEY_UNAUTHORIZED|APIKEY_UNSUPPORTED_FREE_USER|TOKEN_INVALID|APIKEY_USER_NOT_FOUND|CORPAPIKEY_INVALID/i.test(message);
+    return /APIKEY_UNAUTHORIZED|APIKEY_UNSUPPORTED_FREE_USER|TOKEN_INVALID|APIKEY_USER_NOT_FOUND|CORPAPIKEY_INVALID|401\s*Authorization\s*Required|Authorization\s*Required|<\s*title\s*>\s*401/i.test(
+        message,
+    );
 }
 
 /** Shared/community workflow the caller's key cannot open via getJsonApiFormat / create. */
@@ -285,7 +287,9 @@ function isBalanceMessage(message: string) {
 export function isRunningHubKeyFailoverMessage(message: string) {
     const text = String(message || "");
     if (isBalanceMessage(text) || isAuthMessage(text) || isWorkflowPermissionMessage(text)) return true;
-    return /status\s*code\s*40[13]|unauthori[sz]ed|invalid\s*(?:api[\s-_]*)?key|api[\s-_]*key\s*(?:is\s*)?(?:invalid|expired|rejected|not\s*(?:valid|found|exist))|token\s*(?:is\s*)?(?:invalid|expired)/i.test(
+    // APISIX/openresty HTML 401 bodies often omit the word "unauthorized".
+    if (/<\s*html[\s>]|openresty|apisix/i.test(text) && /401|authori[sz]ation\s+required/i.test(text)) return true;
+    return /status\s*code\s*40[13]|unauthori[sz]ed|authori[sz]ation\s+required|invalid\s*(?:api[\s-_]*)?key|api[\s-_]*key\s*(?:is\s*)?(?:invalid|expired|rejected|not\s*(?:valid|found|exist))|token\s*(?:is\s*)?(?:invalid|expired)/i.test(
         text,
     );
 }
@@ -295,7 +299,19 @@ function isUnknownServerError(message: string) {
 }
 
 function errorText(error: unknown) {
-    if (axios.isAxiosError(error)) return readMessage(error.response?.data) || error.message;
+    if (axios.isAxiosError(error)) {
+        const fromBody = readMessage(error.response?.data);
+        if (fromBody) return fromBody;
+        const raw = error.response?.data;
+        if (typeof raw === "string" && /401|Authorization Required|APIKEY_|TOKEN_INVALID/i.test(raw)) {
+            return raw.slice(0, 500);
+        }
+        const status = error.response?.status;
+        if (status === 401 || status === 403) {
+            return `Request failed with status code ${status}`;
+        }
+        return error.message;
+    }
     return error instanceof Error ? error.message : "";
 }
 
@@ -359,8 +375,14 @@ function explainRunningHubError(error: unknown, workflowId: string): Error {
         return new Error(i18n.t("apiErrors.runningHubExportScriptRequired", { id: workflowId }));
     }
     if (/NOT_ENOUGH_BALANCE|INSUFFICIENT_BALANCE|NO_ENOUGH_BALANCE|BALANCE_NOT_ENOUGH|NOT_ENOUGH_POINTS|INSUFFICIENT_POINTS/i.test(message)) return new Error(apiText("runningHubNoBalance"));
+    if (isAuthMessage(message) || (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403))) {
+        return new Error(apiText("runningHubUnauthorized"));
+    }
     if (isUnknownServerError(message)) return new Error(apiText("runningHubUnknownError"));
-    if (error instanceof Error && error.message && !isUnknownServerError(error.message)) return error;
+    if (error instanceof Error && error.message && !isUnknownServerError(error.message) && !/<\s*html[\s>]/i.test(error.message)) return error;
+    if (/<\s*html[\s>]|Authorization Required/i.test(message)) {
+        return new Error(apiText("runningHubUnauthorized"));
+    }
     return new Error(message || apiText("requestFailed"));
 }
 
@@ -6155,14 +6177,19 @@ async function uploadBinary(
         throw new Error(apiText(options?.shrink === false ? "referenceAudioReadFailed" : "referenceImageReadFailed"));
     }
     const body = new FormData();
-    body.append("apiKey", apiKey.replace(/^Bearer\s+/i, "").trim());
+    const token = apiKey.replace(/^Bearer\s+/i, "").trim();
+    body.append("apiKey", token);
     body.append("fileType", "input");
     body.append("file", file);
+    // Form field remains the RH contract; also send Bearer so APISIX gateways
+    // that require Authorization on /upload do not return HTML 401 pages.
+    // Do NOT set Content-Type — axios must keep the multipart boundary.
     const response = await postRunningHubWithFallback(origin, "/task/openapi/upload", body, {
         signal,
         timeout: RUNNINGHUB_UPLOAD_TIMEOUT_MS,
         preferDirect: options?.preferDirect,
         onDirectTransportFallback: options?.onDirectTransportFallback,
+        headers: { Authorization: `Bearer ${token}` },
     });
     assertOk(response.data, apiText("requestFailed"));
     const data = asRecord(asRecord(response.data)?.data) || asRecord(response.data);
