@@ -148,6 +148,39 @@ export function runningHubOrigin(baseUrl: string): string | null {
     }
 }
 
+/**
+ * 海外站 `.ai` 在国内 / Cloudflare Pages 边缘经常直连与代理双双 `ERR_HTTP2_PROTOCOL_ERROR`。
+ * 传输层失败时整轮改打国内站 `.cn`（上传 / 提交 / 轮询必须同一 origin）。
+ */
+function runningHubDomesticOrigin(origin: string): string | null {
+    try {
+        const url = new URL(origin);
+        if (!/(^|\.)runninghub\.ai$/i.test(url.hostname)) return null;
+        url.hostname = url.hostname.replace(/runninghub\.ai$/i, "runninghub.cn");
+        return url.origin;
+    } catch {
+        return null;
+    }
+}
+
+function isRunningHubTransportFailure(error: unknown): boolean {
+    if (isAxiosTimeoutError(error)) return true;
+    const message = errorText(error);
+    if (/runningHubUploadTimeout|runningHubSubmitTimeout|runningHubTimeout|directHostUnreachable|endpointReset|networkFailed|proxyUnreachable|ERR_HTTP2|ERR_HTTP3|CONNECTION_RESET|CONNECTION_CLOSED|EMPTY_RESPONSE|timeout of \d+ms exceeded/i.test(message)) {
+        return true;
+    }
+    if (!axios.isAxiosError(error)) return /failed to fetch|network error|net::err_/i.test(message);
+    if (error.response) return false;
+    const code = String(error.code || "");
+    return (
+        code === "ERR_NETWORK" ||
+        code === "ECONNABORTED" ||
+        code === "ETIMEDOUT" ||
+        /ERR_(HTTP2|HTTP3|QUIC|CONNECTION_RESET|CONNECTION_CLOSED|EMPTY_RESPONSE|INCOMPLETE_CHUNKED)/i.test(code) ||
+        /ERR_(HTTP2|HTTP3|QUIC|CONNECTION_RESET|CONNECTION_CLOSED|EMPTY_RESPONSE|INCOMPLETE_CHUNKED)/i.test(String(error.message || ""))
+    );
+}
+
 export function isRunningHubComfyProxy(baseUrl: string): boolean {
     const raw = String(baseUrl || "").trim();
     if (!runningHubOrigin(raw)) return false;
@@ -289,8 +322,14 @@ function isAxiosTimeoutError(error: unknown) {
 
 function explainRunningHubError(error: unknown, workflowId: string): Error {
     const message = errorText(error);
+    const url = axios.isAxiosError(error) && typeof error.config?.url === "string" ? error.config.url : "";
+    if (
+        /runninghub\.ai/i.test(url) &&
+        (isRunningHubTransportFailure(error) || /ERR_HTTP2|ERR_HTTP3|CONNECTION_RESET|CONNECTION_CLOSED|timeout of \d+ms exceeded/i.test(`${String(axios.isAxiosError(error)?.code || "")} ${message}`))
+    ) {
+        return new Error(apiText("runningHubAiUnreachable"));
+    }
     if (isAxiosTimeoutError(error) || /timeout of \d+ms exceeded/i.test(message)) {
-        const url = axios.isAxiosError(error) && typeof error.config?.url === "string" ? error.config.url : "";
         if (/\/upload(?:\?|$)/i.test(url) || /openapi\/upload/i.test(url)) {
             return new Error(apiText("runningHubUploadTimeout"));
         }
@@ -6012,11 +6051,17 @@ async function postRunningHubWithFallback(
     // 上传/提交超时或边缘掐断时，必须用 forceProxyApiUrl 才能真的改走站点代理。
     const viaProxyApi = proxyApiUrl(direct);
     const forcedProxy = forceProxyApiUrl(direct);
+    // 实测（2026-10-28）：Pages `/api/proxy → runninghub.ai/task/openapi/upload` 对 multipart
+    // 几乎必挂（Failed to fetch / ERR_HTTP2_PROTOCOL_ERROR），而浏览器直连 .ai 小文件可用、大文件不稳，
+    // `.cn` 直连稳定。对 `.ai` 再浪费一轮代理只会拖长时间，上传失败应尽快交给上层改打 `.cn`。
+    const isAiUpload = /runninghub\.ai$/i.test(new URL(direct).hostname) && /\/upload(?:\/|$)/i.test(path);
     const urls = Array.from(
         new Set(
-            options.preferDirect
-                ? [direct, viaProxyApi, forcedProxy].filter(Boolean)
-                : [viaProxyApi, forcedProxy, direct].filter(Boolean),
+            isAiUpload
+                ? [direct].filter(Boolean)
+                : options.preferDirect
+                  ? [direct, viaProxyApi, forcedProxy].filter(Boolean)
+                  : [viaProxyApi, forcedProxy, direct].filter(Boolean),
         ),
     );
     let lastError: unknown;
@@ -6416,21 +6461,48 @@ export async function runRunningHubWorkflow(args: {
     }
 
     const canTryNextKey = (error: unknown) => isRunningHubKeyFailoverMessage(errorText(error));
+    // `.ai` 传输失败时整轮改打 `.cn`（同一 task 的 upload/create/poll 必须同源）。
+    // 生视频必先 upload：`.ai` 大文件/代理都不稳，国内用户把 Base 填成 `.ai` 时优先试 `.cn`。
+    const domestic = runningHubDomesticOrigin(origin);
+    const origins = Array.from(
+        new Set((domestic ? [domestic, origin] : [origin]).filter(Boolean)),
+    ) as string[];
 
     let lastError: unknown = null;
-    for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
-        const apiKey = keys[keyIndex];
-        try {
-            return await runRunningHubWorkflowWithKey({ origin, workflowId, apiKey, args, isLastKey: keyIndex === keys.length - 1 });
-        } catch (error) {
-            // Cancellation must propagate immediately — never switch keys on a user abort.
-            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
-            lastError = error;
-            // A key-level rejection (balance / auth / no workflow access) moves on to the next key.
-            // Anything else (bad graph, unknown server error, transport failure) is surfaced as-is:
-            // retrying it with every key would only multiply the wait.
-            if (!canTryNextKey(error)) throw explainRunningHubError(error, workflowId);
-            // Fall through to the next key; when the last key is refused too, surface that last error.
+    for (let originIndex = 0; originIndex < origins.length; originIndex += 1) {
+        const tryOrigin = origins[originIndex];
+        const hasNextOrigin = originIndex < origins.length - 1;
+        if (tryOrigin !== origin) {
+            console.warn(`[runninghub] ${origin} transport failed; retrying whole run on ${tryOrigin}`);
+        }
+        for (let keyIndex = 0; keyIndex < keys.length; keyIndex += 1) {
+            const apiKey = keys[keyIndex];
+            try {
+                return await runRunningHubWorkflowWithKey({
+                    origin: tryOrigin,
+                    workflowId,
+                    apiKey,
+                    args,
+                    isLastKey: keyIndex === keys.length - 1 && !hasNextOrigin,
+                });
+            } catch (error) {
+                // Cancellation must propagate immediately — never switch keys / origins on a user abort.
+                if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+                lastError = error;
+                // A key-level rejection (balance / auth / no workflow access) moves on to the next key.
+                if (canTryNextKey(error)) continue;
+                const message = errorText(error);
+                // Host dead (HTTP2 / timeout / network): don't burn every key on the same broken origin.
+                // 优先打 `.cn` 时若该站没有这个 workflowId，也要继续试配置里的 `.ai`。
+                if (
+                    hasNextOrigin &&
+                    (isRunningHubTransportFailure(error) || isMissingIdMessage(message) || /找不到这个 ID|cannot find this ID|runningHubWorkflowNotExists/i.test(message))
+                ) {
+                    break;
+                }
+                // Anything else (bad graph, unknown server error) is surfaced as-is.
+                throw explainRunningHubError(error, workflowId);
+            }
         }
     }
     throw explainRunningHubError(lastError, workflowId);

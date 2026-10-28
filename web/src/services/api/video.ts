@@ -1474,13 +1474,18 @@ function readAxiosError(error: unknown, fallback: string) {
             const hint = url ? `\n${url}` : "";
             // axios 客户端超时（如 timeout of 120000ms exceeded）——别把原文甩给用户。
             if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT" || /timeout of \d+ms exceeded/i.test(String(error.message || ""))) {
-                if (/runninghub\.(cn|ai)/i.test(url) && /\/upload/i.test(url)) return `${apiText("runningHubUploadTimeout")}${hint}`;
-                if (/runninghub\.(cn|ai)/i.test(url)) return `${apiText("runningHubSubmitTimeout")}${hint}`;
+                if (/runninghub\.ai/i.test(url)) return `${apiText("runningHubAiUnreachable")}${hint}`;
+                if (/runninghub\.cn/i.test(url) && /\/upload/i.test(url)) return `${apiText("runningHubUploadTimeout")}${hint}`;
+                if (/runninghub\.cn/i.test(url)) return `${apiText("runningHubSubmitTimeout")}${hint}`;
                 return `${apiText("videoTaskTimedOut")}${hint}`;
             }
             // Pages proxy 502 without ACAO used to surface here as a fake CORS/network failure.
-            if (/\/api(?:-)?proxy\?target=/i.test(url)) return `${apiText("proxyUnreachable")}${hint}`;
+            if (/\/api(?:-)?proxy\?target=/i.test(url)) {
+                if (/runninghub\.ai/i.test(url)) return `${apiText("runningHubAiUnreachable")}${hint}`;
+                return `${apiText("proxyUnreachable")}${hint}`;
+            }
             if (error.code === "ERR_NETWORK" && isKnownDirectCorsUrl(url)) {
+                if (/runninghub\.ai/i.test(url)) return `${apiText("runningHubAiUnreachable")}${hint}`;
                 // Only a ts.net tunnel deserves the Tailscale/Funnel checklist — an ordinary relay
                 // (aicost.me, autodl.art …) failing this way is the provider's edge, not a tunnel.
                 return `${apiText(isTunnelCorsUrl(url) ? "directHostUnreachable" : "directHostUnreachableApi")}${hint}`;
@@ -1488,6 +1493,7 @@ function readAxiosError(error: unknown, fallback: string) {
             // A reset/protocol failure is not "blocked by CORS" — the request went out and the
             // connection died mid-flight (HTTP/2 RST_STREAM, TLS teardown, proxy kill).
             if (/ERR_(HTTP2|HTTP3|QUIC|CONNECTION_RESET|CONNECTION_CLOSED|EMPTY_RESPONSE|INCOMPLETE_CHUNKED)/i.test(String(error.code || ""))) {
+                if (/runninghub\.ai/i.test(url)) return `${apiText("runningHubAiUnreachable")}${hint}`;
                 return `${apiText("endpointReset")}${hint}`;
             }
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
