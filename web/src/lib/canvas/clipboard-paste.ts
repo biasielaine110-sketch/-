@@ -11,6 +11,53 @@ import { isAudioFile } from "./canvas-generation-helpers";
  */
 
 /**
+ * 从 paste 事件读出可贴进输入框的纯文本。
+ * 飞书 / Word / 网页常只有 html、或 text/plain 为空；不能只认 plain，否则 preventDefault 后就是「粘贴为空」。
+ */
+export function readClipboardEventText(data: DataTransfer | null | undefined): string {
+    if (!data) return "";
+    const plain = data.getData("text/plain") || data.getData("text") || "";
+    if (plain) return plain;
+    const html = data.getData("text/html") || "";
+    if (!html) return "";
+    return htmlToPlainText(html);
+}
+
+export function htmlToPlainText(html: string): string {
+    if (!html) return "";
+    // DOMParser 比一串 replace 更稳：能解开实体、丢掉 script/style。
+    try {
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        doc.querySelectorAll("script,style,noscript").forEach((node) => node.remove());
+        // 块级结束补换行，避免「一段粘成一行」。
+        doc.querySelectorAll("br").forEach((node) => node.replaceWith("\n"));
+        doc.querySelectorAll("p,div,li,tr,h1,h2,h3,h4,h5,h6").forEach((node) => {
+            if (!node.textContent?.endsWith("\n")) node.append("\n");
+        });
+        return (doc.body?.textContent || "").replace(/\u00a0/g, " ").replace(/\r\n?/g, "\n");
+    } catch {
+        return html
+            .replace(/<br\s*\/?>/gi, "\n")
+            .replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n")
+            .replace(/<[^>]+>/g, "")
+            .replace(/&nbsp;/gi, " ")
+            .replace(/&lt;/gi, "<")
+            .replace(/&gt;/gi, ">")
+            .replace(/&amp;/gi, "&")
+            .replace(/\r\n?/g, "\n");
+    }
+}
+
+/** 把文本插入受控 textarea / input，并摆好光标。 */
+export function insertTextIntoInputElement(element: HTMLInputElement | HTMLTextAreaElement, text: string, currentValue: string) {
+    const start = element.selectionStart ?? currentValue.length;
+    const end = element.selectionEnd ?? currentValue.length;
+    const next = `${currentValue.slice(0, start)}${text}${currentValue.slice(end)}`;
+    const caret = start + text.length;
+    return { next, caret };
+}
+
+/**
  * 剪贴板 html 里的**远程**图片地址（`<img src="https://…">`）。
  *
  * 只认 `data:` 的那条路（`extractClipboardDataImage`）不够用：网页 / 飞书 / 语雀复制正文时

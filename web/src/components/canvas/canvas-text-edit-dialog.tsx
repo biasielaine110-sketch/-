@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { Button, Input, Modal } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import { Minus, Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { insertTextIntoInputElement, readClipboardEventText } from "@/lib/canvas/clipboard-paste";
 import { useTextFindReplace } from "./canvas-text-find-replace";
 import { CanvasTextPromptPicker } from "./canvas-text-prompt-picker";
 import { DEFAULT_CANVAS_FONT_SIZE } from "@/constant/canvas";
@@ -28,17 +29,20 @@ type CanvasTextEditDialogProps = {
 export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize, readOnly = false, onFontSizeChange, onClose, onSave }: CanvasTextEditDialogProps) {
     const { t } = useTranslation();
     const textAreaRef = useRef<TextAreaRef>(null);
+    const draftRef = useRef(value);
     const [draft, setDraft] = useState(value);
     const [localFontSize, setLocalFontSize] = useState(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE)));
     const resolvedFontSize = onFontSizeChange
         ? Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE))
         : localFontSize;
 
-    // 只在「打开瞬间」同步外部 value。打开后若仍监听 value，父级任意一次回写
-    // （底下 contentEditable 误同步、字号回调等）都会把用户正在弹窗里粘贴的内容冲掉。
+    draftRef.current = draft;
+
+    // 只在「打开瞬间」同步外部 value，避免打开后父级回写冲掉弹窗内粘贴内容。
     useEffect(() => {
         if (!open) return;
         setDraft(value);
+        draftRef.current = value;
         setLocalFontSize(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE)));
         // eslint-disable-next-line react-hooks/exhaustive-deps -- sync once per open
     }, [open]);
@@ -63,12 +67,64 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
         else setLocalFontSize(next);
     };
 
+    const handlePaste = (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+        // 全程自己写入：不依赖原生插入（受控 TextArea + 画布 window paste 抢事件时更稳）。
+        event.preventDefault();
+        event.stopPropagation();
+        if (readOnly) return;
+        const text = readClipboardEventText(event.clipboardData);
+        if (!text) return;
+        const area = textAreaRef.current?.resizableTextArea?.textArea || event.currentTarget;
+        const current = draftRef.current;
+        const { next, caret } = insertTextIntoInputElement(area, text, current);
+        draftRef.current = next;
+        setDraft(next);
+        requestAnimationFrame(() => {
+            area.focus();
+            try {
+                area.setSelectionRange(caret, caret);
+            } catch {
+                // ignore
+            }
+        });
+    };
+
     return createPortal(
         <div
             data-canvas-shortcuts-ignore
+            data-canvas-text-edit-dialog
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
+            onPaste={(event) => {
+                // 焦点落在弹窗容器而不是 textarea 时（antd focus trap），仍把文字写进编辑区。
+                if (readOnly) return;
+                const target = event.target;
+                if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const text = readClipboardEventText(event.clipboardData);
+                if (!text) return;
+                const area = textAreaRef.current?.resizableTextArea?.textArea;
+                if (!area) {
+                    const next = `${draftRef.current}${text}`;
+                    draftRef.current = next;
+                    setDraft(next);
+                    return;
+                }
+                area.focus();
+                const current = draftRef.current;
+                const { next, caret } = insertTextIntoInputElement(area, text, current);
+                draftRef.current = next;
+                setDraft(next);
+                requestAnimationFrame(() => {
+                    try {
+                        area.setSelectionRange(caret, caret);
+                    } catch {
+                        // ignore
+                    }
+                });
+            }}
             onKeyDown={(event) => findReplace.handleShortcutKeyDown(event)}
         >
             <Modal
@@ -84,6 +140,22 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                 destroyOnHidden
                 getContainer={false}
                 mask={{ closable: true }}
+                afterOpenChange={(visible) => {
+                    if (!visible) return;
+                    // 打开后强制聚焦编辑区，避免 Ctrl+V 打在 mask/wrap 上。
+                    window.setTimeout(() => {
+                        const area = textAreaRef.current?.resizableTextArea?.textArea;
+                        area?.focus();
+                        if (!readOnly && area) {
+                            const end = area.value.length;
+                            try {
+                                area.setSelectionRange(end, end);
+                            } catch {
+                                // ignore
+                            }
+                        }
+                    }, 0);
+                }}
                 footer={
                     readOnly
                         ? [
@@ -148,44 +220,7 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                     onChange={readOnly ? undefined : (event) => setDraft(event.target.value)}
                     onCopy={(event) => event.stopPropagation()}
                     onCut={(event) => event.stopPropagation()}
-                    onPaste={(event) => {
-                        // 阻止冒泡到画布 window paste（落成文本节点）；纯文本仍走原生插入。
-                        event.stopPropagation();
-                        if (readOnly) {
-                            event.preventDefault();
-                            return;
-                        }
-                        const text = event.clipboardData?.getData("text/plain");
-                        // 剪贴板只有 html/图、没有 text/plain 时，显式从 html 抽字，避免粘出空白。
-                        if (text != null && text !== "") return;
-                        const html = event.clipboardData?.getData("text/html") || "";
-                        const fromHtml = html
-                            ? html
-                                  .replace(/<br\s*\/?>/gi, "\n")
-                                  .replace(/<\/(p|div|li|tr)>/gi, "\n")
-                                  .replace(/<[^>]+>/g, "")
-                                  .replace(/&nbsp;/gi, " ")
-                                  .replace(/&lt;/gi, "<")
-                                  .replace(/&gt;/gi, ">")
-                                  .replace(/&amp;/gi, "&")
-                            : "";
-                        if (!fromHtml) return;
-                        event.preventDefault();
-                        const area = textAreaRef.current?.resizableTextArea?.textArea;
-                        if (!area) {
-                            setDraft((current) => `${current}${fromHtml}`);
-                            return;
-                        }
-                        const start = area.selectionStart ?? draft.length;
-                        const end = area.selectionEnd ?? draft.length;
-                        const next = `${draft.slice(0, start)}${fromHtml}${draft.slice(end)}`;
-                        setDraft(next);
-                        requestAnimationFrame(() => {
-                            const caret = start + fromHtml.length;
-                            area.focus();
-                            area.setSelectionRange(caret, caret);
-                        });
-                    }}
+                    onPaste={handlePaste}
                     className={`font-mono ${readOnly ? "cursor-text" : ""}`}
                     style={{ fontSize: `${resolvedFontSize}px`, lineHeight: `${Math.round(resolvedFontSize * 1.55)}px` }}
                     data-canvas-shortcuts-ignore

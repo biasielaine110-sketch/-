@@ -5,6 +5,7 @@ import { FileText, Image as ImageIcon, Music2, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { insertTextIntoInputElement, readClipboardEventText } from "@/lib/canvas/clipboard-paste";
 import { isImeComposing, isPlainEnterKey } from "@/lib/keyboard-event";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -145,26 +146,22 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                 onCopy={(event) => event.stopPropagation()}
                 onCut={(event) => event.stopPropagation()}
                 onPaste={(event) => {
-                    // 只挡画布级粘贴；文本交给 textarea 原生插入。无 text/plain 时从 html 抽字。
-                    event.stopPropagation();
-                    const text = event.clipboardData?.getData("text/plain");
-                    if (text != null && text !== "") return;
-                    const html = event.clipboardData?.getData("text/html") || "";
-                    if (!html) return;
-                    const fromHtml = html
-                        .replace(/<br\s*\/?>/gi, "\n")
-                        .replace(/<\/(p|div|li|tr)>/gi, "\n")
-                        .replace(/<[^>]+>/g, "")
-                        .replace(/&nbsp;/gi, " ")
-                        .replace(/&lt;/gi, "<")
-                        .replace(/&gt;/gi, ">")
-                        .replace(/&amp;/gi, "&");
-                    if (!fromHtml) return;
+                    // 全程自写：避免画布 window paste 与受控 value 抢事件，并兼容只有 html 的剪贴板。
                     event.preventDefault();
+                    event.stopPropagation();
+                    const text = readClipboardEventText(event.clipboardData);
+                    if (!text) return;
                     const area = event.currentTarget;
-                    const start = area.selectionStart ?? value.length;
-                    const end = area.selectionEnd ?? value.length;
-                    onChange(`${value.slice(0, start)}${fromHtml}${value.slice(end)}`);
+                    const { next, caret } = insertTextIntoInputElement(area, text, value);
+                    onChange(next);
+                    requestAnimationFrame(() => {
+                        area.focus();
+                        try {
+                            area.setSelectionRange(caret, caret);
+                        } catch {
+                            // ignore
+                        }
+                    });
                 }}
                 onDoubleClick={(event) => {
                     if (onDoubleClick) {

@@ -3143,6 +3143,13 @@ function AtelierCanvasPage() {
             if (isCanvasTextPasteTarget(event.target) || isCanvasTextPasteTarget(document.activeElement)) {
                 return;
             }
+            // 编辑弹窗 portal 可能挂在 body，再扫一遍 DOM 标记兜底。
+            if (document.querySelector("[data-canvas-text-edit-dialog] .ant-modal-root, [data-canvas-text-edit-dialog]")) {
+                const active = document.activeElement;
+                if (active instanceof Element && active.closest("[data-canvas-text-edit-dialog],.ant-modal-root,.ant-modal-wrap")) {
+                    return;
+                }
+            }
 
             const data = event.clipboardData;
             if (!data) {

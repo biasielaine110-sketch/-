@@ -6,6 +6,7 @@ import { FileText, Image as ImageIcon, Music2, Video } from "lucide-react";
 
 import i18n from "@/i18n";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { readClipboardEventText } from "@/lib/canvas/clipboard-paste";
 import { isImeComposing, isPlainEnterKey } from "@/lib/keyboard-event";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -166,12 +167,14 @@ export const CanvasPromptChipInput = forwardRef<CanvasPromptChipInputHandle, Pro
                 onCut={(event) => event.stopPropagation()}
                 onPaste={(event) => {
                     // 必须拦掉默认粘贴：剪贴板常带 html/截图，浏览器往 contentEditable 塞 <img>/<div>，
-                    // serialize 后变空串，看起来就像「粘贴不上」。只取 text/plain 插入纯文本。
+                    // serialize 后变空串，看起来就像「粘贴不上」。统一抽纯文本再写入。
                     event.preventDefault();
                     event.stopPropagation();
-                    const text = event.clipboardData?.getData("text/plain") ?? "";
+                    const editor = editorRef.current;
+                    if (!editor) return;
+                    const text = readClipboardEventText(event.clipboardData ?? event.nativeEvent.clipboardData);
                     if (!text) return;
-                    insertPlainTextAtCaret(text);
+                    insertPlainTextAtCaret(editor, text);
                     syncFromEditor();
                 }}
                 onInput={() => {
@@ -334,21 +337,31 @@ function createReferenceChip(reference: CanvasResourceReference, theme: (typeof 
     return wrapper;
 }
 
-/** 在光标处插入纯文本（避免 contentEditable 默认粘贴 HTML）。 */
-function insertPlainTextAtCaret(text: string) {
+/** 在编辑器光标处插入纯文本；光标不在编辑器内时追加到末尾。 */
+function insertPlainTextAtCaret(editor: HTMLElement, text: string) {
+    editor.focus();
     const selection = window.getSelection();
     if (selection?.rangeCount) {
         const range = selection.getRangeAt(0);
-        range.deleteContents();
-        const node = document.createTextNode(text);
-        range.insertNode(node);
-        range.setStartAfter(node);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        return;
+        if (editor.contains(range.commonAncestorContainer)) {
+            range.deleteContents();
+            const node = document.createTextNode(text);
+            range.insertNode(node);
+            range.setStartAfter(node);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return;
+        }
     }
-    if (document.execCommand("insertText", false, text)) return;
+    // 选区丢了就直接 append，避免 execCommand 在失焦时静默失败。
+    const node = document.createTextNode(text);
+    editor.appendChild(node);
+    const range = document.createRange();
+    range.setStartAfter(node);
+    range.collapse(true);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
 }
 
 function serializeEditor(editor: HTMLElement) {

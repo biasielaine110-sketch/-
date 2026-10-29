@@ -3,6 +3,7 @@ import { Input } from "antd";
 import type { TextAreaProps, TextAreaRef } from "antd/es/input/TextArea";
 import { useTranslation } from "react-i18next";
 
+import { insertTextIntoInputElement, readClipboardEventText } from "@/lib/canvas/clipboard-paste";
 import { useTextFindReplace } from "./canvas-text-find-replace";
 import { useCanvasTextEditDialog } from "./use-canvas-text-edit-dialog";
 
@@ -68,6 +69,25 @@ export function CanvasFindReplaceTextArea({
                 className={className}
                 onChange={readOnly ? undefined : (event) => onChange?.(event.target.value)}
                 onDoubleClick={enableDoubleClickEdit ? textEdit.handleDoubleClick : textAreaProps.onDoubleClick}
+                onPaste={(event) => {
+                    textAreaProps.onPaste?.(event);
+                    if (event.defaultPrevented || readOnly) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const text = readClipboardEventText(event.clipboardData);
+                    if (!text) return;
+                    const area = textAreaRef.current?.resizableTextArea?.textArea || event.currentTarget;
+                    const { next, caret } = insertTextIntoInputElement(area, text, value);
+                    onChange?.(next);
+                    requestAnimationFrame(() => {
+                        area.focus();
+                        try {
+                            area.setSelectionRange(caret, caret);
+                        } catch {
+                            // ignore
+                        }
+                    });
+                }}
                 data-canvas-shortcuts-ignore
                 data-canvas-text-input
             />

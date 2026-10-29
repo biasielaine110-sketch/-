@@ -24,7 +24,11 @@ export function isCanvasTextInteractionTarget(target: EventTarget | null) {
     return Boolean(target.closest(`${SELECTABLE_SELECTOR},${EDITABLE_SELECTOR},[data-canvas-shortcuts-ignore]`));
 }
 
-/** 粘贴时应交给输入框/弹窗原生处理，而不是画布落节点。同时看 event.target 与当前焦点。 */
+/**
+ * 粘贴时应交给输入框/弹窗，而不是画布落节点。
+ * 只认真正的可编辑目标——不要用 data-canvas-shortcuts-ignore（按钮也有），
+ * 否则焦点在面板按钮上时既拦画布粘贴、又写不进输入框。
+ */
 export function isCanvasTextPasteTarget(target: EventTarget | null) {
     if (
         target instanceof HTMLInputElement ||
@@ -33,14 +37,12 @@ export function isCanvasTextPasteTarget(target: EventTarget | null) {
     ) {
         return true;
     }
-    if (target instanceof Element) {
-        if (target.closest("[contenteditable],[data-canvas-text-input],[data-canvas-shortcuts-ignore],.ant-modal,.ant-input,.ant-input-textarea,.ant-modal-root,.ant-modal-wrap")) {
-            return true;
-        }
+    if (!(target instanceof Element)) return false;
+    if (target.closest("[data-canvas-text-input],[data-canvas-text-edit-dialog],.ant-input,.ant-input-textarea,.ant-modal textarea,.ant-modal input,.ant-modal-root,.ant-modal-wrap")) {
+        return true;
     }
-    const active = document.activeElement;
-    if (active && active !== target) return isCanvasTextPasteTarget(active);
-    return false;
+    const editable = target.closest("[contenteditable],[contenteditable='true']");
+    return editable instanceof HTMLElement && editable.isContentEditable;
 }
 
 function isFocusSafeTarget(target: EventTarget | null | undefined) {
