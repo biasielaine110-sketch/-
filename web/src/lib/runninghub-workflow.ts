@@ -4415,8 +4415,8 @@ function looksLikeWebappAuthorDemoText(value: string, nodeId: string, keepNodeId
 }
 
 /**
- * 轻量 AI App：按已核对的固定 nodeId 写入；清掉其它文本口韩语/示例；
- * 风格 LoRA 强度默认 0（可用画布档位打开）。
+ * Singularity 形轻量 AI App：固定 nodeId 写入；清演示图/音频/韩语文本；
+ * 若暴露了风格 LoRA strength 则默认归零（与 Fisher 轻量同策略）。
  */
 function applySingularityLightWebappMapping(
     nodes: WebappNode[],
@@ -4424,6 +4424,7 @@ function applySingularityLightWebappMapping(
     imageValues: string[],
     seconds: string,
     aspect: string,
+    loraStrength: string | number,
     setField: (node: WebappNode, value: string | number) => void,
     workflowId: string,
 ) {
@@ -4432,6 +4433,38 @@ function applySingularityLightWebappMapping(
     if (promptNode && prompt.trim()) {
         setField(promptNode, prompt);
         console.info(`[runninghub] ${workflowId}: singularity-light prompt → ${promptNode.nodeId}.${promptNode.fieldName}`);
+    }
+
+    // 清其它文本口韩语/示例（主提示词口保留）。
+    const keepId = promptNode?.nodeId || "";
+    const keepField = promptNode?.fieldName || "";
+    let clearedTexts = 0;
+    for (const node of nodes) {
+        if (promptNode && node.nodeId === keepId && node.fieldName === keepField) continue;
+        const isText = /STRING|TEXT/i.test(node.fieldType || "") || /^(text|prompt|string|caption|positive|value)$/i.test(node.fieldName);
+        if (!isText) continue;
+        if (/FLOAT|INT|NUMBER|BOOLEAN/i.test(node.fieldType || "") && !/STRING|TEXT/i.test(node.fieldType || "")) continue;
+        const label = `${node.fieldName} ${node.nodeName || ""} ${node.description || ""}`;
+        if (/negative|负面/i.test(label)) continue;
+        if (!looksLikeWebappAuthorDemoText(node.fieldValue || "", node.nodeId, keepId)) continue;
+        setField(node, "");
+        clearedTexts += 1;
+    }
+
+    // 风格 LoRA：apiCallDemo 当前未暴露 strength，但若作者后续挂上则默认写 0。
+    const strength = normalizeFisherLoraStrength(loraStrength);
+    let loraWritten = 0;
+    for (const node of nodes) {
+        if (!/^(strength_model|strength_clip)$/i.test(node.fieldName)) continue;
+        if (/mystic|lora|风格/i.test(`${node.nodeName || ""} ${node.description || ""} ${node.fieldName}`) || /LoraLoader/i.test(node.nodeName || "")) {
+            setField(node, strength);
+            loraWritten += 1;
+        }
+    }
+    if (!loraWritten) {
+        console.warn(
+            `[runninghub] ${workflowId}: singularity-light apiCallDemo 未暴露风格 LoRA strength —— 若图里烘焙了 MysticXXX 等韩剧 LoRA，韩语无法从画布关掉，请在应用里暴露 strength 并默认 0 后重发`,
+        );
     }
 
     const duration = Number(seconds);
@@ -4458,14 +4491,13 @@ function applySingularityLightWebappMapping(
             console.info(`[runninghub] ${workflowId}: singularity-light image[${index}] → ${node.nodeId}.${node.fieldName}`);
             return;
         }
-        if (node.fieldValue && !/^none$/i.test(node.fieldValue.trim())) {
-            setField(node, "None");
-            clearedImages += 1;
-        }
+        // 没用到的槽位一律 None，避免作者 example.png / 韩剧演示脸残留。
+        setField(node, "None");
+        clearedImages += 1;
     });
 
     console.info(
-        `[runninghub] ${workflowId}: singularity-light mapped prompt=${Boolean(promptNode)} duration=${Number.isFinite(duration) && duration > 0 ? duration : "-"} aspect=${aspect || "-"} clearedDemoImages=${clearedImages} images=${imageValues.filter(Boolean).length}`,
+        `[runninghub] ${workflowId}: singularity-light mapped prompt=${Boolean(promptNode)} lora=${strength} (fields=${loraWritten}) duration=${Number.isFinite(duration) && duration > 0 ? duration : "-"} aspect=${aspect || "-"} clearedTexts=${clearedTexts} clearedDemoImages=${clearedImages} images=${imageValues.filter(Boolean).length}`,
     );
 }
 
@@ -4617,7 +4649,7 @@ function buildWebappNodeInfoList(
     if (lightApp) {
         applyWorkFisherLightWebappMapping(nodes, prompt, imageValues, seconds, aspect, megapixels, loraStrength, setField, workflowId);
     } else if (singularityLight) {
-        applySingularityLightWebappMapping(nodes, prompt, imageValues, seconds, aspect, setField, workflowId);
+        applySingularityLightWebappMapping(nodes, prompt, imageValues, seconds, aspect, loraStrength, setField, workflowId);
     } else {
         if (prompt.trim()) {
             const target = pickWebappPromptNode(nodes);
@@ -4656,10 +4688,14 @@ function buildWebappNodeInfoList(
     // AI App audio slots (LoadAudio.audio / fieldType AUDIO / 音色参考). Without this, canvas
     // audio was uploaded then rejected as "no place for audio" even when apiCallDemo exposes slots.
     const audioNodes = nodes.filter(isWebappAudioNode);
-    audioValues.filter(Boolean).forEach((value, index) => {
-        const node = audioNodes[index];
-        if (!node || !value) return;
-        setField(node, value);
+    audioNodes.forEach((node, index) => {
+        const value = audioValues[index];
+        if (value) {
+            setField(node, value);
+            return;
+        }
+        // 轻量 H3 App：没用到的音色口必须 None，否则作者韩语演示音轨会继续带出韩语人声。
+        if (lightApp || singularityLight) setField(node, "None");
     });
     return list;
 }
@@ -5677,7 +5713,7 @@ export function adaptMinimaxH3ReferencePrompt(
  * 判断复用适配器（纯函数，`audioCount: 0` 时不追加任何契约），只认 `<d>`。
  */
 export function isMinimaxH3FisherSilentShot(workflowId: string | null | undefined, prompt: string) {
-    if (!isMinimaxH3FisherWorkflow(workflowId) && !isWorkFisherLightAiApp(workflowId)) return false;
+    if (!isMinimaxH3FisherWorkflow(workflowId) && !isWorkFisherLightAiApp(workflowId) && !isMinimaxH3SingularityLightAiApp(workflowId)) return false;
     return !/<\s*d\s*>/i.test(adaptMinimaxH3ReferencePrompt(prompt, { audioCount: 0, audioNegation: true, dropSoundNote: true }));
 }
 
@@ -7022,11 +7058,11 @@ async function runRunningHubWorkflowWithKey(args: {
     // 混合镜（有台词 + 有 `- **对白**：无`）：贴的是「口型约定」而非「全片静场」，日志要能分开看，
     // 否则排查时会把「该念的没念」误判成静场规则串了。
     const fisherMixedShots =
-        (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId)) &&
+        (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId) || isMinimaxH3SingularityLightAiApp(workflowId)) &&
         !fisherDialogueFree &&
         declaresH3SilentDialogue(request.prompt);
     // 「韩语还没走」的第一条排查线索：实际提交的风格 LoRA 权重。用户报障时复制这一行就够。
-    if (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId)) {
+    if (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId) || isMinimaxH3SingularityLightAiApp(workflowId)) {
         console.info(
             `[runninghub] ${workflowId}: fisherLoRA=${normalizeFisherLoraStrength(request.fisherLoraStrength)} (0 = off, Korean voice / burned subtitles / invented lines come from this LoRA)`,
         );
@@ -7089,12 +7125,12 @@ async function runRunningHubWorkflowWithKey(args: {
         audioCount: uploadedAudios.length,
         styleFields: request.fisherStyleFields,
     });
-    // 轻量 App：再剥一层谚文 / `<d>[Korean]…</d>`，防止干净模式转写后仍留下韩语台词块。
+    // 轻量 App：强制台词语种为中文，并剥掉谚文。不要整段删 `<d>`（会逼模型自编台词）。
     if (isWorkFisherLightAiApp(workflowId) || isMinimaxH3SingularityLightAiApp(workflowId)) {
         effectivePrompt = effectivePrompt
-            .replace(/<\s*d\s*>\s*\[Korean\][\s\S]*?<\s*\/\s*d\s*>/gi, "")
             .replace(/\[\s*Korean\s*\]/gi, "[Chinese]")
             .replace(/[\uAC00-\uD7A3]+/g, "")
+            .replace(/<\s*d\s*>\s*\[\s*Chinese\s*\]\s*<\s*\/\s*d\s*>/gi, "")
             .replace(/\n{3,}/g, "\n\n")
             .trim();
     }

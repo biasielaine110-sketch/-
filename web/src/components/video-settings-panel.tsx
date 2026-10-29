@@ -432,10 +432,10 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         </div>
                     </SettingGroup>
                 ) : null}
-                {wenxiLoraRh || fisherLightRh ? (
+                {wenxiLoraRh || fisherLightRh || singularityLightRh ? (
                     <SettingGroup title={t("settingsPanels.video.fisherLora")} color={theme.node.muted}>
-                        {/* 八月文戏低配 / Work-Fisher 轻量 AI App：都暴露 `MysticXXX_MMH3-V1`
-                            strength。默认关，要韩剧质感再往上拖。 */}
+                        {/* 八月文戏低配 / Work-Fisher / Singularity 轻量 AI App：
+                            暴露 `MysticXXX` 一类 strength 时默认关；211575 若未暴露则需作者重发。 */}
                         <div className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-[11px]" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                             <span>{t("settingsPanels.video.fisherLora")}</span>
                             <div className="flex shrink-0 gap-1.5">

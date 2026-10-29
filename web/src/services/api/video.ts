@@ -375,7 +375,10 @@ async function createRunningHubVideoTask(
         // 默认 0 = 关（纯官方 H3，中文、不烧字、不自己加台词）。要韩剧质感再从面板拖回去。
         // 轻量 AI App `211550…` 同样暴露 279.strength_model，一并传档位。
         // 用 workflowId（本函数的 model 参数）判断；配置里的展示名可能不含数字 id。
-        ...(isMinimaxH3FisherWorkflowId(model) || isWorkFisherLightAiAppId(model) || isMinimaxH3WenxiLowWorkflowId(model)
+        ...(isMinimaxH3FisherWorkflowId(model) ||
+        isWorkFisherLightAiAppId(model) ||
+        isMinimaxH3SingularityLightAiAppId(model) ||
+        isMinimaxH3WenxiLowWorkflowId(model)
             ? { fisherLoraStrength: config.videoFisherLoraStrength ?? "0" }
             : {}),
         // 「提交视觉风格字段」（默认 off）：off 时 `视觉风格：…` 整行不进提示词 —— H3 会把那段中文
