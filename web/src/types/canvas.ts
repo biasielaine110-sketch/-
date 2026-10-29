@@ -268,6 +268,8 @@ export type CanvasNodeMetadata = {
     fisherLoraStrength?: string;
     /** Work-Fisher 是否提交 `视觉风格：…` 的值：`on` = 提交（只丢字段名），其余 = 整行不发。 */
     fisherStyleFields?: string;
+    /** RunningHub 机器档位：`default`(Standard) | `plus` | `ultra`。 */
+    rhInstanceType?: string;
     /** MJ 风格 V2.0 LoRA 味型：`strong` | `standard` | `light` | `off`. */
     mjFlavor?: string;
     /** Native H3 client FIFO: 1-based queue position while waiting/running. */

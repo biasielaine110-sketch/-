@@ -533,6 +533,7 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
         videoFisherMode: node.metadata?.fisherMode || globalConfig.videoFisherMode || defaultConfig.videoFisherMode,
         videoFisherLoraStrength: node.metadata?.fisherLoraStrength || globalConfig.videoFisherLoraStrength || defaultConfig.videoFisherLoraStrength,
         videoFisherStyleFields: node.metadata?.fisherStyleFields || globalConfig.videoFisherStyleFields || defaultConfig.videoFisherStyleFields,
+        videoRhInstanceType: node.metadata?.rhInstanceType || globalConfig.videoRhInstanceType || defaultConfig.videoRhInstanceType,
         audioVoice: node.metadata?.audioVoice || globalConfig.audioVoice || defaultConfig.audioVoice,
         audioFormat: node.metadata?.audioFormat || globalConfig.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node.metadata?.audioSpeed || globalConfig.audioSpeed || defaultConfig.audioSpeed,
@@ -566,6 +567,7 @@ function videoConfigPatch(key: keyof AiConfig, value: string) {
     if (key === "videoFisherMode") return { fisherMode: value };
     if (key === "videoFisherLoraStrength") return { fisherLoraStrength: value };
     if (key === "videoFisherStyleFields") return { fisherStyleFields: value };
+    if (key === "videoRhInstanceType") return { rhInstanceType: value };
     return { [key]: value };
 }
 

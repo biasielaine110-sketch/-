@@ -138,6 +138,11 @@ export type AiConfig = {
      */
     videoFisherStyleFields: string;
     /**
+     * RunningHub 机器档位（提交体 `instanceType`）：`default`(Standard/推荐) | `plus` | `ultra`。
+     * Fisher / 轻量 AI App 面板可切换；其它模型忽略。
+     */
+    videoRhInstanceType: string;
+    /**
      * MJ 风格工作流 V2.0 LoRA 味型：`strong` | `standard` | `light` | `off`.
      * Only the 2112477095216926722 / 2112477039575003138 id pair reads it (it scales the two
      * MJ LoRAs); every other model ignores the field.
@@ -243,6 +248,7 @@ export const defaultConfig: AiConfig = {
     videoFisherMode: "video",
     videoFisherLoraStrength: "0",
     videoFisherStyleFields: "off",
+    videoRhInstanceType: "default",
     mjFlavor: "standard",
     systemPrompt: "",
     reasoningEffort: "auto",
@@ -561,6 +567,9 @@ export const useConfigStore = create<ConfigStore>()(
                             : "0",
                         // 只有显式 `on` 才算打开；旧存档/脏值一律 `off`（整行不发，最安全）。
                         videoFisherStyleFields: String(config.videoFisherStyleFields ?? "") === "on" ? "on" : "off",
+                        videoRhInstanceType: /^(plus|ultra|default)$/i.test(String(config.videoRhInstanceType || ""))
+                            ? String(config.videoRhInstanceType).toLowerCase()
+                            : defaultConfig.videoRhInstanceType,
                         mjFlavor: /^(strong|standard|light|off)$/i.test(String(config.mjFlavor || ""))
                             ? String(config.mjFlavor).toLowerCase()
                             : "standard",

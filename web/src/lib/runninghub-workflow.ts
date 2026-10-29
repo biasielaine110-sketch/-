@@ -2698,8 +2698,9 @@ function applyMinimaxH3HdDynamicSettings(
 //
 // Shape: MiniMaxH3ReferenceToVideo (136) + 6×LoadImage refs + ResolutionSelector (115) +
 // Float Duration (132) → math (131) + PrimitiveStringMultiline (138) + VHS_VideoCombine.
-// Single-pass — no LatentUpscaler3D. Export bake ~0.8MP；画布 720 应对齐真 720p（0.92MP）。
+// Single-pass — no LatentUpscaler3D. Export bake / 画布默认 megapixels ≈ 0.8。
 // 禁止把 1080/2K 的 delivered 预算（2.07 / 3.69）直接写进 (115)，否则 SamplerCustomAdvanced 易 VRAM OOM。
+// 更高清晰度靠 RH 机器档位 `instanceType`（Standard/Plus/Ultra），不是抬 megapixels。
 // The published RH app advertises 4 pipeline modes (多参生视频 / 角色资产 / 场景资产 / 多视角);
 // this Export is the video graph only. Mode switching:
 //   - plain Export JSON → always「多参生视频」;
@@ -2759,8 +2760,21 @@ export function isWorkFisherLightAiAppId(workflowId?: string | null) {
 }
 /** Export author bake is 10s; longer multi-ref clips OOM SamplerCustomAdvanced on RH. */
 const MINIMAX_H3_FISHER_SECONDS = { min: 2, max: 12 };
-/** Single-pass 交付上限：真 720p（0.92MP）。再高（1080→2.07）会撑爆 Sampler latent。 */
-const MINIMAX_H3_FISHER_MAX_MEGAPIXELS = 0.92;
+/** Single-pass Export / 画布默认天花板：0.8MP。再高（1080→2.07）会撑爆 Sampler latent。 */
+const MINIMAX_H3_FISHER_MAX_MEGAPIXELS = 0.8;
+
+/** RunningHub 机器档位（AI App / Comfy 提交体 `instanceType`）。 */
+export type RunningHubInstanceType = "default" | "plus" | "ultra";
+
+/** Standard→default(24GB) / Plus→plus(48GB) / Ultra→ultra(84GB)。空或未知回退 Standard。 */
+export function normalizeRunningHubInstanceType(value?: string | null): RunningHubInstanceType {
+    const raw = String(value || "")
+        .trim()
+        .toLowerCase();
+    if (raw === "plus" || raw === "48" || raw === "48gb") return "plus";
+    if (raw === "ultra" || raw === "84" || raw === "84gb") return "ultra";
+    return "default";
+}
 
 export type FisherPipelineMode = "video" | "character" | "scene" | "multiview";
 
@@ -2976,7 +2990,7 @@ function applyMinimaxH3FisherSettings(
                     : MINIMAX_H3_FISHER_MAX_MEGAPIXELS;
             const ceiling = MINIMAX_H3_FISHER_MAX_MEGAPIXELS;
             const requested = singularityDeliveredMegapixels(megapixels);
-            // 480 可低于 bake；720 对齐真 0.92MP；更高档一律压回 ceiling（禁止 1080→2.07）。
+            // 480 可低于 bake；720/更高一律压回 0.8（禁止 1080→2.07）。要更稳用 instanceType Plus。
             selector.inputs.megapixels = requested > 0 ? Math.min(requested, ceiling) : Math.min(authored, ceiling);
         }
     }
@@ -6435,9 +6449,15 @@ async function submitWorkflowTask(
     graph?: ComfyWorkflow,
     signal?: AbortSignal,
     preferDirect = false,
+    instanceType?: string,
 ) {
     const token = apiKey.replace(/^Bearer\s+/i, "").trim();
-    const body: Record<string, unknown> = { apiKey: token, workflowId, addMetadata: true };
+    const body: Record<string, unknown> = {
+        apiKey: token,
+        workflowId,
+        addMetadata: true,
+        instanceType: normalizeRunningHubInstanceType(instanceType),
+    };
     if (nodeInfoList.length) body.nodeInfoList = nodeInfoList;
     // `workflow` runs the graph we send instead of the one saved under workflowId. It is the only way
     // to add a link (nodeInfoList overrides scalar inputs only), which is what a reference image
@@ -6463,11 +6483,11 @@ async function submitWorkflowTask(
  * the shared workflowId the caller's key has no permission to fetch. Scoped to graphs we already
  * decided to submit (never used as a generic create replacement).
  */
-async function submitComfyRunTask(origin: string, apiKey: string, graph: ComfyWorkflow, signal?: AbortSignal) {
+async function submitComfyRunTask(origin: string, apiKey: string, graph: ComfyWorkflow, signal?: AbortSignal, instanceType?: string) {
     const token = apiKey.replace(/^Bearer\s+/i, "").trim();
     const response = await axios.post(
         proxyApiUrl(`${origin}/task/openapi/comfy/run`),
-        { apiKey: token, workflow: JSON.stringify(graph), addMetadata: true },
+        { apiKey: token, workflow: JSON.stringify(graph), addMetadata: true, instanceType: normalizeRunningHubInstanceType(instanceType) },
         { headers: bearer(apiKey), signal, timeout: 60_000 },
     );
     assertOk(response.data, apiText("runningHubNoTaskId"));
@@ -6478,11 +6498,18 @@ async function submitComfyRunTask(origin: string, apiKey: string, graph: ComfyWo
     return created;
 }
 
-async function submitWebappTask(origin: string, apiKey: string, webappId: string, nodeInfoList: ReturnType<typeof buildWebappNodeInfoList>, signal?: AbortSignal) {
+async function submitWebappTask(
+    origin: string,
+    apiKey: string,
+    webappId: string,
+    nodeInfoList: ReturnType<typeof buildWebappNodeInfoList>,
+    signal?: AbortSignal,
+    instanceType?: string,
+) {
     const token = apiKey.replace(/^Bearer\s+/i, "").trim();
     const response = await axios.post(
         proxyApiUrl(`${origin}/task/openapi/ai-app/run`),
-        { apiKey: token, webappId, nodeInfoList },
+        { apiKey: token, webappId, nodeInfoList, instanceType: normalizeRunningHubInstanceType(instanceType) },
         { headers: bearer(apiKey), signal, timeout: 60_000 },
     );
     assertOk(response.data, apiText("runningHubNoTaskId"));
@@ -6665,6 +6692,8 @@ export async function runRunningHubWorkflow(args: {
     fisherStyleFields?: string;
     /** Work-Fisher pipeline mode (video / character / scene / multiview). */
     fisherMode?: string;
+    /** RunningHub 机器档位：`default`(Standard) / `plus` / `ultra`。 */
+    instanceType?: string;
     media?: "image" | "video";
     referenceDataUrls?: string[];
     /** Audio references (data: URLs) → uploaded, then written into `ref_audios.ref_audio_*`. */
@@ -6743,6 +6772,7 @@ async function runRunningHubWorkflowWithKey(args: {
         /** Work-Fisher 是否提交 `视觉风格：…` 的值：`on` = 提交，其余 = 整行不发（默认）。 */
         fisherStyleFields?: string;
         fisherMode?: string;
+        instanceType?: string;
         media?: "image" | "video";
         referenceDataUrls?: string[];
         referenceAudioDataUrls?: string[];
@@ -6753,6 +6783,7 @@ async function runRunningHubWorkflowWithKey(args: {
     const { origin, workflowId, apiKey, isLastKey } = args;
     const request = args.args;
     const fisherMode = normalizeFisherPipelineMode(request.fisherMode);
+    const instanceType = normalizeRunningHubInstanceType(request.instanceType);
     // SelfLift 双采(简易版) / Qwen+Klein 皮肤肌理: the shared workflowId often returns
     // "您暂时无权限访问该工作流". Prefer the Export (API) JSON pasted into the model script so
     // create can run via `workflow` / comfy/run without opening the author's copy. Every other
@@ -6993,13 +7024,14 @@ async function runRunningHubWorkflowWithKey(args: {
         if (!nodes.length) throw new Error(`RunningHub AI App ${workflowId} 读不到可调字段（apiCallDemo 为空）。请确认应用已发布且当前 API Key 有权访问。`);
         // 未显式传档位时强制 0，避免漏传时沿用作者默认 0.5（韩语源头）。
         const lightLora = request.fisherLoraStrength == null || request.fisherLoraStrength === "" ? "0" : request.fisherLoraStrength;
-        console.info(`[runninghub] ${workflowId}: light ai-app submit via ai-app/run (nodes=${nodes.length}, lora=${lightLora})`);
+        console.info(`[runninghub] ${workflowId}: light ai-app submit via ai-app/run (nodes=${nodes.length}, lora=${lightLora}, instance=${instanceType})`);
         task = await submitWebappTask(
             origin,
             apiKey,
             workflowId,
             buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId, lightLora, request.resolution || ""),
             request.signal,
+            instanceType,
         );
     } else if (audioSources.length && !audioAppliedToGraph && webappNodesForAudio?.length) {
         // Prefer AI App / webapp when the Comfy graph cannot host the user's audio (ACL-denied Export,
@@ -7011,19 +7043,20 @@ async function runRunningHubWorkflowWithKey(args: {
             workflowId,
             buildWebappNodeInfoList(webappNodesForAudio, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId, request.fisherLoraStrength || "0", request.resolution || ""),
             request.signal,
+            instanceType,
         );
     } else try {
         // Aiden / Pastoral MJ / 全能生图王 / Singularity / HD Dynamic / Fisher: submit Export via
         // create+workflow (not comfy/run — RH often returns NOT_FOUND). Prefer browser-direct create
         // for multi-ref full graphs (Pages proxy ERR_CONNECTION_CLOSED).
         if ((isKrea2AidenLoraWorkflow(workflowId) || isKrea2PastoralMjWorkflow(workflowId) || isWorkFisherMossWorkflow(workflowId) || preferDirectSubmit) && repairedGraph) {
-            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, preferDirectSubmit);
+            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, preferDirectSubmit, instanceType);
         } else if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             // SelfLift / Qwen+Klein: shared workflowId often denies create/getJsonApiFormat.
             // Submit the patched API graph through `/task/openapi/comfy/run`.
-            task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal);
+            task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal, instanceType);
         } else if (workflow) {
-            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal);
+            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, false, instanceType);
         } else {
             throw new Error("WORKFLOW_NOT_EXISTS");
         }
@@ -7043,7 +7076,7 @@ async function runRunningHubWorkflowWithKey(args: {
         // `/task/openapi/comfy/run` once — that endpoint does not need the app ACL — before surfacing.
         if (isWorkFisherMossWorkflow(workflowId) && repairedGraph) {
             console.warn(`[runninghub] ${workflowId}: create+workflow failed (${message.slice(0, 160)}), retrying via comfy/run`);
-            task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal).catch((retryError: unknown) => {
+            task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal, instanceType).catch((retryError: unknown) => {
                 throw explainRunningHubError(retryError, workflowId);
             });
         } else if (isKrea2AidenLoraWorkflow(workflowId) || isKrea2PastoralMjWorkflow(workflowId) || preferDirectSubmit) {
@@ -7053,7 +7086,7 @@ async function runRunningHubWorkflowWithKey(args: {
         // this origin, fall back once to create-with-workflow (docs: `workflow` overrides workflowId).
         if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             console.warn(`[runninghub] ${workflowId}: comfy/run failed (${message.slice(0, 160)}), retrying local-export graph via create+workflow`);
-            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal).catch((retryError: unknown) => {
+            task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, false, instanceType).catch((retryError: unknown) => {
                 throw explainRunningHubError(retryError, workflowId);
             });
         } else {
@@ -7070,10 +7103,10 @@ async function runRunningHubWorkflowWithKey(args: {
                 // succeeds, renders something unrelated to them, and the user cannot tell why.
                 if (!fallback.length && referenceCount) throw explainRunningHubError(error, workflowId);
                 console.warn(`[runninghub] ${workflowId}: graph submission failed (${message.slice(0, 160)}), retrying with ${fallback.length} override(s)`);
-                task = await submitWorkflowTask(origin, apiKey, workflowId, fallback, undefined, request.signal).catch(async (retryError: unknown) => {
+                task = await submitWorkflowTask(origin, apiKey, workflowId, fallback, undefined, request.signal, false, instanceType).catch(async (retryError: unknown) => {
                     if (!fallback.length) throw explainRunningHubError(retryError, workflowId);
                     if (referenceCount) console.warn(`[runninghub] ${workflowId}: override retry failed too; last resort drops ALL overrides`);
-                    return submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((plainError: unknown) => {
+                    return submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal, false, instanceType).catch((plainError: unknown) => {
                         throw explainRunningHubError(plainError, workflowId);
                     });
                 });
@@ -7095,9 +7128,10 @@ async function runRunningHubWorkflowWithKey(args: {
                         workflowId,
                         buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId, request.fisherLoraStrength || "0", request.resolution || ""),
                         request.signal,
+                        instanceType,
                     );
                 } else if (!workflow) {
-                    task = await submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal).catch((retryError: unknown) => {
+                    task = await submitWorkflowTask(origin, apiKey, workflowId, [], undefined, request.signal, false, instanceType).catch((retryError: unknown) => {
                         throw explainRunningHubError(retryError, workflowId);
                     });
                 } else {

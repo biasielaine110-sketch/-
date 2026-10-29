@@ -25,6 +25,8 @@ import {
     isMinimaxH3WenxiWorkflowId,
     isMinimaxH3YzjinyuWorkflowId,
     isWorkFisherLightAiAppId,
+    normalizeRunningHubInstanceType,
+    type RunningHubInstanceType,
     normalizeFisherLoraStrength,
     normalizeFisherPipelineMode,
     type FisherPipelineMode,
@@ -63,10 +65,17 @@ const twoPassResolutionOptions = [
     { value: "2k", label: "2K" },
 ];
 
-/** Work-Fisher / 轻量 AI App：单采无放大，高于 720 也会被压回 0.92MP，面板只给真实档位。 */
+/** Work-Fisher / 轻量 AI App：单采无放大，高于约 0.8MP 也会被压回，面板只给真实档位。 */
 const fisherResolutionOptions = [
     { value: "480", label: "480p" },
-    { value: "720", label: "720p" },
+    { value: "720", label: "720p ≈0.8MP" },
+];
+
+/** RunningHub AI App 机器档位（对应提交体 instanceType）。 */
+const rhInstanceOptions: Array<{ value: RunningHubInstanceType; labelKey: string; recommended?: boolean }> = [
+    { value: "default", labelKey: "standard", recommended: true },
+    { value: "plus", labelKey: "plus" },
+    { value: "ultra", labelKey: "ultra" },
 ];
 
 /** U35 官流: lift author 1MP up to ~1080-tier delivery; 900p mid tier for VRAM. */
@@ -223,7 +232,8 @@ type VideoSettingsPanelProps = {
             | "videoAudioMode"
             | "videoFisherMode"
             | "videoFisherLoraStrength"
-            | "videoFisherStyleFields",
+            | "videoFisherStyleFields"
+            | "videoRhInstanceType",
         value: string,
     ) => void;
     theme: CanvasTheme;
@@ -250,6 +260,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const fisherLoraStrength = normalizeFisherLoraStrength(config.videoFisherLoraStrength);
     /** 「提交视觉风格字段」：只有显式 `on` 才算打开（默认 off = 整行不发，见 `H3_SCAFFOLD_STYLE_LABELS`）。 */
     const fisherStyleFieldsOn = String(config.videoFisherStyleFields || "off") === "on";
+    const rhInstanceType = normalizeRunningHubInstanceType(config.videoRhInstanceType);
     const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
     const qualityChoices = useMemo(() => {
@@ -437,6 +448,32 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         </div>
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                             {t("settingsPanels.video.fisherLoraHint")}
+                        </div>
+                    </SettingGroup>
+                ) : null}
+                {fisherRh || fisherLightRh ? (
+                    <SettingGroup title={t("settingsPanels.video.rhInstance")} color={theme.node.muted}>
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.rhInstanceHint")}
+                        </div>
+                        <div className="grid grid-cols-3 gap-2.5">
+                            {rhInstanceOptions.map((item) => (
+                                <OptionPill
+                                    key={item.value}
+                                    selected={rhInstanceType === item.value}
+                                    theme={theme}
+                                    onClick={() => onConfigChange("videoRhInstanceType", item.value)}
+                                >
+                                    <span className="inline-flex items-center gap-1">
+                                        {t(`settingsPanels.video.rhInstances.${item.labelKey}`)}
+                                        {item.recommended ? (
+                                            <span className="rounded px-1 text-[9px] leading-4" style={{ background: theme.node.text, color: theme.node.bg || "#111" }}>
+                                                {t("settingsPanels.video.rhInstanceRecommended")}
+                                            </span>
+                                        ) : null}
+                                    </span>
+                                </OptionPill>
+                            ))}
                         </div>
                     </SettingGroup>
                 ) : null}
@@ -647,7 +684,13 @@ export function videoSettingsSummary(config: AiConfig) {
     if (isAutodlH3ComfyVideoModel(model, resolveModelRequestConfig(config, model).baseUrl)) {
         return `${autodlH3ResolutionLabel(config.vquality, model)} · ${normalizeAutodlH3Duration(config.videoSeconds, model)}s`;
     }
-    return `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
+    const base = `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
+    if (isMinimaxH3FisherWorkflowId(model) || isWorkFisherLightAiAppId(model)) {
+        const instance = normalizeRunningHubInstanceType(config.videoRhInstanceType);
+        const label = instance === "plus" ? "Plus" : instance === "ultra" ? "Ultra" : "Standard";
+        return `${base} · ${label}`;
+    }
+    return base;
 }
 
 export function videoResolutionLabel(value: string) {

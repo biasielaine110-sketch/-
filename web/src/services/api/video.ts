@@ -379,6 +379,10 @@ async function createRunningHubVideoTask(
         // 「提交视觉风格字段」（默认 off）：off 时 `视觉风格：…` 整行不进提示词 —— H3 会把那段中文
         // 当旁白念出来（2026-10-25 第八次报障）。on 时只丢字段名、值照发，给用户做 A/B。
         ...(isMinimaxH3FisherWorkflowId(model) ? { fisherStyleFields: config.videoFisherStyleFields || "off" } : {}),
+        // RunningHub Standard / Plus / Ultra → instanceType default|plus|ultra（轻量 App / Fisher）。
+        ...(isMinimaxH3FisherWorkflowId(model) || isWorkFisherLightAiAppId(model)
+            ? { instanceType: config.videoRhInstanceType || "default" }
+            : {}),
         media: "video",
         referenceDataUrls: refs.filter(Boolean),
         // Timbre / voice reference: uploaded and written into `ref_audios.ref_audio_*` by the

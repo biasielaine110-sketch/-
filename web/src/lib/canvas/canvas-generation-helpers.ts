@@ -411,6 +411,7 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
             node?.metadata?.fisherLoraStrength || config.videoFisherLoraStrength || defaultConfig.videoFisherLoraStrength,
         videoFisherStyleFields:
             node?.metadata?.fisherStyleFields || config.videoFisherStyleFields || defaultConfig.videoFisherStyleFields,
+        videoRhInstanceType: node?.metadata?.rhInstanceType || config.videoRhInstanceType || defaultConfig.videoRhInstanceType,
         mjFlavor: node?.metadata?.mjFlavor || config.mjFlavor || defaultConfig.mjFlavor,
         audioVoice: node?.metadata?.audioVoice || config.audioVoice || defaultConfig.audioVoice,
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
