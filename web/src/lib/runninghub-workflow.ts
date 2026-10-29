@@ -4321,6 +4321,62 @@ function rankWebappImageNodes(nodes: WebappNode[]) {
     return [...nodes].sort((a, b) => slotIndex(a) - slotIndex(b) || String(a.nodeId).localeCompare(String(b.nodeId)));
 }
 
+/** 作者预填示例：韩文、台词标记、或 Fisher 固定口 138 上的残留。 */
+function looksLikeWebappAuthorDemoText(value: string, nodeId: string, keepNodeId: string) {
+    const text = String(value || "");
+    if (!text.trim()) return false;
+    // 主提示词口以外的 138，一律清（作者示例台词固定落点）。
+    if (nodeId === "138" && nodeId !== keepNodeId) return true;
+    // 谚文音节 → 韩语预填
+    if (/[\uAC00-\uD7A3]/.test(text)) return true;
+    if (/<\s*d\s*>/i.test(text)) return true;
+    if (/\(\s*S\d+\s*\)/.test(text)) return true;
+    if (/\bsays\s*[:：]/i.test(text)) return true;
+    if (/(?:^|\n)\s*[^：:\n]{1,12}\s*(?:说|道|问|喊)\s*[：:]/.test(text)) return true;
+    return false;
+}
+
+/**
+ * 轻量 AI App：用户提示词写入后，清掉其它文本口里的作者示例（尤其是韩语），
+ * 并把 Mystic 风格 LoRA 强度归零 —— 韩语/硬字幕经常是这支 LoRA 先验，不是提示词。
+ */
+function scrubWorkFisherLightWebappExtras(
+    nodes: WebappNode[],
+    keepPrompt: WebappNode | null,
+    setField: (node: WebappNode, value: string) => void,
+    workflowId: string,
+) {
+    const keepId = keepPrompt?.nodeId || "";
+    const keepField = keepPrompt?.fieldName || "";
+    let cleared = 0;
+    for (const node of nodes) {
+        if (keepPrompt && node.nodeId === keepId && node.fieldName === keepField) continue;
+        const isText = /STRING|TEXT/i.test(node.fieldType || "") || /^(text|prompt|string|caption|positive|value)$/i.test(node.fieldName);
+        if (!isText) continue;
+        const label = `${node.fieldName} ${node.nodeName || ""} ${node.description || ""}`;
+        if (/negative|负面/i.test(label)) continue;
+        if (!looksLikeWebappAuthorDemoText(node.fieldValue || "", node.nodeId, keepId)) continue;
+        setField(node, "");
+        cleared += 1;
+    }
+    let loraZeroed = 0;
+    for (const node of nodes) {
+        const label = `${node.fieldName} ${node.nodeName || ""} ${node.description || ""}`;
+        const isLoraStrength =
+            node.nodeId === "279" ||
+            /^(strength_model|strength_clip)$/i.test(node.fieldName) ||
+            (/mystic|风格\s*lora|lora\s*强度|lora\s*权重/i.test(label) && /strength|强度|权重|value/i.test(node.fieldName));
+        if (!isLoraStrength) continue;
+        const raw = String(node.fieldValue ?? "").trim();
+        if (raw && !/^\d+(\.\d+)?$/.test(raw) && !/FLOAT|INT|NUMBER/i.test(node.fieldType || "")) continue;
+        setField(node, "0");
+        loraZeroed += 1;
+    }
+    if (cleared || loraZeroed) {
+        console.info(`[runninghub] ${workflowId}: light ai-app scrub clearedTexts=${cleared} loraZeroed=${loraZeroed}`);
+    }
+}
+
 function buildWebappNodeInfoList(
     nodes: WebappNode[],
     prompt: string,
@@ -4337,15 +4393,17 @@ function buildWebappNodeInfoList(
         if (item) item.fieldValue = value;
     };
     const lightApp = isWorkFisherLightAiApp(workflowId);
+    let promptTarget: WebappNode | null = null;
     if (prompt.trim()) {
-        const target = pickWebappPromptNode(nodes);
-        if (target) {
-            setField(target, prompt);
+        promptTarget = pickWebappPromptNode(nodes);
+        if (promptTarget) {
+            setField(promptTarget, prompt);
             if (lightApp) {
-                console.info(`[runninghub] ${workflowId}: light ai-app prompt → node ${target.nodeId}.${target.fieldName} (${target.nodeName || target.description || "text"})`);
+                console.info(`[runninghub] ${workflowId}: light ai-app prompt → node ${promptTarget.nodeId}.${promptTarget.fieldName} (${promptTarget.nodeName || promptTarget.description || "text"})`);
             }
         }
     }
+    if (lightApp) scrubWorkFisherLightWebappExtras(nodes, promptTarget, setField, workflowId);
     const pixels = resolveCanvasPixels(size, media);
     const aspect = canvasAspect(size);
     if (pixels) {
