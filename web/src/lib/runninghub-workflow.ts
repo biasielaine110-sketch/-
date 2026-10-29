@@ -2743,16 +2743,14 @@ const WORKFISHER_LIGHT_MEGAPIXELS_NODE = { nodeId: "115", fieldName: "megapixels
 const WORKFISHER_LIGHT_IMAGE_NODE_IDS = ["137", "159", "139", "160", "161", "146"] as const;
 
 function isWorkFisherLightAiApp(workflowId?: string | null) {
-    const raw = String(workflowId || "")
-        .trim()
-        .toLowerCase();
+    const raw = String(workflowId || "").trim();
     if (!raw) return false;
+    // 纯数字 / 带前缀 / 整段 ai-detail 链接都能命中，避免「画布改了但模型名写法不同 → 没走进轻量适配」。
+    const parsed = parseRunningHubWorkflowId(raw);
+    if (parsed && WORKFISHER_LIGHT_AI_APP_IDS.has(parsed)) return true;
     return raw.split("::").some((segment) => {
-        const id = segment
-            .trim()
-            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
-            .trim();
-        return WORKFISHER_LIGHT_AI_APP_IDS.has(id);
+        const id = parseRunningHubWorkflowId(segment.trim());
+        return Boolean(id && WORKFISHER_LIGHT_AI_APP_IDS.has(id));
     });
 }
 
@@ -4396,14 +4394,24 @@ function applyWorkFisherLightWebappMapping(
     }
 
     const strength = normalizeFisherLoraStrength(loraStrength);
-    const loraNode = findNode(WORKFISHER_LIGHT_LORA_STRENGTH.nodeId, WORKFISHER_LIGHT_LORA_STRENGTH.fieldName);
-    if (loraNode) {
-        setField(loraNode, String(strength));
-    } else {
-        // 兜底：只动 strength_*，绝不改 lora_name
-        for (const node of nodes) {
-            if (!/^(strength_model|strength_clip)$/i.test(node.fieldName)) continue;
+    // 只改 strength_*，绝不动 lora_name（否则会把模型名改成 "0"）。
+    let loraWritten = 0;
+    for (const node of nodes) {
+        if (node.nodeId === WORKFISHER_LIGHT_LORA_STRENGTH.nodeId && /^(strength_model|strength_clip)$/i.test(node.fieldName)) {
             setField(node, String(strength));
+            loraWritten += 1;
+            continue;
+        }
+        if (/^(strength_model|strength_clip)$/i.test(node.fieldName) && /mystic|lora/i.test(`${node.nodeName || ""} ${node.description || ""}`)) {
+            setField(node, String(strength));
+            loraWritten += 1;
+        }
+    }
+    if (!loraWritten) {
+        const loraNode = findNode(WORKFISHER_LIGHT_LORA_STRENGTH.nodeId, WORKFISHER_LIGHT_LORA_STRENGTH.fieldName);
+        if (loraNode) {
+            setField(loraNode, String(strength));
+            loraWritten = 1;
         }
     }
 
@@ -4428,14 +4436,24 @@ function applyWorkFisherLightWebappMapping(
     const imageById = new Map(nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName)).map((node) => [node.nodeId, node]));
     const orderedImages = WORKFISHER_LIGHT_IMAGE_NODE_IDS.map((id) => imageById.get(id)).filter((node): node is WebappNode => Boolean(node));
     const fallbackImages = orderedImages.length ? orderedImages : nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName));
-    imageValues.forEach((value, index) => {
-        const node = fallbackImages[index];
-        if (!node || !value) return;
-        setField(node, value);
-        console.info(`[runninghub] ${workflowId}: light ai-app image[${index}] → ${node.nodeId}.${node.fieldName}`);
+    // 没用到的参考图口必须清掉作者演示图，否则韩剧示例脸/场景会继续带出韩语先验。
+    let clearedImages = 0;
+    fallbackImages.forEach((node, index) => {
+        const value = imageValues[index];
+        if (value) {
+            setField(node, value);
+            console.info(`[runninghub] ${workflowId}: light ai-app image[${index}] → ${node.nodeId}.${node.fieldName}`);
+            return;
+        }
+        if (node.fieldValue && !/^none$/i.test(node.fieldValue.trim())) {
+            setField(node, "None");
+            clearedImages += 1;
+        }
     });
 
-    console.info(`[runninghub] ${workflowId}: light ai-app mapped prompt=${Boolean(promptNode)} lora=${strength} clearedTexts=${cleared} images=${imageValues.filter(Boolean).length}`);
+    console.info(
+        `[runninghub] ${workflowId}: light ai-app mapped prompt=${Boolean(promptNode)} lora=${strength} (fields=${loraWritten}) clearedTexts=${cleared} clearedDemoImages=${clearedImages} images=${imageValues.filter(Boolean).length}`,
+    );
 }
 
 function buildWebappNodeInfoList(
@@ -6909,10 +6927,19 @@ async function runRunningHubWorkflowWithKey(args: {
     // 不做 `<d>` 转写、不剥分镜表骨架、不撤尾巴块，由作者工作流原本的对话输出逻辑处理。
     // 文戏两个 id 走**最小形态**（`h3PromptForWorkflow` 里的 `audioNegation` 分支）：转 `<d>` +
     // 一句音色声明，其余说明文一概不发 —— 用户 2026-10-26 选定。
-    const effectivePrompt = h3PromptForWorkflow(workflowId, request.prompt, {
+    let effectivePrompt = h3PromptForWorkflow(workflowId, request.prompt, {
         audioCount: uploadedAudios.length,
         styleFields: request.fisherStyleFields,
     });
+    // 轻量 App：再剥一层谚文 / `<d>[Korean]…</d>`，防止干净模式转写后仍留下韩语台词块。
+    if (isWorkFisherLightAiApp(workflowId)) {
+        effectivePrompt = effectivePrompt
+            .replace(/<\s*d\s*>\s*\[Korean\][\s\S]*?<\s*\/\s*d\s*>/gi, "")
+            .replace(/\[\s*Korean\s*\]/gi, "[Chinese]")
+            .replace(/[\uAC00-\uD7A3]+/g, "")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+    }
     // 排查「模型说了我没写过的话」时最缺的就是这一行 —— 实际提交给 H3 的正文原样打出来，
     // 用户直接复制给我们就能定位（是不是有多余的 <d>、是不是还有别的字段在招它开口）。
     if (isMinimaxH3FamilyWorkflow(workflowId)) {
@@ -6952,12 +6979,14 @@ async function runRunningHubWorkflowWithKey(args: {
                       return [] as WebappNode[];
                   });
         if (!nodes.length) throw new Error(`RunningHub AI App ${workflowId} 读不到可调字段（apiCallDemo 为空）。请确认应用已发布且当前 API Key 有权访问。`);
-        console.info(`[runninghub] ${workflowId}: light ai-app submit via ai-app/run (nodes=${nodes.length}, lora=${request.fisherLoraStrength || "0"})`);
+        // 未显式传档位时强制 0，避免漏传时沿用作者默认 0.5（韩语源头）。
+        const lightLora = request.fisherLoraStrength == null || request.fisherLoraStrength === "" ? "0" : request.fisherLoraStrength;
+        console.info(`[runninghub] ${workflowId}: light ai-app submit via ai-app/run (nodes=${nodes.length}, lora=${lightLora})`);
         task = await submitWebappTask(
             origin,
             apiKey,
             workflowId,
-            buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId, request.fisherLoraStrength || "0", request.resolution || ""),
+            buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId, lightLora, request.resolution || ""),
             request.signal,
         );
     } else if (audioSources.length && !audioAppliedToGraph && webappNodesForAudio?.length) {
