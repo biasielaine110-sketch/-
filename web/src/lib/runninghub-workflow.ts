@@ -2698,9 +2698,8 @@ function applyMinimaxH3HdDynamicSettings(
 //
 // Shape: MiniMaxH3ReferenceToVideo (136) + 6×LoadImage refs + ResolutionSelector (115) +
 // Float Duration (132) → math (131) + PrimitiveStringMultiline (138) + VHS_VideoCombine.
-// Single-pass — no LatentUpscaler3D. Export bakes ResolutionSelector megapixels ≈ 0.8.
-// Writing Singularity "delivered" budgets (720→0.92 / 1080→2.07) straight onto (115) inflates
-// the SamplerCustomAdvanced latent and triggers RH 【VRAM OOM Alert】.
+// Single-pass — no LatentUpscaler3D. Export bake ~0.8MP；画布 720 应对齐真 720p（0.92MP）。
+// 禁止把 1080/2K 的 delivered 预算（2.07 / 3.69）直接写进 (115)，否则 SamplerCustomAdvanced 易 VRAM OOM。
 // The published RH app advertises 4 pipeline modes (多参生视频 / 角色资产 / 场景资产 / 多视角);
 // this Export is the video graph only. Mode switching:
 //   - plain Export JSON → always「多参生视频」;
@@ -2760,8 +2759,8 @@ export function isWorkFisherLightAiAppId(workflowId?: string | null) {
 }
 /** Export author bake is 10s; longer multi-ref clips OOM SamplerCustomAdvanced on RH. */
 const MINIMAX_H3_FISHER_SECONDS = { min: 2, max: 12 };
-/** Export bake ceiling — selector MP is the sampler latent on this single-pass graph. */
-const MINIMAX_H3_FISHER_MAX_MEGAPIXELS = 0.8;
+/** Single-pass 交付上限：真 720p（0.92MP）。再高（1080→2.07）会撑爆 Sampler latent。 */
+const MINIMAX_H3_FISHER_MAX_MEGAPIXELS = 0.92;
 
 export type FisherPipelineMode = "video" | "character" | "scene" | "multiview";
 
@@ -2975,10 +2974,10 @@ function applyMinimaxH3FisherSettings(
                 Number.isFinite(selector.inputs.megapixels) && selector.inputs.megapixels > 0
                     ? selector.inputs.megapixels
                     : MINIMAX_H3_FISHER_MAX_MEGAPIXELS;
-            const ceiling = Math.min(authored, MINIMAX_H3_FISHER_MAX_MEGAPIXELS);
+            const ceiling = MINIMAX_H3_FISHER_MAX_MEGAPIXELS;
             const requested = singularityDeliveredMegapixels(megapixels);
-            // Canvas 480 can go below bake; 720/900/1080 must not inflate past Export 0.8.
-            selector.inputs.megapixels = requested > 0 ? Math.min(requested, ceiling) : ceiling;
+            // 480 可低于 bake；720 对齐真 0.92MP；更高档一律压回 ceiling（禁止 1080→2.07）。
+            selector.inputs.megapixels = requested > 0 ? Math.min(requested, ceiling) : Math.min(authored, ceiling);
         }
     }
 
@@ -4422,15 +4421,28 @@ function applyWorkFisherLightWebappMapping(
         if (durationNode) setField(durationNode, String(clamped));
     }
 
+    let aspectWritten = "";
     if (aspect) {
         const aspectNode = findNode(WORKFISHER_LIGHT_ASPECT_NODE.nodeId, WORKFISHER_LIGHT_ASPECT_NODE.fieldName);
-        if (aspectNode) setField(aspectNode, resolutionSelectorAspectLabel(aspect));
+        if (aspectNode) {
+            aspectWritten = resolutionSelectorAspectLabel(aspect);
+            setField(aspectNode, aspectWritten);
+        }
     }
-    const mpNode = findNode(WORKFISHER_LIGHT_MEGAPIXELS_NODE.nodeId, WORKFISHER_LIGHT_MEGAPIXELS_NODE.fieldName);
+    // 115.megapixels：画布 vquality（720/480…）→ MP；找不到精确字段时按 nodeId+字段名兜底。
+    const mpNode =
+        findNode(WORKFISHER_LIGHT_MEGAPIXELS_NODE.nodeId, WORKFISHER_LIGHT_MEGAPIXELS_NODE.fieldName) ||
+        nodes.find((node) => node.nodeId === WORKFISHER_LIGHT_MEGAPIXELS_NODE.nodeId && /megapixel/i.test(node.fieldName)) ||
+        null;
+    let mpWritten = "";
     if (mpNode) {
         const requested = singularityDeliveredMegapixels(megapixels);
         const ceiling = MINIMAX_H3_FISHER_MAX_MEGAPIXELS;
-        setField(mpNode, String(requested > 0 ? Math.min(requested, ceiling) : ceiling));
+        // 未传清晰度时也写满 720 档，避免沿用作者更低的演示 bake。
+        mpWritten = String(requested > 0 ? Math.min(requested, ceiling) : ceiling);
+        setField(mpNode, mpWritten);
+    } else {
+        console.warn(`[runninghub] ${workflowId}: light ai-app missing 115.megapixels — resolution not inherited`);
     }
 
     const imageById = new Map(nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName)).map((node) => [node.nodeId, node]));
@@ -4452,7 +4464,7 @@ function applyWorkFisherLightWebappMapping(
     });
 
     console.info(
-        `[runninghub] ${workflowId}: light ai-app mapped prompt=${Boolean(promptNode)} lora=${strength} (fields=${loraWritten}) clearedTexts=${cleared} clearedDemoImages=${clearedImages} images=${imageValues.filter(Boolean).length}`,
+        `[runninghub] ${workflowId}: light ai-app mapped prompt=${Boolean(promptNode)} lora=${strength} (fields=${loraWritten}) aspect=${aspectWritten || "-"} mp=${mpWritten || "-"} (from=${megapixels || "default"}) clearedTexts=${cleared} clearedDemoImages=${clearedImages} images=${imageValues.filter(Boolean).length}`,
     );
 }
 

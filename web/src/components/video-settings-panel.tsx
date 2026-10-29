@@ -63,6 +63,12 @@ const twoPassResolutionOptions = [
     { value: "2k", label: "2K" },
 ];
 
+/** Work-Fisher / 轻量 AI App：单采无放大，高于 720 也会被压回 0.92MP，面板只给真实档位。 */
+const fisherResolutionOptions = [
+    { value: "480", label: "480p" },
+    { value: "720", label: "720p" },
+];
+
 /** U35 官流: lift author 1MP up to ~1080-tier delivery; 900p mid tier for VRAM. */
 const u35ResolutionOptions = [
     { value: "720", label: "720p" },
@@ -248,7 +254,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
     const qualityChoices = useMemo(() => {
         if (nativeComfy && !h3Comfy) return resolutionOptionsForFamily(nativeFamily);
-        if (singularityRh || hdDynamicRh || fisherRh || fisherLightRh || yzjinyuRh || wenxiRh) return twoPassResolutionOptions;
+        if (fisherRh || fisherLightRh) return fisherResolutionOptions;
+        if (singularityRh || hdDynamicRh || yzjinyuRh || wenxiRh) return twoPassResolutionOptions;
         if (relayH3) return relayH3ResolutionOptions;
         return resolutionOptions;
     }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, relayH3]);
@@ -472,7 +479,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             {nativeFamily === "twoPass" ? t("settingsPanels.video.twoPassQualityHint") : t("settingsPanels.video.u35QualityHint")}
                         </div>
                     )}
-                    {fisherRh ? (
+                    {fisherRh || fisherLightRh ? (
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                             {t("settingsPanels.video.fisherQualityHint")}
                         </div>

@@ -102,7 +102,7 @@ export default {
             selfLiftOrientationHint: "SelfLift：点横屏 16:9 或竖屏 9:16 即可切换朝向（勿用「自动」若要强制朝向）。",
             fisherMode: "全流程模式",
             fisherModeHint: "Work-Fisher：当前脚本默认是「多参生视频」。角色/场景/多视角需在模型脚本里用 character / scene / multiview 键挂上对应 Export JSON。",
-            fisherQualityHint: "Work-Fisher 为单采（无 latent 放大）：分辨率按 Export 烘焙约 0.8MP 封顶，选 1080 也不会抬高 latent；时长上限 12s（Export 默认 10s），多参考图时过长易 VRAM OOM。",
+            fisherQualityHint: "Work-Fisher / 轻量 App 为单采（无 latent 放大）：最高真 720p（0.92MP），选更高也会被压回；时长上限 12s，多参考图时过长易 VRAM OOM。",
             cropSubtitlesGroup: "字幕",
             cropSubtitles: "自动去字幕",
             cropSubtitlesOn: "开",
