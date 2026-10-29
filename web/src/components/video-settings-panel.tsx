@@ -24,6 +24,7 @@ import {
     isMinimaxH3WenxiLowWorkflowId,
     isMinimaxH3WenxiWorkflowId,
     isMinimaxH3YzjinyuWorkflowId,
+    isWorkFisherLightAiAppId,
     normalizeFisherLoraStrength,
     normalizeFisherPipelineMode,
     type FisherPipelineMode,
@@ -233,6 +234,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const singularityRh = !h3Comfy && isMinimaxH3SingularityWorkflowId(model);
     const hdDynamicRh = !h3Comfy && isMinimaxH3HdDynamicWorkflowId(model);
     const fisherRh = !h3Comfy && isMinimaxH3FisherWorkflowId(model);
+    /** Work-Fisher 轻量 AI App（211550…）：只露风格 LoRA，不露 Fisher 模式/风格字段全套。 */
+    const fisherLightRh = !h3Comfy && isWorkFisherLightAiAppId(model);
     const yzjinyuRh = !h3Comfy && isMinimaxH3YzjinyuWorkflowId(model);
     const wenxiRh = !h3Comfy && isMinimaxH3WenxiWorkflowId(model);
     /** 只有低配图挂着 `MysticXXX_MMH3-V1`，风格 LoRA 档位只对它显示。 */
@@ -245,10 +248,10 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
     const qualityChoices = useMemo(() => {
         if (nativeComfy && !h3Comfy) return resolutionOptionsForFamily(nativeFamily);
-        if (singularityRh || hdDynamicRh || fisherRh || yzjinyuRh || wenxiRh) return twoPassResolutionOptions;
+        if (singularityRh || hdDynamicRh || fisherRh || fisherLightRh || yzjinyuRh || wenxiRh) return twoPassResolutionOptions;
         if (relayH3) return relayH3ResolutionOptions;
         return resolutionOptions;
-    }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, hdDynamicRh, fisherRh, yzjinyuRh, wenxiRh, relayH3]);
+    }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, relayH3]);
     const fisherModeChoices: Array<{ value: FisherPipelineMode; labelKey: string }> = [
         { value: "video", labelKey: "video" },
         { value: "character", labelKey: "character" },
@@ -406,11 +409,10 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         </div>
                     </SettingGroup>
                 ) : null}
-                {wenxiLoraRh ? (
+                {wenxiLoraRh || fisherLightRh ? (
                     <SettingGroup title={t("settingsPanels.video.fisherLora")} color={theme.node.muted}>
-                        {/* 八月最强文戏（低配）同样挂着 548 `MysticXXX_MMH3-V1`：韩语人声 / 硬字幕 /
-                            自编台词的共同源头（见 `applyMinimaxH3WenxiSettings`）。默认关，
-                            想还原作者那份质感再往上拖。 */}
+                        {/* 八月文戏低配 / Work-Fisher 轻量 AI App：都暴露 `MysticXXX_MMH3-V1`
+                            strength。默认关，要韩剧质感再往上拖。 */}
                         <div className="flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-[11px]" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                             <span>{t("settingsPanels.video.fisherLora")}</span>
                             <div className="flex shrink-0 gap-1.5">
@@ -518,7 +520,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.seconds")} color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {(fisherRh ? fisherSecondOptions : wenxiRh ? wenxiSecondOptions : secondOptions).map((value) => (
+                        {(fisherRh || fisherLightRh ? fisherSecondOptions : wenxiRh ? wenxiSecondOptions : secondOptions).map((value) => (
                             <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                 {value}s
                             </OptionPill>
@@ -526,12 +528,16 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <NumberInput
                             value={seconds}
                             min={1}
-                            max={fisherRh ? 12 : wenxiRh ? 15 : 20}
+                            max={fisherRh || fisherLightRh ? 12 : wenxiRh ? 15 : 20}
                             theme={theme}
                             onChange={(value) =>
                                 onConfigChange(
                                     "videoSeconds",
-                                    fisherRh ? String(Math.min(12, Math.max(2, Number(value) || 2))) : wenxiRh ? String(Math.min(15, Math.max(2, Number(value) || 2))) : value,
+                                    fisherRh || fisherLightRh
+                                        ? String(Math.min(12, Math.max(2, Number(value) || 2)))
+                                        : wenxiRh
+                                          ? String(Math.min(15, Math.max(2, Number(value) || 2)))
+                                          : value,
                                 )
                             }
                         />

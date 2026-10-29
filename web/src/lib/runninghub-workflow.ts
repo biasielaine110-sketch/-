@@ -2724,8 +2724,23 @@ const MINIMAX_H3_FISHER_WORKFLOW_IDS = new Set([
     // 加回来之前先问用户 —— 这是**故意**排除的，不是漏加（`runninghub-fisher-scope-probe` 反向锁着）。
 ]);
 
-/** 轻量 AI App：只靠 apiCallDemo 写提示词/参考图，不进 Fisher / H3 方言层。 */
+/**
+ * 轻量 AI App：只靠 apiCallDemo / ai-app/run，不进 Fisher / H3 方言层。
+ * 2026-10-29 新发布可调字段（已核对页面 nodeInfoList）：
+ *  - 138.value = 主提示词（作者默认仍带 [Korean] 示例，提交时覆盖）
+ *  - 132.value = 时长秒
+ *  - 279.strength_model = MysticXXX 风格 LoRA（默认 0.5 → 韩语源头；画布默认写 0）
+ *  - 115.aspect_ratio / megapixels
+ *  - LoadImage 顺序（apiCallDemo）：137, 159, 139, 160, 161, 146
+ */
 const WORKFISHER_LIGHT_AI_APP_IDS = new Set(["2115507346221920257"]);
+const WORKFISHER_LIGHT_PROMPT_NODE = { nodeId: "138", fieldName: "value" } as const;
+const WORKFISHER_LIGHT_DURATION_NODE = { nodeId: "132", fieldName: "value" } as const;
+const WORKFISHER_LIGHT_LORA_STRENGTH = { nodeId: "279", fieldName: "strength_model" } as const;
+const WORKFISHER_LIGHT_ASPECT_NODE = { nodeId: "115", fieldName: "aspect_ratio" } as const;
+const WORKFISHER_LIGHT_MEGAPIXELS_NODE = { nodeId: "115", fieldName: "megapixels" } as const;
+/** 与 RH 应用页 apiCallDemo 图片口顺序一致（对应 Picture 1…6）。 */
+const WORKFISHER_LIGHT_IMAGE_NODE_IDS = ["137", "159", "139", "160", "161", "146"] as const;
 
 function isWorkFisherLightAiApp(workflowId?: string | null) {
     const raw = String(workflowId || "")
@@ -2739,6 +2754,11 @@ function isWorkFisherLightAiApp(workflowId?: string | null) {
             .trim();
         return WORKFISHER_LIGHT_AI_APP_IDS.has(id);
     });
+}
+
+/** Public gate：Work-Fisher 轻量 AI App（可调风格 LoRA，不吃 Fisher 全套）。 */
+export function isWorkFisherLightAiAppId(workflowId?: string | null) {
+    return isWorkFisherLightAiApp(workflowId);
 }
 /** Export author bake is 10s; longer multi-ref clips OOM SamplerCustomAdvanced on RH. */
 const MINIMAX_H3_FISHER_SECONDS = { min: 2, max: 12 };
@@ -4337,44 +4357,85 @@ function looksLikeWebappAuthorDemoText(value: string, nodeId: string, keepNodeId
 }
 
 /**
- * 轻量 AI App：用户提示词写入后，清掉其它文本口里的作者示例（尤其是韩语），
- * 并把 Mystic 风格 LoRA 强度归零 —— 韩语/硬字幕经常是这支 LoRA 先验，不是提示词。
+ * 轻量 AI App：按已核对的固定 nodeId 写入；清掉其它文本口韩语/示例；
+ * 风格 LoRA 强度默认 0（可用画布档位打开）。
  */
-function scrubWorkFisherLightWebappExtras(
+function applyWorkFisherLightWebappMapping(
     nodes: WebappNode[],
-    keepPrompt: WebappNode | null,
+    prompt: string,
+    imageValues: string[],
+    seconds: string,
+    aspect: string,
+    megapixels: string,
+    loraStrength: string | number,
     setField: (node: WebappNode, value: string) => void,
     workflowId: string,
 ) {
-    const keepId = keepPrompt?.nodeId || "";
-    const keepField = keepPrompt?.fieldName || "";
+    const findNode = (nodeId: string, fieldName: string) => nodes.find((node) => node.nodeId === nodeId && node.fieldName === fieldName) || null;
+
+    const promptNode = findNode(WORKFISHER_LIGHT_PROMPT_NODE.nodeId, WORKFISHER_LIGHT_PROMPT_NODE.fieldName) || pickWebappPromptNode(nodes);
+    if (promptNode && prompt.trim()) {
+        setField(promptNode, prompt);
+        console.info(`[runninghub] ${workflowId}: light ai-app prompt → ${promptNode.nodeId}.${promptNode.fieldName}`);
+    }
+
+    const keepId = promptNode?.nodeId || "";
+    const keepField = promptNode?.fieldName || "";
     let cleared = 0;
     for (const node of nodes) {
-        if (keepPrompt && node.nodeId === keepId && node.fieldName === keepField) continue;
+        if (promptNode && node.nodeId === keepId && node.fieldName === keepField) continue;
         const isText = /STRING|TEXT/i.test(node.fieldType || "") || /^(text|prompt|string|caption|positive|value)$/i.test(node.fieldName);
         if (!isText) continue;
+        // FLOAT/INT 的 value（时长 132、常数 163）不要当文本清掉
+        if (/FLOAT|INT|NUMBER|BOOLEAN/i.test(node.fieldType || "") && !/STRING|TEXT/i.test(node.fieldType || "")) continue;
         const label = `${node.fieldName} ${node.nodeName || ""} ${node.description || ""}`;
         if (/negative|负面/i.test(label)) continue;
         if (!looksLikeWebappAuthorDemoText(node.fieldValue || "", node.nodeId, keepId)) continue;
         setField(node, "");
         cleared += 1;
     }
-    let loraZeroed = 0;
-    for (const node of nodes) {
-        const label = `${node.fieldName} ${node.nodeName || ""} ${node.description || ""}`;
-        const isLoraStrength =
-            node.nodeId === "279" ||
-            /^(strength_model|strength_clip)$/i.test(node.fieldName) ||
-            (/mystic|风格\s*lora|lora\s*强度|lora\s*权重/i.test(label) && /strength|强度|权重|value/i.test(node.fieldName));
-        if (!isLoraStrength) continue;
-        const raw = String(node.fieldValue ?? "").trim();
-        if (raw && !/^\d+(\.\d+)?$/.test(raw) && !/FLOAT|INT|NUMBER/i.test(node.fieldType || "")) continue;
-        setField(node, "0");
-        loraZeroed += 1;
+
+    const strength = normalizeFisherLoraStrength(loraStrength);
+    const loraNode = findNode(WORKFISHER_LIGHT_LORA_STRENGTH.nodeId, WORKFISHER_LIGHT_LORA_STRENGTH.fieldName);
+    if (loraNode) {
+        setField(loraNode, String(strength));
+    } else {
+        // 兜底：只动 strength_*，绝不改 lora_name
+        for (const node of nodes) {
+            if (!/^(strength_model|strength_clip)$/i.test(node.fieldName)) continue;
+            setField(node, String(strength));
+        }
     }
-    if (cleared || loraZeroed) {
-        console.info(`[runninghub] ${workflowId}: light ai-app scrub clearedTexts=${cleared} loraZeroed=${loraZeroed}`);
+
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_FISHER_SECONDS.max, Math.max(MINIMAX_H3_FISHER_SECONDS.min, duration));
+        const durationNode = findNode(WORKFISHER_LIGHT_DURATION_NODE.nodeId, WORKFISHER_LIGHT_DURATION_NODE.fieldName);
+        if (durationNode) setField(durationNode, String(clamped));
     }
+
+    if (aspect) {
+        const aspectNode = findNode(WORKFISHER_LIGHT_ASPECT_NODE.nodeId, WORKFISHER_LIGHT_ASPECT_NODE.fieldName);
+        if (aspectNode) setField(aspectNode, resolutionSelectorAspectLabel(aspect));
+    }
+    const mpNode = findNode(WORKFISHER_LIGHT_MEGAPIXELS_NODE.nodeId, WORKFISHER_LIGHT_MEGAPIXELS_NODE.fieldName);
+    if (mpNode) {
+        const requested = singularityDeliveredMegapixels(megapixels);
+        const ceiling = MINIMAX_H3_FISHER_MAX_MEGAPIXELS;
+        setField(mpNode, String(requested > 0 ? Math.min(requested, ceiling) : ceiling));
+    }
+
+    const imageById = new Map(nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName)).map((node) => [node.nodeId, node]));
+    const orderedImages = WORKFISHER_LIGHT_IMAGE_NODE_IDS.map((id) => imageById.get(id)).filter((node): node is WebappNode => Boolean(node));
+    const fallbackImages = orderedImages.length ? orderedImages : nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName));
+    imageValues.forEach((value, index) => {
+        const node = fallbackImages[index];
+        if (!node || !value) return;
+        setField(node, value);
+        console.info(`[runninghub] ${workflowId}: light ai-app image[${index}] → ${node.nodeId}.${node.fieldName}`);
+    });
+
+    console.info(`[runninghub] ${workflowId}: light ai-app mapped prompt=${Boolean(promptNode)} lora=${strength} clearedTexts=${cleared} images=${imageValues.filter(Boolean).length}`);
 }
 
 function buildWebappNodeInfoList(
@@ -4386,6 +4447,8 @@ function buildWebappNodeInfoList(
     media: "image" | "video" = "image",
     audioValues: string[] = [],
     workflowId = "",
+    loraStrength: string | number = "",
+    megapixels = "",
 ) {
     const list = nodes.map((node) => ({ nodeId: node.nodeId, fieldName: node.fieldName, fieldValue: node.fieldValue }));
     const setField = (node: WebappNode, value: string) => {
@@ -4393,52 +4456,46 @@ function buildWebappNodeInfoList(
         if (item) item.fieldValue = value;
     };
     const lightApp = isWorkFisherLightAiApp(workflowId);
-    let promptTarget: WebappNode | null = null;
-    if (prompt.trim()) {
-        promptTarget = pickWebappPromptNode(nodes);
-        if (promptTarget) {
-            setField(promptTarget, prompt);
-            if (lightApp) {
-                console.info(`[runninghub] ${workflowId}: light ai-app prompt → node ${promptTarget.nodeId}.${promptTarget.fieldName} (${promptTarget.nodeName || promptTarget.description || "text"})`);
-            }
-        }
-    }
-    if (lightApp) scrubWorkFisherLightWebappExtras(nodes, promptTarget, setField, workflowId);
-    const pixels = resolveCanvasPixels(size, media);
     const aspect = canvasAspect(size);
-    if (pixels) {
-        for (const node of nodes) {
-            if (/^width$/i.test(node.fieldName)) setField(node, String(pixels.width));
-            else if (/^height$/i.test(node.fieldName)) setField(node, String(pixels.height));
-            else if (/aspect/i.test(node.fieldName) && aspect && /^\d+\s*:\s*\d+$/.test(node.fieldValue.trim())) setField(node, aspect);
-            else if (/^(resolution|size|image_size)$/i.test(node.fieldName) && /^\d+\s*[x×]\s*\d+$/i.test(node.fieldValue.trim())) setField(node, `${pixels.width}x${pixels.height}`);
+    if (lightApp) {
+        applyWorkFisherLightWebappMapping(nodes, prompt, imageValues, seconds, aspect, megapixels, loraStrength, setField, workflowId);
+    } else {
+        if (prompt.trim()) {
+            const target = pickWebappPromptNode(nodes);
+            if (target) setField(target, prompt);
         }
-    }
-    const tier = media === "video" ? null : canvasResolutionTier(size);
-    if (tier) {
-        for (const node of nodes) {
-            const named = /resolution|megapixel|^res$/i.test(node.fieldName) || /分辨率|清晰度/i.test(`${node.nodeName || ""} ${node.description || ""}`);
-            const nextValue = resolutionTierValue(node.fieldValue, tier, named);
-            if (nextValue) setField(node, nextValue);
-        }
-    }
-    const duration = Number(seconds);
-    if (Number.isFinite(duration) && duration > 0) {
-        for (const node of nodes) {
-            if (/^(duration|seconds|video_length|value)$/i.test(node.fieldName) && (/时长|duration|秒|length/i.test(`${node.nodeName || ""} ${node.description || ""}`) || /^(duration|seconds|video_length)$/i.test(node.fieldName))) {
-                setField(node, String(duration));
+        const pixels = resolveCanvasPixels(size, media);
+        if (pixels) {
+            for (const node of nodes) {
+                if (/^width$/i.test(node.fieldName)) setField(node, String(pixels.width));
+                else if (/^height$/i.test(node.fieldName)) setField(node, String(pixels.height));
+                else if (/aspect/i.test(node.fieldName) && aspect && /^\d+\s*:\s*\d+$/.test(node.fieldValue.trim())) setField(node, aspect);
+                else if (/^(resolution|size|image_size)$/i.test(node.fieldName) && /^\d+\s*[x×]\s*\d+$/i.test(node.fieldValue.trim())) setField(node, `${pixels.width}x${pixels.height}`);
             }
         }
-    }
-    const imageNodes = rankWebappImageNodes(nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName)));
-    imageValues.forEach((value, index) => {
-        const node = imageNodes[index];
-        if (!node || !value) return;
-        setField(node, value);
-        if (lightApp) {
-            console.info(`[runninghub] ${workflowId}: light ai-app image[${index}] → node ${node.nodeId}.${node.fieldName} (${node.nodeName || node.description || "image"})`);
+        const tier = media === "video" ? null : canvasResolutionTier(size);
+        if (tier) {
+            for (const node of nodes) {
+                const named = /resolution|megapixel|^res$/i.test(node.fieldName) || /分辨率|清晰度/i.test(`${node.nodeName || ""} ${node.description || ""}`);
+                const nextValue = resolutionTierValue(node.fieldValue, tier, named);
+                if (nextValue) setField(node, nextValue);
+            }
         }
-    });
+        const duration = Number(seconds);
+        if (Number.isFinite(duration) && duration > 0) {
+            for (const node of nodes) {
+                if (/^(duration|seconds|video_length|value)$/i.test(node.fieldName) && (/时长|duration|秒|length/i.test(`${node.nodeName || ""} ${node.description || ""}`) || /^(duration|seconds|video_length)$/i.test(node.fieldName))) {
+                    setField(node, String(duration));
+                }
+            }
+        }
+        const imageNodes = rankWebappImageNodes(nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName)));
+        imageValues.forEach((value, index) => {
+            const node = imageNodes[index];
+            if (!node || !value) return;
+            setField(node, value);
+        });
+    }
     // AI App audio slots (LoadAudio.audio / fieldType AUDIO / 音色参考). Without this, canvas
     // audio was uploaded then rejected as "no place for audio" even when apiCallDemo exposes slots.
     const audioNodes = nodes.filter(isWebappAudioNode);
@@ -6874,15 +6931,34 @@ async function runRunningHubWorkflowWithKey(args: {
         );
     }
     let task: RunningHubTaskView;
-    // Prefer AI App / webapp when the Comfy graph cannot host the user's audio (ACL-denied Export,
-    // or a graph with no LoadAudio / ref_audios). nodeInfoList can still write AUDIO fields.
-    if (audioSources.length && !audioAppliedToGraph && webappNodesForAudio?.length) {
+    // Work-Fisher 轻量 AI App：固定走 ai-app/run + 已核对的 nodeId 映射（提示词 138 / LoRA 279 /
+    // 参考图顺序）。不要走远端 Comfy 图，否则会丢掉 strength 档位、又踩作者韩语示例。
+    if (isWorkFisherLightAiApp(workflowId)) {
+        const nodes =
+            webappNodesForAudio?.length
+                ? webappNodesForAudio
+                : await fetchWebappNodes(origin, apiKey, workflowId, request.signal).catch((webappError: unknown) => {
+                      if (isAuthMessage(errorText(webappError))) throw webappError;
+                      return [] as WebappNode[];
+                  });
+        if (!nodes.length) throw new Error(`RunningHub AI App ${workflowId} 读不到可调字段（apiCallDemo 为空）。请确认应用已发布且当前 API Key 有权访问。`);
+        console.info(`[runninghub] ${workflowId}: light ai-app submit via ai-app/run (nodes=${nodes.length}, lora=${request.fisherLoraStrength || "0"})`);
+        task = await submitWebappTask(
+            origin,
+            apiKey,
+            workflowId,
+            buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId, request.fisherLoraStrength || "0", request.resolution || ""),
+            request.signal,
+        );
+    } else if (audioSources.length && !audioAppliedToGraph && webappNodesForAudio?.length) {
+        // Prefer AI App / webapp when the Comfy graph cannot host the user's audio (ACL-denied Export,
+        // or a graph with no LoadAudio / ref_audios). nodeInfoList can still write AUDIO fields.
         console.info(`[runninghub] ${workflowId}: graph has no audio surface; submitting via ai-app/run with ${uploadedAudios.length} audio file(s)`);
         task = await submitWebappTask(
             origin,
             apiKey,
             workflowId,
-            buildWebappNodeInfoList(webappNodesForAudio, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId),
+            buildWebappNodeInfoList(webappNodesForAudio, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId, request.fisherLoraStrength || "0", request.resolution || ""),
             request.signal,
         );
     } else try {
@@ -6966,7 +7042,7 @@ async function runRunningHubWorkflowWithKey(args: {
                         origin,
                         apiKey,
                         workflowId,
-                        buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId),
+                        buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId, request.fisherLoraStrength || "0", request.resolution || ""),
                         request.signal,
                     );
                 } else if (!workflow) {

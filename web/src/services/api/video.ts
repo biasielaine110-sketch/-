@@ -20,6 +20,7 @@ import { uploadTemporaryPublicImage } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import {
     isMinimaxH3FisherWorkflowId,
+    isWorkFisherLightAiAppId,
     isMinimaxH3HdDynamicWorkflowId,
     isMinimaxH3SingularityWorkflowId,
     isMinimaxH3WenxiLowWorkflowId,
@@ -359,19 +360,24 @@ async function createRunningHubVideoTask(
         size: config.size,
         seconds: config.videoSeconds,
         // Singularity / HD Dynamic / Fisher / 文武双全 / 八月文戏: canvas vquality → ResolutionSelector megapixels mapping.
-        ...(isMinimaxH3SingularityWorkflowId(model) || isMinimaxH3HdDynamicWorkflowId(model) || isMinimaxH3FisherWorkflowId(model) || isMinimaxH3YzjinyuWorkflowId(model) || isMinimaxH3WenxiWorkflowId(model)
+        ...(isMinimaxH3SingularityWorkflowId(model) ||
+        isMinimaxH3HdDynamicWorkflowId(model) ||
+        isMinimaxH3FisherWorkflowId(model) ||
+        isWorkFisherLightAiAppId(model) ||
+        isMinimaxH3YzjinyuWorkflowId(model) ||
+        isMinimaxH3WenxiWorkflowId(model)
             ? { resolution: config.vquality }
             : {}),
         ...(isMinimaxH3FisherWorkflowId(model) ? { fisherMode: config.videoFisherMode } : {}),
         // 韩语人声 / 硬字幕 / 多余台词的共同源头就是 279 号 `MysticXXX_MMH3-V1` LoRA，
         // 默认 0 = 关（纯官方 H3，中文、不烧字、不自己加台词）。要韩剧质感再从面板拖回去。
-        ...(isMinimaxH3FisherWorkflowId(model) ? { fisherLoraStrength: config.videoFisherLoraStrength || "0" } : {}),
+        // 轻量 AI App `211550…` 同样暴露 279.strength_model，一并传档位。
+        ...(isMinimaxH3FisherWorkflowId(model) || isWorkFisherLightAiAppId(model) || isMinimaxH3WenxiLowWorkflowId(model)
+            ? { fisherLoraStrength: config.videoFisherLoraStrength || "0" }
+            : {}),
         // 「提交视觉风格字段」（默认 off）：off 时 `视觉风格：…` 整行不进提示词 —— H3 会把那段中文
         // 当旁白念出来（2026-10-25 第八次报障）。on 时只丢字段名、值照发，给用户做 A/B。
         ...(isMinimaxH3FisherWorkflowId(model) ? { fisherStyleFields: config.videoFisherStyleFields || "off" } : {}),
-        // 八月文戏（低配 `2114557183900192769` 挂着 `MysticXXX_MMH3-V1`）：同一支风格 LoRA 档位，
-        // 默认 0 = 关。高配图没有这支 LoRA，传进去也不会被用到（适配器按低配 id 才写）。
-        ...(isMinimaxH3WenxiLowWorkflowId(model) ? { fisherLoraStrength: config.videoFisherLoraStrength || "0" } : {}),
         media: "video",
         referenceDataUrls: refs.filter(Boolean),
         // Timbre / voice reference: uploaded and written into `ref_audios.ref_audio_*` by the
