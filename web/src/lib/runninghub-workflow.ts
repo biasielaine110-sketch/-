@@ -2693,8 +2693,7 @@ function applyMinimaxH3HdDynamicSettings(
 }
 
 // 【Work-Fisher】AI短剧制作全流程
-// runninghub.ai 2110621324220567554 / runninghub.cn 2110621014144147458 /
-// runninghub.ai 2115507346221920257（2026-10-29 用户指定：同名 AI App 的新发布 id，吃完整 Fisher 适配）。
+// runninghub.ai 2110621324220567554 / runninghub.cn 2110621014144147458.
 // Export: 【Work-Fisher】AI短剧制作全流程_api.json (multi-ref video graph).
 //
 // Shape: MiniMaxH3ReferenceToVideo (136) + 6×LoadImage refs + ResolutionSelector (115) +
@@ -2707,13 +2706,15 @@ function applyMinimaxH3HdDynamicSettings(
 //   - plain Export JSON → always「多参生视频」;
 //   - optional script bag `{ "video": {...}, "character": {...}, "scene": {...}, "multiview": {...} }`
 //     selects the subgraph for the canvas mode pill.
-// Scoped to these Fisher ids only（独立发布 id `211434…` 仍故意排除，见下）。
+// Scoped to these two ids only.
+//
+// ⚠️ runninghub.ai `2115507346221920257`（同名 AI App 新发布）**不在** Fisher 名单：
+// 用户 2026-10-29 曾要求整套适配，但接入后 ACL/Export 要求导致「直接生成不了」→ 已撤回。
+// 该 id 继续走通用 `ai-app/run`；提示词/参考图口由 `buildWebappNodeInfoList` 按字段名打分写入
+// （见 `pickWebappPromptNode` / `rankWebappImageNodes`），不做 H3 方言改写、不强制贴 Export。
 const MINIMAX_H3_FISHER_WORKFLOW_IDS = new Set([
     "2110621324220567554",
     "2110621014144147458",
-    // 同名「AI短剧制作全流程」又一次发布（/ai-detail/2115507346221920257）。未进名单时会走通用
-    // ai-app/run，提示词只写进第一个文本口 → 画面乱。用户 2026-10-29 要求专门按 Fisher 适配。
-    "2115507346221920257",
     // ⚠️ 2026-10-25（用户要求）：runninghub.ai `2114341115852099586` **不是** Fisher 成员 ——
     // 它确实是同一张图的另一个发布 id，但用户要的是「独立模型，不要把那两个模型的改动加到它身上」。
     // 所以下面这一整套一概**不**作用于它：
@@ -2722,6 +2723,23 @@ const MINIMAX_H3_FISHER_WORKFLOW_IDS = new Set([
     // 它是「对照组」：走公开的通用 RunningHub 管线（模型脚本贴 Export → comfy/run，或远端取图）。
     // 加回来之前先问用户 —— 这是**故意**排除的，不是漏加（`runninghub-fisher-scope-probe` 反向锁着）。
 ]);
+
+/** 轻量 AI App：只靠 apiCallDemo 写提示词/参考图，不进 Fisher / H3 方言层。 */
+const WORKFISHER_LIGHT_AI_APP_IDS = new Set(["2115507346221920257"]);
+
+function isWorkFisherLightAiApp(workflowId?: string | null) {
+    const raw = String(workflowId || "")
+        .trim()
+        .toLowerCase();
+    if (!raw) return false;
+    return raw.split("::").some((segment) => {
+        const id = segment
+            .trim()
+            .replace(/^(rh|runninghub|workflow|u)[:_-]?/i, "")
+            .trim();
+        return WORKFISHER_LIGHT_AI_APP_IDS.has(id);
+    });
+}
 /** Export author bake is 10s; longer multi-ref clips OOM SamplerCustomAdvanced on RH. */
 const MINIMAX_H3_FISHER_SECONDS = { min: 2, max: 12 };
 /** Export bake ceiling — selector MP is the sampler latent on this single-pass graph. */
@@ -4257,6 +4275,52 @@ function webappNodesAcceptAudio(nodes: WebappNode[]) {
     return nodes.some(isWebappAudioNode);
 }
 
+/** 给 apiCallDemo 文本口打分：主提示词抬高，角色名/系统/负面压低。 */
+function webappPromptNodeScore(node: WebappNode) {
+    const label = `${node.fieldName} ${node.nodeName || ""} ${node.description || ""}`;
+    if (/negative|负面/i.test(label)) return -1000;
+    let score = 0;
+    if (/^(text|prompt|value|string|caption|positive)$/i.test(node.fieldName)) score += 8;
+    if (/提示词|prompt|多参|视频描述|镜头描述|正文|台词|对白/i.test(label)) score += 30;
+    if (/PrimitiveStringMultiline|多行/i.test(label)) score += 12;
+    // Work-Fisher Export 主提示词固定落在 138.value
+    if (node.nodeId === "138" && /^(value|text|prompt)$/i.test(node.fieldName)) score += 40;
+    if (/角色名|角色卡|场景名|系统提示|system\s*prompt|lora|风格词|negative/i.test(label) && !/提示词|prompt|多参/i.test(label)) score -= 25;
+    // 很长的预填系统/模板不像用户主提示词口
+    if ((node.fieldValue || "").length > 800) score -= 15;
+    return score;
+}
+
+function pickWebappPromptNode(nodes: WebappNode[]) {
+    const textNodes = nodes.filter((node) => /STRING|TEXT/i.test(node.fieldType || "") || /^(text|prompt|string|caption|positive|value)$/i.test(node.fieldName));
+    if (!textNodes.length) return null;
+    let best = textNodes[0];
+    let bestScore = webappPromptNodeScore(best);
+    for (let index = 1; index < textNodes.length; index += 1) {
+        const node = textNodes[index];
+        const score = webappPromptNodeScore(node);
+        if (score > bestScore) {
+            best = node;
+            bestScore = score;
+        }
+    }
+    return bestScore <= -1000 ? null : best;
+}
+
+/** 参考图口按「图片1 / ref_image_0 / nodeId」排序，避免 demo 列表顺序把图塞错槽。 */
+function rankWebappImageNodes(nodes: WebappNode[]) {
+    const slotIndex = (node: WebappNode) => {
+        const label = `${node.nodeName || ""} ${node.description || ""} ${node.fieldName} ${node.nodeId}`;
+        const named = label.match(/(?:图片|参考图?|image|ref(?:_?image)?|图)[_\s#-]*(\d+)/i);
+        if (named) return Number(named[1]);
+        const refAudioSafe = label.match(/ref_images?\.ref_image_(\d+)/i);
+        if (refAudioSafe) return Number(refAudioSafe[1]);
+        const id = Number(node.nodeId);
+        return Number.isFinite(id) ? id + 10_000 : 99_999;
+    };
+    return [...nodes].sort((a, b) => slotIndex(a) - slotIndex(b) || String(a.nodeId).localeCompare(String(b.nodeId)));
+}
+
 function buildWebappNodeInfoList(
     nodes: WebappNode[],
     prompt: string,
@@ -4265,17 +4329,22 @@ function buildWebappNodeInfoList(
     seconds = "",
     media: "image" | "video" = "image",
     audioValues: string[] = [],
+    workflowId = "",
 ) {
     const list = nodes.map((node) => ({ nodeId: node.nodeId, fieldName: node.fieldName, fieldValue: node.fieldValue }));
     const setField = (node: WebappNode, value: string) => {
         const item = list.find((entry) => entry.nodeId === node.nodeId && entry.fieldName === node.fieldName);
         if (item) item.fieldValue = value;
     };
+    const lightApp = isWorkFisherLightAiApp(workflowId);
     if (prompt.trim()) {
-        const textNodes = nodes.filter((node) => /STRING|TEXT/i.test(node.fieldType || "") || /^(text|prompt|string|caption|positive)$/i.test(node.fieldName));
-        const positive = textNodes.filter((node) => !/negative|负面/i.test(`${node.fieldName} ${node.nodeName || ""} ${node.description || ""}`));
-        const target = positive[0] || textNodes[0];
-        if (target) setField(target, prompt);
+        const target = pickWebappPromptNode(nodes);
+        if (target) {
+            setField(target, prompt);
+            if (lightApp) {
+                console.info(`[runninghub] ${workflowId}: light ai-app prompt → node ${target.nodeId}.${target.fieldName} (${target.nodeName || target.description || "text"})`);
+            }
+        }
     }
     const pixels = resolveCanvasPixels(size, media);
     const aspect = canvasAspect(size);
@@ -4298,14 +4367,19 @@ function buildWebappNodeInfoList(
     const duration = Number(seconds);
     if (Number.isFinite(duration) && duration > 0) {
         for (const node of nodes) {
-            if (/^(duration|seconds|video_length)$/i.test(node.fieldName)) setField(node, String(duration));
+            if (/^(duration|seconds|video_length|value)$/i.test(node.fieldName) && (/时长|duration|秒|length/i.test(`${node.nodeName || ""} ${node.description || ""}`) || /^(duration|seconds|video_length)$/i.test(node.fieldName))) {
+                setField(node, String(duration));
+            }
         }
     }
-    const imageNodes = nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName));
+    const imageNodes = rankWebappImageNodes(nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName)));
     imageValues.forEach((value, index) => {
         const node = imageNodes[index];
         if (!node || !value) return;
         setField(node, value);
+        if (lightApp) {
+            console.info(`[runninghub] ${workflowId}: light ai-app image[${index}] → node ${node.nodeId}.${node.fieldName} (${node.nodeName || node.description || "image"})`);
+        }
     });
     // AI App audio slots (LoadAudio.audio / fieldType AUDIO / 音色参考). Without this, canvas
     // audio was uploaded then rejected as "no place for audio" even when apiCallDemo exposes slots.
@@ -4359,8 +4433,8 @@ export type RunningHubAudioPatch = {
  *  - `MiniMaxH3ReferenceToVideo` **with** authored `ref_audios.ref_audio_*` (AIGC特异点 Singularity
  *    2110419404622643201 / 2110419416746909698): the slots exist but their `LoadAudio` nodes still
  *    hold `"None"`, so the model silently speaks with its own voice. Fill them in place.
- *  - The same class **without** any audio key (Work-Fisher Fisher 名单，含
- *    2110621324220567554 / 2110621014144147458 / 2115507346221920257): the export never authored `ref_audios`, so a filename alone goes
+ *  - The same class **without** any audio key (Work-Fisher Fisher 名单
+ *    2110621324220567554 / 2110621014144147458): the export never authored `ref_audios`, so a filename alone goes
  *    nowhere — plant `LoadAudio` nodes and add the links. `nodeInfoList` cannot create links, which
  *    is why the caller has to ship the graph whenever `planted > 0`.
  *
@@ -6750,7 +6824,7 @@ async function runRunningHubWorkflowWithKey(args: {
             origin,
             apiKey,
             workflowId,
-            buildWebappNodeInfoList(webappNodesForAudio, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios),
+            buildWebappNodeInfoList(webappNodesForAudio, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId),
             request.signal,
         );
     } else try {
@@ -6834,7 +6908,7 @@ async function runRunningHubWorkflowWithKey(args: {
                         origin,
                         apiKey,
                         workflowId,
-                        buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios),
+                        buildWebappNodeInfoList(nodes, effectivePrompt, uploaded, request.size, request.seconds, request.media, uploadedAudios, workflowId),
                         request.signal,
                     );
                 } else if (!workflow) {
