@@ -25,6 +25,7 @@ import {
     isMinimaxH3WenxiWorkflowId,
     isMinimaxH3YzjinyuWorkflowId,
     isWorkFisherLightAiAppId,
+    isMinimaxH3SingularityLightAiAppId,
     normalizeRunningHubInstanceType,
     type RunningHubInstanceType,
     normalizeFisherLoraStrength,
@@ -200,6 +201,8 @@ const secondOptions = [6, 10, 12, 16, 20];
 const fisherSecondOptions = [6, 8, 10, 12];
 /** 【MINIMAX-H3】八月最强文戏：图里写死 `official_2_to_15s`，两端都夹住。 */
 const wenxiSecondOptions = [6, 8, 10, 12, 15];
+/** Singularity 轻量 AI App：时长上限 30s。 */
+const singularitySecondOptions = [6, 10, 15, 20, 30];
 
 const stepOptions = [20, 25, 30, 40, 50];
 
@@ -248,6 +251,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const h3Comfy = isAutodlH3ComfyVideoModel(model, requestConfig.baseUrl);
     const relayH3 = !h3Comfy && isRelayMiniMaxH3Video(requestConfig, model);
     const singularityRh = !h3Comfy && isMinimaxH3SingularityWorkflowId(model);
+    /** Singularity 形轻量 AI App（211575… MiniMax H3生成视频）。 */
+    const singularityLightRh = !h3Comfy && isMinimaxH3SingularityLightAiAppId(model);
     const hdDynamicRh = !h3Comfy && isMinimaxH3HdDynamicWorkflowId(model);
     const fisherRh = !h3Comfy && isMinimaxH3FisherWorkflowId(model);
     /** Work-Fisher 轻量 AI App（211550…）：只露风格 LoRA，不露 Fisher 模式/风格字段全套。 */
@@ -266,10 +271,10 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const qualityChoices = useMemo(() => {
         if (nativeComfy && !h3Comfy) return resolutionOptionsForFamily(nativeFamily);
         if (fisherRh || fisherLightRh) return fisherResolutionOptions;
-        if (singularityRh || hdDynamicRh || yzjinyuRh || wenxiRh) return twoPassResolutionOptions;
+        if (singularityRh || singularityLightRh || hdDynamicRh || yzjinyuRh || wenxiRh) return twoPassResolutionOptions;
         if (relayH3) return relayH3ResolutionOptions;
         return resolutionOptions;
-    }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, relayH3]);
+    }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, relayH3]);
     const fisherModeChoices: Array<{ value: FisherPipelineMode; labelKey: string }> = [
         { value: "video", labelKey: "video" },
         { value: "character", labelKey: "character" },
@@ -451,7 +456,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         </div>
                     </SettingGroup>
                 ) : null}
-                {fisherRh || fisherLightRh ? (
+                {fisherRh || fisherLightRh || singularityLightRh ? (
                     <SettingGroup title={t("settingsPanels.video.rhInstance")} color={theme.node.muted}>
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                             {t("settingsPanels.video.rhInstanceHint")}
@@ -564,7 +569,14 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.video.seconds")} color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {(fisherRh || fisherLightRh ? fisherSecondOptions : wenxiRh ? wenxiSecondOptions : secondOptions).map((value) => (
+                        {(fisherRh || fisherLightRh
+                            ? fisherSecondOptions
+                            : singularityLightRh
+                              ? singularitySecondOptions
+                              : wenxiRh
+                                ? wenxiSecondOptions
+                                : secondOptions
+                        ).map((value) => (
                             <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                 {value}s
                             </OptionPill>
@@ -572,16 +584,18 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <NumberInput
                             value={seconds}
                             min={1}
-                            max={fisherRh || fisherLightRh ? 12 : wenxiRh ? 15 : 20}
+                            max={fisherRh || fisherLightRh ? 12 : singularityLightRh ? 30 : wenxiRh ? 15 : 20}
                             theme={theme}
                             onChange={(value) =>
                                 onConfigChange(
                                     "videoSeconds",
                                     fisherRh || fisherLightRh
                                         ? String(Math.min(12, Math.max(2, Number(value) || 2)))
-                                        : wenxiRh
-                                          ? String(Math.min(15, Math.max(2, Number(value) || 2)))
-                                          : value,
+                                        : singularityLightRh
+                                          ? String(Math.min(30, Math.max(2, Number(value) || 2)))
+                                          : wenxiRh
+                                            ? String(Math.min(15, Math.max(2, Number(value) || 2)))
+                                            : value,
                                 )
                             }
                         />
@@ -685,7 +699,7 @@ export function videoSettingsSummary(config: AiConfig) {
         return `${autodlH3ResolutionLabel(config.vquality, model)} · ${normalizeAutodlH3Duration(config.videoSeconds, model)}s`;
     }
     const base = `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
-    if (isMinimaxH3FisherWorkflowId(model) || isWorkFisherLightAiAppId(model)) {
+    if (isMinimaxH3FisherWorkflowId(model) || isWorkFisherLightAiAppId(model) || isMinimaxH3SingularityLightAiAppId(model)) {
         const instance = normalizeRunningHubInstanceType(config.videoRhInstanceType);
         const label = instance === "plus" ? "Plus" : instance === "ultra" ? "Ultra" : "Standard";
         return `${base} · ${label}`;

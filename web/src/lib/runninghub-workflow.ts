@@ -413,6 +413,22 @@ async function fetchWorkflow(origin: string, apiKey: string, workflowId: string,
 }
 
 type WebappNode = { nodeId: string; fieldName: string; fieldValue: string; fieldType?: string; nodeName?: string; description?: string };
+/** ai-app/run 的 nodeInfoList；FLOAT/INT 必须是 JSON number，否则 ComfyMathExpression 会对 str 调 round 报错。 */
+type WebappNodeInfo = { nodeId: string; fieldName: string; fieldValue: string | number };
+
+function coerceWebappFieldValue(node: Pick<WebappNode, "fieldName" | "fieldType" | "nodeName">, value: string | number): string | number {
+    const raw = value == null ? "" : value;
+    const asText = typeof raw === "number" ? String(raw) : String(raw);
+    const fieldType = String(node.fieldType || "");
+    const wantsNumber =
+        /^(FLOAT|INT|NUMBER|INTEGER|DOUBLE)$/i.test(fieldType) ||
+        /^(megapixels|strength_model|strength_clip|cfg|steps|seed|duration|seconds)$/i.test(node.fieldName) ||
+        (node.fieldName === "value" && /Primitive(Float|Int)|时长|duration/i.test(String(node.nodeName || "")));
+    if (!wantsNumber) return asText;
+    const numeric = typeof raw === "number" ? raw : Number(asText.trim());
+    if (!Number.isFinite(numeric)) return asText;
+    return /INT|INTEGER/i.test(fieldType) || /PrimitiveInt/i.test(String(node.nodeName || "")) ? Math.trunc(numeric) : numeric;
+}
 
 const QWEN_IMAGE_21_WORKFLOW_ID = "2101992508854202370";
 // Second Qwen Image 2.1 (文生图) workflow. Its nodes are numbered differently
@@ -2331,6 +2347,21 @@ const MINIMAX_H3_SINGULARITY_WORKFLOW_IDS = new Set(["2110419404622643201", "211
 const MINIMAX_H3_SINGULARITY_SECONDS = { min: 2, max: 30 };
 const MINIMAX_H3_SINGULARITY_MAX_DELIVERED_MP = 4;
 
+/**
+ * Singularity 形轻量 AI App（只走 apiCallDemo / ai-app/run）。
+ * 2026-10-29：`2115750503413284866` MiniMax H3生成视频 — 核对字段：
+ *  - 263.text 主提示词
+ *  - 259.value 时长秒（FLOAT → ComfyMathExpression；必须提交 number）
+ *  - 252.aspect_ratio
+ *  - LoadImage：51,23,49,199,50,19,200,201,43
+ *  - LoadAudio：48,14,15
+ */
+const MINIMAX_H3_SINGULARITY_LIGHT_AI_APP_IDS = new Set(["2115750503413284866"]);
+const SINGULARITY_LIGHT_PROMPT_NODE = { nodeId: "263", fieldName: "text" } as const;
+const SINGULARITY_LIGHT_DURATION_NODE = { nodeId: "259", fieldName: "value" } as const;
+const SINGULARITY_LIGHT_ASPECT_NODE = { nodeId: "252", fieldName: "aspect_ratio" } as const;
+const SINGULARITY_LIGHT_IMAGE_NODE_IDS = ["51", "23", "49", "199", "50", "19", "200", "201", "43"] as const;
+
 function isMinimaxH3SingularityWorkflow(workflowId?: string | null) {
     const raw = String(workflowId || "")
         .trim()
@@ -2345,9 +2376,25 @@ function isMinimaxH3SingularityWorkflow(workflowId?: string | null) {
     });
 }
 
+function isMinimaxH3SingularityLightAiApp(workflowId?: string | null) {
+    const raw = String(workflowId || "").trim();
+    if (!raw) return false;
+    const parsed = parseRunningHubWorkflowId(raw);
+    if (parsed && MINIMAX_H3_SINGULARITY_LIGHT_AI_APP_IDS.has(parsed)) return true;
+    return raw.split("::").some((segment) => {
+        const id = parseRunningHubWorkflowId(segment.trim());
+        return Boolean(id && MINIMAX_H3_SINGULARITY_LIGHT_AI_APP_IDS.has(id));
+    });
+}
+
 /** Public gate for the Singularity 双采放大 clip graph on RunningHub. */
 export function isMinimaxH3SingularityWorkflowId(workflowId?: string | null) {
     return isMinimaxH3SingularityWorkflow(workflowId);
+}
+
+/** Public gate：Singularity 形轻量 AI App（211575… MiniMax H3生成视频）。 */
+export function isMinimaxH3SingularityLightAiAppId(workflowId?: string | null) {
+    return isMinimaxH3SingularityLightAiApp(workflowId);
 }
 
 /** Canvas quality / megapixels string → delivered MP budget for Singularity draft math. */
@@ -4371,6 +4418,57 @@ function looksLikeWebappAuthorDemoText(value: string, nodeId: string, keepNodeId
  * 轻量 AI App：按已核对的固定 nodeId 写入；清掉其它文本口韩语/示例；
  * 风格 LoRA 强度默认 0（可用画布档位打开）。
  */
+function applySingularityLightWebappMapping(
+    nodes: WebappNode[],
+    prompt: string,
+    imageValues: string[],
+    seconds: string,
+    aspect: string,
+    setField: (node: WebappNode, value: string | number) => void,
+    workflowId: string,
+) {
+    const findNode = (nodeId: string, fieldName: string) => nodes.find((node) => node.nodeId === nodeId && node.fieldName === fieldName) || null;
+    const promptNode = findNode(SINGULARITY_LIGHT_PROMPT_NODE.nodeId, SINGULARITY_LIGHT_PROMPT_NODE.fieldName) || pickWebappPromptNode(nodes);
+    if (promptNode && prompt.trim()) {
+        setField(promptNode, prompt);
+        console.info(`[runninghub] ${workflowId}: singularity-light prompt → ${promptNode.nodeId}.${promptNode.fieldName}`);
+    }
+
+    const duration = Number(seconds);
+    if (Number.isFinite(duration) && duration > 0) {
+        const clamped = Math.min(MINIMAX_H3_SINGULARITY_SECONDS.max, Math.max(MINIMAX_H3_SINGULARITY_SECONDS.min, duration));
+        const durationNode = findNode(SINGULARITY_LIGHT_DURATION_NODE.nodeId, SINGULARITY_LIGHT_DURATION_NODE.fieldName);
+        // 必须写 number：259 → ComfyMathExpression round(a*24)，字符串会炸。
+        if (durationNode) setField(durationNode, clamped);
+    }
+
+    if (aspect) {
+        const aspectNode = findNode(SINGULARITY_LIGHT_ASPECT_NODE.nodeId, SINGULARITY_LIGHT_ASPECT_NODE.fieldName);
+        if (aspectNode) setField(aspectNode, resolutionSelectorAspectLabel(aspect));
+    }
+
+    const imageById = new Map(nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName)).map((node) => [node.nodeId, node]));
+    const orderedImages = SINGULARITY_LIGHT_IMAGE_NODE_IDS.map((id) => imageById.get(id)).filter((node): node is WebappNode => Boolean(node));
+    const fallbackImages = orderedImages.length ? orderedImages : nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName));
+    let clearedImages = 0;
+    fallbackImages.forEach((node, index) => {
+        const value = imageValues[index];
+        if (value) {
+            setField(node, value);
+            console.info(`[runninghub] ${workflowId}: singularity-light image[${index}] → ${node.nodeId}.${node.fieldName}`);
+            return;
+        }
+        if (node.fieldValue && !/^none$/i.test(node.fieldValue.trim())) {
+            setField(node, "None");
+            clearedImages += 1;
+        }
+    });
+
+    console.info(
+        `[runninghub] ${workflowId}: singularity-light mapped prompt=${Boolean(promptNode)} duration=${Number.isFinite(duration) && duration > 0 ? duration : "-"} aspect=${aspect || "-"} clearedDemoImages=${clearedImages} images=${imageValues.filter(Boolean).length}`,
+    );
+}
+
 function applyWorkFisherLightWebappMapping(
     nodes: WebappNode[],
     prompt: string,
@@ -4379,7 +4477,7 @@ function applyWorkFisherLightWebappMapping(
     aspect: string,
     megapixels: string,
     loraStrength: string | number,
-    setField: (node: WebappNode, value: string) => void,
+    setField: (node: WebappNode, value: string | number) => void,
     workflowId: string,
 ) {
     const findNode = (nodeId: string, fieldName: string) => nodes.find((node) => node.nodeId === nodeId && node.fieldName === fieldName) || null;
@@ -4432,7 +4530,8 @@ function applyWorkFisherLightWebappMapping(
     if (Number.isFinite(duration) && duration > 0) {
         const clamped = Math.min(MINIMAX_H3_FISHER_SECONDS.max, Math.max(MINIMAX_H3_FISHER_SECONDS.min, duration));
         const durationNode = findNode(WORKFISHER_LIGHT_DURATION_NODE.nodeId, WORKFISHER_LIGHT_DURATION_NODE.fieldName);
-        if (durationNode) setField(durationNode, String(clamped));
+        // FLOAT → 必须 number，否则 131 ComfyMathExpression round 会炸。
+        if (durationNode) setField(durationNode, clamped);
     }
 
     let aspectWritten = "";
@@ -4448,12 +4547,12 @@ function applyWorkFisherLightWebappMapping(
         findNode(WORKFISHER_LIGHT_MEGAPIXELS_NODE.nodeId, WORKFISHER_LIGHT_MEGAPIXELS_NODE.fieldName) ||
         nodes.find((node) => node.nodeId === WORKFISHER_LIGHT_MEGAPIXELS_NODE.nodeId && /megapixel/i.test(node.fieldName)) ||
         null;
-    let mpWritten = "";
+    let mpWritten: string | number = "";
     if (mpNode) {
         const requested = singularityDeliveredMegapixels(megapixels);
         const ceiling = MINIMAX_H3_FISHER_MAX_MEGAPIXELS;
-        // 未传清晰度时也写满 720 档，避免沿用作者更低的演示 bake。
-        mpWritten = String(requested > 0 ? Math.min(requested, ceiling) : ceiling);
+        // 未传清晰度时也写满默认档，避免沿用作者更低的演示 bake；必须 number。
+        mpWritten = requested > 0 ? Math.min(requested, ceiling) : ceiling;
         setField(mpNode, mpWritten);
     } else {
         console.warn(`[runninghub] ${workflowId}: light ai-app missing 115.megapixels — resolution not inherited`);
@@ -4482,6 +4581,14 @@ function applyWorkFisherLightWebappMapping(
     );
 }
 
+function isWebappDurationNode(node: WebappNode) {
+    if (/^(duration|seconds|video_length)$/i.test(node.fieldName)) return true;
+    if (node.nodeId === "259" || node.nodeId === "132") return /^value$/i.test(node.fieldName);
+    if (!/^value$/i.test(node.fieldName)) return false;
+    const label = `${node.nodeName || ""} ${node.description || ""}`;
+    return /PrimitiveFloat|时长|duration|秒|length/i.test(label) && /FLOAT|INT|NUMBER/i.test(node.fieldType || "");
+}
+
 function buildWebappNodeInfoList(
     nodes: WebappNode[],
     prompt: string,
@@ -4493,16 +4600,24 @@ function buildWebappNodeInfoList(
     workflowId = "",
     loraStrength: string | number = "",
     megapixels = "",
-) {
-    const list = nodes.map((node) => ({ nodeId: node.nodeId, fieldName: node.fieldName, fieldValue: node.fieldValue }));
-    const setField = (node: WebappNode, value: string) => {
+): WebappNodeInfo[] {
+    // 一律先按 fieldType 把 FLOAT/INT 收成 JSON number，避免整表回传字符串时长触发 ComfyMathExpression。
+    const list: WebappNodeInfo[] = nodes.map((node) => ({
+        nodeId: node.nodeId,
+        fieldName: node.fieldName,
+        fieldValue: coerceWebappFieldValue(node, node.fieldValue),
+    }));
+    const setField = (node: WebappNode, value: string | number) => {
         const item = list.find((entry) => entry.nodeId === node.nodeId && entry.fieldName === node.fieldName);
-        if (item) item.fieldValue = value;
+        if (item) item.fieldValue = coerceWebappFieldValue(node, value);
     };
     const lightApp = isWorkFisherLightAiApp(workflowId);
+    const singularityLight = isMinimaxH3SingularityLightAiApp(workflowId);
     const aspect = canvasAspect(size);
     if (lightApp) {
         applyWorkFisherLightWebappMapping(nodes, prompt, imageValues, seconds, aspect, megapixels, loraStrength, setField, workflowId);
+    } else if (singularityLight) {
+        applySingularityLightWebappMapping(nodes, prompt, imageValues, seconds, aspect, setField, workflowId);
     } else {
         if (prompt.trim()) {
             const target = pickWebappPromptNode(nodes);
@@ -4511,8 +4626,8 @@ function buildWebappNodeInfoList(
         const pixels = resolveCanvasPixels(size, media);
         if (pixels) {
             for (const node of nodes) {
-                if (/^width$/i.test(node.fieldName)) setField(node, String(pixels.width));
-                else if (/^height$/i.test(node.fieldName)) setField(node, String(pixels.height));
+                if (/^width$/i.test(node.fieldName)) setField(node, pixels.width);
+                else if (/^height$/i.test(node.fieldName)) setField(node, pixels.height);
                 else if (/aspect/i.test(node.fieldName) && aspect && /^\d+\s*:\s*\d+$/.test(node.fieldValue.trim())) setField(node, aspect);
                 else if (/^(resolution|size|image_size)$/i.test(node.fieldName) && /^\d+\s*[x×]\s*\d+$/i.test(node.fieldValue.trim())) setField(node, `${pixels.width}x${pixels.height}`);
             }
@@ -4528,9 +4643,7 @@ function buildWebappNodeInfoList(
         const duration = Number(seconds);
         if (Number.isFinite(duration) && duration > 0) {
             for (const node of nodes) {
-                if (/^(duration|seconds|video_length|value)$/i.test(node.fieldName) && (/时长|duration|秒|length/i.test(`${node.nodeName || ""} ${node.description || ""}`) || /^(duration|seconds|video_length)$/i.test(node.fieldName))) {
-                    setField(node, String(duration));
-                }
+                if (isWebappDurationNode(node)) setField(node, duration);
             }
         }
         const imageNodes = rankWebappImageNodes(nodes.filter((node) => /IMAGE/i.test(node.fieldType || "") || /^image$/i.test(node.fieldName)));
@@ -5600,6 +5713,8 @@ function isMinimaxH3FamilyWorkflow(workflowId?: string | null) {
         // 轻量 AI App 211550…：图仍走 ai-app/run，但提示词必须吃 H3 干净模式 —— 否则分镜表
         // `- **对白** / 画面 / 强制声明` 原样提交会被当成中文台词念出来（用户 2026-10-29）。
         isWorkFisherLightAiApp(workflowId) ||
+        // Singularity 形轻量 App 211575…（MiniMax H3生成视频）同理。
+        isMinimaxH3SingularityLightAiApp(workflowId) ||
         isMinimaxH3YzjinyuWorkflow(workflowId) ||
         // 【MINIMAX-H3】八月最强文戏 pair：作者示例提示词本身就是 `<Subject 1> (S1) says:` +
         // `<d>[Chinese]…</d>` 写法 —— 跟方言层吐出来的口径完全一致，所以它们进这张名单（为了
@@ -5640,7 +5755,7 @@ export function h3PromptForWorkflow(
 ): string {
     if (!isMinimaxH3FamilyWorkflow(workflowId)) return prompt;
     const fisher = isMinimaxH3FisherWorkflow(workflowId);
-    const light = isWorkFisherLightAiApp(workflowId);
+    const light = isWorkFisherLightAiApp(workflowId) || isMinimaxH3SingularityLightAiApp(workflowId);
     return adaptMinimaxH3ReferencePrompt(prompt, {
         audioCount: options?.audioCount,
         // 静音镜连「只要环境音效」那句模板说明也不给 —— Fisher + 轻量 AI App（文戏没有静音镜分流）。
@@ -5658,7 +5773,7 @@ export function h3PromptForWorkflow(
 /** 日志用：这一族走哪一档口径。 */
 export function h3PromptMode(workflowId?: string | null) {
     if (!isMinimaxH3FamilyWorkflow(workflowId)) return "verbatim";
-    if (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId)) return "fisher";
+    if (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId) || isMinimaxH3SingularityLightAiApp(workflowId)) return "fisher";
     if (isMinimaxH3WenxiWorkflow(workflowId)) return "minimal";
     return "plain";
 }
@@ -6975,7 +7090,7 @@ async function runRunningHubWorkflowWithKey(args: {
         styleFields: request.fisherStyleFields,
     });
     // 轻量 App：再剥一层谚文 / `<d>[Korean]…</d>`，防止干净模式转写后仍留下韩语台词块。
-    if (isWorkFisherLightAiApp(workflowId)) {
+    if (isWorkFisherLightAiApp(workflowId) || isMinimaxH3SingularityLightAiApp(workflowId)) {
         effectivePrompt = effectivePrompt
             .replace(/<\s*d\s*>\s*\[Korean\][\s\S]*?<\s*\/\s*d\s*>/gi, "")
             .replace(/\[\s*Korean\s*\]/gi, "[Chinese]")
@@ -6987,7 +7102,8 @@ async function runRunningHubWorkflowWithKey(args: {
     // 用户直接复制给我们就能定位（是不是有多余的 <d>、是不是还有别的字段在招它开口）。
     if (isMinimaxH3FamilyWorkflow(workflowId)) {
         const styleFieldsOn =
-            (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId)) && String(request.fisherStyleFields || "") === "on";
+            (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId) || isMinimaxH3SingularityLightAiApp(workflowId)) &&
+            String(request.fisherStyleFields || "") === "on";
         console.info(`[runninghub] h3 prompt (${workflowId}) mode=${h3PromptMode(workflowId)} audio=${uploadedAudios.length} styleFields=${styleFieldsOn ? "on" : "off"}:\n${effectivePrompt}`);
     }
     const patch: RunningHubWorkflowPatch = prepared
@@ -7011,9 +7127,9 @@ async function runRunningHubWorkflowWithKey(args: {
         );
     }
     let task: RunningHubTaskView;
-    // Work-Fisher 轻量 AI App：固定走 ai-app/run + 已核对的 nodeId 映射（提示词 138 / LoRA 279 /
-    // 参考图顺序）。不要走远端 Comfy 图，否则会丢掉 strength 档位、又踩作者韩语示例。
-    if (isWorkFisherLightAiApp(workflowId)) {
+    // Work-Fisher / Singularity 轻量 AI App：固定走 ai-app/run + 已核对的 nodeId 映射。
+    // 不要走远端 Comfy 图（ACL / 错字段 / FLOAT 被写成字符串触发 ComfyMathExpression）。
+    if (isWorkFisherLightAiApp(workflowId) || isMinimaxH3SingularityLightAiApp(workflowId)) {
         const nodes =
             webappNodesForAudio?.length
                 ? webappNodesForAudio
@@ -7024,7 +7140,8 @@ async function runRunningHubWorkflowWithKey(args: {
         if (!nodes.length) throw new Error(`RunningHub AI App ${workflowId} 读不到可调字段（apiCallDemo 为空）。请确认应用已发布且当前 API Key 有权访问。`);
         // 未显式传档位时强制 0，避免漏传时沿用作者默认 0.5（韩语源头）。
         const lightLora = request.fisherLoraStrength == null || request.fisherLoraStrength === "" ? "0" : request.fisherLoraStrength;
-        console.info(`[runninghub] ${workflowId}: light ai-app submit via ai-app/run (nodes=${nodes.length}, lora=${lightLora}, instance=${instanceType})`);
+        const lightKind = isMinimaxH3SingularityLightAiApp(workflowId) ? "singularity-light" : "light";
+        console.info(`[runninghub] ${workflowId}: ${lightKind} ai-app submit via ai-app/run (nodes=${nodes.length}, lora=${lightLora}, instance=${instanceType})`);
         task = await submitWebappTask(
             origin,
             apiKey,
