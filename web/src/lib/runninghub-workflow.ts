@@ -2693,7 +2693,8 @@ function applyMinimaxH3HdDynamicSettings(
 }
 
 // 【Work-Fisher】AI短剧制作全流程
-// runninghub.ai 2110621324220567554 / runninghub.cn 2110621014144147458.
+// runninghub.ai 2110621324220567554 / runninghub.cn 2110621014144147458 /
+// runninghub.ai 2115507346221920257（2026-10-29 用户指定：同名 AI App 的新发布 id，吃完整 Fisher 适配）。
 // Export: 【Work-Fisher】AI短剧制作全流程_api.json (multi-ref video graph).
 //
 // Shape: MiniMaxH3ReferenceToVideo (136) + 6×LoadImage refs + ResolutionSelector (115) +
@@ -2706,10 +2707,13 @@ function applyMinimaxH3HdDynamicSettings(
 //   - plain Export JSON → always「多参生视频」;
 //   - optional script bag `{ "video": {...}, "character": {...}, "scene": {...}, "multiview": {...} }`
 //     selects the subgraph for the canvas mode pill.
-// Scoped to these two ids only.
+// Scoped to these Fisher ids only（独立发布 id `211434…` 仍故意排除，见下）。
 const MINIMAX_H3_FISHER_WORKFLOW_IDS = new Set([
     "2110621324220567554",
     "2110621014144147458",
+    // 同名「AI短剧制作全流程」又一次发布（/ai-detail/2115507346221920257）。未进名单时会走通用
+    // ai-app/run，提示词只写进第一个文本口 → 画面乱。用户 2026-10-29 要求专门按 Fisher 适配。
+    "2115507346221920257",
     // ⚠️ 2026-10-25（用户要求）：runninghub.ai `2114341115852099586` **不是** Fisher 成员 ——
     // 它确实是同一张图的另一个发布 id，但用户要的是「独立模型，不要把那两个模型的改动加到它身上」。
     // 所以下面这一整套一概**不**作用于它：
@@ -4355,8 +4359,8 @@ export type RunningHubAudioPatch = {
  *  - `MiniMaxH3ReferenceToVideo` **with** authored `ref_audios.ref_audio_*` (AIGC特异点 Singularity
  *    2110419404622643201 / 2110419416746909698): the slots exist but their `LoadAudio` nodes still
  *    hold `"None"`, so the model silently speaks with its own voice. Fill them in place.
- *  - The same class **without** any audio key (Work-Fisher 2110621324220567554 /
- *    2110621014144147458): the export never authored `ref_audios`, so a filename alone goes
+ *  - The same class **without** any audio key (Work-Fisher Fisher 名单，含
+ *    2110621324220567554 / 2110621014144147458 / 2115507346221920257): the export never authored `ref_audios`, so a filename alone goes
  *    nowhere — plant `LoadAudio` nodes and add the links. `nodeInfoList` cannot create links, which
  *    is why the caller has to ship the graph whenever `planted > 0`.
  *
@@ -4588,7 +4592,7 @@ function stripDialogueInvitationClause(text: string) {
  *  - `对白：` / `台词：` → 值是 `无` 就整行去掉，有内容就降级成散文留下（它没被转成 `<d>`，说明本来就不是台词）；
  *  - 我们的契约行（`【静场】`/`【口型约定】`/`【台词锁定】`）、`Xxx (S1) says:`、`<d>…</d>`、`[Shot N]` 一律不动。
  *
- * ⚠️ 只给 Fisher 两个 id（`audioNegation`）跑：别的族吃的是自然语言，剥掉标签反而丢信息。
+ * ⚠️ 只给 Fisher 名单（`audioNegation`）跑：别的族吃的是自然语言，剥掉标签反而丢信息。
  */
 const H3_SCAFFOLD_ALWAYS_DROP = new Set(["时长", "镜头时长", "镜头编号", "转场建议", "转场", "字幕", "备注"]);
 /**
@@ -4672,7 +4676,7 @@ function stripH3Scaffolding(text: string, options?: { keepStyleFields?: boolean 
             const value = labelled[2].trim();
             if (H3_SCAFFOLD_ALWAYS_DROP.has(label)) continue;
             // 风格类：**连值一起丢**（只有 Fisher 走这里，见 `H3_SCAFFOLD_STYLE_LABELS` 的注释）。
-            // `keepStyleFields` = 视频设置面板上的「提交视觉风格字段」开关（Fisher 三个 id，默认关）。
+            // `keepStyleFields` = 视频设置面板上的「提交视觉风格字段」开关（Fisher 名单，默认关）。
             // 打开后不丢整行，而是落到下面那条兜底「只留值」—— 字段名照样不发音，风格文字能进提示词。
             if (!options?.keepStyleFields && H3_SCAFFOLD_STYLE_LABELS.has(label)) continue;
             // 我们自己的「参考图片编号：图片1、图片2。请按这些编号理解提示词中的图片引用。」也是说明文，
@@ -4709,7 +4713,7 @@ function stripH3Scaffolding(text: string, options?: { keepStyleFields?: boolean 
 }
 
 /**
- * 干净模式（Fisher 两个 id + 独立模型）连**我们自动追加的那块尾巴**也一起拿掉。
+ * 干净模式（Fisher 名单；独立模型 `211434…` 已移出方言层）连**我们自动追加的那块尾巴**也一起拿掉。
  *
  * 第四套会给每条 `video_motion_prompt` 末尾补一块固定尾巴（2026-10-26 起是四行
  * `【禁止项】` / `【强制声明】`；更早是单行 `不要出现字幕和文字，不要音乐，只要对白和环境音效。`）。
@@ -4876,7 +4880,7 @@ function h3PerShotSoundscape(text: string): string {
  *
  * ⚠️ **两级作用域**（2026-10-25 用户明确要求「改动都只针对这两个模型」）：
  *  - **槽位本身**给 H3 全族（`overall_soundscape` 是官方格式，填上永远比空着对）；
- *  - **两句否定式**（`No dialogue, no voices.` / `non_diegetic_music: N/A`）**只给 Fisher 两个 id**
+ *  - **两句否定式**（`No dialogue, no voices.` / `non_diegetic_music: N/A`）**只给 Fisher 名单**
  *    （`negate` = `isMinimaxH3FisherWorkflow`）。原因：别的族提示词里的台词若没被转成 `<d>`，
  *    加这句会把该念的话也否掉；`non_diegetic_music: N/A` 还会压掉本来要 BGM 的族。
  *    所以**别把 `dropSoundNote` 兼作这个判据** —— 那是「撤掉模板声音说明」，两件事。
@@ -5106,10 +5110,10 @@ export function adaptMinimaxH3ReferencePrompt(
     // 先垫一句纯画面描述（不加任何「台词」相关的说明）。
     const text = String(prompt || "").trim() ? String(prompt) : H3_SILENT_FALLBACK_PROMPT;
     const audioCount = Math.max(0, Math.min(3, Math.round(Number(options?.audioCount) || 0)));
-    /** Fisher 两个 id：这一镜没有 `<d>` 台词时，连我们自动追加的那句声音说明也不给（见 `stripH3SoundNote`）。 */
+    /** Fisher 名单：这一镜没有 `<d>` 台词时，连我们自动追加的那句声音说明也不给（见 `stripH3SoundNote`）。 */
     const dropSoundNote = Boolean(options?.dropSoundNote);
     /**
-     * **只给 Fisher 两个 id** 的一句否定式（`No dialogue, no voices.` / `non_diegetic_music: N/A`）。
+     * **只给 Fisher 名单** 的一句否定式（`No dialogue, no voices.` / `non_diegetic_music: N/A`）。
      * 和 `dropSoundNote` 是两件事，故意分开传 —— 见 `withH3AudioStatement` 的注释。
      */
     const audioNegation = Boolean(options?.audioNegation);
@@ -5121,7 +5125,7 @@ export function adaptMinimaxH3ReferencePrompt(
     const mixedShots = dropSoundNote && declaresH3SilentDialogue(text);
 
     /**
-     * **干净模式**（= Fisher 两个 id）：只发「正文 + `<d>`」，**我们写的说明一句都不加**。
+     * **干净模式**（= Fisher 名单）：只发「正文 + `<d>`」，**我们写的说明一句都不加**。
      *
      * 2026-10-25 第七次报障，用户两条原话：
      *  ①「这次更离谱，怎么把你配置的规范都读出来了，然后我写的对话提示词一个字都没念」；
@@ -5148,7 +5152,7 @@ export function adaptMinimaxH3ReferencePrompt(
     const voiceAudio = audioCount;
 
     /**
-     * **提交风格字段**（Fisher 三个 id 的视频设置开关，默认关 = `false`）。
+     * **提交风格字段**（Fisher 名单的视频设置开关，默认关 = `false`）。
      *
      * `false`：`视觉风格 / 画面风格 / 影像风格 / 风格提示词 / 风格` 整行丢弃（标签和值都不发，
      * 见 `H3_SCAFFOLD_STYLE_LABELS`）—— 这是 2026-10-25 第八次报障的修法。
@@ -5318,7 +5322,7 @@ export function adaptMinimaxH3ReferencePrompt(
 }
 
 /**
- * Work-Fisher（两个 id）这一镜**有没有要念的台词**。
+ * Work-Fisher（Fisher 名单内各 id）这一镜**有没有要念的台词**。
  *
  * 没有 → 提交时**参考音频整条不提交**（`- **对白**：无` 那一行原样保留，不动用户的脚本）。
  * 用户 2026-10-25：「`- **对白**：无` 的情况还是会自己乱说话」+「静音镜正常是这样的，
@@ -5384,7 +5388,7 @@ export function isMinimaxH3FamilyWorkflowId(workflowId?: string | null) {
  *
  * 三档口径：
  *  - **不在 H3 名单**（含独立模型 `2114341115852099586`）：原文一个字不改；
- *  - **最小形态**（`audioNegation` = Fisher 两个 id + 文戏两个 id）：只留「正文 + `<d>` + 一句
+ *  - **最小形态**（`audioNegation` = Fisher 名单 + 文戏两个 id）：只留「正文 + `<d>` + 一句
  *    `<Audio N> is the voice-timbre reference …`」。不加【台词锁定】、不加 `overall_soundscape:`、
  *    不套描述槽位 —— 这些散文会被 H3 当稿子念出来（2026-10-25 第七次报障的定论）。
  *    2026-10-26 用户选定：「文戏这两个也走最小形态」。
@@ -6531,10 +6535,10 @@ async function runRunningHubWorkflowWithKey(args: {
     const localExportGraph = !usesRunningHubLocalExportGraph(workflowId)
         ? null
         : isMinimaxH3FisherWorkflow(workflowId)
-          ? // 模型脚本（用户覆盖层）优先；没有脚本时只有 .ai 那份 id 有内置图兜底，
-            // 另外两个 Fisher id 照旧返回 null → 走下面的「把 Export 贴进脚本」报错，行为不变。
-            // ⚠️ 内置图只有「多参生视频」那一张：角色 / 场景 / 多视角模式没有内置图，
-            // 必须继续走「脚本里缺该模式 Export」的报错 —— 拿视频图冒充错管线等于白烧一次渲染。
+          ? // 模型脚本（用户覆盖层）优先；Fisher 名单当前无内置 Export 图（`bundledRunningHubGraph`
+            // 对 Fisher 恒为 null）→ 无脚本时继续走远端取图 / 「把 Export 贴进脚本」报错。
+            // ⚠️ 角色 / 场景 / 多视角模式没有视频图可冒充：脚本缺该模式 Export 必须报错，
+            // 否则会白烧一次渲染。
             resolveFisherWorkflowFromScript(request.script, fisherMode) || (fisherMode === "video" ? bundledRunningHubGraph(workflowId) : null)
           : parseComfyApiWorkflow(request.script) || bundledRunningHubGraph(workflowId);
     let workflow = localExportGraph;
@@ -6628,7 +6632,7 @@ async function runRunningHubWorkflowWithKey(args: {
     // Audio references: upload first, then write them into the graph *before* the per-workflow
     // patch. Singularity's patch deletes `LoadAudio("None")` slots as invalid; filling them first is
     // what keeps the slot, and the author's node ids, alive.
-    // ⚠️ 用户 2026-10-25（只针对 Fisher 两个 id）：`- **对白**：无` 的镜头**连参考音频都不挂**。
+    // ⚠️ 用户 2026-10-25（只针对 Fisher 名单）：`- **对白**：无` 的镜头**连参考音频都不挂**。
     // 挂了音色参考 = 给它一条「待续写的人声轨」，H3 是音视频联合模型，会顺着音频把人声续出来 ——
     // 这一镜本来就没台词，音色参考没有任何用处，却正好是「自己乱说话」的燃料。
     // ⚠️ 提示词里那行 `- **对白**：无` **保持原样**（用户 2026-10-25：「静音镜正常是这样的」），

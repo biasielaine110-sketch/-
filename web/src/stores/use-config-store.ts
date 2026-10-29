@@ -120,13 +120,13 @@ export type AiConfig = {
     videoAudioMode: string;
     /**
      * Work-Fisher RH pipeline mode: `video` | `character` | `scene` | `multiview`.
-     * Only honored for the Fisher workflow id pair.
+     * Only honored for Fisher workflow ids（`isMinimaxH3FisherWorkflow`）。
      */
     videoFisherMode: string;
     /**
      * Work-Fisher 风格 LoRA（279 `MysticXXX_MMH3-V1`）权重：`"0"` = 关（默认）。
      * 这支 LoRA 带韩剧素材先验（韩语人声、硬字幕、自编台词），归零后才是干净的中文 H3。
-     * Only the Fisher id pair reads it.
+     * Only Fisher workflow ids read it.
      */
     videoFisherLoraStrength: string;
     /**
@@ -134,7 +134,7 @@ export type AiConfig = {
      *
      * 整行不发是 2026-10-25 第八次报障的修法（H3 会把那段中文当旁白念出来）。这个开关是给用户
      * 自己做 A/B 的口子：打开后风格文字重新影响画面，但「被念」的风险同时回来。
-     * Only the Fisher id trio reads it（`isMinimaxH3FisherWorkflow`）。
+     * Only Fisher workflow ids read it（`isMinimaxH3FisherWorkflow`）。
      */
     videoFisherStyleFields: string;
     /**
