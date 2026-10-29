@@ -5520,8 +5520,8 @@ export function adaptMinimaxH3ReferencePrompt(
  * 判断复用适配器（纯函数，`audioCount: 0` 时不追加任何契约），只认 `<d>`。
  */
 export function isMinimaxH3FisherSilentShot(workflowId: string | null | undefined, prompt: string) {
-    if (!isMinimaxH3FisherWorkflow(workflowId)) return false;
-    return !/<\s*d\s*>/i.test(adaptMinimaxH3ReferencePrompt(prompt, { audioCount: 0 }));
+    if (!isMinimaxH3FisherWorkflow(workflowId) && !isWorkFisherLightAiApp(workflowId)) return false;
+    return !/<\s*d\s*>/i.test(adaptMinimaxH3ReferencePrompt(prompt, { audioCount: 0, audioNegation: true, dropSoundNote: true }));
 }
 
 /**
@@ -5553,6 +5553,9 @@ function isMinimaxH3FamilyWorkflow(workflowId?: string | null) {
         isMinimaxH3SingularityWorkflow(workflowId) ||
         isMinimaxH3HdDynamicWorkflow(workflowId) ||
         isMinimaxH3FisherWorkflow(workflowId) ||
+        // 轻量 AI App 211550…：图仍走 ai-app/run，但提示词必须吃 H3 干净模式 —— 否则分镜表
+        // `- **对白** / 画面 / 强制声明` 原样提交会被当成中文台词念出来（用户 2026-10-29）。
+        isWorkFisherLightAiApp(workflowId) ||
         isMinimaxH3YzjinyuWorkflow(workflowId) ||
         // 【MINIMAX-H3】八月最强文戏 pair：作者示例提示词本身就是 `<Subject 1> (S1) says:` +
         // `<d>[Chinese]…</d>` 写法 —— 跟方言层吐出来的口径完全一致，所以它们进这张名单（为了
@@ -5593,22 +5596,25 @@ export function h3PromptForWorkflow(
 ): string {
     if (!isMinimaxH3FamilyWorkflow(workflowId)) return prompt;
     const fisher = isMinimaxH3FisherWorkflow(workflowId);
+    const light = isWorkFisherLightAiApp(workflowId);
     return adaptMinimaxH3ReferencePrompt(prompt, {
         audioCount: options?.audioCount,
-        // 静音镜连「只要环境音效」那句模板说明也不给 —— 只 Fisher（文戏没有静音镜分流）。
-        dropSoundNote: fisher,
+        // 静音镜连「只要环境音效」那句模板说明也不给 —— Fisher + 轻量 AI App（文戏没有静音镜分流）。
+        dropSoundNote: fisher || light,
         // ⚠️ 参数名是历史包袱：它的实际作用是「干净模式 / 最小形态」（见函数内 `minimal`）。
-        audioNegation: fisher || isMinimaxH3WenxiWorkflow(workflowId),
+        // 轻量 App 与 Fisher 同档：只留正文 + `<d>`，剥掉会被念出来的分镜表骨架/说明文。
+        audioNegation: fisher || light || isMinimaxH3WenxiWorkflow(workflowId),
         // 「提交视觉风格字段」：Fisher 有面板开关（默认关，因为那段裸中文会被念）；文戏没有开关，
         // 固定**保留值、只丢字段名** —— 用户要的是「去掉散文」，不是「把视觉风格整行删掉」。
-        keepStyleFields: fisher ? String(options?.styleFields || "") === "on" : isMinimaxH3WenxiWorkflow(workflowId),
+        // 轻量 App 默认关风格字段（与 Fisher 默认一致）。
+        keepStyleFields: fisher || light ? String(options?.styleFields || "") === "on" : isMinimaxH3WenxiWorkflow(workflowId),
     });
 }
 
 /** 日志用：这一族走哪一档口径。 */
 export function h3PromptMode(workflowId?: string | null) {
     if (!isMinimaxH3FamilyWorkflow(workflowId)) return "verbatim";
-    if (isMinimaxH3FisherWorkflow(workflowId)) return "fisher";
+    if (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId)) return "fisher";
     if (isMinimaxH3WenxiWorkflow(workflowId)) return "minimal";
     return "plain";
 }
@@ -6839,9 +6845,12 @@ async function runRunningHubWorkflowWithKey(args: {
     const fisherDialogueFree = isMinimaxH3FisherSilentShot(workflowId, request.prompt);
     // 混合镜（有台词 + 有 `- **对白**：无`）：贴的是「口型约定」而非「全片静场」，日志要能分开看，
     // 否则排查时会把「该念的没念」误判成静场规则串了。
-    const fisherMixedShots = isMinimaxH3FisherWorkflow(workflowId) && !fisherDialogueFree && declaresH3SilentDialogue(request.prompt);
+    const fisherMixedShots =
+        (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId)) &&
+        !fisherDialogueFree &&
+        declaresH3SilentDialogue(request.prompt);
     // 「韩语还没走」的第一条排查线索：实际提交的风格 LoRA 权重。用户报障时复制这一行就够。
-    if (isMinimaxH3FisherWorkflow(workflowId)) {
+    if (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId)) {
         console.info(
             `[runninghub] ${workflowId}: fisherLoRA=${normalizeFisherLoraStrength(request.fisherLoraStrength)} (0 = off, Korean voice / burned subtitles / invented lines come from this LoRA)`,
         );
@@ -6907,7 +6916,8 @@ async function runRunningHubWorkflowWithKey(args: {
     // 排查「模型说了我没写过的话」时最缺的就是这一行 —— 实际提交给 H3 的正文原样打出来，
     // 用户直接复制给我们就能定位（是不是有多余的 <d>、是不是还有别的字段在招它开口）。
     if (isMinimaxH3FamilyWorkflow(workflowId)) {
-        const styleFieldsOn = isMinimaxH3FisherWorkflow(workflowId) && String(request.fisherStyleFields || "") === "on";
+        const styleFieldsOn =
+            (isMinimaxH3FisherWorkflow(workflowId) || isWorkFisherLightAiApp(workflowId)) && String(request.fisherStyleFields || "") === "on";
         console.info(`[runninghub] h3 prompt (${workflowId}) mode=${h3PromptMode(workflowId)} audio=${uploadedAudios.length} styleFields=${styleFieldsOn ? "on" : "off"}:\n${effectivePrompt}`);
     }
     const patch: RunningHubWorkflowPatch = prepared
