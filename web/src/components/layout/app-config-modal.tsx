@@ -433,7 +433,19 @@ export function AppConfigModal() {
     );
 }
 
-export function ConfigPasswordModal({ open, onCancel, onUnlock }: { open: boolean; onCancel: () => void; onUnlock: () => void }) {
+export function ConfigPasswordModal({
+    open,
+    onCancel,
+    onUnlock,
+    title,
+    hint,
+}: {
+    open: boolean;
+    onCancel: () => void;
+    onUnlock: () => void;
+    title?: string;
+    hint?: string;
+}) {
     const { t } = useTranslation();
     const [password, setPassword] = useState("");
     const [wrong, setWrong] = useState(false);
@@ -467,7 +479,7 @@ export function ConfigPasswordModal({ open, onCancel, onUnlock }: { open: boolea
 
     return (
         <Modal
-            title={t("config.passwordTitle")}
+            title={title || t("config.passwordTitle")}
             open={open}
             centered
             destroyOnHidden
@@ -477,13 +489,14 @@ export function ConfigPasswordModal({ open, onCancel, onUnlock }: { open: boolea
             onOk={submit}
         >
             <form className="space-y-2 pt-1" onSubmit={onFormSubmit}>
-                <div className="text-xs text-stone-500">{t("config.passwordHint")}</div>
+                <div className="text-xs text-stone-500">{hint || t("config.passwordHint")}</div>
                 <Input.Password
                     ref={inputRef as never}
                     value={password}
                     status={wrong ? "error" : undefined}
                     placeholder={t("config.passwordPlaceholder")}
                     autoComplete="current-password"
+                    visibilityToggle={false}
                     onChange={(event) => {
                         setPassword(event.target.value);
                         if (wrong) setWrong(false);
@@ -532,6 +545,7 @@ export function ConfigPasswordGate({ children }: { children: ReactNode }) {
                 status={wrong ? "error" : undefined}
                 placeholder={t("config.passwordPlaceholder")}
                 autoComplete="current-password"
+                visibilityToggle={false}
                 onChange={(event) => {
                     setPassword(event.target.value);
                     if (wrong) setWrong(false);

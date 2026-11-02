@@ -931,6 +931,8 @@ export default {
             hint: "从词库选择提示词填入文本",
             manage: "管理词库",
             empty: "词库为空，请先在偏好设置中添加",
+            passwordTitle: "输入词库密码",
+            passwordHint: "打开文本节点词库前需要验证密码。",
         },
         textFindReplace: {
             open: "查找替换",

@@ -3,6 +3,7 @@ import { Dropdown, type MenuProps } from "antd";
 import { BookMarked, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { ConfigPasswordModal } from "@/components/layout/app-config-modal";
 import { isTextPromptEnabled } from "@/constant/text-prompt-library";
 import { useConfigStore, type TextPromptEntry } from "@/stores/use-config-store";
 
@@ -18,6 +19,7 @@ export function CanvasTextPromptPicker({ onSelect, onOpenPreferences, size = "de
     const { t } = useTranslation();
     const rootRef = useRef<HTMLSpanElement>(null);
     const [open, setOpen] = useState(false);
+    const [gateOpen, setGateOpen] = useState(false);
     const textPrompts = useConfigStore((state) => state.config.textPrompts || []);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     // Entries switched off in preferences stay saved but are hidden from this picker.
@@ -82,7 +84,7 @@ export function CanvasTextPromptPicker({ onSelect, onOpenPreferences, size = "de
         <span ref={rootRef} className="inline-flex">
             <Dropdown
                 open={open}
-                trigger={["click"]}
+                trigger={[]}
                 placement="bottomRight"
                 // Keep the library under the trigger (into the text node). Auto-flip
                 // occasionally puts it above the node on a transformed canvas.
@@ -100,7 +102,14 @@ export function CanvasTextPromptPicker({ onSelect, onOpenPreferences, size = "de
                         }`
                     }
                     style={buttonStyle}
-                    onClick={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        if (open) {
+                            setOpen(false);
+                            return;
+                        }
+                        setGateOpen(true);
+                    }}
                     onMouseDown={(event) => event.stopPropagation()}
                     onPointerDown={(event) => event.stopPropagation()}
                     title={t("canvas.textPromptLibrary.title")}
@@ -110,6 +119,16 @@ export function CanvasTextPromptPicker({ onSelect, onOpenPreferences, size = "de
                     {t("canvas.textPromptLibrary.short")}
                 </button>
             </Dropdown>
+            <ConfigPasswordModal
+                open={gateOpen}
+                title={t("canvas.textPromptLibrary.passwordTitle")}
+                hint={t("canvas.textPromptLibrary.passwordHint")}
+                onCancel={() => setGateOpen(false)}
+                onUnlock={() => {
+                    setGateOpen(false);
+                    setOpen(true);
+                }}
+            />
         </span>
     );
 }

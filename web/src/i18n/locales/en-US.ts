@@ -931,6 +931,8 @@ export default {
             hint: "Pick a prompt from the library",
             manage: "Manage library",
             empty: "Library is empty. Add prompts in Preferences first.",
+            passwordTitle: "Enter library password",
+            passwordHint: "A password is required before opening the text-node prompt library.",
         },
         textFindReplace: {
             open: "Find & replace",
