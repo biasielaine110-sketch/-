@@ -28,6 +28,8 @@ import {
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
 import { parseCanvasAgentSources } from "@/constant/canvas-agents";
 import { localSkillPackDisplayName, parseSkillSources } from "@/lib/chat-skill-pack";
+import { listChatSkills, orderChatSkillsById } from "@/lib/chat-skills";
+import { useOrderDrag } from "@/hooks/use-order-drag";
 import { defaultTextPrompts, isTextPromptEnabled } from "@/constant/text-prompt-library";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
@@ -765,6 +767,25 @@ function ConfigSkillsTab() {
     const upsertPack = useChatSkillPacksStore((state) => state.upsert);
     const setSkillAlias = useChatSkillPacksStore((state) => state.setAlias);
     const uninstallPack = useChatSkillPacksStore((state) => state.uninstall);
+    // 与词库同口径：关掉只是从对话节点的技能列表里收起来，技能本身和已勾选的节点都不动。
+    const hiddenSkillIds = useChatSkillPacksStore((state) => state.hiddenSkillIds);
+    const setSkillHidden = useChatSkillPacksStore((state) => state.setSkillHidden);
+    const skillOrder = useChatSkillPacksStore((state) => state.skillOrder);
+    const setSkillOrder = useChatSkillPacksStore((state) => state.setSkillOrder);
+    // 与对话节点里的技能列表同一份顺序（内置技能也参与排序，这里只是只显示本地包）。
+    const orderedPacks = orderChatSkillsById(packs, skillOrder);
+    const reorderSkills = (fromId: string, toId: string) => {
+        if (!fromId || !toId || fromId === toId) return;
+        const ids = listChatSkills().map((skill) => skill.id);
+        const from = ids.indexOf(fromId);
+        const to = ids.indexOf(toId);
+        if (from < 0 || to < 0) return;
+        const next = [...ids];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
+        setSkillOrder(next);
+    };
+    const skillDrag = useOrderDrag(reorderSkills);
     const skillPackInputRef = useRef<HTMLInputElement>(null);
     const skillFolderInputRef = useRef<HTMLInputElement>(null);
 
@@ -872,15 +893,30 @@ function ConfigSkillsTab() {
                     />
                 </div>
             </div>
-            {packs.length ? (
+            {orderedPacks.length ? (
                 <div className="space-y-2">
-                    {packs.map((pack) => {
+                    {orderedPacks.map((pack) => {
                         const displayName = localSkillPackDisplayName(pack);
                         const desc = String(pack.description || "")
                             .replace(/\s+/g, " ")
                             .trim();
+                        const hidden = (hiddenSkillIds || []).includes(pack.id);
                         return (
-                            <div key={pack.id} className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 px-3 py-2.5 dark:border-stone-800">
+                            <div
+                                key={pack.id}
+                                {...skillDrag.rowProps(pack.id)}
+                                className={`flex items-center justify-between gap-3 rounded-lg border border-stone-200 px-3 py-2.5 transition-opacity dark:border-stone-800 ${
+                                    hidden ? "opacity-60" : ""
+                                } ${skillDrag.dragOverId === pack.id && skillDrag.draggingId !== pack.id ? "border-sky-400 ring-2 ring-sky-500" : ""}`}
+                            >
+                                <span
+                                    className="shrink-0 cursor-grab touch-none text-stone-400 active:cursor-grabbing"
+                                    title={t("config.skills.reorderHint")}
+                                    aria-label={t("config.skills.reorderHint")}
+                                    {...skillDrag.handleProps(pack.id)}
+                                >
+                                    <GripVertical className="size-4" />
+                                </span>
                                 <div className="min-w-0 flex-1">
                                     <div className="flex min-w-0 items-center gap-2">
                                         <div className="truncate text-sm font-semibold" title={displayName}>
@@ -906,6 +942,14 @@ function ConfigSkillsTab() {
                                     </div>
                                 </div>
                                 <div className="flex shrink-0 items-center gap-1.5">
+                                    <Switch
+                                        size="small"
+                                        checked={!hidden}
+                                        onChange={(checked) => setSkillHidden(pack.id, !checked)}
+                                        checkedChildren={t("config.skills.visible")}
+                                        unCheckedChildren={t("config.skills.hidden")}
+                                        title={hidden ? t("config.skills.showTitle") : t("config.skills.hideTitle")}
+                                    />
                                     <Button size="small" icon={<Pencil className="size-3.5" />} onClick={() => editSkillAlias(pack.id)}>
                                         {t("config.skills.alias")}
                                     </Button>

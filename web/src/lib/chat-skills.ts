@@ -234,8 +234,66 @@ function localPackToDefinition(pack: LocalSkillPack): ChatSkillDefinition {
 }
 
 export function listChatSkills(): ChatSkillDefinition[] {
-    const packs = useChatSkillPacksStore.getState().packs;
-    return [...BUILTIN_CHAT_SKILLS, ...packs.map(localPackToDefinition)];
+    const store = useChatSkillPacksStore.getState();
+    return orderChatSkillsById([...BUILTIN_CHAT_SKILLS, ...store.packs.map(localPackToDefinition)], store.skillOrder);
+}
+
+/**
+ * 按用户拖出来的顺序排；没登记的 id 保持原有相对顺序排在最后。
+ * `Array#sort` 在现代 V8 里是稳定的，所以「没登记」那批不会被打乱。
+ */
+export function orderChatSkillsById<T extends { id: string }>(items: readonly T[], order: readonly string[] | null | undefined): T[] {
+    const rank = new Map<string, number>();
+    for (const raw of order || []) {
+        const id = String(raw || "").trim();
+        if (!id || rank.has(id)) continue;
+        rank.set(id, rank.size);
+    }
+    if (!rank.size) return [...items];
+    return [...items].sort((a, b) => {
+        const ra = rank.get(a.id);
+        const rb = rank.get(b.id);
+        if (ra === undefined && rb === undefined) return 0;
+        if (ra === undefined) return 1;
+        if (rb === undefined) return -1;
+        return ra - rb;
+    });
+}
+
+/** 当前保存的顺序（内置 + 本地混排）。 */
+export function listChatSkillOrder(): string[] {
+    return useChatSkillPacksStore.getState().skillOrder || [];
+}
+
+/** 当前被隐藏的技能 id（内置 + 本地都按 id 记）。 */
+export function listHiddenChatSkillIds(): string[] {
+    return useChatSkillPacksStore.getState().hiddenSkillIds || [];
+}
+
+export function isChatSkillHidden(skillId: string): boolean {
+    return listHiddenChatSkillIds().includes(skillId);
+}
+
+/**
+ * 按「词库」那套口径把技能分成可见 / 已隐藏两组。
+ *
+ * 关键一条：**已经在本节点勾选的技能，即使被隐藏也留在可见组**。否则用户勾过它、
+ * 列表里却看不见，既无法取消也搞不懂那些工具为什么还在，只能靠数字 3 对不上来猜。
+ */
+export function splitChatSkillsByVisibility(skills: ChatSkillDefinition[], enabledSkillIds: readonly string[] = []) {
+    const hiddenIds = new Set(listHiddenChatSkillIds());
+    const activeIds = new Set(enabledSkillIds);
+    const visible: ChatSkillDefinition[] = [];
+    const hidden: ChatSkillDefinition[] = [];
+    for (const skill of skills) {
+        if (!hiddenIds.has(skill.id)) {
+            visible.push(skill);
+            continue;
+        }
+        hidden.push(skill);
+        if (activeIds.has(skill.id)) visible.push(skill);
+    }
+    return { visible, hidden };
 }
 
 export function resolveChatSkillTools(skillIds: string[] | undefined): ChatSkillTool[] {

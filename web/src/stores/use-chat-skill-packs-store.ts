@@ -5,6 +5,17 @@ import { localSkillPackDisplayName, normalizePersistedSkillPacks, parseLocalSkil
 
 type ChatSkillPacksStore = {
     packs: LocalSkillPack[];
+    /**
+     * 列表里被隐藏的技能 id（内置技能也在这里）。
+     * 与词库的 enabled 同口径：**只影响列表显示**，已经勾选该技能的节点照旧生效，
+     * 否则用户勾过的技能会静默消失，只剩一个数字对不上。
+     */
+    hiddenSkillIds: string[];
+    /** 隐藏 / 取消隐藏某个技能（只动展示，不动 packs） */
+    setSkillHidden: (skillId: string, hidden: boolean) => void;
+    /** 用户拖出来的技能顺序（内置 + 本地的 id 混排）；没登记的 id 排在最后，保持各自原序 */
+    skillOrder: string[];
+    setSkillOrder: (skillIds: string[]) => void;
     /** 解析好的技能落库（.json 工具包 / SKILL.md 文档技能 / 文件夹，都在外面解析完再进来） */
     upsert: (pack: LocalSkillPack) => LocalSkillPack;
     installFromJson: (raw: string) => LocalSkillPack;
@@ -26,6 +37,27 @@ export const useChatSkillPacksStore = create<ChatSkillPacksStore>()(
     persist(
         (set, get) => ({
             packs: [],
+            hiddenSkillIds: [],
+            skillOrder: [],
+            setSkillOrder: (skillIds) => {
+                const seen = new Set<string>();
+                const next: string[] = [];
+                for (const raw of skillIds || []) {
+                    const id = String(raw || "").trim();
+                    if (!id || seen.has(id)) continue;
+                    seen.add(id);
+                    next.push(id);
+                }
+                set({ skillOrder: next });
+            },
+            setSkillHidden: (skillId, hidden) => {
+                const id = String(skillId || "").trim();
+                if (!id) return;
+                const current = get().hiddenSkillIds || [];
+                const exists = current.includes(id);
+                if (hidden === exists) return;
+                set({ hiddenSkillIds: hidden ? [...current, id] : current.filter((item) => item !== id) });
+            },
             upsert: (pack) => {
                 const now = Date.now();
                 const existing = get().packs.find((item) => item.id === pack.id);
@@ -102,7 +134,12 @@ export const useChatSkillPacksStore = create<ChatSkillPacksStore>()(
                     ),
                 });
             },
-            uninstall: (packId) => set({ packs: get().packs.filter((item) => item.id !== packId) }),
+            uninstall: (packId) =>
+                set({
+                    packs: get().packs.filter((item) => item.id !== packId),
+                    // 卸载顺带清掉隐藏记录，免得以后重装同 id 时莫名其妙还是隐藏的。
+                    hiddenSkillIds: (get().hiddenSkillIds || []).filter((id) => id !== packId),
+                }),
             getPack: (packId) => get().packs.find((item) => item.id === packId),
         }),
         { name: "infinite-canvas:chat_skill_packs" },

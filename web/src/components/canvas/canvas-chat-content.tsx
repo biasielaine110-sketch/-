@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App, Input } from "antd";
 import copy from "copy-to-clipboard";
-import { Bot, Check, Copy, FolderOpen, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Pencil, Plus, SendHorizontal, Sparkles, Square, Trash2, Upload, Video, Wrench, X } from "lucide-react";
+import { Bot, Check, Copy, Eye, EyeOff, FolderOpen, GripVertical, Image as ImageIcon, MessageSquareText, Minus, Pencil, Plus, SendHorizontal, Sparkles, Square, Trash2, Upload, Video, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasPromptChipInput } from "@/components/canvas/canvas-prompt-chip-input";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
+import { useOrderDrag } from "@/hooks/use-order-drag";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { resolveChatSendOptions, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
-import { getChatSkillDisplayName, getChatSkillListHint, listChatSkills, resolveChatSkillIds } from "@/lib/chat-skills";
+import { getChatSkillDisplayName, getChatSkillListHint, listChatSkills, resolveChatSkillIds, splitChatSkillsByVisibility } from "@/lib/chat-skills";
 import { localSkillPackDisplayName, parseSkillSources } from "@/lib/chat-skill-pack";
 import { listCanvasAgents, parseCanvasAgentSources, resolveCanvasAgent } from "@/constant/canvas-agents";
 import { DEFAULT_CANVAS_FONT_SIZE, DEFAULT_CHAT_FONT_SIZE } from "@/constant/canvas";
@@ -78,6 +79,12 @@ export function CanvasChatContent({
     const upsertPack = useChatSkillPacksStore((state) => state.upsert);
     const setSkillAlias = useChatSkillPacksStore((state) => state.setAlias);
     const uninstallPack = useChatSkillPacksStore((state) => state.uninstall);
+    // 隐藏只在列表层面生效；订阅一下，配置页里改了这里要立刻跟着变。
+    const hiddenSkillIds = useChatSkillPacksStore((state) => state.hiddenSkillIds);
+    const setSkillHidden = useChatSkillPacksStore((state) => state.setSkillHidden);
+    // 拖出来的顺序也存在同一处，改完立刻重排列表。
+    const skillOrder = useChatSkillPacksStore((state) => state.skillOrder);
+    const setSkillOrder = useChatSkillPacksStore((state) => state.setSkillOrder);
     const skillPackInputRef = useRef<HTMLInputElement>(null);
     const skillFolderInputRef = useRef<HTMLInputElement>(null);
     const [draft, setDraft] = useState("");
@@ -100,8 +107,29 @@ export function CanvasChatContent({
     /** 先写词再出图：两路从并行改成串行，生图吃 agent 写好的提示词。 */
     const imageUseAgentPrompt = Boolean(node.metadata?.chatImageUseAgentPrompt);
     const enabledSkillIds = resolveChatSkillIds(node.metadata?.chatSkillIds);
-    const skills = useMemo(() => listChatSkills(), [installedPacks]);
+    const skills = useMemo(() => listChatSkills(), [installedPacks, skillOrder]);
     const [skillsOpen, setSkillsOpen] = useState(false);
+    /** 面板在「可见技能」和「已隐藏技能」两种列表之间切换（对应词库里的显隐）。 */
+    const [skillsShowHidden, setSkillsShowHidden] = useState(false);
+    // 词库那套口径：隐藏的从主列表里收起来，但已在本节点勾选的不藏（否则勾了却取消不掉）。
+    const skillGroups = useMemo(() => splitChatSkillsByVisibility(skills, enabledSkillIds), [skills, hiddenSkillIds, enabledSkillIds]);
+    const listedSkills = skillsShowHidden ? skillGroups.hidden : skillGroups.visible;
+    /**
+     * 拖拽排序：始终基于「全量技能顺序」挪动（而不是当前可见列表），
+     * 这样隐藏中的技能不会被挤出列表、也不会因为看不见就丢掉位置。
+     */
+    const reorderSkills = (fromId: string, toId: string) => {
+        if (!fromId || !toId || fromId === toId) return;
+        const ids = skills.map((skill) => skill.id);
+        const from = ids.indexOf(fromId);
+        const to = ids.indexOf(toId);
+        if (from < 0 || to < 0) return;
+        const next = [...ids];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
+        setSkillOrder(next);
+    };
+    const skillDrag = useOrderDrag(reorderSkills);
     const customAgents = useCanvasAgentsStore((state) => state.agents);
     const upsertAgent = useCanvasAgentsStore((state) => state.upsert);
     const uninstallAgent = useCanvasAgentsStore((state) => state.uninstall);
@@ -807,20 +835,32 @@ export function CanvasChatContent({
                                         </div>
                                     </div>
                                     <div className="thin-scrollbar max-h-72 space-y-0.5 overflow-y-auto overscroll-contain">
-                                        {skills.map((skill) => {
+                                        {listedSkills.map((skill) => {
                                             const active = enabledSkillIds.includes(skill.id);
+                                            const hidden = (hiddenSkillIds || []).includes(skill.id);
                                             const skillName = getChatSkillDisplayName(skill);
                                             const skillHint = getChatSkillListHint(skill, 48);
                                             const rowTitle = skillHint ? `${skillName}\n${skillHint}` : skillName;
                                             return (
                                                 <div
                                                     key={skill.id}
-                                                    className="flex w-full items-center gap-1.5 rounded-lg border px-2 py-1.5"
+                                                    {...skillDrag.rowProps(skill.id)}
+                                                    className={`flex w-full items-center gap-1.5 rounded-lg border px-2 py-1.5 ${hidden ? "opacity-60" : ""} ${
+                                                        skillDrag.dragOverId === skill.id && skillDrag.draggingId !== skill.id ? "ring-2 ring-sky-500" : ""
+                                                    }`}
                                                     style={{
                                                         borderColor: active ? theme.toolbar.activeBg : theme.node.stroke,
                                                         background: active ? `${theme.toolbar.activeBg}22` : "transparent",
                                                     }}
                                                 >
+                                                    <span
+                                                        className="shrink-0 cursor-grab touch-none opacity-45 active:cursor-grabbing"
+                                                        title={t("canvas.chat.skillsReorder")}
+                                                        aria-label={t("canvas.chat.skillsReorder")}
+                                                        {...skillDrag.handleProps(skill.id)}
+                                                    >
+                                                        <GripVertical className="size-3" />
+                                                    </span>
                                                     <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => toggleSkill(skill.id)} title={rowTitle}>
                                                         <span
                                                             className="grid size-5 shrink-0 place-items-center rounded border text-[20px]"
@@ -834,6 +874,17 @@ export function CanvasChatContent({
                                                                 {skill.kind === "doc" ? t("canvas.chat.skillsDocBadge") : t("canvas.chat.skillsLocalBadge")}
                                                             </span>
                                                         ) : null}
+                                                    </button>
+                                                    {/* 显示 / 隐藏：跟词库的开关同口径，只影响列表，不影响已勾选的节点。 */}
+                                                    <button
+                                                        type="button"
+                                                        className="grid size-6 shrink-0 place-items-center rounded-md opacity-55 transition hover:opacity-100"
+                                                        style={{ color: theme.node.text }}
+                                                        title={hidden ? t("canvas.chat.skillsUnhide") : t("canvas.chat.skillsHide")}
+                                                        aria-label={hidden ? t("canvas.chat.skillsUnhide") : t("canvas.chat.skillsHide")}
+                                                        onClick={() => setSkillHidden(skill.id, !hidden)}
+                                                    >
+                                                        {hidden ? <Eye className="size-3" /> : <EyeOff className="size-3" />}
                                                     </button>
                                                     {skill.removable ? (
                                                         <>
@@ -862,7 +913,26 @@ export function CanvasChatContent({
                                                 </div>
                                             );
                                         })}
+                                        {listedSkills.length ? null : (
+                                            <div className="px-2 py-4 text-center text-[18px] opacity-55">
+                                                {skillsShowHidden ? t("canvas.chat.skillsHiddenEmpty") : t("canvas.chat.skillsNone")}
+                                            </div>
+                                        )}
                                     </div>
+                                    {skillGroups.hidden.length ? (
+                                        <button
+                                            type="button"
+                                            className="mt-1.5 flex w-full items-center justify-center gap-1.5 rounded-md border px-2 py-1 text-[18px] opacity-70 transition hover:opacity-100"
+                                            style={{ borderColor: theme.node.stroke, color: theme.node.text }}
+                                            title={skillsShowHidden ? t("canvas.chat.skillsBackToVisible") : t("canvas.chat.skillsHiddenHint")}
+                                            onClick={() => setSkillsShowHidden((value) => !value)}
+                                        >
+                                            {skillsShowHidden ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
+                                            {skillsShowHidden
+                                                ? t("canvas.chat.skillsBackToVisible")
+                                                : t("canvas.chat.skillsHiddenCount", { count: skillGroups.hidden.length })}
+                                        </button>
+                                    ) : null}
                                 </div>
                             ) : null}
                         </div>
