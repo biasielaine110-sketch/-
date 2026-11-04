@@ -6633,14 +6633,23 @@ async function submitWorkflowTask(
 }
 
 /**
- * SelfLift-only escape hatch: `/task/openapi/comfy/run` accepts a full API graph without opening
+ * SelfLift-only escape hatch: `/api/openapi/comfy/run` accepts a full API graph without opening
  * the shared workflowId the caller's key has no permission to fetch. Scoped to graphs we already
  * decided to submit (never used as a generic create replacement).
+ *
+ * ⚠️ 路径是 `/api/openapi/comfy/run`，**不是**文档写的 `/task/openapi/comfy/run`。实测（2026-11-05，
+ * 两个站点、假 key、带不带 Bearer 都一样）：
+ *   - `POST /task/openapi/comfy/run` → `{"code":404,"msg":"NOT_FOUND"}` —— 鉴权之前就 404，
+ *     说明是**路由不存在**，跟 key / 图 / 权限都无关；
+ *   - `POST /api/openapi/comfy/run` 带 `Authorization: Bearer` → `{"code":412,"msg":"TOKEN_INVALID"}`，
+ *     不带 header → `{"code":403,"msg":"TOKEN_MISSION"}` —— 这才是活的端点：**读 header 里的 token**。
+ * 早先按文档写 `/task/...` 时，这一族（SelfLift / Qwen+Klein / 独立模型…）每次都在这里吃 NOT_FOUND，
+ * 再靠下面的 create+workflow 兜底；兜不住时用户看到的就是一句没头没尾的 NOT_FOUND。
  */
 async function submitComfyRunTask(origin: string, apiKey: string, graph: ComfyWorkflow, signal?: AbortSignal, instanceType?: string) {
     const token = apiKey.replace(/^Bearer\s+/i, "").trim();
     const response = await axios.post(
-        proxyApiUrl(`${origin}/task/openapi/comfy/run`),
+        proxyApiUrl(`${origin}/api/openapi/comfy/run`),
         { apiKey: token, workflow: JSON.stringify(graph), addMetadata: true, instanceType: normalizeRunningHubInstanceType(instanceType) },
         { headers: bearer(apiKey), signal, timeout: 60_000 },
     );
@@ -7209,7 +7218,7 @@ async function runRunningHubWorkflowWithKey(args: {
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, preferDirectSubmit, instanceType);
         } else if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
             // SelfLift / Qwen+Klein: shared workflowId often denies create/getJsonApiFormat.
-            // Submit the patched API graph through `/task/openapi/comfy/run`.
+            // Submit the patched API graph through `/api/openapi/comfy/run`.
             task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal, instanceType);
         } else if (workflow) {
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, false, instanceType);
@@ -7229,7 +7238,7 @@ async function runRunningHubWorkflowWithKey(args: {
         }
         // 全能生图王: `create` can still answer "您暂时无权限访问该工作流" for a third-party app even when
         // the graph we hold is perfectly runnable. Push the same patched graph through
-        // `/task/openapi/comfy/run` once — that endpoint does not need the app ACL — before surfacing.
+        // `/api/openapi/comfy/run` once — that endpoint does not need the app ACL — before surfacing.
         if (isWorkFisherMossWorkflow(workflowId) && repairedGraph) {
             console.warn(`[runninghub] ${workflowId}: create+workflow failed (${message.slice(0, 160)}), retrying via comfy/run`);
             task = await submitComfyRunTask(origin, apiKey, repairedGraph, request.signal, instanceType).catch((retryError: unknown) => {
@@ -7241,7 +7250,7 @@ async function runRunningHubWorkflowWithKey(args: {
         // Local-export graphs already preferred comfy/run above. If that endpoint is unavailable on
         // this origin, fall back once to create-with-workflow (docs: `workflow` overrides workflowId).
         if (usesRunningHubLocalExportGraph(workflowId) && repairedGraph) {
-            console.warn(`[runninghub] ${workflowId}: comfy/run failed (${message.slice(0, 160)}), retrying local-export graph via create+workflow`);
+            console.warn(`[runninghub] ${workflowId}: comfy/run failed at ${origin} (${message.slice(0, 160)}), retrying local-export graph via create+workflow`);
             task = await submitWorkflowTask(origin, apiKey, workflowId, overrides, repairedGraph, request.signal, false, instanceType).catch((retryError: unknown) => {
                 throw explainRunningHubError(retryError, workflowId);
             });
