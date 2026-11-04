@@ -24,6 +24,7 @@ import { useTranslation } from "react-i18next";
 import { useImageEditorViewport } from "@/components/canvas/use-image-editor-viewport";
 import { CanvasFindReplaceTextArea } from "@/components/canvas/canvas-find-replace-textarea";
 import { readImageMeta } from "@/lib/image-utils";
+import { keyLower } from "@/lib/keyboard-event";
 import type { CanvasAnnotation, CanvasAnnotationKind } from "@/types/canvas";
 
 export type CanvasAnnotateSavePayload = {
@@ -128,7 +129,7 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
         drawingRef.current = { active: false, stroke: null };
         dragRef.current = null;
         void readImageMeta(dataUrl).then(setImage);
-        // Only reset when the dialog opens or the image changes â€?not when parent re-renders with a new [] reference.
+        // Only reset when the dialog opens or the image changes ï¿½?not when parent re-renders with a new [] reference.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [dataUrl, open]);
 
@@ -442,12 +443,13 @@ export function CanvasNodeAnnotateDialog({ dataUrl, open, initialAnnotations = [
             const target = event.target instanceof Element ? event.target : null;
             if (target?.closest("input,textarea,[contenteditable='true']")) return;
             const mod = event.ctrlKey || event.metaKey;
-            if (mod && event.key.toLowerCase() === "z" && !event.shiftKey) {
+            const key = keyLower(event);
+            if (mod && key === "z" && !event.shiftKey) {
                 event.preventDefault();
                 if (isBrushTool) undoMask();
                 else undoAnnotations();
             }
-            if (mod && ((event.key.toLowerCase() === "z" && event.shiftKey) || event.key.toLowerCase() === "y")) {
+            if (mod && ((key === "z" && event.shiftKey) || key === "y")) {
                 event.preventDefault();
                 if (isBrushTool) redoMask();
                 else redoAnnotations();
@@ -664,7 +666,7 @@ function ToolButton({ active, icon, label, onClick }: { active: boolean; icon: R
 
 function AnnotationShape({ item, selected }: { item: CanvasAnnotation; selected: boolean }) {
     // Coordinates are normalized to viewBox 0..1. With non-scaling-stroke, strokeWidth is in CSS pixels
-    // (the stored annotation value), not viewBox units â€?dividing by 400 made marks invisible.
+    // (the stored annotation value), not viewBox units ï¿½?dividing by 400 made marks invisible.
     const width = Math.max(1, item.strokeWidth);
     const highlight = selected ? { strokeDasharray: "6 4" } : {};
     if (item.kind === "rect") {
@@ -678,7 +680,7 @@ function AnnotationShape({ item, selected }: { item: CanvasAnnotation; selected:
         const head = arrowHeadNorm(item.strokeWidth);
         const left = { x: item.x2 - head * Math.cos(angle - Math.PI / 6), y: item.y2 - head * Math.sin(angle - Math.PI / 6) };
         const right = { x: item.x2 - head * Math.cos(angle + Math.PI / 6), y: item.y2 - head * Math.sin(angle + Math.PI / 6) };
-        // vectorEffect is not inherited â€?must be set on each stroked child, otherwise
+        // vectorEffect is not inherited ï¿½?must be set on each stroked child, otherwise
         // strokeWidth is interpreted in viewBox units (0..1) and the arrow looks huge.
         const strokeProps = { stroke: item.stroke, strokeWidth: width, fill: "none" as const, vectorEffect: "non-scaling-stroke" as const, ...highlight };
         return (

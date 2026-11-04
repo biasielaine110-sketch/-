@@ -79,7 +79,7 @@ import { CanvasNode, getCanvasMediaToggle } from "@/components/canvas/canvas-nod
 import { CanvasDraftSaveDialog } from "@/components/canvas/canvas-draft-save-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import { CanvasTextClipboardMenu, blurActiveCanvasTextInput, isCanvasTextInteractionTarget, isCanvasTextPasteTarget } from "@/components/canvas/canvas-text-clipboard-menu";
-import { isImeComposing } from "@/lib/keyboard-event";
+import { isImeComposing, keyLower } from "@/lib/keyboard-event";
 import {
     getCanvasDraftMeta,
     overwriteCanvasDraft,
@@ -2906,7 +2906,7 @@ function AtelierCanvasPage() {
                 return;
             }
 
-            const key = event.key.toLowerCase();
+            const key = keyLower(event);
             const isModifierShortcut = event.metaKey || event.ctrlKey;
 
             // "." is the media-only "100% display box" reset shared with the image toolbar
@@ -3428,7 +3428,7 @@ function AtelierCanvasPage() {
     useEffect(() => {
         const handleDownscaleShortcut = (event: KeyboardEvent) => {
             if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-            if (event.code !== "KeyG" && event.key.toLowerCase() !== "g") return;
+            if (event.code !== "KeyG" && keyLower(event) !== "g") return;
             if (isImeComposing(event)) return;
 
             const target = event.target;

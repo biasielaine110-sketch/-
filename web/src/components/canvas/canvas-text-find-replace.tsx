@@ -3,6 +3,7 @@ import { Button, Checkbox, Input } from "antd";
 import type { InputRef } from "antd/es/input";
 import { ChevronDown, ChevronUp, Replace, Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { keyLower } from "@/lib/keyboard-event";
 
 export type TextMatchRange = { start: number; end: number };
 
@@ -240,7 +241,7 @@ export function useTextFindReplace({
     };
 
     const handleShortcutKeyDown = (event: ReactKeyboardEvent | KeyboardEvent) => {
-        const key = event.key.toLowerCase();
+        const key = keyLower(event);
         const mod = event.ctrlKey || event.metaKey;
         if (mod && key === "f") {
             event.preventDefault();

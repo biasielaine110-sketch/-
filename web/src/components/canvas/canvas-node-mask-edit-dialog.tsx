@@ -5,6 +5,7 @@ import { Brush, Eraser, Redo2, RotateCcw, Undo2, WandSparkles, X, ZoomIn, ZoomOu
 import { useTranslation } from "react-i18next";
 
 import { readImageMeta } from "@/lib/image-utils";
+import { keyLower } from "@/lib/keyboard-event";
 import { useImageEditorViewport } from "@/components/canvas/use-image-editor-viewport";
 import { CanvasFindReplaceTextArea } from "@/components/canvas/canvas-find-replace-textarea";
 
@@ -186,7 +187,7 @@ export function CanvasNodeMaskEditDialog({ dataUrl, open, onClose, onConfirm }: 
         const handleKeyDown = (event: KeyboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
             if (target?.closest("input,textarea,[contenteditable='true']")) return;
-            const key = event.key.toLowerCase();
+            const key = keyLower(event);
             const modifier = (event.metaKey || event.ctrlKey) && !event.altKey;
             const isUndo = modifier && !event.shiftKey && key === "z";
             const isRedo = modifier && ((event.shiftKey && key === "z") || (!event.shiftKey && key === "y"));

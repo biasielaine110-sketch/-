@@ -4,6 +4,7 @@ import { Grid2x2, ListRestart, PanelTop, Redo2, Rows3, Trash2, Undo2, ZoomIn, Zo
 import { useTranslation } from "react-i18next";
 
 import { readImageMeta } from "@/lib/image-utils";
+import { keyLower } from "@/lib/keyboard-event";
 import { resolveGridPreset, type ImageSplitParams } from "@/lib/canvas/canvas-image-data";
 import { useImageEditorViewport } from "@/components/canvas/use-image-editor-viewport";
 
@@ -182,7 +183,7 @@ export function CanvasNodeSplitDialog({ dataUrl, open, onClose, onConfirm }: { d
         const handleKeyDown = (event: KeyboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
             if (target?.closest("input,textarea,[contenteditable='true']")) return;
-            const key = event.key.toLowerCase();
+            const key = keyLower(event);
             const isUndo = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && key === "z";
             const isRedo = (event.metaKey || event.ctrlKey) && !event.altKey && ((event.shiftKey && key === "z") || (!event.shiftKey && key === "y"));
             const isDelete = event.key === "Delete" || event.key === "Backspace";
