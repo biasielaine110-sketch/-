@@ -289,6 +289,9 @@ export function isRunningHubKeyFailoverMessage(message: string) {
     if (isBalanceMessage(text) || isAuthMessage(text) || isWorkflowPermissionMessage(text)) return true;
     // APISIX/openresty HTML 401 bodies often omit the word "unauthorized".
     if (/<\s*html[\s>]|openresty|apisix/i.test(text) && /401|authori[sz]ation\s+required/i.test(text)) return true;
+    // `/task/openapi/upload` 等接口的 401 正文就是 `{"code":-1,"msg":"ApiKey verification failed"}`
+    // —— 既不含 invalid 也不含 unauthorized，漏掉这条时多 Key 渠道会直接失败而不去试下一个 Key。
+    if (/api[\s-_]*key[^.\n]{0,24}(?:verification|verify)[^.\n]{0,12}fail/i.test(text)) return true;
     return /status\s*code\s*40[13]|unauthori[sz]ed|authori[sz]ation\s+required|invalid\s*(?:api[\s-_]*)?key|api[\s-_]*key\s*(?:is\s*)?(?:invalid|expired|rejected|not\s*(?:valid|found|exist))|token\s*(?:is\s*)?(?:invalid|expired)/i.test(
         text,
     );

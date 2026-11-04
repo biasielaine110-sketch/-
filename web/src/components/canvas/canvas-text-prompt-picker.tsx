@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { ConfigPasswordModal } from "@/components/layout/app-config-modal";
 import { isTextPromptEnabled } from "@/constant/text-prompt-library";
+import { TEXT_PROMPT_GATE_ID, isGateUnlocked } from "@/lib/gate-unlock";
 import { useConfigStore, type TextPromptEntry } from "@/stores/use-config-store";
 
 type CanvasTextPromptPickerProps = {
@@ -108,6 +109,11 @@ export function CanvasTextPromptPicker({ onSelect, onOpenPreferences, size = "de
                             setOpen(false);
                             return;
                         }
+                        // 7 天内验证过就直接开列表，否则先过口令。
+                        if (isGateUnlocked(TEXT_PROMPT_GATE_ID)) {
+                            setOpen(true);
+                            return;
+                        }
                         setGateOpen(true);
                     }}
                     onMouseDown={(event) => event.stopPropagation()}
@@ -121,6 +127,7 @@ export function CanvasTextPromptPicker({ onSelect, onOpenPreferences, size = "de
             </Dropdown>
             <ConfigPasswordModal
                 open={gateOpen}
+                gateId={TEXT_PROMPT_GATE_ID}
                 title={t("canvas.textPromptLibrary.passwordTitle")}
                 hint={t("canvas.textPromptLibrary.passwordHint")}
                 onCancel={() => setGateOpen(false)}

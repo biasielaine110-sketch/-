@@ -30,6 +30,7 @@ import { parseCanvasAgentSources } from "@/constant/canvas-agents";
 import { localSkillPackDisplayName, parseSkillSources } from "@/lib/chat-skill-pack";
 import { listChatSkills, orderChatSkillsById } from "@/lib/chat-skills";
 import { useOrderDrag } from "@/hooks/use-order-drag";
+import { CONFIG_GATE_ID, isGateUnlocked, markGateUnlocked } from "@/lib/gate-unlock";
 import { defaultTextPrompts, isTextPromptEnabled } from "@/constant/text-prompt-library";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
@@ -406,6 +407,10 @@ export function AppConfigModal() {
         if (!isConfigOpen) setUnlocked(false);
     }, [isConfigOpen]);
 
+    // 7 天内通过过密码就直接进（渲染期同步判断，避免门禁闪一下再消失）。
+    // localStorage 不可用时 isGateUnlocked 恒为 false，退化成每次都要输密码。
+    const gatePassed = unlocked || isGateUnlocked(CONFIG_GATE_ID);
+
     const closeConfig = () => {
         setUnlocked(false);
         setConfigDialogOpen(false);
@@ -413,7 +418,12 @@ export function AppConfigModal() {
 
     return (
         <>
-            <ConfigPasswordModal open={isConfigOpen && !unlocked} onCancel={closeConfig} onUnlock={() => setUnlocked(true)} />
+            <ConfigPasswordModal
+                open={isConfigOpen && !gatePassed}
+                gateId={CONFIG_GATE_ID}
+                onCancel={closeConfig}
+                onUnlock={() => setUnlocked(true)}
+            />
             <Modal
                 title={
                     <div>
@@ -421,7 +431,7 @@ export function AppConfigModal() {
                         <div className="mt-1 text-xs font-normal text-stone-500">{t("config.modalDescription")}</div>
                     </div>
                 }
-                open={isConfigOpen && unlocked}
+                open={isConfigOpen && gatePassed}
                 width={980}
                 centered
                 destroyOnHidden
@@ -441,12 +451,15 @@ export function ConfigPasswordModal({
     onUnlock,
     title,
     hint,
+    gateId,
 }: {
     open: boolean;
     onCancel: () => void;
     onUnlock: () => void;
     title?: string;
     hint?: string;
+    /** 传了就记住这次通过：7 天内同一道门不再询问（见 lib/gate-unlock）。 */
+    gateId?: string;
 }) {
     const { t } = useTranslation();
     const [password, setPassword] = useState("");
@@ -466,6 +479,8 @@ export function ConfigPasswordModal({
     const submit = () => {
         if (password === CONFIG_GATE_PASSWORD) {
             setWrong(false);
+            // 记住这次通过，7 天内同一道门不再弹密码（只记时间戳，不记密码）。
+            if (gateId) markGateUnlocked(gateId);
             onUnlock();
             return;
         }
@@ -511,6 +526,7 @@ export function ConfigPasswordModal({
                     }}
                 />
                 {wrong ? <div className="text-xs text-red-500">{t("config.passwordWrong")}</div> : null}
+                {gateId ? <div className="text-xs text-stone-400 dark:text-stone-500">{t("config.passwordRemember")}</div> : null}
             </form>
         </Modal>
     );
@@ -519,7 +535,7 @@ export function ConfigPasswordModal({
 /** 独立配置页用的口令门禁：未解锁时只显示密码框。 */
 export function ConfigPasswordGate({ children }: { children: ReactNode }) {
     const { t } = useTranslation();
-    const [unlocked, setUnlocked] = useState(false);
+    const [unlocked, setUnlocked] = useState(() => isGateUnlocked(CONFIG_GATE_ID));
     const [password, setPassword] = useState("");
     const [wrong, setWrong] = useState(false);
     const inputRef = useRef<HTMLInputElement>(null);
@@ -528,6 +544,7 @@ export function ConfigPasswordGate({ children }: { children: ReactNode }) {
 
     const submit = () => {
         if (password === CONFIG_GATE_PASSWORD) {
+            markGateUnlocked(CONFIG_GATE_ID);
             setUnlocked(true);
             setWrong(false);
             return;
