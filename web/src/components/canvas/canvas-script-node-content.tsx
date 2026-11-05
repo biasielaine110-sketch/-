@@ -8,7 +8,8 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
+import { buildScriptGhostPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
+import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import {
     buildStoryScriptAssetDescriptionHints,
     collectScriptCellPromptCandidate,
@@ -398,20 +399,27 @@ export function CanvasScriptNodeContent({
      * `**主体与动作提示词：**` / `- **景别／机位**：` 模版）必须被方案原样继承（这正是用户 02/03 的要求）。
      */
     const schemeId = resolveScriptSchemeId(node.metadata?.scriptScheme);
-    /** 各套词库方案的预填内容（第一套没有预填），按方案 id 取，避免再多几套时到处写三元表达式。 */
+    /**
+     * 第六套的「自定义 / 分镜」提示词来自**画布技能库**（doc 技能的 `systemHint`），不是词库 ——
+     * 运行时按标题取，用户在设置里改了技能内容，这里自动跟着变；代码里不写死任何一段提示词全文。
+     */
+    const skillPacks = useChatSkillPacksStore((state) => state.packs);
+    /** 各套方案的预填内容（第一套没有预填），按方案 id 取，避免再多几套时到处写三元表达式。 */
     const schemePrefills = useMemo<Record<ScriptLibrarySchemeId, ScriptSchemePrefill>>(
         () => ({
             library: buildScriptSchemePrefill(globalConfig?.textPrompts, "library"),
             x20: buildScriptSchemePrefill(globalConfig?.textPrompts, "x20"),
             director: buildScriptSchemePrefill(globalConfig?.textPrompts, "director"),
             muse: buildScriptSchemePrefill(globalConfig?.textPrompts, "muse"),
+            ghost: buildScriptGhostPrefill(globalConfig?.textPrompts, skillPacks),
         }),
-        [globalConfig?.textPrompts],
+        [globalConfig?.textPrompts, skillPacks],
     );
     const libraryPrefill = schemePrefills.library;
     const x20Prefill = schemePrefills.x20;
     const directorPrefill = schemePrefills.director;
     const musePrefill = schemePrefills.muse;
+    const ghostPrefill = schemePrefills.ghost;
     /** 当前方案对应的预填（第一套没有预填）。 */
     const schemePrefill: ScriptSchemePrefill | null = schemeId === "builtin" ? null : schemePrefills[schemeId];
     /**
@@ -1033,7 +1041,7 @@ export function CanvasScriptNodeContent({
     /** 方案 toast 里「缺了哪一段」的中文名。 */
     const schemePartLabel = (part: "system" | "asset" | "shot") => t(`canvas.scriptNode.schemePart_${part}`);
     /** 方案 toast 的 i18n 名（`library` → `Library` / `x20` → `X20` / `director` → `Director` / `muse` → `Muse`）。 */
-    const schemeToastName = (id: ScriptLibrarySchemeId) => (id === "library" ? "Library" : id === "x20" ? "X20" : id === "director" ? "Director" : "Muse");
+    const schemeToastName = (id: ScriptLibrarySchemeId) => (id === "library" ? "Library" : id === "x20" ? "X20" : id === "director" ? "Director" : id === "muse" ? "Muse" : "Ghost");
 
     /**
      * 真正落地方案切换。
@@ -1523,7 +1531,7 @@ export function CanvasScriptNodeContent({
 
     // 「执行方案」总开关：第一套 = 预设自带的内置提示词；第二套 = 词库（分镜表 · 首帧图和视频提示词）；
     // 第三套 = 词库（火_X20_主图分镜图_简洁版）；第四套 = 词库（影视分镜导演）；第五套 = 词库（muse-长视频）。
-    // —— **默认是第四套**（词库没这条才退第二套），换哪套由用户自己点（第五套只手动选，不参与默认判定）。
+    // —— **默认是第四套**（词库没这条才退第二套），换哪套由用户自己点（第五 / 第六套只手动选，不参与默认判定）。
     // 放在预设切换行**之前**——预设决定「出哪些列」，方案决定「用哪套提示词」，后者层次更高。
     const schemeSelector = (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
@@ -1561,11 +1569,12 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.schemeLibraryMissing", { count: schemePrefill.missing.length })}
                 </span>
             ) : null}
-            {/* 默认是第四套；词库方案都取不到「自定义 / 分镜」那一段时自动切不动，必须说清楚
+            {/* 默认是第四套；各套都取不到「自定义 / 分镜」那一段时自动切不动，必须说清楚
                 「为什么还亮着第一套」，否则看着像功能失效。判据只认那一段 —— 资产段几套共用，
                 只有资产词条时切过去也等于没切（见 `resolveAutoApplyScriptScheme`）。
-                第五套只手动选，不参与默认判定，所以要一起数进来判断「到底有没有词可用」。 */}
-            {!node.metadata?.scriptScheme && !directorPrefill.system && !directorPrefill.shot && !x20Prefill.system && !x20Prefill.shot && !libraryPrefill.system && !libraryPrefill.shot && !musePrefill.system && !musePrefill.shot ? (
+                第五 / 第六套只手动选、不参与默认判定，但要一起数进来判断「到底有没有词可用」；
+                第六套那一段来自技能库，没装技能时同样是空。 */}
+            {!node.metadata?.scriptScheme && !directorPrefill.system && !directorPrefill.shot && !x20Prefill.system && !x20Prefill.shot && !libraryPrefill.system && !libraryPrefill.shot && !musePrefill.system && !musePrefill.shot && !ghostPrefill.system && !ghostPrefill.shot ? (
                 <span className="opacity-60">{t("canvas.scriptNode.schemeDefaultOff")}</span>
             ) : null}
         </div>

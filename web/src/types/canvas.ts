@@ -148,12 +148,14 @@ export type CanvasNodeMetadata = {
      */
     scriptShotPrompt?: string;
     /**
-     * 脚本生成器：**执行方案**（五套）。`builtin` = 只用预设自带的内置提示词，三个自定义字段留空；
+     * 脚本生成器：**执行方案**（六套）。`builtin` = 只用预设自带的内置提示词，三个自定义字段留空；
      * `library` = 从词库预填三段（自定义 ←「分镜表------首帧图和视频提示词」/ 资产 ←「资产提取」+「最佳拍档」/
      * 分镜 ← 同自定义）；`x20` = 自定义与分镜都换「火_X20_主图分镜图_简洁版」，资产同上；
-     * `director` = 换成「影视分镜导演」；`muse` = 换成「muse-长视频」（视频运动提示词整段 10 秒脚本）。
+     * `director` = 换成「影视分镜导演」；`muse` = 换成「muse-长视频」（视频运动提示词整段 10 秒脚本）；
+     * `ghost` = 自定义与分镜**运行时从画布技能库**取「鬼怪-----光影全流程」的 doc 技能正文（不写死文本），
+     * 资产仍走词库；视频运动提示词按「———— + 镜头N｜起—止秒 + 逐时间段 +【全片光影与空气】/【声音】/【结束连续性】」整段识别。
      * **默认自动套用 `director`**（词库缺词时回落 `library`，都没有则留在 `builtin`），见
-     * constant/script-scheme.ts 的 `resolveAutoApplyScriptScheme`；`muse` 只手点、不参与默认判定。
+     * constant/script-scheme.ts 的 `resolveAutoApplyScriptScheme`；`muse` / `ghost` 只手点、不参与默认判定。
      * 预填只是写入那三个字段，之后照常可改 —— 方案不封闭。
      */
     scriptScheme?: import("@/constant/script-scheme").ScriptSchemeId;
