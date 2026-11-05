@@ -111,11 +111,15 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const loadConfigFile = async (file: File) => {
         try {
             const result = await importAppConfig(file);
-            // 只有文件真的带了这两个字段（-1 = 旧版文件没带）才提「已还原」，否则会虚报。
+            // 只有文件真的带了技能信息（-1 = 旧版文件没带）才提「已还原」，否则会虚报。
             const hasSkillView = result.skillOrderCount >= 0 || result.skillHiddenCount >= 0;
+            const viewKey = result.skillPackSkipped > 0 ? "config.importedSkillViewSkipped" : "config.importedSkillView";
             message.success(
                 hasSkillView
-                    ? t("config.importedSkillView", {
+                    ? t(viewKey, {
+                          skills: result.skillCount,
+                          packs: result.skillPackCount,
+                          skipped: result.skillPackSkipped,
                           order: Math.max(result.skillOrderCount, 0),
                           hidden: Math.max(result.skillHiddenCount, 0),
                       })
@@ -132,7 +136,12 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         setExporting(true);
         try {
             const result = await exportAppConfig({ includeTextPrompts: exportIncludeTextPrompts });
-            const counts = { order: result.skillOrderCount, hidden: result.skillHiddenCount };
+            const counts = {
+                skills: result.skillCount,
+                packs: result.skillPackCount,
+                order: result.skillOrderCount,
+                hidden: result.skillHiddenCount,
+            };
             message.success(
                 result.method === "draft"
                     ? t("config.exportedToFolderSkillView", { name: result.fileName, folder: result.folderName || "", ...counts })

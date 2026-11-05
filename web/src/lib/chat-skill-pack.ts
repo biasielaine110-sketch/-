@@ -345,16 +345,26 @@ export function normalizePersistedSkillPack(data: unknown): LocalSkillPack {
 }
 
 export function normalizePersistedSkillPacks(raw: unknown): LocalSkillPack[] {
-    if (!Array.isArray(raw)) return [];
+    return normalizePersistedSkillPacksDetailed(raw).packs;
+}
+
+/**
+ * 带统计的版本：导入后要能告诉用户「文件里 N 个技能，导入了 M 个，跳过 K 个」。
+ * 之前这里 `catch {}` 静默跳坏条目，用户只看到「技能少了几个」，完全不知道发生了什么。
+ */
+export function normalizePersistedSkillPacksDetailed(raw: unknown): { packs: LocalSkillPack[]; skipped: number } {
+    if (!Array.isArray(raw)) return { packs: [], skipped: 0 };
     const packs: LocalSkillPack[] = [];
+    let skipped = 0;
     for (const item of raw) {
         try {
             packs.push(normalizePersistedSkillPack(item));
         } catch {
             // skip corrupt entries so one bad pack does not block the whole import
+            skipped += 1;
         }
     }
-    return packs;
+    return { packs, skipped };
 }
 
 export function renderSkillTemplate(template: string, args: Record<string, unknown>) {

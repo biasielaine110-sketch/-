@@ -275,6 +275,128 @@ export function isChatSkillHidden(skillId: string): boolean {
 }
 
 /**
+ * 配置导出 / 备份用的「技能清单」条目：内置技能也在里面。
+ *
+ * 只导出 `skillOrder` + `hiddenSkillIds` 两个 id 数组是不够的 —— 这两个数组是**增量**记录：
+ * 用户没拖动过就是空数组，新装的技能也不会进排序。文件到了另一台机器上就变成
+ * 「顺序没继承、有些技能像消失了」。所以额外把「当前这一版完整列表」拍成快照，
+ * 每项带 name / alias / kind / hidden / order，人打开 JSON 也看得懂。
+ */
+export type ExportedChatSkill = {
+    id: string;
+    name: string;
+    source: "builtin" | "local";
+    /** 本地技能：按工具包还是纯文档；内置技能没有这个字段 */
+    kind?: "pack" | "doc";
+    /** 用户备注名（仅本地技能） */
+    alias?: string;
+    hidden: boolean;
+    /** 列表里的位置（0 起），与 AI 对话窗口里看到的顺序一致 */
+    order: number;
+};
+
+/** 当前技能列表快照：顺序 = `listChatSkills()`，也就是 AI 对话窗口里渲染的那一版。 */
+export function buildChatSkillManifest(): ExportedChatSkill[] {
+    const hiddenIds = new Set(listHiddenChatSkillIds());
+    return listChatSkills().map((skill, index) => {
+        const alias = String(skill.alias || "").trim();
+        return {
+            id: skill.id,
+            name: getChatSkillDisplayName(skill),
+            source: skill.source,
+            ...(skill.kind ? { kind: skill.kind } : {}),
+            ...(alias ? { alias } : {}),
+            hidden: hiddenIds.has(skill.id),
+            order: index,
+        };
+    });
+}
+
+/** 导出 / 备份三件套：清单 + **完整**排序 id + 完整隐藏 id。 */
+export function buildChatSkillSnapshot(): { skills: ExportedChatSkill[]; order: string[]; hiddenIds: string[] } {
+    const skills = buildChatSkillManifest();
+    return {
+        skills,
+        // 写成全量而不是只写用户拖过的那几个：半截排序到另一台机器上会把没登记的技能甩到末尾。
+        order: skills.map((skill) => skill.id),
+        hiddenIds: skills.filter((skill) => skill.hidden).map((skill) => skill.id),
+    };
+}
+
+/** 导入侧的清单归一化：只收对象 + 字符串 id，按 order 稳定排序，重排 0…N-1。 */
+export function normalizeExportedChatSkills(value: unknown): ExportedChatSkill[] {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set<string>();
+    const entries: ExportedChatSkill[] = [];
+    for (const raw of value) {
+        if (!raw || typeof raw !== "object") continue;
+        const item = raw as Record<string, unknown>;
+        const id = typeof item.id === "string" ? item.id.trim() : "";
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const alias = typeof item.alias === "string" ? item.alias.trim().slice(0, 80) : "";
+        const order = Number(item.order);
+        const kind = item.kind === "doc" || item.kind === "pack" ? item.kind : undefined;
+        entries.push({
+            id,
+            name: typeof item.name === "string" ? item.name.trim().slice(0, 120) || id : id,
+            source: item.source === "local" ? "local" : "builtin",
+            ...(kind ? { kind } : {}),
+            ...(alias ? { alias } : {}),
+            hidden: item.hidden === true,
+            order: Number.isFinite(order) ? order : entries.length,
+        });
+    }
+    return entries
+        .map((entry, index) => ({ entry, index }))
+        .sort((a, b) => a.entry.order - b.entry.order || a.index - b.index)
+        .map(({ entry }, index) => ({ ...entry, order: index }));
+}
+
+/**
+ * 把两段排序拼成一段：先按 primary，再把 tail 里没出现过的 id 补在后面。
+ * 用途是兼容「上一版只导出了半截排序」的文件 —— 不补的话这些技能会掉到最后。
+ */
+export function mergeChatSkillOrder(primary: readonly unknown[], tail: readonly unknown[]): string[] {
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const raw of [...primary, ...tail]) {
+        const id = typeof raw === "string" ? raw.trim() : "";
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+    }
+    return ids;
+}
+
+/**
+ * 配置 / 备份导入时还原技能视图（排序 + 显示隐藏）。
+ *
+ * 取值优先级：`chatSkillOrder` / `chatSkillHiddenIds` 两个显式字段 → 退回技能清单快照。
+ * 只有两处都没有（旧版文件）时才返回空对象，让调用方保留本地设置、一个字节都不动。
+ */
+export function resolveImportedChatSkillView(payload?: {
+    chatSkills?: unknown;
+    chatSkillOrder?: unknown;
+    chatSkillHiddenIds?: unknown;
+}): { order?: string[]; hiddenIds?: string[]; skillCount: number } {
+    const manifest = normalizeExportedChatSkills(payload?.chatSkills);
+    const manifestOrder = manifest.map((skill) => skill.id);
+    const orderField = Array.isArray(payload?.chatSkillOrder) ? (payload?.chatSkillOrder as unknown[]) : null;
+    const hiddenField = Array.isArray(payload?.chatSkillHiddenIds) ? (payload?.chatSkillHiddenIds as unknown[]) : null;
+    const order = orderField ? mergeChatSkillOrder(orderField, manifestOrder) : manifestOrder;
+    // 隐式字段是「完整集合」，显式字段给了就以它为准（文件里两个字段本来就同源）。
+    const hiddenIds = hiddenField !== null ? mergeChatSkillOrder(hiddenField, []) : manifest.filter((skill) => skill.hidden).map((skill) => skill.id);
+    const hasOrder = order.length > 0 || orderField !== null;
+    const hasHidden = hiddenField !== null || manifest.length > 0;
+    return {
+        ...(hasOrder ? { order } : {}),
+        ...(hasHidden ? { hiddenIds } : {}),
+        skillCount: manifest.length,
+    };
+}
+
+/**
  * 按「词库」那套口径把技能分成可见 / 已隐藏两组。
  *
  * 关键一条：**已经在本节点勾选的技能，即使被隐藏也留在可见组**。否则用户勾过它、

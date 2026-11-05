@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import { localSkillPackDisplayName, normalizePersistedSkillPacks, parseLocalSkillPackJson, type LocalSkillPack } from "@/lib/chat-skill-pack";
+import { localSkillPackDisplayName, normalizePersistedSkillPacks, normalizePersistedSkillPacksDetailed, parseLocalSkillPackJson, type LocalSkillPack } from "@/lib/chat-skill-pack";
 
 /**
  * 配置导入 / 备份恢复用的技能 id 列表归一化：只收字符串、去空白、去重、限量。
@@ -40,8 +40,8 @@ type ChatSkillPacksStore = {
     /** 解析好的技能落库（.json 工具包 / SKILL.md 文档技能 / 文件夹，都在外面解析完再进来） */
     upsert: (pack: LocalSkillPack) => LocalSkillPack;
     installFromJson: (raw: string) => LocalSkillPack;
-    /** 配置导入：按 id 合并写入，不删本地已有但文件里没有的技能 */
-    importPacks: (packs: LocalSkillPack[]) => number;
+    /** 配置导入：按 id 合并写入，不删本地已有但文件里没有的技能；返回导入 / 跳过条数 */
+    importPacks: (packs: LocalSkillPack[]) => { applied: number; skipped: number };
     /** 全量备份恢复：整表替换 */
     replacePacks: (packs: LocalSkillPack[]) => void;
     /** 只改用户备注名；传空串则清掉备注 */
@@ -106,8 +106,8 @@ export const useChatSkillPacksStore = create<ChatSkillPacksStore>()(
             },
             installFromJson: (raw) => get().upsert(parseLocalSkillPackJson(raw)),
             importPacks: (packs) => {
-                const normalized = normalizePersistedSkillPacks(packs);
-                if (!normalized.length) return 0;
+                const { packs: normalized, skipped } = normalizePersistedSkillPacksDetailed(packs);
+                if (!normalized.length) return { applied: 0, skipped };
                 const now = Date.now();
                 const byId = new Map(get().packs.map((pack) => [pack.id, pack] as const));
                 for (const pack of normalized) {
@@ -123,7 +123,7 @@ export const useChatSkillPacksStore = create<ChatSkillPacksStore>()(
                     });
                 }
                 set({ packs: sortPacks(Array.from(byId.values())) });
-                return normalized.length;
+                return { applied: normalized.length, skipped };
             },
             replacePacks: (packs) => {
                 const normalized = normalizePersistedSkillPacks(packs);

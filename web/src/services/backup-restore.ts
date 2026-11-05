@@ -7,10 +7,11 @@ import { setImageBlob } from "@/services/image-storage";
 import { setMediaBlob } from "@/services/file-storage";
 import type { CanvasAgentDefinition } from "@/constant/canvas-agents";
 import type { LocalSkillPack } from "@/lib/chat-skill-pack";
+import { buildChatSkillSnapshot, resolveImportedChatSkillView, type ExportedChatSkill } from "@/lib/chat-skills";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useAssetStore, type Asset } from "@/stores/use-asset-store";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
-import { normalizeChatSkillIdList, useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
+import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
 
 const imageStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
@@ -28,6 +29,8 @@ type AppBackupFile = {
     files: BackupItem[];
     /** 用户安装的本地技能；旧版备份可能没有该字段 */
     chatSkillPacks?: LocalSkillPack[];
+    /** 技能列表完整快照（内置 + 本地，含隐藏项与顺序）；旧版备份可能没有该字段 */
+    chatSkills?: ExportedChatSkill[];
     /** 技能列表的用户排序与显示隐藏；旧版备份可能没有这两个字段 */
     chatSkillOrder?: string[];
     chatSkillHiddenIds?: string[];
@@ -42,6 +45,9 @@ export async function exportAppBackup() {
     const { config } = useConfigStore.getState();
     const skillState = useChatSkillPacksStore.getState();
     const chatSkillPacks = skillState.packs;
+    // 技能清单 + 全量排序 + 显隐一起进备份：恢复后技能面板的样子要和导出时一模一样
+    // （只有半截排序时，没登记的技能会被甩到末尾，看起来就是「顺序没继承」）。
+    const skillSnapshot = buildChatSkillSnapshot();
     const canvasAgents = useCanvasAgentsStore.getState().agents;
     const files: BackupItem[] = [];
     const zipFiles: { name: string; data: BlobPart }[] = [];
@@ -56,8 +62,9 @@ export async function exportAppBackup() {
         files,
         chatSkillPacks,
         // 排序与显示隐藏也进备份：全量恢复后技能面板的样子要和导出时一致。
-        chatSkillOrder: normalizeChatSkillIdList(skillState.skillOrder),
-        chatSkillHiddenIds: normalizeChatSkillIdList(skillState.hiddenSkillIds),
+        chatSkills: skillSnapshot.skills,
+        chatSkillOrder: skillSnapshot.order,
+        chatSkillHiddenIds: skillSnapshot.hiddenIds,
         canvasAgents,
     };
     zipFiles.push({ name: "backup.json", data: new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }) });
@@ -107,8 +114,13 @@ export async function importAppBackup(file: File) {
     if (Array.isArray(data.chatSkillPacks)) {
         useChatSkillPacksStore.getState().replacePacks(data.chatSkillPacks);
     }
-    // 旧版备份没带这两个字段时 replaceSkillView 会整段跳过，保留本地排序与隐藏。
-    useChatSkillPacksStore.getState().replaceSkillView({ order: data.chatSkillOrder, hiddenIds: data.chatSkillHiddenIds });
+    // 旧版备份没带这些字段时 view 是空的，replaceSkillView 会整段跳过，保留本地排序与隐藏。
+    const skillView = resolveImportedChatSkillView({
+        chatSkills: data.chatSkills,
+        chatSkillOrder: data.chatSkillOrder,
+        chatSkillHiddenIds: data.chatSkillHiddenIds,
+    });
+    useChatSkillPacksStore.getState().replaceSkillView({ order: skillView.order, hiddenIds: skillView.hiddenIds });
     if (Array.isArray(data.canvasAgents)) {
         useCanvasAgentsStore.getState().replaceAgents(data.canvasAgents);
     }
