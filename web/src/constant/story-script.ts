@@ -4578,8 +4578,16 @@ function museSlotOf(label: string): MuseSlot | null {
  * 判据：必须有一行同时命中 ≥2 个段名（确实被压平了才动手）→ 已经分好行的文本一个字节都不改，幂等。
  */
 export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "director"): string {
-    const raw = String(text ?? "");
+    let raw = String(text ?? "");
     if (!raw.trim()) return raw;
+    /**
+     * 另一种「看着像没适配」：模型在 JSON 字符串里把换行**双转义**了（`\\n`），
+     * 解析完拿到的是字面量 `\n` 两个字符，表格里就是一行带满 `\n` 的流水句。
+     * 只在「真换行 < 2 个、字面量 `\n` ≥ 3 个」时替换，正文里正常出现的 `\n` 说明不受影响。
+     */
+    if ((raw.match(/\n/g) || []).length < 2 && (raw.match(/\\n/g) || []).length >= 3) {
+        raw = raw.replace(/\\r\\n|\\n/g, "\n").replace(/\\t/g, " ");
+    }
     /**
      * `after: true` = 这个段名**独占一行**（`【全片光影与空气】` / `————————————`），
      * 否则只要求在它前面断开。用户实样里三块标签都是单独一行、正文另起。
@@ -4635,25 +4643,50 @@ function looksLikeMuseScript(text: string): boolean {
     return /###\s*视频/.test(text) || (/角色设定\s*[：:]/.test(text) && /时间轴\s*[：:]/.test(text));
 }
 
-/** 从标签块里抽语义槽；命中标签少于 4 个就当「不是标签块」，返回 null。 */
+/**
+ * 标签名按**长度倒序**拼成一条正则：`人物动作与表演` 必须优先于 `人物动作` 命中，
+ * 否则 `人物动作与表演：翻蛋` 会被切成 `人物动作`+`与表演：翻蛋`。
+ */
+const MUSE_LABEL_PATTERN = new RegExp(
+    `[\\s\\-*·•#>—–；;/、，,]*[【\\[]?(?:\\*\\*)?(${Object.keys(MUSE_TAG_SLOTS)
+        .sort((a, b) => b.length - a.length)
+        .map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("|")})(?:\\*\\*)?[】\\]]?\\s*[：:]`,
+    "gi",
+);
+
+/**
+ * 从标签块里抽语义槽；命中标签少于 4 个就当「不是标签块」，返回 null。
+ *
+ * ⚠️ **不能只按换行切**（2026-11-05 晚用户第二次报障的真因）：八段块一旦落进 Markdown
+ * 表格单元格，换行会被压掉，整块变成一行 ——
+ * `- **景别**：中景 - **摄影机参数**：… - **负面**：…`。
+ * 旧实现逐行 split，一行里 8 个标签只算 1 次命中（`parseMuseTagSlots` 直接返回 null），
+ * 收敛函数就把这一行原样留在视频列里，用户看到的就是「第五套的适配逻辑根本没跑」。
+ * 现在改成**按标签名本身切**：换行块、`-`/`/`/`；` 分隔的压平行、`【景别】` 写法都走同一条路。
+ */
 function parseMuseTagSlots(text: string): Partial<Record<MuseSlot, string>> | null {
+    const raw = String(text || "");
+    if (!raw.trim()) return null;
+    // 已经是合规长视频脚本（`### 视频…` / `角色设定：` + `时间轴：`）→ 不是标签块，别把它的段落名当标签。
+    if (looksLikeMuseScript(raw)) return null;
+    const matches = Array.from(raw.matchAll(MUSE_LABEL_PATTERN));
+    if (matches.length < 4) return null;
     const slots: Partial<Record<MuseSlot, string>> = {};
     let hits = 0;
-    let current: MuseSlot | null = null;
-    for (const rawLine of String(text || "").split(/\r?\n/)) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        const match = line.match(/^[\s\-*·•]*([^：:\n]{1,20})[：:]\s*([\s\S]*)$/);
-        const slot = match ? museSlotOf(match[1]) : null;
-        if (slot) {
-            hits += 1;
-            const value = String(match?.[2] || "").trim();
-            slots[slot] = [slots[slot], value].filter(Boolean).join(" ");
-            current = slot;
-            continue;
-        }
-        // 续行（标签后面另起一段写的长文）并回上一个槽。
-        if (current && slots[current]) slots[current] = `${slots[current]}\n${line}`;
+    for (let index = 0; index < matches.length; index += 1) {
+        const match = matches[index];
+        const slot = museSlotOf(match[1]);
+        if (!slot) continue;
+        const start = (match.index ?? 0) + match[0].length;
+        const end = index + 1 < matches.length ? matches[index + 1].index ?? raw.length : raw.length;
+        // 值：从标签冒号之后切到下一个标签之前；顺手剥掉压平时遗留的分隔符与粗体尾巴。
+        const value = raw
+            .slice(start, end)
+            .replace(/^[\s；;，,、*·•]+|[\s；;，,、*·•]+$/g, "")
+            .trim();
+        hits += 1;
+        slots[slot] = [slots[slot], value].filter(Boolean).join(" ");
     }
     return hits >= 4 ? slots : null;
 }
@@ -4720,7 +4753,18 @@ function museShotNoLabel(shotNo: number): string {
 }
 
 /** 标签块 → 长视频脚本（第五套的唯一合法形态，见 `STORY_SCRIPT_MUSE_VIDEO_FORMAT`）。 */
-function buildMuseScriptFromSlots(slots: Partial<Record<MuseSlot, string>>, duration: number, shotNo: number): string {
+/**
+ * 标签块 → 长视频脚本（第五套的唯一合法形态，见 `STORY_SCRIPT_MUSE_FORMAT` 同名常量）。
+ *
+ * `cast` = 本镜角色资产（`角色1：描述`）拼出来的一句；**不能拿「画面内容」顶替**——
+ * 那会拼出 `角色设定：母亲在灶台前煎蛋`（那是动作，不是人物设定）。
+ */
+function buildMuseScriptFromSlots(
+    slots: Partial<Record<MuseSlot, string>>,
+    duration: number,
+    shotNo: number,
+    cast?: string,
+): string {
     const dur = Math.max(1, Math.round(duration) || 10);
     // `[时长：5s]` / `[时长：5秒]` 两种写法都要剥掉（用户实样写的是 `5s`）；剥完顺手收一下重复标点。
     const camera = museOneLine(slots.camera)
@@ -4739,8 +4783,8 @@ function buildMuseScriptFromSlots(slots: Partial<Record<MuseSlot, string>>, dura
     const opening = [`文生视频，${ratio} ${orientation}，时长 ${dur} 秒`, shotSize ? `画面为${shotSize}` : "", camera, composition ? `构图：${composition}` : ""]
         .filter(Boolean)
         .join("。");
-    /** 共享环境与光线：优先从摄影机参数 / 运镜里挑讲光的句子。 */
-    const light = museLightSentences(slots.camera, slots.movement, slots.composition) || "环境光方向保持不变，人物面部与手部细节清楚，背景不出现光线突变";
+    /** 共享环境与光线：优先从摄影机参数 / 运镜 / 画面内容里挑讲光的句子（内容里常写「清晨侧逆光」）。 */
+    const light = museLightSentences(slots.camera, slots.movement, slots.composition, slots.content) || "环境光方向保持不变，人物面部与手部细节清楚，背景不出现光线突变";
     /** 时间轴：动作段里的时间码就是天然的分镜节拍。 */
     const timeline = museTimelineItems(slots.action, dur);
     /**
@@ -4778,10 +4822,19 @@ function buildMuseScriptFromSlots(slots: Partial<Record<MuseSlot, string>>, dura
         const last = timelineLines[timelineLines.length - 1];
         timelineLines[timelineLines.length - 1] = `${last.replace(/[。；;]\s*$/, "")}；台词：“${quoted}”。`;
     }
+    /**
+     * `角色设定` 的取值顺序：① 本镜角色资产（`角色1：27岁…穿灰色家居服`）→
+     * ② 画面内容里**确实写了外貌 / 服装**的那一小句 → ③ 通用兜底。
+     * 绝不能直接拿 `画面内容` 兜（会拼出「角色设定：母亲在灶台前煎蛋」——那是动作）。
+     */
+    const castLine =
+        museOneLine(cast) ||
+        content.match(/[^，,。；;]*(?:穿|衣着|外套|家居服|裙|衬衫|短发|长发|扎|岁|妆|肤色|指甲)[^，,。；;]*/)?.[0]?.trim() ||
+        "沿用本镜角色资产的外貌、服装与年龄感，在本段内保持稳定";
     return [
         `### 视频${museShotNoLabel(shotNo)}（${dur}秒）`,
         `${opening}。${content ? `${content}。` : ""}`,
-        `角色设定：${content || "沿用本镜角色资产的外貌、服装与年龄感，在本段内保持稳定"}。`,
+        `角色设定：${castLine}。`,
         `共享环境与光线：${light}。`,
         "时间轴：",
         ...timelineLines,
@@ -4794,14 +4847,30 @@ function buildMuseScriptFromSlots(slots: Partial<Record<MuseSlot, string>>, dura
  * 第五套（muse）整表后处理：`video_motion_prompt` 是八行标签块时，改写成整段长视频脚本。
  *
  * 幂等（合规就原样返回）、只在该预设真有这一列时生效；其它方案完全不受影响。
+ *
+ * 2026-11-05 晚第二次报障补齐的三种「适配逻辑没跑」情形：
+ *  ① 八段块被压成**一行**（表格单元格装不下换行）→ 旧实现逐行切，只算 1 个标签命中而整块放过；
+ *  ② 整段 muse 脚本被写进了 **`shot_prompt` 列**、视频列空着 → 以前直接 return row，视频列一直空；
+ *  ③ 视频列空着、但本镜的行内语义素材齐全 → 以前留着空列，视频节点只能拼一句上下文。
+ * 三种都在这里收敛，模型照不照格式都不影响表格里看到的形态。
  */
 export function normalizeStoryScriptMuseRows(rows: readonly StoryScriptRow[], preset?: StoryScriptPresetId | string | null): StoryScriptRow[] {
     if (!rows?.length) return rows as StoryScriptRow[];
     const columns = getStoryScriptColumns(preset);
     if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
     return rows.map((row, index) => {
+        const shotNo = Number(row.shot_no) || index + 1;
         const rawText = String(row.video_motion_prompt ?? "");
-        if (!rawText.trim()) return row;
+        if (!rawText.trim()) {
+            /**
+             * 视频列空：先看是不是被写到了 `shot_prompt` 列（模型把这一列当成「分镜提示词」很常见），
+             * 再退一步用本镜其它列（景别 / 画面描述 / 角色动作 / 音效）拼一段 —— 有素材才拼，不造空壳。
+             */
+            const relocated = relocateMuseScriptFromRow(row);
+            if (relocated) return relocated;
+            const composed = composeMuseScriptFromRow(row, shotNo);
+            return composed ? { ...row, video_motion_prompt: composed } : row;
+        }
         /**
          * 先还原「被压成一行」的脚本：模型把多行塞进 Markdown 表格单元格 / JSON 单行字符串时，
          * `### 视频一（10秒）` 还在，`looksLikeMuseScript` 就会判「已经合规」直接放过 ——
@@ -4811,9 +4880,51 @@ export function normalizeStoryScriptMuseRows(rows: readonly StoryScriptRow[], pr
         if (looksLikeMuseScript(text)) return text === rawText ? row : { ...row, video_motion_prompt: text };
         const slots = parseMuseTagSlots(text);
         if (!slots) return text === rawText ? row : { ...row, video_motion_prompt: text };
-        const shotNo = Number(row.shot_no) || index + 1;
-        return { ...row, video_motion_prompt: buildMuseScriptFromSlots(slots, Number(row.duration) || 0, shotNo) };
+        return { ...row, video_motion_prompt: buildMuseScriptFromSlots(slots, Number(row.duration) || 0, shotNo, museCastOf(row)) };
     });
+}
+
+/** 本镜角色资产 → `苏晚：27岁中国女性，短发，穿灰色家居服`；没名字就留空（让 `角色设定` 走兜底）。 */
+function museCastOf(row: StoryScriptRow): string {
+    return [
+        [row.character_1, row.character_description_1],
+        [row.character_2, row.character_description_2],
+    ]
+        .map(([name, description]) => {
+            const label = museOneLine(name);
+            // 「（同第 1 镜）」是资产去重后的占位，不是描述。
+            const detail = /^（?同第/.test(museOneLine(description)) ? "" : museOneLine(description);
+            if (label && detail) return `${label}：${detail}`;
+            return label || "";
+        })
+        .filter(Boolean)
+        .join("；");
+}
+
+/** `shot_prompt` 里整段都是长视频脚本（模型写错列）→ 挪到视频列，并把分镜列清空。 */
+function relocateMuseScriptFromRow(row: StoryScriptRow): StoryScriptRow | null {
+    const shotText = String(row.shot_prompt ?? "");
+    if (!/^\s*###\s*视频/.test(shotText)) return null;
+    const text = reflowLongVideoScript(shotText, "muse");
+    if (!looksLikeMuseScript(text)) return null;
+    return { ...row, video_motion_prompt: text, shot_prompt: "" };
+}
+
+/**
+ * 视频列空、模型也没把脚本写错列时，用本镜已有的语义列拼一段长视频脚本。
+ * 判据很紧：至少要有画面描述或角色动作，否则返回 null（不拿空行造垃圾）。
+ */
+function composeMuseScriptFromRow(row: StoryScriptRow, shotNo: number): string | null {
+    const content = museOneLine([row.visual_description, row.lighting_mood].filter(Boolean).join("；"));
+    const action = museOneLine([row.character_action, row.blocking].filter(Boolean).join("；"));
+    if (!content && !action) return null;
+    const sound = museOneLine([row.sound, row.dialogue].filter(Boolean).join("；"));
+    return buildMuseScriptFromSlots(
+        { shot: museOneLine(row.shot), content, action, sound },
+        Number(row.duration) || 0,
+        shotNo,
+        museCastOf(row),
+    );
 }
 
 /* ── 第五套（muse）源内容识别：`### 视频一（10秒）` 整段 → 视频运动提示词列 ───────────────
