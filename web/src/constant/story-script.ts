@@ -3191,6 +3191,17 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
     };
     /** 这一行是不是「镜号标题」（`镜头 02` / `场次02—镜头005` / `第 3 镜`）；不是就当正文续行。 */
     const looksLikeShotHeading = (text: string) => /场次|镜头|镜号|第\s*\d+\s*镜|\bshot\b|\bscene\b/i.test(text);
+    /**
+     * 第五套（muse-长视频）的**段标题**：`视频一（10秒）` / `视频 2` / `第一段视频` / `视频片段3`。
+     *
+     * 这一套的 `视频运动提示词` 不是八段标签块，而是一整段 10 秒视频脚本，正文第一行就是
+     * `### 视频一（10秒）`。旧逻辑把「不认识的 `#` 标题」一律 `continue` 掉 —— 那一行（以及
+     * 它带的「10 秒」这个关键信息）会**静默消失**，模型写好的视频提示词从开头就断了一截。
+     * 这里放行的判据很紧：整行只能是「视频/片段 + 数字（+（N秒））」，
+     * `视频中出现一只猫…` 这种正文不会被误当标题。
+     */
+    const looksLikeVideoSegmentHeading = (text: string) =>
+        /^(?:视频|片段|分镜视频|第)\s*[0-9０-９一二三四五六七八九十]+\s*(?:段|集|条|个)?\s*(?:视频|片段)?\s*(?:[（(]\s*\d+\s*秒?\s*[)）])?\s*$/i.test(text.trim());
 
     for (const rawLine of String(raw || "").split(/\r?\n/)) {
         /**
@@ -3207,7 +3218,15 @@ function splitStoryScriptTemplateBlocks(raw: string): StoryScriptTemplateBlock[]
         if (heading) {
             const text = heading[1].trim();
             // 只把「场次 / 镜头」这类镜号标题当块边界，其它小标题忽略（别把一块拆成两块）。
-            if (looksLikeShotHeading(text)) startBlock(text);
+            if (looksLikeShotHeading(text)) {
+                startBlock(text);
+                continue;
+            }
+            // 例外：长视频方案的段标题是**正文的一部分**（见 `looksLikeVideoSegmentHeading`），
+            // 并进当前字段而不是丢掉；还没有任何字段（标题出现之前）仍按原样忽略。
+            if (lastField && looksLikeVideoSegmentHeading(text)) {
+                lastField.value = lastField.value ? `${lastField.value}\n${line}` : `\n${line}`;
+            }
             continue;
         }
 
@@ -3453,7 +3472,15 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
                         !/运动提示词$/.test(normalizeTemplateLabel(field.label)) &&
                         field.value.trim(),
                 )?.value || "";
-            const motion = bracketVideoPrompt || directorMotion || (motionLines.length ? motionLines.join("\n") : pick("视频运动提示词") || videoPromptField);
+            /**
+             * 第五套方案（muse-长视频）：模版里**显式写了** `- **视频运动提示词**：` 时，那一段就是这一列的全集
+             * （`### 视频一（10秒）` + 文生视频 / 角色设定 / 共享环境与光线 / 时间轴 / Negative prompt），
+             * 必须优先于按标签拼出来的「景别：中近景」这类摘要 —— 否则长文整段被一行摘要顶掉，
+             * 用户看到的永远是「视频运动提示词没识别出来」。
+             * 老模版（只有 景别 / 运镜 / 时长 这几行、没有这一列）完全不受影响：`explicitMotion` 为空，仍走拼装。
+             */
+            const explicitMotion = pick("视频运动提示词").trim();
+            const motion = bracketVideoPrompt || directorMotion || explicitMotion || (motionLines.length ? motionLines.join("\n") : videoPromptField);
             if (motion) record.video_motion_prompt = motion;
         }
 

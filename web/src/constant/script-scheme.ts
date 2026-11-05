@@ -1,7 +1,7 @@
 import type { TextPromptEntry } from "@/constant/text-prompt-library";
 
 /**
- * 分镜表（脚本节点）的**四套执行方案**。
+ * 分镜表（脚本节点）的**五套执行方案**。
  *
  * - `builtin`：预设自带的内置 system prompt / 任务书（改造前逐字一致）。
  * - `library`：改用「词库」里的三段提示词 —— 自定义提示词与分镜提示词都填
@@ -9,10 +9,18 @@ import type { TextPromptEntry } from "@/constant/text-prompt-library";
  * - `x20`：同样走词库，但自定义提示词与分镜提示词换成
  *   「***********火_X20_主图分镜图_简洁版****************************」，资产提示词同上。
  * - `director`：第四套 · 影视分镜导演 —— 自定义提示词与分镜提示词都填
- *   「***********# Role: 影视分镜导演 ****************************」，资产提示词同上（资产两段三套共用）。
+ *   「***********# Role: 影视分镜导演 ****************************」，资产提示词同上（资产两段各套共用）。
  *   这一套的输出形态与前几套不同（`**主体与动作提示词：**` / `**独立风格提示词：**`、
  *   视频段用 `- **景别／机位：**` 这种字段，冒号在加粗里面），解析侧已按同一套标签认
  *   （见 `story-script.ts` 的 `STORY_SCRIPT_TEMPLATE_KNOWN_LABELS`）。
+ * - `muse`：第五套 · muse 长视频（2026-11-05 用户要求）—— 自定义提示词与分镜提示词都填
+ *   「---------muse-长视频-------」，资产提示词同上（资产两段各套共用）。
+ *   这一套的 `视频运动提示词` 不是八段标签块，而是**整段 10 秒视频脚本**：
+ *   `### 视频一（10秒）` + `文生视频，16:9 横屏，时长 10 秒。…` + `角色设定：` /
+ *   `共享环境与光线：` / `时间轴：`（`- 0—3 秒：…`）/ `Negative prompt：`。
+ *   解析侧为此单独放行了两件事（见 `story-script.ts`）：
+ *   ① 小标题 `### 视频一（10秒）` 不再被当「不认识的标题」丢掉；
+ *   ② 块里显式写了 `- **视频运动提示词**：` 时以它为准，不再被 `景别` 那几行拼出来的摘要顶掉。
  *
  * ⚠️ 默认是 **`director`（第四套）**（2026-10-23 用户要求：01 分镜表默认走第四套；词库里没有
  * 影视分镜导演那一条时回落第二套 `library`；都没有则停在内置）。`resolveScriptSchemeId`
@@ -24,14 +32,14 @@ import type { TextPromptEntry } from "@/constant/text-prompt-library";
  * 覆盖入口（`resolveScriptSystemPrompt` / `buildScriptGenerationPromptSections` 都读它们），
  * 预填之后用户可以照常打开弹窗改一两句，改完仍然生效 —— 方案只是「一键填好」，不是封闭开关。
  */
-export type ScriptSchemeId = "builtin" | "library" | "x20" | "director";
+export type ScriptSchemeId = "builtin" | "library" | "x20" | "director" | "muse";
 
-/** 方案切换器的渲染顺序（第一套 → 第四套）。 */
-export const SCRIPT_SCHEME_IDS = ["builtin", "library", "x20", "director"] as const satisfies readonly ScriptSchemeId[];
+/** 方案切换器的渲染顺序（第一套 → 第五套）。 */
+export const SCRIPT_SCHEME_IDS = ["builtin", "library", "x20", "director", "muse"] as const satisfies readonly ScriptSchemeId[];
 
 /** 读方案：认不出 / 没设过一律按 `builtin` 渲染，默认值交给自动预填。 */
 export function resolveScriptSchemeId(value: unknown): ScriptSchemeId {
-    return value === "library" || value === "x20" || value === "director" ? value : "builtin";
+    return value === "library" || value === "x20" || value === "director" || value === "muse" ? value : "builtin";
 }
 
 /** 「从词库预填」的几套方案（第一套不在其中）。 */
@@ -55,9 +63,17 @@ export const SCRIPT_SCHEME_LIBRARY_NEEDLES = {
      * 归一后是 `role影视分镜导演`，所以只认「影视分镜导演」这五个字，`role` 有没有都行。
      */
     shotDirector: ["影视分镜导演"],
-    /** 最佳短剧 · 资产提取提示词（第二 / 三 / 四套方案共用） */
+    /**
+     * 第五套 · muse-长视频 —— 同样一段两用。
+     * 用户那条的标题是 `---------muse-长视频-------`，归一后 `muse长视频`。
+     * 两个 needle 是为了**优先**命中「muse + 长视频」那一条（`muse` 单独太泛，词库里可能还有别的 muse 条目）；
+     * 和别的方案一样，`resolvePromptLibraryEntry` 最后有一层「任一 needle 命中」兜底 ——
+     * 词库里只剩 `muse-短视频` 这种条目时仍会被用上，总比切过去是空的好。
+     */
+    shotMuse: ["muse", "长视频"],
+    /** 最佳短剧 · 资产提取提示词（第二 / 三 / 四 / 五套方案共用） */
     assetExtract: ["资产提取"],
-    /** 配合最佳拍档生图（第二 / 三 / 四套方案共用） */
+    /** 配合最佳拍档生图（第二 / 三 / 四 / 五套方案共用） */
     assetPartner: ["最佳拍档"],
 } as const;
 
@@ -93,7 +109,7 @@ export function resolvePromptLibraryEntry(entries: readonly TextPromptEntry[] | 
 }
 
 export type ScriptSchemePrefill = {
-    /** 这次预填属于哪套方案（`library` / `x20` / `director`）。 */
+    /** 这次预填属于哪套方案（`library` / `x20` / `director` / `muse`）。 */
     scheme: ScriptLibrarySchemeId;
     /** 「自定义系统提示词」（整段替换 system prompt） */
     system: string;
@@ -107,10 +123,11 @@ export type ScriptSchemePrefill = {
     missing: Array<"system" | "asset" | "shot">;
 };
 
-/** 每套方案取「自定义 / 分镜」那一段用的 needle（第四套与第二 / 三套互不串味）。 */
+/** 每套方案取「自定义 / 分镜」那一段用的 needle（第五套与第二 / 三 / 四套互不串味）。 */
 function shotNeedlesOf(scheme: ScriptLibrarySchemeId): readonly string[] {
     if (scheme === "x20") return SCRIPT_SCHEME_LIBRARY_NEEDLES.shotX20;
     if (scheme === "director") return SCRIPT_SCHEME_LIBRARY_NEEDLES.shotDirector;
+    if (scheme === "muse") return SCRIPT_SCHEME_LIBRARY_NEEDLES.shotMuse;
     return SCRIPT_SCHEME_LIBRARY_NEEDLES.shot;
 }
 
@@ -118,8 +135,8 @@ function shotNeedlesOf(scheme: ScriptLibrarySchemeId): readonly string[] {
  * 各套「词库方案」的预填内容。
  *
  * 差异只有一处：自定义提示词 / 分镜提示词取哪一条 —— 第二套取「分镜表 · 首帧图和视频提示词」，
- * 第三套取「火_X20_主图分镜图_简洁版」，第四套取「影视分镜导演」；
- * 资产提示词三套完全一样（资产提取 + 配合最佳拍档生图）。
+ * 第三套取「火_X20_主图分镜图_简洁版」，第四套取「影视分镜导演」，第五套取「muse-长视频」；
+ * 资产提示词各套完全一样（资产提取 + 配合最佳拍档生图）。
  *
  * 一段两用是用户明确要求的（自定义提示词与分镜提示词填同一条）；
  * 两段资产提示词用空行拼起来，避免两套要求粘成一句。
@@ -166,6 +183,11 @@ export function buildScriptX20Prefill(entries: readonly TextPromptEntry[] | null
 /** 第四套（影视分镜导演）的预填。 */
 export function buildScriptDirectorPrefill(entries: readonly TextPromptEntry[] | null | undefined): ScriptSchemePrefill {
     return buildScriptSchemePrefill(entries, "director");
+}
+
+/** 第五套（muse-长视频）的预填。 */
+export function buildScriptMusePrefill(entries: readonly TextPromptEntry[] | null | undefined): ScriptSchemePrefill {
+    return buildScriptSchemePrefill(entries, "muse");
 }
 
 /** 有效文本（去空白后非空）—— 只看「有没有人填过」，不关心内容。 */
