@@ -26,6 +26,8 @@
  *     「也可输出 JSON」的约定，并把列名钉死以保证表头能被解析器匹配上。
  */
 
+import { resolveScriptSchemeId } from "@/constant/script-scheme";
+
 export type StoryScriptCellValue = string | number;
 
 /**
@@ -604,7 +606,16 @@ function buildTemplateShotPlanHint(sourceText: string, onlyShotNo?: number): str
  * 「不要拆解成下面这样」）。所以模版在场时必须**显式作废**这几条，而不是只靠任务书里一句「不适用」。
  * 不拼时会话内容与改造前逐字一致。
  */
-function buildTemplateSystemOverride(singleShot?: boolean): string {
+function buildTemplateSystemOverride(singleShot?: boolean, museScheme?: boolean): string {
+    /**
+     * 第五套（muse）时这一条必须换掉：原文要求「`video_motion_prompt` 逐行抄标签块」，
+     * 与本方案「整段长视频脚本、禁止标签行」正面冲突 —— 两个 override 都自称优先，模型会
+     * 挑先读到的那条照抄，于是用户看到的还是 `景别: … / 摄影机参数: …` 八行。
+     * `shot_prompt` 逐字复制、资产路由、镜号时长等其余条款第五套照样要用，所以只换这一行。
+     */
+    const videoMotionRule = museScheme
+        ? "- `video_motion_prompt`: **do not copy the label block**. This run uses the long-video script format defined in the final section (`### 视频N（X秒）` + 文生视频 / 角色设定 / 共享环境与光线 / 时间轴 / Negative prompt). Never emit `label: value` lines in this column; fold those facts into the script's timeline entries instead."
+        : "- `video_motion_prompt`: copy **every other line of that shot's block verbatim**, one `label: value` per line, keeping the block's original order (景别 / 景别／机位 / 摄影机参数 / 构图方式 / 画面内容 / 人物站位与构图 / 人物动作与表演 / 主体与动作 / 运镜方式 / 光影与色调 / 转场建议 / 台词与声音 / 声音 / 负面 …). Do not merge lines and do not chain them with `+`.";
     return [
         "## Override for this input: the source already contains a per-shot prompt template",
         "",
@@ -613,7 +624,7 @@ function buildTemplateSystemOverride(singleShot?: boolean): string {
         "the 8-part order for `shot_prompt`, the 6-part order for `video_motion_prompt`, and their examples.",
         "",
         "- `shot_prompt`: copy the `首帧图片提示词` (or `主体与动作提示词`) value **verbatim** — every sentence, including the trailing negative list. No rewriting, no shortening, no re-ordering, no bracket chaining.",
-        "- `video_motion_prompt`: copy **every other line of that shot's block verbatim**, one `label: value` per line, keeping the block's original order (景别 / 景别／机位 / 摄影机参数 / 构图方式 / 画面内容 / 人物站位与构图 / 人物动作与表演 / 主体与动作 / 运镜方式 / 光影与色调 / 转场建议 / 台词与声音 / 声音 / 负面 …). Do not merge lines and do not chain them with `+`.",
+        videoMotionRule,
         "- Drop the markdown decoration (`>`, `####`, `---`) — copy the prompt text itself.",
         "- `style_prompt`: use the block's style field if present (`风格提示词` / `独立风格提示词` / `视觉风格`), otherwise `无`. Never invent one.",
         "- Asset routing: `character_1` ← `出场人物资产`, `scene` ← `调用场景资产`, `prop` ← `调用道具资产`.",
@@ -978,6 +989,11 @@ export function resolveScriptSystemPrompt(
          * 第四套的 system 是用户词库文本，一个字都改不了，只能往后追加（见 `STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT`）。
          */
         directorScheme?: boolean;
+        /**
+         * 方案 = 第五套（muse 长视频）→ 追加「`video_motion_prompt` 只能是一整段 10 秒视频脚本」的覆盖段。
+         * 同第四套：system 是用户词库文本，只能往后追加（见 `STORY_SCRIPT_MUSE_VIDEO_FORMAT`）。
+         */
+        museScheme?: boolean;
     },
 ): string {
     const custom = typeof override === "string" ? override.trim() : "";
@@ -985,11 +1001,24 @@ export function resolveScriptSystemPrompt(
     // 这两种情形都必须显式作废预设里的链式写法（见两个 *_SYSTEM_OVERRIDE 的注释）：
     // 模型对 system prompt 的服从度高于任务书末段的「以上不适用」，只改任务书压不住。
     const extra: string[] = [];
-    if (options?.verbatimTemplate) extra.push(buildTemplateSystemOverride(options?.singleShot));
-    if (options?.customShotFormat) extra.push(STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE);
+    // 第五套要把模板 override 里「逐行抄标签块」那一条换掉（见 buildTemplateSystemOverride 注释）。
+    if (options?.verbatimTemplate) extra.push(buildTemplateSystemOverride(options?.singleShot, options?.museScheme));
+    /**
+     * ⚠️ 第五套（muse）**不挂** `STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE`。
+     * 那段的 routing 规则写着「未标注的字段清单（景别 / 摄影机参数 / 构图方式 / 画面内容 /
+     * 人物动作与表演 / 运镜方式 / 台词与声音 / 负面）属于 `video_motion_prompt`，一行一个
+     * `label: value`」—— 第五套的「分镜提示词」预填的就是词库里那条 `muse-长视频`，
+     * `hasScriptGenerationPrompt` 为真 → 这段 override 必挂 → 模型照着 routing 把整段
+     * 长视频脚本拆成八行标签块塞进视频列（用户 2026-11-05 实样：`景别: … / 摄影机参数: …`）。
+     * 第五套的合法形态由 `STORY_SCRIPT_MUSE_VIDEO_FORMAT` 一家说了算，两者冲突时它优先。
+     */
+    if (options?.customShotFormat && !options?.museScheme) extra.push(STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE);
     // 第四套的八段格式排在自定义分镜要求之后：用户词库那段只说「图像段用什么标签」，
     // 没说 video_motion_prompt 放什么，这句要最后压上。
     if (options?.directorScheme) extra.push(STORY_SCRIPT_DIRECTOR_VIDEO_SYSTEM_OVERRIDE);
+    // 第五套同理：用户词库那条只说「整段脚本长什么样」，任务书里还带着 6 段 + `[时长：Xs]`，
+    // 只有这句能把它们一起作废（否则模型退回成「景别 / 摄影机参数 / …」八行标签块）。
+    if (options?.museScheme) extra.push(STORY_SCRIPT_MUSE_VIDEO_SYSTEM_OVERRIDE);
     // 去重段放最后：它要压过前面（含用户词库）关于「每镜都写全资产描述」的说明。
     if (options?.assetDedupe) extra.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
     // 都没有时返回字符串与改造前逐字一致（探针守着老调用点）。
@@ -3865,6 +3894,50 @@ const STORY_SCRIPT_DIRECTOR_VIDEO_SYSTEM_OVERRIDE = [
     STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT,
 ].join("\n");
 
+/**
+ * 第五套（muse 长视频）`video_motion_prompt` 的**唯一合法格式**（用户 2026-11-05 给的实样）。
+ *
+ * 为什么必须单独压一段：这一套要的是「一整段可直接喂长视频模型的中文脚本」——
+ * `### 视频一（10秒）` + 文生视频 / 角色设定 / 共享环境与光线 / 时间轴 / Negative prompt。
+ * 但任务书里还带着第一套的「`video_motion_prompt` 按 6 段写 / `[时长：Xs]` 不超过 N 秒」，
+ * 用户词库那条也只说「每镜怎么写」，两头一夹，模型就退回成
+ * `景别：… / 摄影机参数：… / 构图方式：… / 画面内容：… / 人物动作与表演：… / 运镜方式：… / 台词与声音：… / 负面：…`
+ * 这一套八行标签块（用户看到的正是这个，且 `[时长：5s]` 还是老默认值）。
+ *
+ * ⚠️ 与第四套一样，必须**同时**进 system（作废上文写法）与任务书末尾（最后说话）；
+ * ⚠️ 只在方案 = `muse` 时拼进去 —— 其它几套一个字节都不能变。
+ */
+export const STORY_SCRIPT_MUSE_VIDEO_FORMAT = [
+    "## `video_motion_prompt` 的唯一合法格式（第五套 · muse 长视频）",
+    "`video_motion_prompt` 要写成一整段**可以直接喂给长视频模型的中文脚本**：不是标签块，不是 `[a] + [b]` 括号链，不是 `[时长：Xs]`。每一镜输出且只输出下面这一块，行序固定：",
+    "",
+    "```",
+    "### 视频N（X秒）",
+    "文生视频，16:9 横屏，时长 X 秒。{这一镜的场景与整体氛围一句话：地点、时段、画风、表演基调}。",
+    "角色设定：{本镜出场人物逐人一句：穿什么、什么状态、做什么；再补一句「在本段内保持稳定」}。",
+    "共享环境与光线：{光源位置与方向、明暗关系、室内补光、火光/门光范围、热气与风这类背景动态、要保留的环境音}。",
+    "时间轴：",
+    "- 0—A 秒：{景别 + 机位 + 光线落点 + 具体动作；有台词就写「谁对谁说：『…』」}",
+    "- A—B 秒：{…}",
+    "- B—X 秒：{…}",
+    "镜头以固定机位为主，动作真实连贯，不快速跳切，不把多个动作压缩成夸张表演；末帧是{末帧落点}。人物身份、服装、道具数量与位置稳定。",
+    "Negative prompt：{不要出现的东西，逗号分隔}",
+    "```",
+    "",
+    "硬约束：",
+    "- 首行必须是 `### 视频N（X秒）`：N 是镜号（视频一 / 视频二 也可以），**X 必须等于这一镜 `duration` 列的秒数**（10 秒的镜就写 `（10秒）`，不许写 5）。",
+    "- 这五段**必须都有、顺序固定**：`文生视频…` / `角色设定：` / `共享环境与光线：` / `时间轴：` / `Negative prompt：`。其余句子可以按这一镜的情况增删，但这五段一个都不能少。",
+    "- `时间轴：` 下面必须是 `- 起—止 秒：内容` 的条目（`- 0—3 秒：…`），条目**首尾相接覆盖 0 到 X 秒**，不许跳空、不许重叠、不许只写一条概括。",
+    "- **禁止**出现 `景别：` / `摄影机参数：` / `构图方式：` / `画面内容：` / `人物动作与表演：` / `运镜方式：` / `台词与声音：` / `负面：` 这类标签行 —— 这一列是给长视频模型的自然语言脚本，标签行会被当成素材照念。景别、机位、光线、动作这些信息要**写进 `时间轴` 的对应条目里**，不要单独起标签行。",
+    "- **禁止** `[时长：5s]` 这种方括号时长（时长只写在标题和 `文生视频` 那句里）；**禁止** `（…）+（…）` 括号链；**禁止**把 `shot_prompt`（分镜提示词 / 图像段）整段复制过来。",
+    "- 台词写进时间轴对应秒数那一条里，标明谁说的、什么语气；没有台词就写环境音。",
+].join("\n");
+
+const STORY_SCRIPT_MUSE_VIDEO_SYSTEM_OVERRIDE = [
+    "本节优先级高于上文所有关于 `video_motion_prompt` 的写法说明（含 6 段链式、8 段、`[a] + [b]` 括号连接、`[时长：Xs]`、以及任何「一行一个标签」的字段清单）。",
+    STORY_SCRIPT_MUSE_VIDEO_FORMAT,
+].join("\n");
+
 /** 一行是不是「已经是八段标签块」（至少命中四个标签就算 —— 容忍模型少写一两行）。 */
 function isDirectorVideoBlockText(text: unknown): boolean {
     const value = String(text || "");
@@ -4306,8 +4379,340 @@ export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[]
     });
 }
 
-/** 方案 = 第四套时，任务书末尾追加的格式段（`null` 表示这套不需要）。 */
+/**
+ * 方案 = 第四 / 第五套时，任务书末尾追加的格式段（其它套返回空串，任务书逐字不变）。
+ *
+ * ⚠️ 判据只能用 `resolveScriptSchemeId`（脏值归一到 `builtin`），别自己 `String(scheme)` 比字符串 ——
+ * 第五套刚加时这里只认 `director`，`muse` 直接漏过去，任务书里就只剩第一套那套「按 6 段写」。
+ */
+export function buildStoryScriptSchemeFormatHint(scheme?: unknown): string {
+    const id = resolveScriptSchemeId(scheme);
+    if (id === "director") return STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT;
+    if (id === "muse") return STORY_SCRIPT_MUSE_VIDEO_FORMAT;
+    return "";
+}
+
+/** 旧名（第四套时期就在用，探针与老调用点都认它）—— 现在按方案返回对应格式段。 */
 export function buildStoryScriptDirectorFormatHint(scheme?: unknown): string {
-    return String(scheme || "") === "director" ? STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT : "";
+    return buildStoryScriptSchemeFormatHint(scheme);
+}
+
+/* ── 第五套（muse）确定性后处理：把「标签块」改写成整段长视频脚本 ───────────────────────
+ *
+ * 模型对任务书末段的服从度并不总够（第五套第一次上线就是这么被打回来的）：
+ * 给了 10 秒长视频脚本的格式，它照样吐
+ * `景别：… / 摄影机参数：… / 构图方式：… / 画面内容：… / 人物动作与表演：… / 运镜方式：… / 台词与声音：… / 负面：…`。
+ * 提示词那边已经加了 `STORY_SCRIPT_MUSE_VIDEO_FORMAT` 双挂（system + 任务书），这里是**纯函数兜底**：
+ * 一旦发现那一列是标签块，就按语义槽重组成 `### 视频N（X秒）` + 五段结构，
+ * 保证用户看到的、以及后续喂给长视频模型的，永远是整段脚本而不是八行标签。
+ *
+ * ⚠️ 只在「明显是标签块」时动手：至少 4 个已知标签、且没有 `### 视频` / `时间轴` 这些长视频特征。
+ * ⚠️ 幂等：已经是合规长视频脚本的行，一个字节都不动。
+ */
+type MuseSlot = "shot" | "camera" | "composition" | "content" | "action" | "movement" | "sound" | "negative";
+
+const MUSE_TAG_SLOTS: Record<string, MuseSlot> = {
+    "景别": "shot",
+    "景别／机位": "shot",
+    "景别/机位": "shot",
+    "机位": "shot",
+    "摄影机参数": "camera",
+    "摄像机参数": "camera",
+    "镜头参数": "camera",
+    "摄影机": "camera",
+    "构图方式": "composition",
+    "构图": "composition",
+    "画面内容": "content",
+    "画面描述": "content",
+    "人物动作与表演": "action",
+    "主体与动作": "action",
+    "人物动作": "action",
+    "运镜方式": "movement",
+    "运镜": "movement",
+    "台词与声音": "sound",
+    "声音": "sound",
+    "音效": "sound",
+    "对白": "sound",
+    "负面": "negative",
+    "负面提示词": "negative",
+    "负向提示词": "negative",
+    "negative prompt": "negative",
+};
+
+/** 标签归一后找语义槽（`- **景别**：` / `景别:` / `【景别】` 三种写法都认）。 */
+function museSlotOf(label: string): MuseSlot | null {
+    const key = String(label || "")
+        .toLowerCase()
+        .replace(/[【】\[\]`*·•\s]/g, "")
+        .replace(/[:：]/g, "");
+    if (!key) return null;
+    return MUSE_TAG_SLOTS[key] || MUSE_TAG_SLOTS[key.replace(/／/g, "/")] || MUSE_TAG_SLOTS[key.replace(/\//g, "／")] || null;
+}
+
+/** 这一列已经是长视频脚本（有 `### 视频…` 或五段里的关键段）→ 不许再改写。 */
+function looksLikeMuseScript(text: string): boolean {
+    return /###\s*视频/.test(text) || (/角色设定\s*[：:]/.test(text) && /时间轴\s*[：:]/.test(text));
+}
+
+/** 从标签块里抽语义槽；命中标签少于 4 个就当「不是标签块」，返回 null。 */
+function parseMuseTagSlots(text: string): Partial<Record<MuseSlot, string>> | null {
+    const slots: Partial<Record<MuseSlot, string>> = {};
+    let hits = 0;
+    let current: MuseSlot | null = null;
+    for (const rawLine of String(text || "").split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const match = line.match(/^[\s\-*·•]*([^：:\n]{1,20})[：:]\s*([\s\S]*)$/);
+        const slot = match ? museSlotOf(match[1]) : null;
+        if (slot) {
+            hits += 1;
+            const value = String(match?.[2] || "").trim();
+            slots[slot] = [slots[slot], value].filter(Boolean).join(" ");
+            current = slot;
+            continue;
+        }
+        // 续行（标签后面另起一段写的长文）并回上一个槽。
+        if (current && slots[current]) slots[current] = `${slots[current]}\n${line}`;
+    }
+    return hits >= 4 ? slots : null;
+}
+
+/** 压成一句（去换行、去重复标点、去末尾句号）。 */
+function museOneLine(value: unknown): string {
+    return String(value ?? "")
+        .replace(/\s*\n+\s*/g, " ")
+        .replace(/\s{2,}/g, " ")
+        .replace(/^[\s。；;，,、]+|[\s。；;，,、]+$/g, "")
+        .trim();
+}
+
+/** 从一段文字里挑出讲「光 / 明暗」的句子 —— 用来填 `共享环境与光线`。 */
+function museLightSentences(...values: unknown[]): string {
+    const text = values.map((value) => museOneLine(value)).filter(Boolean).join("。");
+    if (!text) return "";
+    // 按逗号 / 分号 / 句号切成小句再挑 —— 整句里往往只有半句在讲光（"全程固定…；右侧门光方向稳定"）。
+    const picked = text
+        .split(/[，,；;。]/)
+        .map((item) => item.trim())
+        .filter((item) => item && /光|亮|暗|影|色温|逆光|顺光|顶光|反光/.test(item));
+    return picked.join("；");
+}
+
+/**
+ * 把「0—1.2秒…1.2—2.2秒…」切成时间轴条目。
+ *
+ * ⚠️ 不能用 `split(/(?=时间码)/)` —— 零宽 lookahead 的切点会在小数点后断开
+ * （`1.2—2.2秒` 被切成 `1.` + `2—2.2秒`）。改成先用 `matchAll` 把时间码的**位置**全找出来，
+ * 再按位置切片，一个字都不会丢。
+ */
+function museTimelineItems(text: unknown, duration: number): string[] {
+    const value = museOneLine(text);
+    if (!value) return [];
+    const pattern = /\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*秒/g;
+    const matches = Array.from(value.matchAll(pattern));
+    if (matches.length <= 1) return [`- 0—${duration} 秒：${value}`];
+    const items: string[] = [];
+    for (let index = 0; index < matches.length; index += 1) {
+        const match = matches[index];
+        const start = match.index ?? 0;
+        const end = index + 1 < matches.length ? matches[index + 1].index ?? value.length : value.length;
+        const body = value.slice(start, end).trim().replace(/^[，,、。；;]\s*/, "");
+        if (!body) continue;
+        // 时间码本身规范成「0—1.2 秒：」（原样是「0—1.2秒母亲左手…」）。
+        const normalized = body.replace(
+            /^(\d+(?:\.\d+)?)\s*[—–\-~～至]\s*(\d+(?:\.\d+)?)\s*秒\s*[：:]?\s*/,
+            (_all, from, to) => `${from}—${to} 秒：`,
+        );
+        items.push(`- ${normalized}`);
+    }
+    return items.length ? items : [`- 0—${duration} 秒：${value}`];
+}
+
+/** 镜号 → 中文数字标签（用户实样写的是 `### 视频一（10秒）`，不是 `视频1`）。 */
+function museShotNoLabel(shotNo: number): string {
+    const n = Math.max(1, Math.round(Number(shotNo) || 1));
+    const digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+    if (n < 10) return digits[n];
+    if (n < 20) return `十${n % 10 ? digits[n % 10] : ""}`;
+    if (n < 100) return `${digits[Math.floor(n / 10)]}十${n % 10 ? digits[n % 10] : ""}`;
+    return String(n);
+}
+
+/** 标签块 → 长视频脚本（第五套的唯一合法形态，见 `STORY_SCRIPT_MUSE_VIDEO_FORMAT`）。 */
+function buildMuseScriptFromSlots(slots: Partial<Record<MuseSlot, string>>, duration: number, shotNo: number): string {
+    const dur = Math.max(1, Math.round(duration) || 10);
+    // `[时长：5s]` / `[时长：5秒]` 两种写法都要剥掉（用户实样写的是 `5s`）；剥完顺手收一下重复标点。
+    const camera = museOneLine(slots.camera)
+        .replace(/\[?\s*时长\s*[：:]\s*\d+(?:\.\d+)?\s*(?:秒|s)?\s*\]?/gi, "")
+        .replace(/[，,]{2,}/g, "，")
+        .replace(/^[，,、\s]+|[，,、\s]+$/g, "")
+        .trim();
+    const composition = museOneLine(slots.composition);
+    const shotSize = museOneLine(slots.shot);
+    const content = museOneLine(slots.content);
+    const negative = museOneLine(slots.negative) || "不出现多余人物，不出现字幕、水印、Logo。";
+    // 画幅优先取模型自己写的（16:9 / 9:16 / 2.39:1 …），没有就按默认 16:9 横屏。
+    const ratio = `${camera} ${composition}`.match(/\b(16:9|9:16|4:3|3:4|21:9|1:1|2\.39:1)\b/)?.[1] || "16:9";
+    const orientation = /^(9:16|3:4|1:1)$/.test(ratio) ? "竖屏" : "横屏";
+    /** 第一句：文生视频 + 画幅 + 时长 + 这一镜的景别/机位。 */
+    const opening = [`文生视频，${ratio} ${orientation}，时长 ${dur} 秒`, shotSize ? `画面为${shotSize}` : "", camera, composition ? `构图：${composition}` : ""]
+        .filter(Boolean)
+        .join("。");
+    /** 共享环境与光线：优先从摄影机参数 / 运镜里挑讲光的句子。 */
+    const light = museLightSentences(slots.camera, slots.movement, slots.composition) || "环境光方向保持不变，人物面部与手部细节清楚，背景不出现光线突变";
+    /** 时间轴：动作段里的时间码就是天然的分镜节拍。 */
+    const timeline = museTimelineItems(slots.action, dur);
+    /**
+     * 台词从**动作槽**里抽（用户实样：台词写在「人物动作与表演」里，`开始说"明儿也煎一个，别光喝粥。"`），
+     * 声音槽里的引号多半是**语气描述**（`母亲的"哎"比前面略轻`），不是台词本身 —— 别混为一谈。
+     */
+    const dialogueFrom = (raw: string) =>
+        (raw.match(/[说喊问答叫唤应][：:]?\s*[“"'‘]([^“”"'’\n]{1,120})[”"'’]/g) || [])
+            .map((item) => item.replace(/^[说喊问答叫唤应][：:]?\s*[“"'‘]/, "").replace(/[”"'’]$/, ""))
+            .join(" ");
+    const quoted = dialogueFrom(museOneLine(slots.action)) || dialogueFrom(museOneLine(slots.sound));
+    /**
+     * 环境音：声音槽去掉**台词**片段（`说"…"`）、去掉开头的「保留」（下面那句会自己补「保留」二字）。
+     * ⚠️ 只删「动词+引号」那种真台词；`母亲的"哎"比前面略轻` 这种**语气描述**里的引号要留着内容
+     * （否则会留下「母亲的 比前面略轻」这种断句）。
+     */
+    const ambience = museOneLine(slots.sound)
+        .replace(/[说喊问答叫唤应][：:]?\s*[“"'‘][^“”"'’\n]{1,120}[”"'’]/g, " ")
+        .replace(/[“"'‘]([^“”"'’\n]{1,120})[”"'’]/g, "$1")
+        .replace(/^(保留|要有|加入)/, "")
+        .replace(/[，,]{2,}/g, "，")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+    const tail = [
+        "镜头以固定机位为主，动作真实连贯，不快速跳切，不把多个动作压缩成夸张表演。",
+        ambience ? `保留${ambience}，不加音乐、旁白或煽情音效。` : "保留现场环境音，不加音乐、旁白或煽情音效。",
+        "人物身份、服装、道具数量与位置在本段内保持稳定。",
+    ].join("");
+    const timelineLines = timeline.length ? timeline : [`- 0—${dur} 秒：${museOneLine(slots.action) || "按本镜动作完成表演"}`];
+    /**
+     * 台词：动作槽里已经**内嵌**了（`开始说"明儿…"`）→ 不再重复追加；
+     * 只有时间轴里完全没有引号台词时，才把抽出来的台词补到最后一条后面。
+     */
+    if (quoted && !/[“"'‘][^”"'’\n]{1,120}[”"'’]/.test(timelineLines.join("\n"))) {
+        const last = timelineLines[timelineLines.length - 1];
+        timelineLines[timelineLines.length - 1] = `${last.replace(/[。；;]\s*$/, "")}；台词：“${quoted}”。`;
+    }
+    return [
+        `### 视频${museShotNoLabel(shotNo)}（${dur}秒）`,
+        `${opening}。${content ? `${content}。` : ""}`,
+        `角色设定：${content || "沿用本镜角色资产的外貌、服装与年龄感，在本段内保持稳定"}。`,
+        `共享环境与光线：${light}。`,
+        "时间轴：",
+        ...timelineLines,
+        tail,
+        `Negative prompt：${negative}`,
+    ].join("\n");
+}
+
+/**
+ * 第五套（muse）整表后处理：`video_motion_prompt` 是八行标签块时，改写成整段长视频脚本。
+ *
+ * 幂等（合规就原样返回）、只在该预设真有这一列时生效；其它方案完全不受影响。
+ */
+export function normalizeStoryScriptMuseRows(rows: readonly StoryScriptRow[], preset?: StoryScriptPresetId | string | null): StoryScriptRow[] {
+    if (!rows?.length) return rows as StoryScriptRow[];
+    const columns = getStoryScriptColumns(preset);
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
+    return rows.map((row, index) => {
+        const text = String(row.video_motion_prompt ?? "");
+        if (!text.trim() || looksLikeMuseScript(text)) return row;
+        const slots = parseMuseTagSlots(text);
+        if (!slots) return row;
+        const shotNo = Number(row.shot_no) || index + 1;
+        return { ...row, video_motion_prompt: buildMuseScriptFromSlots(slots, Number(row.duration) || 0, shotNo) };
+    });
+}
+
+/* ── 第五套（muse）源内容识别：`### 视频一（10秒）` 整段 → 视频运动提示词列 ───────────────
+ *
+ * 用户 2026-11-05 原话：「当使用第 5 套执行方案时，视频运动提示词需要识别下列该内容并填入」，
+ * 给的样例就是 `### 视频一（10秒）` + 文生视频 / 角色设定 / 共享环境与光线 / 时间轴 / Negative prompt。
+ *
+ * 为什么必须**独立开一条通道**（不能靠模版覆盖层）：
+ *  ① 模版覆盖层的判据是「`- **标签**：值` 的字段块」，而这一段是**散文正文**（没有任何标签），
+ *    走那条路会被判成「不是模版块」直接丢掉；
+ *  ② 段标题 `### 视频一（10秒）` 会被模版解析当成「不认识的 `#` 标题」跳过。
+ * 这一条通道只认「视频段标题 + 整段正文」，与模版通道互不干扰，两边同时在场也不会打架。
+ */
+
+/** 中文数字 → 阿拉伯数字（只到 99，够镜号用）。 */
+function museCnNumber(text: string): number {
+    const map: Record<string, number> = { 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+    const value = String(text || "").trim();
+    if (!value) return 0;
+    if (/^\d+$/.test(value)) return Number(value);
+    if (value === "十") return 10;
+    if (value.includes("十")) {
+        const [head, tail] = value.split("十");
+        const high = head ? map[head] ?? 0 : 1;
+        const low = tail ? map[tail] ?? 0 : 0;
+        return high * 10 + low;
+    }
+    return map[value] ?? 0;
+}
+
+/** 源内容里的长视频段：`### 视频一（10秒）` 起，到下一个标题 / 分隔线前止。 */
+export function extractMuseVideoScriptBlocks(sourceText: string): Array<{ shotNo: number; seconds: number; text: string }> {
+    const lines = String(sourceText || "").split(/\r?\n/);
+    const blocks: Array<{ shotNo: number; seconds: number; text: string }> = [];
+    let current: { shotNo: number; seconds: number; lines: string[] } | null = null;
+    const flush = () => {
+        if (current) blocks.push({ shotNo: current.shotNo, seconds: current.seconds, text: current.lines.join("\n").trim() });
+        current = null;
+    };
+    const heading = /^\s{0,3}#{1,6}\s*视频\s*([0-9０-９一二三四五六七八九十]+)\s*(?:[（(]\s*(\d+(?:\.\d+)?)\s*秒?\s*[)）])?\s*$/;
+    for (const line of lines) {
+        const matched = line.match(heading);
+        if (matched) {
+            flush();
+            current = { shotNo: museCnNumber(matched[1]), seconds: Number(matched[2]) || 0, lines: [line.trim()] };
+            continue;
+        }
+        if (!current) continue;
+        // 碰到**别的**标题或水平分隔线 → 本段结束（视频段之间常用 `---` 分隔）。
+        if (/^\s{0,3}#{1,6}\s+\S/.test(line) || /^\s*[-*_]{3,}\s*$/.test(line)) {
+            flush();
+            continue;
+        }
+        current.lines.push(line);
+    }
+    flush();
+    return blocks.filter((block) => block.shotNo > 0 && block.text);
+}
+
+/**
+ * 第五套：把源内容里的整段长视频脚本按镜号填进 `video_motion_prompt` 列。
+ *
+ * 判定「模型已经写对了就不动」：那一列本身已经是长视频脚本（`### 视频…` 或 `角色设定`+`时间轴`）时，
+ * 保留模型写的（它可能结合了本镜的资产信息）；否则用源内容整段覆盖。
+ */
+export function applyMuseVideoScriptOverlay(
+    rows: readonly StoryScriptRow[],
+    sourceText: string,
+    preset?: StoryScriptPresetId | string | null,
+): StoryScriptRow[] {
+    if (!rows?.length) return rows as StoryScriptRow[];
+    const columns = getStoryScriptColumns(preset);
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
+    const blocks = extractMuseVideoScriptBlocks(sourceText);
+    if (!blocks.length) return rows as StoryScriptRow[];
+    const byShot = new Map<number, (typeof blocks)[number]>();
+    for (const block of blocks) {
+        // 同镜号出现多次 → 最后一个赢（用户可能贴了修订版）。
+        byShot.set(block.shotNo, block);
+    }
+    return rows.map((row, index) => {
+        const shotNo = Number(row.shot_no) || index + 1;
+        const block = byShot.get(shotNo);
+        if (!block) return row;
+        const current = String(row.video_motion_prompt ?? "");
+        if (looksLikeMuseScript(current)) return row;
+        return { ...row, video_motion_prompt: block.text };
+    });
 }
 
