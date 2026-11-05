@@ -6697,9 +6697,34 @@ function AtelierCanvasPage() {
                     { signal: controller.signal },
                 );
                 if (controller.signal.aborted) return;
-                const parsed = parseStoryScriptOutput(answer, presetId);
+                let parsed = parseStoryScriptOutput(answer, presetId);
+                let lastAnswer = answer;
+                /**
+                 * 模型反问而不是出表（`{ rows: [], clarification: "…" }`）时**自动重试一次**。
+                 * 2026-11-05 实样：源稿 31 镜、任务书却硬写「必须 19 行」，模型判定冲突 →
+                 * 每点一次都弹同一句「生成失败」。根因（模版误判 / 镜号重复）已在任务书侧修掉，
+                 * 这里再加一层「压死反问」的保险：第二遍直接在末尾命令它按源稿出表。
+                 */
+                if (!parsed.ok && parsed.needsClarification) {
+                    const retryTask = `${scriptTask}\n\n⚠️ 不要再反问、不要再要求确认：直接按源内容的实际镜头输出完整表格（JSON 的 \`rows\` 数组，\`shot_no\` 从 1 起连续递增），把这一句疑问写进 \`title\` 尾部。`;
+                    const retryContent: AiTextMessage["content"] = hydrated.referenceImages.length
+                        ? [{ type: "text" as const, text: retryTask }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
+                        : retryTask;
+                    const retried = await requestImageQuestion(
+                        textConfig,
+                        [
+                            { role: "system", content: scriptSystemPrompt },
+                            { role: "user", content: retryContent },
+                        ],
+                        (streamed) => setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptRaw: streamed } } : node))),
+                        { signal: controller.signal },
+                    );
+                    if (controller.signal.aborted) return;
+                    lastAnswer = retried;
+                    parsed = parseStoryScriptOutput(retried, presetId);
+                }
                 if (!parsed.ok) {
-                    setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: parsed.error, scriptRaw: answer } } : node)));
+                    setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: parsed.error, scriptRaw: lastAnswer } } : node)));
                     message.error(t("canvas.scriptNode.parseFailed"));
                     return;
                 }
@@ -6907,12 +6932,25 @@ function AtelierCanvasPage() {
                     const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
                         ? [{ type: "text" as const, text: rowTask }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
                         : rowTask;
-                    const answer = await requestImageQuestion(textConfig, [
+                    let answer = await requestImageQuestion(textConfig, [
                         { role: "system", content: systemPrompt },
                         { role: "user", content: userContent },
                     ], () => {}, { signal: controller.signal });
                     if (controller.signal.aborted) return;
-                    const parsed = parseStoryScriptOutput(answer, presetId);
+                    let parsed = parseStoryScriptOutput(answer, presetId);
+                    // 模型反问而不是出表 → 压死一次「直接按内容写这一镜」，与整表路径同口径。
+                    if (!parsed.ok && parsed.needsClarification) {
+                        const retryTask = `${rowTask}\n\n⚠️ 不要再反问、不要再要求确认：直接按下面的内容写这一镜（JSON \`rows\` 里只放 1 个元素）。`;
+                        const retryContent: AiTextMessage["content"] = hydrated.referenceImages.length
+                            ? [{ type: "text" as const, text: retryTask }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
+                            : retryTask;
+                        answer = await requestImageQuestion(textConfig, [
+                            { role: "system", content: systemPrompt },
+                            { role: "user", content: retryContent },
+                        ], () => {}, { signal: controller.signal });
+                        if (controller.signal.aborted) return;
+                        parsed = parseStoryScriptOutput(answer, presetId);
+                    }
                     if (!parsed.ok || !parsed.rows.length) {
                         lastError = parsed.ok ? "模型未返回这一镜" : parsed.error;
                         // 批量里某一镜失败不该把整批带崩 —— 记下错误，继续下一镜。

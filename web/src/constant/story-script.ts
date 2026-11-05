@@ -370,7 +370,8 @@ Output one JSON object and nothing else — no markdown fence, no explanation:
     }
   ]
 }
-\`shot_no\` 和 \`duration\` 必须是整数（不要写 "2-5"、"3秒"）；其余字段一律字符串，缺失时写 \`无\`。`;
+\`shot_no\` 和 \`duration\` 必须是整数（不要写 "2-5"、"3秒"）；其余字段一律字符串，缺失时写 \`无\`。
+如果源稿与要求不完全一致（镜数 / 镜号对不上、缺少某些字段）：**不要反问、不要返回空 \`rows\`** —— 按源稿实际镜数生成完整表格，\`shot_no\` 从 1 起连续递增，把这一句疑问写进 \`title\` 尾部（例如 \`（按源稿 31 镜生成）\`）。`;
 
 const STORY_SCRIPT_COMMON_RULES = [
     "输出字段必须覆盖：镜号、时长、画面描述、角色1、角色描述1、角色2、角色描述2、场景、场景描述、道具、道具描述、景别、角色动作、人物站位、情绪、场景标签、光影氛围、音效、对白、风格提示词、分镜提示词、视频运动提示词。",
@@ -588,12 +589,40 @@ function buildTemplateShotPlanHint(sourceText: string, onlyShotNo?: number): str
             `\`rows\` 里只放 1 个元素，\`shot_no\` 必须是 ${onlyShotNo}；不要输出其它镜头。`,
         ].join("\n");
     }
+    /**
+     * ⚠️ 镜号必须在源稿里唯一，否则这条提示会**自相矛盾**（2026-11-05 用户实样）：
+     * 源稿把几段分镜拼在一起，块镜号是 2、3、4、3、4、4、3…，任务书照写「依次为 2、3、4、3…」，
+     * 而别处又要求「镜号连续递增」→ 模型判定「要求无法同时满足」，直接返回 `rows: []` 反问。
+     * 现在有重复就按块的出现顺序重编 1…N，并明说这不是冲突。
+     */
+    const uniqueNos = new Set(shotNos);
+    if (uniqueNos.size !== shotNos.length) {
+        return [
+            "## 本次镜数 / 镜号（以块的出现顺序为准）",
+            `源模版共 **${blocks.length} 个块**，所以 \`rows\` 必须正好 ${blocks.length} 个元素，一块一镜。`,
+            `源稿里这些块的镜号有重复（${shotNos.join("、")}）—— 这是源稿分段拼接留下的，**不是冲突**：`,
+            `按块的出现顺序把 \`shot_no\` 写成 1…${blocks.length} 即可，不要合并镜头、不要补镜头、**不要反问**。`,
+            "每一镜的 `duration` 照该块 `镜头时长` 的秒数填写。",
+        ].join("\n");
+    }
+    /**
+     * 块数少于正文镜数（用户只给部分镜头写了提示词模版）时，把这层关系**说明白**：
+     * 不说明的话，模型会拿「正文 31 镜」去反驳「必须 19 行」，同样是反问而不是出表。
+     */
+    const sourceShots = countStoryScriptSourceShots(String(sourceText || ""));
+    const countNote =
+        sourceShots > blocks.length
+            ? `源稿正文共 **${sourceShots} 个镜头**，其中只有 ${blocks.length} 块带逐镜提示词 —— 本次**以这 ${blocks.length} 块为准**，只输出 ${blocks.length} 行，这是有意为之，不要补齐其它镜头、不要反问。`
+            : "";
     return [
         "## 本次镜数 / 镜号（照源模版，不许增删）",
         `源模版共 **${blocks.length} 个镜头**，所以 \`rows\` 必须正好 ${blocks.length} 个元素，`,
         `\`shot_no\` 依次为：${shotNos.join("、")}（不要重新编号、不要合并镜头、不要补镜头）。`,
+        countNote,
         "每一镜的 `duration` 照该镜 `镜头时长` 的秒数填写。",
-    ].join("\n");
+    ]
+        .filter(Boolean)
+        .join("\n");
 }
 
 /**
@@ -2605,7 +2634,19 @@ export function normalizeStoryScriptRow(raw: unknown, index: number, columns: St
     return row;
 }
 
-export type StoryScriptParseResult = { ok: true; title: string; rows: StoryScriptRow[] } | { ok: false; error: string };
+export type StoryScriptParseResult =
+    | { ok: true; title: string; rows: StoryScriptRow[] }
+    | {
+          ok: false;
+          error: string;
+          /**
+           * 模型**没有出表、而是在反问**：返回 `{ title, rows: [] }` 外加
+           * `clarification` / `conflicts` 一类的说明（2026-11-05 用户实样：
+           * 「要求输出19镜，但实际正文包含镜头1—31…请确认」）。
+           * 生成侧据此自动重试一次「不要反问、直接出表」，而不是直接把这句话拍给用户。
+           */
+          needsClarification?: boolean;
+      };
 
 /**
  * 从上往下扫一遍，取出所有「顶层完整 JSON 值」（对象 / 数组）。
@@ -2735,6 +2776,28 @@ function parseLongVideoScriptRows(text: string, columns: StoryScriptColumn[]): S
         });
 }
 
+/**
+ * 契约形状的「没有出表」返回：`{ title, rows: [], clarification / conflicts / message / … }`。
+ *
+ * 用户看到的现象（2026-11-05 实样）是「生成失败：无法解析为分镜表结构（既不是 JSON，也不是表格）」——
+ * 这条文案骗人：返回**就是** JSON，只是 `rows` 是空的，模型在反问。把模型自己写的话抽出来，
+ * 生成侧才能「自动重试一次」或至少让用户一眼看到真正原因（镜数对不上 / 缺字段）。
+ */
+function readStoryScriptClarification(record: Record<string, unknown>): string {
+    const pieces: string[] = [];
+    const pushText = (value: unknown) => {
+        if (typeof value === "string" && value.trim()) pieces.push(value.trim());
+        else if (Array.isArray(value)) value.forEach(pushText);
+    };
+    for (const key of ["clarification", "conflicts", "question", "message", "note", "reason", "error"]) pushText(record[key]);
+    // 模型常把整段说明直接写进 `title`（「请确认源稿：…」），没有别的字段时才拿它兜底。
+    if (!pieces.length) {
+        const title = toText(record.title).trim();
+        if (title.length >= 12) pieces.push(title);
+    }
+    return pieces.join("；").replace(/\s+/g, " ").slice(0, 400);
+}
+
 /** 从模型输出里解析分镜表：JSON 优先，失败时退回 markdown 表格。列定义由 preset 决定。 */
 export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetId | string | null): StoryScriptParseResult {
     const columns = getStoryScriptColumns(preset);
@@ -2747,6 +2810,8 @@ export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetI
     const objStart = raw.indexOf("{");
     const objEnd = raw.lastIndexOf("}");
     if (objStart >= 0 && objEnd > objStart) jsonCandidates.push(raw.slice(objStart, objEnd + 1));
+    /** 契约形状但 `rows` 为空时，把模型写在里面的疑问原样留一份（后面报错用它，而不是「不是 JSON」）。 */
+    let clarificationNote = "";
     for (const candidate of jsonCandidates) {
         try {
             const parsed: unknown = JSON.parse(candidate);
@@ -2755,6 +2820,7 @@ export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetI
             const list = Array.isArray(record.rows) ? record.rows : Array.isArray(parsed) ? (parsed as unknown[]) : [];
             const rows = list.map((item, index) => normalizeStoryScriptRow(item, index, columns));
             if (rows.length) return { ok: true, title: toText(record.title), rows };
+            if (!clarificationNote) clarificationNote = readStoryScriptClarification(record);
         } catch {
             // 试下一个候选；都失败就落到下面的表格兜底
         }
@@ -2779,6 +2845,23 @@ export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetI
     // 第五路：第五 / 六套有时把整个回复写成纯脚本正文（没有表格容器），按镜号切回行。
     const longVideoRows = parseLongVideoScriptRows(raw, columns);
     if (longVideoRows.length) return { ok: true, title: "", rows: longVideoRows };
+
+    // 模型没出表、而是在反问（`{ rows: [], clarification / conflicts }`）：
+    // 报「不是 JSON」会把人引偏 —— 它明明是 JSON，只是空的。这里把模型的原话给出去。
+    if (!clarificationNote) {
+        for (const value of topLevelValues) {
+            if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+            clarificationNote = readStoryScriptClarification(value as Record<string, unknown>);
+            if (clarificationNote) break;
+        }
+    }
+    if (clarificationNote) {
+        return {
+            ok: false,
+            needsClarification: true,
+            error: `模型没有生成分镜表，而是在反问 / 要求确认需求：${clarificationNote}`,
+        };
+    }
 
     // 报错带上返回开头：用户点「复制原始返回」之外，弹窗里就能看出是空返回 / 上游报错 / 纯说明文字。
     const preview = raw.replace(/\s+/g, " ").trim().slice(0, 160);
@@ -3063,6 +3146,27 @@ function isTemplateAnchor(label: string): boolean {
     // `Seedance 2.0 视频提示词` 这类带前缀的写法：以「视频提示词」结尾就认。
     return /视频提示词$/.test(normalized) && !/运动提示词$/.test(normalized);
 }
+
+/**
+ * 「可以逐字复制」的提示词类字段。见 `isTemplatePromptLabel`：
+ * 只有出现其中之一，`hasStoryScriptShotTemplate` 才认这是用户贴的逐镜提示词模版。
+ */
+const STORY_SCRIPT_TEMPLATE_PROMPT_LABELS = new Set(
+    ["首帧图片提示词", "首帧提示词", "图片提示词", "分镜提示词", "静帧提示词", "画面提示词", "主体与动作提示词", "独立风格提示词", "视频提示词"].map(normalizeTemplateLabel),
+);
+
+/**
+ * 「一眼就是模版」的结构字段：第四套视频块专用（`景别／机位` / `摄影机参数` / `构图方式` /
+ * `人物站位与构图` / `运镜` / `光影与色调` / `转场建议`）。
+ *
+ * 为什么需要它：第四套的**视频块**没有任何「提示词」字段，只有这些，不能因此判成「不是模版」；
+ * 而普通分场剧本里常见的 `景别：` + `画面内容：` + `人物动作与表演：` 又必须判成「不是模版」
+ * （2026-11-05 用户实样：31 镜剧本被认成 19 块模版 → 模型反问）。所以要求**至少命中两个**：
+ * 剧本式写法最多命中 0 个，第四套视频块稳定命中 5–6 个。
+ */
+const STORY_SCRIPT_TEMPLATE_RICH_LABELS = new Set(
+    ["摄影机参数", "构图方式", "景别／机位", "人物站位与构图", "运镜", "光影与色调", "转场建议", "表演要求", "台词与声音", "负面", "主体与动作"].map(normalizeTemplateLabel),
+);
 
 /** 取末尾一段数字（`场次02—镜头005` → 5）；没有则 0。 */
 function trailingNumber(value: string): number {
@@ -3636,11 +3740,64 @@ function mergeStoryScriptTemplateRecords(records: Array<Record<string, unknown>>
 }
 
 /**
+ * 只有出现「提示词」类字段，才算用户真的贴了一套逐镜提示词模版 —— 也就是「有东西可以逐字复制」。
+ *
+ * 为什么必须这么卡（2026-11-05 用户实样）：31 镜的分场剧本里，个别镜头写了
+ * `景别：中景` + `画面内容：…` 两行，就满足了「锚点 + ≥2 字段」的块判据 → 被当成 19 块模版。
+ * 于是任务书写「`rows` 必须正好 19 个元素、镜号依次为 2、3、4、3…」，system 又写
+ * 「`shot_prompt` 逐字复制 `首帧图片提示词`」—— 正文根本没有这个字段，与正文 31 镜也冲突，
+ * 模型只能返回 `{ rows: [], clarification: "请确认源稿…" }`，用户看到的就是「生成失败」。
+ */
+function isTemplatePromptLabel(label: string): boolean {
+    const normalized = normalizeTemplateLabel(label);
+    if (STORY_SCRIPT_TEMPLATE_PROMPT_LABELS.has(normalized)) return true;
+    return /(?:图片|静帧|画面|分镜|视频)提示词$/.test(normalized) && !/运动提示词$/.test(normalized);
+}
+
+/**
+ * 源稿正文里出现的镜号标题个数（`镜头 12` / `镜号12` / `第 3 镜`，含 `###`、加粗、引用前缀）。
+ * 用来判断「识别到的模版块」与「正文实际镜数」是否对得上 —— 只做提示，不当硬闸门。
+ */
+function countStoryScriptSourceShots(raw: string): number {
+    const numbers = new Set<number>();
+    for (const rawLine of String(raw || "").split(/\r?\n/)) {
+        const line = rawLine
+            .trim()
+            .replace(/^(?:>\s*)+/, "")
+            .replace(/^#{1,6}\s*/, "")
+            .replace(/^\*{1,2}\s*/, "")
+            .trim();
+        const matched =
+            /^(?:镜头|镜号)\s*([0-9]{1,3}|[一二三四五六七八九十]{1,3})(?!\d)/.exec(line) ?? /^第\s*([0-9]{1,3}|[一二三四五六七八九十]{1,3})\s*镜/.exec(line);
+        if (!matched) continue;
+        const value = /^\d+$/.test(matched[1]) ? Number(matched[1]) : chineseNumeralToNumber(matched[1]);
+        if (value > 0) numbers.add(value);
+    }
+    return numbers.size;
+}
+
+/** 这一块够不够「像模版」：有可逐字复制的提示词字段，或命中 ≥2 个第四套视频块专属字段。 */
+function isTemplateLikeBlock(block: StoryScriptTemplateBlock): boolean {
+    if (block.fields.some((field) => isTemplatePromptLabel(field.label))) return true;
+    const hits = new Set<string>();
+    for (const field of block.fields) {
+        const label = normalizeTemplateLabel(field.label);
+        if (STORY_SCRIPT_TEMPLATE_RICH_LABELS.has(label)) hits.add(label);
+    }
+    return hits.size >= 2;
+}
+
+/**
  * 这段文本是不是「逐镜标签块」模版（任务书靠它决定要不要加「原文搬运」要求）。
  * 只认块级命中，不认零星几行 —— 普通剧本不会出现 `- **首帧图片提示词**：…` 这种写法。
  */
 export function hasStoryScriptShotTemplate(text: string): boolean {
-    return splitStoryScriptTemplateBlocks(String(text || "")).length > 0;
+    const blocks = splitStoryScriptTemplateBlocks(String(text || ""));
+    if (!blocks.length) return false;
+    // ⚠️ 不能只看「有没有块」：31 镜的分场剧本里，个别镜头写了 `景别：/画面内容：` 两行就算一块，
+    // 于是一份剧本被当成 19 块逐镜模版 → 任务书硬写「必须正好 19 行」+ system 要求
+    // 「逐字复制首帧图片提示词」（正文没有这个字段）→ 模型判定自相矛盾，返回 rows: [] 反问。
+    return blocks.some(isTemplateLikeBlock);
 }
 
 /**
@@ -3649,7 +3806,13 @@ export function hasStoryScriptShotTemplate(text: string): boolean {
  * 以前这一步全靠猜（「是没识别到，还是模型没生成？」）。
  */
 export function countStoryScriptTemplateShots(text: string): number {
-    const blocks = splitStoryScriptTemplateBlocks(String(text || ""));
+    /**
+     * ⚠️ 只数「像模版」的块（与 `hasStoryScriptShotTemplate` 同一判据）。
+     * 以前直接 `blocks.length`：31 镜的分场剧本里有 19 镜写了 `景别：/画面内容：`，
+     * UI 就显示「已识别 19 块」并发 `templateShotCountMismatch` 警告 —— 用户看到的
+     * 是「模版明明识别到了，生成却报错」，比不显示更误导。
+     */
+    const blocks = splitStoryScriptTemplateBlocks(String(text || "")).filter(isTemplateLikeBlock);
     if (!blocks.length) return 0;
     /**
      * ⚠️ 数的是**镜**，不是块。第四套一镜有两个块（`### 镜头01提示词` 图像块 + `### 镜头01｜标题` 视频块），
