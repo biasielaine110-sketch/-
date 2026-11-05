@@ -63,6 +63,7 @@ export default {
             mjFlavorSoftLora: "MJ soft light (flavor source)",
             mjFlavorFilterLora: "MJ style filter (flavor source)",
             mjFlavorFixedHint: "The other four stay put: 0.60 art source / 0.40 composition / 0.60 detail / 0.50 realism",
+            museHint: "zhenzhen-image-muse returns one image per call and picks the size and format itself. Only 1:1 / 16:9 / 9:16 / 4:3 / 3:4 / 3:2 / 2:3 are accepted (other ratios snap to the nearest one); quality and pixel dimensions do not apply to it.",
         },
         video: {
             title: "Video settings",

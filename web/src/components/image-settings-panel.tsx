@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { isKrea2MjStyleWorkflowId, isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, krea2MjFlavorWeights } from "@/lib/runninghub-workflow";
-import { isMidjourneyModel } from "@/services/api/image";
+import { isMidjourneyModel, isZhenzhenMuseImageModel } from "@/services/api/image";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
 const qualityOptions = [
@@ -85,6 +85,8 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const activeSize = config.size || "auto";
     const transparentBackground = config.background === "transparent";
     const midjourney = isMidjourneyModel(modelOptionName(config.model || config.imageModel || ""));
+    /** Seedance.nz muse：一次一张、尺寸与格式由模型定，比例只能取 7 档，清晰度/像素尺寸都不可用。 */
+    const museImage = isZhenzhenMuseImageModel(modelOptionName(config.model || config.imageModel || ""));
     const mjVersion = midjourneyVersionOptions.some((item) => item.value === config.mjVersion) ? config.mjVersion : "8.1";
     // MiniMax H3 story storyboard workflow renders a video next to the frames — surface its
     // duration control here (the workflow receives it as the Float (Duration) node value). The
@@ -127,6 +129,11 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 }}
             >
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.image.title")}</div> : null}
+                {museImage ? (
+                    <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                        {t("settingsPanels.image.museHint")}
+                    </div>
+                ) : null}
                 {midjourney ? (
                     <div className="space-y-2.5">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.mjVersion")}</SettingTitle>

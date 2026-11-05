@@ -63,6 +63,7 @@ export default {
             mjFlavorSoftLora: "MJ 柔光（MJ 味来源）",
             mjFlavorFilterLora: "MJ 风格滤镜（MJ 味来源）",
             mjFlavorFixedHint: "其余四层固定：0.60 画风 · 0.40 构图 · 0.60 细节 · 0.50 写实",
+            museHint: "zhenzhen-image-muse 每次输出一张，尺寸与格式由模型决定；比例只认 1:1 / 16:9 / 9:16 / 4:3 / 3:4 / 3:2 / 2:3（其它比例会吸到最近的一档），清晰度与像素尺寸对它不生效。",
         },
         video: {
             title: "视频设置",

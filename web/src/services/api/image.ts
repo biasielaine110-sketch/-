@@ -2351,8 +2351,70 @@ function resolveMidjourneySpeed(quality: string) {
     return "fast";
 }
 
+/**
+ * Seedance.nz `zhenzhen-image-muse` —— 文生图 / 最多 9 张参考图的合成，**每次只出一张**。
+ * 契约（https://api.seedance.nz/docs/#muse-image）：
+ *   提交 `POST /v1/image/generations`，查询 `GET /v1/image/generations/{id}`；
+ *   `n` 只收 1；`size` 收 `auto|1:1|16:9|9:16|4:3|3:4|3:2|2:3`；`aspect_ratio` 同名同值且优先于 size；
+ *   ⚠️ **不支持分辨率档位（1k/2k/4k）、像素尺寸、蒙版、输出格式** —— 所以 `metadata` 一个字段都别发，
+ *   `zhenzhen-image-*` 其它模型那条「metadata.resolution + output_format:png」对它会 400；
+ *   `images[]` 走 JSON（公开 URL / data URI / base64，按传入顺序，0–9 张，base64 前合计 ≤11MiB）；
+ *   输出尺寸与格式由模型自己决定（实测 WebP / PNG 都有），直链约 24 小时有效。
+ */
+export function isZhenzhenMuseImageModel(model: string) {
+    return /zhenzhen-image-muse/i.test(model.trim());
+}
+
+/** muse 只认这 7 档比例 + auto；像素尺寸不算数，只能吸附到最接近的一档。 */
+const MUSE_IMAGE_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"] as const;
+
+function museImageSize(size: string) {
+    const value = size.trim().toLowerCase();
+    if (!value || value === "auto") return "auto";
+    if ((MUSE_IMAGE_RATIOS as readonly string[]).includes(value)) return value;
+    const dimensions = parseImageDimensions(value);
+    const aspect = dimensions ? dimensions.width / dimensions.height : ratioToNumber(value);
+    if (!Number.isFinite(aspect) || aspect <= 0) return "auto";
+    // 按比例的对数差挑最近的一档：21:9 → 16:9、4:5 → 3:4、3:1 → 16:9 都自然落位。
+    let best: string = MUSE_IMAGE_RATIOS[0];
+    let bestDiff = Number.POSITIVE_INFINITY;
+    for (const candidate of MUSE_IMAGE_RATIOS) {
+        const [width, height] = candidate.split(":").map(Number);
+        const diff = Math.abs(Math.log(width / height / aspect));
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+function ratioToNumber(value: string) {
+    if (!value.includes(":")) return Number.NaN;
+    const [width, height] = value.split(":").map(Number);
+    return width && height ? width / height : Number.NaN;
+}
+
+async function requestSeedanceNzMuseImage(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    const images: string[] = [];
+    for (const image of references.slice(0, 9)) {
+        images.push(await resolveInlineOrRemoteReferenceUrl(image, references.length, { signal: options?.signal }));
+    }
+    const body: Record<string, unknown> = {
+        model: config.model,
+        prompt: withSystemPrompt(config, prompt),
+        size: museImageSize(config.size),
+        n: 1,
+        ...(images.length ? { images } : {}),
+    };
+    const response = await postImageJson<ImageApiResponse>(config, "/image/generations", body, options);
+    return resolveImageApiResponse(config, response.data, options);
+}
+
 /** Seedance.nz non-MJ images: POST /v1/image/generations (singular) + metadata.resolution */
 async function requestSeedanceNzImage(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    // muse 不认 metadata（resolution / output_format 都算不支持的字段），走自己的最小 body。
+    if (isZhenzhenMuseImageModel(config.model)) return requestSeedanceNzMuseImage(config, prompt, references, options);
     const resolution = resolveSeedanceNzResolution(config.model, config.quality);
     const body: Record<string, unknown> = {
         model: config.model,
