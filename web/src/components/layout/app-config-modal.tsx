@@ -110,8 +110,17 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
 
     const loadConfigFile = async (file: File) => {
         try {
-            await importAppConfig(file);
-            message.success(t("config.imported"));
+            const result = await importAppConfig(file);
+            // 只有文件真的带了这两个字段（-1 = 旧版文件没带）才提「已还原」，否则会虚报。
+            const hasSkillView = result.skillOrderCount >= 0 || result.skillHiddenCount >= 0;
+            message.success(
+                hasSkillView
+                    ? t("config.importedSkillView", {
+                          order: Math.max(result.skillOrderCount, 0),
+                          hidden: Math.max(result.skillHiddenCount, 0),
+                      })
+                    : t("config.imported"),
+            );
         } catch (error) {
             message.error(error instanceof Error ? error.message : t("config.importFailed"));
         } finally {
@@ -123,10 +132,11 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         setExporting(true);
         try {
             const result = await exportAppConfig({ includeTextPrompts: exportIncludeTextPrompts });
+            const counts = { order: result.skillOrderCount, hidden: result.skillHiddenCount };
             message.success(
                 result.method === "draft"
-                    ? t("config.exportedToFolder", { name: result.fileName, folder: result.folderName || "" })
-                    : t("config.exported"),
+                    ? t("config.exportedToFolderSkillView", { name: result.fileName, folder: result.folderName || "", ...counts })
+                    : t("config.exportedSkillView", counts),
             );
             setExportOpen(false);
         } catch (error) {

@@ -1,6 +1,6 @@
 import i18n from "@/i18n";
 import type { CanvasAgentDefinition } from "@/constant/canvas-agents";
-import { resolveCanvasProjectIdFromLocation, saveBlobAs } from "@/lib/fs/save-blob";
+import { resolveCanvasProjectIdFromLocation, saveBlobAs, type SaveBlobResult } from "@/lib/fs/save-blob";
 import type { LocalSkillPack } from "@/lib/chat-skill-pack";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { normalizeChatSkillIdList, useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
@@ -13,9 +13,12 @@ type AppConfigFile = {
     config: AiConfig | Omit<AiConfig, "textPrompts">;
     /** 用户安装的本地技能（工具包 / 文档技能）；旧版配置文件可能没有该字段 */
     chatSkillPacks?: LocalSkillPack[];
-    /** 技能列表的用户排序（内置 + 本地 id 混排）；旧版配置文件可能没有该字段 */
+    /**
+     * 技能列表的用户排序（内置 + 本地 id 混排）；旧版配置文件可能没有该字段。
+     * 这是「视图偏好」而不是技能本体，所以**不受 includeChatSkillPacks 影响**：不导技能包时也照常写。
+     */
     chatSkillOrder?: string[];
-    /** 技能列表里被隐藏的 id；旧版配置文件可能没有该字段 */
+    /** 技能列表里被隐藏的 id（内置技能也在里面）；旧版配置文件可能没有该字段。同上，随配置一起走。 */
     chatSkillHiddenIds?: string[];
     /** 用户导入的本地 agent；旧版配置文件可能没有该字段 */
     canvasAgents?: CanvasAgentDefinition[];
@@ -25,13 +28,35 @@ export type ExportAppConfigOptions = {
     projectId?: string | null;
     /** When false, omit the text prompt library from the exported JSON. Default true. */
     includeTextPrompts?: boolean;
-    /** When false, omit local chat skill packs. Default true. */
+    /** When false, omit local chat skill packs. Default true. 排序与显示隐藏不受此开关影响。 */
     includeChatSkillPacks?: boolean;
     /** When false, omit local canvas agents. Default true. */
     includeCanvasAgents?: boolean;
 };
 
-export async function exportAppConfig(options?: ExportAppConfigOptions) {
+/**
+ * 导出结果 = 文件落盘信息 + 本次带走的技能视图条数。
+ *
+ * 带上条数是为了让 toast 能写「含技能排序 N 项、显示隐藏 M 项」：用户在另一台机器导入前
+ * 就能确认这份文件到底有没有把排序 / 隐藏带出来，不必再打开 JSON 里找 `chatSkillOrder`。
+ */
+export type ExportAppConfigResult = SaveBlobResult & {
+    skillOrderCount: number;
+    skillHiddenCount: number;
+    /** 是否连技能本体（chatSkillPacks）一起写进了文件 */
+    includesChatSkillPacks: boolean;
+};
+
+/**
+ * 导入结果：两个条数。
+ * `-1` 表示文件里根本没有该字段（旧版导出 / 手工改过的文件）——此时本地排序与隐藏**保持原样**。
+ */
+export type ImportAppConfigResult = {
+    skillOrderCount: number;
+    skillHiddenCount: number;
+};
+
+export async function exportAppConfig(options?: ExportAppConfigOptions): Promise<ExportAppConfigResult> {
     const { config } = useConfigStore.getState();
     const includeTextPrompts = options?.includeTextPrompts !== false;
     const includeChatSkillPacks = options?.includeChatSkillPacks !== false;
@@ -43,28 +68,33 @@ export async function exportAppConfig(options?: ExportAppConfigOptions) {
               return rest;
           })();
     const skillState = useChatSkillPacksStore.getState();
+    // 排序 / 显示隐藏无条件导出：它们是「这个人的使用习惯」，与是否携带技能正文无关。
+    // 放进 includeChatSkillPacks 分支里会导致关掉「本地技能」后，另一台机器上的顺序与隐藏全丢。
+    const chatSkillOrder = normalizeChatSkillIdList(skillState.skillOrder);
+    const chatSkillHiddenIds = normalizeChatSkillIdList(skillState.hiddenSkillIds);
     const data: AppConfigFile = {
         app: "infinite-canvas",
         version: 1,
         exportedAt: new Date().toISOString(),
         config: exportConfig,
-        ...(includeChatSkillPacks
-            ? {
-                  chatSkillPacks: skillState.packs,
-                  // 排序与显示隐藏跟技能本体一起走：只导出 packs 会让另一台机器上的顺序 / 隐藏全丢。
-                  chatSkillOrder: normalizeChatSkillIdList(skillState.skillOrder),
-                  chatSkillHiddenIds: normalizeChatSkillIdList(skillState.hiddenSkillIds),
-              }
-            : {}),
+        chatSkillOrder,
+        chatSkillHiddenIds,
+        ...(includeChatSkillPacks ? { chatSkillPacks: skillState.packs } : {}),
         ...(includeCanvasAgents ? { canvasAgents: useCanvasAgentsStore.getState().agents } : {}),
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
-    return saveBlobAs(blob, "infinite-canvas-config.json", {
+    const saved = await saveBlobAs(blob, "infinite-canvas-config.json", {
         projectId: options?.projectId ?? resolveCanvasProjectIdFromLocation(),
     });
+    return {
+        ...saved,
+        skillOrderCount: chatSkillOrder.length,
+        skillHiddenCount: chatSkillHiddenIds.length,
+        includesChatSkillPacks: includeChatSkillPacks,
+    };
 }
 
-export async function importAppConfig(file: File) {
+export async function importAppConfig(file: File): Promise<ImportAppConfigResult> {
     let data: AppConfigFile;
     try {
         data = JSON.parse(await file.text()) as AppConfigFile;
@@ -89,9 +119,23 @@ export async function importAppConfig(file: File) {
     if (Array.isArray(data.chatSkillPacks)) {
         useChatSkillPacksStore.getState().importPacks(data.chatSkillPacks);
     }
-    // 排序 / 显示隐藏跟着技能包一起导入；旧版文件没带这两个字段时 replaceSkillView 会整段跳过。
-    useChatSkillPacksStore.getState().replaceSkillView({ order: data.chatSkillOrder, hiddenIds: data.chatSkillHiddenIds });
+    // 排序 / 显示隐藏逐字段判断：文件里只有其中一个字段时，另一个保持本地原样。
+    // 旧版文件两个都没有 → 一个字节都不动，也不会把本地排序洗成空。
+    const hasOrder = Array.isArray(data.chatSkillOrder);
+    const hasHidden = Array.isArray(data.chatSkillHiddenIds);
+    const orderIds = hasOrder ? normalizeChatSkillIdList(data.chatSkillOrder) : [];
+    const hiddenIds = hasHidden ? normalizeChatSkillIdList(data.chatSkillHiddenIds) : [];
+    if (hasOrder || hasHidden) {
+        useChatSkillPacksStore.getState().replaceSkillView({
+            order: hasOrder ? orderIds : undefined,
+            hiddenIds: hasHidden ? hiddenIds : undefined,
+        });
+    }
     if (Array.isArray(data.canvasAgents)) {
         useCanvasAgentsStore.getState().importAgents(data.canvasAgents);
     }
+    return {
+        skillOrderCount: hasOrder ? orderIds.length : -1,
+        skillHiddenCount: hasHidden ? hiddenIds.length : -1,
+    };
 }
