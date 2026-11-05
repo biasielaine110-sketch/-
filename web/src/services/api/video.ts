@@ -171,6 +171,11 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
         assertVideoConfig(requestConfig, requestConfig.model);
         return createOpenAIVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
     }
+    // Seedance.nz `zhenzhen-video-muse`: fixed 10s/720p/audio, refs as JSON `images[]` (no multipart),
+    // so it must not fall through to the generic OpenAI shape (which posts `input_reference` files).
+    if (isZhenzhenMuseVideoModel(selectedModel)) {
+        return createMuseVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
+    }
     // Built-in AutoDL ComfyUI path owns resolution/ref_audio mapping. Never let a stale
     // channel script omit ref_audio_0 and surface "模型调用脚本执行失败".
     if (shouldUseAutodlComfyVideoBuiltin(selectedModel, requestConfig.baseUrl, script)) {
@@ -204,6 +209,8 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     }
     const requestConfig = resolveModelRequestConfig(config, task.model);
     assertVideoConfig(requestConfig, requestConfig.model);
+    // muse 走自己的查询端点（`/video/generations/{id}`，结果在 `data.result_url`）。
+    if (isZhenzhenMuseVideoModel(task.model)) return pollMuseVideoTask(requestConfig, task, options);
     return pollOpenAIVideoTask(requestConfig, task, options);
 }
 
@@ -847,6 +854,163 @@ function unwrapVideoTaskResponse(payload: ApiVideoResponse): VideoResponse {
     }
     const record = payload as VideoResponse & { task_id?: string };
     return { ...record, id: record.id || record.task_id || "" };
+}
+
+/**
+ * Seedance.nz `zhenzhen-video-muse` —— 固定 10 秒 / 720p / 有声的异步视频任务。
+ * 契约（https://api.seedance.nz/docs/#muse-video）：
+ *   提交 `POST /v1/video/generations`，轮询 `GET /v1/video/generations/{id}`；
+ *   `duration` 只收 10、`resolution` 只收 720p、`n` 只收 1、`audio` 只收 true —— **别的值直接被拒**，
+ *   所以画布上的时长 / 清晰度旋钮对这个模型不生效（设置面板里有说明）；
+ *   参考图走 JSON `images: string[]`（公开 URL 或 data URI），0–9 张，
+ *   **不吃 multipart `input_reference`**（通用 OpenAI 路径那条会 400）；
+ *   结果在 `data.result_url`，完整列表在 `data.data.content.video_urls[]`，兼容查询时也有 `metadata.url`。
+ */
+export function isZhenzhenMuseVideoModel(model: string) {
+    return /zhenzhen-video-muse/i.test(modelOptionName(model));
+}
+
+/** muse 只接受这一个时长 / 分辨率组合（传别的值直接报错）。 */
+const MUSE_VIDEO_SECONDS = 10;
+const MUSE_VIDEO_RESOLUTION = "720p";
+/** `size` 白名单：21:9 不在里面，要退到最接近的 16:9。 */
+const MUSE_VIDEO_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"] as const;
+
+function readObject(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function museVideoSize(config: AiConfig) {
+    const raw = String(config.size || "").trim();
+    // 空 / auto：交给 API 自己决定（文生视频 16:9，带参考图则跟随参考构图）。
+    if (!raw || raw === "auto" || raw === "adaptive") return "";
+    if ((MUSE_VIDEO_RATIOS as readonly string[]).includes(raw)) return raw;
+    const ratio = normalizeVideoRatio(raw);
+    if (ratio === "21:9") return "16:9";
+    return (MUSE_VIDEO_RATIOS as readonly string[]).includes(ratio) ? ratio : "16:9";
+}
+
+async function resolveMuseReferenceImages(references: ReferenceImage[]) {
+    const list = references.slice(0, 9);
+    if (!list.length) return [] as string[];
+    const urls = await Promise.all(list.map((image) => resolveAutodlComfyReferenceUrl(image, list.length)));
+    return urls.map((url) => String(url || "").trim()).filter(Boolean);
+}
+
+async function createMuseVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const modelName = modelOptionName(model);
+    assertVideoConfig(config, modelName);
+    if (!prompt.trim()) throw new Error(apiText("videoTaskCreateFailed"));
+    const images = await resolveMuseReferenceImages(references);
+    const size = museVideoSize(config);
+    const payload: Record<string, unknown> = {
+        model: modelName,
+        prompt,
+        duration: MUSE_VIDEO_SECONDS,
+        resolution: MUSE_VIDEO_RESOLUTION,
+        n: 1,
+        audio: true,
+        ...(size ? { size } : {}),
+        ...(images.length ? { images } : {}),
+    };
+    try {
+        return { id: await postMuseVideoTask(config, "/video/generations", payload, options), provider: "openai", model };
+    } catch (error) {
+        // 只有「muse 专用端点不存在」（404/405）才退回 OpenAI 兼容的 /videos：有些中转站只挂了通用
+        // 视频端点。参数错 / 鉴权错一律原样抛出，绝不因为一个 400 就重复下单（那是白花钱）。
+        if (!isMissingVideoEndpoint(error)) throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+        const fallback: Record<string, unknown> = {
+            model: modelName,
+            prompt,
+            seconds: String(MUSE_VIDEO_SECONDS),
+            duration: String(MUSE_VIDEO_SECONDS),
+            resolution: MUSE_VIDEO_RESOLUTION,
+            ...(size ? { ratio: size, size } : {}),
+            ...(images.length ? { images } : {}),
+        };
+        try {
+            return { id: await postMuseVideoTask(config, "/videos", fallback, options), provider: "openai", model };
+        } catch (retryError) {
+            throw new Error(readAxiosError(retryError, apiText("videoTaskCreateFailed")));
+        }
+    }
+}
+
+async function postMuseVideoTask(config: AiConfig, path: string, payload: Record<string, unknown>, options?: RequestOptions) {
+    const { url: postUrl, bypass } = aiUrlForBody(config, path, payload);
+    try {
+        const created = unwrapVideoTaskResponse(
+            (await retryAlternateTransport(config, path, postUrl, payload, (url) => axios.post<ApiVideoResponse>(url, payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal }))).data,
+        );
+        if (!created.id) throw new Error(apiText("noVideoTaskId"));
+        return created.id;
+    } catch (error) {
+        throw mapOversizeUploadError(error, bypass);
+    }
+}
+
+/** 404/405 = 这条路径没挂上（不是参数被拒）；用来决定「能不能换一条路重试」。 */
+function isMissingVideoEndpoint(error: unknown) {
+    if (!axios.isAxiosError(error) || !error.response) return false;
+    if (error.response.status === 404 || error.response.status === 405) return true;
+    return /not\s*found|no\s*route|unsupported\s*path/i.test(readAxiosError(error, ""));
+}
+
+function museResultUrl(payload: unknown) {
+    const root = readObject(payload);
+    if (!root) return "";
+    const inner = readObject(root.data) || root;
+    const content = readObject(inner.content);
+    const nested = readObject(inner.data);
+    const nestedContent = readObject(nested?.content);
+    const metadata = readObject(inner.metadata);
+    const candidates: unknown[] = [
+        inner.result_url,
+        inner.video_url,
+        inner.url,
+        content?.video_url,
+        content?.url,
+        inner.video_urls,
+        nested?.result_url,
+        nested?.video_url,
+        nestedContent?.video_url,
+        nestedContent?.video_urls,
+        metadata?.url,
+        metadata?.video_url,
+        metadata?.video_urls,
+    ];
+    for (const value of candidates) {
+        if (typeof value === "string" && value.trim() && /^https?:\/\//i.test(value.trim())) return value.trim();
+        if (Array.isArray(value)) {
+            const first = value.find((item): item is string => typeof item === "string" && /^https?:\/\//i.test(item.trim()));
+            if (first) return first.trim();
+        }
+    }
+    return "";
+}
+
+async function pollMuseVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    try {
+        const payload = (await axios.get<ApiVideoResponse>(aiApiUrl(config, `/video/generations/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data;
+        const root = readObject(payload) || {};
+        const inner = readObject(root.data) || root;
+        const url = museResultUrl(payload);
+        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        const status = String(inner.status || root.status || "").toLowerCase();
+        if (/fail|cancel|error/.test(status)) {
+            const message = [readObject(inner.error)?.message, inner.error, inner.msg, inner.message, inner.fail_reason, root.msg, root.message].find(
+                (value): value is string => typeof value === "string" && Boolean(value.trim()),
+            );
+            return { status: "failed", error: readApiErrorMessage(message) || apiText("videoGenerationFailed") };
+        }
+        // `completed` 但这一轮还没带出 url（结算后才写 metadata）：继续轮，别提前判死。
+        return { status: "pending" };
+    } catch (error) {
+        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        if (!isMissingVideoEndpoint(error)) throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
+    }
+    // 这个中转站没有 muse 专用查询端点 → 用 OpenAI 兼容的 /videos/{id} 读（同站文档明确支持）。
+    return pollOpenAIVideoTask(config, task, options);
 }
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {

@@ -103,6 +103,8 @@ export default {
             fisherMode: "Pipeline mode",
             fisherModeHint: "Work-Fisher: the pasted script defaults to multi-ref video. Character / scene / multiview need Export JSON under character / scene / multiview keys in the model script.",
             fisherQualityHint: "Work-Fisher / light App is single-pass (no latent upscale): default ~0.8 MP (720 also maps here); higher picks still clamp. Duration max 12s. If VRAM is tight, raise the compute tier to Plus.",
+            museQualityHint: "zhenzhen-video-muse always renders 720p with audio; the quality setting does not apply to it.",
+            museSecondsHint: "zhenzhen-video-muse is fixed at 10 seconds; the duration setting does not apply to it.",
             rhInstance: "Compute tier",
             rhInstanceHint: "RunningHub machine VRAM: Standard 24GB (recommended), Plus 48GB, Ultra 84GB. Output stays ~0.8 MP; higher tiers mainly avoid OOM.",
             rhInstanceRecommended: "Rec",

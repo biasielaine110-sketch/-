@@ -103,6 +103,8 @@ export default {
             fisherMode: "全流程模式",
             fisherModeHint: "Work-Fisher：当前脚本默认是「多参生视频」。角色/场景/多视角需在模型脚本里用 character / scene / multiview 键挂上对应 Export JSON。",
             fisherQualityHint: "Work-Fisher / 轻量 App 为单采（无 latent 放大）：默认约 0.8MP（选 720 也是这档），再高会被压回；时长上限 12s。显存不够请改「算力档位」选 Plus。",
+            museQualityHint: "zhenzhen-video-muse 固定输出 720p（带音轨），清晰度设置对它不生效。",
+            museSecondsHint: "zhenzhen-video-muse 固定 10 秒，时长设置对它不生效。",
             rhInstance: "算力档位",
             rhInstanceHint: "对应 RunningHub 机器显存：Standard 24GB（推荐）、Plus 48GB、Ultra 84GB。画面分辨率仍约 0.8MP；档位越高越不易 OOM。",
             rhInstanceRecommended: "推荐",
