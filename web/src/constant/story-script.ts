@@ -2709,6 +2709,32 @@ function collectStoryScriptRows(values: unknown[], columns: StoryScriptColumn[])
     return { title, rows };
 }
 
+/**
+ * 第五 / 六套：模型把**整个回复**吐成一整段长视频脚本（没有 JSON / 表格容器）时的兜底。
+ *
+ * 现象：格式段要求「`video_motion_prompt` 是一整段脚本」，模型有时会理解成「整个回复只写脚本正文」
+ * —— 于是 JSON / JSONL / Markdown 表格 / 逐镜标签块四路全落空，报「无法解析为分镜表结构」。
+ * 这里按镜号把整段切回一行一镜，整块文本填进 `video_motion_prompt`，其余列交给
+ * `normalizeStoryScriptRow` 的预设兜底（镜号 / 时长照常可用）。
+ * 判据故意紧：必须有明确的 `镜头N｜起—止秒` 或 `### 视频N（X秒）` 标题，
+ * 纯说明文字 / 上游报错字符串不会被吞进来。
+ */
+function parseLongVideoScriptRows(text: string, columns: StoryScriptColumn[]): StoryScriptRow[] {
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return [];
+    const ghostBlocks = extractGhostVideoScriptBlocks(text);
+    const blocks = ghostBlocks.length ? ghostBlocks : extractMuseVideoScriptBlocks(text);
+    if (!blocks.length) return [];
+    const byShot = new Map<number, (typeof blocks)[number]>();
+    for (const block of blocks) byShot.set(block.shotNo, block);
+    return [...byShot.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([shotNo, block], index) => {
+            const record: Record<string, unknown> = { shot_no: shotNo, video_motion_prompt: block.text };
+            if (block.seconds > 0) record.duration = Math.round(block.seconds);
+            return normalizeStoryScriptRow(record, index, columns);
+        });
+}
+
 /** 从模型输出里解析分镜表：JSON 优先，失败时退回 markdown 表格。列定义由 preset 决定。 */
 export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetId | string | null): StoryScriptParseResult {
     const columns = getStoryScriptColumns(preset);
@@ -2750,7 +2776,16 @@ export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetI
     const templateRows = parseStoryScriptTemplateRows(raw, columns);
     if (templateRows.length) return { ok: true, title: "", rows: templateRows };
 
-    return { ok: false, error: "无法解析为分镜表结构（既不是 JSON，也不是 Markdown 表格）" };
+    // 第五路：第五 / 六套有时把整个回复写成纯脚本正文（没有表格容器），按镜号切回行。
+    const longVideoRows = parseLongVideoScriptRows(raw, columns);
+    if (longVideoRows.length) return { ok: true, title: "", rows: longVideoRows };
+
+    // 报错带上返回开头：用户点「复制原始返回」之外，弹窗里就能看出是空返回 / 上游报错 / 纯说明文字。
+    const preview = raw.replace(/\s+/g, " ").trim().slice(0, 160);
+    return {
+        ok: false,
+        error: `无法解析为分镜表结构（既不是 JSON，也不是 Markdown 表格）。模型返回开头：${preview || "（空）"}`,
+    };
 }
 
 /** 兜底：解析 markdown / 管道分隔表格。按列名匹配表头，匹配不到时按顺序落在已知列上。 */
@@ -3936,7 +3971,8 @@ const STORY_SCRIPT_DIRECTOR_VIDEO_SYSTEM_OVERRIDE = [
  */
 export const STORY_SCRIPT_MUSE_VIDEO_FORMAT = [
     "## `video_motion_prompt` 的唯一合法格式（第五套 · muse 长视频）",
-    "`video_motion_prompt` 要写成一整段**可以直接喂给长视频模型的中文脚本**：不是标签块，不是 `[a] + [b]` 括号链，不是 `[时长：Xs]`。每一镜输出且只输出下面这一块，行序固定：",
+    "⚠️ 本节只规定 `video_motion_prompt` **这一列的值**：整个回复仍然必须是任务书要求的完整分镜表（JSON 对象的 `rows` 数组，或 Markdown 表格），一行一镜，其余列照常填写。不要把整段脚本当作整个回复输出。",
+    "`video_motion_prompt` 要写成一整段**可以直接喂给长视频模型的中文脚本**：不是标签块，不是 `[a] + [b]` 括号链，不是 `[时长：Xs]`。这一列里每一镜只写下面这一块，行序固定：",
     "",
     "```",
     "### 视频N（X秒）",
@@ -3976,7 +4012,8 @@ const STORY_SCRIPT_MUSE_VIDEO_SYSTEM_OVERRIDE = [
  */
 export const STORY_SCRIPT_GHOST_VIDEO_FORMAT = [
     "## `video_motion_prompt` 的唯一合法格式（第六套 · 鬼怪光影全流程）",
-    "`video_motion_prompt` 要写成一整段**按全片累计时间轴排好的光影分镜脚本**：不是标签块，不是括号链，不是 `[时长：Xs]`，也不是第五套那种 `### 视频N（X秒）` 脚本。每一镜输出且只输出下面这一块，行序固定：",
+    "⚠️ 本节只规定 `video_motion_prompt` **这一列的值**：整个回复仍然必须是任务书要求的完整分镜表（JSON 对象的 `rows` 数组，或 Markdown 表格），一行一镜，其余列照常填写。不要把整段脚本当作整个回复输出。",
+    "`video_motion_prompt` 要写成一整段**按全片累计时间轴排好的光影分镜脚本**：不是标签块，不是括号链，不是 `[时长：Xs]`，也不是第五套那种 `### 视频N（X秒）` 脚本。这一列里每一镜只写下面这一块，行序固定：",
     "",
     "```",
     "————————————",
