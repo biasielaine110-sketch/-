@@ -1927,7 +1927,7 @@ export default {
         import: "Import settings",
         export: "Export settings",
         exportTitle: "Export settings",
-        exportDescription: "Export providers, preferences, local skills, agents, and other settings. Optionally include the text-node prompt library.",
+        exportDescription: "Export providers, preferences, local skills (including their order and visibility), agents, and other settings. Optionally include the text-node prompt library.",
         exportIncludeTextPrompts: "Include text-node prompt library",
         exportConfirm: "Export",
         exported: "Settings exported",

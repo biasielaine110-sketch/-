@@ -3,7 +3,7 @@ import type { CanvasAgentDefinition } from "@/constant/canvas-agents";
 import { resolveCanvasProjectIdFromLocation, saveBlobAs } from "@/lib/fs/save-blob";
 import type { LocalSkillPack } from "@/lib/chat-skill-pack";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
-import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
+import { normalizeChatSkillIdList, useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
 
 type AppConfigFile = {
@@ -13,6 +13,10 @@ type AppConfigFile = {
     config: AiConfig | Omit<AiConfig, "textPrompts">;
     /** 用户安装的本地技能（工具包 / 文档技能）；旧版配置文件可能没有该字段 */
     chatSkillPacks?: LocalSkillPack[];
+    /** 技能列表的用户排序（内置 + 本地 id 混排）；旧版配置文件可能没有该字段 */
+    chatSkillOrder?: string[];
+    /** 技能列表里被隐藏的 id；旧版配置文件可能没有该字段 */
+    chatSkillHiddenIds?: string[];
     /** 用户导入的本地 agent；旧版配置文件可能没有该字段 */
     canvasAgents?: CanvasAgentDefinition[];
 };
@@ -38,12 +42,20 @@ export async function exportAppConfig(options?: ExportAppConfigOptions) {
               const { textPrompts: _textPrompts, ...rest } = config;
               return rest;
           })();
+    const skillState = useChatSkillPacksStore.getState();
     const data: AppConfigFile = {
         app: "infinite-canvas",
         version: 1,
         exportedAt: new Date().toISOString(),
         config: exportConfig,
-        ...(includeChatSkillPacks ? { chatSkillPacks: useChatSkillPacksStore.getState().packs } : {}),
+        ...(includeChatSkillPacks
+            ? {
+                  chatSkillPacks: skillState.packs,
+                  // 排序与显示隐藏跟技能本体一起走：只导出 packs 会让另一台机器上的顺序 / 隐藏全丢。
+                  chatSkillOrder: normalizeChatSkillIdList(skillState.skillOrder),
+                  chatSkillHiddenIds: normalizeChatSkillIdList(skillState.hiddenSkillIds),
+              }
+            : {}),
         ...(includeCanvasAgents ? { canvasAgents: useCanvasAgentsStore.getState().agents } : {}),
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
@@ -77,6 +89,8 @@ export async function importAppConfig(file: File) {
     if (Array.isArray(data.chatSkillPacks)) {
         useChatSkillPacksStore.getState().importPacks(data.chatSkillPacks);
     }
+    // 排序 / 显示隐藏跟着技能包一起导入；旧版文件没带这两个字段时 replaceSkillView 会整段跳过。
+    useChatSkillPacksStore.getState().replaceSkillView({ order: data.chatSkillOrder, hiddenIds: data.chatSkillHiddenIds });
     if (Array.isArray(data.canvasAgents)) {
         useCanvasAgentsStore.getState().importAgents(data.canvasAgents);
     }

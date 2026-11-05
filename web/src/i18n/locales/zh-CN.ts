@@ -1924,7 +1924,7 @@ export default {
         import: "导入配置",
         export: "导出配置",
         exportTitle: "导出配置",
-        exportDescription: "导出当前渠道、偏好、本地技能、Agent 与其它设置。可选择是否一并写入文本节点词库。",
+        exportDescription: "导出当前渠道、偏好、本地技能（含技能排序与显示隐藏）、Agent 与其它设置。可选择是否一并写入文本节点词库。",
         exportIncludeTextPrompts: "包含文本节点词库",
         exportConfirm: "导出",
         exported: "配置已导出",

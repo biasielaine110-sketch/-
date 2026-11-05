@@ -3,6 +3,25 @@ import { persist } from "zustand/middleware";
 
 import { localSkillPackDisplayName, normalizePersistedSkillPacks, parseLocalSkillPackJson, type LocalSkillPack } from "@/lib/chat-skill-pack";
 
+/**
+ * 配置导入 / 备份恢复用的技能 id 列表归一化：只收字符串、去空白、去重、限量。
+ * 老配置可能混进 null / 数字 / 重复项，直接写进 store 会让排序 rank 与隐藏判定对不上。
+ */
+export function normalizeChatSkillIdList(value: unknown, limit = 500): string[] {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const raw of value) {
+        if (typeof raw !== "string") continue;
+        const id = raw.trim();
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+        if (ids.length >= limit) break;
+    }
+    return ids;
+}
+
 type ChatSkillPacksStore = {
     packs: LocalSkillPack[];
     /**
@@ -16,6 +35,8 @@ type ChatSkillPacksStore = {
     /** 用户拖出来的技能顺序（内置 + 本地的 id 混排）；没登记的 id 排在最后，保持各自原序 */
     skillOrder: string[];
     setSkillOrder: (skillIds: string[]) => void;
+    /** 配置导入 / 备份恢复：整表替换排序与隐藏；某字段不是数组就跳过（旧版文件没带 → 保留本地） */
+    replaceSkillView: (view: { order?: unknown; hiddenIds?: unknown }) => void;
     /** 解析好的技能落库（.json 工具包 / SKILL.md 文档技能 / 文件夹，都在外面解析完再进来） */
     upsert: (pack: LocalSkillPack) => LocalSkillPack;
     installFromJson: (raw: string) => LocalSkillPack;
@@ -57,6 +78,13 @@ export const useChatSkillPacksStore = create<ChatSkillPacksStore>()(
                 const exists = current.includes(id);
                 if (hidden === exists) return;
                 set({ hiddenSkillIds: hidden ? [...current, id] : current.filter((item) => item !== id) });
+            },
+            replaceSkillView: (view) => {
+                const next: Partial<Pick<ChatSkillPacksStore, "skillOrder" | "hiddenSkillIds">> = {};
+                // 只认数组：旧版配置 / 备份没有这两个字段时一个字节都不动，保留本地排序与隐藏。
+                if (Array.isArray(view?.order)) next.skillOrder = normalizeChatSkillIdList(view.order);
+                if (Array.isArray(view?.hiddenIds)) next.hiddenSkillIds = normalizeChatSkillIdList(view.hiddenIds);
+                if (Object.keys(next).length) set(next);
             },
             upsert: (pack) => {
                 const now = Date.now();

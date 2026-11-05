@@ -10,7 +10,7 @@ import type { LocalSkillPack } from "@/lib/chat-skill-pack";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useAssetStore, type Asset } from "@/stores/use-asset-store";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
-import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
+import { normalizeChatSkillIdList, useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { useConfigStore, type AiConfig } from "@/stores/use-config-store";
 
 const imageStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
@@ -28,6 +28,9 @@ type AppBackupFile = {
     files: BackupItem[];
     /** 用户安装的本地技能；旧版备份可能没有该字段 */
     chatSkillPacks?: LocalSkillPack[];
+    /** 技能列表的用户排序与显示隐藏；旧版备份可能没有这两个字段 */
+    chatSkillOrder?: string[];
+    chatSkillHiddenIds?: string[];
     /** 用户导入的本地 agent；旧版备份可能没有该字段 */
     canvasAgents?: CanvasAgentDefinition[];
 };
@@ -37,7 +40,8 @@ export async function exportAppBackup() {
     const { projects } = useCanvasStore.getState();
     const { assets } = useAssetStore.getState();
     const { config } = useConfigStore.getState();
-    const chatSkillPacks = useChatSkillPacksStore.getState().packs;
+    const skillState = useChatSkillPacksStore.getState();
+    const chatSkillPacks = skillState.packs;
     const canvasAgents = useCanvasAgentsStore.getState().agents;
     const files: BackupItem[] = [];
     const zipFiles: { name: string; data: BlobPart }[] = [];
@@ -51,6 +55,9 @@ export async function exportAppBackup() {
         config,
         files,
         chatSkillPacks,
+        // 排序与显示隐藏也进备份：全量恢复后技能面板的样子要和导出时一致。
+        chatSkillOrder: normalizeChatSkillIdList(skillState.skillOrder),
+        chatSkillHiddenIds: normalizeChatSkillIdList(skillState.hiddenSkillIds),
         canvasAgents,
     };
     zipFiles.push({ name: "backup.json", data: new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }) });
@@ -100,6 +107,8 @@ export async function importAppBackup(file: File) {
     if (Array.isArray(data.chatSkillPacks)) {
         useChatSkillPacksStore.getState().replacePacks(data.chatSkillPacks);
     }
+    // 旧版备份没带这两个字段时 replaceSkillView 会整段跳过，保留本地排序与隐藏。
+    useChatSkillPacksStore.getState().replaceSkillView({ order: data.chatSkillOrder, hiddenIds: data.chatSkillHiddenIds });
     if (Array.isArray(data.canvasAgents)) {
         useCanvasAgentsStore.getState().replaceAgents(data.canvasAgents);
     }
