@@ -46,7 +46,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMuseVideoScriptOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMuseVideoScriptOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -6737,7 +6737,7 @@ function AtelierCanvasPage() {
                             presetId,
                         )
                       : ghostScheme
-                        ? applyGhostVideoScriptOverlay(dedupedRows, sourceText, presetId)
+                        ? normalizeStoryScriptGhostRows(applyGhostVideoScriptOverlay(dedupedRows, sourceText, presetId), presetId)
                         : dedupedRows;
                 /**
                  * 把「认没认出模版」这件事**明说出来**：以前三列为空时用户只能猜
@@ -6961,7 +6961,8 @@ function AtelierCanvasPage() {
                      */
                     if (ghostScheme) {
                         const overlaid = applyGhostVideoScriptOverlay(workingRows, sourceText, presetId);
-                        workingRows = workingRows.map((item, index) => (index === rowIndex ? overlaid[index] : item));
+                        const normalizedRows = normalizeStoryScriptGhostRows(overlaid, presetId);
+                        workingRows = workingRows.map((item, index) => (index === rowIndex ? normalizedRows[index] : item));
                     }
                     // 单镜重写常把「后面几镜」的描述又写全了（模型看不到整表已经去重过）——
                     // 这里再跑一遍幂等去重，保证「首现镜写全、其余留空」在单镜改动后依然成立。

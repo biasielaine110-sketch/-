@@ -3917,6 +3917,7 @@ export function isStoryScriptDirectorSoundNoteLine(line: unknown): boolean {
  */
 export const STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT = [
     "## `video_motion_prompt` 的唯一合法格式（第四套 · 影视分镜导演）",
+    "⚠️ 本节只规定这一列的值：整表仍按任务书输出，**优先给 JSON 契约（`rows` 数组）**；不要用 Markdown 管道表格 —— 它的单元格装不下换行，会把八行标签块压成一行。这一列的换行必须原样保留（JSON 字符串里写 `\\n`）。",
     "`video_motion_prompt` **不是**图像提示词，**不是** `[a] + [b]` 括号链。它必须是一块逐行标签文本：",
     "一行一个字段，标签写成 `- **标签：**`——**冒号放在两个星号里面**（`- **景别／机位：**中景，平视。`），值紧跟在第二个 `**` 后面、不留空格；顺序固定为下面八行（示例只用来说明格式）：",
     "- **时长：**6秒，00:59—01:05。",
@@ -3971,7 +3972,7 @@ const STORY_SCRIPT_DIRECTOR_VIDEO_SYSTEM_OVERRIDE = [
  */
 export const STORY_SCRIPT_MUSE_VIDEO_FORMAT = [
     "## `video_motion_prompt` 的唯一合法格式（第五套 · muse 长视频）",
-    "⚠️ 本节只规定 `video_motion_prompt` **这一列的值**：整个回复仍然必须是任务书要求的完整分镜表（JSON 对象的 `rows` 数组，或 Markdown 表格），一行一镜，其余列照常填写。不要把整段脚本当作整个回复输出。",
+    "⚠️ 本节只规定 `video_motion_prompt` **这一列的值**：整表仍按任务书输出，**优先给 JSON 契约（`rows` 数组）**；不要用 Markdown 管道表格 —— 它的单元格装不下换行，会把整段脚本压成一行流水句。这一列的换行必须原样保留（JSON 字符串里写 `\\n`），**禁止**写成 `### 视频一（10秒） 文生视频，… 角色设定：… 时间轴：…` 这样一行到底。",
     "`video_motion_prompt` 要写成一整段**可以直接喂给长视频模型的中文脚本**：不是标签块，不是 `[a] + [b]` 括号链，不是 `[时长：Xs]`。这一列里每一镜只写下面这一块，行序固定：",
     "",
     "```",
@@ -4012,7 +4013,7 @@ const STORY_SCRIPT_MUSE_VIDEO_SYSTEM_OVERRIDE = [
  */
 export const STORY_SCRIPT_GHOST_VIDEO_FORMAT = [
     "## `video_motion_prompt` 的唯一合法格式（第六套 · 鬼怪光影全流程）",
-    "⚠️ 本节只规定 `video_motion_prompt` **这一列的值**：整个回复仍然必须是任务书要求的完整分镜表（JSON 对象的 `rows` 数组，或 Markdown 表格），一行一镜，其余列照常填写。不要把整段脚本当作整个回复输出。",
+    "⚠️ 本节只规定 `video_motion_prompt` **这一列的值**：整表仍按任务书输出，**优先给 JSON 契约（`rows` 数组）**；不要用 Markdown 管道表格 —— 它的单元格装不下换行，会把整段脚本压成一行流水句。这一列的换行必须原样保留（JSON 字符串里写 `\\n`），**禁止**写成 `———————————— 镜头八｜25.00—30.00秒 全景…` 这样一行到底。",
     "`video_motion_prompt` 要写成一整段**按全片累计时间轴排好的光影分镜脚本**：不是标签块，不是括号链，不是 `[时长：Xs]`，也不是第五套那种 `### 视频N（X秒）` 脚本。这一列里每一镜只写下面这一块，行序固定：",
     "",
     "```",
@@ -4448,16 +4449,24 @@ export function normalizeStoryScriptDirectorRows(rows: readonly StoryScriptRow[]
         const shotPatch = cleanedShotPrompt === rawShotPrompt ? null : { shot_prompt: cleanedShotPrompt };
         // ① 已经是八段块：只把 `主体与动作` 那一行的外貌 / 服装剥掉，其余行一个字不动
         //    （模版逐字复制过来的行本来就没有外貌词，剥完逐字相同 → 等于没动）。
-        if (isDirectorVideoBlockText(row.video_motion_prompt)) {
-            const original = String(row.video_motion_prompt);
+        /**
+         * ⚠️ 先还原「被压成一行」：模型选 Markdown 管道表格时，八行 `- **时长：**…` 会粘成一行，
+         * `isDirectorVideoBlockText` 照样数得出 ≥4 个标签 → 判「已经合规」直接放过，用户看到的
+         * 就是一行流水标签块（第四套「模板不生效」的另一半根因）。幂等：已分行的原样返回。
+         */
+        const rawVideoPrompt = String(row.video_motion_prompt ?? "");
+        const videoPrompt = reflowLongVideoScript(rawVideoPrompt, "director");
+        if (isDirectorVideoBlockText(videoPrompt)) {
+            const original = videoPrompt;
             // 先把标签统一成 `- **标签：**值`（用户 2026-10-27），再修主体行 / 对白行，最后补尾巴块。
             const rewritten = withDirectorSoundNote(
                 rewriteDirectorDialogueBlock(rewriteDirectorSubjectLine(reformatStoryScriptDirectorLabels(original), names), names),
             );
-            if (rewritten === original && !shotPatch) return row;
+            const finalText = rewritten === original ? original : rewritten;
+            if (finalText === rawVideoPrompt && !shotPatch) return row;
             return {
                 ...row,
-                ...(rewritten === original ? null : { video_motion_prompt: rewritten }),
+                ...(finalText === rawVideoPrompt ? null : { video_motion_prompt: finalText }),
                 ...(shotPatch || null),
             };
         }
@@ -4555,6 +4564,70 @@ function museSlotOf(label: string): MuseSlot | null {
         .replace(/[:：]/g, "");
     if (!key) return null;
     return MUSE_TAG_SLOTS[key] || MUSE_TAG_SLOTS[key.replace(/／/g, "/")] || MUSE_TAG_SLOTS[key.replace(/\//g, "／")] || null;
+}
+
+/**
+ * 长视频脚本「被压成一行」的还原（第五 / 第六套共用）。
+ *
+ * 为什么会压平：这两套的格式段要求「整表仍然是一张表」，模型最省事的做法是吐 **Markdown 管道表格**，
+ * 而管道表格的单元格不能换行 —— 于是 `### 视频一（10秒） 文生视频，16:9… 角色设定：… 时间轴：…`
+ * 全挤在一行里。内容一个字没少，用户看到的却是「专属模板没生效」：标题、五段、逐秒条目糊成一串。
+ * （2026-11-05 晚用户报障，回归点就是上一版格式段第一句把「JSON 或 Markdown 表格」并列写出。）
+ *
+ * 这里只做一件事：在**已知段名前面**补换行，不新增 / 删除任何字符。
+ * 判据：必须有一行同时命中 ≥2 个段名（确实被压平了才动手）→ 已经分好行的文本一个字节都不改，幂等。
+ */
+export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "director"): string {
+    const raw = String(text ?? "");
+    if (!raw.trim()) return raw;
+    /**
+     * `after: true` = 这个段名**独占一行**（`【全片光影与空气】` / `————————————`），
+     * 否则只要求在它前面断开。用户实样里三块标签都是单独一行、正文另起。
+     */
+    const rules: Array<{ re: RegExp; after?: boolean }> =
+        kind === "muse"
+            ? [
+                  { re: /###\s*视频\s*[0-9０-９一二三四五六七八九十]/g },
+                  { re: /文生视频\s*[，,]/g },
+                  { re: /角色设定\s*[：:]/g },
+                  { re: /共享环境与光线\s*[：:]/g },
+                  { re: /时间轴\s*[：:]/g },
+                  { re: /Negative prompt\s*[：:]/gi },
+                  { re: /镜头以固定机位为主/g },
+              ]
+            : kind === "director"
+              ? [
+                    // 第四套八行块：`- **时长：**…` —— 压平时这八行会粘成一行。
+                    { re: /-\s*\*\*/g },
+                    { re: /【禁止项】/g, after: true },
+                    { re: /【强制声明】/g, after: true },
+                ]
+              : [
+                    { re: /[—―﹣－─━﹘]{4,}/g, after: true },
+                    { re: /镜头\s*[0-9０-９一二三四五六七八九十]+\s*[｜|]\s*\d/g },
+                    { re: /【全片光影与空气】/g, after: true },
+                    { re: /【声音】/g, after: true },
+                    { re: /【结束连续性】/g, after: true },
+                ];
+    /** 时间轴条目：`- 0—1.2 秒：…`（muse）/ `25.00—26.20秒：`（ghost）。都要求带冒号，标题行不会被误切。 */
+    const itemPattern =
+        kind === "muse"
+            ? /-\s*\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*秒\s*[：:]/g
+            : kind === "ghost"
+              ? /\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*秒\s*[：:]/g
+              : null;
+    const breakRules = itemPattern ? [...rules, { re: itemPattern }] : rules;
+    const lines = raw.split(/\r?\n/);
+    const flattened = lines.some((line) => breakRules.reduce((count, rule) => count + (line.match(rule.re)?.length || 0), 0) >= 2);
+    if (!flattened) return raw;
+    const reflowed = lines
+        .map((line) => {
+            let next = line;
+            for (const rule of breakRules) next = next.replace(rule.re, (matched) => (rule.after ? `\n${matched}\n` : `\n${matched}`));
+            return next;
+        })
+        .join("\n");
+    return reflowed.replace(/\n{2,}/g, "\n").replace(/^\n+|\n+$/g, "");
 }
 
 /** 这一列已经是长视频脚本（有 `### 视频…` 或五段里的关键段）→ 不许再改写。 */
@@ -4727,10 +4800,17 @@ export function normalizeStoryScriptMuseRows(rows: readonly StoryScriptRow[], pr
     const columns = getStoryScriptColumns(preset);
     if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
     return rows.map((row, index) => {
-        const text = String(row.video_motion_prompt ?? "");
-        if (!text.trim() || looksLikeMuseScript(text)) return row;
+        const rawText = String(row.video_motion_prompt ?? "");
+        if (!rawText.trim()) return row;
+        /**
+         * 先还原「被压成一行」的脚本：模型把多行塞进 Markdown 表格单元格 / JSON 单行字符串时，
+         * `### 视频一（10秒）` 还在，`looksLikeMuseScript` 就会判「已经合规」直接放过 ——
+         * 用户看到的却是一行流水句，等于专属格式没生效。reflow 幂等，已分行的原样返回。
+         */
+        const text = reflowLongVideoScript(rawText, "muse");
+        if (looksLikeMuseScript(text)) return text === rawText ? row : { ...row, video_motion_prompt: text };
         const slots = parseMuseTagSlots(text);
-        if (!slots) return row;
+        if (!slots) return text === rawText ? row : { ...row, video_motion_prompt: text };
         const shotNo = Number(row.shot_no) || index + 1;
         return { ...row, video_motion_prompt: buildMuseScriptFromSlots(slots, Number(row.duration) || 0, shotNo) };
     });
@@ -4910,6 +4990,127 @@ export function applyGhostVideoScriptOverlay(
         const current = String(row.video_motion_prompt ?? "");
         if (looksLikeGhostScript(current)) return row;
         return { ...row, video_motion_prompt: block.text };
+    });
+}
+
+/** 全片累计秒的统一写法（用户实样是两位小数：`25.00—30.00秒`）。 */
+function ghostStamp(seconds: number): string {
+    return Math.max(0, Number(seconds) || 0).toFixed(2);
+}
+
+/**
+ * 标签块 / 一段散文 → 第六套的整段光影脚本（结构骨架）。
+ *
+ * 与第五套 `buildMuseScriptFromSlots` 的差别：时间码是**全片累计秒**（不是每镜从 0 开始），
+ * 结尾是 `【全片光影与空气】` / `【声音】` / `【结束连续性】` 三块，没有 Negative prompt。
+ * 只保证「结构一定是用户要的形状」，措辞尽量沿用模型给的信息 —— 不凭空编镜头内容。
+ */
+function buildGhostScriptFromSlots(
+    slots: Partial<Record<MuseSlot, string>>,
+    startSeconds: number,
+    endSeconds: number,
+    shotNo: number,
+): string {
+    const start = Math.max(0, Number(startSeconds) || 0);
+    const end = Math.max(start + 1, Number(endSeconds) || start + 1);
+    const duration = end - start;
+    const stripDurationTag = (value: unknown) => museOneLine(value).replace(/\[?\s*时长\s*[：:]\s*\d+(?:\.\d+)?\s*(?:秒|s)?\s*\]?/gi, "").trim();
+    const shotSize = stripDurationTag(slots.shot) || "中景";
+    const camera = stripDurationTag(slots.camera);
+    const movement = stripDurationTag(slots.movement);
+    const composition = stripDurationTag(slots.composition);
+    const content = stripDurationTag(slots.content);
+    const action = stripDurationTag(slots.action);
+    const sound = museOneLine(slots.sound);
+
+    const shotLine = `${shotSize}${camera ? `，${camera}` : ""}${movement ? `，${movement}` : ""}。`.replace(/。。+$/, "。");
+    /** `构图方式：对称构图` → 别写成「构图对称构图」。 */
+    const pictureLine = `${content || "人物、道具与光位保持连续，画面不出现跳切"}${composition ? (composition.includes("构图") ? `；${composition}` : `；构图${composition}`) : ""}。`.replace(/。。+$/, "。");
+
+    /** 动作槽里的时间码就是天然节拍；没有时间码就一条覆盖整镜（不许留空）。 */
+    const beats = museTimelineItems(action || content, Math.round(duration));
+    const items = beats.map((beat) => {
+        const matched = beat.match(/^-\s*(\d+(?:\.\d+)?)\s*[—–\-~～至]\s*(\d+(?:\.\d+)?)\s*秒\s*[：:]\s*([\s\S]*)$/);
+        if (!matched) {
+            return `${ghostStamp(start)}—${ghostStamp(end)}秒：\n${museOneLine(String(beat).replace(/^-\s*/, "")) || "按本镜动作完成表演"}`;
+        }
+        const from = start + Math.min(Number(matched[1]) || 0, duration);
+        const to = start + Math.min(Number(matched[2]) || duration, duration);
+        return `${ghostStamp(from)}—${ghostStamp(Math.max(to, from + 0.1))}秒：\n${museOneLine(matched[3]) || "动作延续，不停顿"}。`;
+    });
+    if (!items.length) items.push(`${ghostStamp(start)}—${ghostStamp(end)}秒：\n按本镜动作完成表演，动作连贯不停顿。`);
+
+    /**
+     * 台词是**要保留的信息**，不能跟着标签一起剥掉：`母亲说“趁热吃”` → 声音块里只剩「保留油锅滋滋声」，
+     * 台词却在 strip 时被抹掉了（用户实样要求台词出现在条目里，至少在声音块留一条）。
+     */
+    const spoken: string[] = [];
+    const pullDialogue = (value: string) => {
+        const found = value.match(/[说喊问答叫唤应][：:]?\s*[“"'‘]([^“”"'’\n]{1,120})[”"'’]/g) || [];
+        for (const matched of found) {
+            const line = matched.replace(/^[说喊问答叫唤应][：:]?\s*[“"'‘]/, "").replace(/[”"'’]$/, "").trim();
+            if (line && !spoken.includes(line)) spoken.push(line);
+        }
+        return value.replace(/[^\s，,、。；;：:]{0,8}[说喊问答叫唤应][：:]?\s*[“"'‘][^“”"'’\n]{1,120}[”"'’]/g, " ");
+    };
+    const soundRest = pullDialogue(sound);
+    pullDialogue(action);
+    const ambience = soundRest
+        .replace(/[“"'‘]([^“”"'’\n]{1,120})[”"'’]/g, "$1")
+        .replace(/^(保留|要有|加入)/, "")
+        .replace(/[，,]{2,}/g, "，")
+        .replace(/\s{2,}/g, " ")
+        .replace(/^[，,、\s]+|[，,、\s]+$/g, "")
+        .trim();
+    const dialogueLine = spoken.length ? `对白${spoken.map((line) => `“${line}”`).join("；")}，` : "";
+    const lastBeat = items.length ? String(items[items.length - 1]).split("\n").pop() || "" : "";
+    const light = museLightSentences(slots.camera, slots.movement, slots.composition, slots.content);
+
+    return [
+        "————————————",
+        `镜头${museShotNoLabel(shotNo)}｜${ghostStamp(start)}—${ghostStamp(end)}秒`,
+        shotLine,
+        pictureLine,
+        "————————————",
+        ...items,
+        "【全片光影与空气】",
+        `${light || "光源位置与方向保持不变，室内外明暗关系连续，门光 / 火光范围稳定"}；人物停顿时背景不冻结，热气与风持续可见。`,
+        "【声音】",
+        `${ambience ? `保留${ambience}，` : "保留现场环境音，"}${dialogueLine}对白音量随距离变化；不加音乐、旁白、叹息与额外台词。`,
+        "【结束连续性】",
+        `${lastBeat ? `最后一个动作停在「${lastBeat.replace(/[。；;，,\s]+$/g, "")}」` : "人数、道具数量与位置保持到最后一帧"}；服装、车辆、食物状态与本镜开头一致。`,
+    ].join("\n");
+}
+
+/**
+ * 第六套（ghost）整表后处理：`video_motion_prompt` 必须收敛成
+ * `———— / 镜头N｜起—止秒 / 逐秒条目 / 【全片光影与空气】/【声音】/【结束连续性】`。
+ *
+ * 为什么第五套有、第六套也必须补上：第五套有 `normalizeStoryScriptMuseRows` 兜底，
+ * 模型退回八段标签块也能被重组成长视频脚本；第六套之前只有「源内容 overlay」，
+ * 模型不听话 / 源内容模版把视频列盖成旧格式时，整列会原样留在那里 —— 用户看到的就是
+ * 「第六套的专属格式没起作用」。
+ *
+ * 幂等：已经合规（含 `【全片光影与空气】`）的行只做「压平还原」，不改写内容。
+ * 时间码按**全片累计秒**推进（前面各镜 duration 累加），与用户实样一致。
+ */
+export function normalizeStoryScriptGhostRows(rows: readonly StoryScriptRow[], preset?: StoryScriptPresetId | string | null): StoryScriptRow[] {
+    if (!rows?.length) return rows as StoryScriptRow[];
+    const columns = getStoryScriptColumns(preset);
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
+    let cursor = 0;
+    return rows.map((row, index) => {
+        const duration = Math.max(1, Math.round(Number(row.duration) || 0) || 5);
+        const start = cursor;
+        const end = start + duration;
+        cursor = end;
+        const rawText = String(row.video_motion_prompt ?? "");
+        if (!rawText.trim()) return row;
+        const text = reflowLongVideoScript(rawText, "ghost");
+        if (looksLikeGhostScript(text)) return text === rawText ? row : { ...row, video_motion_prompt: text };
+        const slots = parseMuseTagSlots(text);
+        const shotNo = Number(row.shot_no) || index + 1;
+        return { ...row, video_motion_prompt: buildGhostScriptFromSlots(slots || {}, start, end, shotNo) };
     });
 }
 
