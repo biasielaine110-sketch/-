@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Segmented, Tooltip } from "antd";
-import { Combine, Crosshair, Download, Film, ImagePlus, LoaderCircle, Scissors, Trash2, X } from "lucide-react";
+import { Combine, Crosshair, Download, Film, ImagePlus, ListVideo, LoaderCircle, Scissors, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -25,12 +25,17 @@ type CanvasVideoMergeNodeContentProps = {
     clips: ResolvedVideoMergeClip[];
     isPicking: boolean;
     isExporting: boolean;
+    /** 正在本地渲染 mp4（重活，按钮要锁住，别让人连点两遍）。 */
+    isRendering: boolean;
+    /** 0–1；没在渲染时给 0。 */
+    renderProgress: number;
     onTogglePicking: (nodeId: string) => void;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
     onExport: (nodeId: string) => void;
+    onRender: (nodeId: string) => void;
 };
 
-export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExporting, onTogglePicking, onConfigChange, onExport }: CanvasVideoMergeNodeContentProps) {
+export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExporting, isRendering, renderProgress, onTogglePicking, onConfigChange, onExport, onRender }: CanvasVideoMergeNodeContentProps) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [selectedIndex, setSelectedIndex] = useState(0);
@@ -41,11 +46,54 @@ export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExportin
     const dragStateRef = useRef<{ from: number; startX: number; startY: number; active: boolean } | null>(null);
     const stripRef = useRef<HTMLDivElement | null>(null);
     const videoRef = useRef<HTMLVideoElement | null>(null);
+    /**
+     * 「整条显示」：按时间线顺序把每段的首尾接起来演一遍，用来确认拼接效果。
+     * 关掉就回到单条预览（原来的行为）。
+     */
+    const [playAll, setPlayAll] = useState(false);
+    const [playIndex, setPlayIndex] = useState(0);
 
     const rawClips = node.metadata?.videoMergeClips || [];
     const totalSeconds = useMemo(() => totalMergeLengthSec(rawClips), [rawClips]);
     const safeIndex = Math.min(Math.max(0, selectedIndex), Math.max(0, clips.length - 1));
     const selected = clips[safeIndex];
+
+    // ── 整条显示 ────────────────────────────────────────────────────────────────
+    // 只跳「能播」的段：源被删掉的段在时间线上留着占位，但它没法演。
+    const playIndexSafe = Math.min(Math.max(0, playIndex), Math.max(0, clips.length - 1));
+    const playClip = clips[playIndexSafe];
+    const playLengthSec = playClip ? Math.max(MIN_MERGE_CLIP_SEC, playClip.clip.outSec - playClip.clip.inSec) : 0;
+
+    const gotoPlayClip = (index: number) => {
+        let next = index;
+        while (next < clips.length && (!clips[next].url || clips[next].missing)) next += 1;
+        if (next >= clips.length) return false;
+        setPlayIndex(next);
+        return true;
+    };
+
+    const togglePlayAll = () => {
+        if (playAll) {
+            setPlayAll(false);
+            return;
+        }
+        // 从头开始演整条 —— 用户点这个就是要看「拼起来长什么样」。
+        const first = clips.findIndex((item) => Boolean(item.url) && !item.missing);
+        setPlayIndex(Math.max(0, first));
+        setPlayAll(true);
+    };
+
+    /** 一段演完 → 下一段；已经是最后一段就停在尾帧，不自动循环。 */
+    const advancePlay = (element?: HTMLVideoElement | null) => {
+        element?.pause();
+        if (!gotoPlayClip(playIndexSafe + 1) && element) {
+            try {
+                element.currentTime = Math.max(0, playClip?.clip.outSec || 0);
+            } catch {
+                // 有些容器 seek 到片尾会抛，忽略即可。
+            }
+        }
+    };
 
     // 时长探测只做一轮：`durationSec` 一旦回填，key 就不再命中，不会循环。
     const probeKey = clips
@@ -73,8 +121,9 @@ export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExportin
         };
     }, [probeKey, clips, rawClips, node.id, onConfigChange]);
 
-    // 换选中片段时把预览挪到它的入点，避免每次都要手动拖。
+    // 换选中片段时把预览挪到它的入点，避免每次都要手动拖。（整条播放时由视频元素自己接管定位）
     useEffect(() => {
+        if (playAll) return;
         const video = videoRef.current;
         if (!video || !selected || selected.clip.kind !== "video") return;
         const target = Math.max(0, selected.clip.inSec);
@@ -84,7 +133,15 @@ export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExportin
         } catch {
             // 元数据还没加载完，浏览器会自己忽略 —— 下一次点选会再对一次。
         }
-    }, [safeIndex, selected]);
+    }, [safeIndex, selected, playAll]);
+
+    // 整条播放里的图片段没有 ended 事件，用定时器按「停留时长」推进。
+    useEffect(() => {
+        if (!playAll || !playClip || playClip.clip.kind !== "image") return;
+        const timer = window.setTimeout(() => advancePlay(), Math.max(0.1, playLengthSec) * 1000);
+        return () => window.clearTimeout(timer);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [playAll, playIndexSafe, playLengthSec, playClip?.clip.kind]);
 
     const patch = (next: Partial<CanvasNodeMetadata>) => onConfigChange(node.id, next);
 
@@ -225,9 +282,20 @@ export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExportin
                             <div className="flex min-h-0 flex-1 flex-col gap-1.5 rounded-lg border p-2" style={{ borderColor: theme.node.stroke }}>
                                 <div className="flex items-center justify-between gap-2">
                                     <span className="truncate text-[11px] font-medium">
-                                        {safeIndex + 1}. {selected.clip.title}
+                                        {playAll ? t("canvas.videoMerge.playAllSegment", { index: playIndexSafe + 1, count: clips.length }) : `${safeIndex + 1}. ${selected.clip.title}`}
                                     </span>
                                     <div className="flex shrink-0 items-center gap-1">
+                                        <Tooltip title={playAll ? t("canvas.videoMerge.playSingle") : t("canvas.videoMerge.playAll")}>
+                                            <Button
+                                                size="small"
+                                                type={playAll ? "primary" : "text"}
+                                                icon={<ListVideo className="size-3.5" />}
+                                                className="!h-6 !px-1.5 !text-[10px]"
+                                                onClick={togglePlayAll}
+                                            >
+                                                {playAll ? t("canvas.videoMerge.playSingle") : t("canvas.videoMerge.playAll")}
+                                            </Button>
+                                        </Tooltip>
                                         <Tooltip title={t("canvas.videoMerge.remove")}>
                                             <button type="button" className="rounded p-1 opacity-60 hover:bg-red-500/10 hover:text-red-500" onClick={removeSelected}>
                                                 <Trash2 className="size-3.5" />
@@ -237,7 +305,44 @@ export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExportin
                                 </div>
 
                                 <div className="relative min-h-0 flex-1 overflow-hidden rounded-md bg-black/25">
-                                    {selected.clip.kind === "video" && selected.url ? (
+                                    {playAll ? (
+                                        playClip?.url ? (
+                                            playClip.clip.kind === "video" ? (
+                                                <video
+                                                    /* 换段就换 key：旧的立刻卸载停声，新的自己从入点开始 */
+                                                    key={`play-all-${playIndexSafe}-${playClip.clip.nodeId}`}
+                                                    src={playClip.url}
+                                                    className="h-full w-full object-contain"
+                                                    controls
+                                                    playsInline
+                                                    preload="auto"
+                                                    onLoadedMetadata={(event) => {
+                                                        const video = event.currentTarget;
+                                                        try {
+                                                            video.currentTime = Math.max(0, playClip.clip.inSec);
+                                                        } catch {
+                                                            // 容器不支持 seek 就算了，从头播也能看个大概。
+                                                        }
+                                                        void video.play().catch(() => undefined);
+                                                    }}
+                                                    onTimeUpdate={(event) => {
+                                                        const video = event.currentTarget;
+                                                        // 出点判定要用 media 时间，不是时间线时间。
+                                                        if (video.currentTime < Math.max(0, playClip.clip.outSec) - 0.03) return;
+                                                        advancePlay(video);
+                                                    }}
+                                                    onEnded={(event) => advancePlay(event.currentTarget)}
+                                                />
+                                            ) : (
+                                                <img src={playClip.url} alt={playClip.clip.title} className="h-full w-full object-contain" />
+                                            )
+                                        ) : (
+                                            <div className="flex h-full w-full items-center justify-center gap-1 text-[11px] opacity-50">
+                                                <Film className="size-4" />
+                                                {t("canvas.videoMerge.missingSource")}
+                                            </div>
+                                        )
+                                    ) : selected.clip.kind === "video" && selected.url ? (
                                         <video ref={videoRef} key={`${selected.clip.nodeId}-preview`} src={selected.url} className="h-full w-full object-contain" controls playsInline preload="metadata" />
                                     ) : selected.url ? (
                                         <img src={selected.url} alt={selected.clip.title} className="h-full w-full object-contain" />
@@ -249,7 +354,9 @@ export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExportin
                                     )}
                                 </div>
 
-                                {selected.clip.kind === "video" ? (
+                                {playAll ? (
+                                    <div className="text-[11px] leading-4 opacity-55">{t("canvas.videoMerge.playAllHint")}</div>
+                                ) : selected.clip.kind === "video" ? (
                                     <div className="flex flex-wrap items-center gap-1 text-[11px]">
                                         <TimeField
                                             label={t("canvas.videoMerge.inPoint")}
@@ -313,15 +420,27 @@ export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExportin
                     </span>
                 </div>
 
-                <Button
-                    type="primary"
-                    block
-                    disabled={!canExport || isExporting}
-                    icon={isExporting ? <LoaderCircle className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
-                    onClick={() => onExport(node.id)}
-                >
-                    {isExporting ? t("canvas.videoMerge.exporting") : t("canvas.videoMerge.export")}
-                </Button>
+                <div className="flex items-center gap-2">
+                    <Button
+                        type="primary"
+                        block
+                        className="flex-1"
+                        disabled={!canExport || isRendering || isExporting}
+                        icon={isRendering ? <LoaderCircle className="size-3.5 animate-spin" /> : <Combine className="size-3.5" />}
+                        onClick={() => onRender(node.id)}
+                    >
+                        {isRendering ? `${t("canvas.videoMerge.rendering")} ${Math.round(Math.min(1, Math.max(0, renderProgress)) * 100)}%` : t("canvas.videoMerge.render")}
+                    </Button>
+                    <Button
+                        block
+                        className="flex-1"
+                        disabled={!canExport || isExporting || isRendering}
+                        icon={isExporting ? <LoaderCircle className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                        onClick={() => onExport(node.id)}
+                    >
+                        {isExporting ? t("canvas.videoMerge.exporting") : t("canvas.videoMerge.export")}
+                    </Button>
+                </div>
             </div>
         </div>
     );

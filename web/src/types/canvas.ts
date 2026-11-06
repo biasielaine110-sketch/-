@@ -374,6 +374,8 @@ export type CanvasNodeMetadata = {
     videoMergeClips?: CanvasVideoMergeClip[];
     /** 视频合并：画幅（null / "original" = 跟随第一段素材）。 */
     videoMergeAspect?: string | null;
+    /** 视频合并：这条视频是哪个合并节点渲染出来的（溯源用，不影响播放）。 */
+    videoMergeFrom?: string;
     /** Midjourney Imagine parent task id — enables manual Upscale (U1–U4). */
     midjourneyTaskId?: string;
     /** Midjourney tile index 1–4 when the primary image is a specific Imagine tile. */
