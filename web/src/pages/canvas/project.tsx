@@ -46,7 +46,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMuseVideoScriptOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -6772,7 +6772,7 @@ function AtelierCanvasPage() {
                       : ghostScheme
                         ? normalizeStoryScriptGhostRows(applyGhostVideoScriptOverlay(dedupedRows, sourceText, presetId), presetId)
                         : momanScheme
-                          ? normalizeStoryScriptMomanRows(dedupedRows, presetId)
+                          ? normalizeStoryScriptMomanRows(applyMomanVideoScriptOverlay(dedupedRows, sourceText, presetId), presetId)
                           : mashuScheme
                             ? normalizeStoryScriptMashuRows(applyMashuVideoScriptOverlay(dedupedRows, sourceText, presetId), presetId)
                             : dedupedRows;
@@ -7023,11 +7023,14 @@ function AtelierCanvasPage() {
                         workingRows = workingRows.map((item, index) => (index === rowIndex ? normalizedRows[index] : item));
                     }
                     /**
-                     * 第七套（魔漫）：这一列的合法形态是 `0.00—1.50：【景别，运镜】…` 时间码分段 ——
-                     * 压成一行 / 塞了整格 JSON / 写错到分镜列，都在这里收敛，同样只替换刚重写的那一行。
+                     * 第七套（魔漫）：源内容里贴了 storyboard JSON 时，这一列按 `prompt` **逐字照搬**
+                     * （模型自己另编的那段形态对、内容错）；随后再收敛成时间码分段 ——
+                     * 压成一行 / 塞了整格 JSON / 写错到分镜列，都在 normalize 里处理。
+                     * 同样只替换刚重写的那一行。
                      */
                     if (momanScheme) {
-                        const normalizedRows = normalizeStoryScriptMomanRows(workingRows, presetId);
+                        const overlaid = applyMomanVideoScriptOverlay(workingRows, sourceText, presetId);
+                        const normalizedRows = normalizeStoryScriptMomanRows(overlaid, presetId);
                         workingRows = workingRows.map((item, index) => (index === rowIndex ? normalizedRows[index] : item));
                     }
                     /**

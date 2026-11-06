@@ -2854,11 +2854,10 @@ function momanRowRecord(record: Record<string, unknown>): Record<string, unknown
 }
 
 /**
- * 第七套的兜底解析：从整段返回里抠出所有 storyboard 对象并转成行。
- * 容器形态都认：顶层数组、`{ storyboards: [...] }`、`{ rows: [...] }`（模型混用）、裸对象。
+ * 从任意文本里抠出所有 storyboard 对象（源稿与模型返回共用同一个抽取器）。
+ * 容器形态都认：顶层数组、`{ storyboards: [...] }`、`{ rows: [...] }`（模型混用）、裸对象、JSONL。
  */
-function parseMomanStoryboardRows(raw: string, columns: StoryScriptColumn[]): StoryScriptRow[] {
-    if (!columns.some((column) => column.key === "video_motion_prompt")) return [];
+function extractMomanStoryboardRecords(raw: string): Record<string, unknown>[] {
     const records: Record<string, unknown>[] = [];
     const consume = (item: unknown) => {
         if (Array.isArray(item)) {
@@ -2874,7 +2873,17 @@ function parseMomanStoryboardRows(raw: string, columns: StoryScriptColumn[]): St
         const nested = Object.values(record).filter((value) => value && typeof value === "object");
         nested.forEach(consume);
     };
-    for (const value of extractTopLevelJsonValues(raw)) consume(value);
+    for (const value of extractTopLevelJsonValues(String(raw ?? ""))) consume(value);
+    return records;
+}
+
+/**
+ * 第七套的兜底解析：从整段返回里抠出所有 storyboard 对象并转成行。
+ * 容器形态都认：顶层数组、`{ storyboards: [...] }`、`{ rows: [...] }`（模型混用）、裸对象。
+ */
+function parseMomanStoryboardRows(raw: string, columns: StoryScriptColumn[]): StoryScriptRow[] {
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return [];
+    const records = extractMomanStoryboardRecords(raw);
     if (!records.length) return [];
     return records.map((record, index) => normalizeStoryScriptRow({ ...momanRowRecord(record), shot_no: index + 1 }, index, columns));
 }
@@ -2932,6 +2941,58 @@ export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], p
         }
         const text = reflowLongVideoScript(unwrapMomanJsonPrompt(rawText), "moman");
         return text === rawText ? row : { ...row, video_motion_prompt: text };
+    });
+}
+
+/**
+ * storyboard 记录对应的「源镜号」：优先 `merged_from_shots`（`镜3—镜4` → 3），退 `id`（`storyboard_02` → 2）。
+ * 认不出返回 0（此时 overlay 会退回「按顺序对位」）。
+ */
+function momanRecordShotNo(record: Record<string, unknown>): number {
+    const merged = String(record.merged_from_shots ?? "").replace(/[０-９]/g, (ch) => String(ch.charCodeAt(0) - 0xff10));
+    const fromMerged = merged.match(/(\d+)/)?.[1];
+    if (fromMerged) return Number(fromMerged);
+    const fromId = String(record.id ?? "").replace(/[０-９]/g, (ch) => String(ch.charCodeAt(0) - 0xff10)).match(/(\d+)\s*$/)?.[1];
+    return fromId ? Number(fromId) : 0;
+}
+
+/**
+ * 第七套（魔漫）：把**源内容**里的 storyboard `prompt` 逐字搬进 `video_motion_prompt` 列。
+ *
+ * 为什么必须有这一层（2026-11-06 报障）：第二 / 五 / 六 / 八套都有各自的 overlay，
+ * 唯独第七套只做了 `normalizeStoryScriptMomanRows`（收尾形态），没有「按源稿填入」。
+ * 于是用户把 storyboard JSON 贴进源内容后，这一列填的是**模型自己另编的一段**：
+ * 形态看着对（也是 `0.00—2.00：【景别，运镜】…`），但时长、台词、构图全不是源稿的
+ * —— 用户看到的就是「识别和填进去的不对」。
+ *
+ * 口径：源稿里有 storyboard 就**照搬**（`prompt` 一个字不改，只把压平的换行还原）；
+ * 对位优先「源稿第 N 条 → 第 N 行」，条数与行数不一致时才退回按源镜号匹配；
+ * 源稿里没有 JSON / 没 `prompt` → 一个字节都不动（模型自己写的仍保留）。
+ */
+export function applyMomanVideoScriptOverlay(
+    rows: readonly StoryScriptRow[],
+    sourceText: string,
+    preset?: StoryScriptPresetId | string | null,
+): StoryScriptRow[] {
+    if (!rows?.length) return rows as StoryScriptRow[];
+    const columns = getStoryScriptColumns(preset);
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
+    const records = extractMomanStoryboardRecords(sourceText);
+    if (!records.length) return rows as StoryScriptRow[];
+    const prompts = records
+        .map((record) => ({ shotNo: momanRecordShotNo(record), text: reflowLongVideoScript(String(record.prompt ?? "").trim(), "moman") }))
+        .filter((item) => item.text);
+    if (!prompts.length) return rows as StoryScriptRow[];
+    const rowShotNos = new Set(rows.map((row, index) => Number(row.shot_no) || index + 1));
+    // 条数对得上整表（最常见：源稿 N 条 = 表格 N 行）→ 一律按顺序；
+    // 只有源稿比表格少、且镜号能对上时才按源镜号找（避免「源稿镜3 撞上表格第3行」的错位）。
+    const alignByShotNo = prompts.length < rows.length && prompts.every((item) => item.shotNo > 0) && prompts.some((item) => rowShotNos.has(item.shotNo));
+    return rows.map((row, index) => {
+        const shotNo = Number(row.shot_no) || index + 1;
+        const hit = alignByShotNo ? prompts.find((item) => item.shotNo === shotNo) : prompts[index];
+        if (!hit) return row;
+        if (String(row.video_motion_prompt ?? "") === hit.text) return row;
+        return { ...row, video_motion_prompt: hit.text };
     });
 }
 
