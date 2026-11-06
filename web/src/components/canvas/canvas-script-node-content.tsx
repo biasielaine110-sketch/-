@@ -2877,23 +2877,34 @@ export function CanvasScriptNodeContent({
                             </button>
                         ) : null}
                     </div>
-                    {/* 「选择铺链路」：勾几镜 → 只铺这几镜，并把它们合成一个视频链路（一段视频）。 */}
+                    {/* 「选择铺链路」：勾几镜 → 只铺这几镜，并把它们合成一个视频链路（一段视频）。
+                        勾选态必须**实心高对比**：`activeBg` 是浅米色（浅色主题 #e7e5df、深色主题 #3a3631），
+                        拿它当描边 + 12% 填充 + 文字色，在同样浅/同样暗的节点面板上等于没变化，
+                        用户看到的就是「勾了镜头它还是灰的」。这里改用 `activeText` 实心（浅色主题深底、
+                        深色主题浅底），未勾选才保留灰描边 + 半透明 —— 与上面「紧凑版」那个按钮同一口径。 */}
                     {onBuildPipeline ? (
                         <button
                             type="button"
-                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition disabled:cursor-not-allowed disabled:opacity-40"
+                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition"
                             style={{
-                                borderColor: selectedRows.size ? theme.toolbar.activeBg : theme.node.stroke,
-                                background: selectedRows.size ? `${theme.toolbar.activeBg}1f` : "transparent",
-                                color: selectedRows.size ? theme.toolbar.activeBg : theme.node.text,
-                                opacity: selectedRows.size ? 1 : 0.6,
+                                borderColor: selectedRows.size ? theme.toolbar.activeText : theme.node.stroke,
+                                background: selectedRows.size ? theme.toolbar.activeText : "transparent",
+                                color: selectedRows.size ? theme.node.panel : theme.node.text,
+                                opacity: selectedRows.size ? 1 : 0.55,
+                                boxShadow: selectedRows.size ? `0 0 0 3px ${theme.toolbar.activeText}1a` : undefined,
+                                cursor: selectedRows.size ? "pointer" : "not-allowed",
                             }}
-                            disabled={!selectedRows.size}
+                            // 不用真 `disabled`：disabled 元素悬停不弹 title，用户看不到「先勾几行」，
+                            // 只会看到一个死的灰按钮。改成 aria-disabled + 点击弹提示，语义与可发现性都在。
+                            aria-disabled={!selectedRows.size}
                             onMouseDown={(event) => event.stopPropagation()}
                             onPointerDown={(event) => event.stopPropagation()}
                             onClick={(event) => {
                                 event.stopPropagation();
-                                if (!selectedRows.size) return;
+                                if (!selectedRows.size) {
+                                    message.info(t("canvas.scriptNode.pipelineBuildSelectedNone"));
+                                    return;
+                                }
                                 onBuildPipeline(node.id, Array.from(selectedRows).sort((a, b) => a - b));
                             }}
                             title={selectedRows.size ? t("canvas.scriptNode.pipelineBuildSelectedHint", { count: selectedRows.size }) : t("canvas.scriptNode.pipelineBuildSelectedNone")}
@@ -2904,15 +2915,18 @@ export function CanvasScriptNodeContent({
                                 : t("canvas.scriptNode.pipelineBuildSelected")}
                         </button>
                     ) : null}
-                    {/* 合并为一镜 / 取消合并 + 解除合并组：成对放在这里，勾几行立刻就能点。 */}
+                    {/* 合并为一镜 / 取消合并 + 解除合并组：成对放在这里，勾几行立刻就能点。
+                        「取消合并」这个**按下态**同样不能用 activeBg（浅米色文字压浅米色底 = 看不出已选中），
+                        与上面「选择铺链路」统一改成 activeText 实心。 */}
                     <div className="flex items-center gap-1.5">
                         <button
                             type="button"
-                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition disabled:cursor-not-allowed disabled:opacity-40"
+                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition disabled:cursor-not-allowed"
                             style={{
-                                borderColor: selectedAllMerged ? theme.toolbar.activeBg : theme.node.stroke,
-                                background: selectedAllMerged ? `${theme.toolbar.activeBg}1f` : "transparent",
-                                color: selectedAllMerged ? theme.toolbar.activeBg : theme.node.text,
+                                borderColor: selectedAllMerged ? theme.toolbar.activeText : theme.node.stroke,
+                                background: selectedAllMerged ? theme.toolbar.activeText : "transparent",
+                                color: selectedAllMerged ? theme.node.panel : theme.node.text,
+                                opacity: selectedAllMerged ? 1 : selectedRows.size < 2 ? 0.55 : 1,
                             }}
                             disabled={selectedRows.size < 2 && !selectedAllMerged}
                             onMouseDown={(event) => event.stopPropagation()}
