@@ -1558,6 +1558,7 @@ export default {
             mentionHint: "Type @ to reference an image",
             removeReference: "Remove this reference (disconnect)",
             reorderHint: "Drag the handle to reorder references",
+            previewHint: "Double-click to enlarge",
             optimizePrompt: "H3 Prompt Optimizer",
             optimizing: "Optimizing…",
             optimizePromptTitle: "Rewrite the current input with the \"H3 Prompt Optimizer\" prompt from the library",

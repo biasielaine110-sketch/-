@@ -1558,6 +1558,7 @@ export default {
             mentionHint: "输入 @ 引用对应图片",
             removeReference: "移除该参考（断开连接）",
             reorderHint: "拖动手柄可调整引用顺序",
+            previewHint: "双击放大预览",
             optimizePrompt: "H3-提示词优化",
             optimizing: "优化中…",
             optimizePromptTitle: "用词库「H3-提示词优化」的提示词改写当前输入内容",

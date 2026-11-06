@@ -8289,6 +8289,11 @@ function AtelierCanvasPage() {
                     mentionReferences={getMentionReferences(panelNode.id)}
                     onReorderReferences={(orderedNodeIds) => handleReorderLinkedMedia(panelNode.id, orderedNodeIds)}
                     onRemoveReference={(referenceNodeId) => handleRemoveLinkedMedia(panelNode.id, referenceNodeId)}
+                    onPreviewReference={(referenceNodeId) => {
+                        // 双击参考图 chip → 走画布统一的全屏预览弹窗（带分辨率 / 模型 / 提示词 / 下载）。
+                        const reference = nodesRef.current.find((item) => item.id === referenceNodeId);
+                        if (reference) handleNodeViewImage(reference);
+                    }}
                     onPromptChange={handleNodePromptChange}
                     onConfigChange={handleConfigNodeChange}
                     onContentChange={handleNodeContentChange}
@@ -8304,7 +8309,7 @@ function AtelierCanvasPage() {
                     }}
                 />
             ),
-        [getConfigInputs, getMentionReferences, handleCancelNodeSchedule, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, handleNodeSchedule, handleRemoveLinkedMedia, handleReorderLinkedMedia, isNodeGenerating, stopGenerationForNode],
+        [getConfigInputs, getMentionReferences, handleCancelNodeSchedule, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, handleNodeSchedule, handleNodeViewImage, handleRemoveLinkedMedia, handleReorderLinkedMedia, isNodeGenerating, stopGenerationForNode],
     );
 
     const handleDirectorExport = useCallback(

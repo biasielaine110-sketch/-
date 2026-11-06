@@ -51,6 +51,8 @@ type CanvasNodePromptPanelProps = {
     mentionReferences?: CanvasResourceReference[];
     onReorderReferences?: (orderedNodeIds: string[]) => void;
     onRemoveReference?: (referenceNodeId: string) => void;
+    /** 双击参考图 chip：交给画布打开全屏预览（复用图片节点的详情弹窗，可缩放/下载）。 */
+    onPreviewReference?: (referenceNodeId: string) => void;
     onImageSettingsOpenChange?: (open: boolean) => void;
     /** 排期生成时间（epoch ms）。设置后到点由画布调度器自动触发一次生成。 */
     scheduledAt?: number;
@@ -61,7 +63,7 @@ type CanvasNodePromptPanelProps = {
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onReorderReferences, onRemoveReference, onImageSettingsOpenChange, scheduledAt, onSchedule, onCancelSchedule, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onReorderReferences, onRemoveReference, onPreviewReference, onImageSettingsOpenChange, scheduledAt, onSchedule, onCancelSchedule, modeOverride }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
@@ -140,6 +142,15 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const dropSlotRef = useRef<number | null>(null);
     const chipRowRef = useRef<HTMLDivElement | null>(null);
 
+    // 双击参考图 chip = 放大预览。
+    //
+    // 为什么不用 `onDoubleClick`：`pointerdown` 里为了不让画布把这次按下当成「拖节点 / 平移画布」，
+    // 已经 `preventDefault()` 过了 —— 浏览器因此不会补发兼容鼠标事件（mousedown/mouseup/click/dblclick），
+    // 原生双击在这排 chip 上根本不会触发。所以双击判定自己做：
+    // 同一个 chip、两次按下间隔 ≤ 320ms、位移 ≤ 6px（手抖不算换位置）。
+    const CHIP_DOUBLE_TAP_MS = 320;
+    const lastChipTapRef = useRef<{ index: number; time: number; x: number; y: number } | null>(null);
+
     // 面板可能在拖拽中被卸载（取消选中 / 重新生成）—— 把挂在 window 上的监听摘掉，别泄漏。
     useEffect(
         () => () => {
@@ -181,11 +192,38 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         setDropSlot(slot);
     };
 
+    /** 只有「有图的图片参考」才有放大预览（视频 / 音频 / 纯文本 chip 不接）。 */
+    const canPreviewReference = (reference: CanvasResourceReference | undefined) =>
+        Boolean(onPreviewReference && reference && reference.kind === "image" && reference.previewUrl);
+
+    const previewReference = (reference: CanvasResourceReference | undefined) => {
+        if (!canPreviewReference(reference)) return;
+        onPreviewReference?.(reference!.nodeId);
+    };
+
     const handleChipPointerDown = (event: React.PointerEvent<HTMLSpanElement>, index: number) => {
         if (!onReorderReferences || event.button !== 0 || dragChipRef.current) return;
         // 必须拦下来：不然画布把这次 pointerdown 当「拖节点 / 平移画布」。
         event.preventDefault();
         event.stopPropagation();
+
+        // 双击 → 放大预览（判定见 `CHIP_DOUBLE_TAP_MS` 附近注释）。第二下不再开始拖拽，
+        // 不然「双击预览」会先被记成一次原地拖动。
+        const reference = activeReferences[index];
+        const now = Date.now();
+        const lastTap = lastChipTapRef.current;
+        const isDoubleTap =
+            canPreviewReference(reference) &&
+            Boolean(lastTap) &&
+            lastTap!.index === index &&
+            now - lastTap!.time <= CHIP_DOUBLE_TAP_MS &&
+            Math.hypot(event.clientX - lastTap!.x, event.clientY - lastTap!.y) <= 6;
+        lastChipTapRef.current = { index, time: now, x: event.clientX, y: event.clientY };
+        if (isDoubleTap) {
+            lastChipTapRef.current = null;
+            previewReference(reference);
+            return;
+        }
 
         const reorder = onReorderReferences;
         const state: ChipDragState = {
@@ -218,6 +256,8 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                 // 4px 阈值：手抖不算拖拽，避免「点一下就换了位置」。
                 if (Math.hypot(native.clientX - state.startX, native.clientY - state.startY) < 4) return;
                 state.moved = true;
+                // 真的拖起来了 → 上一记点击作废，免得「拖完马上点一下」被读成双击。
+                lastChipTapRef.current = null;
                 setDragChipIndex(state.index);
                 setDropSlotBoth(state.index);
                 document.body.style.cursor = "grabbing";
@@ -353,6 +393,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                     <span className="text-[11px] opacity-55">{t("canvas.promptPanel.references")}</span>
                     {activeReferences.map((reference, index) => {
                         const isDragging = dragChipIndex === index;
+                        const canPreview = canPreviewReference(reference);
                         return (
                             <Fragment key={reference.id}>
                                 {dropSlot === index && dragChipIndex !== null ? (
@@ -363,9 +404,11 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                     // 整块 chip（抓手 / 缩略图 / 标签）都能拖 —— 指针事件由自己接管，
                                     // 不再依赖浏览器原生 drag。见上面 `handleChipPointerDown` 的注释。
                                     onPointerDown={onReorderReferences ? (event) => handleChipPointerDown(event, index) : undefined}
+                                    // 兜底：没有拖拽回调时 pointerdown 不会 preventDefault，原生双击照常触发。
+                                    onDoubleClick={canPreview ? () => previewReference(reference) : undefined}
                                     className={`relative mr-1 inline-flex max-w-44 touch-none select-none items-center gap-1 rounded-lg border px-1.5 py-1 text-xs transition-opacity ${isDragging ? "opacity-40" : ""} ${onReorderReferences ? "cursor-grab active:cursor-grabbing" : ""}`}
                                     style={{ background: theme.toolbar.itemHover, borderColor: theme.node.stroke, color: theme.node.text }}
-                                    title={reference.title}
+                                    title={canPreview ? `${reference.title} · ${t("canvas.promptPanel.previewHint")}` : reference.title}
                                 >
                                     <span
                                         data-ref-chip-handle={index}
@@ -375,7 +418,15 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                     >
                                         <GripVertical className="size-3" />
                                     </span>
-                                    {reference.kind === "image" && reference.previewUrl ? <img src={reference.previewUrl} alt="" draggable={false} className="size-6 rounded object-cover" /> : null}
+                                    {reference.kind === "image" && reference.previewUrl ? (
+                                        <span className="group/ref relative inline-flex shrink-0">
+                                            <img src={reference.previewUrl} alt="" draggable={false} className="size-6 rounded object-cover" />
+                                            {canPreview ? (
+                                                // 悬停时缩略图右下角浮出「放大」角标，提示这里可以双击。
+                                                <Maximize2 className="pointer-events-none absolute -bottom-1 -right-1 size-2.5 rounded-sm bg-black/60 p-px text-white opacity-0 transition-opacity group-hover/ref:opacity-100" />
+                                            ) : null}
+                                        </span>
+                                    ) : null}
                                     <span className="truncate font-medium">{reference.label}</span>
                                     {onRemoveReference ? (
                                         <button
