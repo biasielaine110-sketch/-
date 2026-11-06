@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Combine, Download, FolderPlus, GripVertical, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Sparkles, Trash2, Unlink2, Video } from "lucide-react";
+import { Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Sparkles, Trash2, Unlink2, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -46,6 +46,8 @@ export function CanvasNodeContextMenu({
     onConvertType,
     batchGenerateCount = 0,
     onBatchGenerate,
+    groupCount = 0,
+    onGroupSelected,
 }: {
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
@@ -72,6 +74,9 @@ export function CanvasNodeContextMenu({
     /** 选区里可批量生成的节点数（图片 / 视频）。>=2 才在菜单顶部出现「一键生成」。 */
     batchGenerateCount?: number;
     onBatchGenerate?: () => void;
+    /** 选区里可成组的节点数（非分组节点）。>=2 才在菜单顶部出现「成组」。 */
+    groupCount?: number;
+    onGroupSelected?: () => void;
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -90,6 +95,8 @@ export function CanvasNodeContextMenu({
     // other. Other node types have no counterpart and simply never show the entry.
     const convertTarget = node ? nodeConversionTarget(node.type) : null;
     const showBatchGenerate = menu.type === "node" && Boolean(node) && batchGenerateCount > 1 && Boolean(onBatchGenerate);
+    const showGroup = menu.type === "node" && Boolean(node) && groupCount > 1 && Boolean(onGroupSelected);
+    const showSelectionActions = showBatchGenerate || showGroup;
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -310,19 +317,31 @@ export function CanvasNodeContextMenu({
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
         >
-            {/* 多选批量动作：选区里有 >=2 个图片 / 视频节点时置顶，跟单节点的工具项分开
-                （它不作用于「右键的这个节点」，而是整个选区）。 */}
-            {showBatchGenerate ? (
+            {/* 多选批量动作：作用于**整个选区**而不是「右键的这个节点」，所以跟单节点工具项分开。
+                都不能塞进 `orderedTools`（那套会被写进 imageContextMenuOrder 排序配置）。 */}
+            {showSelectionActions ? (
                 <div className="mb-1 border-b pb-1" style={{ borderColor: theme.toolbar.border }}>
-                    <MenuButton
-                        icon={<Sparkles className="size-4" />}
-                        label={t("canvas.contextMenu.batchGenerate", { count: batchGenerateCount })}
-                        onClick={() => {
-                            onBeforeAction?.();
-                            onBatchGenerate?.();
-                            onClose();
-                        }}
-                    />
+                    {showBatchGenerate ? (
+                        <MenuButton
+                            icon={<Sparkles className="size-4" />}
+                            label={t("canvas.contextMenu.batchGenerate", { count: batchGenerateCount })}
+                            onClick={() => {
+                                onBeforeAction?.();
+                                onBatchGenerate?.();
+                                onClose();
+                            }}
+                        />
+                    ) : null}
+                    {showGroup ? (
+                        <MenuButton
+                            icon={<GroupIcon className="size-4" />}
+                            label={t("canvas.contextMenu.group", { count: groupCount })}
+                            onClick={() => {
+                                onGroupSelected?.();
+                                onClose();
+                            }}
+                        />
+                    ) : null}
                 </div>
             ) : null}
             {/* Type conversion is a structural node operation, not a tool: it stays out of the

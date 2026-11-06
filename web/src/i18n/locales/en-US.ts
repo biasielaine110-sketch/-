@@ -1680,6 +1680,9 @@ export default {
             batchGenerateEmpty: "None of the selected nodes can generate (add a prompt or connect a text node first)",
             batchGenerateStarted: "Started generating {{count}} nodes",
             batchGenerateSkipped: "{{count}} more were skipped (already running / no prompt / unsupported type)",
+            group: "Group ({{count}})",
+            groupCreated: "Grouped {{count}} nodes — select the group, press X and click a node downstream to pull every member in one go",
+            groupEmpty: "Nothing in the selection can be grouped (a group cannot be grouped again)",
         },
         generation: {
             interrupted: "Generation was interrupted by a page refresh. Generate again.",

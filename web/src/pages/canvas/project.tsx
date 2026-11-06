@@ -114,6 +114,7 @@ import { createZip } from "@/lib/zip";
 import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFileBase, normalizeMergeClip, probeImageSize, probeVideoMeta, resolveMergeCanvasSize, videoMergeClipFromNode, type ResolvedVideoMergeClip } from "@/lib/canvas/video-merge";
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
 import { buildBatchGeneratePlan, isBatchGeneratableNode } from "@/lib/canvas/batch-generate";
+import { attachNodesToGroup, collectGroupMembers, isGroupableNode, resolveGroupFrame } from "@/lib/canvas/canvas-grouping";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, getGroupMemberNodes, normalizeConnection, resolveConnectionPairs, canConnectNodes, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
@@ -3430,8 +3431,13 @@ function AtelierCanvasPage() {
                 // 脚本节点**不走特例**：X 选中脚本节点后逐个点其他节点，即可把它们连进脚本节点 ——
                 // 连进来的素材就成了「整表资产池」，这正是「按 X 拾取节点加入资产池」。
                 // 想用弹窗添加资产，请点节点里的「+ 添加资产」按钮（节点内容区的 assetEntryRow）。
-                setMouseWorld({ x: outputNode.position.x, y: outputNode.position.y + outputNode.height / 2 });
-                setConnecting({ nodeId: outputNodeId, handleType: "target", sticky: true });
+                //
+                // ⚠️ 分组是唯一例外：它是**一捆素材**，X 打在组上时用户想的是「把这组接到我刚点的节点」，
+                // 所以按 source 起线（组 → 点到的节点），展开后就是 每个成员 → 目标。
+                // 想反过来（把某个源推给组里每个成员），拖手柄连组即可，不用 X。
+                const anchorHandleType = outputNode.type === CanvasNodeType.Group ? "source" : "target";
+                setMouseWorld({ x: anchorHandleType === "source" ? outputNode.position.x + outputNode.width : outputNode.position.x, y: outputNode.position.y + outputNode.height / 2 });
+                setConnecting({ nodeId: outputNodeId, handleType: anchorHandleType, sticky: true });
                 setSelectedNodeIds(new Set([outputNodeId]));
                 setToolbarNodeId(outputNodeId);
                 setSelectedConnectionId(null);
@@ -6913,6 +6919,57 @@ function AtelierCanvasPage() {
         [handleGenerateNode, isNodeGenerating, message, t],
     );
 
+    /** 右键菜单顶部「成组」作用的节点：选区里至少 2 个**非分组**节点（图片 + 文本混选也算）。 */
+    const groupableNodeIds = useMemo(() => {
+        if (!contextMenu || contextMenu.type !== "node" || selectedNodeIds.size < 2) return [];
+        const byId = new Map(nodes.map((node) => [node.id, node]));
+        const ids = Array.from(selectedNodeIds).filter((id) => {
+            const node = byId.get(id);
+            return Boolean(node && isGroupableNode(node));
+        });
+        return ids.length >= 2 ? ids : [];
+    }, [contextMenu, nodes, selectedNodeIds]);
+
+    /**
+     * 把选区打成一个分组框。
+     *
+     * 只做两件事：按包围盒摆一个框 + 给成员挂 `metadata.groupId`，**成员位置一个都不动**
+     * （成组不该打乱用户排好的版）。组本身和普通节点一样能连线：连它 = 连它里面的每一个成员
+     * （`resolveConnectionPairs` 会把组端点展开成全体成员），所以下游一次就能取到组里的
+     * 全部图片和文本；成员自己的连线照旧，单独取某一个不受影响。
+     */
+    const handleGroupSelected = useCallback(
+        (nodeIds: string[]) => {
+            const members = collectGroupMembers(nodesRef.current, nodeIds);
+            const frame = resolveGroupFrame(members);
+            if (!frame || members.length < 2) {
+                message.warning(t("canvas.contextMenu.groupEmpty"));
+                return;
+            }
+            // 工厂收的是**中心点**、且用默认尺寸；这里必须整份覆盖成包围盒算出来的左上角 + 真实尺寸。
+            const groupNode: CanvasNodeData = {
+                ...createCanvasNode(CanvasNodeType.Group, { x: 0, y: 0 }),
+                position: frame.position,
+                width: frame.width,
+                height: frame.height,
+            };
+            const memberIds = new Set(members.map((member) => member.id));
+            // 组框要**垫在成员下面**（数组靠前 = 渲染靠后）：追加到末尾会让半透明的组框盖在成员上方，
+            // 成员看着发灰。插到第一个成员的位置，成员就整个露在框上，框的空白区照样能拖。
+            setNodes((prev) => {
+                const next = attachNodesToGroup(prev, memberIds, groupNode.id);
+                const firstMemberIndex = next.findIndex((node) => memberIds.has(node.id));
+                next.splice(firstMemberIndex < 0 ? next.length : firstMemberIndex, 0, groupNode);
+                return next;
+            });
+            // 成组后选中这个组：紧接着按 X 就能把它连到下游，一步取到整组内容。
+            setSelectedNodeIds(new Set([groupNode.id]));
+            setSelectedConnectionId(null);
+            message.success(t("canvas.contextMenu.groupCreated", { count: members.length }));
+        },
+        [message, t],
+    );
+
     const imageContextHandlers = useMemo<ImageToolHandlers>(
         () => ({
             onUpload: (node) => handleUploadRequest(node.id),
@@ -9148,6 +9205,8 @@ function AtelierCanvasPage() {
                         }}
                         batchGenerateCount={batchGenerateNodeIds.length}
                         onBatchGenerate={() => handleBatchGenerate(batchGenerateNodeIds)}
+                        groupCount={groupableNodeIds.length}
+                        onGroupSelected={() => handleGroupSelected(groupableNodeIds)}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
