@@ -2854,10 +2854,153 @@ function momanRowRecord(record: Record<string, unknown>): Record<string, unknown
 }
 
 /**
+ * 把「复制走形」的 JSON 修回可解析（2026-11-06 第二次报障的根因）：
+ * 用户从聊天窗口把 storyboard JSON 粘进画布后，`prompt` 里原本的 `\n` 转义常被还原成**真实换行**
+ * —— `JSON.parse` 直接抛错，`extractTopLevelJsonValues` 把整段丢掉，overlay 拿不到源稿，
+ * 视频列于是留着模型自己另写的一段（形态对、内容不对，用户看到的就是「识别错了」）。
+ *
+ * 只做三件收窄的修复，不改变语义：
+ *  ① 字符串内的裸 `\n` / `\r` / `\t` → 转义回去；
+ *  ② 尾随逗号（`,}` / `,]`）丢掉；
+ *  ③ 其它字符原样（绝不碰字符串外的引号配对）。
+ */
+function repairJsonishText(text: string): string {
+    let out = "";
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (inString) {
+            if (escaped) {
+                out += char;
+                escaped = false;
+                continue;
+            }
+            if (char === "\\") {
+                out += char;
+                escaped = true;
+                continue;
+            }
+            if (char === "\n") {
+                out += "\\n";
+                continue;
+            }
+            if (char === "\r") {
+                out += "\\r";
+                continue;
+            }
+            if (char === "\t") {
+                out += "\\t";
+                continue;
+            }
+            if (char === '"') {
+                inString = false;
+                out += char;
+                continue;
+            }
+            out += char;
+            continue;
+        }
+        if (char === '"') {
+            inString = true;
+            out += char;
+            continue;
+        }
+        if (char === "," && /^\s*[}\]]/.test(text.slice(index + 1, index + 40))) continue;
+        out += char;
+    }
+    return out;
+}
+
+/** 补齐未闭合的括号：用户只粘了数组里的一段（`[{…},`）时，尾部补 `]` / `}` 才能 parse。 */
+function closeUnbalancedJson(text: string): string {
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (char === "\\") escaped = true;
+            else if (char === '"') inString = false;
+            continue;
+        }
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+        if (char === "{") stack.push("}");
+        else if (char === "[") stack.push("]");
+        else if ((char === "}" || char === "]") && stack.length) stack.pop();
+    }
+    let tail = inString ? '"' : "";
+    while (stack.length) tail += stack.pop() as string;
+    return text.replace(/,\s*$/, "") + tail;
+}
+
+/** 宽松解析：原样 → 修走形 → 补括号，三种都试，全失败返回 `undefined`。 */
+function parseJsonLenient(slice: string): unknown {
+    const repaired = repairJsonishText(slice);
+    const candidates = [slice, repaired, closeUnbalancedJson(repaired)];
+    for (const candidate of candidates) {
+        if (!candidate.trim()) continue;
+        try {
+            return JSON.parse(candidate);
+        } catch {
+            // 换下一种
+        }
+    }
+    return undefined;
+}
+
+/**
+ * 最后一道兜底：连 JSON 都拼不回去时，直接按 `"prompt": "…"` 抓字符串字面量。
+ * 逐字符扫到结束引号（允许真实换行），`\n` / `\"` 等转义照常还原。
+ */
+function extractMomanPromptLiterals(text: string): Record<string, unknown>[] {
+    const records: Record<string, unknown>[] = [];
+    const pattern = /"prompt"\s*:\s*"/g;
+    let match: RegExpExecArray | null = pattern.exec(text);
+    while (match) {
+        let index = pattern.lastIndex;
+        let escaped = false;
+        let value = "";
+        while (index < text.length) {
+            const char = text[index];
+            if (escaped) {
+                value += char === "n" ? "\n" : char === "t" ? "\t" : char === "r" ? "\r" : char;
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if (char === "\\") {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if (char === '"') break;
+            value += char;
+            index += 1;
+        }
+        pattern.lastIndex = index + 1;
+        const prompt = value.trim();
+        if (prompt) records.push({ prompt });
+        match = pattern.exec(text);
+    }
+    return records;
+}
+
+/**
  * 从任意文本里抠出所有 storyboard 对象（源稿与模型返回共用同一个抽取器）。
  * 容器形态都认：顶层数组、`{ storyboards: [...] }`、`{ rows: [...] }`（模型混用）、裸对象、JSONL。
+ *
+ * ⚠️ 三级抽取（缺一级就会出现「源稿明明贴了，表格却填模型自写内容」）：
+ *  ① 严格：`extractTopLevelJsonValues`（括号配对 + JSON.parse）；
+ *  ② 宽松：整段 / 首个 `{` 到最后一个 `}`，修走形 + 补括号后再 parse；
+ *  ③ 兜底：直接抓 `"prompt"` 字符串字面量。
  */
 function extractMomanStoryboardRecords(raw: string): Record<string, unknown>[] {
+    const text = String(raw ?? "");
     const records: Record<string, unknown>[] = [];
     const consume = (item: unknown) => {
         if (Array.isArray(item)) {
@@ -2873,8 +3016,22 @@ function extractMomanStoryboardRecords(raw: string): Record<string, unknown>[] {
         const nested = Object.values(record).filter((value) => value && typeof value === "object");
         nested.forEach(consume);
     };
-    for (const value of extractTopLevelJsonValues(String(raw ?? ""))) consume(value);
-    return records;
+    for (const value of extractTopLevelJsonValues(text)) consume(value);
+    if (records.length) return records;
+
+    const loose: unknown[] = [];
+    const whole = parseJsonLenient(text.trim());
+    if (whole !== undefined) loose.push(whole);
+    const start = text.indexOf("{");
+    if (start >= 0) {
+        const lastClose = text.lastIndexOf("}");
+        const slice = lastClose > start ? text.slice(start, lastClose + 1) : text.slice(start);
+        const parsed = parseJsonLenient(slice);
+        if (parsed !== undefined) loose.push(parsed);
+    }
+    loose.forEach(consume);
+    if (records.length) return records;
+    return extractMomanPromptLiterals(text);
 }
 
 /**
