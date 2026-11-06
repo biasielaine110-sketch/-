@@ -2851,6 +2851,88 @@ function momanContentParts(value: unknown): { dialogue: string; emotion: string 
     return { dialogue, emotion: mood || kind || "" };
 }
 
+/** 任意值 → 去空白的单行文本（数组按 `、` 连）。 */
+function momanText(value: unknown): string {
+    if (Array.isArray(value)) return value.map((item) => momanText(item)).filter(Boolean).join("、");
+    if (value === null || value === undefined) return "";
+    if (typeof value === "object") return "";
+    return String(value).replace(/\r?\n+/g, " ").trim();
+}
+
+/**
+ * storyboard 的一条 → **完整的**视频运动提示词（2026-11-06 第五次报障）。
+ *
+ * 前几版只把 `prompt` 搬进视频列，用户要的是「整条 storyboard 都进去」：
+ * `prompt` 是分段运镜正文，但 `opening_state` / `ending_state`（站位、动作落点、道具状态、
+ * 情绪锚点）、`role_ids` / `prop_ids` / `scene_ids`（锚点引用）、`content`（台词与情绪）、
+ * `source_material`（原始文本）同样是这一镜的信息，缺了就等于把一条 storyboard 截掉一半。
+ *
+ * 口径：
+ *   - `prompt` **逐字放最前**（一个字不改，只把压平的换行还原）；
+ *   - 其余字段按 JSON 原顺序逐条以 `【标签】值` 附后，**空字段整行不写**（不留空壳标签）；
+ *   - 数组用 `、` 连，嵌套对象按子字段拆行；
+ *   - 每次都从 record 重组，所以对同一份源稿多次调用结果恒定（幂等）。
+ */
+export function buildMomanVideoPrompt(record: Record<string, unknown>): string {
+    if (!record || typeof record !== "object") return "";
+    const prompt = reflowLongVideoScript(String(record.prompt ?? "").trim(), "moman");
+    const lines: string[] = [];
+    if (prompt) lines.push(prompt);
+    const push = (label: string, value: string) => {
+        if (value) lines.push(`【${label}】${value}`);
+    };
+    // ① 分镜元信息：只写有的项，缺项不占位。
+    const meta = [
+        momanText(record.id),
+        momanText(record.duration) ? `时长 ${momanText(record.duration)}` : "",
+        momanText(record.drama_type),
+        momanText(record.merged_from_shots) ? `合并自 ${momanText(record.merged_from_shots)}` : "",
+    ].filter(Boolean);
+    if (meta.length) push("分镜信息", meta.join(" ｜ "));
+    // ② 锚点引用：画布里的 `@role_xxx` / `@scene_xxx` / `@prop_xxx`，生成时用来绑定资产。
+    push("场景", momanText(record.scene_ids) || momanText(record.scene_id));
+    push("角色", momanText(record.role_ids));
+    push("道具", momanText(record.prop_ids));
+    // ③ 首尾状态：这两块是「一镜怎么开始、怎么落地」，视频续接全靠它们。
+    const states: Array<{ label: string; keys: Array<[string, string]> }> = [
+        {
+            label: "开场",
+            keys: [
+                ["状态", "summary"],
+                ["承接台词", "last_line_from_previous"],
+                ["人物站位", "role_positions"],
+                ["动作落点", "action_end_position"],
+                ["道具状态", "prop_states"],
+                ["情绪锚点", "emotion_anchor"],
+            ],
+        },
+        {
+            label: "结束",
+            keys: [
+                ["状态", "summary"],
+                ["落点台词", "last_line"],
+                ["人物站位", "role_positions"],
+                ["动作落点", "action_end_position"],
+                ["道具状态", "prop_states"],
+                ["情绪锚点", "emotion_anchor"],
+            ],
+        },
+    ];
+    const stateOf = (key: string) => (record[key] && typeof record[key] === "object" ? (record[key] as Record<string, unknown>) : {});
+    for (const { label, keys } of states) {
+        const state = stateOf(label === "开场" ? "opening_state" : "ending_state");
+        for (const [name, key] of keys) {
+            push(name === "状态" ? `${label}状态` : `${label}·${name}`, momanText(state[key]));
+        }
+    }
+    // ④ 台词与素材：`content` 是 `类型|说话人|台词|情绪`，逐字保留（不美化分隔符）。
+    push("对白", String(record.content ?? "").replace(/\r?\n+/g, " ").trim());
+    const material = record.source_material && typeof record.source_material === "object" ? (record.source_material as Record<string, unknown>) : {};
+    push("原始文本", momanText(material.original_text));
+    push("转写脚本", momanText(material.converted_script));
+    return lines.join("\n");
+}
+
 /** storyboard JSON 的一条 → 一行分镜（键名对齐 `STORY_SCRIPT_CLASSIC_COLUMNS`）。 */
 function momanRowRecord(record: Record<string, unknown>): Record<string, unknown> {
     const prompt = reflowLongVideoScript(String(record.prompt ?? ""), "moman");
@@ -2869,7 +2951,8 @@ function momanRowRecord(record: Record<string, unknown>): Record<string, unknown
         blocking: toText(opening.role_positions),
         dialogue,
         emotion: emotion || toText(opening.emotion_anchor),
-        video_motion_prompt: prompt,
+        // 视频列放**整条 storyboard**（prompt 在最前，状态/锚点/台词/素材逐条附后），不是只取 prompt。
+        video_motion_prompt: buildMomanVideoPrompt(record),
         shot_prompt: "",
         style_prompt: "",
         sound: "",
@@ -2976,6 +3059,93 @@ function parseJsonLenient(slice: string): unknown {
     return undefined;
 }
 
+/** `\"` / `\n` / `\t` 等转义还原成真字符（与 `extractMomanPromptLiterals` 同口径）。 */
+function unescapeMomanLiteral(text: string): string {
+    let out = "";
+    let escaped = false;
+    for (const char of text) {
+        if (escaped) {
+            out += char === "n" ? "\n" : char === "t" ? "\t" : char === "r" ? "\r" : char;
+            escaped = false;
+            continue;
+        }
+        if (char === "\\") {
+            escaped = true;
+            continue;
+        }
+        out += char;
+    }
+    return out;
+}
+
+const MOMAN_PROMPT_SLOT = "__MOMAN_PROMPT_";
+
+/**
+ * 把所有 `"prompt": "…"` 的**值**挖出来换成占位符，返回「打了码的文本 + 挖出来的值」。
+ *
+ * 为什么需要（2026-11-06 第五次报障的收尾）：`prompt` 是 storyboard 里唯一会带裸引号
+ * （`发出对白："…"`）和真实换行的大字段，它一坏整段 JSON 就 parse 不动，
+ * 只能退到「按字面量抓 prompt」的兜底 —— 而那条兜底**只有 prompt**，
+ * `opening_state` / `ending_state` / 锚点 / `content` / `source_material` 全丢，
+ * 用户看到的就是「上面的内容没加进去」。
+ *
+ * 挖掉它之后剩下的 JSON 是干净的（其它字段都是中文正文），修一遍就能 parse，
+ * 整条 storyboard 的其它字段于是能一并拿到 —— 见 `extractMomanStoryboardRecords` 第三级。
+ */
+function maskMomanPromptValues(text: string): { text: string; values: string[] } {
+    const values: string[] = [];
+    const pattern = /"prompt"\s*:\s*"/g;
+    let out = "";
+    let cursor = 0;
+    let match: RegExpExecArray | null = pattern.exec(text);
+    while (match) {
+        const valueStart = pattern.lastIndex;
+        let index = valueStart;
+        let escaped = false;
+        while (index < text.length) {
+            const char = text[index];
+            if (escaped) {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if (char === "\\") {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if (char === '"') {
+                const tail = text.slice(index + 1);
+                // 收尾判据与 extractMomanPromptLiterals 一致：引号后跟 `,` / `}` / `]` 或已到末尾。
+                if (/^\s*[,}\]]/.test(tail) || !tail.trim()) break;
+            }
+            index += 1;
+        }
+        values.push(unescapeMomanLiteral(text.slice(valueStart, index)));
+        out += `${text.slice(cursor, valueStart)}${MOMAN_PROMPT_SLOT}${values.length - 1}__`;
+        cursor = index;
+        pattern.lastIndex = index + 1;
+        match = pattern.exec(text);
+    }
+    out += text.slice(cursor);
+    return { text: out, values };
+}
+
+/** 把占位符换回真值（parse 之后递归走一遍）。 */
+function restoreMomanPromptValues(value: unknown, values: readonly string[]): unknown {
+    if (typeof value === "string") {
+        const hit = value.match(new RegExp(`^${MOMAN_PROMPT_SLOT}(\\d+)__$`));
+        return hit ? values[Number(hit[1])] ?? "" : value;
+    }
+    if (Array.isArray(value)) return value.map((item) => restoreMomanPromptValues(item, values));
+    if (value && typeof value === "object") {
+        const out: Record<string, unknown> = {};
+        for (const [key, item] of Object.entries(value as Record<string, unknown>)) out[key] = restoreMomanPromptValues(item, values);
+        return out;
+    }
+    return value;
+}
+
 /**
  * 最后一道兜底：连 JSON 都拼不回去时，直接按 `"prompt": "…"` 抓字符串字面量。
  *
@@ -3065,6 +3235,26 @@ function extractMomanStoryboardRecords(raw: string): Record<string, unknown>[] {
     }
     loose.forEach(consume);
     if (records.length) return records;
+
+    // ③ 兜底（第五次报障）：`prompt` 里带裸引号 / 真实换行时上面两级全失败。
+    //    先把 `prompt` 的值整体挖掉换成占位符（坏字符全在它里面），剩下的 JSON 修一遍就能 parse
+    //    → 整条 storyboard 的其它字段（首尾状态、锚点、台词、素材）一并拿到，再把 prompt 塞回去。
+    const masked = maskMomanPromptValues(text);
+    if (masked.values.length) {
+        const restored: unknown[] = [];
+        const maskedWhole = parseJsonLenient(masked.text.trim());
+        if (maskedWhole !== undefined) restored.push(maskedWhole);
+        const maskedStart = masked.text.indexOf("{");
+        if (maskedStart >= 0) {
+            const maskedEnd = masked.text.lastIndexOf("}");
+            const slice = maskedEnd > maskedStart ? masked.text.slice(maskedStart, maskedEnd + 1) : masked.text.slice(maskedStart);
+            const parsed = parseJsonLenient(slice);
+            if (parsed !== undefined) restored.push(parsed);
+        }
+        restored.forEach((value) => consume(restoreMomanPromptValues(value, masked.values)));
+        if (records.length) return records;
+    }
+    // ④ 连占位符都救不回来 → 至少把 `prompt` 抓出来（宁可只有正文，也不要空转）。
     return extractMomanPromptLiterals(text);
 }
 
@@ -3090,7 +3280,10 @@ export function isMomanVideoScript(text: unknown): boolean {
     return hits.length >= 2;
 }
 
-/** 单元格里塞了整个 storyboard JSON 时，取出 `prompt`（取不到就把原文还回去）。 */
+/**
+ * 单元格里塞了整个 storyboard JSON 时展开成完整提示词（取不到就把原文还回去）。
+ * 整条 storyboard → `buildMomanVideoPrompt`（与源稿覆盖同一口径）；只有 `{ "prompt": … }` → 取 prompt。
+ */
 function unwrapMomanJsonPrompt(value: string): string {
     const text = String(value ?? "").trim();
     if (!text.startsWith("{")) return value;
@@ -3099,8 +3292,10 @@ function unwrapMomanJsonPrompt(value: string): string {
     if (start < 0 || end <= start) return value;
     try {
         const parsed: unknown = JSON.parse(text.slice(start, end + 1));
-        if (parsed && typeof parsed === "object" && typeof (parsed as Record<string, unknown>).prompt === "string") {
-            return String((parsed as Record<string, unknown>).prompt);
+        if (parsed && typeof parsed === "object") {
+            const record = parsed as Record<string, unknown>;
+            if (isMomanStoryboardRecord(record)) return buildMomanVideoPrompt(record);
+            if (typeof record.prompt === "string") return record.prompt;
         }
     } catch {
         // 不是合法 JSON（可能只是正文以 `{` 开头）→ 原样返回
@@ -3148,7 +3343,7 @@ function momanRecordShotNo(record: Record<string, unknown>): number {
 }
 
 /**
- * 第七套（魔漫）：把**源内容**里的 storyboard `prompt` 逐字搬进 `video_motion_prompt` 列。
+ * 第七套（魔漫）：把**源内容**里的整条 storyboard 搬进 `video_motion_prompt` 列。
  *
  * 为什么必须有这一层（2026-11-06 报障）：第二 / 五 / 六 / 八套都有各自的 overlay，
  * 唯独第七套只做了 `normalizeStoryScriptMomanRows`（收尾形态），没有「按源稿填入」。
@@ -3156,7 +3351,9 @@ function momanRecordShotNo(record: Record<string, unknown>): number {
  * 形态看着对（也是 `0.00—2.00：【景别，运镜】…`），但时长、台词、构图全不是源稿的
  * —— 用户看到的就是「识别和填进去的不对」。
  *
- * 口径：源稿里有 storyboard 就**照搬**（`prompt` 一个字不改，只把压平的换行还原）；
+ * 口径（第五次报障后定稿）：**整条 storyboard 都进去**，不是只取 `prompt`。
+ * `buildMomanVideoPrompt` 负责组装：`prompt` 逐字在前，`opening_state` / `ending_state` /
+ * `role_ids` / `prop_ids` / `scene_ids` / `content` / `source_material` 逐条以 `【标签】` 附后。
  * 对位优先「源稿第 N 条 → 第 N 行」，条数与行数不一致时才退回按源镜号匹配；
  * 源稿里没有 JSON / 没 `prompt` → 一个字节都不动（模型自己写的仍保留）。
  */
@@ -3171,7 +3368,8 @@ export function applyMomanVideoScriptOverlay(
     const records = extractMomanStoryboardRecords(sourceText);
     if (!records.length) return rows as StoryScriptRow[];
     const prompts = records
-        .map((record) => ({ shotNo: momanRecordShotNo(record), text: reflowLongVideoScript(String(record.prompt ?? "").trim(), "moman") }))
+        // 整条 storyboard（prompt + 首尾状态 + 锚点 + 台词 + 素材）一起进视频列，见 buildMomanVideoPrompt。
+        .map((record) => ({ shotNo: momanRecordShotNo(record), text: buildMomanVideoPrompt(record) }))
         .filter((item) => item.text);
     if (!prompts.length) return rows as StoryScriptRow[];
     const rowShotNos = new Set(rows.map((row, index) => Number(row.shot_no) || index + 1));
