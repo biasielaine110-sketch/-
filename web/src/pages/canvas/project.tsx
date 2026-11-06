@@ -7949,10 +7949,19 @@ function AtelierCanvasPage() {
                 return;
             }
             // 分段方式（单镜 / 每 N 镜 / 按每段时长）决定「几个镜共用一个视频节点」。
+            // **手动合并组**（用户在表里勾几行点「合并为一镜」）优先于档位：
+            // 它存的是**原始行下标**，而 `renderable` 已经剔掉空行、下标不再对应 —— 先按
+            // 「原始下标 → renderable 位置」换算一次，否则删过空行之后会合并到错位的镜上。
+            const renderableSlot = new Map<number, number>();
+            renderable.forEach((item, slot) => renderableSlot.set(item.index, slot));
+            const manualMergeGroups = (source.metadata?.scriptMergeGroups || [])
+                .map((span) => (Array.isArray(span) ? span.map((index) => renderableSlot.get(index)).filter((slot): slot is number => slot !== undefined) : []))
+                .filter((span) => span.length >= 2);
             const groups = groupStoryScriptRows(
                 renderable.map((item) => item.row),
                 mergeMode,
                 segmentSeconds,
+                manualMergeGroups,
             );
 
             const created: CanvasNodeData[] = [];
@@ -8064,7 +8073,9 @@ function AtelierCanvasPage() {
                 const videoPrompt = withScriptAssetBinding(baseVideoPrompt, videoBinding);
                 // 单镜模式：10/15 秒 = 锁定成片秒数（不抄表里旧值，否则「选了 10 秒铺出来还是 3 秒」）；
                 // 5 秒 = 上限（表里更短就按表里）。合并模式仍按本段各镜 duration 累加。
-                const seconds = mergeMode === "shot"
+                // ⚠️ 判据是 `merged`（本段真的有多镜）而**不是**档位：手动合并组在「单镜」档位下也是多镜，
+                // 只看档位会把 3 镜合一的视频切成「第一镜的 5 秒」，画面却是三段连续动作。
+                const seconds = !merged && mergeMode === "shot"
                     ? resolveStoryScriptShotSeconds(first.row.duration, segmentSeconds)
                     : Math.min(20, storyScriptGroupDuration({ rows: members.map((member) => member.row) }));
                 const videoNode: CanvasNodeData = {

@@ -1269,37 +1269,99 @@ export function stepStoryScriptFontSize(value: unknown, delta: number): number |
 export type StoryScriptRowGroup = { rows: StoryScriptRow[] };
 
 /**
+ * **手动合并组**（`metadata.scriptMergeGroups`）：每组是一串**连续的行下标**，组内多镜合成一个
+ * 视频节点铺链路。用户原话：「需要能够选择几个镜头铺链路，即将这几个镜头合并成一个镜头」。
+ *
+ * 归一化口径（`normalizeStoryScriptMergeGroups`）：
+ * - 组内不连续时**补齐中间行**（勾了第 2、4 镜 = 2–4 合一）——「合并成一个镜头」本来就要求连续，
+ *   中间留一镜在外面会变成「前半段 / 后半段」两条互不相连的视频，比补齐更违反意图；
+ * - 每组至少 2 行（1 行等于没合并，直接丢掉，免得表里显示一个假的合并标）；
+ * - 组与组**不许重叠**：先出现的（起点更靠前的）赢，后来的整组丢弃；
+ * - 越界下标（删过行）直接丢，不报错。
+ */
+export function normalizeStoryScriptMergeGroups(groups: unknown, rowCount: number): number[][] {
+    if (!Array.isArray(groups) || rowCount <= 0) return [];
+    const inRange = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 0 && (value as number) < rowCount;
+    const candidates = (groups as unknown[])
+        .map((group) => (Array.isArray(group) ? Array.from(new Set((group as unknown[]).filter(inRange))).sort((a, b) => a - b) : []))
+        .filter((group) => group.length >= 2)
+        .sort((a, b) => a[0] - b[0]);
+    const used = new Set<number>();
+    const normalized: number[][] = [];
+    for (const group of candidates) {
+        const span: number[] = [];
+        for (let index = group[0]; index <= group[group.length - 1]; index += 1) span.push(index);
+        if (span.some((index) => used.has(index))) continue;
+        span.forEach((index) => used.add(index));
+        normalized.push(span);
+    }
+    return normalized;
+}
+
+/**
+ * 删掉一行之后重排手动合并组：被删的那一行从组里摘掉，后面的行下标整体前移一位。
+ * 组里剩下不到 2 行就作废（一镜谈不上「合并」），与 `normalizeStoryScriptMergeGroups` 同口径。
+ */
+export function shiftStoryScriptMergeGroupsAfterDelete(groups: unknown, deletedRowIndex: number): number[][] {
+    if (!Array.isArray(groups) || !Number.isInteger(deletedRowIndex) || deletedRowIndex < 0) return normalizeStoryScriptMergeGroups(groups, Number.MAX_SAFE_INTEGER);
+    return (groups as unknown[])
+        .map((span) =>
+            Array.isArray(span)
+                ? span
+                      .filter((index): index is number => Number.isInteger(index) && index >= 0 && index !== deletedRowIndex)
+                      .map((index) => (index > deletedRowIndex ? index - 1 : index))
+                : [],
+        )
+        .filter((span) => span.length >= 2);
+}
+
+/**
  * 把分镜行切成一段一段，**每个分组铺出一个视频节点**。
  * - `shot`：一镜一段；
  * - `2` / `3` / `4` / `5`：连续 N 镜一段；
  * - `duration`：按每段目标时长累加，凑够目标就切段（第一镜就超长时也单独成段；没设时长则退回单镜）。
+ *
+ * `manualGroups`（手动勾选合并的那几组）**优先于上面的档位**：手动组一定自成一队，其余没被勾中的行
+ * 仍按档位切 —— 于是「1–3 镜合一 + 后面每 2 镜一段」这种混着用也能成立。手动组两侧的自动段
+ * 重新起算（`duration` 的秒数不会跨越手动组累加）。
  */
 export function groupStoryScriptRows(
     rows: StoryScriptRow[],
     mode?: StoryScriptMergeMode | string | null,
     segmentSeconds?: unknown,
+    manualGroups?: unknown,
 ): StoryScriptRowGroup[] {
     const resolved = resolveStoryScriptMergeMode(mode);
     const target = storyScriptSegmentSecondsValue(segmentSeconds);
-    if (resolved === "duration" && target > 0) {
-        const groups: StoryScriptRowGroup[] = [];
-        let current: StoryScriptRow[] = [];
-        let acc = 0;
-        for (const row of rows) {
-            current.push(row);
-            acc += Math.max(1, Math.round(Number(row.duration) || 0));
-            if (acc >= target) {
-                groups.push({ rows: current });
-                current = [];
-                acc = 0;
-            }
-        }
-        if (current.length) groups.push({ rows: current });
-        return groups;
-    }
-    const size = storyScriptMergeGroupSize(resolved);
+    const manual = normalizeStoryScriptMergeGroups(manualGroups, rows.length);
+    const manualStart = new Map<number, number[]>();
+    manual.forEach((span) => manualStart.set(span[0], span));
+
     const groups: StoryScriptRowGroup[] = [];
-    for (let index = 0; index < rows.length; index += size) groups.push({ rows: rows.slice(index, index + size) });
+    let current: StoryScriptRow[] = [];
+    let acc = 0;
+    const flush = () => {
+        if (!current.length) return;
+        groups.push({ rows: current });
+        current = [];
+        acc = 0;
+    };
+    const size = storyScriptMergeGroupSize(resolved);
+    const byDuration = resolved === "duration" && target > 0;
+
+    for (let index = 0; index < rows.length; index += 1) {
+        const span = manualStart.get(index);
+        if (span) {
+            flush();
+            groups.push({ rows: span.filter((slot) => slot < rows.length).map((slot) => rows[slot]) });
+            index = span[span.length - 1];
+            continue;
+        }
+        current.push(rows[index]);
+        acc += Math.max(1, Math.round(Number(rows[index].duration) || 0));
+        if (byDuration ? acc >= target : current.length >= size) flush();
+    }
+    flush();
     return groups;
 }
 

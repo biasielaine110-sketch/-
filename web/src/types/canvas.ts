@@ -220,6 +220,12 @@ export type CanvasNodeMetadata = {
     /** 脚本生成器：铺链路时每个视频节点合并几镜（shot / 2 / 3 / duration）。 */
     scriptMergeMode?: import("@/constant/story-script").StoryScriptMergeMode;
     /**
+     * 脚本生成器：**手动合并组**（每组是一串连续的行下标，≥2 行）。分镜表里勾几行点「合并为一镜」
+     * 就写进这里；一键铺链路时组内多镜合成**一个**视频节点，优先于 `scriptMergeMode` 的档位。
+     * 口径见 `constant/story-script.ts: normalizeStoryScriptMergeGroups`（不连续会补齐、组不许重叠）。
+     */
+    scriptMergeGroups?: number[][];
+    /**
      * 脚本生成器：已经按这份内容自动适配过窗口尺寸的「内容签名」。
      * 节点滚出视口会卸载、回来时重新自动适配会覆盖用户手动拉伸的尺寸，故把它存进 metadata。
      */

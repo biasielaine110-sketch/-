@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent as React
 import { createPortal } from "react-dom";
 import { App, Modal } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Copy, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -28,6 +28,7 @@ import {
     nextScriptAssetRole,
     nextStoryScriptExtraColumnKey,
     normalizeStoryScriptExtraColumns,
+    normalizeStoryScriptMergeGroups,
     remapStoryScriptCellAssets,
     remapStoryScriptRowAssets,
     remapStoryScriptRowAudios,
@@ -47,6 +48,7 @@ import {
     scriptRowAudioIds,
     SCRIPT_EXTRA_COLUMN_ROLE_IDS,
     shiftStoryScriptCellAssetsAfterDelete,
+    shiftStoryScriptMergeGroupsAfterDelete,
     shiftStoryScriptRowAssetsAfterDelete,
     shiftStoryScriptRowAudiosAfterDelete,
     stepStoryScriptFontSize,
@@ -897,6 +899,8 @@ export function CanvasScriptNodeContent({
             scriptCellAssets: shiftStoryScriptCellAssetsAfterDelete(node.metadata?.scriptCellAssets, deletedShotNo, extraColumns),
             // 逐镜声音同理：不移的话「第 5 镜的配音」会挂到删行后顶上来的新第 5 镜身上。
             scriptRowAudios: shiftStoryScriptRowAudiosAfterDelete(node.metadata?.scriptRowAudios, deletedShotNo),
+            // 手动合并组按**行下标**存：删掉的行要从组里摘掉，后面的下标整体前移一位。
+            scriptMergeGroups: shiftStoryScriptMergeGroupsAfterDelete(node.metadata?.scriptMergeGroups, rowIndex),
         });
         setSelectedRows(new Set());
         message.success(t("canvas.scriptNode.rowDeleted"));
@@ -918,6 +922,8 @@ export function CanvasScriptNodeContent({
             scriptCellAssets: remapStoryScriptCellAssets(node.metadata?.scriptCellAssets, mapping, extraColumns),
             scriptRowAudios: remapStoryScriptRowAudios(node.metadata?.scriptRowAudios, mapping),
             scriptRowNotes: remapStoryScriptRowNotes(node.metadata?.scriptRowNotes, mapping),
+            // 手动合并组记的是「相邻几行」：顺序一变就是另一组了，直接清掉比错位合并安全。
+            scriptMergeGroups: [],
         });
         // 勾选按 rowIndex 存，顺序一变就指到别人身上了 —— 清空。
         setSelectedRows(new Set());
@@ -934,6 +940,33 @@ export function CanvasScriptNodeContent({
 
     const toggleAllRows = () => {
         setSelectedRows((current) => (current.size === rows.length ? new Set() : new Set(rows.map((_, index) => index))));
+    };
+
+    /**
+     * 把勾选的行登记成一个「手动合并组」：一键铺链路时组内这几镜合成**一个**视频节点。
+     *
+     * 用户原话：「需要能够选择几个镜头铺链路，即将这几个镜头合并成一个镜头」。
+     * 与上面的「视频分段」档位是**两套并存**的关系（手动优先）：
+     * 档位管「剩下的行怎么切」，手动组管「我点名的这几镜一定要在一起」。
+     *
+     * 勾的行不连续时按「首行—末行」补齐（`normalizeStoryScriptMergeGroups` 的口径），
+     * 因为「合并成一个镜头」本身要求连续；中间留一镜在外面会切成两条互不相连的视频。
+     */
+    const mergeSelectedRows = () => {
+        if (selectedRows.size < 2) return;
+        const picked = normalizeStoryScriptMergeGroups([Array.from(selectedRows)], rows.length);
+        if (!picked.length) return;
+        // 与已有手动组重叠的整组丢掉（后来的覆盖前面的），避免一个行同时属于两队。
+        const kept = manualMergeGroups.filter((span) => !span.some((index) => selectedRows.has(index)));
+        patchMetadata({ scriptMergeGroups: [...kept, ...picked] });
+        setSelectedRows(new Set());
+    };
+
+    /** 「取消合并」：把勾中的行从手动组里摘掉（整组摘，不做半组拆解 —— 半组没有意义）。 */
+    const unmergeSelectedRows = () => {
+        if (!selectedRows.size) return;
+        patchMetadata({ scriptMergeGroups: manualMergeGroups.filter((span) => !span.some((index) => selectedRows.has(index))) });
+        setSelectedRows(new Set());
     };
 
     /** 打开「加剧情 / 重生成」弹窗：单镜（行按钮）或整批（勾选后底部按钮）都走这里。 */
@@ -1706,6 +1739,20 @@ export function CanvasScriptNodeContent({
     // 结果想要「每镜 10 秒」的人反而拿到「3+3+4 合成一段 10 秒」——镜头被合并掉了。
     const segmentSeconds = resolveStoryScriptSegmentSeconds(node.metadata?.scriptSegmentSeconds);
     const mergeMode = resolveStoryScriptMergeMode(node.metadata?.scriptMergeMode);
+    /**
+     * **手动合并组**：表里勾了几行点「合并为一镜」写进 `metadata.scriptMergeGroups`（存的是行下标）。
+     * 它**优先于**上面的「视频分段」档位 —— 手动勾中的几镜一定合成一个视频节点，其余行照档位切。
+     * 每次渲染都过一遍归一化：删行 / 调序之后越界或重叠的组会被自动丢掉，不会把不相邻的镜硬凑一起。
+     */
+    const manualMergeGroups = useMemo(() => normalizeStoryScriptMergeGroups(node.metadata?.scriptMergeGroups, rows.length), [node.metadata?.scriptMergeGroups, rows.length]);
+    /** 行下标 → 它所在的合并组（`null` = 没合并）。铺链路与表里的「合并」徽标共用这一份。 */
+    const mergeGroupOfRow = useMemo(() => {
+        const map = new Map<number, number[]>();
+        manualMergeGroups.forEach((span) => span.forEach((index) => map.set(index, span)));
+        return map;
+    }, [manualMergeGroups]);
+    /** 勾中的行是否**全部**已在手动合并组里：是的话批量条显示「取消合并」而不是「合并为一镜」。 */
+    const selectedAllMerged = selectedRows.size > 0 && Array.from(selectedRows).every((rowIndex) => mergeGroupOfRow.has(rowIndex));
     const segmentSelector = (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
             <span className="opacity-60">{t("canvas.scriptNode.segmentLabel")}</span>
@@ -1859,7 +1906,14 @@ export function CanvasScriptNodeContent({
     // 单镜模式也要显示（「每镜 5 秒以内 · 共 20 段」/「每镜 10 秒 · 共 20 段」）：以前这里只在
     // 「按每段时长」时才算，于是选了档位 + 单镜的用户屏幕上什么都没变，看起来就像设置没生效。
     const segmentPreview = useMemo(() => {
-        if (segmentSeconds === "none" || !rows.length) return "";
+        if (!rows.length) return "";
+        const groups = groupStoryScriptRows(rows, mergeMode, segmentSeconds, manualMergeGroups);
+        // 手动合并了镜头时，**真实段数**才是用户关心的（「我勾的这几镜到底合成一条了吗」）。
+        // 这时候档位说明只是兜底，所以文案换成「手动合并 N 组 · 共 M 段」。
+        if (manualMergeGroups.length) {
+            return t("canvas.scriptNode.segmentPreviewManual", { groups: manualMergeGroups.length, count: groups.length });
+        }
+        if (segmentSeconds === "none") return "";
         if (mergeMode === "shot") {
             // 5 秒是「上限」（默认档），10 / 15 是「锁定」，两种文案不能混。
             const capped = Number(segmentSeconds) < 10;
@@ -1868,7 +1922,6 @@ export function CanvasScriptNodeContent({
                 count: rows.length,
             });
         }
-        const groups = groupStoryScriptRows(rows, mergeMode, segmentSeconds);
         if (!groups.length) return "";
         if (mergeMode === "duration") {
             return t("canvas.scriptNode.segmentPreview", {
@@ -1878,7 +1931,7 @@ export function CanvasScriptNodeContent({
             });
         }
         return t("canvas.scriptNode.segmentPreviewMerge", { shots: mergeMode, count: groups.length });
-    }, [mergeMode, rows, segmentSeconds, t]);
+    }, [manualMergeGroups, mergeMode, rows, segmentSeconds, t]);
     const mergeSelector = (
         <div className="flex flex-wrap items-center gap-1.5" style={{ color: theme.node.text }}>
             <span className="opacity-60">{t("canvas.scriptNode.mergeLabel")}</span>
@@ -1915,13 +1968,33 @@ export function CanvasScriptNodeContent({
                     className="whitespace-nowrap rounded border px-1.5"
                     style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText }}
                     title={
-                        mergeMode === "shot"
-                            ? t(Number(segmentSeconds) < 10 ? "canvas.scriptNode.segmentPreviewShotCapHint" : "canvas.scriptNode.segmentPreviewShotHint", { seconds: segmentSeconds })
-                            : t("canvas.scriptNode.segmentPreviewHint")
+                        manualMergeGroups.length
+                            ? t("canvas.scriptNode.segmentPreviewManualHint")
+                            : mergeMode === "shot"
+                              ? t(Number(segmentSeconds) < 10 ? "canvas.scriptNode.segmentPreviewShotCapHint" : "canvas.scriptNode.segmentPreviewShotHint", { seconds: segmentSeconds })
+                              : t("canvas.scriptNode.segmentPreviewHint")
                     }
                 >
                     {segmentPreview}
                 </span>
+            ) : null}
+            {/* 有手动合并组时给一个「拆开」的出口：否则用户只能靠删行来撤销，且会误以为是档位在管。 */}
+            {manualMergeGroups.length ? (
+                <button
+                    type="button"
+                    className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition opacity-80 hover:opacity-100"
+                    style={{ borderColor: theme.node.stroke }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        patchMetadata({ scriptMergeGroups: [] });
+                    }}
+                    title={t("canvas.scriptNode.mergeManualClearHint")}
+                >
+                    <X className="size-3" />
+                    {t("canvas.scriptNode.mergeManualClear")}
+                </button>
             ) : null}
         </div>
     );
@@ -2152,7 +2225,12 @@ export function CanvasScriptNodeContent({
                     </thead>
                     <tbody>
                         {rows.map((row, rowIndex) => (
-                            <tr key={`${row.shot_no}-${rowIndex}`} className="align-top">
+                            <tr
+                                key={`${row.shot_no}-${rowIndex}`}
+                                className="align-top"
+                                /* 手动合并组整行打一层极淡底色：一眼看出「这几镜会合成一个视频节点」。 */
+                                style={mergeGroupOfRow.has(rowIndex) ? { background: `${theme.toolbar.activeBg}12` } : undefined}
+                            >
                                 {showRowSelect ? (
                                     <td className="border-b px-1 py-1.5" style={{ borderColor: theme.node.stroke }}>
                                         <button
@@ -2228,6 +2306,20 @@ export function CanvasScriptNodeContent({
                                                     <div className="opacity-35">{t("canvas.scriptNode.noContent")}</div>
                                                 )
                                             )}
+                                            {/* 镜号格：这一镜属于某个「手动合并组」时标出组内位置（2/3 = 三镜合一的第二镜）。 */}
+                                            {column.key === "shot_no" && mergeGroupOfRow.has(rowIndex) ? (
+                                                <div
+                                                    className="mt-0.5 inline-flex items-center gap-0.5 rounded border px-1 text-[0.7em] leading-tight"
+                                                    style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText }}
+                                                    title={t("canvas.scriptNode.mergeManualRowTag", {
+                                                        no: (mergeGroupOfRow.get(rowIndex)?.indexOf(rowIndex) ?? 0) + 1,
+                                                        total: mergeGroupOfRow.get(rowIndex)?.length ?? 0,
+                                                    })}
+                                                >
+                                                    <Combine className="size-2.5" />
+                                                    {(mergeGroupOfRow.get(rowIndex)?.indexOf(rowIndex) ?? 0) + 1}/{mergeGroupOfRow.get(rowIndex)?.length ?? 0}
+                                                </div>
+                                            ) : null}
                                             {showCellSlot ? (
                                                 <div className="mt-0.5 flex flex-wrap items-center gap-1" onDoubleClick={(event) => event.stopPropagation()}>
                                                     {cellDisplayIds.map((imageId) => {
@@ -2677,6 +2769,33 @@ export function CanvasScriptNodeContent({
                             >
                                 <Video className="size-3" />
                                 {t("canvas.scriptNode.buildSelectedVideos")}
+                            </button>
+                        ) : null}
+                        {/*
+                         * 「合并为一镜」：勾几行 → 铺链路时这几镜合成**一个**视频节点。
+                         * 与「把选中 N 镜铺成视频」（每镜各一个视频节点）是并排的两个动作，
+                         * 所以放在它右边、同样的胶囊样式，靠文案区分。
+                         */}
+                        {selectedRows.size >= 2 || selectedAllMerged ? (
+                            <button
+                                type="button"
+                                className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition"
+                                style={{
+                                    borderColor: selectedAllMerged ? theme.toolbar.activeBg : theme.node.stroke,
+                                    background: selectedAllMerged ? `${theme.toolbar.activeBg}1f` : "transparent",
+                                    color: selectedAllMerged ? theme.toolbar.activeBg : theme.node.text,
+                                }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    if (selectedAllMerged) unmergeSelectedRows();
+                                    else mergeSelectedRows();
+                                }}
+                                title={selectedAllMerged ? t("canvas.scriptNode.mergeManualOffHint") : t("canvas.scriptNode.mergeManualHint")}
+                            >
+                                <Combine className="size-3" />
+                                {selectedAllMerged ? t("canvas.scriptNode.mergeManualOff") : t("canvas.scriptNode.mergeManual")}
                             </button>
                         ) : null}
                         <button
