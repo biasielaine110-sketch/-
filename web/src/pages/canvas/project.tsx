@@ -503,8 +503,6 @@ function AtelierCanvasPage() {
     const [audioMergeOpen, setAudioMergeOpen] = useState(false);
     const [audioMergeSelected, setAudioMergeSelected] = useState<string[]>([]);
     const [audioMergePicking, setAudioMergePicking] = useState(false);
-    /** 视频合并节点：正在「X 拾取」的是哪个节点（null = 没在拾取）。 */
-    const [videoMergePickingNodeId, setVideoMergePickingNodeId] = useState<string | null>(null);
     /** 正在打包剪映工程包的节点 id —— 只用来把按钮换成 loading。 */
     const [videoMergeExportingNodeId, setVideoMergeExportingNodeId] = useState<string | null>(null);
     /** 正在本地渲染合并 mp4 的节点 id + 进度（0–1）。 */
@@ -539,7 +537,6 @@ function AtelierCanvasPage() {
     const connectionTargetNodeIdRef = useRef(connectionTargetNodeId);
     const audioMergePickingRef = useRef(false);
     const audioMergeSelectedRef = useRef<string[]>([]);
-    const videoMergePickingRef = useRef<string | null>(null);
     const selectionBoxRef = useRef(selectionBox);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     /** Keyed by jobId (not targetNodeId) so queued native-video submits do not abort the running job. */
@@ -976,8 +973,7 @@ function AtelierCanvasPage() {
         connectingParamsRef.current = connectingParams;
         connectionTargetNodeIdRef.current = connectionTargetNodeId;
         pendingConnectionCreateRef.current = pendingConnectionCreate;
-        videoMergePickingRef.current = videoMergePickingNodeId;
-    }, [nodes, chatSessions, connections, selectedNodeIds, hoveredNodeId, toolbarNodeId, viewport, connectingParams, connectionTargetNodeId, pendingConnectionCreate, videoMergePickingNodeId]);
+    }, [nodes, chatSessions, connections, selectedNodeIds, hoveredNodeId, toolbarNodeId, viewport, connectingParams, connectionTargetNodeId, pendingConnectionCreate]);
 
     useLayoutEffect(() => {
         selectionBoxRef.current = selectionBox;
@@ -1103,6 +1099,39 @@ function AtelierCanvasPage() {
                     .map((pair) => ({ id: nanoid(), fromNodeId: pair.fromNodeId, toNodeId: pair.toNodeId }));
                 return additions.length ? [...prev, ...additions] : prev;
             });
+
+            /**
+             * 连线即拾取：把视频 / 图片接进视频合并节点，就直接进它的时间线。
+             *
+             * 这是「选中合并节点按 X，再逐个点素材节点」那条路的落点 —— 保留 X 的批量拾取手感，
+             * 又不用再额外点一次「拾取画布素材」。反向（从时间线移出）在 `deleteConnection` /
+             * 节点内「移出时间线」里做，两边对称才不会出现「有线但没段 / 有段但没线」。
+             */
+            const clipAdds = pairs.flatMap((pair) => {
+                const target = nodesSnapshot.find((node) => node.id === pair.toNodeId);
+                const source = nodesSnapshot.find((node) => node.id === pair.fromNodeId);
+                if (target?.type !== CanvasNodeType.VideoMerge || !source || !isVideoMergeSourceNode(source)) return [];
+                return [{ mergeId: target.id, source }];
+            });
+            if (clipAdds.length) {
+                setNodes((prev) =>
+                    prev.map((node) => {
+                        const adds = clipAdds.filter((item) => item.mergeId === node.id);
+                        if (!adds.length) return node;
+                        const clips = node.metadata?.videoMergeClips || [];
+                        const known = new Set(clips.map((clip) => clip.nodeId));
+                        const appended = [...clips];
+                        for (const { source } of adds) {
+                            if (known.has(source.id)) continue;
+                            const created = videoMergeClipFromNode(source);
+                            if (!created) continue;
+                            known.add(source.id);
+                            appended.push(created);
+                        }
+                        return appended.length === clips.length ? node : { ...node, metadata: { ...node.metadata, videoMergeClips: appended } };
+                    }),
+                );
+            }
 
             // Annotate âImage: load the first linked image into the annotate node.
             for (const { fromNodeId, toNodeId } of pairs) {
@@ -1503,9 +1532,15 @@ function AtelierCanvasPage() {
             setNodes((prev) => {
                 const next = prev.filter((node) => !allIds.has(node.id));
                 return next.map((node) => {
-                    const groupId = node.metadata?.groupId;
-                    if (groupId && allIds.has(groupId)) return { ...node, metadata: { ...node.metadata, groupId: undefined } };
-                    return node;
+                    // 合并节点的时间线跟着连线走：源节点被删 = 线也没了，时间线上那段一起收掉，
+                    // 否则会留下一条永远连不回来的「源节点已删除」幽灵行。
+                    const clips = node.metadata?.videoMergeClips;
+                    const pruned = clips?.some((clip) => allIds.has(clip.nodeId))
+                        ? { ...node, metadata: { ...node.metadata, videoMergeClips: clips.filter((clip) => !allIds.has(clip.nodeId)) } }
+                        : node;
+                    const groupId = pruned.metadata?.groupId;
+                    if (groupId && allIds.has(groupId)) return { ...pruned, metadata: { ...pruned.metadata, groupId: undefined } };
+                    return pruned;
                 });
             });
             setConnections((prev) => prev.filter((conn) => !allIds.has(conn.fromNodeId) && !allIds.has(conn.toNodeId)));
@@ -1532,6 +1567,18 @@ function AtelierCanvasPage() {
     );
 
     const deleteConnection = useCallback((connectionId: string) => {
+        // 「连线即拾取」的反向：断开连进合并节点的线，等于把那段素材从时间线移出。
+        const removed = connectionsRef.current.find((conn) => conn.id === connectionId);
+        if (removed) {
+            setNodes((prev) =>
+                prev.map((node) => {
+                    if (node.id !== removed.toNodeId) return node;
+                    const clips = node.metadata?.videoMergeClips;
+                    if (!clips?.some((clip) => clip.nodeId === removed.fromNodeId)) return node;
+                    return { ...node, metadata: { ...node.metadata, videoMergeClips: clips.filter((clip) => clip.nodeId !== removed.fromNodeId) } };
+                }),
+            );
+        }
         setConnections((prev) => prev.filter((conn) => conn.id !== connectionId));
         setSelectedConnectionId((current) => (current === connectionId ? null : current));
         setContextMenu((current) => (current?.type === "connection" && current.connectionId === connectionId ? null : current));
@@ -2222,29 +2269,6 @@ function AtelierCanvasPage() {
     const pendingSelectionRef = useRef<Set<string> | null>(null);
 
     /**
-     * 「X 拾取」把画布节点塞进 / 移出视频合并节点的时间线。
-     *
-     * 判定只在 `isVideoMergeSourceNode`（有内容的视频/图片）；空节点拾进去只会多一行导不出的东西。
-     * 整个列表都换成新数组再写回 —— `videoMergeClips` 是 metadata 上的数组，就地 push 不会触发重渲染。
-     */
-    const toggleVideoMergeClip = useCallback((mergeNodeId: string, sourceNode: CanvasNodeData) => {
-        setNodes((prev) =>
-            prev.map((node) => {
-                if (node.id !== mergeNodeId) return node;
-                const clips = node.metadata?.videoMergeClips || [];
-                const exists = clips.some((clip) => clip.nodeId === sourceNode.id);
-                if (exists) return { ...node, metadata: { ...node.metadata, videoMergeClips: clips.filter((clip) => clip.nodeId !== sourceNode.id) } };
-                const created = videoMergeClipFromNode(sourceNode);
-                return created ? { ...node, metadata: { ...node.metadata, videoMergeClips: [...clips, created] } } : node;
-            }),
-        );
-    }, [setNodes]);
-
-    const toggleVideoMergePicking = useCallback((nodeId: string) => {
-        setVideoMergePickingNodeId((current) => (current === nodeId ? null : nodeId));
-    }, []);
-
-    /**
      * 时间线的「已解析视图」：clip 只是元数据，真要显示 / 导出还得回头找源节点的 URL。
      *
      * URL 优先取 `metadata.content`（视频节点本来就靠它渲染）；被导出 / 草稿往返洗掉 blob URL 的
@@ -2308,6 +2332,18 @@ function AtelierCanvasPage() {
             cancelled = true;
         };
     }, [nodeById, nodes]);
+
+    /**
+     * 时间线 → 连线 的反向收口（节点内「移出时间线 / 清空时间线」用）。
+     *
+     * 时间线是显式列表、连线是它的镜像：节点里删了段，对应的线也得断，
+     * 否则会留下「线还连着、段没了」的半截状态 —— 再想加回来还得先手动断线。
+     */
+    const handleDetachVideoMergeClips = useCallback((mergeNodeId: string, sourceNodeIds: string[]) => {
+        if (!sourceNodeIds.length) return;
+        const dropped = new Set(sourceNodeIds);
+        setConnections((prev) => prev.filter((conn) => !(conn.toNodeId === mergeNodeId && dropped.has(conn.fromNodeId))));
+    }, []);
 
     /**
      * 一键导出剪映草稿包。
@@ -2568,17 +2604,7 @@ function AtelierCanvasPage() {
                     return;
                 }
             }
-            // 视频合并的「X 拾取」：点画布上的视频 / 图片节点 = 把它加进（或移出）时间线，
-            // 不做普通选中。拾取模式只是「点了往哪放」的指针，选中的仍是那个合并节点自己。
-            if (videoMergePickingRef.current) {
-                const clicked = nodesRef.current.find((node) => node.id === nodeId);
-                if (clicked && clicked.id !== videoMergePickingRef.current && isVideoMergeSourceNode(clicked)) {
-                    event.preventDefault();
-                    toggleVideoMergeClip(videoMergePickingRef.current, clicked);
-                    pendingSelectionRef.current = null;
-                    return;
-                }
-            }
+            // 视频合并不再有「拾取模式」：素材靠连线进来（选中合并节点按 X，再点素材节点）。
             // Keep Alt+drag from focusing the browser menu bar (Windows).
             if (event.altKey) event.preventDefault();
             blurActiveCanvasTextInput(event.target);
@@ -2612,7 +2638,7 @@ function AtelierCanvasPage() {
             const { nextSelected } = selectNodeByEvent(event, nodeId);
             pendingSelectionRef.current = nextSelected;
         },
-        [connectNodes, selectNodeByEvent, setConnecting, toggleAudioMergePick, toggleVideoMergeClip],
+        [connectNodes, selectNodeByEvent, setConnecting, toggleAudioMergePick],
     );
 
     const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
@@ -2624,14 +2650,6 @@ function AtelierCanvasPage() {
         if (audioMergePickingRef.current) {
             const clicked = nodesRef.current.find((node) => node.id === nodeId);
             if (clicked?.type === CanvasNodeType.Audio) {
-                pendingSelectionRef.current = null;
-                return;
-            }
-        }
-        // 视频合并拾取中：点素材节点只切换选中状态，绝不能顺手把节点拖走。
-        if (videoMergePickingRef.current) {
-            const clicked = nodesRef.current.find((node) => node.id === nodeId);
-            if (clicked && clicked.id !== videoMergePickingRef.current && isVideoMergeSourceNode(clicked)) {
                 pendingSelectionRef.current = null;
                 return;
             }
@@ -8812,12 +8830,11 @@ function AtelierCanvasPage() {
                     <CanvasVideoMergeNodeContent
                         node={contentNode}
                         clips={videoMergeResolvedByNodeId.get(contentNode.id) || []}
-                        isPicking={videoMergePickingNodeId === contentNode.id}
                         isExporting={videoMergeExportingNodeId === contentNode.id}
                         isRendering={videoMergeRenderingNodeId === contentNode.id}
                         renderProgress={videoMergeRenderingNodeId === contentNode.id ? videoMergeRenderProgress : 0}
-                        onTogglePicking={toggleVideoMergePicking}
                         onConfigChange={handleConfigNodeChange}
+                        onDetachClips={handleDetachVideoMergeClips}
                         onExport={(nodeId) => void handleVideoMergeExport(nodeId)}
                         onRender={(nodeId) => void handleVideoMergeRender(nodeId)}
                     />
@@ -8866,7 +8883,7 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptAudioCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAudioImport, handleRowAudiosChange, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, handleVideoMergeExport, handleVideoMergeRender, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme, toggleVideoMergePicking, videoMergeExportingNodeId, videoMergePickingNodeId, videoMergeRenderProgress, videoMergeRenderingNodeId, videoMergeResolvedByNodeId],
+        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptAudioCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAudioImport, handleRowAudiosChange, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, handleDetachVideoMergeClips, handleVideoMergeExport, handleVideoMergeRender, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme, videoMergeExportingNodeId, videoMergeRenderProgress, videoMergeRenderingNodeId, videoMergeResolvedByNodeId],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;

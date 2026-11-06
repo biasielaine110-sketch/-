@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Segmented, Tooltip } from "antd";
-import { Combine, Crosshair, Download, Film, ImagePlus, ListVideo, LoaderCircle, Scissors, Trash2, X } from "lucide-react";
+import { Combine, Download, Film, ImagePlus, ListVideo, LoaderCircle, Scissors, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -23,19 +23,19 @@ import type { CanvasNodeData, CanvasNodeMetadata, CanvasVideoMergeClip } from "@
 type CanvasVideoMergeNodeContentProps = {
     node: CanvasNodeData;
     clips: ResolvedVideoMergeClip[];
-    isPicking: boolean;
     isExporting: boolean;
     /** 正在本地渲染 mp4（重活，按钮要锁住，别让人连点两遍）。 */
     isRendering: boolean;
     /** 0–1；没在渲染时给 0。 */
     renderProgress: number;
-    onTogglePicking: (nodeId: string) => void;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
+    /** 把素材从时间线移出时，顺手断掉它连进本节点的那根线（时间线 = 连线，两边必须对称）。 */
+    onDetachClips?: (nodeId: string, sourceNodeIds: string[]) => void;
     onExport: (nodeId: string) => void;
     onRender: (nodeId: string) => void;
 };
 
-export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExporting, isRendering, renderProgress, onTogglePicking, onConfigChange, onExport, onRender }: CanvasVideoMergeNodeContentProps) {
+export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRendering, renderProgress, onConfigChange, onDetachClips, onExport, onRender }: CanvasVideoMergeNodeContentProps) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [selectedIndex, setSelectedIndex] = useState(0);
@@ -159,7 +159,15 @@ export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExportin
         if (!selected) return;
         const next = removeMergeClip(rawClips, safeIndex);
         commitClips(next);
+        onDetachClips?.(node.id, [selected.clip.nodeId]);
         setSelectedIndex(Math.max(0, Math.min(safeIndex, next.length - 1)));
+    };
+
+    /** 清空时间线 = 把这节点进来的线全断掉，否则线还在、段没了，谁也说不清哪个才算数。 */
+    const clearClips = () => {
+        const ids = rawClips.map((clip) => clip.nodeId);
+        commitClips([]);
+        if (ids.length) onDetachClips?.(node.id, ids);
     };
 
     const resolveBlockIndexAt = (clientX: number) => {
@@ -236,16 +244,14 @@ export function CanvasVideoMergeNodeContent({ node, clips, isPicking, isExportin
             </div>
 
             <div className="flex min-h-0 flex-1 cursor-default flex-col gap-2" onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
-                <div className="flex items-center gap-1.5">
-                    <Button size="small" type={isPicking ? "primary" : "default"} icon={<Crosshair className="size-3.5" />} onClick={() => onTogglePicking(node.id)} className="flex-1">
-                        {isPicking ? t("canvas.videoMerge.pickingOn") : t("canvas.videoMerge.pickingOff")}
-                    </Button>
+                <div className="flex items-center justify-between gap-1.5">
+                    <span className="min-w-0 flex-1 truncate text-[11px] opacity-55" title={t("canvas.videoMerge.pickViaConnect")}>
+                        {t("canvas.videoMerge.pickViaConnect")}
+                    </span>
                     <Tooltip title={t("canvas.videoMerge.clear")}>
-                        <Button size="small" icon={<X className="size-3.5" />} disabled={!clips.length} onClick={() => commitClips([])} />
+                        <Button size="small" icon={<X className="size-3.5" />} disabled={!clips.length} onClick={clearClips} />
                     </Tooltip>
                 </div>
-
-                {isPicking ? <div className="rounded-md px-2 py-1 text-[11px] leading-4 opacity-70" style={{ background: theme.node.fill }}>{t("canvas.videoMerge.pickingHint")}</div> : null}
 
                 {clips.length ? (
                     <>
