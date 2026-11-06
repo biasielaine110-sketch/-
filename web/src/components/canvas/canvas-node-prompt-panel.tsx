@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { ArrowUp, Clock, GripVertical, LoaderCircle, Maximize2, Square, WandSparkles, X } from "lucide-react";
 import { App, Button, Tooltip } from "antd";
 import dayjs from "dayjs";
@@ -24,6 +24,7 @@ import { CanvasTextSettingsPopover } from "./canvas-text-settings-popover";
 import { CanvasScheduleDialog } from "./canvas-schedule-dialog";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { moveIndex, resolveReorderTargetIndex } from "@/lib/canvas/canvas-reference-order";
 
 export type CanvasNodeGenerationMode = CanvasGenerationMode;
 
@@ -110,50 +111,73 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
     const activeReferences = mentionReferences.filter((reference) => reference.active && reference.nodeId !== node.id);
 
-    // HTML5 drag reordering of the reference chips, matching the channel-editor interaction:
-    // only the grip handle is draggable, so dragging can never trigger the browser's native
-    // image drag ("plus" cursor + zoomed snapshot). Dropping on another chip reorders the
-    // upstream connections, which renumbers 图片1/图片2 labels and the API reference order.
+    // HTML5 drag reordering of the reference chips, matching the channel-editor interaction.
+    // 整块 chip 都可拖（不再只留手柄）：用户会直接按住缩略图拖，只有手柄可拖时按住图片
+    // 完全没反应 —— 就是「拖动卡住」的报障。图片自身 `draggable={false}`，所以不会触发
+    // 浏览器原生图片拖拽（"plus" 光标 + 放大快照）。Drop 后重排上游连线顺序，
+    // 从而重新编号 图片1/图片2 并改变 API 的 reference_images 顺序。
+    //
+    // 落点由**整排容器**统一判定，不绑在单个 chip 上：拖到两张 chip 之间的空隙、或者拖到行尾
+    // 空白处松手，以前没有任何元素接 drop（事件冒到画布 → 什么都不发生），看起来就像「拖不动」。
+    // 现在按光标位置算插入位（0 = 插到最前，n = 插到最后），并在缝隙里画一条竖线。
+    const CHIP_REORDER_MIME = "application/x-canvas-reference-reorder";
     const [dragChipIndex, setDragChipIndex] = useState<number | null>(null);
-    const [dropChipIndex, setDropChipIndex] = useState<number | null>(null);
-    const dragChipIndexRef = useRef<number | null>(null);
+    const [dropSlot, setDropSlot] = useState<number | null>(null);
+    // dragover / drop 里读 ref：dragstart 与紧随其后的 dragover 可能在同一帧，state 未必已刷新。
+    const dragChipRef = useRef<number | null>(null);
+    const chipRowRef = useRef<HTMLDivElement | null>(null);
+
+    /** 光标 → 插入位。换行布局下先比行（中线以上算「在这一行之前」），再比左右半边。 */
+    const resolveDropSlot = (clientX: number, clientY: number) => {
+        const row = chipRowRef.current;
+        if (!row) return activeReferences.length;
+        const chips = Array.from(row.querySelectorAll<HTMLElement>("[data-ref-chip]"));
+        for (let index = 0; index < chips.length; index += 1) {
+            const rect = chips[index].getBoundingClientRect();
+            if (clientY < rect.top + rect.height / 2) return index;
+            if (clientY <= rect.bottom && clientX < rect.left + rect.width / 2) return index;
+        }
+        return chips.length;
+    };
 
     const handleChipDragStart = (event: ReactDragEvent, index: number) => {
         event.dataTransfer.effectAllowed = "move";
         // Use a private MIME type (NOT text/plain) so the canvas's drop handler never mistakes
         // this reorder drag for an external text drop (which would create a text node + dialog).
-        event.dataTransfer.setData("application/x-canvas-reference-reorder", String(index));
-        dragChipIndexRef.current = index;
+        event.dataTransfer.setData(CHIP_REORDER_MIME, String(index));
+        dragChipRef.current = index;
         setDragChipIndex(index);
-        setDropChipIndex(null);
+        setDropSlot(index);
     };
 
-    const handleChipDragOver = (event: ReactDragEvent, index: number) => {
-        if (dragChipIndexRef.current === null) return;
+    const handleChipRowDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
+        if (dragChipRef.current === null) return;
         event.preventDefault();
         event.stopPropagation();
         event.dataTransfer.dropEffect = "move";
-        if (dropChipIndex !== index) setDropChipIndex(index);
+        const slot = resolveDropSlot(event.clientX, event.clientY);
+        if (slot !== dropSlot) setDropSlot(slot);
     };
 
-    const handleChipDrop = (event: ReactDragEvent, targetIndex: number) => {
+    const handleChipRowDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+        const from = dragChipRef.current;
+        if (from === null) return;
         event.preventDefault();
         event.stopPropagation();
-        const rawFrom = dragChipIndexRef.current ?? Number(event.dataTransfer.getData("application/x-canvas-reference-reorder"));
-        dragChipIndexRef.current = null;
+        const slot = resolveDropSlot(event.clientX, event.clientY);
+        dragChipRef.current = null;
         setDragChipIndex(null);
-        setDropChipIndex(null);
-        if (!onReorderReferences || !Number.isFinite(rawFrom) || rawFrom < 0 || rawFrom >= activeReferences.length || rawFrom === targetIndex) return;
-        const next = [...activeReferences];
-        const [moved] = next.splice(rawFrom, 1);
-        next.splice(targetIndex, 0, moved);
-        onReorderReferences(next.map((reference) => reference.nodeId));
+        setDropSlot(null);
+        if (!onReorderReferences) return;
+        const to = resolveReorderTargetIndex(from, slot, activeReferences.length);
+        if (to < 0) return;
+        onReorderReferences(moveIndex(activeReferences, from, to).map((reference) => reference.nodeId));
     };
 
     const handleChipDragEnd = () => {
-        dragChipIndexRef.current = null;
+        dragChipRef.current = null;
         setDragChipIndex(null);
-        setDropChipIndex(null);
+        setDropSlot(null);
     };
 
     const connectedTextPrompt = activeReferences
@@ -253,54 +277,69 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             onWheel={(event) => event.stopPropagation()}
         >
             {activeReferences.length ? (
-                <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                <div
+                    ref={chipRowRef}
+                    className="mb-2 flex flex-wrap items-center gap-1.5"
+                    onDragOver={onReorderReferences ? handleChipRowDragOver : undefined}
+                    onDrop={onReorderReferences ? handleChipRowDrop : undefined}
+                    onDragLeave={(event) => {
+                        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+                        setDropSlot(null);
+                    }}
+                >
                     <span className="text-[11px] opacity-55">{t("canvas.promptPanel.references")}</span>
                     {activeReferences.map((reference, index) => {
-                        const isDropTarget = dropChipIndex === index && dragChipIndex !== null && dragChipIndex !== index;
+                        const isDragging = dragChipIndex === index;
                         return (
-                            <span
-                                key={reference.id}
-                                data-ref-chip={index}
-                                className={`relative mr-1 inline-flex max-w-44 items-center gap-1 rounded-lg border px-1.5 py-1 text-xs ${isDropTarget ? "ring-2 ring-sky-500" : ""}`}
-                                style={{ background: theme.toolbar.itemHover, borderColor: isDropTarget ? "#0ea5e9" : theme.node.stroke, color: theme.node.text }}
-                                title={reference.title}
-                                onDragOver={onReorderReferences ? (event) => handleChipDragOver(event, index) : undefined}
-                                onDrop={onReorderReferences ? (event) => handleChipDrop(event, index) : undefined}
-                            >
+                            <Fragment key={reference.id}>
+                                {dropSlot === index && dragChipIndex !== null ? (
+                                    <span data-ref-drop-marker={index} className="h-6 w-0.5 shrink-0 rounded-full bg-sky-500" aria-hidden />
+                                ) : null}
                                 <span
-                                    data-ref-chip-handle={index}
+                                    data-ref-chip={index}
+                                    // 整块 chip 都能拖（不只是那个 3px 的小抓手）：用户会直接按住缩略图拖，
+                                    // 以前只有抓手 draggable，按住图片拖完全没反应 —— 就是报障的「拖动卡住」。
+                                    // 图片自身 draggable={false}，所以不会触发浏览器原生图片拖拽。
                                     draggable={Boolean(onReorderReferences)}
                                     onDragStart={onReorderReferences ? (event) => handleChipDragStart(event, index) : undefined}
                                     onDragEnd={onReorderReferences ? handleChipDragEnd : undefined}
-                                    className="cursor-grab touch-none opacity-45 active:cursor-grabbing"
-                                    title={t("canvas.promptPanel.reorderHint")}
-                                    aria-label={t("canvas.promptPanel.reorderHint")}
+                                    className={`relative mr-1 inline-flex max-w-44 items-center gap-1 rounded-lg border px-1.5 py-1 text-xs transition-opacity ${isDragging ? "opacity-40" : ""} ${onReorderReferences ? "cursor-grab active:cursor-grabbing" : ""}`}
+                                    style={{ background: theme.toolbar.itemHover, borderColor: theme.node.stroke, color: theme.node.text }}
+                                    title={reference.title}
                                 >
-                                    <GripVertical className="size-3" />
-                                </span>
-                                {reference.kind === "image" && reference.previewUrl ? <img src={reference.previewUrl} alt="" draggable={false} className="size-6 rounded object-cover" /> : null}
-                                <span className="truncate font-medium">{reference.label}</span>
-                                {onRemoveReference ? (
-                                    <button
-                                        type="button"
-                                        data-canvas-shortcuts-ignore
-                                        onClick={(event) => {
-                                            event.preventDefault();
-                                            event.stopPropagation();
-                                            onRemoveReference(reference.nodeId);
-                                        }}
-                                        onPointerDown={(event) => event.stopPropagation()}
-                                        className="absolute -right-1 -top-1 z-10 flex size-4 cursor-pointer items-center justify-center rounded-full border shadow-sm transition-transform hover:scale-110"
-                                        style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
-                                        title={t("canvas.promptPanel.removeReference")}
-                                        aria-label={t("canvas.promptPanel.removeReference")}
+                                    <span
+                                        data-ref-chip-handle={index}
+                                        className="pointer-events-none opacity-45"
+                                        title={t("canvas.promptPanel.reorderHint")}
+                                        aria-label={t("canvas.promptPanel.reorderHint")}
                                     >
-                                        <X className="size-2.5" />
-                                    </button>
-                                ) : null}
-                            </span>
+                                        <GripVertical className="size-3" />
+                                    </span>
+                                    {reference.kind === "image" && reference.previewUrl ? <img src={reference.previewUrl} alt="" draggable={false} className="size-6 rounded object-cover" /> : null}
+                                    <span className="truncate font-medium">{reference.label}</span>
+                                    {onRemoveReference ? (
+                                        <button
+                                            type="button"
+                                            data-canvas-shortcuts-ignore
+                                            onClick={(event) => {
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                onRemoveReference(reference.nodeId);
+                                            }}
+                                            onPointerDown={(event) => event.stopPropagation()}
+                                            className="absolute -right-1 -top-1 z-10 flex size-4 cursor-pointer items-center justify-center rounded-full border shadow-sm transition-transform hover:scale-110"
+                                            style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+                                            title={t("canvas.promptPanel.removeReference")}
+                                            aria-label={t("canvas.promptPanel.removeReference")}
+                                        >
+                                            <X className="size-2.5" />
+                                        </button>
+                                    ) : null}
+                                </span>
+                            </Fragment>
                         );
                     })}
+                    {dropSlot === activeReferences.length && dragChipIndex !== null ? <span data-ref-drop-marker="end" className="h-6 w-0.5 shrink-0 rounded-full bg-sky-500" aria-hidden /> : null}
                     <span className="text-[11px] opacity-45">{t("canvas.promptPanel.mentionHint")}</span>
                 </div>
             ) : null}

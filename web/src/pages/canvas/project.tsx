@@ -103,6 +103,7 @@ import { DirectorPanel } from "@/components/canvas/director-panel";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores/canvas/use-generation-history-store";
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
@@ -1518,23 +1519,20 @@ function AtelierCanvasPage() {
         setContextMenu((current) => (current?.type === "connection" && current.connectionId === connectionId ? null : current));
     }, []);
 
-    // Reorder the connections feeding a chat node so its "linked media" thumbnails, mention labels
-    // (图1/图2) and the API reference_images order all follow the user's drag order. Only the
-    // incoming image/video connections are reordered; every other connection keeps its position.
+    // Reorder the connections feeding a node so its "linked media" thumbnails, mention labels
+    // (图1/图2) and the API reference_images order all follow the user's drag order.
+    //
+    // 两条已经踩过的坑，都表现为「拖了没反应 / 像卡住」：
+    // 1. 旧实现要求「命中条数 === 新顺序条数」，chip 里只要少一条（上游图还没出结果、素材被停用）
+    //    就直接 `return prev`，静默失效。现在命中几条就排几条，认不得的原封不动。
+    // 2. 参考图可能不是直连本节点，而是挂在**本节点所接的 Config 汇流点**上（`getMentionResourceNodes`
+    //    在直连为空时会回落到 hub）。只认直连时 `incoming.length` 恒为 0，同样静默失效。
     const handleReorderLinkedMedia = useCallback((nodeId: string, orderedNodeIds: string[]) => {
-        const order = new Map(orderedNodeIds.map((id, index) => [id, index]));
         setConnections((prev) => {
-            const incoming = prev.filter((conn) => conn.toNodeId === nodeId && order.has(conn.fromNodeId));
-            if (incoming.length !== order.size) return prev;
-            incoming.sort((a, b) => (order.get(a.fromNodeId)! - order.get(b.fromNodeId)!));
-            const incomingIds = new Set(incoming.map((conn) => conn.id));
-            let pointer = 0;
-            const next = prev.map((conn) => {
-                if (conn.toNodeId !== nodeId || !incomingIds.has(conn.id)) return conn;
-                const replacement = incoming[pointer++];
-                return replacement;
-            });
-            return next;
+            const hubIds = prev
+                .filter((conn) => conn.fromNodeId === nodeId && nodesRef.current.some((node) => node.id === conn.toNodeId && node.type === CanvasNodeType.Config))
+                .map((conn) => conn.toNodeId);
+            return reorderConnectionsForTargets(prev, [nodeId, ...new Set(hubIds)], orderedNodeIds) ?? prev;
         });
     }, []);
 
