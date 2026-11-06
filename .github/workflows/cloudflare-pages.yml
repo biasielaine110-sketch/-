@@ -38,6 +38,11 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: web
+          # gitHubToken lets wrangler-action post the deployment URL back to the commit, which is
+          # the only way to tell "deployed to preview" apart from "deployed to production" when
+          # the step fails (2026-11-06: step 6 failed, the retry step exited 0, yet
+          # infinite-atelier.pages.dev stayed on the previous build).
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
           command: pages deploy dist --project-name=infinite-atelier --branch=main
         # wrangler-action has no built-in backoff; a short shell retry covers 10429 spikes.
       - name: Retry deploy if rate-limited
@@ -47,9 +52,15 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
+          echo "wrangler $(npx wrangler --version 2>&1 | tail -1)"
+          ls -1 dist | head -5
           for i in 1 2 3; do
             echo "Retry deploy attempt $i after rate-limit cooldown..."
             sleep $((i * 40))
-            npx wrangler pages deploy dist --project-name=infinite-atelier --branch=main && exit 0
+            if npx wrangler pages deploy dist --project-name=infinite-atelier --branch=main; then
+              echo "retry $i succeeded"
+              exit 0
+            fi
+            echo "retry $i failed"
           done
           exit 1
