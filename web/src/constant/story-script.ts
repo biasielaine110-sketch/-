@@ -2955,7 +2955,12 @@ function parseJsonLenient(slice: string): unknown {
 
 /**
  * 最后一道兜底：连 JSON 都拼不回去时，直接按 `"prompt": "…"` 抓字符串字面量。
- * 逐字符扫到结束引号（允许真实换行），`\n` / `\"` 等转义照常还原。
+ *
+ * ⚠️ 收尾判据不能是「遇到第一个 `"` 就停」（2026-11-06 第四次报障「只摘取其中的一段」）：
+ * storyboard 的 `prompt` 里带对白，用户从聊天窗口复制后 `\"` 常被还原成裸 `"`，
+ * 例如 `发出对白："结婚五十年，她忘了所有人。"`。若见 `"` 就收尾，抓到的只是这段对白之前的半截，
+ * 第二段时间码整段丢掉。所以只有「引号后面跟 `,` / `}` / `]`（可跨空白）或已到文本末尾」
+ * 才算字符串结束，其余一律当正文里的引号照收。
  */
 function extractMomanPromptLiterals(text: string): Record<string, unknown>[] {
     const records: Record<string, unknown>[] = [];
@@ -2978,7 +2983,13 @@ function extractMomanPromptLiterals(text: string): Record<string, unknown>[] {
                 index += 1;
                 continue;
             }
-            if (char === '"') break;
+            if (char === '"') {
+                const tail = text.slice(index + 1);
+                if (/^\s*[,}\]]/.test(tail) || !tail.trim()) break;
+                value += char;
+                index += 1;
+                continue;
+            }
             value += char;
             index += 1;
         }
