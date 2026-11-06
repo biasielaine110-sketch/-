@@ -46,7 +46,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, describeMomanSourceOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptImageSize, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, describeMomanSourceOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMergeGroups, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptImageSize, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -7870,7 +7870,11 @@ function AtelierCanvasPage() {
     );
 
     const handleBuildScriptPipeline = useCallback(
-        (nodeId: string) => {
+        /**
+         * @param rowIndexes 「选择铺链路」传勾选的行下标：只铺这一段，且这一段合成**一个**视频节点。
+         *                   不传 = 整表一键铺链路（与以前逐字节一致）。
+         */
+        (nodeId: string, rowIndexes?: number[]) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             const rows = source.metadata?.scriptRows || [];
@@ -7941,9 +7945,24 @@ function AtelierCanvasPage() {
             // 先摘掉「一行连图片提示词都凑不出来」的空行，再按分段方式切组——否则空行会把合并的镜数算歪。
             // `scriptExtras` 必须传进去：风格提示词也可能活在自建列（列名带「风格」）里。
             // 第四套：末尾追加的风格行写成 `- **视觉风格：**…`。
-            const renderable = rows
+            const allRenderable = rows
                 .map((row, index) => ({ row, index, prompts: preset.buildShotPrompts(row, scriptExtras, { directorScheme }) }))
                 .filter((item) => Boolean(item.prompts.imagePrompt));
+            /**
+             * 「选择铺链路」：只铺勾选的那一段，**且这一段合成一个视频节点**（用户 2026-11-06 要求）。
+             *
+             * 勾的行可能不连续（第 2、4 镜），而「合成一段视频」本身要求连续 —— 按首尾补齐
+             * （与「合并为一镜」同口径），否则中间那一镜会被跳过、视频内容也接不上。
+             * ⚠️ 这里的下标是**原始行下标**（和 `metadata.scriptMergeGroups` 同一套坐标系），
+             * 不是 `allRenderable` 里的位置 —— 下面一律用 `item.index` 比较。
+             */
+            const picked = (rowIndexes || []).filter((index) => Number.isInteger(index) && index >= 0 && index < rows.length);
+            const selection = picked.length
+                ? (normalizeStoryScriptMergeGroups([picked], rows.length)[0] ?? [Math.min(...picked)])
+                : undefined;
+            const renderable = selection
+                ? allRenderable.filter((item) => item.index >= selection[0] && item.index <= selection[selection.length - 1])
+                : allRenderable;
             if (!renderable.length) {
                 message.warning(t("canvas.scriptNode.pipelineEmpty"));
                 return;
@@ -7954,9 +7973,13 @@ function AtelierCanvasPage() {
             // 「原始下标 → renderable 位置」换算一次，否则删过空行之后会合并到错位的镜上。
             const renderableSlot = new Map<number, number>();
             renderable.forEach((item, slot) => renderableSlot.set(item.index, slot));
-            const manualMergeGroups = (source.metadata?.scriptMergeGroups || [])
-                .map((span) => (Array.isArray(span) ? span.map((index) => renderableSlot.get(index)).filter((slot): slot is number => slot !== undefined) : []))
-                .filter((span) => span.length >= 2);
+            const manualMergeGroups = selection
+                ? // 选择铺链路：选中的这一段**整体**成一段，不理表里原有的手动合并组 ——
+                  // 点这个按钮要的就是「一段视频」，勾了 3 镜却铺出 2 段是错的。
+                  (renderable.length > 1 ? [[...Array.from({ length: renderable.length }, (_, slot) => slot)]] : [])
+                : (source.metadata?.scriptMergeGroups || [])
+                      .map((span) => (Array.isArray(span) ? span.map((index) => renderableSlot.get(index)).filter((slot): slot is number => slot !== undefined) : []))
+                      .filter((span) => span.length >= 2);
             const groups = groupStoryScriptRows(
                 renderable.map((item) => item.row),
                 mergeMode,
@@ -8114,14 +8137,30 @@ function AtelierCanvasPage() {
             const shotCount = renderable.length;
             const videoCount = groups.length;
             modal.confirm({
-                title: t("canvas.scriptNode.pipelineConfirmTitle"),
-                content: t("canvas.scriptNode.pipelineConfirmBody", { shots: shotCount, nodes: created.length, videos: videoCount, links: assetLinkCount }),
+                title: t(selection ? "canvas.scriptNode.pipelineSelectedConfirmTitle" : "canvas.scriptNode.pipelineConfirmTitle"),
+                content: t(selection ? "canvas.scriptNode.pipelineSelectedConfirmBody" : "canvas.scriptNode.pipelineConfirmBody", {
+                    shots: shotCount,
+                    nodes: created.length,
+                    videos: videoCount,
+                    links: assetLinkCount,
+                }),
                 okText: t("canvas.scriptNode.pipelineBuild"),
                 cancelText: t("common.cancel"),
                 onOk: () => {
                     // 铺链的同时把「资产名 → 图片」锁表落库，表上就能看到这些名字已经锁定。
                     const nextLocks = Object.keys(nameLocks).length ? nameLocks : undefined;
-                    const patchLocks = (item: CanvasNodeData) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: nextLocks } } : item);
+                    /**
+                     * 「选择铺链路」顺手把这一段记成手动合并组：表上立刻出现 `⛓ 2/3` 徽标，
+                     * 之后再点「一键铺链路」仍是同一段 —— 免得两条路径给出两种结果。
+                     * 已有组与这一段重叠的整组丢掉（后来的覆盖前面的，与 `mergeSelectedRows` 同口径）。
+                     */
+                    const nextMergeGroups = selection && selection.length >= 2
+                        ? normalizeStoryScriptMergeGroups(
+                              [...(source.metadata?.scriptMergeGroups || []).filter((span) => !span.some((index) => selection.includes(index))), selection],
+                              rows.length,
+                          )
+                        : undefined;
+                    const patchLocks = (item: CanvasNodeData) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: nextLocks, ...(nextMergeGroups ? { scriptMergeGroups: nextMergeGroups } : {}) } } : item);
                     nodesRef.current = [...nodesRef.current.map(patchLocks), ...created];
                     setNodes((prev) => [...prev.map(patchLocks), ...created]);
                     setConnections((prev) => [...prev, ...createdConnections]);

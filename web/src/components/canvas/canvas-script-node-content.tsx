@@ -231,8 +231,11 @@ type CanvasScriptNodeContentProps = {
     assetRoles?: Record<string, string>;
     /** 切换某张已链接素材的分类（角色 / 场景 / 道具 / 站位图）。 */
     onAssetRoleChange?: (nodeId: string, assetNodeId: string, role: ScriptAssetRole) => void;
-    /** 一键铺「分镜 → 图片 → 视频」链路。 */
-    onBuildPipeline?: (nodeId: string) => void;
+    /**
+     * 一键铺「分镜 → 图片 → 视频」链路。
+     * 传 `rowIndexes` 就是「选择铺链路」：只铺勾选的这一段，且这一段合成**一个**视频节点。
+     */
+    onBuildPipeline?: (nodeId: string, rowIndexes?: number[]) => void;
     /** 只给某一行分镜建一个视频节点（预填该镜的视频提示词与时长）。 */
     onBuildShotVideo?: (nodeId: string, rowIndex: number) => void;
     /** 勾选多镜后批量建视频节点（每镜一个节点，自带该镜的提示词 / 时长 / 素材连线）。 */
@@ -2040,24 +2043,10 @@ export function CanvasScriptNodeContent({
                     {segmentPreview}
                 </span>
             ) : null}
-            {/* 有手动合并组时给一个「拆开」的出口：否则用户只能靠删行来撤销，且会误以为是档位在管。 */}
-            {manualMergeGroups.length ? (
-                <button
-                    type="button"
-                    className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition opacity-80 hover:opacity-100"
-                    style={{ borderColor: theme.node.stroke }}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                        event.stopPropagation();
-                        patchMetadata({ scriptMergeGroups: [] });
-                    }}
-                    title={t("canvas.scriptNode.mergeManualClearHint")}
-                >
-                    <X className="size-3" />
-                    {t("canvas.scriptNode.mergeManualClear")}
-                </button>
-            ) : null}
+            {/*
+             * 「解除合并组」（拆开手动合并）已经搬到**右下角**「一键铺链路」下面 ——
+             * 与「合并为一镜」放一起，成对出现才不会一个在这、一个在那。
+             */}
         </div>
     );
 
@@ -2817,32 +2806,10 @@ export function CanvasScriptNodeContent({
                             </button>
                         ) : null}
                         {/*
-                         * 「合并为一镜」：勾几行 → 铺链路时这几镜合成**一个**视频节点。
-                         * 与「把选中 N 镜铺成视频」（每镜各一个视频节点）是并排的两个动作，
-                         * 所以放在它右边、同样的胶囊样式，靠文案区分。
+                         * 「合并为一镜 / 取消合并」已经搬到**右下角**（「一键铺链路」下面）：
+                         * 用户要求「合并为一镜和解除合并组都需要放在最右边，一键铺链路的下面」——
+                         * 筛选/批量动作留在左边这条批量条，铺链路相关的都归到右边那一列。
                          */}
-                        {selectedRows.size >= 2 || selectedAllMerged ? (
-                            <button
-                                type="button"
-                                className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition"
-                                style={{
-                                    borderColor: selectedAllMerged ? theme.toolbar.activeBg : theme.node.stroke,
-                                    background: selectedAllMerged ? `${theme.toolbar.activeBg}1f` : "transparent",
-                                    color: selectedAllMerged ? theme.toolbar.activeBg : theme.node.text,
-                                }}
-                                onMouseDown={(event) => event.stopPropagation()}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                onClick={(event) => {
-                                    event.stopPropagation();
-                                    if (selectedAllMerged) unmergeSelectedRows();
-                                    else mergeSelectedRows();
-                                }}
-                                title={selectedAllMerged ? t("canvas.scriptNode.mergeManualOffHint") : t("canvas.scriptNode.mergeManualHint")}
-                            >
-                                <Combine className="size-3" />
-                                {selectedAllMerged ? t("canvas.scriptNode.mergeManualOff") : t("canvas.scriptNode.mergeManual")}
-                            </button>
-                        ) : null}
                         <button
                             type="button"
                             className="inline-flex size-6 items-center justify-center rounded-full border transition"
@@ -2859,46 +2826,131 @@ export function CanvasScriptNodeContent({
                         </button>
                     </span>
                 ) : null}
-                <div className="ml-auto flex items-center gap-1.5">
-                    {onRegenerateAll ? (
-                        <button
-                            type="button"
-                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-                            style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
-                            onMouseDown={(event) => event.stopPropagation()}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                modal.confirm({
-                                    title: t("canvas.scriptNode.regenAllConfirm"),
-                                    okText: t("canvas.scriptNode.regenAll"),
-                                    cancelText: t("common.cancel"),
-                                    onOk: () => onRegenerateAll(node.id),
-                                });
-                            }}
-                            title={t("canvas.scriptNode.regenAllHint")}
-                        >
-                            <RotateCcw className="size-3.5" />
-                            {t("canvas.scriptNode.regenAll")}
-                        </button>
-                    ) : null}
+                {/*
+                 * 右下角这一列：铺链路相关的动作全部挂在「一键铺链路」**下面**（用户 2026-11-06 要求）。
+                 * 分镜表横向 4.2k px，滚到表尾时鼠标就在右下角，按钮就地排列不用再跑回左边；
+                 * 竖排三行、右对齐，与表格右边缘齐平。
+                 *
+                 * 行 1：整表重生成 + 一键铺链路（原来就有）
+                 * 行 2：选择铺链路（勾几镜 → 合成**一个**视频链路，新增）
+                 * 行 3：合并为一镜 / 取消合并 + 解除合并组（从左边批量条与「视频分段」旁搬来）
+                 */}
+                <div className="ml-auto flex flex-col items-end gap-1">
+                    <div className="flex items-center gap-1.5">
+                        {onRegenerateAll ? (
+                            <button
+                                type="button"
+                                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                                style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    modal.confirm({
+                                        title: t("canvas.scriptNode.regenAllConfirm"),
+                                        okText: t("canvas.scriptNode.regenAll"),
+                                        cancelText: t("common.cancel"),
+                                        onOk: () => onRegenerateAll(node.id),
+                                    });
+                                }}
+                                title={t("canvas.scriptNode.regenAllHint")}
+                            >
+                                <RotateCcw className="size-3.5" />
+                                {t("canvas.scriptNode.regenAll")}
+                            </button>
+                        ) : null}
+                        {onBuildPipeline ? (
+                            <button
+                                type="button"
+                                className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 font-medium text-white transition"
+                                style={{ background: theme.toolbar.activeBg }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    onBuildPipeline(node.id);
+                                }}
+                                title={t("canvas.scriptNode.pipelineHint")}
+                            >
+                                <Wand2 className="size-3.5" />
+                                {t("canvas.scriptNode.pipelineBuild")}
+                            </button>
+                        ) : null}
+                    </div>
+                    {/* 「选择铺链路」：勾几镜 → 只铺这几镜，并把它们合成一个视频链路（一段视频）。 */}
                     {onBuildPipeline ? (
                         <button
                             type="button"
-                            className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 font-medium text-white transition"
-                            style={{ background: theme.toolbar.activeBg }}
+                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition disabled:cursor-not-allowed disabled:opacity-40"
+                            style={{
+                                borderColor: selectedRows.size ? theme.toolbar.activeBg : theme.node.stroke,
+                                background: selectedRows.size ? `${theme.toolbar.activeBg}1f` : "transparent",
+                                color: selectedRows.size ? theme.toolbar.activeBg : theme.node.text,
+                                opacity: selectedRows.size ? 1 : 0.6,
+                            }}
+                            disabled={!selectedRows.size}
                             onMouseDown={(event) => event.stopPropagation()}
                             onPointerDown={(event) => event.stopPropagation()}
                             onClick={(event) => {
                                 event.stopPropagation();
-                                onBuildPipeline(node.id);
+                                if (!selectedRows.size) return;
+                                onBuildPipeline(node.id, Array.from(selectedRows).sort((a, b) => a - b));
                             }}
-                            title={t("canvas.scriptNode.pipelineHint")}
+                            title={selectedRows.size ? t("canvas.scriptNode.pipelineBuildSelectedHint", { count: selectedRows.size }) : t("canvas.scriptNode.pipelineBuildSelectedNone")}
                         >
-                            <Wand2 className="size-3.5" />
-                            {t("canvas.scriptNode.pipelineBuild")}
+                            <Sparkles className="size-3.5" />
+                            {selectedRows.size
+                                ? t("canvas.scriptNode.pipelineBuildSelectedCount", { count: selectedRows.size })
+                                : t("canvas.scriptNode.pipelineBuildSelected")}
                         </button>
                     ) : null}
+                    {/* 合并为一镜 / 取消合并 + 解除合并组：成对放在这里，勾几行立刻就能点。 */}
+                    <div className="flex items-center gap-1.5">
+                        <button
+                            type="button"
+                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition disabled:cursor-not-allowed disabled:opacity-40"
+                            style={{
+                                borderColor: selectedAllMerged ? theme.toolbar.activeBg : theme.node.stroke,
+                                background: selectedAllMerged ? `${theme.toolbar.activeBg}1f` : "transparent",
+                                color: selectedAllMerged ? theme.toolbar.activeBg : theme.node.text,
+                            }}
+                            disabled={selectedRows.size < 2 && !selectedAllMerged}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                if (selectedAllMerged) unmergeSelectedRows();
+                                else mergeSelectedRows();
+                            }}
+                            title={
+                                selectedAllMerged
+                                    ? t("canvas.scriptNode.mergeManualOffHint")
+                                    : selectedRows.size >= 2
+                                      ? t("canvas.scriptNode.mergeManualHint")
+                                      : t("canvas.scriptNode.mergeManualNeedSelect")
+                            }
+                        >
+                            <Combine className="size-3.5" />
+                            {selectedAllMerged ? t("canvas.scriptNode.mergeManualOff") : t("canvas.scriptNode.mergeManual")}
+                        </button>
+                        {manualMergeGroups.length ? (
+                            <button
+                                type="button"
+                                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                                style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    patchMetadata({ scriptMergeGroups: [] });
+                                }}
+                                title={t("canvas.scriptNode.mergeManualClearHint")}
+                            >
+                                <X className="size-3.5" />
+                                {t("canvas.scriptNode.mergeManualClear", { count: manualMergeGroups.length })}
+                            </button>
+                        ) : null}
+                    </div>
                 </div>
             </div>
         </div>
