@@ -2834,7 +2834,10 @@ const MOMAN_RECORD_KEYS = ["duration", "drama_type", "merged_from_shots", "openi
 
 function isMomanStoryboardRecord(record: Record<string, unknown>): boolean {
     if (typeof record.prompt !== "string" || !record.prompt.trim()) return false;
-    return MOMAN_RECORD_KEYS.filter((key) => record[key] !== undefined).length >= 2;
+    if (MOMAN_RECORD_KEYS.filter((key) => record[key] !== undefined).length >= 2) return true;
+    // 精简形态 `{ id: "storyboard_09", prompt: "…" }`：用户常常只把这一镜的 id + prompt 贴回来。
+    // 认它，视频列才能带上 `【分镜信息】`；不认就会掉到「只有 prompt 字面量」那一级（内容对、元信息丢）。
+    return /storyboard/i.test(String(record.id ?? ""));
 }
 
 /** `独白|旁白|结婚五十年，她忘了所有人。他便每天重新追她一次。|calm` → 台词 / 情绪。 */
@@ -3223,15 +3226,24 @@ function extractMomanStoryboardRecords(raw: string): Record<string, unknown>[] {
     for (const value of extractTopLevelJsonValues(text)) consume(value);
     if (records.length) return records;
 
+    /**
+     * ⚠️ 两种切法**互斥**（2026-11-06 第六次报障的第三个真因）：
+     * 源稿前后没有说明文字时，`整段` 与 `首个 { 到最后一个 }` 是**同一份内容**，
+     * 两个都 parse 成功就会把同一条 storyboard 收进 records **两次** ——
+     * 于是「只贴了 storyboard_02、表里 2 行」变成「2 条源稿按顺序覆盖 2 行」，
+     * 第 1 行被错盖、第 2 行还是模型自编的。前者成功就不再试后者。
+     */
     const loose: unknown[] = [];
     const whole = parseJsonLenient(text.trim());
     if (whole !== undefined) loose.push(whole);
-    const start = text.indexOf("{");
-    if (start >= 0) {
-        const lastClose = text.lastIndexOf("}");
-        const slice = lastClose > start ? text.slice(start, lastClose + 1) : text.slice(start);
-        const parsed = parseJsonLenient(slice);
-        if (parsed !== undefined) loose.push(parsed);
+    else {
+        const start = text.indexOf("{");
+        if (start >= 0) {
+            const lastClose = text.lastIndexOf("}");
+            const slice = lastClose > start ? text.slice(start, lastClose + 1) : text.slice(start);
+            const parsed = parseJsonLenient(slice);
+            if (parsed !== undefined) loose.push(parsed);
+        }
     }
     loose.forEach(consume);
     if (records.length) return records;
@@ -3244,12 +3256,14 @@ function extractMomanStoryboardRecords(raw: string): Record<string, unknown>[] {
         const restored: unknown[] = [];
         const maskedWhole = parseJsonLenient(masked.text.trim());
         if (maskedWhole !== undefined) restored.push(maskedWhole);
-        const maskedStart = masked.text.indexOf("{");
-        if (maskedStart >= 0) {
-            const maskedEnd = masked.text.lastIndexOf("}");
-            const slice = maskedEnd > maskedStart ? masked.text.slice(maskedStart, maskedEnd + 1) : masked.text.slice(maskedStart);
-            const parsed = parseJsonLenient(slice);
-            if (parsed !== undefined) restored.push(parsed);
+        else {
+            const maskedStart = masked.text.indexOf("{");
+            if (maskedStart >= 0) {
+                const maskedEnd = masked.text.lastIndexOf("}");
+                const slice = maskedEnd > maskedStart ? masked.text.slice(maskedStart, maskedEnd + 1) : masked.text.slice(maskedStart);
+                const parsed = parseJsonLenient(slice);
+                if (parsed !== undefined) restored.push(parsed);
+            }
         }
         restored.forEach((value) => consume(restoreMomanPromptValues(value, masked.values)));
         if (records.length) return records;
@@ -3331,15 +3345,81 @@ export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], p
 }
 
 /**
- * storyboard 记录对应的「源镜号」：优先 `merged_from_shots`（`镜3—镜4` → 3），退 `id`（`storyboard_02` → 2）。
- * 认不出返回 0（此时 overlay 会退回「按顺序对位」）。
+ * storyboard 记录对应的「表格行号」。
+ *
+ * ⚠️ **`id` 优先于 `merged_from_shots`**（2026-11-06 第六次报障的真因之一）：
+ * 表格的镜号是 storyboard 的**序号**（`id: "storyboard_02"` → 第 2 行），而 `merged_from_shots`
+ * （`镜3—镜4`）是**原剧本的镜号**，两套编号并不相等。旧实现优先用后者，于是「只贴了
+ * storyboard_02、表格有 2 行」时算出镜号 3 → 匹配不到任何行 → 退回按顺序 → 把第 2 条的内容
+ * 盖到第 1 行上，第 2 行仍留着模型自编的那段（用户看到的就是「还是错的」）。
+ * 认不出返回 0（此时 overlay 退回「按顺序对位」）。
  */
 function momanRecordShotNo(record: Record<string, unknown>): number {
+    const fromId = String(record.id ?? "").replace(/[０-９]/g, (ch) => String(ch.charCodeAt(0) - 0xff10)).match(/(\d+)\s*$/)?.[1];
+    if (fromId) return Number(fromId);
     const merged = String(record.merged_from_shots ?? "").replace(/[０-９]/g, (ch) => String(ch.charCodeAt(0) - 0xff10));
     const fromMerged = merged.match(/(\d+)/)?.[1];
-    if (fromMerged) return Number(fromMerged);
-    const fromId = String(record.id ?? "").replace(/[０-９]/g, (ch) => String(ch.charCodeAt(0) - 0xff10)).match(/(\d+)\s*$/)?.[1];
-    return fromId ? Number(fromId) : 0;
+    return fromMerged ? Number(fromMerged) : 0;
+}
+
+/**
+ * 源内容里**没有 JSON**、只有时间码分段正文时的通道（2026-11-06 第六次报障）。
+ *
+ * 用户第二次、第三次往往是「把上一轮的 prompt 正文再贴回来改」，或者魔漫技能直接给的
+ * 就是 `0.00—1.50：【景别，运镜】…` 纯文本 —— 这类源稿没有 `"prompt"` 键，
+ * 三级 JSON 抽取全部落空，overlay 静默返回原表，视频列于是继续留着模型另编的一段
+ * （形态一模一样、时间码却是 `0.00—1.00` 这种编出来的）。
+ *
+ * 口径：**贴什么填什么** —— 按「时间码 + 冒号」切段，遇到 `0.00` 起的段头算新的一条，
+ * 其余段续在同一镜里；至少两段才认（避免正文里一句时间码被当成整镜源稿）。
+ */
+function extractMomanPlainScriptRecords(text: string): Record<string, unknown>[] {
+    const raw = String(text ?? "").replace(/\\n/g, "\n").replace(/\r\n?/g, "\n").trim();
+    if (!raw) return [];
+    const pattern = /\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*(?:秒|s)?\s*[：:]/gi;
+    const marks: Array<{ start: number; time: number }> = [];
+    let match: RegExpExecArray | null = pattern.exec(raw);
+    while (match) {
+        marks.push({ start: match.index, time: Number.parseFloat(match[0]) });
+        match = pattern.exec(raw);
+    }
+    if (marks.length < 2) return [];
+    const blocks: string[] = [];
+    for (let index = 0; index < marks.length; index += 1) {
+        const from = marks[index].start;
+        const to = index + 1 < marks.length ? marks[index + 1].start : raw.length;
+        const piece = raw.slice(from, to).trim();
+        if (!piece) continue;
+        if (!blocks.length || marks[index].time <= 0.0001) blocks.push(piece);
+        else blocks[blocks.length - 1] = `${blocks[blocks.length - 1]}\n${piece}`;
+    }
+    return blocks
+        .filter((block) => /^\s*\d+(?:\.\d+)?\s*[—–\-~～至]/i.test(block))
+        .map((block) => ({ prompt: block }));
+}
+
+/**
+ * 源稿 → storyboard 记录（JSON 三级抽取 → 纯文本时间码段落兜底）。
+ * 含 `"prompt":` 却抽不出对象时**不再**退到纯文本通道：那种源稿是坏掉的 JSON，
+ * 硬抓会把 `{"id":…}` 一起当正文塞进视频列。
+ */
+function resolveMomanSourceRecords(sourceText: string): Record<string, unknown>[] {
+    const text = String(sourceText ?? "");
+    const records = extractMomanStoryboardRecords(text);
+    if (records.length) return records;
+    if (/["']prompt["']\s*:/.test(text)) return [];
+    return extractMomanPlainScriptRecords(text);
+}
+
+/** 诊断用：源内容里的第七套源稿到底是什么形态、有几条（生成完给用户一句明说，别再静默空转）。 */
+export function describeMomanSourceOverlay(sourceText: string): { kind: "json" | "plain" | "none"; records: number } {
+    const text = String(sourceText ?? "");
+    if (!text.trim()) return { kind: "none", records: 0 };
+    const json = extractMomanStoryboardRecords(text);
+    if (json.length) return { kind: "json", records: json.length };
+    if (/["']prompt["']\s*:/.test(text)) return { kind: "none", records: 0 };
+    const plain = extractMomanPlainScriptRecords(text);
+    return plain.length ? { kind: "plain", records: plain.length } : { kind: "none", records: 0 };
 }
 
 /**
@@ -3365,7 +3445,7 @@ export function applyMomanVideoScriptOverlay(
     if (!rows?.length) return rows as StoryScriptRow[];
     const columns = getStoryScriptColumns(preset);
     if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
-    const records = extractMomanStoryboardRecords(sourceText);
+    const records = resolveMomanSourceRecords(sourceText);
     if (!records.length) return rows as StoryScriptRow[];
     const prompts = records
         // 整条 storyboard（prompt + 首尾状态 + 锚点 + 台词 + 素材）一起进视频列，见 buildMomanVideoPrompt。
