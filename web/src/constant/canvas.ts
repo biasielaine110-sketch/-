@@ -28,6 +28,7 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Annotate]: { width: 420, height: 320, get title() { return i18n.t("canvas.nodeTypes.annotate"); } },
     [CanvasNodeType.Merge]: { width: 480, height: 420, get title() { return i18n.t("canvas.nodeTypes.merge"); } },
     [CanvasNodeType.Script]: { width: 760, height: 520, get title() { return i18n.t("canvas.nodeTypes.script"); } },
+    [CanvasNodeType.VideoMerge]: { width: 560, height: 600, get title() { return i18n.t("canvas.nodeTypes.videoMerge"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
 
 export const NODE_SPECS = {
@@ -74,6 +75,11 @@ export const NODE_SPECS = {
     [CanvasNodeType.Script]: {
         width: 760, height: 520, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Script].title; },
         metadata: { status: "idle", scriptSource: "", scriptPrompt: "", scriptRows: [] },
+    },
+    [CanvasNodeType.VideoMerge]: {
+        width: 560, height: 600, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.VideoMerge].title; },
+        // 切片列表默认留空 —— 数组不能放在这里共用，否则所有新节点会共享同一个引用。
+        metadata: { status: "idle", videoMergeAspect: null },
     },
 } satisfies Record<CanvasNodeType, CanvasNodeSpec>;
 

@@ -1,4 +1,4 @@
-import { Clapperboard, FileText, Group, Grid2x2, Highlighter, Image as ImageIcon, MessageSquareText, Music2, ScrollText, Settings2, Video } from "lucide-react";
+import { Clapperboard, Combine, FileText, Group, Grid2x2, Highlighter, Image as ImageIcon, MessageSquareText, Music2, ScrollText, Settings2, Video } from "lucide-react";
 
 import i18n from "@/i18n";
 
@@ -39,6 +39,7 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
     { type: CanvasNodeType.Group, title: i18n.t("canvas.node.group"), icon: <Group className={iconClass} />, minimapColor: "#94a3b8" },
     { type: CanvasNodeType.Director, title: i18n.t("canvas.nodeTypes.director"), icon: <Clapperboard className={iconClass} />, hasSourceHandle: false, hasTargetHandle: false, minimapColor: "#14b8a6" },
     { type: CanvasNodeType.Script, title: i18n.t("canvas.nodeTypes.script"), icon: <ScrollText className={iconClass} />, minimapColor: "#f59e0b", resource: builtinResource, hidePanel: true },
+    { type: CanvasNodeType.VideoMerge, title: i18n.t("canvas.nodeTypes.videoMerge"), icon: <Combine className={iconClass} />, minimapColor: "#d946ef", hasSourceHandle: false, hidePanel: true },
     { type: CanvasNodeType.Chat, title: i18n.t("canvas.nodeTypes.chat"), icon: <MessageSquareText className={iconClass} />, minimapColor: "#38bdf8", resource: builtinResource, hidePanel: true },
 ].map((def) => {
     const spec = NODE_SPECS[def.type];

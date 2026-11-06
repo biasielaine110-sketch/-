@@ -21,6 +21,7 @@ export enum CanvasNodeType {
     Annotate = "annotate",
     Merge = "merge",
     Script = "script",
+    VideoMerge = "video-merge",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -108,6 +109,27 @@ export type CanvasTextAnnotation = CanvasAnnotationBase & {
 };
 
 export type CanvasAnnotation = CanvasRectAnnotation | CanvasEllipseAnnotation | CanvasArrowAnnotation | CanvasTextAnnotation;
+
+/**
+ * 视频合并节点里的一段素材。
+ *
+ * 只记「哪个节点 + 取哪一段」，不复制文件：素材始终是画布节点原来的那个 blob，
+ * 导出时才按 `inSec`/`outSec` 换成剪映草稿里的微秒区间。
+ * 图片没有「入点」概念，它的 `outSec` 就是在时间线上占的时长。
+ */
+export type CanvasVideoMergeClip = {
+    /** 来源节点 id。 */
+    nodeId: string;
+    kind: "video" | "image";
+    /** 落盘用的标题快照 —— 源节点之后改名，不会改掉已排好的时间线。 */
+    title: string;
+    /** 素材总长（秒）；图片为 0。 */
+    durationSec?: number;
+    /** 取用区间起点（秒）。 */
+    inSec: number;
+    /** 取用区间终点（秒）；图片用它的时长。 */
+    outSec: number;
+};
 
 export type CanvasNodeMetadata = {
     content?: string;
@@ -348,6 +370,10 @@ export type CanvasNodeMetadata = {
     mergeSlotIds?: Array<string | null>;
     /** Cover focus 0..1 keyed by source node id. */
     mergeOffsets?: Record<string, { x: number; y: number }>;
+    /** 视频合并节点：数组顺序 = 时间线顺序。 */
+    videoMergeClips?: CanvasVideoMergeClip[];
+    /** 视频合并：画幅（null / "original" = 跟随第一段素材）。 */
+    videoMergeAspect?: string | null;
     /** Midjourney Imagine parent task id — enables manual Upscale (U1–U4). */
     midjourneyTaskId?: string;
     /** Midjourney tile index 1–4 when the primary image is a specific Imagine tile. */

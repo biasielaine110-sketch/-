@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { saveAs } from "file-saver";
 import { Group, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -32,7 +33,7 @@ import {
     subscribeNativeVideoQueue,
 } from "@/lib/canvas/native-video-job-queue";
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
-import { uploadMediaFile } from "@/services/file-storage";
+import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { subscribeLocalMediaLibraryAccess } from "@/services/local-media-library";
 import { nanoid } from "nanoid";
 import { captureVideoFrameDataUrl, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -62,6 +63,7 @@ import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/com
 import { CanvasNodeAnnotateDialog, type CanvasAnnotateInpaintPayload, type CanvasAnnotateSavePayload } from "@/components/canvas/canvas-node-annotate-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasMergeNodeContent } from "@/components/canvas/canvas-merge-node-content";
+import { CanvasVideoMergeNodeContent } from "@/components/canvas/canvas-video-merge-node-content";
 import { CanvasScriptNodeContent, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptGenAction } from "@/components/canvas/canvas-script-node-content";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { CanvasNodeMjUpscaleDialog } from "@/components/canvas/canvas-node-mj-upscale-dialog";
@@ -107,6 +109,9 @@ import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-orde
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
+import { buildJianyingBundle, secondsToMicro, type JianyingDraftClip } from "@/lib/canvas/jianying-draft";
+import { createZip } from "@/lib/zip";
+import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFileBase, normalizeMergeClip, probeImageSize, probeVideoMeta, resolveMergeCanvasSize, videoMergeClipFromNode, type ResolvedVideoMergeClip } from "@/lib/canvas/video-merge";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, getGroupMemberNodes, normalizeConnection, resolveConnectionPairs, canConnectNodes, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
@@ -496,6 +501,12 @@ function AtelierCanvasPage() {
     const [audioMergeOpen, setAudioMergeOpen] = useState(false);
     const [audioMergeSelected, setAudioMergeSelected] = useState<string[]>([]);
     const [audioMergePicking, setAudioMergePicking] = useState(false);
+    /** 视频合并节点：正在「X 拾取」的是哪个节点（null = 没在拾取）。 */
+    const [videoMergePickingNodeId, setVideoMergePickingNodeId] = useState<string | null>(null);
+    /** 正在打包剪映工程包的节点 id —— 只用来把按钮换成 loading。 */
+    const [videoMergeExportingNodeId, setVideoMergeExportingNodeId] = useState<string | null>(null);
+    /** 视频合并节点里用到的素材 id → 可直接播放的 url（blob 失效后由 storageKey 重建）。 */
+    const [videoMergeMediaUrls, setVideoMergeMediaUrls] = useState<Record<string, string>>({});
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [panoramaNodeId, setPanoramaNodeId] = useState<string | null>(null);
@@ -523,6 +534,7 @@ function AtelierCanvasPage() {
     const connectionTargetNodeIdRef = useRef(connectionTargetNodeId);
     const audioMergePickingRef = useRef(false);
     const audioMergeSelectedRef = useRef<string[]>([]);
+    const videoMergePickingRef = useRef<string | null>(null);
     const selectionBoxRef = useRef(selectionBox);
     const pendingConnectionCreateRef = useRef(pendingConnectionCreate);
     /** Keyed by jobId (not targetNodeId) so queued native-video submits do not abort the running job. */
@@ -959,7 +971,8 @@ function AtelierCanvasPage() {
         connectingParamsRef.current = connectingParams;
         connectionTargetNodeIdRef.current = connectionTargetNodeId;
         pendingConnectionCreateRef.current = pendingConnectionCreate;
-    }, [nodes, chatSessions, connections, selectedNodeIds, hoveredNodeId, toolbarNodeId, viewport, connectingParams, connectionTargetNodeId, pendingConnectionCreate]);
+        videoMergePickingRef.current = videoMergePickingNodeId;
+    }, [nodes, chatSessions, connections, selectedNodeIds, hoveredNodeId, toolbarNodeId, viewport, connectingParams, connectionTargetNodeId, pendingConnectionCreate, videoMergePickingNodeId]);
 
     useLayoutEffect(() => {
         selectionBoxRef.current = selectionBox;
@@ -2203,6 +2216,222 @@ function AtelierCanvasPage() {
     // Cache the capture result for the following bubbling drag handler to avoid applying shift-selection twice.
     const pendingSelectionRef = useRef<Set<string> | null>(null);
 
+    /**
+     * 「X 拾取」把画布节点塞进 / 移出视频合并节点的时间线。
+     *
+     * 判定只在 `isVideoMergeSourceNode`（有内容的视频/图片）；空节点拾进去只会多一行导不出的东西。
+     * 整个列表都换成新数组再写回 —— `videoMergeClips` 是 metadata 上的数组，就地 push 不会触发重渲染。
+     */
+    const toggleVideoMergeClip = useCallback((mergeNodeId: string, sourceNode: CanvasNodeData) => {
+        setNodes((prev) =>
+            prev.map((node) => {
+                if (node.id !== mergeNodeId) return node;
+                const clips = node.metadata?.videoMergeClips || [];
+                const exists = clips.some((clip) => clip.nodeId === sourceNode.id);
+                if (exists) return { ...node, metadata: { ...node.metadata, videoMergeClips: clips.filter((clip) => clip.nodeId !== sourceNode.id) } };
+                const created = videoMergeClipFromNode(sourceNode);
+                return created ? { ...node, metadata: { ...node.metadata, videoMergeClips: [...clips, created] } } : node;
+            }),
+        );
+    }, [setNodes]);
+
+    const toggleVideoMergePicking = useCallback((nodeId: string) => {
+        setVideoMergePickingNodeId((current) => (current === nodeId ? null : nodeId));
+    }, []);
+
+    /**
+     * 时间线的「已解析视图」：clip 只是元数据，真要显示 / 导出还得回头找源节点的 URL。
+     *
+     * URL 优先取 `metadata.content`（视频节点本来就靠它渲染）；被导出 / 草稿往返洗掉 blob URL 的
+     * 节点只剩 `storageKey`，那条路要走异步 `resolveMediaUrl`，结果缓存在 `videoMergeMediaUrls` 里
+     * —— 别在 render 里 await。
+     */
+    const videoMergeResolvedByNodeId = useMemo(() => {
+        const map = new Map<string, ResolvedVideoMergeClip[]>();
+        for (const node of nodes) {
+            if (node.type !== CanvasNodeType.VideoMerge) continue;
+            const clips = node.metadata?.videoMergeClips || [];
+            map.set(
+                node.id,
+                clips.map((clip) => {
+                    const source = nodeById.get(clip.nodeId);
+                    const url = String(source?.metadata?.content || "") || videoMergeMediaUrls[clip.nodeId] || "";
+                    return {
+                        clip,
+                        url,
+                        storageKey: source?.metadata?.storageKey,
+                        // 节点尺寸是缩放后的显示尺寸，但视频/图片节点保持比例，拿它定画幅够用。
+                        width: source?.width,
+                        height: source?.height,
+                        missing: !source || !isVideoMergeSourceNode(source) || (!url && !source.metadata?.storageKey),
+                    };
+                }),
+            );
+        }
+        return map;
+    }, [nodeById, nodes, videoMergeMediaUrls]);
+
+    // 只补「有 storageKey 但没有 URL」那部分；同一个 key 试过一次就不再试，避免拖节点时刷屏。
+    const videoMergeUrlAttemptsRef = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        const pending: { nodeId: string; storageKey: string }[] = [];
+        for (const node of nodes) {
+            if (node.type !== CanvasNodeType.VideoMerge) continue;
+            for (const clip of node.metadata?.videoMergeClips || []) {
+                const source = nodeById.get(clip.nodeId);
+                const storageKey = source?.metadata?.storageKey;
+                if (!storageKey || source?.metadata?.content) continue;
+                const attemptKey = `${clip.nodeId}:${storageKey}`;
+                if (videoMergeUrlAttemptsRef.current.has(attemptKey)) continue;
+                videoMergeUrlAttemptsRef.current.add(attemptKey);
+                pending.push({ nodeId: clip.nodeId, storageKey });
+            }
+        }
+        if (!pending.length) return;
+        let cancelled = false;
+        void Promise.all(pending.map(async (item) => ({ nodeId: item.nodeId, url: await resolveMediaUrl(item.storageKey, "") }))).then((results) => {
+            if (cancelled) return;
+            const usable = results.filter((item) => item.url);
+            if (!usable.length) return;
+            setVideoMergeMediaUrls((prev) => {
+                const next = { ...prev };
+                for (const item of usable) next[item.nodeId] = item.url;
+                return next;
+            });
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [nodeById, nodes]);
+
+    /**
+     * 一键导出剪映草稿包。
+     *
+     * 产物是一个 zip：`draft_content.json` + `draft_meta_info.json` + `materials/` + `install.bat`。
+     * 浏览器拿不到用户磁盘的绝对路径，所以 JSON 里先写 `__DRAFT_DIR__` 占位符，由 `install.bat`
+     * 在本机替换成真实路径再交给剪映。素材原样打包、**不重新编码** —— 裁剪只写进 in/out 区间。
+     */
+    const handleVideoMergeExport = useCallback(
+        async (mergeNodeId: string) => {
+            const mergeNode = nodesRef.current.find((node) => node.id === mergeNodeId);
+            const clips = mergeNode?.metadata?.videoMergeClips || [];
+            if (!mergeNode || !clips.length) {
+                message.warning(t("canvas.videoMerge.exportEmpty"));
+                return;
+            }
+            setVideoMergeExportingNodeId(mergeNodeId);
+            const hide = message.loading(t("canvas.videoMerge.exporting"), 0);
+            const createdUrls: string[] = [];
+            try {
+                const sources = new Map(nodesRef.current.map((node) => [node.id, node]));
+                const files: { name: string; data: BlobPart }[] = [];
+                const draftClips: JianyingDraftClip[] = [];
+                const clipSizes: { width?: number; height?: number }[] = [];
+                let skipped = 0;
+                let coverBlob: Blob | null = null;
+                let coverAttempts = 0;
+
+                for (let index = 0; index < clips.length; index += 1) {
+                    const clip = clips[index];
+                    const source = sources.get(clip.nodeId);
+                    if (!source || !isVideoMergeSourceNode(source)) {
+                        skipped += 1;
+                        continue;
+                    }
+                    const storageKey = source.metadata?.storageKey;
+                    const url = String(source.metadata?.content || "") || (storageKey ? await resolveMediaUrl(storageKey, "") : "");
+                    const stored = storageKey ? await getMediaBlob(storageKey) : null;
+                    const blob = stored ?? (url ? await fetch(url).then((response) => response.blob()).catch(() => null) : null);
+                    if (!blob) {
+                        skipped += 1;
+                        continue;
+                    }
+                    // 探测（时长 / 像素尺寸 / 封面）都要一个能播放的地址；没有就给 blob 临时开一个。
+                    const probeUrl = url || URL.createObjectURL(blob);
+                    if (probeUrl !== url) createdUrls.push(probeUrl);
+                    if (!coverBlob && coverAttempts < 2) {
+                        coverAttempts += 1;
+                        coverBlob = await captureMergeCover(probeUrl, clip.kind);
+                    }
+
+                    let sourceDurationSec = 0;
+                    let width = Math.max(2, Math.round(Number(source.width) || 1920));
+                    let height = Math.max(2, Math.round(Number(source.height) || 1080));
+                    if (clip.kind === "video") {
+                        const meta = await probeVideoMeta(probeUrl);
+                        sourceDurationSec = meta.durationSec || Number(clip.durationSec) || 0;
+                        if (meta.width > 0 && meta.height > 0) {
+                            width = meta.width;
+                            height = meta.height;
+                        }
+                    } else {
+                        const size = await probeImageSize(blob, { width, height });
+                        width = size.width;
+                        height = size.height;
+                    }
+
+                    const trimmed = normalizeMergeClip({ ...clip, durationSec: sourceDurationSec || clip.durationSec });
+                    const inUs = secondsToMicro(trimmed.inSec);
+                    const outUs = secondsToMicro(trimmed.outSec);
+                    if (outUs - inUs < 1000) {
+                        skipped += 1;
+                        continue;
+                    }
+                    // 标题以源节点为准：拾取时抄的那份可能已经过时（用户改过节点名）。
+                    const fileName = `${mergeClipFileBase(source.title || clip.title, index, clip.kind)}.${mediaExtension(blob.type, clip.kind)}`;
+                    files.push({ name: `materials/${fileName}`, data: blob });
+                    draftClips.push({
+                        fileName,
+                        kind: clip.kind,
+                        // 图片的「源时长」就是它在时间线上占的长度；视频必须给全片长度，否则剪映会截断。
+                        sourceDurationUs: clip.kind === "video" ? secondsToMicro(sourceDurationSec || trimmed.outSec) : outUs - inUs,
+                        inUs,
+                        outUs,
+                        width,
+                        height,
+                        hasAudio: clip.kind === "video",
+                    });
+                    clipSizes.push({ width, height });
+                }
+
+                if (!draftClips.length) {
+                    message.error(t("canvas.videoMerge.exportEmpty"));
+                    return;
+                }
+
+                const draftName = String(mergeNode.title || t("canvas.nodeTypes.videoMerge")).trim() || "canvas-draft";
+                const canvasSize = resolveMergeCanvasSize(mergeNode.metadata?.videoMergeAspect, clipSizes);
+                const bundle = buildJianyingBundle({
+                    name: draftName,
+                    canvasWidth: canvasSize.width,
+                    canvasHeight: canvasSize.height,
+                    clips: draftClips,
+                    coverFileName: coverBlob ? "draft_cover.jpg" : undefined,
+                });
+                if (coverBlob) files.push({ name: "draft_cover.jpg", data: coverBlob });
+                files.push({ name: "draft_content.json", data: JSON.stringify(bundle.draftContent, null, 2) });
+                files.push({ name: "draft_meta_info.json", data: JSON.stringify(bundle.draftMetaInfo, null, 2) });
+                // install.bat 必须是纯 ASCII：UTF-8 BOM / 中文在不带 BOM 的 cmd 里会乱码成语法错误。
+                files.push({ name: "install.bat", data: bundle.installScript });
+                files.push({ name: "README.txt", data: `\ufeff${bundle.readme}` });
+
+                const zip = await createZip(files);
+                const safeName = draftName.replace(/[\\/:*?"<>|]/g, "_").slice(0, 40) || "jianying-draft";
+                saveAs(zip, `${safeName}_剪映草稿.zip`);
+                hide();
+                if (skipped > 0) message.warning(t("canvas.videoMerge.exportMissing", { count: skipped }));
+                message.success(t("canvas.videoMerge.exportSuccess"));
+            } catch (error) {
+                hide();
+                message.error(error instanceof Error ? error.message : t("canvas.videoMerge.exportFailed"));
+            } finally {
+                for (const url of createdUrls) URL.revokeObjectURL(url);
+                setVideoMergeExportingNodeId((current) => (current === mergeNodeId ? null : current));
+            }
+        },
+        [t],
+    );
+
     // Toggle an audio node into/out of the merge selection while "pick" mode is active.
     const toggleAudioMergePick = useCallback((nodeId: string) => {
         setAudioMergeSelected((prev) => {
@@ -2224,6 +2453,17 @@ function AtelierCanvasPage() {
                 if (clicked?.type === CanvasNodeType.Audio) {
                     event.preventDefault();
                     toggleAudioMergePick(nodeId);
+                    pendingSelectionRef.current = null;
+                    return;
+                }
+            }
+            // 视频合并的「X 拾取」：点画布上的视频 / 图片节点 = 把它加进（或移出）时间线，
+            // 不做普通选中。拾取模式只是「点了往哪放」的指针，选中的仍是那个合并节点自己。
+            if (videoMergePickingRef.current) {
+                const clicked = nodesRef.current.find((node) => node.id === nodeId);
+                if (clicked && clicked.id !== videoMergePickingRef.current && isVideoMergeSourceNode(clicked)) {
+                    event.preventDefault();
+                    toggleVideoMergeClip(videoMergePickingRef.current, clicked);
                     pendingSelectionRef.current = null;
                     return;
                 }
@@ -2261,7 +2501,7 @@ function AtelierCanvasPage() {
             const { nextSelected } = selectNodeByEvent(event, nodeId);
             pendingSelectionRef.current = nextSelected;
         },
-        [connectNodes, selectNodeByEvent, setConnecting, toggleAudioMergePick],
+        [connectNodes, selectNodeByEvent, setConnecting, toggleAudioMergePick, toggleVideoMergeClip],
     );
 
     const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
@@ -2273,6 +2513,14 @@ function AtelierCanvasPage() {
         if (audioMergePickingRef.current) {
             const clicked = nodesRef.current.find((node) => node.id === nodeId);
             if (clicked?.type === CanvasNodeType.Audio) {
+                pendingSelectionRef.current = null;
+                return;
+            }
+        }
+        // 视频合并拾取中：点素材节点只切换选中状态，绝不能顺手把节点拖走。
+        if (videoMergePickingRef.current) {
+            const clicked = nodesRef.current.find((node) => node.id === nodeId);
+            if (clicked && clicked.id !== videoMergePickingRef.current && isVideoMergeSourceNode(clicked)) {
                 pendingSelectionRef.current = null;
                 return;
             }
@@ -8409,6 +8657,19 @@ function AtelierCanvasPage() {
                     />
                 );
             }
+            if (contentNode.type === CanvasNodeType.VideoMerge) {
+                return (
+                    <CanvasVideoMergeNodeContent
+                        node={contentNode}
+                        clips={videoMergeResolvedByNodeId.get(contentNode.id) || []}
+                        isPicking={videoMergePickingNodeId === contentNode.id}
+                        isExporting={videoMergeExportingNodeId === contentNode.id}
+                        onTogglePicking={toggleVideoMergePicking}
+                        onConfigChange={handleConfigNodeChange}
+                        onExport={(nodeId) => void handleVideoMergeExport(nodeId)}
+                    />
+                );
+            }
             if (contentNode.type === CanvasNodeType.Merge) {
                 return (
                     <CanvasMergeNodeContent
@@ -8452,7 +8713,7 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptAudioCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAudioImport, handleRowAudiosChange, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme],
+        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptAudioCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAudioImport, handleRowAudiosChange, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, handleVideoMergeExport, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme, toggleVideoMergePicking, videoMergeExportingNodeId, videoMergePickingNodeId, videoMergeResolvedByNodeId],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;
