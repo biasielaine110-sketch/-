@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Combine, Download, FolderPlus, GripVertical, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Trash2, Unlink2, Video } from "lucide-react";
+import { Combine, Download, FolderPlus, GripVertical, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Sparkles, Trash2, Unlink2, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -44,6 +44,8 @@ export function CanvasNodeContextMenu({
     onOpenAudioTools,
     onOpenAudioMerge,
     onConvertType,
+    batchGenerateCount = 0,
+    onBatchGenerate,
 }: {
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
@@ -67,6 +69,9 @@ export function CanvasNodeContextMenu({
     onOpenAudioMerge?: () => void;
     /** Switch the node's generation type in place (image ↔ video); connections are kept. */
     onConvertType?: (node: CanvasNodeData, targetType: CanvasNodeType) => void;
+    /** 选区里可批量生成的节点数（图片 / 视频）。>=2 才在菜单顶部出现「一键生成」。 */
+    batchGenerateCount?: number;
+    onBatchGenerate?: () => void;
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -84,6 +89,7 @@ export function CanvasNodeContextMenu({
     // Image and video nodes are the same generation slot in two flavours, so either can become the
     // other. Other node types have no counterpart and simply never show the entry.
     const convertTarget = node ? nodeConversionTarget(node.type) : null;
+    const showBatchGenerate = menu.type === "node" && Boolean(node) && batchGenerateCount > 1 && Boolean(onBatchGenerate);
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -304,6 +310,21 @@ export function CanvasNodeContextMenu({
             onPointerDown={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.preventDefault()}
         >
+            {/* 多选批量动作：选区里有 >=2 个图片 / 视频节点时置顶，跟单节点的工具项分开
+                （它不作用于「右键的这个节点」，而是整个选区）。 */}
+            {showBatchGenerate ? (
+                <div className="mb-1 border-b pb-1" style={{ borderColor: theme.toolbar.border }}>
+                    <MenuButton
+                        icon={<Sparkles className="size-4" />}
+                        label={t("canvas.contextMenu.batchGenerate", { count: batchGenerateCount })}
+                        onClick={() => {
+                            onBeforeAction?.();
+                            onBatchGenerate?.();
+                            onClose();
+                        }}
+                    />
+                </div>
+            ) : null}
             {/* Type conversion is a structural node operation, not a tool: it stays out of the
                 reorderable list (and its saved order) and sits above it. */}
             {convertTarget && onConvertType && node ? (

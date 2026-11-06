@@ -113,6 +113,7 @@ import { buildJianyingBundle, secondsToMicro, type JianyingDraftClip } from "@/l
 import { createZip } from "@/lib/zip";
 import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFileBase, normalizeMergeClip, probeImageSize, probeVideoMeta, resolveMergeCanvasSize, videoMergeClipFromNode, type ResolvedVideoMergeClip } from "@/lib/canvas/video-merge";
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
+import { buildBatchGeneratePlan, isBatchGeneratableNode } from "@/lib/canvas/batch-generate";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, getGroupMemberNodes, normalizeConnection, resolveConnectionPairs, canConnectNodes, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
@@ -6839,7 +6840,12 @@ function AtelierCanvasPage() {
         if (isCanvasTextInteractionTarget(event.target)) return;
         event.preventDefault();
         event.stopPropagation();
-        setSelectedNodeIds(new Set([nodeId]));
+        // 右键落在**已选中**的一员上时保留整个选区（多选后右键要能出「一键生成」）；
+        // 落在选区外则按常规塌缩成这一个节点。用 ref 读，避免把选区状态塞进 CanvasNode 的 props。
+        const current = selectedNodeIdsRef.current;
+        if (current.size <= 1 || !current.has(nodeId)) {
+            setSelectedNodeIds(new Set([nodeId]));
+        }
         setSelectedConnectionId(null);
         setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId });
     }, []);
@@ -6854,6 +6860,40 @@ function AtelierCanvasPage() {
         if (!contextMenu || contextMenu.type !== "node") return null;
         return nodes.find((node) => node.id === contextMenu.nodeId) || null;
     }, [contextMenu, nodes]);
+
+    /** 右键菜单顶部「一键生成」作用的节点：选区里至少 2 个图片 / 视频节点才算数。 */
+    const batchGenerateNodeIds = useMemo(() => {
+        if (!contextMenu || contextMenu.type !== "node" || selectedNodeIds.size < 2) return [];
+        const byId = new Map(nodes.map((node) => [node.id, node]));
+        const ids = Array.from(selectedNodeIds).filter((id) => isBatchGeneratableNode(byId.get(id)));
+        return ids.length >= 2 ? ids : [];
+    }, [contextMenu, nodes, selectedNodeIds]);
+
+    /**
+     * 批量生成：把选区里的图片 / 视频节点一次性丢进生成队列。
+     *
+     * 刻意复用 `handleGenerateNode`（而不是另写一条请求链路），这样提示词上游合并、风格 / 摄像机修饰、
+     * 排队与中止、状态回写全都与单点生成一模一样；每个节点各自持一个 abort controller，互不影响。
+     */
+    const handleBatchGenerate = useCallback(
+        (nodeIds: string[]) => {
+            const plan = buildBatchGeneratePlan({
+                nodes: nodesRef.current,
+                nodeIds,
+                connections: connectionsRef.current,
+                isGenerating: isNodeGenerating,
+            });
+            if (!plan.items.length) {
+                message.warning(t("canvas.contextMenu.batchGenerateEmpty"));
+                return;
+            }
+            for (const item of plan.items) void handleGenerateNode(item.nodeId, item.mode, item.prompt);
+            message.success(t("canvas.contextMenu.batchGenerateStarted", { count: plan.items.length }));
+            const skipped = plan.skippedRunning + plan.skippedNoPrompt + plan.skippedType;
+            if (skipped > 0) message.info(t("canvas.contextMenu.batchGenerateSkipped", { count: skipped }));
+        },
+        [handleGenerateNode, isNodeGenerating, message, t],
+    );
 
     const imageContextHandlers = useMemo<ImageToolHandlers>(
         () => ({
@@ -9089,6 +9129,8 @@ function AtelierCanvasPage() {
                             convertNodeTypeById(node.id, targetType);
                             setContextMenu(null);
                         }}
+                        batchGenerateCount={batchGenerateNodeIds.length}
+                        onBatchGenerate={() => handleBatchGenerate(batchGenerateNodeIds)}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);

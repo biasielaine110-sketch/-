@@ -1678,6 +1678,10 @@ export default {
         contextMenu: {
             reorderHint: "Drag the handle to reorder buttons (saved to config for export/import)",
             dragHandle: "Drag to reorder",
+            batchGenerate: "Generate all ({{count}})",
+            batchGenerateEmpty: "None of the selected nodes can generate (add a prompt or connect a text node first)",
+            batchGenerateStarted: "Started generating {{count}} nodes",
+            batchGenerateSkipped: "{{count}} more were skipped (already running / no prompt / unsupported type)",
         },
         generation: {
             interrupted: "Generation was interrupted by a page refresh. Generate again.",
