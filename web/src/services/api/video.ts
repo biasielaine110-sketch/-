@@ -176,6 +176,11 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     if (isZhenzhenMuseVideoModel(selectedModel)) {
         return createMuseVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
     }
+    // APIMart `muse-video-ext`：另一套契约（/videos/generations + /tasks/{id} + image_urls），
+    // 落到下面的 OpenAI 形状会 404/400，所以必须在通用路径之前单独分流。
+    if (isApimartMuseVideoModel(selectedModel)) {
+        return createApimartMuseVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
+    }
     // Built-in AutoDL ComfyUI path owns resolution/ref_audio mapping. Never let a stale
     // channel script omit ref_audio_0 and surface "模型调用脚本执行失败".
     if (shouldUseAutodlComfyVideoBuiltin(selectedModel, requestConfig.baseUrl, script)) {
@@ -211,6 +216,8 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     assertVideoConfig(requestConfig, requestConfig.model);
     // muse 走自己的查询端点（`/video/generations/{id}`，结果在 `data.result_url`）。
     if (isZhenzhenMuseVideoModel(task.model)) return pollMuseVideoTask(requestConfig, task, options);
+    // APIMart muse 查的是 `/tasks/{id}`（`data.result.videos[0].url[0]`）。
+    if (isApimartMuseVideoModel(task.model)) return pollApimartMuseVideoTask(requestConfig, task, options);
     return pollOpenAIVideoTask(requestConfig, task, options);
 }
 
@@ -1011,6 +1018,124 @@ async function pollMuseVideoTask(config: AiConfig, task: VideoGenerationTask, op
     }
     // 这个中转站没有 muse 专用查询端点 → 用 OpenAI 兼容的 /videos/{id} 读（同站文档明确支持）。
     return pollOpenAIVideoTask(config, task, options);
+}
+
+/**
+ * APIMart `muse-video-ext`（https://docs.apimart.ai/cn/api-reference/videos/muse-video-ext/generation）。
+ *
+ * 它和 Seedance 的 `zhenzhen-video-muse` 是**两套不同契约**，共用一条路就是它跑不通的原因：
+ *   · 提交 `POST /v1/videos/generations`，轮询 `GET /v1/tasks/{task_id}`（不是 `/video/generations`）；
+ *   · 参考图字段是 `image_urls`（不是 `images`），比例字段是 `aspect_ratio`（不是 `size`，也不吃 WxH）；
+ *   · 提交响应 `{code:200, data:[{status:"submitted", task_id:"task_..."}]}` → 任务 ID 在 `data[0].task_id`；
+ *   · 查询响应的 `data` 是**对象**，`data.status` + `data.result.videos[0].url[0]`（url 是数组）；
+ *   · 规格写死 10s / 720p / 有声 / n=1；`audio:false`、`size:"1024x1024"`、`quality`、`seed` 一律别传。
+ */
+export function isApimartMuseVideoModel(model: string) {
+    return /muse-video-ext/i.test(modelOptionName(model));
+}
+
+/**
+ * 幂等键：一次「独立生成」一个新键；同一次提交的传输层重试沿用同一个键，
+ * 这样超时重发不会变成两笔扣费（文档 409 idempotency_in_progress 就是给这条用的）。
+ */
+function apimartMuseHeaders(config: AiConfig) {
+    const cryptoApi = typeof globalThis !== "undefined" ? (globalThis.crypto as Crypto | undefined) : undefined;
+    const key = cryptoApi?.randomUUID ? cryptoApi.randomUUID() : `muse-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    return { ...aiHeaders(config, "application/json"), Accept: "application/json", "Idempotency-Key": key };
+}
+
+/** `data[0].task_id` 为主；`X-APIMart-Response-Version: 2026-07-27` 那种版本则落在 `data.id`。导出供探针复用。 */
+export function apimartMuseTaskId(payload: unknown) {
+    const root = readObject(payload);
+    if (!root) return "";
+    const first = readObject(Array.isArray(root.data) ? root.data[0] : null);
+    const data = readObject(root.data);
+    const candidates = [first?.task_id, first?.id, data?.task_id, data?.id, root.task_id, root.id];
+    for (const value of candidates) {
+        if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
+}
+
+/** `data.result.videos[0].url[0]`；顺带兼容 `video_url` / `result_url` 这类同义写法。导出供探针复用。 */
+export function apimartMuseResultUrl(payload: unknown) {
+    const root = readObject(payload);
+    if (!root) return "";
+    const data = readObject(root.data) || root;
+    const result = readObject(data.result) || readObject(root.result);
+    const videos = Array.isArray(result?.videos) ? result.videos : [];
+    const first = readObject(videos[0]);
+    const candidates: unknown[] = [first?.url, first?.video_url, result?.video_url, result?.url, data.video_url, data.url, data.result_url];
+    for (const value of candidates) {
+        if (typeof value === "string" && /^https?:\/\//i.test(value.trim())) return value.trim();
+        if (Array.isArray(value)) {
+            const hit = value.find((item): item is string => typeof item === "string" && /^https?:\/\//i.test(item.trim()));
+            if (hit) return hit.trim();
+        }
+    }
+    return "";
+}
+
+/**
+ * 提交体。**只放文档认的字段**：`size`、`images`、`audio`、`quality`、`seed`、`negative_prompt`
+ * 都不是这个模型的参数（有的直接 400，有的静默忽略），发出去只是给中转站多一个判断点。
+ * 导出供探针断言字段面。
+ */
+export function buildApimartMuseVideoPayload(config: AiConfig, model: string, prompt: string, images: string[] = []) {
+    // 空 / auto 一律**省略**这个字段：文档明确不能传 "auto"（省略 = 文生 16:9、参考图生跟随构图）。
+    const ratio = museVideoSize(config);
+    return {
+        model: modelOptionName(model),
+        prompt,
+        duration: MUSE_VIDEO_SECONDS,
+        resolution: MUSE_VIDEO_RESOLUTION,
+        n: 1,
+        ...(ratio ? { aspect_ratio: ratio } : {}),
+        ...(images.length ? { image_urls: images.slice(0, 9) } : {}),
+    } as Record<string, unknown>;
+}
+
+async function createApimartMuseVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const modelName = modelOptionName(model);
+    assertVideoConfig(config, modelName);
+    if (!prompt.trim()) throw new Error(apiText("videoTaskCreateFailed"));
+    const images = await resolveMuseReferenceImages(references);
+    const payload = buildApimartMuseVideoPayload(config, modelName, prompt, images);
+    const path = "/videos/generations";
+    const { url: postUrl, bypass } = aiUrlForBody(config, path, payload);
+    const headers = apimartMuseHeaders(config);
+    try {
+        const response = await retryAlternateTransport(config, path, postUrl, payload, (url) => axios.post<unknown>(url, payload, { headers, signal: options?.signal }));
+        const id = apimartMuseTaskId(response.data);
+        if (!id) throw new Error(apiText("noVideoTaskId"));
+        return { id, provider: "openai", model };
+    } catch (error) {
+        throw new Error(readAxiosError(mapOversizeUploadError(error, bypass), apiText("videoTaskCreateFailed")));
+    }
+}
+
+async function pollApimartMuseVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    let payload: unknown;
+    try {
+        const response = await axios.get<unknown>(aiApiUrl(config, `/tasks/${encodeURIComponent(task.id)}`), { headers: aiHeaders(config), signal: options?.signal });
+        payload = response.data;
+    } catch (error) {
+        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
+    }
+    const root = readObject(payload) || {};
+    const data = readObject(root.data) || root;
+    const status = String(data.status || root.status || "").toLowerCase();
+    // 失败也可能是 HTTP 200 —— 只认 `data.status`，别拿 HTTP 码或 progress=100 当成功。
+    if (/fail|error|cancel|reject|denied/.test(status)) {
+        const errorNode = readObject(data.error);
+        const message = [errorNode?.message, data.error, data.message, data.msg, root.message, root.msg].find((value): value is string => typeof value === "string" && Boolean(value.trim()));
+        return { status: "failed", error: readApiErrorMessage(message) || apiText("videoGenerationFailed") };
+    }
+    const url = apimartMuseResultUrl(payload);
+    if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+    // `completed` 但这一轮还没写结果 URL、以及 `unknown` 这种暂不明确的状态，都继续轮 —— 别提前判死。
+    return { status: "pending" };
 }
 
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {

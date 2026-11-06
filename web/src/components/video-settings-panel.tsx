@@ -16,7 +16,7 @@ import {
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { isZhenzhenMuseVideoModel } from "@/services/api/video";
-import { resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import {
     FISHER_LORA_STRENGTH_OPTIONS,
     isMinimaxH3FisherWorkflowId,
@@ -34,6 +34,7 @@ import {
     type FisherPipelineMode,
 } from "@/lib/runninghub-workflow";
 import { isRelayMiniMaxH3Video } from "@/services/api/video";
+import { isApimartMuseVideoModel } from "@/services/api/video";
 import {
     COMFY_H3_STABLE_SEED,
     COMFY_H3_STABLE_SEED_B,
@@ -269,8 +270,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const rhInstanceType = normalizeRunningHubInstanceType(config.videoRhInstanceType);
     const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
     const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
-    /** Seedance.nz muse：固定 10s / 720p / 有声，时长与清晰度都不可调（传别的值 API 直接拒）。 */
-    const museVideo = isZhenzhenMuseVideoModel(model);
+    /** Seedance.nz muse / APIMart muse-video-ext：固定 10s / 720p / 有声，时长与清晰度都不可调（传别的值 API 直接拒）。 */
+    const museVideo = isZhenzhenMuseVideoModel(model) || isApimartMuseVideoModel(model);
     const qualityChoices = useMemo(() => {
         if (nativeComfy && !h3Comfy) return resolutionOptionsForFamily(nativeFamily);
         if (fisherRh || fisherLightRh) return fisherResolutionOptions;
@@ -531,7 +532,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     ) : null}
                     {museVideo ? (
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
-                            {t("settingsPanels.video.museQualityHint")}
+                            {t("settingsPanels.video.museQualityHint", { model: modelOptionName(model) })}
                         </div>
                     ) : null}
                     <div className={`grid gap-2.5 ${qualityChoices.length >= 3 ? "grid-cols-4" : "grid-cols-3"}`}>
@@ -578,7 +579,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 <SettingGroup title={t("settingsPanels.video.seconds")} color={theme.node.muted}>
                     {museVideo ? (
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
-                            {t("settingsPanels.video.museSecondsHint")}
+                            {t("settingsPanels.video.museSecondsHint", { model: modelOptionName(model) })}
                         </div>
                     ) : (
                     <div className="grid grid-cols-3 gap-2.5">
@@ -713,7 +714,7 @@ export function videoSettingsSummary(config: AiConfig) {
         return `${autodlH3ResolutionLabel(config.vquality, model)} · ${normalizeAutodlH3Duration(config.videoSeconds, model)}s`;
     }
     // muse 的时长 / 清晰度是服务端写死的，别把画布上的旋钮值写进摘要（会骗人）。
-    if (isZhenzhenMuseVideoModel(model)) return `720p · 10s`;
+    if (isZhenzhenMuseVideoModel(model) || isApimartMuseVideoModel(model)) return `720p · 10s`;
     const base = `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
     if (isMinimaxH3FisherWorkflowId(model) || isWorkFisherLightAiAppId(model) || isMinimaxH3SingularityLightAiAppId(model)) {
         const instance = normalizeRunningHubInstanceType(config.videoRhInstanceType);
