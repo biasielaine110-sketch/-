@@ -1034,6 +1034,12 @@ export function resolveScriptSystemPrompt(
          * （见 `STORY_SCRIPT_MOMAN_VIDEO_FORMAT`）。
          */
         momanScheme?: boolean;
+        /**
+         * 方案 = 第八套（麻薯 15 秒分镜组）→ 追加「`video_motion_prompt` 只能是
+         * `### 【分镜组N】（起—止秒）` + 组级四块 + 组内逐镜块」的覆盖段。
+         * 同前几套：system 是用户词库 / 技能正文，只能往后追加（见 `STORY_SCRIPT_MASHU_VIDEO_FORMAT`）。
+         */
+        mashuScheme?: boolean;
     },
 ): string {
     const custom = typeof override === "string" ? override.trim() : "";
@@ -1045,7 +1051,7 @@ export function resolveScriptSystemPrompt(
      * 第五 / 第六套都是「整段长视频脚本」，共用同一套冲突规避：
      * 模板 override 里「逐行抄标签块」那一条要换掉（见 buildTemplateSystemOverride 注释）。
      */
-    const longVideoScheme = Boolean(options?.museScheme || options?.ghostScheme || options?.momanScheme);
+    const longVideoScheme = Boolean(options?.museScheme || options?.ghostScheme || options?.momanScheme || options?.mashuScheme);
     if (options?.verbatimTemplate) extra.push(buildTemplateSystemOverride(options?.singleShot, longVideoScheme));
     /**
      * ⚠️ 长视频方案（第五 / 第六套）**不挂** `STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE`。
@@ -1064,6 +1070,7 @@ export function resolveScriptSystemPrompt(
     if (options?.museScheme) extra.push(STORY_SCRIPT_MUSE_VIDEO_SYSTEM_OVERRIDE);
     if (options?.ghostScheme) extra.push(STORY_SCRIPT_GHOST_VIDEO_SYSTEM_OVERRIDE);
     if (options?.momanScheme) extra.push(STORY_SCRIPT_MOMAN_VIDEO_SYSTEM_OVERRIDE);
+    if (options?.mashuScheme) extra.push(STORY_SCRIPT_MASHU_VIDEO_SYSTEM_OVERRIDE);
     // 去重段放最后：它要压过前面（含用户词库 / 技能正文）关于「每镜都写全资产描述」的说明。
     if (options?.assetDedupe) extra.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
     // 都没有时返回字符串与改造前逐字一致（探针守着老调用点）。
@@ -2928,6 +2935,242 @@ export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], p
     });
 }
 
+/* ── 第八套（麻薯 · 分镜组）────────────────────────────────────────────────
+ *
+ * 用户 2026-11-06 给的实样是一份「分镜组」脚本（一整段 = 一行 = 15 秒成片）：
+ *
+ *   ### 【分镜组2】（0—15秒）
+ *   【人物年龄与真人声音锚定】…
+ *   【核心静态画面】…
+ *   【全局光影与空气】空间与光源：… / 整体受光：… / 跨镜连续：…
+ *   【导演与场次参考】… / 参考方法：… / 本组应用：…
+ *   镜头 1:
+ *   持续时间: 3秒（本组第0—3秒）
+ *   景别与运镜: …
+ *   场景与配音:
+ *   【场景名称】… 【光影设定】… 【场景状态】… 【画面动作】… 【光影与空气】…
+ *   【说话状态】… 【原文台词】… 【配音执行稿】… 【发声节拍】… 【配音指令】…
+ *   [环境音效(SFX)：…]
+ *   镜头 2: …
+ *
+ * ⚠️ 与第七套的区别：第七套是「一行一镜 + 时间码段落」，第八套是「一行一组 + 组内多镜」。
+ * 两组都靠 `### 【分镜组N】` 认边界，组内 `镜头 N:` 只是组内的分镜，**不能再拆成表格行**
+ * （拆了「每镜 15 秒」立刻变成每镜 3 秒，而且组级的光影 / 声音锚定会丢）。
+ */
+
+/** `０-９` 全角数字 → 半角（`museCnNumber` 只认 `\d`）。 */
+function mashuDigits(value: unknown): string {
+    return String(value ?? "").replace(/[０-９]/g, (ch) => String(ch.charCodeAt(0) - 0xff10));
+}
+
+/** 生成器包在整段外面的 `_::~OUTPUT_START::~_` / `_::~FIELD::~_` / `_::~OUTPUT_END::~_`。 */
+function isMashuMarkupLine(line: unknown): boolean {
+    const text = String(line ?? "").trim();
+    return /^_*\s*::~[A-Za-z_]+::~_*$/.test(text);
+}
+
+/** `### 【分镜组2】（0—15秒）` / `## 【分镜组 二 】（第0—15秒）` / `【分镜组1】`。 */
+const MASHU_GROUP_HEADING = /^\s*#{0,6}\s*【\s*分镜组\s*([0-9０-９一二三四五六七八九十]+)\s*】\s*(?:[（(]\s*(?:本组)?\s*第?\s*([0-9０-９]+(?:\.[0-9]+)?)\s*[—–\-~～至]\s*([0-9０-９]+(?:\.[0-9]+)?)\s*秒?\s*[）)])?/;
+
+const MASHU_SHOT_HEADING = /^\s*镜头\s*([0-9０-９一二三四五六七八九十]+)\s*[：:]/;
+
+/**
+ * 源内容 / 模型返回里的分镜组段：`### 【分镜组N】（起—止秒）` 起，到下一组标题前止。
+ * 组内一切（含 `镜头 N:`）都留在正文里 —— 表格的一行就是这一整组。
+ */
+export function extractMashuStoryboardBlocks(sourceText: string): Array<{ shotNo: number; seconds: number; text: string }> {
+    const lines = String(sourceText || "").split(/\r?\n/);
+    const blocks: Array<{ shotNo: number; seconds: number; text: string }> = [];
+    let current: { shotNo: number; seconds: number; lines: string[] } | null = null;
+    const flush = () => {
+        if (current) blocks.push({ shotNo: current.shotNo, seconds: current.seconds, text: current.lines.join("\n").trim() });
+        current = null;
+    };
+    for (const line of lines) {
+        // 生成器的分隔标记不进正文（留在视频列里会被当成素材念出来）。
+        if (isMashuMarkupLine(line)) continue;
+        const matched = line.match(MASHU_GROUP_HEADING);
+        if (matched) {
+            flush();
+            const start = Number(mashuDigits(matched[2])) || 0;
+            const end = Number(mashuDigits(matched[3])) || 0;
+            current = {
+                shotNo: museCnNumber(mashuDigits(matched[1])),
+                seconds: end > start ? Math.round((end - start) * 100) / 100 : 0,
+                lines: [line.trim()],
+            };
+            continue;
+        }
+        if (!current) continue;
+        current.lines.push(line);
+    }
+    flush();
+    return blocks.filter((block) => block.shotNo > 0 && block.text);
+}
+
+/** 一段文本是不是「第八套认可的视频运动提示词」：有 `【分镜组N】` 且至少一个 `镜头 N:`。 */
+export function isMashuVideoScript(text: unknown): boolean {
+    const value = String(text ?? "");
+    if (!value.trim()) return false;
+    const group = /【\s*分镜组\s*[0-9０-９一二三四五六七八九十]+\s*】/.test(value);
+    const shot = /镜头\s*[0-9０-９一二三四五六七八九十]+\s*[：:]/.test(value);
+    return group && shot;
+}
+
+/** 组内按 `镜头 N:` 切开（保持顺序），第一段用于填「景别 / 画面描述 / 人物站位」这类单值列。 */
+function splitMashuShots(groupText: string): string[] {
+    const shots: string[] = [];
+    let current: string[] | null = null;
+    for (const line of String(groupText || "").split(/\r?\n/)) {
+        if (MASHU_SHOT_HEADING.test(line)) {
+            if (current) shots.push(current.join("\n").trim());
+            current = [line];
+            continue;
+        }
+        if (current) current.push(line);
+    }
+    if (current) shots.push(current.join("\n").trim());
+    return shots.filter(Boolean);
+}
+
+/**
+ * 从文本里取某个 `【标签】` 紧随的值（切到下一个 `【` / 换行后的 `镜头 N:` / `[环境音效` 前）。
+ * 组级四块与镜内十块共用 —— 两处的块名不重名，所以一个函数够用。
+ *
+ * ⚠️ 正则**不能带 `m` 标志**：m 模式下 `$` 是「行尾」，`【核心静态画面】` 这种「标签独占一行、
+ * 正文在下一行」的块会在标签行尾就被判成结束，取到空串（`.split(/[；;。]/)[0].slice(0, 60)` 也一样）。
+ * 这里用显式的 `\n\s*镜头N:` 当分镜边界、`$` 当全文结尾。
+ */
+function mashuBlockValue(text: string, label: string): string {
+    const source = String(text || "");
+    const pattern = new RegExp(`【\\s*${label}\\s*】([\\s\\S]*?)(?=【|\\n\\s*镜头\\s*[0-9０-９一二三四五六七八九十]+\\s*[：:]|\\[\\s*环境音效|$)`);
+    return museOneLine(source.match(pattern)?.[1] || "");
+}
+
+/** 组内所有镜的某个块拼起来（跳过「无」「无。」这类空话）。 */
+function mashuCollect(text: string, label: string): string[] {
+    const values = splitMashuShots(text)
+        .map((shot) => mashuBlockValue(shot, label))
+        .filter((value) => value && !/^无[。.]?$/.test(value));
+    return Array.from(new Set(values));
+}
+
+/** 一行 SFX：`[环境音效(SFX)：第1.4秒，接花时手掌与花束接触的轻微摩擦声。]`。 */
+function mashuSfxLines(text: string): string[] {
+    const found = String(text || "").match(/\[\s*环境音效[^\]]*\]/g) || [];
+    return Array.from(
+        new Set(
+            found
+                .map((item) => item.replace(/^\[\s*环境音效\s*\(SFX\)\s*[：:]?\s*/i, "").replace(/\]$/, "").trim())
+                .filter((item) => item && !/^无[。.]?$/.test(item)),
+        ),
+    );
+}
+
+/** 分镜组 → 一行分镜（键名对齐 `STORY_SCRIPT_CLASSIC_COLUMNS`）。 */
+function mashuRowRecord(block: { shotNo: number; seconds: number; text: string }): Record<string, unknown> {
+    const text = reflowLongVideoScript(block.text, "mashu");
+    const shots = splitMashuShots(text);
+    const first = shots[0] || text;
+    /** 组标题没写秒数时退回「组内各镜持续时间相加」。 */
+    const seconds =
+        block.seconds ||
+        shots.reduce((sum, shot) => sum + (Number(mashuDigits(shot.match(/持续时间\s*[：:]\s*([0-9０-９.]+)\s*秒/)?.[1])) || 0), 0);
+    const shotLine = museOneLine(first.match(/景别与运镜\s*[：:]\s*([^\n]*)/)?.[1] || "");
+    const shotSize = shotLine.split(/[；;]/)[0]?.trim() || shotLine;
+    const sceneName = mashuBlockValue(first, "场景名称").replace(/^[：:]\s*/, "");
+    const dialogueParts = mashuCollect(text, "原文台词");
+    const sfx = mashuSfxLines(text);
+    /** 「情绪」列只放一句语感锚定，不能把整段配音说明塞进去；「无对白…」这类占位直接留空。 */
+    const speakingLine = mashuBlockValue(first, "说话状态");
+    const emotionText = /^无/.test(speakingLine) ? "" : (speakingLine.split(/[；;。]/)[0] || "").slice(0, 60);
+    return {
+        duration: seconds ? String(Math.round(seconds)) : "",
+        shot: shotSize,
+        visual_description: mashuBlockValue(text, "核心静态画面"),
+        character_action: mashuBlockValue(first, "画面动作"),
+        blocking: mashuBlockValue(first, "场景状态"),
+        scene: sceneName,
+        scene_tags: sceneName,
+        lighting_mood: [mashuBlockValue(first, "光影设定"), mashuBlockValue(first, "光影与空气")].filter(Boolean).join("；"),
+        dialogue: dialogueParts.join(" → "),
+        emotion: emotionText,
+        sound: sfx.join("；"),
+        video_motion_prompt: text,
+        shot_prompt: "",
+        style_prompt: "",
+    };
+}
+
+/**
+ * 第八套的原文通道：模型**不按契约出表**、直接把分镜组脚本吐回来时，按 `### 【分镜组N】` 切行。
+ *
+ * ⚠️ 只有正文（首个非空字符不是 `{` / `[`）才走这里：JSON 契约里的 `video_motion_prompt`
+ * 同样包含 `### 【分镜组…`，若在 JSON 上也切，会把契约行拆成错乱的假行。
+ * JSON 形态交给通用通道 —— 列名对不上时再由 `normalizeStoryScriptMashuRows` 兜。
+ */
+function parseMashuStoryboardRows(raw: string, columns: StoryScriptColumn[]): StoryScriptRow[] {
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return [];
+    const head = String(raw || "").replace(/^[\s\u3000]+/, "")[0] || "";
+    if (head === "{" || head === "[") return [];
+    const blocks = extractMashuStoryboardBlocks(raw);
+    if (!blocks.length) return [];
+    return blocks.map((block, index) => normalizeStoryScriptRow({ ...mashuRowRecord(block), shot_no: block.shotNo || index + 1 }, index, columns));
+}
+
+/**
+ * 第八套整表后处理（幂等）：
+ *  ① 字面量 `\\n` / 被压成一行的分镜组 → `reflowLongVideoScript(text, "mashu")` 还原换行；
+ *  ② 视频列空着、但 `shot_prompt` 里塞的是这份分镜组脚本（模型写错列）→ 挪到视频列并清空分镜列；
+ *  ③ 视频列整格是 JSON（`{"prompt": …}` / 整个对象）→ 取出里面的分镜组正文。
+ */
+export function normalizeStoryScriptMashuRows(rows: readonly StoryScriptRow[], preset?: StoryScriptPresetId | string | null): StoryScriptRow[] {
+    if (!rows?.length) return rows as StoryScriptRow[];
+    const columns = getStoryScriptColumns(preset);
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
+    return rows.map((row) => {
+        const rawText = String(row.video_motion_prompt ?? "");
+        if (!rawText.trim()) {
+            const shotText = String(row.shot_prompt ?? "");
+            if (!shotText.trim()) return row;
+            const text = unwrapMomanJsonPrompt(shotText);
+            const reflowed = reflowLongVideoScript(text, "mashu");
+            if (!isMashuVideoScript(reflowed)) return row;
+            // 分镜组脚本整段落到视频列；「分镜提示词」列保持空白（它是图像段，不该重复整段脚本）。
+            return { ...row, video_motion_prompt: reflowed, shot_prompt: "" };
+        }
+        const text = reflowLongVideoScript(unwrapMomanJsonPrompt(rawText), "mashu");
+        return text === rawText ? row : { ...row, video_motion_prompt: text };
+    });
+}
+
+/**
+ * 第八套：源内容里贴了整套分镜组脚本时，按组号把整段填进 `video_motion_prompt`。
+ * 该列已经写成分镜组脚本时一个字节都不动（模型可能结合了本镜资产信息）。
+ */
+export function applyMashuVideoScriptOverlay(
+    rows: readonly StoryScriptRow[],
+    sourceText: string,
+    preset?: StoryScriptPresetId | string | null,
+): StoryScriptRow[] {
+    if (!rows?.length) return rows as StoryScriptRow[];
+    const columns = getStoryScriptColumns(preset);
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
+    const blocks = extractMashuStoryboardBlocks(sourceText);
+    if (!blocks.length) return rows as StoryScriptRow[];
+    const byShot = new Map<number, (typeof blocks)[number]>();
+    // 同组号出现多次 → 最后一个赢（用户可能贴了修订版）。
+    for (const block of blocks) byShot.set(block.shotNo, block);
+    return rows.map((row, index) => {
+        const shotNo = Number(row.shot_no) || index + 1;
+        const block = byShot.get(shotNo);
+        if (!block) return row;
+        const current = String(row.video_motion_prompt ?? "");
+        if (isMashuVideoScript(current)) return row;
+        return { ...row, video_motion_prompt: reflowLongVideoScript(block.text, "mashu") };
+    });
+}
+
 /**
  * 契约形状的「没有出表」返回：`{ title, rows: [], clarification / conflicts / message / … }`。
  *
@@ -2995,6 +3238,12 @@ export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetI
 
     const tableRows = parseMarkdownTable(raw, columns);
     if (tableRows.length) return { ok: true, title: "", rows: tableRows };
+
+    // 第八套（麻薯 · 分镜组）：模型不按契约、直接把 `### 【分镜组N】（0—15秒）` 脚本吐回来时，
+    // 按组切成表格行（一行 = 一组 15 秒）。放在 JSON / 表格之后：有契约就仍走契约，
+    // 只有整段是这种脚本正文时才认（JSON 形态在前面的通道已经返回，不会被这里拆散）。
+    const mashuRows = parseMashuStoryboardRows(raw, columns);
+    if (mashuRows.length) return { ok: true, title: "", rows: mashuRows };
 
     // 最后才试「用户自有模版」的逐镜标签块（`- **首帧图片提示词**：…`）。
     // 放在表格之后是刻意的：模型真吐了表格就还走表格，老行为不变。
@@ -4404,6 +4653,84 @@ const STORY_SCRIPT_MOMAN_VIDEO_SYSTEM_OVERRIDE = [
     STORY_SCRIPT_MOMAN_VIDEO_FORMAT,
 ].join("\n");
 
+/**
+ * 第八套（麻薯 · 优化镜头 / 音色 / 光影空气版）的 `video_motion_prompt` 格式 ——
+ * 用户 2026-11-06 给的实样就是一份**「分镜组」脚本**：
+ *
+ * ```
+ * ### 【分镜组2】（0—15秒）
+ * 【人物年龄与真人声音锚定】奶奶｜人物年龄：…｜VoiceID：NAINAI_01｜…
+ * 【核心静态画面】奶奶坐在画面左侧…
+ * 【全局光影与空气】空间与光源：… / 整体受光：… / 跨镜连续：…
+ * 【导演与场次参考】李安《饮食男女》… / 参考方法：… / 本组应用：…
+ * 镜头 1:
+ * 持续时间: 3秒（本组第0—3秒）
+ * 景别与运镜: …
+ * 场景与配音:
+ * 【场景名称】… 【光影设定】… 【场景状态】… 【画面动作】… 【光影与空气】…
+ * 【说话状态】… 【原文台词】… 【配音执行稿】… 【发声节拍】… 【配音指令】…
+ * [环境音效(SFX)：…]
+ * …（组内继续 镜头 2 / 镜头 3 …，秒数相加等于这一组的 duration）
+ * ```
+ *
+ * 与前几套的区别：**一个表格行 = 一个 15 秒分镜组**，组内 2~5 个镜头分秒切开。
+ * 所以这一列天然比别人的长，且**必须保留换行**（压成一行就完全没法用）。
+ *
+ * ⚠️ 同样 system 末尾 + 任务书末尾双挂，且只在 `scheme = mashu` 时生效。
+ */
+export const STORY_SCRIPT_MASHU_VIDEO_FORMAT = [
+    "## `video_motion_prompt` 的唯一合法格式（第八套 · 麻薯 分镜组）",
+    "⚠️ 本节只规定 `video_motion_prompt` **这一列的值**：整表仍按任务书输出，**优先给 JSON 契约（`rows` 数组）**；不要用 Markdown 管道表格 —— 它的单元格装不下换行，会把整段分镜组脚本压成一行流水句。这一列的换行必须原样保留（JSON 字符串里写 `\\n`），**禁止**写成 `### 【分镜组1】（0—15秒） 【人物年龄与真人声音锚定】… 镜头 1: …` 这样一行到底。",
+    "这一列每一行写一个**完整的分镜组**（一行 = 一段 15 秒成片，组内再分若干镜头）。行序与块名固定，一个都不能少：",
+    "",
+    "```",
+    "### 【分镜组N】（起—止秒）",
+    "【人物年龄与真人声音锚定】",
+    "{每个出场人物一行：名字｜人物年龄：…｜声音年龄感：…｜VoiceID：…｜基础音色：…｜真人发声特征：…｜连续性约束：…}",
+    "【核心静态画面】",
+    "{一句：谁在画面哪一侧、正在做什么、光落在哪里}",
+    "【全局光影与空气】",
+    "空间与光源：{光源的画外位置、高度、方向，以及人物遮挡与室内漫反射补光}",
+    "整体受光：{迎光面 / 暗部 / 色温与反差}",
+    "跨镜连续：{本组各镜必须继承的光位、轴线、人物左右关系}",
+    "【导演与场次参考】",
+    "{影片名 + 场次}",
+    "参考方法：{借鉴什么关系表达 / 为什么不照搬事件}",
+    "本组应用：{这一组具体怎么用}",
+    "镜头 1:",
+    "持续时间: X秒（本组第起—止秒）",
+    "景别与运镜: {景别；机位角度；固定或运动；焦点落在哪}",
+    "场景与配音:",
+    "【场景名称】…",
+    "【光影设定】…",
+    "【场景状态】{人物位置、道具状态、上一个动作停在哪}",
+    "【画面动作】{逐秒拆开：第0—1秒…；第1—2秒…}",
+    "【光影与空气】{本镜光位与遮挡变化，不新增光源}",
+    "【说话状态】{有没有对白、音量、口型约定}",
+    "【原文台词】{照抄原稿台词；没有就写「无。」}",
+    "【配音执行稿】{第A—B秒，谁说：“台词”；没有就写「无。」}",
+    "【发声节拍】{停连与重音；没有就写「无。」}",
+    "【配音指令】{说话人｜年龄 / 声音年龄感｜VoiceID｜基础音色｜场景状态｜说话状态｜发声方式}",
+    "[环境音效(SFX)：{秒数 + 具体音效；没有就写「无。」}]",
+    "镜头 2:",
+    "…（同上四行 + 十个【】块 + 一行 SFX，直到把这一组的秒数用完）",
+    "```",
+    "",
+    "硬约束：",
+    "- 每组首行必须是 `### 【分镜组N】（起—止秒）`：N 从 1 起连续递增；括号里的秒数**必须等于这一行 `duration` 列的值**（这一套默认每镜 15 秒，就写 `（0—15秒）`）。",
+    "- 组级四块**必须都有、顺序固定**：`【人物年龄与真人声音锚定】` / `【核心静态画面】` / `【全局光影与空气】` / `【导演与场次参考】`。`【全局光影与空气】` 下固定三行 `空间与光源：` / `整体受光：` / `跨镜连续：`；`【导演与场次参考】` 下固定两行 `参考方法：` / `本组应用：`。",
+    "- 组内每镜固定四行标题：`镜头 N:`（半角冒号）→ `持续时间: X秒（本组第A—B秒）` → `景别与运镜: …` → `场景与配音:`，紧接着十个 `【】` 块，顺序固定：`【场景名称】` / `【光影设定】` / `【场景状态】` / `【画面动作】` / `【光影与空气】` / `【说话状态】` / `【原文台词】` / `【配音执行稿】` / `【发声节拍】` / `【配音指令】`。每镜最后一行是 `[环境音效(SFX)：…]`（半角方括号，没有音效就写 `无。`）。",
+    "- 组内所有镜头的**持续时间相加必须正好等于**这一行的 `duration`（15 秒就写 3+5+2+5 这类组合），且括号里的「本组第A—B秒」首尾相接、从 0 起连续覆盖到 `duration`。",
+    "- 台词要**同时**出现在 `【原文台词】`、`【配音执行稿】`（带秒数区间）与 `【配音指令】`（带 VoiceID）里；没有台词的镜这三块都写「无。」，并明确「不做说话口型」。",
+    "- **禁止** `景别：` / `摄影机参数：` / `构图方式：` / `画面内容：` / `人物动作与表演：` / `运镜方式：` / `台词与声音：` / `负面：` 这类八段标签行；**禁止**第五套的 `### 视频N（X秒）` / `文生视频，…` / `角色设定：` / `时间轴：` / `Negative prompt：`；**禁止**第六套的 `———————————— 镜头N｜起—止秒`；**禁止**第七套的 `0.00—1.50：【景别，运镜】…` 时间码行；**禁止** `[时长：5s]` 方括号时长、`（…）+（…）` 括号链、把 `shot_prompt` 整段复制过来。",
+    "- 源稿用 `@role_xxx` / `@scene_xxx` / `@prop_xxx` 这类资产 id 指代角色、场景、道具时，在 `【场景状态】` / `【画面动作】` 里原样保留，不要换成自然语言。",
+].join("\n");
+
+const STORY_SCRIPT_MASHU_VIDEO_SYSTEM_OVERRIDE = [
+    "本节优先级高于上文所有关于 `video_motion_prompt` 的写法说明（含 6 段链式、8 段标签块、`[a] + [b]` 括号连接、`[时长：Xs]`、任何「一行一个标签」的字段清单，以及第五套 `### 视频N（X秒）`、第六套 `———————————— 镜头N｜起—止秒`、第七套 `0.00—1.50：【景别，运镜】`）。",
+    STORY_SCRIPT_MASHU_VIDEO_FORMAT,
+].join("\n");
+
 /** 一行是不是「已经是八段标签块」（至少命中四个标签就算 —— 容忍模型少写一两行）。 */
 function isDirectorVideoBlockText(text: unknown): boolean {
     const value = String(text || "");
@@ -4865,6 +5192,7 @@ export function buildStoryScriptSchemeFormatHint(scheme?: unknown): string {
     if (id === "muse") return STORY_SCRIPT_MUSE_VIDEO_FORMAT;
     if (id === "ghost") return STORY_SCRIPT_GHOST_VIDEO_FORMAT;
     if (id === "moman") return STORY_SCRIPT_MOMAN_VIDEO_FORMAT;
+    if (id === "mashu") return STORY_SCRIPT_MASHU_VIDEO_FORMAT;
     return "";
 }
 
@@ -4936,7 +5264,7 @@ function museSlotOf(label: string): MuseSlot | null {
  * 这里只做一件事：在**已知段名前面**补换行，不新增 / 删除任何字符。
  * 判据：必须有一行同时命中 ≥2 个段名（确实被压平了才动手）→ 已经分好行的文本一个字节都不改，幂等。
  */
-export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "director" | "moman"): string {
+export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "director" | "moman" | "mashu"): string {
     let raw = String(text ?? "");
     if (!raw.trim()) return raw;
     /**
@@ -4975,7 +5303,32 @@ export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "d
                 ? [
                       // 第七套没有段标题，唯一的分段依据就是时间码段落（见下面的 itemPattern）。
                   ]
-              : [
+                : kind === "mashu"
+                  ? [
+                        // 第八套：`### 【分镜组N】（0—15秒）` 独占一行，组级四块与镜内十块各占一行，
+                        // 逐镜标题 `镜头 1:` 与四行头也在前面断开。
+                        { re: /###\s*【分镜组/g },
+                        { re: /【人物年龄与真人声音锚定】/g, after: true },
+                        { re: /【核心静态画面】/g, after: true },
+                        { re: /【全局光影与空气】/g, after: true },
+                        { re: /【导演与场次参考】/g, after: true },
+                        { re: /镜头\s*[0-9０-９一二三四五六七八九十]+\s*[：:]/g },
+                        { re: /持续时间\s*[：:]/g },
+                        { re: /景别与运镜\s*[：:]/g },
+                        { re: /场景与配音\s*[：:]/g },
+                        { re: /【场景名称】/g, after: true },
+                        { re: /【光影设定】/g, after: true },
+                        { re: /【场景状态】/g, after: true },
+                        { re: /【画面动作】/g, after: true },
+                        { re: /【光影与空气】/g, after: true },
+                        { re: /【说话状态】/g, after: true },
+                        { re: /【原文台词】/g, after: true },
+                        { re: /【配音执行稿】/g, after: true },
+                        { re: /【发声节拍】/g, after: true },
+                        { re: /【配音指令】/g, after: true },
+                        { re: /\[环境音效\s*\(SFX\)/gi },
+                    ]
+                  : [
                     { re: /[—―﹣－─━﹘]{4,}/g, after: true },
                     { re: /镜头\s*[0-9０-９一二三四五六七八九十]+\s*[｜|]\s*\d/g },
                     { re: /【全片光影与空气】/g, after: true },

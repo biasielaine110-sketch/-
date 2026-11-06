@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { buildScriptGhostPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
+import { buildScriptGhostPrefill, buildScriptMashuPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import {
     buildStoryScriptAssetDescriptionHints,
@@ -413,6 +413,7 @@ export function CanvasScriptNodeContent({
             muse: buildScriptSchemePrefill(globalConfig?.textPrompts, "muse"),
             ghost: buildScriptGhostPrefill(globalConfig?.textPrompts, skillPacks),
             moman: buildScriptMomanPrefill(globalConfig?.textPrompts, skillPacks),
+            mashu: buildScriptMashuPrefill(globalConfig?.textPrompts, skillPacks),
         }),
         [globalConfig?.textPrompts, skillPacks],
     );
@@ -422,6 +423,7 @@ export function CanvasScriptNodeContent({
     const musePrefill = schemePrefills.muse;
     const ghostPrefill = schemePrefills.ghost;
     const momanPrefill = schemePrefills.moman;
+    const mashuPrefill = schemePrefills.mashu;
     /** 当前方案对应的预填（第一套没有预填）。 */
     const schemePrefill: ScriptSchemePrefill | null = schemeId === "builtin" ? null : schemePrefills[schemeId];
     /**
@@ -1043,7 +1045,7 @@ export function CanvasScriptNodeContent({
     /** 方案 toast 里「缺了哪一段」的中文名。 */
     const schemePartLabel = (part: "system" | "asset" | "shot") => t(`canvas.scriptNode.schemePart_${part}`);
     /** 方案 toast 的 i18n 名（`library` → `Library` / `x20` → `X20` / `director` → `Director` / `muse` → `Muse`）。 */
-    const schemeToastName = (id: ScriptLibrarySchemeId) => (id === "library" ? "Library" : id === "x20" ? "X20" : id === "director" ? "Director" : id === "muse" ? "Muse" : id === "ghost" ? "Ghost" : "Moman");
+    const schemeToastName = (id: ScriptLibrarySchemeId) => (id === "library" ? "Library" : id === "x20" ? "X20" : id === "director" ? "Director" : id === "muse" ? "Muse" : id === "ghost" ? "Ghost" : id === "moman" ? "Moman" : "Mashu");
 
     /**
      * 真正落地方案切换。
@@ -1075,6 +1077,14 @@ export function CanvasScriptNodeContent({
         const toastName = schemeToastName(next);
         patchMetadata({
             scriptScheme: next,
+            /**
+             * 第八套（麻薯 · 分镜组）**切过去就默认「每镜 15 秒」**（用户 2026-11-06 明确要求）：
+             * 这套的 `video_motion_prompt` 一行就是一个 15 秒分镜组（组内 3+5+2+5 这类组合），
+             * 时长停在默认 5 秒会让每一行只出 5 秒成片，整组表演被砍掉三分之二。
+             * ⚠️ 只动「每镜时长」，**不替用户改「视频分段」** —— 那个是铺链方式，用户自己选的
+             * （与时长 pill 的既有口径一致，见 segmentSelector 注释）。
+             */
+            ...(next === "mashu" ? { scriptSegmentSeconds: "15" as const } : {}),
             // 只在**离开第一套**时备份：词库方案之间互换时若再备份，存进去的会是刚被另一套预填的文案，
             // 用户真正手写的那份就永久丢了。
             ...(schemeId === "builtin"
@@ -1576,7 +1586,7 @@ export function CanvasScriptNodeContent({
                 只有资产词条时切过去也等于没切（见 `resolveAutoApplyScriptScheme`）。
                 第五 / 第六套只手动选、不参与默认判定，但要一起数进来判断「到底有没有词可用」；
                 第六套那一段来自技能库，没装技能时同样是空。 */}
-            {!node.metadata?.scriptScheme && !directorPrefill.system && !directorPrefill.shot && !x20Prefill.system && !x20Prefill.shot && !libraryPrefill.system && !libraryPrefill.shot && !musePrefill.system && !musePrefill.shot && !ghostPrefill.system && !ghostPrefill.shot && !momanPrefill.system && !momanPrefill.shot ? (
+            {!node.metadata?.scriptScheme && !directorPrefill.system && !directorPrefill.shot && !x20Prefill.system && !x20Prefill.shot && !libraryPrefill.system && !libraryPrefill.shot && !musePrefill.system && !musePrefill.shot && !ghostPrefill.system && !ghostPrefill.shot && !momanPrefill.system && !momanPrefill.shot && !mashuPrefill.system && !mashuPrefill.shot ? (
                 <span className="opacity-60">{t("canvas.scriptNode.schemeDefaultOff")}</span>
             ) : null}
         </div>

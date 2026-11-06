@@ -34,26 +34,34 @@ import type { TextPromptEntry } from "@/constant/text-prompt-library";
  *   这一套的 `视频运动提示词` 是**按时间码分段的 JSON 分镜**里 `prompt` 字段那种形态：
  *   `0.00—1.50：【局部特写，微幅下移】…` 一段一行、覆盖整段时长（见 `STORY_SCRIPT_MOMAN_VIDEO_FORMAT`）；
  *   模型若直接把 storyboard JSON 吐回来，解析侧按 `prompt` 整段填入（`parseMomanStoryboardRows`）。
+ * - `mashu`：第八套 · 麻薯------优化镜头，音色，光影空气版（2026-11-06 用户要求）——
+ *   与第七套同为「三段来源各不相同」（自定义 ← 词库、分镜 ← 技能库、资产 ← 词库），见 `buildScriptMashuPrefill`。
+ *   这一套的 `视频运动提示词` 是**「分镜组」脚本**：`### 【分镜组N】（起—止秒）` + 组级四块
+ *   （`【人物年龄与真人声音锚定】` / `【核心静态画面】` / `【全局光影与空气】` / `【导演与场次参考】`）
+ *   + 组内逐镜 `镜头 N:` + `持续时间:` + `景别与运镜:` + `场景与配音:`（其下十个 `【…】` 块）
+ *   + 每镜一行 `[环境音效(SFX)：…]`（见 `STORY_SCRIPT_MASHU_VIDEO_FORMAT`）。
+ *   ⚠️ 这一套**切过去就顺手把「每镜时长」设成 15 秒**（用户 2026-11-06 明确要求）——
+ *   一个分镜组正好就是一行 15 秒的成片，组内 2~5 个镜头相加凑满 15 秒。
  *
  * ⚠️ 默认是 **`director`（第四套）**（2026-10-23 用户要求：01 分镜表默认走第四套；词库里没有
  * 影视分镜导演那一条时回落第二套 `library`；都没有则停在内置）。`resolveScriptSchemeId`
  * **只做归一化**，不承担默认值 —— 默认行为由 `resolveAutoApplyScriptScheme` 判定，组件在挂载后
  * 真的把三段预填进去。若把这里的默认值改成 `director`，按钮会亮成第四套、而三个输入框还是空的，
  * 生成时照样走内置提示词，界面与行为对不上（这个坑第一版就踩过）。
- * 第五 / 第六 / 第七套同样**只手点、不进自动判定**。
+ * 第五 / 第六 / 第七 / 第八套同样**只手点、不进自动判定**。
  *
  * 为什么是「预填进那三个输入框」而不是另开一条注入通道：那三个字段本来就是这个节点的
  * 覆盖入口（`resolveScriptSystemPrompt` / `buildScriptGenerationPromptSections` 都读它们），
  * 预填之后用户可以照常打开弹窗改一两句，改完仍然生效 —— 方案只是「一键填好」，不是封闭开关。
  */
-export type ScriptSchemeId = "builtin" | "library" | "x20" | "director" | "muse" | "ghost" | "moman";
+export type ScriptSchemeId = "builtin" | "library" | "x20" | "director" | "muse" | "ghost" | "moman" | "mashu";
 
-/** 方案切换器的渲染顺序（第一套 → 第七套）。 */
-export const SCRIPT_SCHEME_IDS = ["builtin", "library", "x20", "director", "muse", "ghost", "moman"] as const satisfies readonly ScriptSchemeId[];
+/** 方案切换器的渲染顺序（第一套 → 第八套）。 */
+export const SCRIPT_SCHEME_IDS = ["builtin", "library", "x20", "director", "muse", "ghost", "moman", "mashu"] as const satisfies readonly ScriptSchemeId[];
 
 /** 读方案：认不出 / 没设过一律按 `builtin` 渲染，默认值交给自动预填。 */
 export function resolveScriptSchemeId(value: unknown): ScriptSchemeId {
-    return value === "library" || value === "x20" || value === "director" || value === "muse" || value === "ghost" || value === "moman" ? value : "builtin";
+    return value === "library" || value === "x20" || value === "director" || value === "muse" || value === "ghost" || value === "moman" || value === "mashu" ? value : "builtin";
 }
 
 /** 「有预填内容」的几套方案（第一套不在其中）。 */
@@ -92,18 +100,26 @@ export const SCRIPT_SCHEME_LIBRARY_NEEDLES = {
      * 归一后标题是 `剧本转分镜15秒不固定为15秒镜头时长魔漫`，两个 needle 都要在。
      */
     shotMoman: ["剧本转分镜", "魔漫"],
-    /** 最佳短剧 · 资产提取提示词（第二 / 三 / 四 / 五 / 六 / 七套方案共用） */
+    /**
+     * 第八套 · 麻薯------优化镜头，音色，光影空气版 —— **自定义系统提示词**取这一条；
+     * 同一标题的**分镜提示词**来自技能库（见 `SCRIPT_SCHEME_SKILL_NEEDLES.shotMashu`）。
+     * 归一后标题是 `麻薯优化镜头音色光影空气版`，两个 needle 都要在。
+     */
+    shotMashu: ["麻薯", "光影空气"],
+    /** 最佳短剧 · 资产提取提示词（第二 ~ 第八套方案共用） */
     assetExtract: ["资产提取"],
-    /** 配合最佳拍档生图（第二 / 三 / 四 / 五 / 六 / 七套方案共用） */
+    /** 配合最佳拍档生图（第二 ~ 第八套方案共用） */
     assetPartner: ["最佳拍档"],
 } as const;
 
-/** 第六 / 第七套在**技能库**（不是词库）里按标题找的那条。 */
+/** 第六 / 第七 / 第八套在**技能库**（不是词库）里按标题找的那条。 */
 export const SCRIPT_SCHEME_SKILL_NEEDLES = {
     /** 第六套：`鬼怪-----光影全流程` */
     shotGhost: ["鬼怪", "光影全流程"],
     /** 第七套：`剧本转分镜15秒（不固定为15秒镜头时长）-魔漫`（填「分镜提示词」） */
     shotMoman: ["剧本转分镜", "魔漫"],
+    /** 第八套：`麻薯------优化镜头，音色，光影空气版`（填「分镜提示词」） */
+    shotMashu: ["麻薯", "光影空气"],
 } as const;
 
 /**
@@ -189,6 +205,11 @@ export function resolveMomanSkillPrompt(skills: readonly ScriptSchemeSkillSource
     return resolveSchemeSkillPrompt(skills, SCRIPT_SCHEME_SKILL_NEEDLES.shotMoman);
 }
 
+/** 第八套：技能库里的「麻薯------优化镜头，音色，光影空气版」，只填「分镜提示词」。 */
+export function resolveMashuSkillPrompt(skills: readonly ScriptSchemeSkillSource[] | null | undefined): { text: string; title: string } {
+    return resolveSchemeSkillPrompt(skills, SCRIPT_SCHEME_SKILL_NEEDLES.shotMashu);
+}
+
 export type ScriptSchemePrefill = {
     /** 这次预填属于哪套方案（`library` / `x20` / `director` / `muse` / `ghost`）。 */
     scheme: ScriptLibrarySchemeId;
@@ -211,6 +232,8 @@ function shotNeedlesOf(scheme: ScriptLibrarySchemeId): readonly string[] {
     if (scheme === "muse") return SCRIPT_SCHEME_LIBRARY_NEEDLES.shotMuse;
     // 第七套：自定义系统提示词取词库这一条（分镜提示词另有来源 —— 技能库，见 buildScriptMomanPrefill）。
     if (scheme === "moman") return SCRIPT_SCHEME_LIBRARY_NEEDLES.shotMoman;
+    // 第八套：同第七套，自定义系统提示词取词库（分镜提示词来自技能库，见 buildScriptMashuPrefill）。
+    if (scheme === "mashu") return SCRIPT_SCHEME_LIBRARY_NEEDLES.shotMashu;
     // 第六套的自定义 / 分镜来自**技能**不是词库 —— 返回空 needle，误调也绝不会串到第二套词条。
     if (scheme === "ghost") return [];
     return SCRIPT_SCHEME_LIBRARY_NEEDLES.shot;
@@ -232,6 +255,8 @@ function collectAssetParts(entries: readonly TextPromptEntry[] | null | undefine
  * 第三套取「火_X20_主图分镜图_简洁版」，第四套取「影视分镜导演」，第五套取「muse-长视频」；
  * 资产提示词各套完全一样（资产提取 + 配合最佳拍档生图）。
  * ⚠️ 第六套不走这里 —— 见 `buildScriptGhostPrefill`（来源是技能，不是词库）。
+ * ⚠️ 第七 / 第八套也不走这里 —— 见 `buildScriptMomanPrefill` / `buildScriptMashuPrefill`
+ * （system 与 shot 来源不同，不能被「一段两用」合并）。
  *
  * 一段两用是用户明确要求的（自定义提示词与分镜提示词填同一条）；
  * 两段资产提示词用空行拼起来，避免两套要求粘成一句。
@@ -305,6 +330,40 @@ export function buildScriptMomanPrefill(
     const assetParts = collectAssetParts(entries);
     const result: ScriptSchemePrefill = {
         scheme: "moman",
+        system: systemEntry?.content?.trim() || "",
+        shot: skill.text,
+        asset: assetParts.map((entry) => entry.content.trim()).join("\n\n"),
+        titles: {
+            system: systemEntry?.title || "",
+            shot: skill.title,
+            asset: assetParts.map((entry) => entry.title),
+        },
+        missing: [],
+    };
+    if (!result.system) result.missing.push("system");
+    if (!result.asset) result.missing.push("asset");
+    if (!result.shot) result.missing.push("shot");
+    return result;
+}
+
+/**
+ * 第八套（麻薯 · 优化镜头 / 音色 / 光影空气版）的预填 —— 与第七套同构，**三段来源各不相同**：
+ *   ① 自定义系统提示词 ← **词库**「麻薯------优化镜头，音色，光影空气版」；
+ *   ② 资产提示词 ← 词库「最佳短剧-资产提取提示词」+「配合最佳拍档生图」（与其它套共用）；
+ *   ③ 分镜提示词 ← **技能库**同名 doc 技能的正文（运行时按标题取，代码里不写死）。
+ *
+ * 与第七套的唯一差别是 needle 不同（麻薯 / 光影空气），所以**不能**直接复用 `buildScriptMomanPrefill`
+ * —— 那会拿「剧本转分镜 + 魔漫」去匹配，第八套永远命中不到自己的词条。
+ */
+export function buildScriptMashuPrefill(
+    entries: readonly TextPromptEntry[] | null | undefined,
+    skills: readonly ScriptSchemeSkillSource[] | null | undefined,
+): ScriptSchemePrefill {
+    const systemEntry = resolvePromptLibraryEntry(entries, SCRIPT_SCHEME_LIBRARY_NEEDLES.shotMashu);
+    const skill = resolveMashuSkillPrompt(skills);
+    const assetParts = collectAssetParts(entries);
+    const result: ScriptSchemePrefill = {
+        scheme: "mashu",
         system: systemEntry?.content?.trim() || "",
         shot: skill.text,
         asset: assetParts.map((entry) => entry.content.trim()).join("\n\n"),
