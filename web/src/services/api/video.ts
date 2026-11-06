@@ -1272,32 +1272,54 @@ async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, pr
     const size = normalizeRelayH3Size(config.size, config.vquality);
     const metasoSize = normalizeMetasoH3Size(config.size, config.vquality);
     const resolution = /high|2k|1080|1440|2560/i.test(config.vquality || "") ? "2K" : "768P";
+    // 「请求尺寸」和「参考图裁切尺寸」必须是同一个值：不一致时上游只会认其中一个，
+    // 另一个被静默忽略 —— 表现就是「明明选了 1:1 / 21:9，出来的却是 16:9」。
+    // 官方 H3 只有 16:9 / 9:16（及近似竖版）这几档，其余比例用 CometAPI 的 WxH 表。
+    const targetSize = ["16:9", "9:16", "3:4", "2:3"].includes(ratio) ? metasoSize : size;
 
+    // ⚠️ H3 的构图比例实际来自首帧 / 参考图本身：中转站对 `size` / `aspect_ratio` 基本是
+    //    「收下但不报错」，出片仍按参考图比例来。所以必须先把参考图 **cover 裁到目标比例**
+    //    再上传（与 Metaso 路径共用 `resizeImageDataUrlToExactSize`）—— 否则用户选 16:9、
+    //    参考图是竖图，成品依旧是 9:16。裁切只改画幅，不改构图中心。
     const imageUrls: string[] = [];
     for (const image of references.slice(0, 9)) {
-        const publicUrl = [image.url, image.dataUrl].map((value) => String(value || "").trim()).find((value) => isPublicHttpUrl(value) && !value.startsWith("data:"));
-        if (publicUrl) {
-            imageUrls.push(publicUrl);
-            continue;
-        }
-        const dataUrl = await imageToDataUrl(image);
-        if (!dataUrl?.startsWith("data:image/")) continue;
+        let dataUrl = "";
         try {
-            const blob = await (await fetch(dataUrl)).blob();
-            const uploaded = await uploadProviderMediaFile(config, blob, "reference.png", options);
-            if (isPublicHttpUrl(uploaded) && !uploaded.startsWith("data:")) imageUrls.push(uploaded);
+            dataUrl = await imageToDataUrl(image);
         } catch {
-            // Keep going — text-to-video may still work without a reference URL.
+            dataUrl = "";
         }
+        if (dataUrl?.startsWith("data:image/")) {
+            try {
+                const sized = await resizeImageDataUrlToExactSize(dataUrl, targetSize);
+                const blob = await (await fetch(sized)).blob();
+                const uploaded = await uploadProviderMediaFile(config, blob, publicImageFilename(blob), options);
+                if (isPublicHttpUrl(uploaded) && !uploaded.startsWith("data:")) {
+                    imageUrls.push(uploaded);
+                    continue;
+                }
+            } catch {
+                // 裁切 / 上传失败 → 退回原图直连：比例可能不保，但别让整单失败。
+            }
+        }
+        const publicUrl = [image.url, image.dataUrl].map((value) => String(value || "").trim()).find((value) => isPublicHttpUrl(value) && !value.startsWith("data:"));
+        if (publicUrl) imageUrls.push(publicUrl);
     }
 
     const attempts: Record<string, unknown>[] = [
         // New API / Sora-compatible JSON (primary for manxueapi.com).
+        // 🔴 比例字段必须**一次给全**：不同中转分别读 `size` / `aspect_ratio` / `ratio`，
+        //    不认的会被忽略；但绝不能像以前那样「第一发只给 size，返回 200 就再也不发
+        //    aspect_ratio」—— 那正是「选了 16:9 出来还是 9:16」的第二个原因。
         {
             model: modelName,
             prompt,
             seconds,
-            size: metasoSize,
+            duration: secondsNum,
+            size: targetSize,
+            aspect_ratio: ratio,
+            ratio,
+            resolution,
             ...(imageUrls[0] ? { input_reference: { image_url: imageUrls[0] } } : {}),
         },
         // Same shape with CometAPI WxH sizes some H3 adapters expect.
@@ -1305,7 +1327,11 @@ async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, pr
             model: modelName,
             prompt,
             seconds,
+            duration: secondsNum,
             size,
+            aspect_ratio: ratio,
+            ratio,
+            resolution,
             ...(imageUrls[0] ? { input_reference: { image_url: imageUrls[0] } } : {}),
         },
         // MiniMax-native field names used by some New API model adapters.
@@ -1313,8 +1339,11 @@ async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, pr
             model: modelName,
             prompt,
             duration: secondsNum,
+            seconds,
+            size: targetSize,
             resolution,
             aspect_ratio: ratio,
+            ratio,
             ...(imageUrls[0] ? { first_frame_image: imageUrls[0] } : {}),
         },
     ];
@@ -1342,14 +1371,18 @@ async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, pr
         body.append("model", modelName);
         body.append("prompt", prompt);
         body.append("seconds", seconds);
-        body.append("size", size);
+        body.append("size", targetSize);
+        body.append("aspect_ratio", ratio);
+        body.append("ratio", ratio);
         for (const imageUrl of imageUrls.slice(0, 9)) body.append("images", imageUrl);
         if (!imageUrls.length) {
             for (const image of references.slice(0, 9)) {
                 const rawDataUrl = await imageToDataUrl(image);
                 if (!rawDataUrl?.startsWith("data:image/")) continue;
+                // 与上面一致：先 cover 裁到目标画幅，再压体积（不然还是按参考图比例出片）。
+                const sizedDataUrl = await resizeImageDataUrlToExactSize(rawDataUrl, targetSize).catch(() => rawDataUrl);
                 // Compressed so the multipart body fits the site-proxy cap.
-                const dataUrl = await compressReferenceDataUrl(rawDataUrl, Math.max(1, references.length));
+                const dataUrl = await compressReferenceDataUrl(sizedDataUrl, Math.max(1, references.length));
                 body.append("input_reference", await dataUrlToFile({ ...image, dataUrl }));
             }
         }
@@ -1391,7 +1424,7 @@ function normalizeMetasoH3Seconds(value: string) {
 }
 
 /** Metaso documented sizes: 1280x720, 720x1280, 1792x1024, 1024x1792. */
-function normalizeMetasoH3Size(size: string, quality: string) {
+export function normalizeMetasoH3Size(size: string, quality: string) {
     const ratio = normalizeVideoRatio(size);
     const high = /high|2k|1080|1792|1024x1792|1792x1024/i.test(quality || "") || /1792|1024x1792|1792x1024/i.test(size || "");
     if (ratio === "9:16" || ratio === "3:4" || ratio === "2:3") return high ? "1024x1792" : "720x1280";
@@ -1399,7 +1432,7 @@ function normalizeMetasoH3Size(size: string, quality: string) {
 }
 
 /** CometAPI canonical H3 WxH table (768P / 2K). */
-function normalizeRelayH3Size(size: string, quality: string) {
+export function normalizeRelayH3Size(size: string, quality: string) {
     const ratio = normalizeVideoRatio(size);
     const high = /high|2k|1080|1440|2560|2912/i.test(quality || "") || /2560|1440|2912|1920/i.test(size || "");
     const table: Record<string, { sd: string; hd: string }> = {
