@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { buildScriptGhostPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
+import { buildScriptGhostPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import {
     buildStoryScriptAssetDescriptionHints,
@@ -412,6 +412,7 @@ export function CanvasScriptNodeContent({
             director: buildScriptSchemePrefill(globalConfig?.textPrompts, "director"),
             muse: buildScriptSchemePrefill(globalConfig?.textPrompts, "muse"),
             ghost: buildScriptGhostPrefill(globalConfig?.textPrompts, skillPacks),
+            moman: buildScriptMomanPrefill(globalConfig?.textPrompts, skillPacks),
         }),
         [globalConfig?.textPrompts, skillPacks],
     );
@@ -420,6 +421,7 @@ export function CanvasScriptNodeContent({
     const directorPrefill = schemePrefills.director;
     const musePrefill = schemePrefills.muse;
     const ghostPrefill = schemePrefills.ghost;
+    const momanPrefill = schemePrefills.moman;
     /** 当前方案对应的预填（第一套没有预填）。 */
     const schemePrefill: ScriptSchemePrefill | null = schemeId === "builtin" ? null : schemePrefills[schemeId];
     /**
@@ -1041,7 +1043,7 @@ export function CanvasScriptNodeContent({
     /** 方案 toast 里「缺了哪一段」的中文名。 */
     const schemePartLabel = (part: "system" | "asset" | "shot") => t(`canvas.scriptNode.schemePart_${part}`);
     /** 方案 toast 的 i18n 名（`library` → `Library` / `x20` → `X20` / `director` → `Director` / `muse` → `Muse`）。 */
-    const schemeToastName = (id: ScriptLibrarySchemeId) => (id === "library" ? "Library" : id === "x20" ? "X20" : id === "director" ? "Director" : id === "muse" ? "Muse" : "Ghost");
+    const schemeToastName = (id: ScriptLibrarySchemeId) => (id === "library" ? "Library" : id === "x20" ? "X20" : id === "director" ? "Director" : id === "muse" ? "Muse" : id === "ghost" ? "Ghost" : "Moman");
 
     /**
      * 真正落地方案切换。
@@ -1574,7 +1576,7 @@ export function CanvasScriptNodeContent({
                 只有资产词条时切过去也等于没切（见 `resolveAutoApplyScriptScheme`）。
                 第五 / 第六套只手动选、不参与默认判定，但要一起数进来判断「到底有没有词可用」；
                 第六套那一段来自技能库，没装技能时同样是空。 */}
-            {!node.metadata?.scriptScheme && !directorPrefill.system && !directorPrefill.shot && !x20Prefill.system && !x20Prefill.shot && !libraryPrefill.system && !libraryPrefill.shot && !musePrefill.system && !musePrefill.shot && !ghostPrefill.system && !ghostPrefill.shot ? (
+            {!node.metadata?.scriptScheme && !directorPrefill.system && !directorPrefill.shot && !x20Prefill.system && !x20Prefill.shot && !libraryPrefill.system && !libraryPrefill.shot && !musePrefill.system && !musePrefill.shot && !ghostPrefill.system && !ghostPrefill.shot && !momanPrefill.system && !momanPrefill.shot ? (
                 <span className="opacity-60">{t("canvas.scriptNode.schemeDefaultOff")}</span>
             ) : null}
         </div>

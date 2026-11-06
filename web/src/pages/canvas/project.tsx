@@ -46,7 +46,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMuseVideoScriptOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMuseVideoScriptOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -6651,6 +6651,8 @@ function AtelierCanvasPage() {
             const directorScheme = wholeSchemeId === "director";
             const museScheme = wholeSchemeId === "muse";
             const ghostScheme = wholeSchemeId === "ghost";
+            /** 第七套（魔漫 15 秒分镜）：视频列是按时间码分段的 `0.00—1.50：【景别，运镜】…`。 */
+            const momanScheme = wholeSchemeId === "moman";
             const directorFormatHint = buildStoryScriptSchemeFormatHint(sourceNode.metadata?.scriptScheme);
             const scriptTask = directorFormatHint ? `${task}\n\n${directorFormatHint}` : task;
             /**
@@ -6671,6 +6673,8 @@ function AtelierCanvasPage() {
                 museScheme,
                 // 第六套：压上「只能是 `———— 镜头N｜起—止秒` 整段光影脚本」（见 STORY_SCRIPT_GHOST_VIDEO_FORMAT）。
                 ghostScheme,
+                // 第七套：压上「只能是 `0.00—1.50：【景别，运镜】…` 时间码分段」（见 STORY_SCRIPT_MOMAN_VIDEO_FORMAT）。
+                momanScheme,
             });
             const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
             const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
@@ -6763,7 +6767,9 @@ function AtelierCanvasPage() {
                         )
                       : ghostScheme
                         ? normalizeStoryScriptGhostRows(applyGhostVideoScriptOverlay(dedupedRows, sourceText, presetId), presetId)
-                        : dedupedRows;
+                        : momanScheme
+                          ? normalizeStoryScriptMomanRows(dedupedRows, presetId)
+                          : dedupedRows;
                 /**
                  * 把「认没认出模版」这件事**明说出来**：以前三列为空时用户只能猜
                  * （「是没识别到，还是模型没生成？」），日志和 UI 都没有证据。
@@ -6873,6 +6879,8 @@ function AtelierCanvasPage() {
             const directorScheme = schemeId === "director";
             const museScheme = schemeId === "muse";
             const ghostScheme = schemeId === "ghost";
+            /** 第七套（魔漫）：单镜的 `video_motion_prompt` 也是 `0.00—1.50：【景别，运镜】…` 时间码分段。 */
+            const momanScheme = schemeId === "moman";
             const directorFormatHint = buildStoryScriptSchemeFormatHint(sourceNode.metadata?.scriptScheme);
             const extraPlot = (options?.extraPlot || "").trim();
             // 默认保持站位一致（= 改造前的行为）；只有显式传 false 才放开。
@@ -6903,6 +6911,8 @@ function AtelierCanvasPage() {
                     museScheme,
                     // 与整表生成同一口径：第六套的视频列只能是 `———— 镜头N｜起—止秒` 整段光影脚本。
                     ghostScheme,
+                    // 与整表生成同一口径：第七套的视频列只能是 `0.00—1.50：【景别，运镜】…` 时间码分段。
+                    momanScheme,
                 });
                 // 逐镜串行：每改完一镜就写回，下一镜的 prev / next 读到的就是刚改完的版本。
                 let workingRows = [...sourceRows];
@@ -7000,6 +7010,14 @@ function AtelierCanvasPage() {
                     if (ghostScheme) {
                         const overlaid = applyGhostVideoScriptOverlay(workingRows, sourceText, presetId);
                         const normalizedRows = normalizeStoryScriptGhostRows(overlaid, presetId);
+                        workingRows = workingRows.map((item, index) => (index === rowIndex ? normalizedRows[index] : item));
+                    }
+                    /**
+                     * 第七套（魔漫）：这一列的合法形态是 `0.00—1.50：【景别，运镜】…` 时间码分段 ——
+                     * 压成一行 / 塞了整格 JSON / 写错到分镜列，都在这里收敛，同样只替换刚重写的那一行。
+                     */
+                    if (momanScheme) {
+                        const normalizedRows = normalizeStoryScriptMomanRows(workingRows, presetId);
                         workingRows = workingRows.map((item, index) => (index === rowIndex ? normalizedRows[index] : item));
                     }
                     // 单镜重写常把「后面几镜」的描述又写全了（模型看不到整表已经去重过）——

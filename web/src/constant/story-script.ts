@@ -1028,6 +1028,12 @@ export function resolveScriptSystemPrompt(
          * 这一套的 system 来自**画布技能库**那条 doc 技能正文，同样只能在后面追加（见 `STORY_SCRIPT_GHOST_VIDEO_FORMAT`）。
          */
         ghostScheme?: boolean;
+        /**
+         * 方案 = 第七套（魔漫 15 秒分镜）→ 追加「`video_motion_prompt` 只能按 `0.00—1.50：【景别，运镜】…`
+         * 时间码分段写」的覆盖段。同前几套：system 是用户词库 / 技能正文，只能往后追加
+         * （见 `STORY_SCRIPT_MOMAN_VIDEO_FORMAT`）。
+         */
+        momanScheme?: boolean;
     },
 ): string {
     const custom = typeof override === "string" ? override.trim() : "";
@@ -1039,7 +1045,7 @@ export function resolveScriptSystemPrompt(
      * 第五 / 第六套都是「整段长视频脚本」，共用同一套冲突规避：
      * 模板 override 里「逐行抄标签块」那一条要换掉（见 buildTemplateSystemOverride 注释）。
      */
-    const longVideoScheme = Boolean(options?.museScheme || options?.ghostScheme);
+    const longVideoScheme = Boolean(options?.museScheme || options?.ghostScheme || options?.momanScheme);
     if (options?.verbatimTemplate) extra.push(buildTemplateSystemOverride(options?.singleShot, longVideoScheme));
     /**
      * ⚠️ 长视频方案（第五 / 第六套）**不挂** `STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE`。
@@ -1057,6 +1063,7 @@ export function resolveScriptSystemPrompt(
     // 两套互斥（方案 id 唯一），格式段绝不能同时挂。
     if (options?.museScheme) extra.push(STORY_SCRIPT_MUSE_VIDEO_SYSTEM_OVERRIDE);
     if (options?.ghostScheme) extra.push(STORY_SCRIPT_GHOST_VIDEO_SYSTEM_OVERRIDE);
+    if (options?.momanScheme) extra.push(STORY_SCRIPT_MOMAN_VIDEO_SYSTEM_OVERRIDE);
     // 去重段放最后：它要压过前面（含用户词库 / 技能正文）关于「每镜都写全资产描述」的说明。
     if (options?.assetDedupe) extra.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
     // 都没有时返回字符串与改造前逐字一致（探针守着老调用点）。
@@ -2776,6 +2783,151 @@ function parseLongVideoScriptRows(text: string, columns: StoryScriptColumn[]): S
         });
 }
 
+/* ── 第七套（魔漫）storyboard JSON → 分镜表行 ────────────────────────────────────────────
+ *
+ * 用户 2026-11-06 给的实样（魔漫技能的输出形态）：
+ * `{ "id": "storyboard_02", "duration": "6.0s", "merged_from_shots": "镜3—镜4",
+ *    "opening_state": { summary, role_positions, action_end_position, prop_states, emotion_anchor },
+ *    "ending_state": { … }, "prompt": "0.00—1.50：【局部特写，微幅下移】…\n1.50—6.00：【双人中景，缓慢后移】…",
+ *    "content": "独白|旁白|结婚五十年，她忘了所有人。…|calm", "source_material": { … } }`
+ *
+ * 这类 JSON 与契约（`{ rows: [{ shot_no, duration, video_motion_prompt … }] }`）**不是一套字段**：
+ * 它只有 `duration` 恰好与列同名，其余全落空 —— 走通用 JSON 通道会得到「只有时长、视频列空白」的
+ * 半残表（用户看到的就是「视频运动提示词没识别出来」）。所以这里单开一条通道，只认这一种形状：
+ *   - 必须同时有 `prompt`（非空字符串）与至少两个魔漫特征键；
+ *   - `prompt` → `video_motion_prompt`（换行原样保留，被压平时按时间码还原）；
+ *   - `content`（`类型|说话人|台词|情绪`）→ `dialogue` / `emotion`；
+ *   - `opening_state` → 画面描述 / 角色动作 / 人物站位，`ending_state` 的 summary 补进画面描述。
+ * ⚠️ 判据里带上 `prompt` 是必须的：普通契约行没有 `prompt` 键，绝不会被这条通道吞掉。
+ */
+const MOMAN_RECORD_KEYS = ["duration", "drama_type", "merged_from_shots", "opening_state", "ending_state", "role_ids", "scene_ids", "prop_ids", "content", "source_material"] as const;
+
+function isMomanStoryboardRecord(record: Record<string, unknown>): boolean {
+    if (typeof record.prompt !== "string" || !record.prompt.trim()) return false;
+    return MOMAN_RECORD_KEYS.filter((key) => record[key] !== undefined).length >= 2;
+}
+
+/** `独白|旁白|结婚五十年，她忘了所有人。他便每天重新追她一次。|calm` → 台词 / 情绪。 */
+function momanContentParts(value: unknown): { dialogue: string; emotion: string } {
+    const text = toText(value);
+    if (!text) return { dialogue: "", emotion: "" };
+    const parts = text.split("|").map((item) => item.trim());
+    if (parts.length < 2) return { dialogue: text, emotion: "" };
+    const [kind, speaker, line, mood] = parts;
+    // 四段式：`类型 | 说话人 | 台词 | 情绪`；三段式则第三段当台词。
+    const quote = parts.length >= 4 ? line : parts.slice(2).join("|").trim();
+    const body = quote || line || "";
+    const dialogue = body ? (speaker ? `${speaker}：“${body}”` : body) : "";
+    return { dialogue, emotion: mood || kind || "" };
+}
+
+/** storyboard JSON 的一条 → 一行分镜（键名对齐 `STORY_SCRIPT_CLASSIC_COLUMNS`）。 */
+function momanRowRecord(record: Record<string, unknown>): Record<string, unknown> {
+    const prompt = reflowLongVideoScript(String(record.prompt ?? ""), "moman");
+    const pickState = (value: unknown) => (value && typeof value === "object" ? (value as Record<string, unknown>) : {});
+    const opening = pickState(record.opening_state);
+    const ending = pickState(record.ending_state);
+    const { dialogue, emotion } = momanContentParts(record.content);
+    // 景别 + 运镜取自第一段的方括号：`0.00—1.50：【局部特写，微幅下移】…` → `局部特写，微幅下移`
+    const bracket = prompt.match(/【([^】]+)】/)?.[1]?.trim() || "";
+    const summaries = [toText(opening.summary), toText(ending.summary)].filter(Boolean);
+    return {
+        duration: toText(record.duration),
+        shot: bracket,
+        visual_description: summaries.join(" → "),
+        character_action: toText(opening.action_end_position),
+        blocking: toText(opening.role_positions),
+        dialogue,
+        emotion: emotion || toText(opening.emotion_anchor),
+        video_motion_prompt: prompt,
+        shot_prompt: "",
+        style_prompt: "",
+        sound: "",
+    };
+}
+
+/**
+ * 第七套的兜底解析：从整段返回里抠出所有 storyboard 对象并转成行。
+ * 容器形态都认：顶层数组、`{ storyboards: [...] }`、`{ rows: [...] }`（模型混用）、裸对象。
+ */
+function parseMomanStoryboardRows(raw: string, columns: StoryScriptColumn[]): StoryScriptRow[] {
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return [];
+    const records: Record<string, unknown>[] = [];
+    const consume = (item: unknown) => {
+        if (Array.isArray(item)) {
+            item.forEach(consume);
+            return;
+        }
+        if (!item || typeof item !== "object") return;
+        const record = item as Record<string, unknown>;
+        if (isMomanStoryboardRecord(record)) {
+            records.push(record);
+            return;
+        }
+        const nested = Object.values(record).filter((value) => value && typeof value === "object");
+        nested.forEach(consume);
+    };
+    for (const value of extractTopLevelJsonValues(raw)) consume(value);
+    if (!records.length) return [];
+    return records.map((record, index) => normalizeStoryScriptRow({ ...momanRowRecord(record), shot_no: index + 1 }, index, columns));
+}
+
+/**
+ * 一段文本是不是「第七套认可的视频运动提示词」：至少两段 `0.00—1.50：` 形式的时间码。
+ * 单独开一个断言出口，探针不依赖在别处重复写正则。
+ */
+export function isMomanVideoScript(text: unknown): boolean {
+    const value = String(text ?? "");
+    if (!value.trim()) return false;
+    const hits = value.match(/\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*(?:秒|s)?\s*[：:]/gi) || [];
+    return hits.length >= 2;
+}
+
+/** 单元格里塞了整个 storyboard JSON 时，取出 `prompt`（取不到就把原文还回去）。 */
+function unwrapMomanJsonPrompt(value: string): string {
+    const text = String(value ?? "").trim();
+    if (!text.startsWith("{")) return value;
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start < 0 || end <= start) return value;
+    try {
+        const parsed: unknown = JSON.parse(text.slice(start, end + 1));
+        if (parsed && typeof parsed === "object" && typeof (parsed as Record<string, unknown>).prompt === "string") {
+            return String((parsed as Record<string, unknown>).prompt);
+        }
+    } catch {
+        // 不是合法 JSON（可能只是正文以 `{` 开头）→ 原样返回
+    }
+    return value;
+}
+
+/**
+ * 第七套整表后处理（幂等）：保证 `video_motion_prompt` 是**按时间码分段**的形态。
+ *
+ * 处理三件事（都只在确实需要时动手）：
+ *  ① 字面量 `\\n` / 被压成一行的段落在 → `reflowLongVideoScript(text, "moman")` 还原换行；
+ *  ② 视频列空着、但 `shot_prompt` 里塞的是这份时间码脚本（模型写错列）→ 挪到视频列并清空分镜列；
+ *  ③ 视频列整格是 JSON（`{"prompt": "…"}` / 整个 storyboard 对象）→ 取 `prompt` 字段。
+ */
+export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], preset?: StoryScriptPresetId | string | null): StoryScriptRow[] {
+    if (!rows?.length) return rows as StoryScriptRow[];
+    const columns = getStoryScriptColumns(preset);
+    if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
+    return rows.map((row) => {
+        const rawText = String(row.video_motion_prompt ?? "");
+        if (!rawText.trim()) {
+            const shotText = String(row.shot_prompt ?? "");
+            if (isMomanVideoScript(shotText) || /^\s*\{/.test(shotText)) {
+                const text = unwrapMomanJsonPrompt(shotText);
+                if (text && isMomanVideoScript(text)) return { ...row, video_motion_prompt: reflowLongVideoScript(text, "moman"), shot_prompt: "" };
+            }
+            return row;
+        }
+        const text = reflowLongVideoScript(unwrapMomanJsonPrompt(rawText), "moman");
+        return text === rawText ? row : { ...row, video_motion_prompt: text };
+    });
+}
+
 /**
  * 契约形状的「没有出表」返回：`{ title, rows: [], clarification / conflicts / message / … }`。
  *
@@ -2803,6 +2955,13 @@ export function parseStoryScriptOutput(text: string, preset?: StoryScriptPresetI
     const columns = getStoryScriptColumns(preset);
     const raw = stripCodeFence(String(text || ""));
     if (!raw.trim()) return { ok: false, error: "模型返回为空" };
+
+    // 第七套（魔漫）：模型直接吐 storyboard JSON（`prompt` 里是按时间码分段的正文）时，
+    // 必须**先于**所有通用 JSON 通道 —— 它们只认「列同名键 / 顶层数组」，会把这种对象收成
+    // 「只有时长」的半残行（用户看到的就是「视频运动提示词没识别出来」）。
+    // 判据带 `prompt` 键，普通契约行不会被这条通道吞掉。
+    const momanRows = parseMomanStoryboardRows(raw, columns);
+    if (momanRows.length) return { ok: true, title: "", rows: momanRows };
 
     // 从模型返回里抠 JSON：先按整段解析（纯 JSON、或根为数组），失败再退到「第一个 { 到最后一个 }」
     // 的区间切片（应对前后裹了说明文字的常见情形）。
@@ -4209,6 +4368,42 @@ const STORY_SCRIPT_GHOST_VIDEO_SYSTEM_OVERRIDE = [
     STORY_SCRIPT_GHOST_VIDEO_FORMAT,
 ].join("\n");
 
+/**
+ * 第七套（魔漫 · 15 秒分镜）的 `video_motion_prompt` 格式 —— 用户 2026-11-06 给的实样就是
+ * storyboard JSON 里的 `prompt` 字段：`0.00—1.50：【局部特写，微幅下移】…` 换行
+ * `1.50—6.00：【双人中景，缓慢后移】…`。时间码从 0.00 起、两位小数、首尾相接覆盖整镜。
+ *
+ * 与第五 / 第六套的区别：那两套各有自己的段标题（`### 视频N（X秒）` / `———— 镜头N｜起—止秒`），
+ * 这一套**没有标题**，只有纯时间码段落 + 方括号里的「景别，运镜」。
+ *
+ * ⚠️ 同样 system 末尾 + 任务书末尾双挂，且只在 `scheme = moman` 时生效。
+ */
+export const STORY_SCRIPT_MOMAN_VIDEO_FORMAT = [
+    "## `video_motion_prompt` 的唯一合法格式（第七套 · 魔漫 15 秒分镜）",
+    "⚠️ 本节只规定 `video_motion_prompt` **这一列的值**：整表仍按任务书输出，**优先给 JSON 契约（`rows` 数组）**；不要用 Markdown 管道表格 —— 它的单元格装不下换行，会把整段脚本压成一行流水句。这一列的换行必须原样保留（JSON 字符串里写 `\\n`）。",
+    "`video_motion_prompt` 要写成**按时间码分段的一镜到底脚本**，每一段独占一行，格式固定：",
+    "",
+    "```",
+    "0.00—1.50：【景别，运镜】画面内容：机位与镜头、人物与道具的具体动作、光线落点、前后景层次、声音与对白（要写谁说的、什么语气）。",
+    "1.50—4.00：【景别，运镜】…",
+    "4.00—6.00：【景别，运镜】…",
+    "```",
+    "",
+    "硬约束：",
+    "- 每一行**必须以 `起.止—终.止` 的时间码开头**（两位小数，如 `0.00—1.50`），紧接着冒号 `：` 与方括号 `【景别，运镜】`。方括号里第一项写景别（`局部特写` / `双人中景` / `全景`），第二项写运镜（`微幅下移` / `缓慢后移` / `固定机位`）。",
+    "- 时间码**从 `0.00` 起、首尾相接、连续覆盖到这一镜 `duration` 的最后一秒**，不许跳空、不许重叠、不许只写一段概括。",
+    "- 段数按内容需要给（通常 2—4 段），但每一段都要能独立指导生成：景别 + 机位 + 动作 + 光线 + 声音，不要只写「继续上一个动作」。",
+    "- 台词写进它发生的那一段里，标明说话人与语气（`奶奶：“我不认识你，不能收你的花。” 语气平缓偏冷`）；没有台词就写环境音与音乐进入 / 退出。",
+    "- 源稿用 `@role_xxx` / `@scene_xxx` / `@prop_xxx` 这类资产 id 指代角色、场景、道具时，**在视频列里原样保留**，不要换成自然语言描述；源稿没给这类 id 时不要自己造。",
+    "- **禁止** `景别：` / `摄影机参数：` / `构图方式：` / `画面内容：` / `人物动作与表演：` / `运镜方式：` / `台词与声音：` / `负面：` 这类标签行；**禁止** `### 视频N（X秒）`、`文生视频，…`、`角色设定：`、`时间轴：`、`Negative prompt：`（那是第五套）；**禁止** `———————————— 镜头N｜起—止秒`（那是第六套）；**禁止** `[时长：5s]` 方括号时长、`（…）+（…）` 括号链、把 `shot_prompt` 整段复制过来。",
+    "- 该镜由多镜合并而来（源稿写 `镜3—镜4` / `merged_from_shots`）时，时间码按**合并后的总时长**从 `0.00` 连续排，不要按原镜号重新从 0 起。",
+].join("\n");
+
+const STORY_SCRIPT_MOMAN_VIDEO_SYSTEM_OVERRIDE = [
+    "本节优先级高于上文所有关于 `video_motion_prompt` 的写法说明（含 6 段链式、8 段标签块、`[a] + [b]` 括号连接、`[时长：Xs]`、任何「一行一个标签」的字段清单，以及第五套 muse 的 `### 视频N（X秒）` 与第六套的 `———————————— 镜头N｜起—止秒`）。",
+    STORY_SCRIPT_MOMAN_VIDEO_FORMAT,
+].join("\n");
+
 /** 一行是不是「已经是八段标签块」（至少命中四个标签就算 —— 容忍模型少写一两行）。 */
 function isDirectorVideoBlockText(text: unknown): boolean {
     const value = String(text || "");
@@ -4669,6 +4864,7 @@ export function buildStoryScriptSchemeFormatHint(scheme?: unknown): string {
     if (id === "director") return STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT;
     if (id === "muse") return STORY_SCRIPT_MUSE_VIDEO_FORMAT;
     if (id === "ghost") return STORY_SCRIPT_GHOST_VIDEO_FORMAT;
+    if (id === "moman") return STORY_SCRIPT_MOMAN_VIDEO_FORMAT;
     return "";
 }
 
@@ -4740,15 +4936,17 @@ function museSlotOf(label: string): MuseSlot | null {
  * 这里只做一件事：在**已知段名前面**补换行，不新增 / 删除任何字符。
  * 判据：必须有一行同时命中 ≥2 个段名（确实被压平了才动手）→ 已经分好行的文本一个字节都不改，幂等。
  */
-export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "director"): string {
+export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "director" | "moman"): string {
     let raw = String(text ?? "");
     if (!raw.trim()) return raw;
     /**
      * 另一种「看着像没适配」：模型在 JSON 字符串里把换行**双转义**了（`\\n`），
      * 解析完拿到的是字面量 `\n` 两个字符，表格里就是一行带满 `\n` 的流水句。
-     * 只在「真换行 < 2 个、字面量 `\n` ≥ 3 个」时替换，正文里正常出现的 `\n` 说明不受影响。
+     * 判据：真换行 0 个且有字面量（一定是转义了），或真换行 <2 而字面量 ≥3（压平的老情形）。
      */
-    if ((raw.match(/\n/g) || []).length < 2 && (raw.match(/\\n/g) || []).length >= 3) {
+    const realBreaks = (raw.match(/\n/g) || []).length;
+    const literalBreaks = (raw.match(/\\n/g) || []).length;
+    if ((literalBreaks >= 1 && realBreaks === 0) || (realBreaks < 2 && literalBreaks >= 3)) {
         raw = raw.replace(/\\r\\n|\\n/g, "\n").replace(/\\t/g, " ");
     }
     /**
@@ -4773,6 +4971,10 @@ export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "d
                     { re: /【禁止项】/g, after: true },
                     { re: /【强制声明】/g, after: true },
                 ]
+              : kind === "moman"
+                ? [
+                      // 第七套没有段标题，唯一的分段依据就是时间码段落（见下面的 itemPattern）。
+                  ]
               : [
                     { re: /[—―﹣－─━﹘]{4,}/g, after: true },
                     { re: /镜头\s*[0-9０-９一二三四五六七八九十]+\s*[｜|]\s*\d/g },
@@ -4780,13 +4982,15 @@ export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "d
                     { re: /【声音】/g, after: true },
                     { re: /【结束连续性】/g, after: true },
                 ];
-    /** 时间轴条目：`- 0—1.2 秒：…`（muse）/ `25.00—26.20秒：`（ghost）。都要求带冒号，标题行不会被误切。 */
+    /** 时间轴条目：`- 0—1.2 秒：…`（muse）/ `25.00—26.20秒：`（ghost）/ `0.00—1.50：…`（moman）。都要求带冒号。 */
     const itemPattern =
         kind === "muse"
             ? /-\s*\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*秒\s*[：:]/g
             : kind === "ghost"
               ? /\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*秒\s*[：:]/g
-              : null;
+              : kind === "moman"
+                ? /\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*(?:秒|s)?\s*[：:]/gi
+                : null;
     const breakRules = itemPattern ? [...rules, { re: itemPattern }] : rules;
     const lines = raw.split(/\r?\n/);
     const flattened = lines.some((line) => breakRules.reduce((count, rule) => count + (line.match(rule.re)?.length || 0), 0) >= 2);

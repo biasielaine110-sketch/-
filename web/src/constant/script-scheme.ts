@@ -28,26 +28,32 @@ import type { TextPromptEntry } from "@/constant/text-prompt-library";
  *   这一套的 `视频运动提示词` 是「光影全流程」分镜脚本：`————————————` 分隔 +
  *   `镜头八｜25.00—30.00秒` + 逐时间段 `25.00—26.20秒：` + 结尾 `【全片光影与空气】` /
  *   `【声音】` / `【结束连续性】` 三块（见 `story-script.ts` 的 `STORY_SCRIPT_GHOST_VIDEO_FORMAT`）。
+ * - `moman`：第七套 · 剧本转分镜15秒（不固定为15秒镜头时长）-魔漫（2026-11-06 用户要求）——
+ *   三段来源**各不相同**：自定义系统提示词 ← **词库**同名条目；分镜提示词 ← **技能库**同名 doc 技能正文；
+ *   资产提示词仍走词库（各套共用）。见 `buildScriptMomanPrefill`。
+ *   这一套的 `视频运动提示词` 是**按时间码分段的 JSON 分镜**里 `prompt` 字段那种形态：
+ *   `0.00—1.50：【局部特写，微幅下移】…` 一段一行、覆盖整段时长（见 `STORY_SCRIPT_MOMAN_VIDEO_FORMAT`）；
+ *   模型若直接把 storyboard JSON 吐回来，解析侧按 `prompt` 整段填入（`parseMomanStoryboardRows`）。
  *
  * ⚠️ 默认是 **`director`（第四套）**（2026-10-23 用户要求：01 分镜表默认走第四套；词库里没有
  * 影视分镜导演那一条时回落第二套 `library`；都没有则停在内置）。`resolveScriptSchemeId`
  * **只做归一化**，不承担默认值 —— 默认行为由 `resolveAutoApplyScriptScheme` 判定，组件在挂载后
  * 真的把三段预填进去。若把这里的默认值改成 `director`，按钮会亮成第四套、而三个输入框还是空的，
  * 生成时照样走内置提示词，界面与行为对不上（这个坑第一版就踩过）。
- * 第五 / 第六套同样**只手点、不进自动判定**。
+ * 第五 / 第六 / 第七套同样**只手点、不进自动判定**。
  *
  * 为什么是「预填进那三个输入框」而不是另开一条注入通道：那三个字段本来就是这个节点的
  * 覆盖入口（`resolveScriptSystemPrompt` / `buildScriptGenerationPromptSections` 都读它们），
  * 预填之后用户可以照常打开弹窗改一两句，改完仍然生效 —— 方案只是「一键填好」，不是封闭开关。
  */
-export type ScriptSchemeId = "builtin" | "library" | "x20" | "director" | "muse" | "ghost";
+export type ScriptSchemeId = "builtin" | "library" | "x20" | "director" | "muse" | "ghost" | "moman";
 
-/** 方案切换器的渲染顺序（第一套 → 第六套）。 */
-export const SCRIPT_SCHEME_IDS = ["builtin", "library", "x20", "director", "muse", "ghost"] as const satisfies readonly ScriptSchemeId[];
+/** 方案切换器的渲染顺序（第一套 → 第七套）。 */
+export const SCRIPT_SCHEME_IDS = ["builtin", "library", "x20", "director", "muse", "ghost", "moman"] as const satisfies readonly ScriptSchemeId[];
 
 /** 读方案：认不出 / 没设过一律按 `builtin` 渲染，默认值交给自动预填。 */
 export function resolveScriptSchemeId(value: unknown): ScriptSchemeId {
-    return value === "library" || value === "x20" || value === "director" || value === "muse" || value === "ghost" ? value : "builtin";
+    return value === "library" || value === "x20" || value === "director" || value === "muse" || value === "ghost" || value === "moman" ? value : "builtin";
 }
 
 /** 「有预填内容」的几套方案（第一套不在其中）。 */
@@ -79,15 +85,25 @@ export const SCRIPT_SCHEME_LIBRARY_NEEDLES = {
      * 词库里只剩 `muse-短视频` 这种条目时仍会被用上，总比切过去是空的好。
      */
     shotMuse: ["muse", "长视频"],
-    /** 最佳短剧 · 资产提取提示词（第二 / 三 / 四 / 五 / 六套方案共用） */
+    /**
+     * 第七套 · 剧本转分镜15秒（不固定为15秒镜头时长）-魔漫 —— **自定义系统提示词**取这一条；
+     * 同一标题的**分镜提示词**来自技能库（见 `SCRIPT_SCHEME_SKILL_NEEDLES.shotMoman`），
+     * 两处来源不同是用户 2026-11-06 点名的口径。
+     * 归一后标题是 `剧本转分镜15秒不固定为15秒镜头时长魔漫`，两个 needle 都要在。
+     */
+    shotMoman: ["剧本转分镜", "魔漫"],
+    /** 最佳短剧 · 资产提取提示词（第二 / 三 / 四 / 五 / 六 / 七套方案共用） */
     assetExtract: ["资产提取"],
-    /** 配合最佳拍档生图（第二 / 三 / 四 / 五 / 六套方案共用） */
+    /** 配合最佳拍档生图（第二 / 三 / 四 / 五 / 六 / 七套方案共用） */
     assetPartner: ["最佳拍档"],
 } as const;
 
-/** 第六套在**技能库**（不是词库）里按标题找的那条：`鬼怪-----光影全流程`。 */
+/** 第六 / 第七套在**技能库**（不是词库）里按标题找的那条。 */
 export const SCRIPT_SCHEME_SKILL_NEEDLES = {
+    /** 第六套：`鬼怪-----光影全流程` */
     shotGhost: ["鬼怪", "光影全流程"],
+    /** 第七套：`剧本转分镜15秒（不固定为15秒镜头时长）-魔漫`（填「分镜提示词」） */
+    shotMoman: ["剧本转分镜", "魔漫"],
 } as const;
 
 /**
@@ -144,9 +160,12 @@ export type ScriptSchemeSkillSource = {
  * 一起归一后比对：用户给技能改了备注名（alias）也能找到。找不到就返回空，
  * 让三个字段保持原样（绝不偷偷拿第二套词库的内容顶上）。
  */
-export function resolveGhostSkillPrompt(skills: readonly ScriptSchemeSkillSource[] | null | undefined): { text: string; title: string } {
+export function resolveSchemeSkillPrompt(
+    skills: readonly ScriptSchemeSkillSource[] | null | undefined,
+    needles: readonly string[],
+): { text: string; title: string } {
     const empty = { text: "", title: "" };
-    const wanted = SCRIPT_SCHEME_SKILL_NEEDLES.shotGhost.map(normalizePromptLibraryTitle).filter(Boolean);
+    const wanted = needles.map(normalizePromptLibraryTitle).filter(Boolean);
     const usable = (skills || []).filter((item) => item && typeof item.systemHint === "string" && item.systemHint.trim());
     if (!usable.length || !wanted.length) return empty;
     const labelOf = (item: ScriptSchemeSkillSource) => normalizePromptLibraryTitle(`${item.alias || ""}${item.name || ""}${item.id || ""}`);
@@ -158,6 +177,16 @@ export function resolveGhostSkillPrompt(skills: readonly ScriptSchemeSkillSource
         text: String(hit.systemHint || "").trim(),
         title: String(hit.alias || hit.name || hit.id || "").trim(),
     };
+}
+
+/** 第六套：技能库里的「鬼怪-----光影全流程」。 */
+export function resolveGhostSkillPrompt(skills: readonly ScriptSchemeSkillSource[] | null | undefined): { text: string; title: string } {
+    return resolveSchemeSkillPrompt(skills, SCRIPT_SCHEME_SKILL_NEEDLES.shotGhost);
+}
+
+/** 第七套：技能库里的「剧本转分镜15秒（不固定为15秒镜头时长）-魔漫」，只填「分镜提示词」。 */
+export function resolveMomanSkillPrompt(skills: readonly ScriptSchemeSkillSource[] | null | undefined): { text: string; title: string } {
+    return resolveSchemeSkillPrompt(skills, SCRIPT_SCHEME_SKILL_NEEDLES.shotMoman);
 }
 
 export type ScriptSchemePrefill = {
@@ -180,6 +209,8 @@ function shotNeedlesOf(scheme: ScriptLibrarySchemeId): readonly string[] {
     if (scheme === "x20") return SCRIPT_SCHEME_LIBRARY_NEEDLES.shotX20;
     if (scheme === "director") return SCRIPT_SCHEME_LIBRARY_NEEDLES.shotDirector;
     if (scheme === "muse") return SCRIPT_SCHEME_LIBRARY_NEEDLES.shotMuse;
+    // 第七套：自定义系统提示词取词库这一条（分镜提示词另有来源 —— 技能库，见 buildScriptMomanPrefill）。
+    if (scheme === "moman") return SCRIPT_SCHEME_LIBRARY_NEEDLES.shotMoman;
     // 第六套的自定义 / 分镜来自**技能**不是词库 —— 返回空 needle，误调也绝不会串到第二套词条。
     if (scheme === "ghost") return [];
     return SCRIPT_SCHEME_LIBRARY_NEEDLES.shot;
@@ -245,6 +276,40 @@ export function buildScriptGhostPrefill(
         asset: assetParts.map((entry) => entry.content.trim()).join("\n\n"),
         titles: {
             system: skill.title,
+            shot: skill.title,
+            asset: assetParts.map((entry) => entry.title),
+        },
+        missing: [],
+    };
+    if (!result.system) result.missing.push("system");
+    if (!result.asset) result.missing.push("asset");
+    if (!result.shot) result.missing.push("shot");
+    return result;
+}
+
+/**
+ * 第七套（剧本转分镜15秒 · 魔漫）的预填 —— **三段来源各不相同**（用户 2026-11-06 点名）：
+ *   ① 自定义系统提示词 ← **词库**「剧本转分镜15秒（不固定为15秒镜头时长）-魔漫」；
+ *   ② 资产提示词 ← 词库「最佳短剧-资产提取提示词」+「配合最佳拍档生图」（与其它套共用）；
+ *   ③ 分镜提示词 ← **技能库**同名 doc 技能的正文（运行时按标题取，代码里不写死）。
+ *
+ * ⚠️ 别把它改写成「一段两用」（`buildScriptSchemePrefill` 的口径）：这一套的 system 与 shot
+ * 是两条不同来源的内容，合并会让技能正文顶掉词库那段 system。
+ */
+export function buildScriptMomanPrefill(
+    entries: readonly TextPromptEntry[] | null | undefined,
+    skills: readonly ScriptSchemeSkillSource[] | null | undefined,
+): ScriptSchemePrefill {
+    const systemEntry = resolvePromptLibraryEntry(entries, SCRIPT_SCHEME_LIBRARY_NEEDLES.shotMoman);
+    const skill = resolveMomanSkillPrompt(skills);
+    const assetParts = collectAssetParts(entries);
+    const result: ScriptSchemePrefill = {
+        scheme: "moman",
+        system: systemEntry?.content?.trim() || "",
+        shot: skill.text,
+        asset: assetParts.map((entry) => entry.content.trim()).join("\n\n"),
+        titles: {
+            system: systemEntry?.title || "",
             shot: skill.title,
             asset: assetParts.map((entry) => entry.title),
         },
