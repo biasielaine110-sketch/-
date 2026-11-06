@@ -308,7 +308,7 @@ export default {
         notFoundModels: "This provider has no OpenAI /models list (Volcengine Agent Plan does not). Add model names manually, e.g. doubao-seed-2.1-turbo or doubao-seedream-5.0-lite.",
         invalidRequest: "Invalid request (400). Check the prompt and model settings.",
         badGateway: "Gateway error (502). The API service is temporarily unavailable.",
-        serviceBusy: "Service unavailable (503). Try again later.",
+        serviceBusy: "Service unavailable (503): the request reached the provider, but every channel it tried failed. For image models this usually means the provider has no usable channel for this model (quota exhausted, channel disabled, or upstream overload). The canvas already retried once via the chat endpoint. If it still fails, check the model's channel group in the provider dashboard or switch to another image model on the same provider.",
         originOverloaded: "The provider's origin server is overloaded or misconfigured (Cloudflare {{status}}). The request reached the provider fine but their server failed to process it — nothing is wrong with the app's settings. Retry later or check the provider's status page.",
         httpFailed: "Request failed (HTTP {{status}}). Check the Base URL and API key.",
         htmlError: "The service returned an HTML error page ({{preview}})",

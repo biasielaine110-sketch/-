@@ -1015,6 +1015,24 @@ function isImageEditsModelRestricted(message: string) {
     return /only\s+supports?\s+grok|multipart\s+(file\s+)?uploads?\s+(are\s+)?not\s+supported|async\s+image\s+tasks\s+only\s+support|only\s+supports?\s+image\s+urls/i.test(message);
 }
 
+/**
+ * New API 系中转把「所有渠道都试过仍失败」统一收敛成 **503**，body 可能是
+ * `{"error":{"message":"当前分组 default 下对于模型 xxx 无可用渠道…"}}`，也可能是一段
+ * HTML/空 body（于是前端只剩 `readStatusError(503)` 的「服务繁忙」）。
+ *
+ * 图片模型撞上它有两种成因，都值得再试一跳：
+ *   1. 该中转只在 `/chat/completions` 暴露这个图模型（New API 选渠道只按 model+group，
+ *      不看端点，所以真正的失败发生在它转发给上游之后）；
+ *   2. 上游渠道瞬时过载 / 额度耗尽 —— 这一跳多半也救不回来，但成本只有一次请求。
+ * 无 key 时上游先回 401，所以这个 503 一定出现在鉴权之后，不是 CDN 层拦截。
+ */
+function isImageChannelUnavailable(error: unknown, message: string) {
+    if (axios.isAxiosError(error) && error.response?.status === 503) return true;
+    return /no\s+available\s+channel|无可用渠道|没有可用渠道|当前分组|no\s+available\s+provider|渠道.*(不可用|已禁用|耗尽)/i.test(
+        message,
+    );
+}
+
 function pushChatImageCandidate(urls: string[], value: unknown) {
     if (typeof value !== "string") return;
     const text = value.trim();
@@ -3187,6 +3205,18 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
         return images;
     } catch (error) {
         const message = readAxiosError(error, apiText("requestFailed"));
+        // 中转 503（渠道全部失败 / 该站只在 chat 端点暴露这个图模型）：改走 /chat/completions 再试一跳。
+        // gpt-image 家族在 chat 端点大多能出图（返回 markdown 或 data:image），比让用户死盯「服务繁忙」有用。
+        if (isGptImageModel(requestConfig.model) && isImageChannelUnavailable(error, message)) {
+            try {
+                return await requestChatCompletionsImages(requestConfig, prompt, [], options);
+            } catch (fallbackError) {
+                const fallbackMessage = readAxiosError(fallbackError, message);
+                throw new Error(
+                    normalizeImageApiErrorMessage(fallbackMessage === apiText("requestFailed") ? message : fallbackMessage, requestConfig.model),
+                );
+            }
+        }
         // New API OpenAI image route often only accepts Imagen — retry Gemini models via generateContent.
         if (isGeminiNativeImageModel(requestConfig.model) && isImagenOnlyEndpointError(message)) {
             try {
@@ -3399,6 +3429,18 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         return images;
     } catch (error) {
         const message = readAxiosError(error, apiText("requestFailed"));
+        // 同上：/images/edits 撞 503 时改走 /chat/completions（参考图走 image_url）。带 mask 的请求
+        // chat 端点没有对应字段，直接跳过这跳、保留原始错误。
+        if (!mask && isGptImageModel(requestConfig.model) && isImageChannelUnavailable(error, message)) {
+            try {
+                return await requestChatCompletionsImages(requestConfig, requestPrompt, references, options);
+            } catch (fallbackError) {
+                const fallbackMessage = readAxiosError(fallbackError, message);
+                throw new Error(
+                    normalizeImageApiErrorMessage(fallbackMessage === apiText("requestFailed") ? message : fallbackMessage, requestConfig.model),
+                );
+            }
+        }
         // 上游只接受固定尺寸（如 miora 的 hy-image-3.5-edit）：去掉 size 再试一次，让它按参考图自己定尺寸。
         // 这一步是白名单的兜底 —— 尺寸表万一又变，用户也不至于只看到一坨 502 JSON。
         if (!mask && isUnsupportedImageSizeError(message)) {

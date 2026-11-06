@@ -308,7 +308,7 @@ export default {
         notFoundModels: "该渠道没有 OpenAI /models 列表接口（火山方舟 Agent Plan 就是这样）。请手动填写模型名，例如 doubao-seed-2.1-turbo、doubao-seedream-5.0-lite。",
         invalidRequest: "请求参数无效（400），请检查提示词与模型设置",
         badGateway: "网关错误（502），接口服务暂时不可用，请稍后重试",
-        serviceBusy: "服务繁忙（503），请稍后重试",
+        serviceBusy: "服务繁忙（503）：请求已经到达服务商，但它把所有渠道试完仍未成功。图片模型多是「该模型在该站没有可用渠道」——额度耗尽、渠道被禁用，或上游过载。画布已自动改走 chat 端点重试过一跳；仍然失败请到中转后台确认该模型的渠道分组，或改选同站其它生图模型",
         originOverloaded: "服务商源站过载或故障（Cloudflare {{status}}）——请求已正常到达服务商，是对方服务器未能处理，与画布设置无关。请稍后重试，或到服务商后台/用户群确认服务状态",
         httpFailed: "请求失败（HTTP {{status}}），请检查 Base URL 和 API Key 是否正确",
         htmlError: "服务返回了 HTML 错误页面（{{preview}}）",
