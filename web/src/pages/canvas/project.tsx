@@ -46,7 +46,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptImageSize, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -7472,16 +7472,20 @@ function AtelierCanvasPage() {
     // 与「上传素材」走同一条路径——建图片节点 → 连成脚本节点上游 → 写上分类 → 立刻触发生成；
     // 图片节点会把结果写回自身，所以用户看到的就是「这张资产正在生成」。
     const handleGenerateScriptAsset = useCallback(
-        (nodeId: string, role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string) => {
+        (nodeId: string, role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string, size?: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             const scene = prompt.trim();
             if (!source || !scene) return;
             const assetTitle = title.trim() || scene.slice(0, 24);
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            // 生图比例（弹窗里选的 9:16 / 16:9…）：写进 `metadata.size`（生图链路读它），
+            // 同时把节点画成对应画幅 —— 否则画布上还是正方形，用户看不出自己选的比例生效了。
+            const imageSize = resolveStoryScriptImageSize(size) || resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
+            const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
             // 弹窗里挑的风格直接落到新图片节点上：生图链路读的是节点自己的 metadata.styleTemplateId，
             // 之后在节点上的风格选择器里还能改。
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(styleTemplateId ? { styleTemplateId } : {}) });
-            const placed = attachScriptAssets(source, [{ node: { ...node, title: assetTitle }, width: spec.width, height: spec.height }]);
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(styleTemplateId ? { styleTemplateId } : {}) });
+            const placed = attachScriptAssets(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
             // 分类写进脚本节点（内联：mergeScriptAssetRoles 声明在本回调之后，进依赖数组会 TDZ）。
@@ -7566,16 +7570,18 @@ function AtelierCanvasPage() {
         [appendRowAssets, buildAssetItems, message, placeRowAssetNodes, revealNodes, t],
     );
 
-    /** 逐镜 AI 生成图片：建图片节点、关联到这一镜并立刻触发生图。 */
+    /** 逐镜 AI 生成图片：建图片节点、关联到这一镜并立刻触发生图（`size` 是弹窗里选的生图比例）。 */
     const handleRowAssetGenerate = useCallback(
-        (nodeId: string, shotNo: number, prompt: string, title: string, styleTemplateId?: string) => {
+        (nodeId: string, shotNo: number, prompt: string, title: string, styleTemplateId?: string, size?: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             const scene = prompt.trim();
             if (!source || !scene) return;
             const assetTitle = title.trim() || scene.slice(0, 24);
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(styleTemplateId ? { styleTemplateId } : {}) });
-            const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: spec.width, height: spec.height }]);
+            const imageSize = resolveStoryScriptImageSize(size) || resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
+            const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(styleTemplateId ? { styleTemplateId } : {}) });
+            const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
             // 立刻同步 nodesRef：紧接着的触发生成会读 nodesRef 判断「这是不是一个图片节点（结果写回自身）」。
@@ -7799,14 +7805,16 @@ function AtelierCanvasPage() {
      * 同时落库成脚本节点的 `scriptCellImageModel`，下次打开这一格还是这个模型。
      */
     const handleCellAssetGenerate = useCallback(
-        (nodeId: string, shotNo: number, columnKey: string, prompt: string, title: string, model?: string, styleTemplateId?: string) => {
+        (nodeId: string, shotNo: number, columnKey: string, prompt: string, title: string, model?: string, styleTemplateId?: string, size?: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             const scene = prompt.trim();
             if (!source || !scene) return;
             const assetTitle = title.trim() || scene.slice(0, 24);
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(model ? { model } : {}), ...(styleTemplateId ? { styleTemplateId } : {}) });
-            const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: spec.width, height: spec.height }]);
+            const imageSize = resolveStoryScriptImageSize(size) || resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
+            const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(model ? { model } : {}), ...(styleTemplateId ? { styleTemplateId } : {}) });
+            const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
             // 立刻同步 nodesRef / connectionsRef：紧接着的触发生成会读 nodesRef 判断「这是不是一个图片节点（结果写回自身）」，
@@ -7890,8 +7898,15 @@ function AtelierCanvasPage() {
             const textWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Text].width;
             // 文本节点默认 480 高，铺链路时压到 240：否则每一镜的横向三件套会占掉整屏。
             const textHeight = 240;
-            const imageWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Image].width;
-            const imageHeight = NODE_DEFAULT_SIZE[CanvasNodeType.Image].height;
+            // **生图比例**：脚本节点上存着一档（`metadata.scriptImageSize`，9:16 / 16:9 …）。
+            // 铺出来的图片节点按这个画幅建、并把比例写进 `metadata.size` —— 于是「逐节点点生成」
+            // 也是同一个画幅，不用再一个个改。空 = 跟随全局配置，沿用默认方形。
+            const scriptImageSize = resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
+            const imageSpec =
+                nodeSizeFromRatio(scriptImageSize, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height) ||
+                NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            const imageWidth = imageSpec.width;
+            const imageHeight = imageSpec.height;
             const videoWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Video].width;
             const videoHeight = NODE_DEFAULT_SIZE[CanvasNodeType.Video].height;
             const gapX = 48;
@@ -7951,7 +7966,7 @@ function AtelierCanvasPage() {
                         position: { x: baseX, y: centeredY(rowY, textHeight) },
                     };
                     const imageNode: CanvasNodeData = {
-                        ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE }),
+                        ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE, ...(scriptImageSize ? { size: scriptImageSize } : {}) }),
                         title: t("canvas.scriptNode.pipelineImage", { no: shotNo }),
                         width: imageWidth,
                         height: imageHeight,

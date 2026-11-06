@@ -36,6 +36,7 @@ import {
     resolveScriptAssetRole,
     resolveStoryScriptDisplayColumns,
     resolveStoryScriptFontSize,
+    resolveStoryScriptImageSize,
     resolveStoryScriptMergeMode,
     resolveStoryScriptPresetId,
     resolveStoryScriptSegmentSeconds,
@@ -58,6 +59,7 @@ import {
     STORY_SCRIPT_MERGE_MODES,
     STORY_SCRIPT_PRESET_IDS,
     STORY_SCRIPT_SEGMENT_SECONDS,
+    STORY_SCRIPT_IMAGE_SIZES,
     type ScriptAssetRole,
     type StoryScriptExtraColumn,
     type StoryScriptPresetId,
@@ -217,9 +219,9 @@ type CanvasScriptNodeContentProps = {
     /**
      * 没有现成素材时，直接用一段描述生成一张资产图：上层会建图片节点、连成上游素材、
      * 写入分类并立刻触发生图。`title` 是建出来的节点标题（角色类靠它做名字匹配），
-     * `styleTemplateId` 是本次挑的风格模板（落成新节点的风格）。
+     * `styleTemplateId` 是本次挑的风格模板（落成新节点的风格），`size` 是生图比例（`9:16` / `16:9`…）。
      */
-    onGenerateAsset?: (nodeId: string, role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string) => void;
+    onGenerateAsset?: (nodeId: string, role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string, size?: string) => void;
     /** 已链接素材的分类（节点 id → 分类），用于在引用条上回显 / 切换。 */
     assetRoles?: Record<string, string>;
     /** 切换某张已链接素材的分类（角色 / 场景 / 道具 / 站位图）。 */
@@ -256,8 +258,8 @@ type CanvasScriptNodeContentProps = {
     onRowAssetsChange?: (nodeId: string, shotNo: number, ids: string[]) => void;
     /** 逐镜导入本地图片：建节点并立刻关联到这一镜。 */
     onRowAssetImport?: (nodeId: string, shotNo: number, files: File[]) => void;
-    /** 逐镜 AI 生成图片：建节点、关联到这一镜并立刻触发生图（`styleTemplateId` 是本次挑的风格模板）。 */
-    onRowAssetGenerate?: (nodeId: string, shotNo: number, prompt: string, title: string, styleTemplateId?: string) => void;
+    /** 逐镜 AI 生成图片：建节点、关联到这一镜并立刻触发生图（`styleTemplateId` 是本次挑的风格模板，`size` 是生图比例）。 */
+    onRowAssetGenerate?: (nodeId: string, shotNo: number, prompt: string, title: string, styleTemplateId?: string, size?: string) => void;
     /**
      * **逐镜声音**：镜号 → 已关联的音频节点 id（存在 `metadata.scriptRowAudios`）。
      * 表里「声音」列链接 / 导入的音频，铺链路时**只直连这一镜（或该分段）的视频节点** —— 只连视频，不参与生图。
@@ -281,8 +283,8 @@ type CanvasScriptNodeContentProps = {
     onCellAssetsChange?: (nodeId: string, shotNo: number, columnKey: string, ids: string[]) => void;
     /** 按镜按资产导入本地图片：建节点并立刻关联到这一格。 */
     onCellAssetImport?: (nodeId: string, shotNo: number, columnKey: string, files: File[]) => void;
-    /** 按镜按资产 AI 生成图片：建节点、关联到这一格并立刻触发生图（`model` 是这一格单独挑的生图模型，`styleTemplateId` 是本次挑的风格模板）。 */
-    onCellAssetGenerate?: (nodeId: string, shotNo: number, columnKey: string, prompt: string, title: string, model?: string, styleTemplateId?: string) => void;
+    /** 按镜按资产 AI 生成图片：建节点、关联到这一格并立刻触发生图（`model` 是这一格单独挑的生图模型，`styleTemplateId` 是本次挑的风格模板，`size` 是生图比例）。 */
+    onCellAssetGenerate?: (nodeId: string, shotNo: number, columnKey: string, prompt: string, title: string, model?: string, styleTemplateId?: string, size?: string) => void;
     /**
      * **资产池**：已经连到本脚本节点的素材（带分类）。「按镜按资产」弹窗据此多出一个「@ 资产池」tab ——
      * 池里的图点一下就能挂进某一格，不用重新上传，也不用重新连一次上游。
@@ -1743,11 +1745,53 @@ export function CanvasScriptNodeContent({
         </div>
     );
 
+    /**
+     * 「AI 生图比例」：`9:16` 竖屏 / `16:9` 横屏 / `1:1` …，空 = 跟随全局配置。
+     *
+     * 这一档不是「只给弹窗用的默认值」—— 它是这个脚本节点**出图的画幅口径**：
+     * ① 三个「AI 生成」弹窗（添加资产 / 镜头图 / 按镜按资产）打开时都带着它；
+     * ② 一键铺链路建出来的图片节点直接写上 `metadata.size`，于是逐节点点生成也是这个画幅。
+     * 存在 `metadata.scriptImageSize`（不是全局偏好）：同一张画布上竖屏短剧与横屏素材能各用各的。
+     */
+    const imageSize = resolveStoryScriptImageSize(node.metadata?.scriptImageSize);
+    const imageSizeSelector = (
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
+            <span className="opacity-60">{t("canvas.scriptNode.imageSizeLabel")}</span>
+            {STORY_SCRIPT_IMAGE_SIZES.map((id) => {
+                const active = id === imageSize;
+                return (
+                    <button
+                        key={id || "auto"}
+                        type="button"
+                        className="inline-flex h-6 items-center rounded-full border px-2.5 transition"
+                        style={{
+                            borderColor: active ? theme.toolbar.activeText : theme.node.stroke,
+                            // 与「每镜时长」同口径：选中必须实心，浅色描边会被看成「没点上」。
+                            background: active ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                            color: active ? theme.node.panel : theme.node.text,
+                            opacity: active ? 1 : 0.7,
+                        }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            patchMetadata({ scriptImageSize: id || undefined });
+                        }}
+                        title={t("canvas.scriptNode.imageSizeHint")}
+                    >
+                        {id || t("canvas.scriptNode.imageSizeAuto")}
+                    </button>
+                );
+            })}
+        </div>
+    );
+
     const sourcePanel = (
         <div className="flex min-h-0 flex-1 flex-col gap-1.5 px-2 pb-2">
             {schemeSelector}
             {presetSwitcher}
             {segmentSelector}
+            {imageSizeSelector}
             <div className="flex shrink-0 items-center gap-2 text-[0.923em] opacity-60" style={{ color: theme.node.text }}>
                 <span>{t("canvas.scriptNode.sourceLabel")}</span>
                 {connectedTextCount ? <span>· {t("canvas.scriptNode.connectedHint", { count: connectedTextCount })}</span> : null}
@@ -2501,6 +2545,9 @@ export function CanvasScriptNodeContent({
                     选「按每段时长」→ 连续几镜凑够 N 秒。 */}
                 {segmentSelector}
                 {mergeSelector}
+                {/* 生图比例也放到表体操作条：看分镜表时直接决定「这一批图出竖屏还是横屏」，
+                    改完再点「AI 生成」/ 一键铺链路就生效。 */}
+                {imageSizeSelector}
                 {/* 手动添加资产列（「宠物」「车辆」…）：自建列的行为与内置资产列一致，铺链路会按分类把图连进图片节点。
                     常驻显示、到上限才禁用 —— 之前到 8 列直接消失，看起来像「这个功能没了 / 加不上」。 */}
                 <button
@@ -2755,7 +2802,9 @@ export function CanvasScriptNodeContent({
             onClose={() => setAssetDialogOpen(false)}
             onLink={(links) => onLinkAssets?.(node.id, links)}
             onImport={(files, role) => onImportAssets?.(node.id, files, role)}
-            onGenerate={onGenerateAsset ? (role, prompt, title, styleTemplateId) => onGenerateAsset(node.id, role, prompt, title, styleTemplateId) : undefined}
+            imageSize={imageSize}
+            onImageSizeChange={(size) => patchMetadata({ scriptImageSize: size || undefined })}
+            onGenerate={onGenerateAsset ? (role, prompt, title, styleTemplateId, size) => onGenerateAsset(node.id, role, prompt, title, styleTemplateId, size) : undefined}
         />
     ) : null;
 
@@ -2770,6 +2819,8 @@ export function CanvasScriptNodeContent({
             onClose={() => setRowAssetTarget(null)}
             onLink={() => undefined}
             onImport={() => undefined}
+            imageSize={imageSize}
+            onImageSizeChange={(size) => patchMetadata({ scriptImageSize: size || undefined })}
             rowMode={{
                 no: rowAssetTarget.shotNo,
                 selectedIds: rowAssetTarget.ids,
@@ -2781,7 +2832,7 @@ export function CanvasScriptNodeContent({
                 title: t("canvas.scriptNode.pipelineImage", { no: rowAssetTarget.shotNo }),
                 onLink: (nodeIds) => onRowAssetsChange?.(node.id, rowAssetTarget.shotNo, nodeIds),
                 onImport: (files) => onRowAssetImport?.(node.id, rowAssetTarget.shotNo, files),
-                onGenerate: onRowAssetGenerate ? (prompt, title, _model, styleTemplateId) => onRowAssetGenerate(node.id, rowAssetTarget.shotNo, prompt, title, styleTemplateId) : undefined,
+                onGenerate: onRowAssetGenerate ? (prompt, title, _model, styleTemplateId, size) => onRowAssetGenerate(node.id, rowAssetTarget.shotNo, prompt, title, styleTemplateId, size) : undefined,
             }}
         />
     ) : null;
@@ -2799,6 +2850,8 @@ export function CanvasScriptNodeContent({
             onClose={() => setCellAssetTarget(null)}
             onLink={() => undefined}
             onImport={() => undefined}
+            imageSize={imageSize}
+            onImageSizeChange={(size) => patchMetadata({ scriptImageSize: size || undefined })}
             rowMode={{
                 no: cellAssetTarget.shotNo,
                 columnKey: cellAssetTarget.columnKey,
@@ -2811,7 +2864,7 @@ export function CanvasScriptNodeContent({
                 onLink: (nodeIds) => onCellAssetsChange?.(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, nodeIds),
                 onImport: (files) => onCellAssetImport?.(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, files),
                 onGenerate: onCellAssetGenerate
-                    ? (prompt, title, model, styleTemplateId) => onCellAssetGenerate(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, prompt, title, model, styleTemplateId)
+                    ? (prompt, title, model, styleTemplateId, size) => onCellAssetGenerate(node.id, cellAssetTarget.shotNo, cellAssetTarget.columnKey, prompt, title, model, styleTemplateId, size)
                     : undefined,
             }}
         />

@@ -6,7 +6,8 @@ import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
-import { collectScriptAssetPromptCandidates, scriptAssetColumnRole, SCRIPT_ASSET_GENERATABLE_ROLE_IDS, SCRIPT_ASSET_ROLE_IDS, type ScriptAssetPromptCandidate, type ScriptAssetRole, type StoryScriptRow } from "@/constant/story-script";
+import { CanvasSizePicker } from "@/components/canvas/canvas-size-picker";
+import { collectScriptAssetPromptCandidates, resolveStoryScriptImageSize, scriptAssetColumnRole, SCRIPT_ASSET_GENERATABLE_ROLE_IDS, SCRIPT_ASSET_ROLE_IDS, type ScriptAssetPromptCandidate, type ScriptAssetRole, type StoryScriptRow } from "@/constant/story-script";
 import { resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import { isAudioFile } from "@/lib/canvas/canvas-generation-helpers";
@@ -80,8 +81,8 @@ export type ScriptRowAssetMode = {
      * 这样「再挂一条」不用反复关窗重开（声音列一格常要挂台词 + 音效 + 环境声好几条）。
      */
     onImport: (files: File[]) => void | Promise<string[] | void>;
-    /** `model` 是本次生成要用的生图模型（不传就跟随节点默认的图片模型）；`styleTemplateId` 是本次生成挑的风格模板。 */
-    onGenerate?: (prompt: string, title: string, model?: string, styleTemplateId?: string) => void;
+    /** `model` 是本次生成要用的生图模型（不传就跟随节点默认的图片模型）；`styleTemplateId` 是本次生成挑的风格模板；`size` 是生图比例（`9:16` / `16:9` …，不传跟随全局）。 */
+    onGenerate?: (prompt: string, title: string, model?: string, styleTemplateId?: string, size?: string) => void;
 };
 
 type CanvasScriptAssetDialogProps = {
@@ -93,8 +94,15 @@ type CanvasScriptAssetDialogProps = {
     onClose: () => void;
     onLink: (links: ScriptAssetLinkSelection[]) => void;
     onImport: (files: File[], role: ScriptAssetRole) => void;
-    /** 用描述直接生成一张资产图：上层负责建节点、连线、写分类并触发生成。`styleTemplateId` 会落到新节点的风格上。 */
-    onGenerate?: (role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string) => void;
+    /** 用描述直接生成一张资产图：上层负责建节点、连线、写分类并触发生成。`styleTemplateId` 会落到新节点的风格上，`size` 落到 `metadata.size`（生图比例）。 */
+    onGenerate?: (role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string, size?: string) => void;
+    /**
+     * **生图比例**（`9:16` / `16:9` / `1:1` …，空 = 跟随全局配置）。
+     * 传了就作为「AI 生成」tab 的当前值；用户改动时通过 `onImageSizeChange` 回写脚本节点
+     * （`metadata.scriptImageSize`），下次打开弹窗与一键铺链路都用它。
+     */
+    imageSize?: string;
+    onImageSizeChange?: (size: string) => void;
     /** **资产池**：已连到脚本节点的素材（带分类）。「按镜按资产」模式下多出一个「@ 资产池」tab。 */
     poolAssets?: ScriptAssetPoolAsset[];
     /** 传了就走「逐镜模式」：只为某一镜关联图片，隐藏分类、勾选即关联。 */
@@ -121,7 +129,7 @@ const AUDIO_ACCEPT = "audio/*,.mp3,.wav,.m4a,.m4b,.aac,.flac,.ogg,.oga,.opus,.we
  */
 const acceptsFile = (file: File, audioOnly: boolean) => (audioOnly ? isAudioFile(file) : isAssetFile(file));
 
-export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose, onLink, onImport, onGenerate, poolAssets, rowMode }: CanvasScriptAssetDialogProps) {
+export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose, onLink, onImport, onGenerate, poolAssets, rowMode, imageSize, onImageSizeChange }: CanvasScriptAssetDialogProps) {
     const { t } = useTranslation();
     const globalConfig = useConfigStore((state) => state.config);
     const [selected, setSelected] = useState<string[]>([]);
@@ -137,6 +145,11 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
     const [genStyleOpen, setGenStyleOpen] = useState(false);
     /** 「按镜按资产」生成时这一格单独挑的生图模型（空 = 跟随节点默认的图片模型）。 */
     const [genModel, setGenModel] = useState("");
+    /**
+     * 本次生图的比例（`""` = 跟随全局配置）。默认取脚本节点上存着的 `scriptImageSize`，
+     * 用户一改就回写节点，所以「这次选 9:16」等于「以后这个脚本节点默认 9:16」。
+     */
+    const [genSize, setGenSize] = useState("");
     const [dragging, setDragging] = useState(false);
     /** 逐镜模式上传中：上传是异步的，期间禁掉「选文件」按钮，避免连点选两批。 */
     const [uploading, setUploading] = useState(false);
@@ -157,6 +170,7 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
             setGenStyleId("");
             setGenStyleOpen(false);
             setGenModel("");
+            setGenSize("");
             setDragging(false);
             setUploading(false);
             return;
@@ -173,8 +187,9 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
         setGenTitle(rowMode?.candidate?.title || rowMode?.title || "");
         setGenStyleId("");
         setGenModel(rowMode?.model || "");
+        setGenSize(resolveStoryScriptImageSize(imageSize));
         setDragging(false);
-    }, [open, rowMode]);
+    }, [open, rowMode, imageSize]);
 
     // 候选集变了（别的节点被删/被连走）时，把已经不存在的勾选摘掉。
     // 内容没变时返回原数组，避免「候选数组每次都是新引用」引发渲染循环。
@@ -505,6 +520,25 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                 <span className="text-[11px] opacity-60">{t("canvas.scriptNode.assetGenStyleLabel")}</span>
                 <CanvasStylePicker value={genStyleId || undefined} onChange={(next) => setGenStyleId(next || "")} onOpenChange={setGenStyleOpen} placement="topLeft" />
             </div>
+            {/*
+             * 生图比例：9:16 / 16:9 这类竖屏 / 横屏画幅。落点是新建图片节点的 `metadata.size`，
+             * 生图链路与上游网关都直接认比例字符串；选「跟随全局」= 不写，回落到偏好里的默认尺寸。
+             * 改动同时回写脚本节点（scriptImageSize），下次打开还是这一档，一键铺链路也用它。
+             */}
+            <div className="flex flex-wrap items-center gap-2 text-[12px]" style={{ color: theme.node.text }}>
+                <span className="text-[11px] opacity-60">{t("canvas.scriptNode.assetGenSizeLabel")}</span>
+                <CanvasSizePicker
+                    // 空 = 跟随全局：显示成 `auto`（选它等于回到跟随全局），不要留成空白 placeholder。
+                    value={genSize || "auto"}
+                    className="w-[132px]"
+                    onChange={(next) => {
+                        const normalized = resolveStoryScriptImageSize(next);
+                        setGenSize(normalized);
+                        onImageSizeChange?.(normalized);
+                    }}
+                />
+                <span className="text-[11px] opacity-50">{t("canvas.scriptNode.assetGenSizeHint")}</span>
+            </div>
             {/* 「按镜按资产」模式：这一格可以单独挑生图模型（同一张表里不同资产用不同模型出图）。 */}
             {isCellMode ? (
                 <div className="flex flex-col gap-1">
@@ -537,9 +571,9 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                         const title = genTitle.trim() || prompt.slice(0, 24);
                         if (rowMode) {
                             const model = resolveModelForCapability(globalConfig, genModel || rowMode.model, "image");
-                            rowMode.onGenerate?.(prompt, title, model || undefined, genStyleId || undefined);
+                            rowMode.onGenerate?.(prompt, title, model || undefined, genStyleId || undefined, genSize || undefined);
                         } else {
-                            onGenerate?.(genRole, prompt, title, genStyleId || undefined);
+                            onGenerate?.(genRole, prompt, title, genStyleId || undefined, genSize || undefined);
                         }
                         onClose();
                     }}

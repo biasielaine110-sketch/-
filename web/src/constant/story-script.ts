@@ -1194,6 +1194,29 @@ export function storyScriptSegmentSecondsValue(value: unknown): number {
     return id === "none" ? 0 : Number(id);
 }
 
+/**
+ * 脚本节点「AI 生图」的比例档位。
+ *
+ * `""` = 跟随全局配置（不写 metadata.size，`buildGenerationConfig` 会回落到偏好里的 `size`）；
+ * 其余都是**比例字符串**（`9:16` / `16:9` / `1:1` …）——生图链路与网关都直接认这种写法，
+ * 不要在这里换算成像素（miora 那套白名单由 `resolveRequestSize` 在请求前收口）。
+ */
+export const STORY_SCRIPT_IMAGE_SIZES = ["", "1:1", "3:4", "4:3", "9:16", "16:9"] as const;
+
+/** 归一化生图比例：认 `16:9` / `16x9` / 带空格，`auto` / 空 / 认不出的写法一律回落「跟随全局」。 */
+export function resolveStoryScriptImageSize(value: unknown): string {
+    const text = String(value ?? "")
+        .trim()
+        .toLowerCase();
+    if (!text || text === "auto") return "";
+    const matched = /^(\d{1,2})\s*[:x×]\s*(\d{1,2})$/.exec(text);
+    if (!matched) return "";
+    const width = Number(matched[1]);
+    const height = Number(matched[2]);
+    if (!(width > 0) || !(height > 0)) return "";
+    return `${width}:${height}`;
+}
+
 /** 铺链路时的视频分段方式：单镜 / 每 N 镜合并（2~5）/ 按每段时长自动合并。 */
 export type StoryScriptMergeMode = "shot" | "2" | "3" | "4" | "5" | "duration";
 export const STORY_SCRIPT_MERGE_MODES: StoryScriptMergeMode[] = ["shot", "2", "3", "4", "5", "duration"];

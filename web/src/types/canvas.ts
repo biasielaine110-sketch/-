@@ -210,6 +210,11 @@ export type CanvasNodeMetadata = {
      * 只作为「格子生图弹窗」的默认值：每次生成都会把选中的模型写到新建的那张图片节点上。
      */
     scriptCellImageModel?: string;
+    /**
+     * 脚本生成器：**AI 生图的比例**（`9:16` / `16:9` / `1:1` …，空 = 跟随全局配置）。
+     * 三处都读它：「添加资产」「镜头图」「按镜按资产」弹窗的默认值，以及一键铺链路建出来的图片节点。
+     */
+    scriptImageSize?: string;
     /** 脚本生成器：每段目标时长（none / 10 / 15），同时用于生成时的分段要求与铺链路的自动合并。 */
     scriptSegmentSeconds?: import("@/constant/story-script").StoryScriptSegmentSeconds;
     /** 脚本生成器：铺链路时每个视频节点合并几镜（shot / 2 / 3 / duration）。 */
