@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { ArrowUp, Clock, GripVertical, LoaderCircle, Maximize2, Square, WandSparkles, X } from "lucide-react";
 import { App, Button, Tooltip } from "antd";
 import dayjs from "dayjs";
@@ -27,6 +27,18 @@ import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-refer
 import { moveIndex, resolveReorderTargetIndex } from "@/lib/canvas/canvas-reference-order";
 
 export type CanvasNodeGenerationMode = CanvasGenerationMode;
+
+/** 参考图 chip 的拖拽会话（pointer 手写拖拽，见组件内注释）。 */
+type ChipDragState = {
+    index: number;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+    move: ((event: PointerEvent) => void) | null;
+    up: ((event: PointerEvent) => void) | null;
+    cancel: (() => void) | null;
+};
 
 type CanvasNodePromptPanelProps = {
     node: CanvasNodeData;
@@ -111,21 +123,36 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
     const activeReferences = mentionReferences.filter((reference) => reference.active && reference.nodeId !== node.id);
 
-    // HTML5 drag reordering of the reference chips, matching the channel-editor interaction.
-    // 整块 chip 都可拖（不再只留手柄）：用户会直接按住缩略图拖，只有手柄可拖时按住图片
-    // 完全没反应 —— 就是「拖动卡住」的报障。图片自身 `draggable={false}`，所以不会触发
-    // 浏览器原生图片拖拽（"plus" 光标 + 放大快照）。Drop 后重排上游连线顺序，
-    // 从而重新编号 图片1/图片2 并改变 API 的 reference_images 顺序。
+    // 参考图 chip 的拖拽排序 —— **指针事件手写，不用 HTML5 drag**。
     //
-    // 落点由**整排容器**统一判定，不绑在单个 chip 上：拖到两张 chip 之间的空隙、或者拖到行尾
-    // 空白处松手，以前没有任何元素接 drop（事件冒到画布 → 什么都不发生），看起来就像「拖不动」。
-    // 现在按光标位置算插入位（0 = 插到最前，n = 插到最后），并在缝隙里画一条竖线。
-    const CHIP_REORDER_MIME = "application/x-canvas-reference-reorder";
+    // 为什么换掉 HTML5 drag：这排 chip 长在画布节点里，外层是 `transform: scale()` 的缩放容器。
+    // 浏览器原生 drag 在这个环境里非常脆 —— 只要 `dragstart` 之后被拖元素被 React 重渲染碰到一点点
+    // （class 变更、兄弟节点插入），或者 `dragover` 有一帧没被 preventDefault，浏览器就会**直接取消
+    // 这次拖拽**：拖影一闪、光标回弹、之后拖到手柄上再怎么拖都不响应 —— 就是「拖动完卡住」。
+    // 现在改成 pointer 自己接管：pointerdown 拦住（不让画布拿去拖节点），move/up 挂到 window
+    // 的**捕获阶段**，指针飘到哪里都不会丢事件，也不存在「浏览器中途取消」这条路径。
+    //
+    // 拖拽状态（起点下标 / 是否已越过阈值）放 ref，只有「插入位」和「正在拖第几张」进 state，
+    // 避免每一次 mousemove 都重渲染整个面板。
     const [dragChipIndex, setDragChipIndex] = useState<number | null>(null);
     const [dropSlot, setDropSlot] = useState<number | null>(null);
-    // dragover / drop 里读 ref：dragstart 与紧随其后的 dragover 可能在同一帧，state 未必已刷新。
-    const dragChipRef = useRef<number | null>(null);
+    const dragChipRef = useRef<ChipDragState | null>(null);
+    const dropSlotRef = useRef<number | null>(null);
     const chipRowRef = useRef<HTMLDivElement | null>(null);
+
+    // 面板可能在拖拽中被卸载（取消选中 / 重新生成）—— 把挂在 window 上的监听摘掉，别泄漏。
+    useEffect(
+        () => () => {
+            const state = dragChipRef.current;
+            if (!state) return;
+            if (state.move) window.removeEventListener("pointermove", state.move, true);
+            if (state.up) window.removeEventListener("pointerup", state.up, true);
+            if (state.cancel) window.removeEventListener("pointercancel", state.cancel, true);
+            dragChipRef.current = null;
+            document.body.style.cursor = "";
+        },
+        [],
+    );
 
     /** 光标 → 插入位。换行布局下先比行（中线以上算「在这一行之前」），再比左右半边。 */
     const resolveDropSlot = (clientX: number, clientY: number) => {
@@ -140,44 +167,89 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         return chips.length;
     };
 
-    const handleChipDragStart = (event: ReactDragEvent, index: number) => {
-        event.dataTransfer.effectAllowed = "move";
-        // Use a private MIME type (NOT text/plain) so the canvas's drop handler never mistakes
-        // this reorder drag for an external text drop (which would create a text node + dialog).
-        event.dataTransfer.setData(CHIP_REORDER_MIME, String(index));
-        dragChipRef.current = index;
-        setDragChipIndex(index);
-        setDropSlot(index);
+    /** 光标是否还在这排 chip 附近（松手处飘到画布上就算放弃，别把「拖走」当成「拖到最后」）。 */
+    const isInsideChipRow = (clientX: number, clientY: number) => {
+        const row = chipRowRef.current;
+        if (!row) return false;
+        const rect = row.getBoundingClientRect();
+        const pad = 28;
+        return clientX >= rect.left - pad && clientX <= rect.right + pad && clientY >= rect.top - pad && clientY <= rect.bottom + pad;
     };
 
-    const handleChipRowDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
-        if (dragChipRef.current === null) return;
+    const setDropSlotBoth = (slot: number | null) => {
+        dropSlotRef.current = slot;
+        setDropSlot(slot);
+    };
+
+    const handleChipPointerDown = (event: React.PointerEvent<HTMLSpanElement>, index: number) => {
+        if (!onReorderReferences || event.button !== 0 || dragChipRef.current) return;
+        // 必须拦下来：不然画布把这次 pointerdown 当「拖节点 / 平移画布」。
         event.preventDefault();
         event.stopPropagation();
-        event.dataTransfer.dropEffect = "move";
-        const slot = resolveDropSlot(event.clientX, event.clientY);
-        if (slot !== dropSlot) setDropSlot(slot);
-    };
 
-    const handleChipRowDrop = (event: ReactDragEvent<HTMLDivElement>) => {
-        const from = dragChipRef.current;
-        if (from === null) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const slot = resolveDropSlot(event.clientX, event.clientY);
-        dragChipRef.current = null;
-        setDragChipIndex(null);
-        setDropSlot(null);
-        if (!onReorderReferences) return;
-        const to = resolveReorderTargetIndex(from, slot, activeReferences.length);
-        if (to < 0) return;
-        onReorderReferences(moveIndex(activeReferences, from, to).map((reference) => reference.nodeId));
-    };
+        const reorder = onReorderReferences;
+        const state: ChipDragState = {
+            index,
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            moved: false,
+            move: null,
+            up: null,
+            cancel: null,
+        };
+        const detach = () => {
+            if (state.move) window.removeEventListener("pointermove", state.move, true);
+            if (state.up) window.removeEventListener("pointerup", state.up, true);
+            if (state.cancel) window.removeEventListener("pointercancel", state.cancel, true);
+        };
+        const end = () => {
+            detach();
+            dragChipRef.current = null;
+            setDragChipIndex(null);
+            setDropSlotBoth(null);
+            if (document.body.style.cursor === "grabbing") document.body.style.cursor = "";
+        };
 
-    const handleChipDragEnd = () => {
-        dragChipRef.current = null;
-        setDragChipIndex(null);
-        setDropSlot(null);
+        state.move = (native) => {
+            if (native.pointerId !== state.pointerId) return;
+            native.preventDefault();
+            if (!state.moved) {
+                // 4px 阈值：手抖不算拖拽，避免「点一下就换了位置」。
+                if (Math.hypot(native.clientX - state.startX, native.clientY - state.startY) < 4) return;
+                state.moved = true;
+                setDragChipIndex(state.index);
+                setDropSlotBoth(state.index);
+                document.body.style.cursor = "grabbing";
+            }
+            if (!isInsideChipRow(native.clientX, native.clientY)) {
+                if (dropSlotRef.current !== null) setDropSlotBoth(null);
+                return;
+            }
+            const slot = resolveDropSlot(native.clientX, native.clientY);
+            if (slot !== dropSlotRef.current) setDropSlotBoth(slot);
+        };
+
+        state.up = (native) => {
+            if (native.pointerId !== state.pointerId) return;
+            const droppedInside = isInsideChipRow(native.clientX, native.clientY);
+            const slot = state.moved && droppedInside ? resolveDropSlot(native.clientX, native.clientY) : state.index;
+            const moved = state.moved;
+            end();
+            if (!moved || !droppedInside) return;
+            const to = resolveReorderTargetIndex(index, slot, activeReferences.length);
+            if (to < 0) return;
+            reorder(moveIndex(activeReferences, index, to).map((reference) => reference.nodeId));
+        };
+
+        state.cancel = () => end();
+
+        dragChipRef.current = state;
+        // 监听挂在 window 的**捕获阶段**：指针飘出面板、甚至落到画布上都不会丢事件，
+        // 画布也没机会把 move/up 吞掉。这是「拖到一半卡死」最根本的兜底。
+        window.addEventListener("pointermove", state.move, true);
+        window.addEventListener("pointerup", state.up, true);
+        window.addEventListener("pointercancel", state.cancel, true);
     };
 
     const connectedTextPrompt = activeReferences
@@ -277,16 +349,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             onWheel={(event) => event.stopPropagation()}
         >
             {activeReferences.length ? (
-                <div
-                    ref={chipRowRef}
-                    className="mb-2 flex flex-wrap items-center gap-1.5"
-                    onDragOver={onReorderReferences ? handleChipRowDragOver : undefined}
-                    onDrop={onReorderReferences ? handleChipRowDrop : undefined}
-                    onDragLeave={(event) => {
-                        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-                        setDropSlot(null);
-                    }}
-                >
+                <div ref={chipRowRef} className="mb-2 flex flex-wrap items-center gap-1.5">
                     <span className="text-[11px] opacity-55">{t("canvas.promptPanel.references")}</span>
                     {activeReferences.map((reference, index) => {
                         const isDragging = dragChipIndex === index;
@@ -297,13 +360,10 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                 ) : null}
                                 <span
                                     data-ref-chip={index}
-                                    // 整块 chip 都能拖（不只是那个 3px 的小抓手）：用户会直接按住缩略图拖，
-                                    // 以前只有抓手 draggable，按住图片拖完全没反应 —— 就是报障的「拖动卡住」。
-                                    // 图片自身 draggable={false}，所以不会触发浏览器原生图片拖拽。
-                                    draggable={Boolean(onReorderReferences)}
-                                    onDragStart={onReorderReferences ? (event) => handleChipDragStart(event, index) : undefined}
-                                    onDragEnd={onReorderReferences ? handleChipDragEnd : undefined}
-                                    className={`relative mr-1 inline-flex max-w-44 items-center gap-1 rounded-lg border px-1.5 py-1 text-xs transition-opacity ${isDragging ? "opacity-40" : ""} ${onReorderReferences ? "cursor-grab active:cursor-grabbing" : ""}`}
+                                    // 整块 chip（抓手 / 缩略图 / 标签）都能拖 —— 指针事件由自己接管，
+                                    // 不再依赖浏览器原生 drag。见上面 `handleChipPointerDown` 的注释。
+                                    onPointerDown={onReorderReferences ? (event) => handleChipPointerDown(event, index) : undefined}
+                                    className={`relative mr-1 inline-flex max-w-44 touch-none select-none items-center gap-1 rounded-lg border px-1.5 py-1 text-xs transition-opacity ${isDragging ? "opacity-40" : ""} ${onReorderReferences ? "cursor-grab active:cursor-grabbing" : ""}`}
                                     style={{ background: theme.toolbar.itemHover, borderColor: theme.node.stroke, color: theme.node.text }}
                                     title={reference.title}
                                 >
