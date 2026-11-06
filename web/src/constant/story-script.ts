@@ -643,7 +643,7 @@ function buildTemplateSystemOverride(singleShot?: boolean, longVideoScheme?: boo
      * `shot_prompt` 逐字复制、资产路由、镜号时长等其余条款照样要用，所以只换这一行。
      */
     const videoMotionRule = longVideoScheme
-        ? "- `video_motion_prompt`: **do not copy the label block**. This run uses the long-video script format defined in the final section (Scheme 5: `### 视频N（X秒）` + 文生视频 / 角色设定 / 共享环境与光线 / 时间轴 / Negative prompt; Scheme 6: `————————————` + `镜头N｜起—止秒` + timestamped beats + 【全片光影与空气】/【声音】/【结束连续性】). Never emit `label: value` lines in this column; fold those facts into the script's timeline entries instead."
+        ? "- `video_motion_prompt`: **do not copy the label block**. This run uses the long-video script format defined in the final section (Scheme 5: `### 视频N（X秒）` + 参考生视频 (image-to-video, no character-sheet line) / 共享环境与光线 / 时间轴 / Negative prompt; Scheme 6: `————————————` + `镜头N｜起—止秒` + timestamped beats + 【全片光影与空气】/【声音】/【结束连续性】). Never emit `label: value` lines in this column; fold those facts into the script's timeline entries instead."
         : "- `video_motion_prompt`: copy **every other line of that shot's block verbatim**, one `label: value` per line, keeping the block's original order (景别 / 景别／机位 / 摄影机参数 / 构图方式 / 画面内容 / 人物站位与构图 / 人物动作与表演 / 主体与动作 / 运镜方式 / 光影与色调 / 转场建议 / 台词与声音 / 声音 / 负面 …). Do not merge lines and do not chain them with `+`.";
     return [
         "## Override for this input: the source already contains a per-shot prompt template",
@@ -4734,7 +4734,7 @@ function parseStoryScriptTemplateRows(text: string, columns: StoryScriptColumn[]
                 )?.value || "";
             /**
              * 第五套方案（muse-长视频）：模版里**显式写了** `- **视频运动提示词**：` 时，那一段就是这一列的全集
-             * （`### 视频一（10秒）` + 文生视频 / 角色设定 / 共享环境与光线 / 时间轴 / Negative prompt），
+             * （`### 视频一（10秒）` + 参考生视频 / 共享环境与光线 / 时间轴 / Negative prompt），
              * 必须优先于按标签拼出来的「景别：中近景」这类摘要 —— 否则长文整段被一行摘要顶掉，
              * 用户看到的永远是「视频运动提示词没识别出来」。
              * 老模版（只有 景别 / 运镜 / 时长 这几行、没有这一列）完全不受影响：`explicitMotion` 为空，仍走拼装。
@@ -5189,7 +5189,9 @@ const STORY_SCRIPT_DIRECTOR_VIDEO_SYSTEM_OVERRIDE = [
  * 第五套（muse 长视频）`video_motion_prompt` 的**唯一合法格式**（用户 2026-11-05 给的实样）。
  *
  * 为什么必须单独压一段：这一套要的是「一整段可直接喂长视频模型的中文脚本」——
- * `### 视频一（10秒）` + 文生视频 / 角色设定 / 共享环境与光线 / 时间轴 / Negative prompt。
+ * `### 视频一（10秒）` + 参考生视频 / 共享环境与光线 / 时间轴 / Negative prompt。
+ * （2026-11-06 用户改口径：这一套是**参考生视频**、已经给了设定图 → 首句由「文生视频」改成
+ * 「参考生视频」，并整段删掉 `角色设定：`；见 `normalizeMuseReferenceScript`。）
  * 但任务书里还带着第一套的「`video_motion_prompt` 按 6 段写 / `[时长：Xs]` 不超过 N 秒」，
  * 用户词库那条也只说「每镜怎么写」，两头一夹，模型就退回成
  * `景别：… / 摄影机参数：… / 构图方式：… / 画面内容：… / 人物动作与表演：… / 运镜方式：… / 台词与声音：… / 负面：…`
@@ -5199,29 +5201,31 @@ const STORY_SCRIPT_DIRECTOR_VIDEO_SYSTEM_OVERRIDE = [
  * ⚠️ 只在方案 = `muse` 时拼进去 —— 其它几套一个字节都不能变。
  */
 export const STORY_SCRIPT_MUSE_VIDEO_FORMAT = [
-    "## `video_motion_prompt` 的唯一合法格式（第五套 · muse 长视频）",
-    "⚠️ 本节只规定 `video_motion_prompt` **这一列的值**：整表仍按任务书输出，**优先给 JSON 契约（`rows` 数组）**；不要用 Markdown 管道表格 —— 它的单元格装不下换行，会把整段脚本压成一行流水句。这一列的换行必须原样保留（JSON 字符串里写 `\\n`），**禁止**写成 `### 视频一（10秒） 文生视频，… 角色设定：… 时间轴：…` 这样一行到底。",
+    "## `video_motion_prompt` 的唯一合法格式（第五套 · muse 长视频 · 参考生视频）",
+    "⚠️ 本节只规定 `video_motion_prompt` **这一列的值**：整表仍按任务书输出，**优先给 JSON 契约（`rows` 数组）**；不要用 Markdown 管道表格 —— 它的单元格装不下换行，会把整段脚本压成一行流水句。这一列的换行必须原样保留（JSON 字符串里写 `\\n`），**禁止**写成 `### 视频一（10秒） 参考生视频，… 时间轴：…` 这样一行到底。",
+    "这一套走的是**参考生视频**（图生视频），**不是文生视频**：人物长相、发型、年龄、服装、妆容都由用户已经提供的**设定图 / 首帧参考图**决定，所以这一列里**不写任何角色设定**。",
     "`video_motion_prompt` 要写成一整段**可以直接喂给长视频模型的中文脚本**：不是标签块，不是 `[a] + [b]` 括号链，不是 `[时长：Xs]`。这一列里每一镜只写下面这一块，行序固定：",
     "",
     "```",
     "### 视频N（X秒）",
-    "文生视频，16:9 横屏，时长 X 秒。{这一镜的场景与整体氛围一句话：地点、时段、画风、表演基调}。",
-    "角色设定：{本镜出场人物逐人一句：穿什么、什么状态、做什么；再补一句「在本段内保持稳定」}。",
+    "参考生视频，16:9 横屏，时长 X 秒，人物与场景以已给的设定图 / 首帧参考图为准。{这一镜的场景与整体氛围一句话：地点、时段、画风、表演基调}。",
     "共享环境与光线：{光源位置与方向、明暗关系、室内补光、火光/门光范围、热气与风这类背景动态、要保留的环境音}。",
     "时间轴：",
     "- 0—A 秒：{景别 + 机位 + 光线落点 + 具体动作；有台词就写「谁对谁说：『…』」}",
     "- A—B 秒：{…}",
     "- B—X 秒：{…}",
-    "镜头以固定机位为主，动作真实连贯，不快速跳切，不把多个动作压缩成夸张表演；末帧是{末帧落点}。人物身份、服装、道具数量与位置稳定。",
+    "镜头以固定机位为主，动作真实连贯，不快速跳切，不把多个动作压缩成夸张表演；末帧是{末帧落点}。人物身份、服装、道具数量与位置与参考图保持一致。",
     "Negative prompt：{不要出现的东西，逗号分隔}",
     "```",
     "",
     "硬约束：",
     "- 首行必须是 `### 视频N（X秒）`：N 是镜号（视频一 / 视频二 也可以），**X 必须等于这一镜 `duration` 列的秒数**（10 秒的镜就写 `（10秒）`，不许写 5）。",
-    "- 这五段**必须都有、顺序固定**：`文生视频…` / `角色设定：` / `共享环境与光线：` / `时间轴：` / `Negative prompt：`。其余句子可以按这一镜的情况增删，但这五段一个都不能少。",
+    "- 第二段**必须以 `参考生视频` 四个字开头**（**不许写「文生视频」**），紧接着画幅、时长，再补一句「人物与场景以已给的设定图 / 首帧参考图为准」，然后才是这一镜的场景与氛围。",
+    "- 这四段**必须都有、顺序固定**：`参考生视频…` / `共享环境与光线：` / `时间轴：` / `Negative prompt：`。其余句子可以按这一镜的情况增删，但这四段一个都不能少。",
+    "- **禁止**出现 `角色设定：`（也别写 `人物设定：`）这一行，**禁止**在这一列里描写人物长相、发型、年龄、身材、服装、妆容 —— 用户已经给了设定图，重复描写只会和参考图打架。人物只用称谓指代（`母亲` / `儿子` / `苏晚`，或源稿给的 `@role_xxx` 资产 id），写的永远是**动作、表演、站位与状态**。",
     "- `时间轴：` 下面必须是 `- 起—止 秒：内容` 的条目（`- 0—3 秒：…`），条目**首尾相接覆盖 0 到 X 秒**，不许跳空、不许重叠、不许只写一条概括。",
     "- **禁止**出现 `景别：` / `摄影机参数：` / `构图方式：` / `画面内容：` / `人物动作与表演：` / `运镜方式：` / `台词与声音：` / `负面：` 这类标签行 —— 这一列是给长视频模型的自然语言脚本，标签行会被当成素材照念。景别、机位、光线、动作这些信息要**写进 `时间轴` 的对应条目里**，不要单独起标签行。",
-    "- **禁止** `[时长：5s]` 这种方括号时长（时长只写在标题和 `文生视频` 那句里）；**禁止** `（…）+（…）` 括号链；**禁止**把 `shot_prompt`（分镜提示词 / 图像段）整段复制过来。",
+    "- **禁止** `[时长：5s]` 这种方括号时长（时长只写在标题和 `参考生视频` 那句里）；**禁止** `（…）+（…）` 括号链；**禁止**把 `shot_prompt`（分镜提示词 / 图像段）整段复制过来。",
     "- 台词写进时间轴对应秒数那一条里，标明谁说的、什么语气；没有台词就写环境音。",
 ].join("\n");
 
@@ -5265,7 +5269,7 @@ export const STORY_SCRIPT_GHOST_VIDEO_FORMAT = [
     "- 开头必须是一条 `————————————` 分隔线，紧接着 `镜头N｜起—止秒`（N 可以用中文数字，如「镜头八」；**起止秒是全片累计时间**，两位小数）。分隔线之后先写两句「景别 / 画面同时看见什么」，再写一条同样的分隔线。",
     "- 之后每一条都是 `起.止—终.止秒：` 独占一行，下接正文；条目**首尾相接、覆盖这一镜从起到止的全部秒数**，不许跳空、不许重叠、不许只写一条概括。时间码沿用全片累计秒，不要从 0 重新数。",
     "- 结尾三块**必须都有、顺序固定**：`【全片光影与空气】` / `【声音】` / `【结束连续性】`。编号、方括号、中文书名号都不许换。",
-    "- **禁止** `景别：` / `摄影机参数：` / `构图方式：` / `画面内容：` / `人物动作与表演：` / `运镜方式：` / `台词与声音：` / `负面：` 这类标签行，也**禁止**第五套的 `### 视频N（X秒）` / `文生视频…` / `角色设定：` / `时间轴：` / `Negative prompt：`。景别、机位、光线、动作都要写进对应时间段条目，不单独起标签行。",
+    "- **禁止** `景别：` / `摄影机参数：` / `构图方式：` / `画面内容：` / `人物动作与表演：` / `运镜方式：` / `台词与声音：` / `负面：` 这类标签行，也**禁止**第五套的 `### 视频N（X秒）` / `参考生视频，…` / `角色设定：` / `时间轴：` / `Negative prompt：`。景别、机位、光线、动作都要写进对应时间段条目，不单独起标签行。",
     "- **禁止** `[时长：5s]` 这种方括号时长、`（…）+（…）` 括号链、把 `shot_prompt` 整段复制过来。台词写进对应秒数的条目里，标明说话人与语气；没有台词就写环境音。",
 ].join("\n");
 
@@ -5301,7 +5305,7 @@ export const STORY_SCRIPT_MOMAN_VIDEO_FORMAT = [
     "- 段数按内容需要给（通常 2—4 段），但每一段都要能独立指导生成：景别 + 机位 + 动作 + 光线 + 声音，不要只写「继续上一个动作」。",
     "- 台词写进它发生的那一段里，标明说话人与语气（`奶奶：“我不认识你，不能收你的花。” 语气平缓偏冷`）；没有台词就写环境音与音乐进入 / 退出。",
     "- 源稿用 `@role_xxx` / `@scene_xxx` / `@prop_xxx` 这类资产 id 指代角色、场景、道具时，**在视频列里原样保留**，不要换成自然语言描述；源稿没给这类 id 时不要自己造。",
-    "- **禁止** `景别：` / `摄影机参数：` / `构图方式：` / `画面内容：` / `人物动作与表演：` / `运镜方式：` / `台词与声音：` / `负面：` 这类标签行；**禁止** `### 视频N（X秒）`、`文生视频，…`、`角色设定：`、`时间轴：`、`Negative prompt：`（那是第五套）；**禁止** `———————————— 镜头N｜起—止秒`（那是第六套）；**禁止** `[时长：5s]` 方括号时长、`（…）+（…）` 括号链、把 `shot_prompt` 整段复制过来。",
+    "- **禁止** `景别：` / `摄影机参数：` / `构图方式：` / `画面内容：` / `人物动作与表演：` / `运镜方式：` / `台词与声音：` / `负面：` 这类标签行；**禁止** `### 视频N（X秒）`、`参考生视频，…`、`角色设定：`、`时间轴：`、`Negative prompt：`（那是第五套）；**禁止** `———————————— 镜头N｜起—止秒`（那是第六套）；**禁止** `[时长：5s]` 方括号时长、`（…）+（…）` 括号链、把 `shot_prompt` 整段复制过来。",
     "- 该镜由多镜合并而来（源稿写 `镜3—镜4` / `merged_from_shots`）时，时间码按**合并后的总时长**从 `0.00` 连续排，不要按原镜号重新从 0 起。",
 ].join("\n");
 
@@ -5379,7 +5383,7 @@ export const STORY_SCRIPT_MASHU_VIDEO_FORMAT = [
     "- 组内每镜固定四行标题：`镜头 N:`（半角冒号）→ `持续时间: X秒（本组第A—B秒）` → `景别与运镜: …` → `场景与配音:`，紧接着十个 `【】` 块，顺序固定：`【场景名称】` / `【光影设定】` / `【场景状态】` / `【画面动作】` / `【光影与空气】` / `【说话状态】` / `【原文台词】` / `【配音执行稿】` / `【发声节拍】` / `【配音指令】`。每镜最后一行是 `[环境音效(SFX)：…]`（半角方括号，没有音效就写 `无。`）。",
     "- 组内所有镜头的**持续时间相加必须正好等于**这一行的 `duration`（15 秒就写 3+5+2+5 这类组合），且括号里的「本组第A—B秒」首尾相接、从 0 起连续覆盖到 `duration`。",
     "- 台词要**同时**出现在 `【原文台词】`、`【配音执行稿】`（带秒数区间）与 `【配音指令】`（带 VoiceID）里；没有台词的镜这三块都写「无。」，并明确「不做说话口型」。",
-    "- **禁止** `景别：` / `摄影机参数：` / `构图方式：` / `画面内容：` / `人物动作与表演：` / `运镜方式：` / `台词与声音：` / `负面：` 这类八段标签行；**禁止**第五套的 `### 视频N（X秒）` / `文生视频，…` / `角色设定：` / `时间轴：` / `Negative prompt：`；**禁止**第六套的 `———————————— 镜头N｜起—止秒`；**禁止**第七套的 `0.00—1.50：【景别，运镜】…` 时间码行；**禁止** `[时长：5s]` 方括号时长、`（…）+（…）` 括号链、把 `shot_prompt` 整段复制过来。",
+    "- **禁止** `景别：` / `摄影机参数：` / `构图方式：` / `画面内容：` / `人物动作与表演：` / `运镜方式：` / `台词与声音：` / `负面：` 这类八段标签行；**禁止**第五套的 `### 视频N（X秒）` / `参考生视频，…` / `角色设定：` / `时间轴：` / `Negative prompt：`；**禁止**第六套的 `———————————— 镜头N｜起—止秒`；**禁止**第七套的 `0.00—1.50：【景别，运镜】…` 时间码行；**禁止** `[时长：5s]` 方括号时长、`（…）+（…）` 括号链、把 `shot_prompt` 整段复制过来。",
     "- 源稿用 `@role_xxx` / `@scene_xxx` / `@prop_xxx` 这类资产 id 指代角色、场景、道具时，在 `【场景状态】` / `【画面动作】` 里原样保留，不要换成自然语言。",
 ].join("\n");
 
@@ -5942,7 +5946,11 @@ export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "d
         kind === "muse"
             ? [
                   { re: /###\s*视频\s*[0-9０-９一二三四五六七八九十]/g },
+                  // `参考生视频，…` 是现在的口径；`文生视频，…` 留着认旧输出（模型 / 旧源稿还在写），
+                  // 归一函数 `normalizeMuseReferenceScript` 会把它们改成「参考生视频」。
+                  { re: /参考生视频\s*[，,]/g },
                   { re: /文生视频\s*[，,]/g },
+                  // `角色设定：…` 现在要被整行删掉，但先得分出来才能删干净（压平时它粘在上一段尾巴上）。
                   { re: /角色设定\s*[：:]/g },
                   { re: /共享环境与光线\s*[：:]/g },
                   { re: /时间轴\s*[：:]/g },
@@ -6015,9 +6023,38 @@ export function reflowLongVideoScript(text: unknown, kind: "muse" | "ghost" | "d
     return reflowed.replace(/\n{2,}/g, "\n").replace(/^\n+|\n+$/g, "");
 }
 
-/** 这一列已经是长视频脚本（有 `### 视频…` 或五段里的关键段）→ 不许再改写。 */
+/**
+ * 这一列已经是长视频脚本（有 `### 视频…`，或「开头那句 + `时间轴：`」都在）→ 不许再改写。
+ *
+ * ⚠️ 参考生视频口径后开头是 `参考生视频，`；`文生视频，` / `角色设定：` 留着认旧输出，
+ * 否则「模型自己写对的脚本」会被判成标签块、被二次重组。
+ */
 function looksLikeMuseScript(text: string): boolean {
-    return /###\s*视频/.test(text) || (/角色设定\s*[：:]/.test(text) && /时间轴\s*[：:]/.test(text));
+    return /###\s*视频/.test(text) || (/时间轴\s*[：:]/.test(text) && /(?:参考生视频|文生视频|角色设定)\s*[，,：:]/.test(text));
+}
+
+/**
+ * 第五套口径 = **参考生视频**（用户 2026-11-06：已经给了设定图，不需要角色设定描述）。
+ *
+ * 这一列里两样东西必须清掉：
+ *  ① 首句的「文生视频」→「参考生视频」（模型、旧模版、用户自己的词库都可能还写着「文生视频」）；
+ *  ② 整段 `角色设定：…`（含 `人物设定：…` 写法）—— 重复描写长相 / 服装只会和参考图打架。
+ *
+ * 为什么必须在**收敛函数里**做、而不是只改提示词模板：模型经常「写对了一半」——
+ * `### 视频N（X秒）` 有、`时间轴：` 有，`looksLikeMuseScript` 就判「已合规」直接放过，
+ * 于是视频列里照样留着「文生视频」和角色长相描述，用户看到的还是文生视频那套。
+ * 幂等：合规文本原样返回。
+ */
+function normalizeMuseReferenceScript(text: unknown): string {
+    let value = String(text ?? "");
+    if (!value.trim()) return value;
+    // ① 角色设定段：先按「整行」删（reflow 之后基本都在行首），再兜底处理粘在上一段尾巴上的情形。
+    value = value
+        .replace(/(?:^|\n)[ \t]*(?:[-*•][ \t]*)?(?:角色设定|人物设定)[ \t]*[：:][^\n]*/g, "")
+        .replace(/(?:角色设定|人物设定)\s*[：:][\s\S]*?(?=\n?[ \t]*(?:共享环境与光线|时间轴|Negative prompt)\s*[：:]|$)/g, "");
+    // ② 「文生视频」→「参考生视频」；替换结果不含原串，天然幂等。
+    value = value.replace(/文生视频/g, "参考生视频");
+    return value.replace(/\n{3,}/g, "\n\n").replace(/^\n+|\n+$/g, "");
 }
 
 /**
@@ -6045,7 +6082,7 @@ const MUSE_LABEL_PATTERN = new RegExp(
 function parseMuseTagSlots(text: string): Partial<Record<MuseSlot, string>> | null {
     const raw = String(text || "");
     if (!raw.trim()) return null;
-    // 已经是合规长视频脚本（`### 视频…` / `角色设定：` + `时间轴：`）→ 不是标签块，别把它的段落名当标签。
+    // 已经是合规长视频脚本（`### 视频…`，或开头 `参考生视频 / 文生视频 / 角色设定` + `时间轴：`）→ 不是标签块，别把它的段落名当标签。
     if (looksLikeMuseScript(raw)) return null;
     const matches = Array.from(raw.matchAll(MUSE_LABEL_PATTERN));
     if (matches.length < 4) return null;
@@ -6129,18 +6166,18 @@ function museShotNoLabel(shotNo: number): string {
     return String(n);
 }
 
-/** 标签块 → 长视频脚本（第五套的唯一合法形态，见 `STORY_SCRIPT_MUSE_VIDEO_FORMAT`）。 */
 /**
- * 标签块 → 长视频脚本（第五套的唯一合法形态，见 `STORY_SCRIPT_MUSE_FORMAT` 同名常量）。
+ * 标签块 → 长视频脚本（第五套的唯一合法形态，见 `STORY_SCRIPT_MUSE_VIDEO_FORMAT`）。
  *
- * `cast` = 本镜角色资产（`角色1：描述`）拼出来的一句；**不能拿「画面内容」顶替**——
- * 那会拼出 `角色设定：母亲在灶台前煎蛋`（那是动作，不是人物设定）。
+ * ⚠️ 2026-11-06 口径变更：这一套是**参考生视频**（用户已经给了设定图）→
+ * 首句写「参考生视频，…，人物与场景以已给的设定图 / 首帧参考图为准」，
+ * 并且**不再生成 `角色设定：` 段**（人物外形由参考图决定，重复描写会和图打架）。
+ * 所以这里既不需要 `cast` 入参，也不能拿「画面内容」里的外貌小句顶上去。
  */
 function buildMuseScriptFromSlots(
     slots: Partial<Record<MuseSlot, string>>,
     duration: number,
     shotNo: number,
-    cast?: string,
 ): string {
     const dur = Math.max(1, Math.round(duration) || 10);
     // `[时长：5s]` / `[时长：5秒]` 两种写法都要剥掉（用户实样写的是 `5s`）；剥完顺手收一下重复标点。
@@ -6156,8 +6193,8 @@ function buildMuseScriptFromSlots(
     // 画幅优先取模型自己写的（16:9 / 9:16 / 2.39:1 …），没有就按默认 16:9 横屏。
     const ratio = `${camera} ${composition}`.match(/\b(16:9|9:16|4:3|3:4|21:9|1:1|2\.39:1)\b/)?.[1] || "16:9";
     const orientation = /^(9:16|3:4|1:1)$/.test(ratio) ? "竖屏" : "横屏";
-    /** 第一句：文生视频 + 画幅 + 时长 + 这一镜的景别/机位。 */
-    const opening = [`文生视频，${ratio} ${orientation}，时长 ${dur} 秒`, shotSize ? `画面为${shotSize}` : "", camera, composition ? `构图：${composition}` : ""]
+    /** 第一句：**参考生视频** + 画幅 + 时长 + 人物外形以设定图为准 + 这一镜的景别/机位。 */
+    const opening = [`参考生视频，${ratio} ${orientation}，时长 ${dur} 秒，人物与场景以已给的设定图 / 首帧参考图为准`, shotSize ? `画面为${shotSize}` : "", camera, composition ? `构图：${composition}` : ""]
         .filter(Boolean)
         .join("。");
     /** 共享环境与光线：优先从摄影机参数 / 运镜 / 画面内容里挑讲光的句子（内容里常写「清晨侧逆光」）。 */
@@ -6188,7 +6225,7 @@ function buildMuseScriptFromSlots(
     const tail = [
         "镜头以固定机位为主，动作真实连贯，不快速跳切，不把多个动作压缩成夸张表演。",
         ambience ? `保留${ambience}，不加音乐、旁白或煽情音效。` : "保留现场环境音，不加音乐、旁白或煽情音效。",
-        "人物身份、服装、道具数量与位置在本段内保持稳定。",
+        "人物身份、服装、道具数量与位置与参考图保持一致。",
     ].join("");
     const timelineLines = timeline.length ? timeline : [`- 0—${dur} 秒：${museOneLine(slots.action) || "按本镜动作完成表演"}`];
     /**
@@ -6199,19 +6236,9 @@ function buildMuseScriptFromSlots(
         const last = timelineLines[timelineLines.length - 1];
         timelineLines[timelineLines.length - 1] = `${last.replace(/[。；;]\s*$/, "")}；台词：“${quoted}”。`;
     }
-    /**
-     * `角色设定` 的取值顺序：① 本镜角色资产（`角色1：27岁…穿灰色家居服`）→
-     * ② 画面内容里**确实写了外貌 / 服装**的那一小句 → ③ 通用兜底。
-     * 绝不能直接拿 `画面内容` 兜（会拼出「角色设定：母亲在灶台前煎蛋」——那是动作）。
-     */
-    const castLine =
-        museOneLine(cast) ||
-        content.match(/[^，,。；;]*(?:穿|衣着|外套|家居服|裙|衬衫|短发|长发|扎|岁|妆|肤色|指甲)[^，,。；;]*/)?.[0]?.trim() ||
-        "沿用本镜角色资产的外貌、服装与年龄感，在本段内保持稳定";
     return [
         `### 视频${museShotNoLabel(shotNo)}（${dur}秒）`,
         `${opening}。${content ? `${content}。` : ""}`,
-        `角色设定：${castLine}。`,
         `共享环境与光线：${light}。`,
         "时间轴：",
         ...timelineLines,
@@ -6252,37 +6279,21 @@ export function normalizeStoryScriptMuseRows(rows: readonly StoryScriptRow[], pr
          * 先还原「被压成一行」的脚本：模型把多行塞进 Markdown 表格单元格 / JSON 单行字符串时，
          * `### 视频一（10秒）` 还在，`looksLikeMuseScript` 就会判「已经合规」直接放过 ——
          * 用户看到的却是一行流水句，等于专属格式没生效。reflow 幂等，已分行的原样返回。
+         * 再统一成**参考生视频**口径：`文生视频` → `参考生视频`、整段删掉 `角色设定：`（幂等）。
          */
-        const text = reflowLongVideoScript(rawText, "muse");
+        const text = normalizeMuseReferenceScript(reflowLongVideoScript(rawText, "muse"));
         if (looksLikeMuseScript(text)) return text === rawText ? row : { ...row, video_motion_prompt: text };
         const slots = parseMuseTagSlots(text);
         if (!slots) return text === rawText ? row : { ...row, video_motion_prompt: text };
-        return { ...row, video_motion_prompt: buildMuseScriptFromSlots(slots, Number(row.duration) || 0, shotNo, museCastOf(row)) };
+        return { ...row, video_motion_prompt: buildMuseScriptFromSlots(slots, Number(row.duration) || 0, shotNo) };
     });
-}
-
-/** 本镜角色资产 → `苏晚：27岁中国女性，短发，穿灰色家居服`；没名字就留空（让 `角色设定` 走兜底）。 */
-function museCastOf(row: StoryScriptRow): string {
-    return [
-        [row.character_1, row.character_description_1],
-        [row.character_2, row.character_description_2],
-    ]
-        .map(([name, description]) => {
-            const label = museOneLine(name);
-            // 「（同第 1 镜）」是资产去重后的占位，不是描述。
-            const detail = /^（?同第/.test(museOneLine(description)) ? "" : museOneLine(description);
-            if (label && detail) return `${label}：${detail}`;
-            return label || "";
-        })
-        .filter(Boolean)
-        .join("；");
 }
 
 /** `shot_prompt` 里整段都是长视频脚本（模型写错列）→ 挪到视频列，并把分镜列清空。 */
 function relocateMuseScriptFromRow(row: StoryScriptRow): StoryScriptRow | null {
     const shotText = String(row.shot_prompt ?? "");
     if (!/^\s*###\s*视频/.test(shotText)) return null;
-    const text = reflowLongVideoScript(shotText, "muse");
+    const text = normalizeMuseReferenceScript(reflowLongVideoScript(shotText, "muse"));
     if (!looksLikeMuseScript(text)) return null;
     return { ...row, video_motion_prompt: text, shot_prompt: "" };
 }
@@ -6300,14 +6311,15 @@ function composeMuseScriptFromRow(row: StoryScriptRow, shotNo: number): string |
         { shot: museOneLine(row.shot), content, action, sound },
         Number(row.duration) || 0,
         shotNo,
-        museCastOf(row),
     );
 }
 
 /* ── 第五套（muse）源内容识别：`### 视频一（10秒）` 整段 → 视频运动提示词列 ───────────────
  *
  * 用户 2026-11-05 原话：「当使用第 5 套执行方案时，视频运动提示词需要识别下列该内容并填入」，
- * 给的样例就是 `### 视频一（10秒）` + 文生视频 / 角色设定 / 共享环境与光线 / 时间轴 / Negative prompt。
+ * 给的样例就是 `### 视频一（10秒）` + 参考生视频 / 共享环境与光线 / 时间轴 / Negative prompt
+ * （样例原写作「文生视频 / 角色设定」，2026-11-06 用户改成参考生视频口径，源稿里那两样会在
+ * `normalizeMuseReferenceScript` 里统一清掉）。
  *
  * 为什么必须**独立开一条通道**（不能靠模版覆盖层）：
  *  ① 模版覆盖层的判据是「`- **标签**：值` 的字段块」，而这一段是**散文正文**（没有任何标签），
@@ -6364,8 +6376,9 @@ export function extractMuseVideoScriptBlocks(sourceText: string): Array<{ shotNo
 /**
  * 第五套：把源内容里的整段长视频脚本按镜号填进 `video_motion_prompt` 列。
  *
- * 判定「模型已经写对了就不动」：那一列本身已经是长视频脚本（`### 视频…` 或 `角色设定`+`时间轴`）时，
+ * 判定「模型已经写对了就不动」：那一列本身已经是长视频脚本（`### 视频…`，或开头那句 + `时间轴：`）时，
  * 保留模型写的（它可能结合了本镜的资产信息）；否则用源内容整段覆盖。
+ * 覆盖进来的文本也要过一遍 `normalizeMuseReferenceScript`（源稿里常写着「文生视频 / 角色设定」）。
  */
 export function applyMuseVideoScriptOverlay(
     rows: readonly StoryScriptRow[],
@@ -6388,7 +6401,7 @@ export function applyMuseVideoScriptOverlay(
         if (!block) return row;
         const current = String(row.video_motion_prompt ?? "");
         if (looksLikeMuseScript(current)) return row;
-        return { ...row, video_motion_prompt: block.text };
+        return { ...row, video_motion_prompt: normalizeMuseReferenceScript(reflowLongVideoScript(block.text, "muse")) };
     });
 }
 
