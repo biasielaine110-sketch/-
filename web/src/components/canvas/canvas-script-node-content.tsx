@@ -99,13 +99,16 @@ export type { ScriptAssetCandidate, ScriptAssetLinkSelection };
 /** 顶部工具条字号相对正文基准的倍数（改造前 15px / 13px），跟着基准字号一起缩放。 */
 const HEADER_FONT_SCALE = 1.154;
 /**
- * 操作列：复制 / 送画布 / 建视频 / 重生成 / 补资产 / 改剧情 / 上移下移 / 删除。
+ * 操作列：勾选 / 复制 / 送画布 / 建视频 / 重生成 / 补资产 / 改剧情 / 上移下移 / 删除。
  *
  * 2026-10-17（第十五轮）：这一列改成**右侧吸附**（`sticky right-0`）——经典预设整表约 4.2k px，
  * 操作列在最右边，不吸附就得一路横向拖到底才够得到「补资产 / 重生成」，用户因此只看得见底部的
  * 「整表补齐」。列宽同时 132 → 160、按钮收到 20px，所有按钮两行内排完，不再把每行撑高。
+ *
+ * 2026-11-06：表尾补一个**行勾选框**（与最左第一列同一个 `selectedRows`）——表太宽，从开头选够不到。
+ * 160 → 182 是为了把多出来的那一个 20px 按钮塞进**同一行**里，不额外撑高每行。
  */
-const TABLE_ACTION_WIDTH = 160;
+const TABLE_ACTION_WIDTH = 182;
 /** 勾选列（批量重生成 / 批量铺视频）的宽度：只有一个圆形勾选按钮。 */
 const TABLE_SELECT_WIDTH = 34;
 /**
@@ -940,6 +943,65 @@ export function CanvasScriptNodeContent({
 
     const toggleAllRows = () => {
         setSelectedRows((current) => (current.size === rows.length ? new Set() : new Set(rows.map((_, index) => index))));
+    };
+
+    /**
+     * 「全选 / 全不选」按钮：表头**首尾各铺一个**。
+     * 整表 4.2k px 宽，横向拖到最右边（正在操作的那一镜）时够不到最左边那一格，
+     * 所以表尾吸附的操作列里也放一个；两处共用这一份实现，状态与样式永远一致。
+     */
+    const renderSelectAllButton = () => {
+        const all = rows.length > 0 && selectedRows.size === rows.length;
+        return (
+            <button
+                type="button"
+                className="inline-flex size-5 items-center justify-center rounded-md border text-[0.7em] transition"
+                style={{
+                    borderColor: all ? theme.toolbar.activeBg : theme.node.stroke,
+                    background: all ? theme.toolbar.activeBg : "transparent",
+                    color: all ? theme.toolbar.activeText : theme.node.text,
+                    opacity: all ? 1 : 0.7,
+                }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    toggleAllRows();
+                }}
+                title={all ? t("canvas.scriptNode.selectNone") : t("canvas.scriptNode.selectAll")}
+            >
+                {all ? "✓" : ""}
+            </button>
+        );
+    };
+
+    /**
+     * 单行勾选按钮：首列与表尾操作列共用同一份 `selectedRows`。
+     * 两处是**同一个状态的两个入口**，在哪边勾都能互相同步（不是两份独立数据）。
+     */
+    const renderRowSelectButton = (rowIndex: number) => {
+        const picked = selectedRows.has(rowIndex);
+        return (
+            <button
+                type="button"
+                className="inline-flex size-5 items-center justify-center rounded-md border text-[0.7em] transition"
+                style={{
+                    borderColor: picked ? theme.toolbar.activeBg : theme.node.stroke,
+                    background: picked ? theme.toolbar.activeBg : "transparent",
+                    color: picked ? theme.toolbar.activeText : theme.node.text,
+                    opacity: picked ? 1 : 0.6,
+                }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    toggleRowSelected(rowIndex);
+                }}
+                title={t("canvas.scriptNode.selectRow")}
+            >
+                {picked ? "✓" : ""}
+            </button>
+        );
     };
 
     /**
@@ -2153,24 +2215,7 @@ export function CanvasScriptNodeContent({
                         <tr>
                             {showRowSelect ? (
                                 <th className="sticky top-0 z-10 border-b px-1 py-1" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel }}>
-                                    <button
-                                        type="button"
-                                        className="inline-flex size-5 items-center justify-center rounded-md border text-[0.7em] transition"
-                                        style={{
-                                            borderColor: selectedRows.size && selectedRows.size === rows.length ? theme.toolbar.activeBg : theme.node.stroke,
-                                            background: selectedRows.size && selectedRows.size === rows.length ? theme.toolbar.activeBg : "transparent",
-                                            color: selectedRows.size && selectedRows.size === rows.length ? theme.toolbar.activeText : theme.node.text,
-                                        }}
-                                        onMouseDown={(event) => event.stopPropagation()}
-                                        onPointerDown={(event) => event.stopPropagation()}
-                                        onClick={(event) => {
-                                            event.stopPropagation();
-                                            toggleAllRows();
-                                        }}
-                                        title={selectedRows.size === rows.length ? t("canvas.scriptNode.selectNone") : t("canvas.scriptNode.selectAll")}
-                                    >
-                                        {selectedRows.size && selectedRows.size === rows.length ? "✓" : ""}
-                                    </button>
+                                    {renderSelectAllButton()}
                                 </th>
                             ) : null}
                             {displayColumns.map((column) => {
@@ -2219,7 +2264,14 @@ export function CanvasScriptNodeContent({
                                 );
                             })}
                             <th className="sticky right-0 top-0 z-30 border-b border-l px-2 py-1 text-left font-semibold whitespace-nowrap" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }}>
-                                {t("canvas.scriptNode.columnActions")}
+                                <span className="inline-flex items-center gap-1">
+                                    {/*
+                                     * 表尾「全选」：整表 4.2k px 宽，勾完一镜后已经横向拖到最右边了，
+                                     * 再拖回最左边点全选非常难够到 —— 这一列本来就是吸附的，就地再放一个。
+                                     */}
+                                    {showRowSelect ? renderSelectAllButton() : null}
+                                    {t("canvas.scriptNode.columnActions")}
+                                </span>
                             </th>
                         </tr>
                     </thead>
@@ -2233,25 +2285,7 @@ export function CanvasScriptNodeContent({
                             >
                                 {showRowSelect ? (
                                     <td className="border-b px-1 py-1.5" style={{ borderColor: theme.node.stroke }}>
-                                        <button
-                                            type="button"
-                                            className="inline-flex size-5 items-center justify-center rounded-md border text-[0.7em] transition"
-                                            style={{
-                                                borderColor: selectedRows.has(rowIndex) ? theme.toolbar.activeBg : theme.node.stroke,
-                                                background: selectedRows.has(rowIndex) ? theme.toolbar.activeBg : "transparent",
-                                                color: selectedRows.has(rowIndex) ? theme.toolbar.activeText : theme.node.text,
-                                                opacity: selectedRows.has(rowIndex) ? 1 : 0.6,
-                                            }}
-                                            onMouseDown={(event) => event.stopPropagation()}
-                                            onPointerDown={(event) => event.stopPropagation()}
-                                            onClick={(event) => {
-                                                event.stopPropagation();
-                                                toggleRowSelected(rowIndex);
-                                            }}
-                                            title={t("canvas.scriptNode.selectRow")}
-                                        >
-                                            {selectedRows.has(rowIndex) ? "✓" : ""}
-                                        </button>
+                                        {renderRowSelectButton(rowIndex)}
                                     </td>
                                 ) : null}
                                 {displayColumns.map((column) => {
@@ -2442,6 +2476,17 @@ export function CanvasScriptNodeContent({
                                 {/* 右侧吸附：整表 4.2k px 宽，操作列不吸附就得横向拖到底才够得到。 */}
                                 <td className="sticky right-0 z-10 border-b border-l px-1 py-1" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
                                     <div className="flex flex-wrap items-center gap-0.5">
+                                        {/*
+                                         * 表尾勾选：与最左第一列**同一份 `selectedRows`**。
+                                         * 分镜表横向 4.2k px，勾第 8 镜时视线和滚动条都在最右边，
+                                         * 要回到最左边那格去点非常难够到（用户原话：「比较长，从最开头选不好选」）。
+                                         * 这一列是吸附的，所以就地再放一个入口，两处互相同步。
+                                         */}
+                                        {showRowSelect ? (
+                                            <span className="mr-0.5 inline-flex items-center pr-1" style={{ borderRight: `1px solid ${theme.node.stroke}` }}>
+                                                {renderRowSelectButton(rowIndex)}
+                                            </span>
+                                        ) : null}
                                         {/* 复制类动作改成纯图标：带文字的按钮一行只放得下一个，两行复制按钮
                                             就够把每行撑高 50px（用户反馈的「镜头之间间距太大」有一半来自这里）。 */}
                                         {preset.rowActions.map((action) => (
