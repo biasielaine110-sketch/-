@@ -546,7 +546,7 @@ export default {
             templateApplied: "Filled shot prompt / video motion prompt from {{count}} template block(s)",
             templateShotCountMismatch: "The template has {{expected}} shots but the model returned {{actual}}: only the first {{actual}} were filled. Regenerate, or switch to a more reliable model.",
             momanSourceApplied: "Video motion prompts filled from your source ({{count}} storyboards).",
-            momanSourcePartial: "The source has {{count}} storyboards but the table has {{total}} rows: the first {{count}} rows were filled from the source, the rest are model-written.",
+            momanSourcePartial: "The source has {{count}} storyboards but the table has {{total}} rows: {{count}} of them were replaced from the source by shot number, the other {{rest}} are still model-written. To use the source there too, paste those storyboards into the source as well and regenerate.",
             momanSourceMissing: "No storyboard JSON or timecode segments found in the source: this column was written by the model, not copied from your source. Paste the storyboard into Source and regenerate.",
             promptPlaceholder: "Extra requirements (optional), e.g. keep the lead as Shen Zhaozhao, max 12 shots",
             generate: "Generate script",

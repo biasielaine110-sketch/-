@@ -6818,7 +6818,13 @@ function AtelierCanvasPage() {
                     if (momanInfo.kind === "none") {
                         message.warning(t("canvas.scriptNode.momanSourceMissing"));
                     } else if (momanInfo.records < finalRows.length) {
-                        message.info(t("canvas.scriptNode.momanSourcePartial", { count: momanInfo.records, total: finalRows.length }));
+                        message.info(
+                            t("canvas.scriptNode.momanSourcePartial", {
+                                count: momanInfo.records,
+                                total: finalRows.length,
+                                rest: finalRows.length - momanInfo.records,
+                            }),
+                        );
                     } else {
                         message.info(t("canvas.scriptNode.momanSourceApplied", { count: momanInfo.records }));
                     }

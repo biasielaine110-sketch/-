@@ -3062,6 +3062,51 @@ function parseJsonLenient(slice: string): unknown {
     return undefined;
 }
 
+/**
+ * 按**顶层 `{}` 配对**切出所有对象片段（只切不 parse）。
+ *
+ * 为什么需要它（2026-11-06 第七次报障）：源稿里贴了**多个 storyboard**（或前后还带说明文字）时，
+ * 严格级的括号配对拿到的片段是准的，只是每个片段自己走形（多逗号 / 裸引号）parse 失败；
+ * 而宽松级的两种切法「整段」「首个 `{` 到最后一个 `}`」都会把多个对象**粘成一个**去 parse，
+ * 必然失败 —— 于是三级全落空，overlay 静默返回原表，视频列仍是模型自编的那段。
+ *
+ * 裸引号（对白 `"…"` 被还原成未转义）会让字符串状态错乱、切分不可信；
+ * 所以调用方还会用 `maskMomanPromptValues` 先把 `prompt` 值挖成占位符再切一次。
+ */
+function splitTopLevelJsonSlices(text: string): string[] {
+    const slices: string[] = [];
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (char === "\\") escaped = true;
+            else if (char === '"') inString = false;
+            continue;
+        }
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+        if (char === "{") {
+            if (depth === 0) start = index;
+            depth += 1;
+            continue;
+        }
+        if (char !== "}") continue;
+        if (depth === 0) continue;
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+            slices.push(text.slice(start, index + 1));
+            start = -1;
+        }
+    }
+    return slices;
+}
+
 /** `\"` / `\n` / `\t` 等转义还原成真字符（与 `extractMomanPromptLiterals` 同口径）。 */
 function unescapeMomanLiteral(text: string): string {
     let out = "";
@@ -3201,14 +3246,22 @@ function extractMomanPromptLiterals(text: string): Record<string, unknown>[] {
  * 从任意文本里抠出所有 storyboard 对象（源稿与模型返回共用同一个抽取器）。
  * 容器形态都认：顶层数组、`{ storyboards: [...] }`、`{ rows: [...] }`（模型混用）、裸对象、JSONL。
  *
- * ⚠️ 三级抽取（缺一级就会出现「源稿明明贴了，表格却填模型自写内容」）：
+ * ⚠️ 四级抽取，**全部跑完再按 `id + prompt 前 60 字` 去重合并**：
  *  ① 严格：`extractTopLevelJsonValues`（括号配对 + JSON.parse）；
- *  ② 宽松：整段 / 首个 `{` 到最后一个 `}`，修走形 + 补括号后再 parse；
- *  ③ 兜底：直接抓 `"prompt"` 字符串字面量。
+ *  ①-b 片段级修复：配对得到的每个片段再各自 `parseJsonLenient`（多逗号 / 走形）；
+ *  ② 宽松：整段 / 首个 `{` 到最后一个 `}`（两种切法互斥，避免同一条被当两份）；
+ *  ③ 兜底：把 `prompt` 值挖成占位符后重来（裸引号 / 真实换行全在它里面）；
+ *  ④ 最后才按 `"prompt": "…"` 抓字面量（只有正文，没有首尾状态）。
+ *
+ * 🔴 **不能「捞到就走」**（2026-11-06 第七次报障）：用户贴 01+02 两份，01 是合法 JSON、
+ * 02 的对白引号被聊天窗口还原成裸 `"`。严格级配对到 01 成功就 return，02 永远进不来 ——
+ * 于是「贴了两份，表里只有一份是源稿，另一份仍是模型自编」。凡是通道之间可能互补，
+ * 就必须合并去重，而不是先到先得。
  */
 function extractMomanStoryboardRecords(raw: string): Record<string, unknown>[] {
     const text = String(raw ?? "");
     const records: Record<string, unknown>[] = [];
+    const seen = new Set<string>();
     const consume = (item: unknown) => {
         if (Array.isArray(item)) {
             item.forEach(consume);
@@ -3217,57 +3270,69 @@ function extractMomanStoryboardRecords(raw: string): Record<string, unknown>[] {
         if (!item || typeof item !== "object") return;
         const record = item as Record<string, unknown>;
         if (isMomanStoryboardRecord(record)) {
-            records.push(record);
+            const key = `${String(record.id ?? "").trim()}::${String(record.prompt ?? "").slice(0, 60)}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                records.push(record);
+            }
             return;
         }
         const nested = Object.values(record).filter((value) => value && typeof value === "object");
         nested.forEach(consume);
     };
-    for (const value of extractTopLevelJsonValues(text)) consume(value);
-    if (records.length) return records;
 
-    /**
-     * ⚠️ 两种切法**互斥**（2026-11-06 第六次报障的第三个真因）：
-     * 源稿前后没有说明文字时，`整段` 与 `首个 { 到最后一个 }` 是**同一份内容**，
-     * 两个都 parse 成功就会把同一条 storyboard 收进 records **两次** ——
-     * 于是「只贴了 storyboard_02、表里 2 行」变成「2 条源稿按顺序覆盖 2 行」，
-     * 第 1 行被错盖、第 2 行还是模型自编的。前者成功就不再试后者。
-     */
-    const loose: unknown[] = [];
+    // ① 严格：括号配对 + JSON.parse（可能只捞到其中一部分，所以下面还要继续补）。
+    for (const value of extractTopLevelJsonValues(text)) consume(value);
+
+    // ①-b 片段级修复：严格级配对是准的，只是每个片段自己走形（多逗号 / 裸引号）。
+    //     逐个片段修 —— 多条 storyboard 各救各的；下面两种切法都会把多个对象「粘成一个」。
+    for (const slice of splitTopLevelJsonSlices(text)) {
+        const parsed = parseJsonLenient(slice);
+        if (parsed !== undefined) consume(parsed);
+    }
+
+    // ② 整段 / 首个 `{` 到最后一个 `}`：两种切法互斥（源稿没夹说明文字时二者是同一份内容，
+    //    都 parse 成功就会把同一条收两次 —— 去重能兜住，但少跑一次也省事）。
     const whole = parseJsonLenient(text.trim());
-    if (whole !== undefined) loose.push(whole);
+    if (whole !== undefined) consume(whole);
     else {
         const start = text.indexOf("{");
         if (start >= 0) {
             const lastClose = text.lastIndexOf("}");
             const slice = lastClose > start ? text.slice(start, lastClose + 1) : text.slice(start);
             const parsed = parseJsonLenient(slice);
-            if (parsed !== undefined) loose.push(parsed);
+            if (parsed !== undefined) consume(parsed);
         }
     }
-    loose.forEach(consume);
-    if (records.length) return records;
 
-    // ③ 兜底（第五次报障）：`prompt` 里带裸引号 / 真实换行时上面两级全失败。
-    //    先把 `prompt` 的值整体挖掉换成占位符（坏字符全在它里面），剩下的 JSON 修一遍就能 parse
+    // ③ 把 `prompt` 的值整体挖掉换成占位符（坏字符全在它里面），剩下的修一遍就能 parse
     //    → 整条 storyboard 的其它字段（首尾状态、锚点、台词、素材）一并拿到，再把 prompt 塞回去。
+    //    ⚠️ 这一步**无条件跑**：即使 ①② 已经捞到一份，另一份带裸引号的可能只有这里能救。
     const masked = maskMomanPromptValues(text);
     if (masked.values.length) {
-        const restored: unknown[] = [];
-        const maskedWhole = parseJsonLenient(masked.text.trim());
-        if (maskedWhole !== undefined) restored.push(maskedWhole);
-        else {
-            const maskedStart = masked.text.indexOf("{");
-            if (maskedStart >= 0) {
-                const maskedEnd = masked.text.lastIndexOf("}");
-                const slice = maskedEnd > maskedStart ? masked.text.slice(maskedStart, maskedEnd + 1) : masked.text.slice(maskedStart);
-                const parsed = parseJsonLenient(slice);
-                if (parsed !== undefined) restored.push(parsed);
+        let restoredCount = 0;
+        for (const slice of splitTopLevelJsonSlices(masked.text)) {
+            const parsed = parseJsonLenient(slice);
+            if (parsed === undefined) continue;
+            restoredCount += 1;
+            consume(restoreMomanPromptValues(parsed, masked.values));
+        }
+        if (!restoredCount) {
+            const maskedWhole = parseJsonLenient(masked.text.trim());
+            if (maskedWhole !== undefined) consume(restoreMomanPromptValues(maskedWhole, masked.values));
+            else {
+                const maskedStart = masked.text.indexOf("{");
+                if (maskedStart >= 0) {
+                    const maskedEnd = masked.text.lastIndexOf("}");
+                    const slice = maskedEnd > maskedStart ? masked.text.slice(maskedStart, maskedEnd + 1) : masked.text.slice(maskedStart);
+                    const parsed = parseJsonLenient(slice);
+                    if (parsed !== undefined) consume(restoreMomanPromptValues(parsed, masked.values));
+                }
             }
         }
-        restored.forEach((value) => consume(restoreMomanPromptValues(value, masked.values)));
-        if (records.length) return records;
     }
+    if (records.length) return records;
+
     // ④ 连占位符都救不回来 → 至少把 `prompt` 抓出来（宁可只有正文，也不要空转）。
     return extractMomanPromptLiterals(text);
 }

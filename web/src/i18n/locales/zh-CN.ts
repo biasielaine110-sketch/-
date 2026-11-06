@@ -546,7 +546,7 @@ export default {
             templateApplied: "已按逐镜模版回填 {{count}} 块的分镜提示词 / 视频运动提示词",
             templateShotCountMismatch: "模版有 {{expected}} 镜，模型只生成了 {{actual}} 镜：已按顺序回填前 {{actual}} 镜。可再点一次生成，或改用更稳定的模型。",
             momanSourceApplied: "已按源内容回填视频运动提示词（{{count}} 条 storyboard）。",
-            momanSourcePartial: "源内容里有 {{count}} 条 storyboard，表里共 {{total}} 行：前 {{count}} 行已按源内容回填，其余仍是模型生成。",
+            momanSourcePartial: "源内容里有 {{count}} 条 storyboard，表里共 {{total}} 行：这 {{count}} 行已按镜号换成源稿，另外 {{rest}} 行仍是模型按格式生成的。要让那几行也用源稿，把它们的 storyboard 一并贴进「源内容」再生成。",
             momanSourceMissing: "源内容里没找到 storyboard JSON 或时间码分段：这一列的视频运动提示词是模型按格式生成的，不是你的源稿。请把 storyboard 贴进「源内容」再生成。",
             promptPlaceholder: "补充要求（可选），例如：主角固定为沈昭昭，控制在 12 个镜头以内",
             generate: "生成脚本",
