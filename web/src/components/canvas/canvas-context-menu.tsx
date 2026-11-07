@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Sparkles, Trash2, Unlink2, Video } from "lucide-react";
+import { Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -48,6 +48,8 @@ export function CanvasNodeContextMenu({
     onBatchGenerate,
     groupCount = 0,
     onGroupSelected,
+    h3OptimizeCount = 0,
+    onH3OptimizeSelected,
 }: {
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
@@ -77,6 +79,9 @@ export function CanvasNodeContextMenu({
     /** 选区里可成组的节点数（非分组节点）。>=2 才在菜单顶部出现「成组」。 */
     groupCount?: number;
     onGroupSelected?: () => void;
+    /** 选区里可做「h3 提示词优化」的节点数（图片 / 视频且提示词非空）。>=1 就出现。 */
+    h3OptimizeCount?: number;
+    onH3OptimizeSelected?: () => void;
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -96,7 +101,9 @@ export function CanvasNodeContextMenu({
     const convertTarget = node ? nodeConversionTarget(node.type) : null;
     const showBatchGenerate = menu.type === "node" && Boolean(node) && batchGenerateCount > 1 && Boolean(onBatchGenerate);
     const showGroup = menu.type === "node" && Boolean(node) && groupCount > 1 && Boolean(onGroupSelected);
-    const showSelectionActions = showBatchGenerate || showGroup;
+    // h3 提示词优化作用在**选区**上（点一次逐个转格式），所以哪怕只选了 1 个也出现。
+    const showH3Optimize = menu.type === "node" && Boolean(node) && h3OptimizeCount > 0 && Boolean(onH3OptimizeSelected);
+    const showSelectionActions = showBatchGenerate || showGroup || showH3Optimize;
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -338,6 +345,17 @@ export function CanvasNodeContextMenu({
                             label={t("canvas.contextMenu.group", { count: groupCount })}
                             onClick={() => {
                                 onGroupSelected?.();
+                                onClose();
+                            }}
+                        />
+                    ) : null}
+                    {showH3Optimize ? (
+                        <MenuButton
+                            icon={<WandSparkles className="size-4" />}
+                            label={t("canvas.contextMenu.h3Optimize", { count: h3OptimizeCount })}
+                            onClick={() => {
+                                onBeforeAction?.();
+                                onH3OptimizeSelected?.();
                                 onClose();
                             }}
                         />

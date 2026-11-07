@@ -2,10 +2,13 @@ import { useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent
 import { createPortal } from "react-dom";
 import { Button, Input, Modal } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
-import { Minus, Plus } from "lucide-react";
+import { LoaderCircle, Minus, Plus, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { insertTextIntoInputElement, readClipboardEventText } from "@/lib/canvas/clipboard-paste";
+import { requestH3PromptOptimize } from "@/lib/canvas/h3-prompt-optimize";
+import type { AiConfig } from "@/stores/use-config-store";
+import { ModelPicker } from "@/components/model-picker";
 import { useTextFindReplace } from "./canvas-text-find-replace";
 import { CanvasTextPromptPicker } from "./canvas-text-prompt-picker";
 import { DEFAULT_CANVAS_FONT_SIZE } from "@/constant/canvas";
@@ -13,6 +16,21 @@ import { DEFAULT_CANVAS_FONT_SIZE } from "@/constant/canvas";
 const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 48;
 const FONT_SIZE_STEP = 2;
+
+/**
+ * 「h3 提示词优化」入口配置 —— 只有图片 / 视频节点的提示词弹窗才传。
+ *
+ * `config` 是 **capability=text** 的配置（模型单独选，默认跟 `config.textModel` 走），
+ * `systemPrompt` 已经是技能库 / 词库里的正文，弹窗自己不碰技能解析。
+ */
+export type CanvasTextEditDialogH3Optimize = {
+    config: AiConfig;
+    systemPrompt: string;
+    /** 来源标题（技能名 / 词条名），显示在按钮旁 */
+    sourceTitle: string;
+    /** 命中技能库还是回落词库 —— 决定提示文案 */
+    fromSkill: boolean;
+};
 
 type CanvasTextEditDialogProps = {
     open: boolean;
@@ -22,11 +40,13 @@ type CanvasTextEditDialogProps = {
     fontSize?: number;
     readOnly?: boolean;
     onFontSizeChange?: (fontSize: number) => void;
+    /** 传了才显示「h3 提示词优化」那一行。 */
+    h3Optimize?: CanvasTextEditDialogH3Optimize | null;
     onClose: () => void;
     onSave?: (content: string) => void;
 };
 
-export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize, readOnly = false, onFontSizeChange, onClose, onSave }: CanvasTextEditDialogProps) {
+export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize, readOnly = false, onFontSizeChange, h3Optimize = null, onClose, onSave }: CanvasTextEditDialogProps) {
     const { t } = useTranslation();
     const textAreaRef = useRef<TextAreaRef>(null);
     const draftRef = useRef(value);
@@ -36,6 +56,13 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
         ? Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE))
         : localFontSize;
 
+    // h3 提示词优化：模型可单独选（空 = 用默认文本模型），流式结果直接写进编辑区。
+    const [optimizeModel, setOptimizeModel] = useState("");
+    const [optimizing, setOptimizing] = useState(false);
+    const [optimizeError, setOptimizeError] = useState("");
+    const optimizeControllerRef = useRef<AbortController | null>(null);
+    const canH3Optimize = Boolean(h3Optimize && h3Optimize.systemPrompt.trim() && !readOnly);
+
     draftRef.current = draft;
 
     // 只在「打开瞬间」同步外部 value，避免打开后父级回写冲掉弹窗内粘贴内容。
@@ -44,8 +71,64 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
         setDraft(value);
         draftRef.current = value;
         setLocalFontSize(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE)));
+        setOptimizeError("");
         // eslint-disable-next-line react-hooks/exhaustive-deps -- sync once per open
     }, [open]);
+
+    // 关闭 / 卸载一律掐掉飞行中的请求，避免请求回来后往已经关掉的弹窗里写文本。
+    useEffect(() => {
+        if (open) return;
+        optimizeControllerRef.current?.abort();
+        optimizeControllerRef.current = null;
+        setOptimizing(false);
+    }, [open]);
+    useEffect(() => () => optimizeControllerRef.current?.abort(), []);
+
+    const writeDraft = (text: string) => {
+        draftRef.current = text;
+        setDraft(text);
+    };
+
+    const runH3Optimize = async () => {
+        if (!h3Optimize || !canH3Optimize) return;
+        // 优化中再点 = 停止，并把内容退回优化前的样子。
+        if (optimizeControllerRef.current) {
+            optimizeControllerRef.current.abort();
+            return;
+        }
+        const original = draftRef.current;
+        if (!original.trim()) return;
+        const controller = new AbortController();
+        optimizeControllerRef.current = controller;
+        setOptimizing(true);
+        setOptimizeError("");
+        const model = optimizeModel.trim() || h3Optimize.config.textModel || h3Optimize.config.model;
+        try {
+            const answer = await requestH3PromptOptimize(
+                { ...h3Optimize.config, model },
+                original,
+                {
+                    systemPrompt: h3Optimize.systemPrompt,
+                    signal: controller.signal,
+                    onStream: (text) => {
+                        if (controller.signal.aborted) return;
+                        writeDraft(text);
+                    },
+                },
+            );
+            if (controller.signal.aborted) return;
+            writeDraft(answer);
+        } catch (error) {
+            if (controller.signal.aborted) {
+                writeDraft(original);
+                return;
+            }
+            setOptimizeError(error instanceof Error ? error.message : String(error));
+        } finally {
+            if (optimizeControllerRef.current === controller) optimizeControllerRef.current = null;
+            setOptimizing(false);
+        }
+    };
 
     const findReplace = useTextFindReplace({
         value: draft,
@@ -209,6 +292,36 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                 </div>
 
                 {findReplace.panel ? <div className="mb-3">{findReplace.panel}</div> : null}
+
+                {/* h3 提示词优化：技能正文当 system、当前编辑内容当 user，模型可单独选（默认文本模型）。 */}
+                {canH3Optimize && h3Optimize ? (
+                    <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-stone-200 px-2 py-1.5 dark:border-stone-700" data-canvas-h3-optimize>
+                        <Button
+                            size="small"
+                            type="primary"
+                            ghost
+                            className="!h-7 !shrink-0 !rounded-full !px-2.5"
+                            icon={optimizing ? <LoaderCircle className="size-3.5 animate-spin" /> : <WandSparkles className="size-3.5" />}
+                            disabled={!optimizing && !draft.trim()}
+                            onClick={runH3Optimize}
+                            title={t(h3Optimize.fromSkill ? "canvas.textEditDialog.h3OptimizeTitleSkill" : "canvas.textEditDialog.h3OptimizeTitleLibrary", { title: h3Optimize.sourceTitle })}
+                        >
+                            <span className="text-xs">{optimizing ? t("canvas.textEditDialog.h3OptimizeStop") : t("canvas.textEditDialog.h3Optimize")}</span>
+                        </Button>
+                        <span className="shrink-0 text-[11px] text-stone-500">{t("canvas.textEditDialog.h3OptimizeModel")}</span>
+                        <ModelPicker
+                            config={h3Optimize.config}
+                            value={optimizeModel || h3Optimize.config.textModel}
+                            onChange={setOptimizeModel}
+                            capability="text"
+                            className="max-w-[220px]"
+                        />
+                        <span className="min-w-0 flex-1 truncate text-[11px] text-stone-400">
+                            {t(h3Optimize.fromSkill ? "canvas.textEditDialog.h3OptimizeSourceSkill" : "canvas.textEditDialog.h3OptimizeSourceLibrary", { title: h3Optimize.sourceTitle })}
+                        </span>
+                        {optimizeError ? <span className="max-w-full truncate text-[11px] text-red-500">{optimizeError}</span> : null}
+                    </div>
+                ) : null}
 
                 <Input.TextArea
                     ref={textAreaRef}

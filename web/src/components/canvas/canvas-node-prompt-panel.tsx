@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, Clock, GripVertical, LoaderCircle, Maximize2, Square, WandSparkles, X } from "lucide-react";
 import { App, Button, Tooltip } from "antd";
 import dayjs from "dayjs";
@@ -7,7 +7,9 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { defaultConfig, resolveModelForCapability, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
-import { resolveH3PromptOptimizerEntry } from "@/constant/text-prompt-library";
+import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
+import { resolveH3OptimizeSystemPrompt } from "@/lib/canvas/h3-prompt-optimize";
+import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { resolveNativeH3VideoSettingDefaults } from "@/lib/comfyui-native";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatDuration } from "@/lib/image-utils";
@@ -69,9 +71,27 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const textPrompts = useConfigStore((state) => state.config.textPrompts || []);
+    const skillPacks = useChatSkillPacksStore((state) => state.packs);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mode = modeOverride ?? defaultMode(node.type);
     const config = buildNodeConfig(globalConfig, node, mode);
+
+    // 「h3 提示词优化」的 instruction：技能库「转Minih3-视频提示词」优先，没装才回落词库。
+    // 图片 / 视频节点的**放大编辑弹窗**里也要有这颗按钮，所以两条入口共用这一份解析结果。
+    const h3PromptSource = useMemo(() => resolveH3OptimizeSystemPrompt(skillPacks, textPrompts), [skillPacks, textPrompts]);
+    const h3TextConfig = useMemo(() => buildGenerationConfig(globalConfig, node, "text"), [globalConfig, node]);
+    const h3OptimizeOption = useMemo(
+        () =>
+            mode === "image" || mode === "video"
+                ? {
+                      config: h3TextConfig,
+                      systemPrompt: h3PromptSource.text,
+                      sourceTitle: h3PromptSource.title,
+                      fromSkill: h3PromptSource.source === "skill",
+                  }
+                : null,
+        [h3PromptSource, h3TextConfig, mode],
+    );
     const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
     const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
     const isEditingExistingContent = hasTextContent || hasImageContent;
@@ -121,6 +141,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         onChange: updatePrompt,
         title: t("canvas.promptPanel.editorTitle"),
         placeholder: promptPlaceholder,
+        h3Optimize: h3OptimizeOption,
     });
 
     const activeReferences = mentionReferences.filter((reference) => reference.active && reference.nodeId !== node.id);
@@ -355,7 +376,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             const answer = await requestImageQuestion(
                 config,
                 [
-                    { role: "system", content: resolveH3PromptOptimizerEntry(textPrompts).content },
+                    { role: "system", content: h3PromptSource.text },
                     { role: "user", content: original },
                 ] satisfies AiTextMessage[],
                 (text) => {

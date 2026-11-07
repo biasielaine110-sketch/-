@@ -1,6 +1,6 @@
 import { useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 
-import { CanvasTextEditDialog } from "./canvas-text-edit-dialog";
+import { CanvasTextEditDialog, type CanvasTextEditDialogH3Optimize } from "./canvas-text-edit-dialog";
 
 type UseCanvasTextEditDialogOptions = {
     value: string;
@@ -10,6 +10,8 @@ type UseCanvasTextEditDialogOptions = {
     fontSize?: number;
     readOnly?: boolean;
     onFontSizeChange?: (fontSize: number) => void;
+    /** 「h3 提示词优化」配置（图片 / 视频节点提示词弹窗才传）。 */
+    h3Optimize?: CanvasTextEditDialogH3Optimize | null;
 };
 
 /** Shared double-click → popup text editor for any text field. */
@@ -21,6 +23,7 @@ export function useCanvasTextEditDialog({
     fontSize,
     readOnly = false,
     onFontSizeChange,
+    h3Optimize = null,
 }: UseCanvasTextEditDialogOptions): {
     open: boolean;
     openEditor: () => void;
@@ -47,6 +50,7 @@ export function useCanvasTextEditDialog({
             fontSize={fontSize}
             readOnly={readOnly}
             onFontSizeChange={onFontSizeChange}
+            h3Optimize={h3Optimize}
             onClose={closeEditor}
             onSave={readOnly ? undefined : onChange}
         />

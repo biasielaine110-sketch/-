@@ -53,6 +53,7 @@ import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
+import { CanvasH3OptimizeDialog } from "@/components/canvas/canvas-h3-optimize-dialog";
 import type { ImageToolHandlers } from "@/components/canvas/canvas-image-toolbar-tools";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { saveBlobAs } from "@/lib/fs/save-blob";
@@ -108,6 +109,7 @@ import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores/canvas/use-generation-history-store";
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
+import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
 import { buildScriptAssetBatchMounts, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, resolveScriptAssetColumnX, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
@@ -7081,6 +7083,41 @@ function AtelierCanvasPage() {
         return nodes.find((node) => node.id === contextMenu.nodeId) || null;
     }, [contextMenu, nodes]);
 
+    /** 右键菜单顶部「h3 提示词优化」作用的节点：选区里的图片 / 视频节点，且提示词非空。 */
+    const [h3OptimizeOpen, setH3OptimizeOpen] = useState(false);
+    /**
+     * 打开弹窗时**冻结**一份目标列表。
+     *
+     * 不能直接用 `h3OptimizeTargets`：点菜单项会先开弹窗、再 `setContextMenu(null)`，
+     * 而 targets 的 memo 以 contextMenu 为前提，菜单一关就变空数组 → 弹窗里「0 个节点」。
+     * 冻结之后也顺带免疫「优化过程中节点被改写、列表跟着抖」。
+     */
+    const [h3OptimizeSnapshot, setH3OptimizeSnapshot] = useState<H3OptimizeTarget[]>([]);
+    const h3OptimizeTargets = useMemo(() => {
+        if (!contextMenu || contextMenu.type !== "node") return [];
+        return collectH3OptimizeTargets(nodes, Array.from(selectedNodeIds));
+    }, [contextMenu, nodes, selectedNodeIds]);
+    const openH3Optimize = useCallback(() => {
+        setH3OptimizeSnapshot(h3OptimizeTargets);
+        setH3OptimizeOpen(true);
+    }, [h3OptimizeTargets]);
+    /** 批量优化的文本模型配置（模型本身在弹窗里单独选，默认跟默认文本模型走）。 */
+    const h3OptimizeConfig = useMemo(() => buildGenerationConfig(effectiveConfig, undefined, "text"), [effectiveConfig]);
+    /**
+     * 逐个把优化结果写回节点。
+     *
+     * 字段与提示词面板同口径（`prompt` / `composerContent`），并且**必须** bump `promptSyncAt` ——
+     * 面板里那份提示词是局部 state，只认这个时间戳才会重新同步；不 bump 就会出现
+     * 「节点里已经转成 h3 了、面板还显示旧文本」。
+     */
+    const handleH3OptimizeApply = useCallback(
+        (target: H3OptimizeTarget, text: string) => {
+            if (target.field === "composerContent") handleConfigNodeChange(target.id, { composerContent: text, promptSyncAt: Date.now() });
+            else handleConfigNodeChange(target.id, { prompt: text, promptSyncAt: Date.now() });
+        },
+        [handleConfigNodeChange],
+    );
+
     /** 右键菜单顶部「一键生成」作用的节点：选区里至少 2 个图片 / 视频节点才算数。 */
     const batchGenerateNodeIds = useMemo(() => {
         if (!contextMenu || contextMenu.type !== "node" || selectedNodeIds.size < 2) return [];
@@ -9666,6 +9703,8 @@ function AtelierCanvasPage() {
                         onBatchGenerate={() => handleBatchGenerate(batchGenerateNodeIds)}
                         groupCount={groupableNodeIds.length}
                         onGroupSelected={() => handleGroupSelected(groupableNodeIds)}
+                        h3OptimizeCount={h3OptimizeTargets.length}
+                        onH3OptimizeSelected={openH3Optimize}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
@@ -9685,6 +9724,10 @@ function AtelierCanvasPage() {
                             setContextMenu(null);
                         }}
                     />
+                ) : null}
+
+                {h3OptimizeOpen ? (
+                    <CanvasH3OptimizeDialog open targets={h3OptimizeSnapshot} config={h3OptimizeConfig} onApply={handleH3OptimizeApply} onClose={() => setH3OptimizeOpen(false)} />
                 ) : null}
 
                 <input ref={imageInputRef} type="file" multiple accept="image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav,text/*,.txt,.md,.markdown,.csv,.json,.docx,.pdf,.rtf,.html,.xml,.yaml,.yml" className="hidden" onChange={handleImageInputChange} />
