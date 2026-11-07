@@ -9,7 +9,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasScriptBatchAssetDialog } from "@/components/canvas/canvas-script-batch-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { buildScriptGhostPrefill, buildScriptMashuPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
+import { buildScriptGhostPrefill, buildScriptMashuPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveSchemeDefaultMergeMode, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import {
     buildStoryScriptAssetDescriptionHints,
@@ -896,8 +896,15 @@ export function CanvasScriptNodeContent({
         if (!next) return;
         schemeAutoAppliedRef.current = true;
         const prefill = schemePrefills[next];
+        /**
+         * 默认「视频分段」：新节点挂载后会自动套上第四套，所以这里也要落一次 `每 4 镜一段`
+         * （用户 2026-11-07：第 1~6 套都默认每 4 镜一分段）。
+         * ⚠️ 只在**用户没设过**时写 —— 老节点可能早就自己选过「单镜」，自动预填不该把它悄悄改掉。
+         */
+        const defaultMergeMode = resolveSchemeDefaultMergeMode(next);
         patchMetadata({
             scriptScheme: next,
+            ...(defaultMergeMode && !node.metadata?.scriptMergeMode ? { scriptMergeMode: defaultMergeMode } : {}),
             ...(prefill.system ? { scriptSystemPrompt: prefill.system } : {}),
             ...(prefill.asset ? { scriptAssetPrompt: prefill.asset } : {}),
             ...(prefill.shot ? { scriptShotPrompt: prefill.shot } : {}),
@@ -905,6 +912,35 @@ export function CanvasScriptNodeContent({
         // patchMetadata 每次渲染都是新函数；真正的闸门是 next 与 ref，重复执行最多「看一眼就退出」。
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [libraryPrefill, x20Prefill, directorPrefill, node.metadata?.scriptAssetPrompt, node.metadata?.scriptScheme, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt]);
+
+    /**
+     * 老节点补默认档位：`scriptMergeMode` **没设过**（= 用户从没点过「视频分段」，一直是归一化出来的
+     * 「单镜」）而方案已经落在第 1~6 套上的，挂载时补一次 `每 4 镜一段`。
+     *
+     * 为什么需要这条：上面那条自动预填只在「方案为空」时才跑，而改造前建好的节点早就写死了
+     * `scriptScheme = director` —— 不补的话用户会看到「改了代码但旧脚本还是单镜」，以为没生效。
+     * ⚠️ 只要 `scriptMergeMode` 有值（哪怕就是 "shot"，用户手点过）就一个字都不动。
+     * ⚠️ 第 7 / 8 套（moman / mashu）由 `resolveSchemeDefaultMergeMode` 返回 null 自动跳过。
+     */
+    const schemeMergeDefaultRef = useRef(false);
+    useEffect(() => {
+        if (schemeMergeDefaultRef.current) return;
+        if (node.metadata?.scriptMergeMode) {
+            schemeMergeDefaultRef.current = true;
+            return;
+        }
+        // 方案为空时交给上面那条自动预填（它会连方案和档位一起写），这里只管「方案已定」的老节点。
+        if (!node.metadata?.scriptScheme) return;
+        const mode = resolveSchemeDefaultMergeMode(node.metadata.scriptScheme);
+        if (!mode) {
+            schemeMergeDefaultRef.current = true;
+            return;
+        }
+        schemeMergeDefaultRef.current = true;
+        patchMetadata({ scriptMergeMode: mode });
+        // patchMetadata 每次渲染都是新函数，真正的闸门是 ref + 上面两个 metadata 判断。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [node.metadata?.scriptMergeMode, node.metadata?.scriptScheme]);
 
     const updateRow = (rowIndex: number, key: string, value: string) => {
         const numeric = columns.some((column) => column.key === key && column.numeric);
@@ -1189,11 +1225,14 @@ export function CanvasScriptNodeContent({
      *   后者是已有结果 —— 换方案只影响下一次生成，没必要清空。
      */
     const applyScheme = (next: ScriptSchemeId) => {
+        // 第 1~6 套统一默认「每 4 镜一分段」（用户 2026-11-07）；第 7 / 8 套返回 null = 不动用户的档位。
+        const defaultMergeMode = resolveSchemeDefaultMergeMode(next);
         if (next === "builtin") {
             const backup = node.metadata?.scriptLibraryBackup;
             patchMetadata({
                 scriptScheme: "builtin",
                 scriptLibraryBackup: undefined,
+                ...(defaultMergeMode ? { scriptMergeMode: defaultMergeMode } : {}),
                 scriptSystemPrompt: backup?.system,
                 scriptAssetPrompt: backup?.asset,
                 scriptShotPrompt: backup?.shot,
@@ -1206,11 +1245,17 @@ export function CanvasScriptNodeContent({
         patchMetadata({
             scriptScheme: next,
             /**
+             * 第 1~6 套：**切过去就默认「每 4 镜一分段」**（用户 2026-11-07 明确要求）——
+             * 这几套的输出本来就是「一段 = 连续几镜凑满一个成片时长」，单镜一分段会让每一行
+             * 只出几秒的碎片。第 7 / 8 套不动（`resolveSchemeDefaultMergeMode` 返回 null）。
+             */
+            ...(defaultMergeMode ? { scriptMergeMode: defaultMergeMode } : {}),
+            /**
              * 第八套（麻薯 · 分镜组）**切过去就默认「每镜 15 秒」**（用户 2026-11-06 明确要求）：
              * 这套的 `video_motion_prompt` 一行就是一个 15 秒分镜组（组内 3+5+2+5 这类组合），
              * 时长停在默认 5 秒会让每一行只出 5 秒成片，整组表演被砍掉三分之二。
-             * ⚠️ 只动「每镜时长」，**不替用户改「视频分段」** —— 那个是铺链方式，用户自己选的
-             * （与时长 pill 的既有口径一致，见 segmentSelector 注释）。
+             * ⚠️ 第八套**只**动「每镜时长」：它自己一行就是一段，所以上面 `defaultMergeMode` 对它是 null，
+             * 铺链时仍按用户原来选的档位走（不会被外面的「每 4 镜」顶掉）。
              */
             ...(next === "mashu" ? { scriptSegmentSeconds: "15" as const } : {}),
             // 只在**离开第一套**时备份：词库方案之间互换时若再备份，存进去的会是刚被另一套预填的文案，
@@ -2710,16 +2755,13 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.shotCount", { count: rows.length })} · {t("canvas.scriptNode.totalDuration", { seconds: totalDuration })}
                 </span>
                 {/* 执行方案也放到表体操作条：看表时想「换套提示词再重生成」不用切回输入视图。
-                    与「每镜时长 / 视频分段」并排，都属于「怎么生成」的那一组。 */}
+                    与「每镜时长」并排，都属于「怎么生成」的那一组。
+                    ⚠️「视频分段」「生图比例」已搬到右下角「一键铺链路」下面（见下面的按钮列）：
+                    那两个决定的是「铺链路怎么铺」，混在这一长排里用户找不到。 */}
                 {schemeSelector}
                 {/* 每镜时长也放到表体操作条：用户看分镜表时就能直接改，不用切回「输入」视图再找。
-                    与「视频分段」并排：选单镜 → 每镜一段（10/15 锁定成片秒数、5 秒是上限）；
-                    选「按每段时长」→ 连续几镜凑够 N 秒。 */}
+                    选单镜 → 每镜一段（10/15 锁定成片秒数、5 秒是上限）；选「按每段时长」→ 连续几镜凑够 N 秒。 */}
                 {segmentSelector}
-                {mergeSelector}
-                {/* 生图比例也放到表体操作条：看分镜表时直接决定「这一批图出竖屏还是横屏」，
-                    改完再点「AI 生成」/ 一键铺链路就生效。 */}
-                {imageSizeSelector}
                 {/* 手动添加资产列（「宠物」「车辆」…）：自建列的行为与内置资产列一致，铺链路会按分类把图连进图片节点。
                     常驻显示、到上限才禁用 —— 之前到 8 列直接消失，看起来像「这个功能没了 / 加不上」。 */}
                 <button
@@ -2878,9 +2920,11 @@ export function CanvasScriptNodeContent({
                  * 竖排三行、右对齐，与表格右边缘齐平。
                  *
                  * 行 1：整表重生成 + 一键铺链路（原来就有）
-                 * 行 2：选择铺链路（勾几镜 → 合成**一个**视频链路，新增）
-                 * 行 3：只铺视频（简洁版：只铺视频节点窗口，不建文本 / 图片节点）
-                 * 行 4：合并为一镜 / 取消合并 + 解除合并组（从左边批量条与「视频分段」旁搬来）
+                 * 行 2：「视频分段」+「生图比例」（从左边那排长条搬来，用户 2026-11-07：
+                 *       「视频分段和生图比例都放在一键铺链路的下面」—— 这两个决定的就是「铺链路怎么铺」）
+                 * 行 3：选择铺链路（勾几镜 → 合成**一个**视频链路）
+                 * 行 4：只铺视频（简洁版：只铺视频节点窗口，不建文本 / 图片节点）
+                 * 行 5：合并为一镜 / 取消合并 + 解除合并组（从左边批量条与「视频分段」旁搬来）
                  */}
                 <div className="ml-auto flex flex-col items-end gap-1">
                     <div className="flex items-center gap-1.5">
@@ -2924,6 +2968,14 @@ export function CanvasScriptNodeContent({
                             </button>
                         ) : null}
                     </div>
+                    {/* 「视频分段」+「生图比例」：紧贴在「一键铺链路」下面（用户 2026-11-07 点名）。
+                        它们不改节点内容、改的是**这次怎么铺**（几镜合成一段 / 建出来的图什么画幅），
+                        所以和铺链路按钮放在一起，比混在左侧「方案 / 每镜时长」那一长排里更好找。
+                        两个都自带 flex-wrap：节点被拉窄时各自换行，不会横向溢出。
+                        ⚠️ 这里是**表体视图**的落点；「输入」视图（sourcePanel）里没有铺链路按钮，
+                        那两处保留不动（读写同一个 metadata，改哪边都一样）。 */}
+                    <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">{mergeSelector}</div>
+                    <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">{imageSizeSelector}</div>
                     {/* 「选择铺链路」：勾几镜 → 只铺这几镜，并把它们合成一个视频链路（一段视频）。
                         勾选态必须**实心高对比**：`activeBg` 是浅米色（浅色主题 #e7e5df、深色主题 #3a3631），
                         拿它当描边 + 12% 填充 + 文字色，在同样浅/同样暗的节点面板上等于没变化，

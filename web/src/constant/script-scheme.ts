@@ -66,6 +66,27 @@ export function resolveScriptSchemeId(value: unknown): ScriptSchemeId {
     return value === "library" || value === "x20" || value === "director" || value === "muse" || value === "ghost" || value === "moman" || value === "mashu" ? value : "builtin";
 }
 
+/**
+ * 第 1~6 套方案执行时**默认的「视频分段」= 每 4 镜一段**（用户 2026-11-07 明确要求）。
+ *
+ * 为什么是「切方案时顺手写一次 metadata」而不是改「视频分段」的默认渲染值：
+ * `resolveStoryScriptMergeMode` 只做归一化（脏值 → `shot`），它同时被铺链路、表体预览、
+ * 分段时长任务书读，把默认值改在那里会让**所有**老节点（含第 7 / 8 套）一起变成每 4 镜一段。
+ * 这里的口径是「这套方案默认这么铺」，所以只在这一套被真正应用时落库，用户之后仍可随手改回单镜。
+ *
+ * 第 7 / 8 套（`moman` / `mashu`）**不在此列**：
+ *  - `moman` 是「按时间码分段」的 JSON 分镜，一行本身的时长就不定长；
+ *  - `mashu` 一行就是一个 15 秒分镜组（组内 2~5 个镜头），再叠一层「每 4 镜一段」会把自己的
+ *    分段口径顶掉（它切过去只改「每镜时长」，见 `applyScheme` 注释）。
+ */
+export const SCRIPT_SCHEME_DEFAULT_MERGE_MODE = "4" as const;
+
+/** 这套方案要不要顺手把「视频分段」设成每 4 镜一段（第 7 / 8 套返回 `null` = 不动）。 */
+export function resolveSchemeDefaultMergeMode(scheme: unknown): typeof SCRIPT_SCHEME_DEFAULT_MERGE_MODE | null {
+    const id = resolveScriptSchemeId(scheme);
+    return id === "moman" || id === "mashu" ? null : SCRIPT_SCHEME_DEFAULT_MERGE_MODE;
+}
+
 /** 「有预填内容」的几套方案（第一套不在其中）。 */
 export type ScriptLibrarySchemeId = Exclude<ScriptSchemeId, "builtin">;
 
