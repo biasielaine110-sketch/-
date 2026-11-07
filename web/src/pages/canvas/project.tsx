@@ -54,6 +54,7 @@ import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
 import { CanvasH3OptimizeDialog } from "@/components/canvas/canvas-h3-optimize-dialog";
+import { CanvasH3OptimizeProgress } from "@/components/canvas/canvas-h3-optimize-progress";
 import type { ImageToolHandlers } from "@/components/canvas/canvas-image-toolbar-tools";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { saveBlobAs } from "@/lib/fs/save-blob";
@@ -110,6 +111,7 @@ import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
+import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
 import { buildScriptAssetBatchMounts, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, resolveScriptAssetColumnX, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
@@ -250,7 +252,7 @@ const MAX_IMAGE_NODE_HISTORY = 24;
 function isOverlayEventTarget(target: EventTarget | null): boolean {
     return (
         target instanceof Element &&
-        Boolean(target.closest(".ant-modal, .ant-drawer, .ant-popover, .ant-dropdown, .ant-select-dropdown, .ant-picker-dropdown, .ant-tooltip, .canvas-style-picker"))
+        Boolean(target.closest(".ant-modal, .ant-drawer, .ant-popover, .ant-dropdown, .ant-select-dropdown, .ant-picker-dropdown, .ant-tooltip, .canvas-style-picker, .canvas-h3-optimize-progress"))
     );
 }
 
@@ -7098,9 +7100,14 @@ function AtelierCanvasPage() {
         return collectH3OptimizeTargets(nodes, Array.from(selectedNodeIds));
     }, [contextMenu, nodes, selectedNodeIds]);
     const openH3Optimize = useCallback(() => {
+        // 同一时间只允许一个后台队列：两批并行会互相覆盖同一批节点的提示词。
+        if (isH3OptimizeQueueRunning()) {
+            message.warning(t("canvas.h3Optimize.busy"));
+            return;
+        }
         setH3OptimizeSnapshot(h3OptimizeTargets);
         setH3OptimizeOpen(true);
-    }, [h3OptimizeTargets]);
+    }, [h3OptimizeTargets, message, t]);
     /** 批量优化的文本模型配置（模型本身在弹窗里单独选，默认跟默认文本模型走）。 */
     const h3OptimizeConfig = useMemo(() => buildGenerationConfig(effectiveConfig, undefined, "text"), [effectiveConfig]);
     /**
@@ -7116,6 +7123,32 @@ function AtelierCanvasPage() {
             else handleConfigNodeChange(target.id, { prompt: text, promptSyncAt: Date.now() });
         },
         [handleConfigNodeChange],
+    );
+
+    /**
+     * 弹窗点「开始」→ 关窗 + 丢进**后台队列**（`lib/canvas/h3-optimize-runner.ts`）。
+     *
+     * 用户 2026-11-07 报障：「选择模型执行后…不要一直挂着，我无法操作别的内容了」。
+     * 所以这里**不 await 阻止关窗**：先把弹窗关掉，队列自己串行跑、边跑边写回节点，
+     * 进度和「停止」在右下角 `CanvasH3OptimizeProgress`。
+     */
+    const runH3OptimizeBatch = useCallback(
+        (options: { model: string; systemPrompt: string }) => {
+            const targets = h3OptimizeSnapshot;
+            setH3OptimizeOpen(false);
+            if (!targets.length) return;
+            const config: AiConfig = { ...h3OptimizeConfig, model: options.model.trim() || h3OptimizeConfig.textModel || h3OptimizeConfig.model };
+            void startH3OptimizeQueue({ jobs: targets, config, systemPrompt: options.systemPrompt, onApply: handleH3OptimizeApply }).then((result) => {
+                if (!result.started) {
+                    if (result.reason === "busy") message.warning(t("canvas.h3Optimize.busy"));
+                    return;
+                }
+                if (result.cancelled) message.info(t("canvas.h3Optimize.cancelled", { count: result.done }));
+                else if (result.failed > 0) message.warning(t("canvas.h3Optimize.doneWithFailed", { count: result.done, failed: result.failed }));
+                else message.success(t("canvas.h3Optimize.done", { count: result.done }));
+            });
+        },
+        [handleH3OptimizeApply, h3OptimizeConfig, h3OptimizeSnapshot, message, t],
     );
 
     /** 右键菜单顶部「一键生成」作用的节点：选区里至少 2 个图片 / 视频节点才算数。 */
@@ -9728,8 +9761,11 @@ function AtelierCanvasPage() {
                 ) : null}
 
                 {h3OptimizeOpen ? (
-                    <CanvasH3OptimizeDialog open targets={h3OptimizeSnapshot} config={h3OptimizeConfig} onApply={handleH3OptimizeApply} onClose={() => setH3OptimizeOpen(false)} />
+                    <CanvasH3OptimizeDialog open targets={h3OptimizeSnapshot} config={h3OptimizeConfig} onStart={runH3OptimizeBatch} onClose={() => setH3OptimizeOpen(false)} />
                 ) : null}
+
+                {/* 后台队列的进度 / 停止入口：弹窗关掉以后仍然显示，不挡画布操作。 */}
+                <CanvasH3OptimizeProgress />
 
                 <input ref={imageInputRef} type="file" multiple accept="image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav,text/*,.txt,.md,.markdown,.csv,.json,.docx,.pdf,.rtf,.html,.xml,.yaml,.yml" className="hidden" onChange={handleImageInputChange} />
 

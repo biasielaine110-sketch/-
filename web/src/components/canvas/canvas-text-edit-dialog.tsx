@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ClipboardEvent as ReactClipboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { Button, Input, Modal } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
@@ -6,7 +6,7 @@ import { LoaderCircle, Minus, Plus, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { insertTextIntoInputElement, readClipboardEventText } from "@/lib/canvas/clipboard-paste";
-import { requestH3PromptOptimize } from "@/lib/canvas/h3-prompt-optimize";
+import { getH3OptimizeQueueState, startH3OptimizeQueue, stopH3OptimizeQueue, subscribeH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import type { AiConfig } from "@/stores/use-config-store";
 import { ModelPicker } from "@/components/model-picker";
 import { useTextFindReplace } from "./canvas-text-find-replace";
@@ -30,6 +30,13 @@ export type CanvasTextEditDialogH3Optimize = {
     sourceTitle: string;
     /** 命中技能库还是回落词库 —— 决定提示文案 */
     fromSkill: boolean;
+    /**
+     * 这条提示词属于哪个节点 —— 后台队列按 `field` 回写，**弹窗关掉也照样写完**。
+     * （用户 2026-11-07：点了优化就只能干等，别的什么都干不了。）
+     */
+    job: { id: string; title: string; field: "prompt" | "composerContent" };
+    /** 每转出一点就写回节点；由提示词面板提供（它同时会把自己的 `prompt` state 一起更新） */
+    applyOptimized: (text: string) => void;
 };
 
 type CanvasTextEditDialogProps = {
@@ -56,14 +63,32 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
         ? Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE))
         : localFontSize;
 
-    // h3 提示词优化：模型可单独选（空 = 用默认文本模型），流式结果直接写进编辑区。
+    // h3 提示词优化：模型可单独选（空 = 用默认文本模型）。
+    // ⚠️ 真正的请求跑在 `lib/canvas/h3-optimize-runner.ts` 的**后台队列**里：点一下就开始，
+    // 弹窗随手关掉（或去点别的节点）也不中断，结果按 `h3Optimize.job.field` 写回节点。
+    // 这里只是订阅流式正文，让「弹窗还开着」的那段时间能看到文字在长。
     const [optimizeModel, setOptimizeModel] = useState("");
-    const [optimizing, setOptimizing] = useState(false);
-    const [optimizeError, setOptimizeError] = useState("");
-    const optimizeControllerRef = useRef<AbortController | null>(null);
+    const h3Queue = useSyncExternalStore(subscribeH3OptimizeQueue, getH3OptimizeQueueState);
     const canH3Optimize = Boolean(h3Optimize && h3Optimize.systemPrompt.trim() && !readOnly);
+    const h3JobId = h3Optimize?.job.id || "";
+    const h3Running = h3Queue.running && h3Queue.currentId === h3JobId;
+    /** 队列正忙着转**别的**节点：同一时间只允许一个队列，这里先别让点（避免两批互相覆盖）。 */
+    const h3BusyElsewhere = h3Queue.running && !h3Running;
+    const h3Error = h3Running ? h3Queue.currentError : "";
 
     draftRef.current = draft;
+
+    const writeDraft = (text: string) => {
+        draftRef.current = text;
+        setDraft(text);
+    };
+
+    // 队列正在转这一条 → 流式正文同步进编辑区（关掉弹窗后改由 `applyOptimized` 写节点）。
+    useEffect(() => {
+        if (!h3Running || !h3Queue.currentText) return;
+        draftRef.current = h3Queue.currentText;
+        setDraft(h3Queue.currentText);
+    }, [h3Running, h3Queue.currentText]);
 
     // 只在「打开瞬间」同步外部 value，避免打开后父级回写冲掉弹窗内粘贴内容。
     useEffect(() => {
@@ -71,63 +96,25 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
         setDraft(value);
         draftRef.current = value;
         setLocalFontSize(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE)));
-        setOptimizeError("");
         // eslint-disable-next-line react-hooks/exhaustive-deps -- sync once per open
     }, [open]);
 
-    // 关闭 / 卸载一律掐掉飞行中的请求，避免请求回来后往已经关掉的弹窗里写文本。
-    useEffect(() => {
-        if (open) return;
-        optimizeControllerRef.current?.abort();
-        optimizeControllerRef.current = null;
-        setOptimizing(false);
-    }, [open]);
-    useEffect(() => () => optimizeControllerRef.current?.abort(), []);
-
-    const writeDraft = (text: string) => {
-        draftRef.current = text;
-        setDraft(text);
-    };
-
-    const runH3Optimize = async () => {
+    const runH3Optimize = () => {
         if (!h3Optimize || !canH3Optimize) return;
-        // 优化中再点 = 停止，并把内容退回优化前的样子。
-        if (optimizeControllerRef.current) {
-            optimizeControllerRef.current.abort();
+        // 正在转这一条 → 再点 = 停止（队列停在当前这条，已经写进节点的内容保留）。
+        if (h3Running) {
+            stopH3OptimizeQueue();
             return;
         }
         const original = draftRef.current;
         if (!original.trim()) return;
-        const controller = new AbortController();
-        optimizeControllerRef.current = controller;
-        setOptimizing(true);
-        setOptimizeError("");
         const model = optimizeModel.trim() || h3Optimize.config.textModel || h3Optimize.config.model;
-        try {
-            const answer = await requestH3PromptOptimize(
-                { ...h3Optimize.config, model },
-                original,
-                {
-                    systemPrompt: h3Optimize.systemPrompt,
-                    signal: controller.signal,
-                    onStream: (text) => {
-                        if (controller.signal.aborted) return;
-                        writeDraft(text);
-                    },
-                },
-            );
-            if (controller.signal.aborted) return;
-            writeDraft(answer);
-        } catch (error) {
-            if (controller.signal.aborted) {
-                writeDraft(original);
-                return;
-            }
-            setOptimizeError(error instanceof Error ? error.message : String(error));
-        } finally {
-            if (optimizeControllerRef.current === controller) optimizeControllerRef.current = null;
-            setOptimizing(false);
-        }
+        void startH3OptimizeQueue({
+            jobs: [{ ...h3Optimize.job, text: original }],
+            config: { ...h3Optimize.config, model },
+            systemPrompt: h3Optimize.systemPrompt,
+            onApply: (_target, text) => h3Optimize.applyOptimized(text),
+        });
     };
 
     const findReplace = useTextFindReplace({
@@ -293,7 +280,8 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
 
                 {findReplace.panel ? <div className="mb-3">{findReplace.panel}</div> : null}
 
-                {/* h3 提示词优化：技能正文当 system、当前编辑内容当 user，模型可单独选（默认文本模型）。 */}
+                {/* h3 提示词优化：技能正文当 system、当前编辑内容当 user，模型可单独选（默认文本模型）。
+                    点一下就开始，任务跑在后台队列里 —— 这个弹窗随手关掉也不会中断，结果直接写回节点。 */}
                 {canH3Optimize && h3Optimize ? (
                     <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-stone-200 px-2 py-1.5 dark:border-stone-700" data-canvas-h3-optimize>
                         <Button
@@ -301,12 +289,12 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                             type="primary"
                             ghost
                             className="!h-7 !shrink-0 !rounded-full !px-2.5"
-                            icon={optimizing ? <LoaderCircle className="size-3.5 animate-spin" /> : <WandSparkles className="size-3.5" />}
-                            disabled={!optimizing && !draft.trim()}
+                            icon={h3Running ? <LoaderCircle className="size-3.5 animate-spin" /> : <WandSparkles className="size-3.5" />}
+                            disabled={h3BusyElsewhere || (!h3Running && !draft.trim())}
                             onClick={runH3Optimize}
                             title={t(h3Optimize.fromSkill ? "canvas.textEditDialog.h3OptimizeTitleSkill" : "canvas.textEditDialog.h3OptimizeTitleLibrary", { title: h3Optimize.sourceTitle })}
                         >
-                            <span className="text-xs">{optimizing ? t("canvas.textEditDialog.h3OptimizeStop") : t("canvas.textEditDialog.h3Optimize")}</span>
+                            <span className="text-xs">{h3Running ? t("canvas.textEditDialog.h3OptimizeStop") : t("canvas.textEditDialog.h3Optimize")}</span>
                         </Button>
                         <span className="shrink-0 text-[11px] text-stone-500">{t("canvas.textEditDialog.h3OptimizeModel")}</span>
                         <ModelPicker
@@ -319,7 +307,8 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                         <span className="min-w-0 flex-1 truncate text-[11px] text-stone-400">
                             {t(h3Optimize.fromSkill ? "canvas.textEditDialog.h3OptimizeSourceSkill" : "canvas.textEditDialog.h3OptimizeSourceLibrary", { title: h3Optimize.sourceTitle })}
                         </span>
-                        {optimizeError ? <span className="max-w-full truncate text-[11px] text-red-500">{optimizeError}</span> : null}
+                        {h3Running ? <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400">{t("canvas.textEditDialog.h3OptimizeBackground")}</span> : null}
+                        {h3Error ? <span className="max-w-full truncate text-[11px] text-red-500">{h3Error}</span> : null}
                     </div>
                 ) : null}
 

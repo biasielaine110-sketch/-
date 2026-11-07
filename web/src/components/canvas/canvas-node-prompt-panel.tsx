@@ -8,7 +8,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { defaultConfig, resolveModelForCapability, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
-import { resolveH3OptimizeSystemPrompt } from "@/lib/canvas/h3-prompt-optimize";
+import { resolveH3OptimizeSystemPrompt, resolveNodePromptField } from "@/lib/canvas/h3-prompt-optimize";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { resolveNativeH3VideoSettingDefaults } from "@/lib/comfyui-native";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -80,18 +80,6 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     // 图片 / 视频节点的**放大编辑弹窗**里也要有这颗按钮，所以两条入口共用这一份解析结果。
     const h3PromptSource = useMemo(() => resolveH3OptimizeSystemPrompt(skillPacks, textPrompts), [skillPacks, textPrompts]);
     const h3TextConfig = useMemo(() => buildGenerationConfig(globalConfig, node, "text"), [globalConfig, node]);
-    const h3OptimizeOption = useMemo(
-        () =>
-            mode === "image" || mode === "video"
-                ? {
-                      config: h3TextConfig,
-                      systemPrompt: h3PromptSource.text,
-                      sourceTitle: h3PromptSource.title,
-                      fromSkill: h3PromptSource.source === "skill",
-                  }
-                : null,
-        [h3PromptSource, h3TextConfig, mode],
-    );
     const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
     const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
     const isEditingExistingContent = hasTextContent || hasImageContent;
@@ -135,6 +123,25 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         if (isEditingExistingContent) onConfigChange(node.id, { composerContent: value });
         else onPromptChange(node.id, value);
     };
+
+    /**
+     * 放大编辑弹窗里的「h3 提示词优化」配置。
+     *
+     * `job` + `applyOptimized` 是关键：请求跑在 `h3-optimize-runner` 的**后台队列**里，
+     * 弹窗关掉以后仍然按 `field` 把结果写回这个节点（`updatePrompt` 同时会更新面板的本地 state），
+     * 所以用户不用盯着弹窗等。
+     */
+    const h3OptimizeOption =
+        mode === "image" || mode === "video"
+            ? {
+                  config: h3TextConfig,
+                  systemPrompt: h3PromptSource.text,
+                  sourceTitle: h3PromptSource.title,
+                  fromSkill: h3PromptSource.source === "skill",
+                  job: { id: node.id, title: String(node.title || node.id), field: resolveNodePromptField(node) },
+                  applyOptimized: updatePrompt,
+              }
+            : null;
 
     const textEdit = useCanvasTextEditDialog({
         value: prompt,
