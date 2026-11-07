@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { useOrderDrag } from "@/hooks/use-order-drag";
+import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasScriptBatchAssetDialog } from "@/components/canvas/canvas-script-batch-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
@@ -511,6 +512,38 @@ export function CanvasScriptNodeContent({
 
     const [view, setView] = useState<"source" | "table">(rows.length ? "table" : "source");
     const [editing, setEditing] = useState<{ rowIndex: number; key: string } | null>(null);
+    /**
+     * 双击缩略图看大图（分镜表里的参考图缩略图、插入资产格里的图）。
+     *
+     * 引用条的缩略图**单击另有含义**（轮转资产分类：角色 → 场景 → 道具…），而浏览器在双击时会先补两次
+     * `click` —— 直接挂 `onDoubleClick` 的结果是「分类先连转两格，才弹大图」。所以单击延迟 260ms 再执行，
+     * 第二击落在窗口内就撤销那一击、只走预览。`key` 用来区分是不是同一张图（连点两张不同的图不该判双击）。
+     */
+    const [previewImage, setPreviewImage] = useState<{ src: string; title: string } | null>(null);
+    const singleClickRef = useRef<{ key: string; timer: number; run: () => void } | null>(null);
+    /** 返回 `true` = 这一击构成双击（单击动作已被撤销，调用方去开预览）。 */
+    const armSingleClick = (key: string, run: () => void) => {
+        const pending = singleClickRef.current;
+        if (pending) {
+            window.clearTimeout(pending.timer);
+            singleClickRef.current = null;
+            if (pending.key === key) return true;
+            // 点了另一张图：把上一击补上，别把它吞掉。
+            pending.run();
+        }
+        const timer = window.setTimeout(() => {
+            singleClickRef.current = null;
+            run();
+        }, 260);
+        singleClickRef.current = { key, timer, run };
+        return false;
+    };
+    useEffect(
+        () => () => {
+            if (singleClickRef.current) window.clearTimeout(singleClickRef.current.timer);
+        },
+        [],
+    );
     // 剧本原文 / 补充要求走本地草稿，失焦才写回 metadata：每个字都 setNodes 会让整张画布
     // 逐键重渲（文本节点也是靠对话框规避这一点的），生成时再显式把草稿交给上层。
     const [sourceDraft, setSourceDraft] = useState(source);
@@ -1624,14 +1657,29 @@ export function CanvasScriptNodeContent({
                                     onPointerDown={(event) => event.stopPropagation()}
                                     onClick={(event) => {
                                         event.stopPropagation();
-                                        onAssetRoleChange(node.id, reference.nodeId, nextScriptAssetRole(role));
+                                        // 单击 = 轮转分类；同一张图 260ms 内第二击 = 看大图。
+                                        const double = armSingleClick(`ref:${reference.nodeId}`, () => onAssetRoleChange(node.id, reference.nodeId, nextScriptAssetRole(role)));
+                                        if (double && preview) setPreviewImage({ src: preview, title: reference.title });
                                     }}
                                 >
                                     {thumb}
                                     <span className="text-[0.769em] leading-none opacity-75">{t(`canvas.scriptNode.assetRole_${role}`)}</span>
                                 </button>
                             ) : (
-                                <span className="flex flex-col items-center gap-0.5">{thumb}</span>
+                                // 不可分类（或上层没给改分类的回调）时缩略图本身没有单击动作，双击直接看大图。
+                                <span
+                                    className="flex flex-col items-center gap-0.5"
+                                    onDoubleClick={
+                                        preview
+                                            ? (event) => {
+                                                  event.stopPropagation();
+                                                  setPreviewImage({ src: preview, title: reference.title });
+                                              }
+                                            : undefined
+                                    }
+                                >
+                                    {thumb}
+                                </span>
                             )}
                             {onRemoveScriptAsset ? (
                                 <button
@@ -2523,6 +2571,12 @@ export function CanvasScriptNodeContent({
                                                                           ? t("canvas.scriptNode.nameLockTag", { name: cellName })
                                                                           : meta?.title || imageId
                                                                 }
+                                                                // 双击资产格里的图 → 看大图。必须 stopPropagation：
+                                                                // 这一格的父级双击是「编辑单元格」，图上的双击不该把人踢进编辑态。
+                                                                onDoubleClick={(event) => {
+                                                                    event.stopPropagation();
+                                                                    if (meta?.previewUrl) setPreviewImage({ src: meta.previewUrl, title: meta.title || imageId });
+                                                                }}
                                                             >
                                                                 {meta?.previewUrl ? <img src={meta.previewUrl} alt={meta.title} className="size-full object-cover" /> : <ImageIcon className="size-6" />}
                                                                 {cellFromLock ? (
@@ -2984,11 +3038,12 @@ export function CanvasScriptNodeContent({
                  * 分镜表横向 4.2k px，滚到表尾时鼠标就在右下角，按钮就地排列不用再跑回左边；
                  * 竖排三行、右对齐，与表格右边缘齐平。
                  *
-                 * 行 1：整表重生成 + 一键铺链路（原来就有）
-                 * 行 2：「视频分段」+「生图比例」（从左边那排长条搬来，用户 2026-11-07：
+                 * 行 1：整表重生成
+                 * 行 2：一键铺链路（完整版）+ 只铺视频窗口（简洁版）并排，**完整版在左**
+                 *       （用户 2026-11-08：「把一键铺链路按钮放在只铺视频窗口按钮的左边」）
+                 * 行 3：「视频分段」+「生图比例」（用户 2026-11-07：
                  *       「视频分段和生图比例都放在一键铺链路的下面」—— 这两个决定的就是「铺链路怎么铺」）
-                 * 行 3：选择铺链路（勾几镜 → 合成**一个**视频链路）
-                 * 行 4：只铺视频（简洁版：只铺视频节点窗口，不建文本 / 图片节点）
+                 * 行 4：选择铺链路（勾几镜 → 合成**一个**视频链路）
                  * 行 5：合并为一镜 / 取消合并 + 解除合并组（从左边批量条与「视频分段」旁搬来）
                  */}
                 <div className="ml-auto flex flex-col items-end gap-1">
@@ -3015,7 +3070,14 @@ export function CanvasScriptNodeContent({
                                 {t("canvas.scriptNode.regenAll")}
                             </button>
                         ) : null}
-                        {onBuildPipeline ? (
+                    </div>
+                    {/* 「一键铺链路」+「只铺视频窗口」同一行，**一键铺链路在左**（用户 2026-11-08 要求）。
+                        这两个本来就是同一件事的完整版 / 简洁版：完整版每镜铺「文本 → 图片 → 视频」三个节点，
+                        简洁版只铺视频节点窗口（提示词 / 时长 / 资产图 / 音频都连好，但按分段算窗口数）。
+                        位置放在「视频分段 / 生图比例」**上面**：一是 2026-11-07 那条「分段与比例放在一键铺链路下面」
+                        仍然成立，二是这颗本来就是整表级动作，跟上面「重新生成整表」挨着才顺。 */}
+                    {onBuildPipeline ? (
+                        <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">
                             <button
                                 type="button"
                                 className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 font-medium text-white transition"
@@ -3031,8 +3093,27 @@ export function CanvasScriptNodeContent({
                                 <Wand2 className="size-3.5" />
                                 {t("canvas.scriptNode.pipelineBuild")}
                             </button>
-                        ) : null}
-                    </div>
+                            {/* 「只铺视频」：一键铺链路的**简洁版**（用户原话：「需要有一个简洁版的按钮，即只铺视频节点窗口」）。
+                                只按分段把视频节点窗口铺出来 —— 提示词 / 时长 / 资产图 / 音频全都连好，但没有文本与图片节点，
+                                节点数量按分段数算（N 镜一段 = 1 个窗口）；勾了行就只铺勾的那几镜（合成一段）。
+                                ⚠️ 刻意**不用真 `disabled`**：disabled 元素悬停不弹 title，用户就看不到功能说明。 */}
+                            <button
+                                type="button"
+                                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                                style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, { videoOnly: true });
+                                }}
+                                title={t("canvas.scriptNode.pipelineVideoOnlyHint")}
+                            >
+                                <Video className="size-3.5" />
+                                {t("canvas.scriptNode.pipelineVideoOnly")}
+                            </button>
+                        </div>
+                    ) : null}
                     {/* 「视频分段」+「生图比例」：紧贴在「一键铺链路」下面（用户 2026-11-07 点名）。
                         它们不改节点内容、改的是**这次怎么铺**（几镜合成一段 / 建出来的图什么画幅），
                         所以和铺链路按钮放在一起，比混在左侧「方案 / 每镜时长」那一长排里更好找。
@@ -3077,27 +3158,6 @@ export function CanvasScriptNodeContent({
                             {selectedRows.size
                                 ? t("canvas.scriptNode.pipelineBuildSelectedCount", { count: selectedRows.size })
                                 : t("canvas.scriptNode.pipelineBuildSelected")}
-                        </button>
-                    ) : null}
-                    {/* 「只铺视频」：一键铺链路的**简洁版**（用户原话：「需要有一个简洁版的按钮，即只铺视频节点窗口」）。
-                        只按分段把视频节点窗口铺出来 —— 提示词 / 时长 / 资产图 / 音频全都连好，但没有文本与图片节点，
-                        节点数量按分段数算（N 镜一段 = 1 个窗口），不会像完整版那样一镜变三个节点。
-                        勾了行就只铺勾的那几镜（与「选择铺链路」同口径：合成一段）。 */}
-                    {onBuildPipeline ? (
-                        <button
-                            type="button"
-                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-                            style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
-                            onMouseDown={(event) => event.stopPropagation()}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, { videoOnly: true });
-                            }}
-                            title={t("canvas.scriptNode.pipelineVideoOnlyHint")}
-                        >
-                            <Video className="size-3.5" />
-                            {t("canvas.scriptNode.pipelineVideoOnly")}
                         </button>
                     ) : null}
                     {/* 「一键直接生图」+「一键铺视频链路并生成」同一行，**直接生图在左**（用户 2026-11-07 点名）：
@@ -3547,6 +3607,9 @@ export function CanvasScriptNodeContent({
             {rowAudioDialog}
             {rowEditDialog}
             {addColumnDialog}
+            {/* 双击缩略图看大图：直接复用画布那套预览（滚轮缩放 / 拖拽平移 / 下载），
+                不另做一套「小窗」，免得用户在两个弹窗里操作手感不一致。 */}
+            <CanvasImagePreviewModal open={Boolean(previewImage)} src={previewImage?.src} title={previewImage?.title} fileName={previewImage?.title} onClose={() => setPreviewImage(null)} />
         </>
     );
 }
