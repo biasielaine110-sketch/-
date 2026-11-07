@@ -17,8 +17,9 @@ import { DRAFT_DIR_PLACEHOLDER, DRAFT_ROOT_PLACEHOLDER } from "@/lib/canvas/jian
  * 不支持时上层自动退回「下载 zip + install.bat」那条老路（见 `supportsJianyingDirectWrite`）。
  *
  * ## 覆盖语义
- * 草稿文件夹名由 `stableJianyingDraftFolderName(标题, 节点id)` 决定 —— **同一个节点反复导出是覆盖**，
- * 不会像 zip 那条路每次新建一个（随机后缀）把草稿箱塞满。代价：用户在剪映里改过的东西会被重导覆盖。
+ * 草稿文件夹名由 `jianyingDraftFolderName(节点标题)` 决定 —— `节点名_MMDD`（例：`约会_1107`）。
+ * 同一天再导出同一个节点就是覆盖（不会把草稿箱塞满）；换一天导出是新草稿。
+ * 名字**撞上已有草稿**时上层会弹一个框，让用户选「覆盖」还是「换个名字」（见 `jianyingDraftFolderExists`）。
  */
 
 /** 直写时要落盘的一个文件；`name` 可以带 `materials/` 这类子目录前缀。 */
@@ -172,20 +173,61 @@ export async function ensureJianyingWritePermission(handle: FileSystemDirectoryH
 
 // ── 落盘 ────────────────────────────────────────────────────────────────────────────────
 
-/**
- * 草稿文件夹名：必须**全 ASCII**（剪映对目录名不敏感，但 Windows 路径 + 我们自己的日志都省事），
- * 且**稳定** —— 同一个节点反复导出落在同一个文件夹里，实现「覆盖上次」。
- */
-export function stableJianyingDraftFolderName(draftName: string, seed: string) {
-    const cleaned = String(draftName || "")
-        .replace(/[^A-Za-z0-9 _-]+/g, " ")
+/** 清掉 Windows 文件夹名里不允许出现的字符（含控制字符），并削掉结尾的点（`mkdir` 会失败）。 */
+export function cleanWindowsPathSegment(value: string) {
+    return String(value || "")
+        .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, " ")
         .replace(/\s+/g, " ")
         .trim()
-        .slice(0, 28);
-    const tail = String(seed || "")
-        .replace(/[^A-Za-z0-9]/g, "")
-        .slice(-8);
-    return `${cleaned || "canvas-draft"}-${tail || "draft"}`;
+        .replace(/\.+$/, "")
+        .trim();
+}
+
+/**
+ * 草稿文件夹名：`节点名_MMDD`（例：`约会_1107`）。
+ *
+ * 日期取**本地时间**。同一天对同一个节点反复导出落在同一个文件夹里 → 天然是「覆盖上次」；
+ * 换一天再导出就是一份新草稿，不会把昨天那版盖掉。
+ *
+ * ⚠️ 与 `jianying-draft.ts: asciiDraftFolderName` 刻意不同：这里**保留中文**。
+ * 那条路（下载 zip + install.bat）必须全 ASCII，是因为 `.bat` 由浏览器按 UTF-8 写出、cmd 默认
+ * 代码页不是 UTF-8，`set "NAME=中文"` 会乱码；而这条是 File System Access 直写，名字由浏览器
+ * 按 UTF-8 交给系统，不经过 cmd 代码页，中文安全 —— 用户要的就是「约会_1107」这种可读的名字。
+ */
+export function jianyingDraftFolderName(draftName: string, at: Date = new Date()) {
+    const base = cleanWindowsPathSegment(draftName).slice(0, 40) || "canvas-draft";
+    const month = String(at.getMonth() + 1).padStart(2, "0");
+    const day = String(at.getDate()).padStart(2, "0");
+    return `${base}_${month}${day}`;
+}
+
+/**
+ * 草稿根目录里已经有这一点名的文件夹了吗？
+ *
+ * 用 `getDirectoryHandle`（**不带** `create`）探一下：`NotFoundError` 就是没有。
+ * 其他错误（没授权 / 名字非法）一律当「不存在」—— 让后面真正的写盘那步报原始错误，
+ * 比在这里擅自判定「已存在」弹一个假的重名框好。
+ */
+export async function jianyingDraftFolderExists(root: FileSystemDirectoryHandle, folderName: string) {
+    const name = String(folderName || "").trim();
+    if (!name) return false;
+    try {
+        await root.getDirectoryHandle(name);
+        return true;
+    } catch {
+        // `NotFoundError` = 没有这个文件夹；其他错误（未授权 / 名字非法）也当「没有」——
+        // 让后面真正写盘那步报原始错误，比在这里擅自弹一个假的重名框好。
+        return false;
+    }
+}
+
+/** 给「换个名字」预填一个当前没被占用的名字：`约会_1106-2`、`-3`…… 最多试 30 个。 */
+export async function suggestAvailableDraftFolderName(root: FileSystemDirectoryHandle, folderName: string) {
+    for (let index = 2; index <= 30; index += 1) {
+        const candidate = `${folderName}-${index}`;
+        if (!(await jianyingDraftFolderExists(root, candidate))) return candidate;
+    }
+    return `${folderName}-${Date.now().toString(36).slice(-4)}`;
 }
 
 /**

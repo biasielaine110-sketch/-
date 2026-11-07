@@ -24,8 +24,10 @@ import {
  */
 export type CanvasJianyingExportDialogProps = {
     open: boolean;
-    /** 这次要写的草稿名（= 合并节点标题），用于显示与文件夹命名。 */
+    /** 这次要写的草稿名（= 合并节点标题），用于显示。 */
     draftName: string;
+    /** 草稿**文件夹**名（`节点名_MMDD`），提示文案里给用户看到底会落在哪个目录。 */
+    folderName: string;
     clipCount: number;
     totalSeconds: number;
     /** 正在写盘（禁用按钮 + loading）。 */
@@ -36,7 +38,7 @@ export type CanvasJianyingExportDialogProps = {
     onSubmit: (target: { handle: FileSystemDirectoryHandle; rootPath: string }) => void;
 };
 
-export function CanvasJianyingExportDialog({ open, draftName, clipCount, totalSeconds, submitting, onCancel, onUsePackage, onSubmit }: CanvasJianyingExportDialogProps) {
+export function CanvasJianyingExportDialog({ open, draftName, folderName, clipCount, totalSeconds, submitting, onCancel, onUsePackage, onSubmit }: CanvasJianyingExportDialogProps) {
     const { t } = useTranslation();
     const [rootPath, setRootPath] = useState("");
     const [picked, setPicked] = useState<FileSystemDirectoryHandle | null>(null);
@@ -136,7 +138,14 @@ export function CanvasJianyingExportDialog({ open, draftName, clipCount, totalSe
 
                 {error ? <div className="text-[12px] text-red-500">{error}</div> : null}
 
-                <div className="text-[11px] opacity-45">{t("canvas.videoMerge.exportOverwriteHint", { name: draftName })}</div>
+                <div className="flex flex-wrap items-baseline gap-x-1.5 text-[11px]">
+                    <span className="opacity-45">{t("canvas.videoMerge.exportDraftNameLabel")}</span>
+                    <span className="font-medium">{draftName}</span>
+                    <span className="opacity-30">→</span>
+                    <span className="opacity-45">{t("canvas.videoMerge.exportDraftFolderLabel")}</span>
+                    <code className="rounded bg-black/[0.06] px-1.5 py-0.5 font-mono text-[11px] dark:bg-white/10">{folderName || draftName}</code>
+                </div>
+                <div className="text-[11px] opacity-45">{t("canvas.videoMerge.exportOverwriteHint", { folder: folderName || draftName })}</div>
 
                 <div className="flex items-center justify-between gap-2 pt-1">
                     <Button type="text" size="small" disabled={submitting} onClick={onUsePackage}>

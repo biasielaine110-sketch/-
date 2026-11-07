@@ -65,6 +65,7 @@ import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components
 import { CanvasMergeNodeContent } from "@/components/canvas/canvas-merge-node-content";
 import { CanvasVideoMergeNodeContent } from "@/components/canvas/canvas-video-merge-node-content";
 import { CanvasJianyingExportDialog } from "@/components/canvas/canvas-jianying-export-dialog";
+import { CanvasJianyingConflictDialog } from "@/components/canvas/canvas-jianying-conflict-dialog";
 import { CanvasScriptNodeContent, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptGenAction } from "@/components/canvas/canvas-script-node-content";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { CanvasNodeMjUpscaleDialog } from "@/components/canvas/canvas-node-mj-upscale-dialog";
@@ -112,7 +113,7 @@ import { collectScriptAssetOccupied, planScriptAssetSlots, resolveScriptAssetLan
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { buildJianyingBundle, secondsToMicro, type JianyingDraftClip } from "@/lib/canvas/jianying-draft";
-import { ensureJianyingWritePermission, joinDraftPath, loadJianyingRootPath, looksLikeAbsoluteDraftRoot, readStoredJianyingRoot, resolveJianyingPlaceholders, saveJianyingRootPath, stableJianyingDraftFolderName, storeJianyingRoot, supportsJianyingDirectWrite, writeJianyingDraft, type JianyingDraftFile } from "@/lib/canvas/jianying-direct";
+import { cleanWindowsPathSegment, ensureJianyingWritePermission, jianyingDraftFolderExists, jianyingDraftFolderName, joinDraftPath, loadJianyingRootPath, looksLikeAbsoluteDraftRoot, readStoredJianyingRoot, resolveJianyingPlaceholders, saveJianyingRootPath, storeJianyingRoot, suggestAvailableDraftFolderName, supportsJianyingDirectWrite, writeJianyingDraft, type JianyingDraftFile } from "@/lib/canvas/jianying-direct";
 import { createZip } from "@/lib/zip";
 import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFileBase, normalizeMergeClip, probeImageSize, probeVideoMeta, resolveMergeCanvasSize, videoMergeClipFromNode, type ResolvedVideoMergeClip } from "@/lib/canvas/video-merge";
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
@@ -529,8 +530,12 @@ function AtelierCanvasPage() {
      * 弹窗是异步的（用户要先粘路径、选目录），所以数据先攒在这里，用户确认后继续写。
      */
     const jianyingPendingRef = useRef<JianyingExportPayload | null>(null);
+    /** 这次要写到哪儿（目录句柄 + 绝对路径）：重名弹窗里点「覆盖 / 换名」后还要拿它落盘。 */
+    const jianyingTargetRef = useRef<{ handle: FileSystemDirectoryHandle; rootPath: string } | null>(null);
+    /** 重名弹窗：撞车的文件夹名 + 预填的替代名。非空 = 弹窗打开。 */
+    const [jianyingConflict, setJianyingConflict] = useState<{ folderName: string; draftName: string; suggestedName: string } | null>(null);
     /** 弹窗里要显示的那几个数（渲染期读 ref 不响应，单独存一份 state）。 */
-    const [jianyingDialogMeta, setJianyingDialogMeta] = useState<{ draftName: string; clipCount: number; totalSeconds: number } | null>(null);
+    const [jianyingDialogMeta, setJianyingDialogMeta] = useState<{ draftName: string; folderName: string; clipCount: number; totalSeconds: number } | null>(null);
     const [jianyingDialogOpen, setJianyingDialogOpen] = useState(false);
     const [jianyingWriting, setJianyingWriting] = useState(false);
     /** 正在本地渲染合并 mp4 的节点 id + 进度（0–1）。 */
@@ -2409,6 +2414,8 @@ function AtelierCanvasPage() {
                     .map((file) => (file.name.endsWith(".json") && typeof file.data === "string" ? { name: file.name, data: resolveJianyingPlaceholders(file.data, draftDir, target.rootPath) } : file));
                 await writeJianyingDraft(target.handle, payload.folderName, files);
                 jianyingPendingRef.current = null;
+                jianyingTargetRef.current = null;
+                setJianyingConflict(null);
                 setJianyingDialogMeta(null);
                 setJianyingDialogOpen(false);
                 hide();
@@ -2421,6 +2428,58 @@ function AtelierCanvasPage() {
             }
         },
         [message, t],
+    );
+
+    /**
+     * 直写之前的**重名闸门**：先探一下草稿目录里是不是已经有同名文件夹。
+     *
+     *  - 没有 → 直接写（常见路径：当天第一次导出，或换了一天）。
+     *  - 有 → 弹重名框，让用户选「覆盖」还是「换个名字」；两个按钮的回调见下面两个 handler。
+     *
+     * 为什么不在 `writeJianyingPayload` 里做：那个函数是「确定要写了」之后的事，
+     * 而这里要在写之前把选择权交给用户（覆盖会丢用户在剪映里手改的内容）。
+     */
+    const startJianyingDirectWrite = useCallback(
+        async (payload: JianyingExportPayload, target: { handle: FileSystemDirectoryHandle; rootPath: string }) => {
+            jianyingTargetRef.current = target;
+            const exists = await jianyingDraftFolderExists(target.handle, payload.folderName);
+            if (!exists) {
+                await writeJianyingPayload(payload, target);
+                return;
+            }
+            // 预填一个没被占用的替代名，用户想换名时基本点一下就完事。
+            const suggestedName = await suggestAvailableDraftFolderName(target.handle, payload.folderName);
+            setJianyingDialogOpen(false);
+            setJianyingConflict({ folderName: payload.folderName, draftName: payload.draftName, suggestedName });
+        },
+        [writeJianyingPayload],
+    );
+
+    /** 重名框里选「覆盖」：沿用原文件夹名，`writeJianyingDraft` 会先递归删掉再重建。 */
+    const handleJianyingConflictOverwrite = useCallback(() => {
+        const payload = jianyingPendingRef.current;
+        const target = jianyingTargetRef.current;
+        // 框先不关：写盘期间它继续显示 loading，成功后由 `writeJianyingPayload` 收掉。
+        if (payload && target) void writeJianyingPayload(payload, target);
+    }, [writeJianyingPayload]);
+
+    /**
+     * 重名框里选「换名」：再校验一次（用户可能手打了一个同样被占用的名字），
+     * 通过才改 `payload.folderName` 落盘。返回 `null` 表示已开始写，返回字符串是给框里显示的错误。
+     */
+    const handleJianyingConflictRename = useCallback(
+        async (nextName: string) => {
+            const payload = jianyingPendingRef.current;
+            const target = jianyingTargetRef.current;
+            if (!payload || !target) return t("canvas.videoMerge.exportFailed");
+            const cleaned = cleanWindowsPathSegment(nextName).slice(0, 40);
+            if (!cleaned) return t("canvas.videoMerge.exportNameRequired");
+            if (await jianyingDraftFolderExists(target.handle, cleaned)) return t("canvas.videoMerge.exportNameTaken", { name: cleaned });
+            payload.folderName = cleaned;
+            await writeJianyingPayload(payload, target);
+            return null;
+        },
+        [t, writeJianyingPayload],
     );
 
     /**
@@ -2534,11 +2593,13 @@ function AtelierCanvasPage() {
                 files.push({ name: "install.bat", data: bundle.installScript });
                 files.push({ name: "README.txt", data: `\ufeff${bundle.readme}` });
 
+                // 草稿文件夹名 = 节点名 + 日期（`约会_1107`）：同一天重复导出是覆盖，换一天是新草稿。
+                const folderName = jianyingDraftFolderName(draftName);
                 // 攒成一份 payload：直写与「下载压缩包」都要它（弹窗要用户粘路径 / 授权时先放 ref 里）。
                 const payload: JianyingExportPayload = {
                     mergeNodeId,
                     draftName,
-                    folderName: stableJianyingDraftFolderName(draftName, mergeNodeId),
+                    folderName,
                     files,
                     clipCount: draftClips.length,
                     totalSeconds: bundle.totalSeconds,
@@ -2561,12 +2622,12 @@ function AtelierCanvasPage() {
                 if (storedHandle && looksLikeAbsoluteDraftRoot(storedPath)) {
                     const granted = await ensureJianyingWritePermission(storedHandle);
                     if (granted) {
-                        await writeJianyingPayload(payload, { handle: storedHandle, rootPath: storedPath.trim().replace(/[\\/]+$/, "") });
+                        await startJianyingDirectWrite(payload, { handle: storedHandle, rootPath: storedPath.trim().replace(/[\\/]+$/, "") });
                         return;
                     }
                 }
                 // ③ 首次 / 授权失效 → 弹窗里粘一次草稿路径、选一次草稿文件夹
-                setJianyingDialogMeta({ draftName, clipCount: draftClips.length, totalSeconds: bundle.totalSeconds });
+                setJianyingDialogMeta({ draftName, folderName, clipCount: draftClips.length, totalSeconds: bundle.totalSeconds });
                 setJianyingDialogOpen(true);
             } catch (error) {
                 hide();
@@ -2576,7 +2637,7 @@ function AtelierCanvasPage() {
                 setVideoMergeExportingNodeId((current) => (current === mergeNodeId ? null : current));
             }
         },
-        [message, packageJianyingPayload, t, writeJianyingPayload],
+        [message, packageJianyingPayload, startJianyingDirectWrite, t],
     );
 
     /**
@@ -9644,17 +9705,20 @@ function AtelierCanvasPage() {
                 <CanvasJianyingExportDialog
                     open={jianyingDialogOpen}
                     draftName={jianyingDialogMeta?.draftName || ""}
+                    folderName={jianyingDialogMeta?.folderName || ""}
                     clipCount={jianyingDialogMeta?.clipCount || 0}
                     totalSeconds={jianyingDialogMeta?.totalSeconds || 0}
                     submitting={jianyingWriting}
                     onCancel={() => {
                         jianyingPendingRef.current = null;
+                        jianyingTargetRef.current = null;
                         setJianyingDialogMeta(null);
                         setJianyingDialogOpen(false);
                     }}
                     onUsePackage={() => {
                         const pending = jianyingPendingRef.current;
                         jianyingPendingRef.current = null;
+                        jianyingTargetRef.current = null;
                         setJianyingDialogMeta(null);
                         setJianyingDialogOpen(false);
                         if (pending) void packageJianyingPayload(pending);
@@ -9662,8 +9726,26 @@ function AtelierCanvasPage() {
                     onSubmit={(target) => {
                         const pending = jianyingPendingRef.current;
                         if (!pending) return;
-                        void writeJianyingPayload(pending, target);
+                        // 选完目录不等于能直接写：先过「重名闸门」，撞名会转去重名弹窗。
+                        void startJianyingDirectWrite(pending, target);
                     }}
+                />
+
+                {/* 剪映直写：草稿目录里已经有同名文件夹（`节点名_MMDD`）→ 问覆盖还是换名。 */}
+                <CanvasJianyingConflictDialog
+                    open={Boolean(jianyingConflict)}
+                    folderName={jianyingConflict?.folderName || ""}
+                    draftName={jianyingConflict?.draftName || ""}
+                    suggestedName={jianyingConflict?.suggestedName || ""}
+                    submitting={jianyingWriting}
+                    onCancel={() => {
+                        jianyingPendingRef.current = null;
+                        jianyingTargetRef.current = null;
+                        setJianyingConflict(null);
+                        setJianyingDialogMeta(null);
+                    }}
+                    onOverwrite={handleJianyingConflictOverwrite}
+                    onRename={handleJianyingConflictRename}
                 />
 
                 <CanvasImagePreviewModal
