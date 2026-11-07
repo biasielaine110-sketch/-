@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { GripVertical, ImageIcon, List, Music2, Settings2, Video, X, Grid2x2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { useOrderDrag } from "@/hooks/use-order-drag";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useConfigStore } from "@/stores/use-config-store";
 import { mergeOrderedIds, reorderIds, sortByOrder } from "@/lib/canvas/menu-order";
@@ -108,15 +109,11 @@ export function NodeCreateMenu({ position, onCreate, onClose }: { position: Posi
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
     const menuRef = useRef<HTMLDivElement>(null);
-    const suppressClickRef = useRef(false);
-    const suppressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const nodeCreateMenuOrder = useConfigStore((state) => state.config.nodeCreateMenuOrder);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const definitions = listNodeDefinitions().filter((def) => def.showInCreateMenu !== false);
     const defaultOrder = definitions.map((def) => def.type);
     const order = useMemo(() => mergeOrderedIds(nodeCreateMenuOrder || [], defaultOrder), [defaultOrder.join("|"), nodeCreateMenuOrder]);
-    const [draggingId, setDraggingId] = useState<string | null>(null);
-    const [dragOverId, setDragOverId] = useState<string | null>(null);
 
     const orderedDefinitions = useMemo(
         () =>
@@ -136,30 +133,13 @@ export function NodeCreateMenu({ position, onCreate, onClose }: { position: Posi
         return () => document.removeEventListener("pointerdown", handlePointerDown, true);
     }, [onClose]);
 
-    useEffect(
-        () => () => {
-            if (suppressTimerRef.current) clearTimeout(suppressTimerRef.current);
-        },
-        [],
-    );
-
-    const armClickSuppress = () => {
-        suppressClickRef.current = true;
-        if (suppressTimerRef.current) clearTimeout(suppressTimerRef.current);
-        suppressTimerRef.current = setTimeout(() => {
-            suppressClickRef.current = false;
-            suppressTimerRef.current = null;
-        }, 250);
-    };
-
-    const clearDrag = () => {
-        setDraggingId(null);
-        setDragOverId(null);
-    };
-
     const persistOrder = (next: string[]) => {
         updateConfig("nodeCreateMenuOrder", next);
     };
+
+    // 排序走指针事件（`useOrderDrag`）：原生 HTML5 drag 在弹出菜单里拖起即被取消
+    // （2026-11-07「小抓手拖不动」，根因见 `hooks/use-order-drag.ts`）。
+    const menuDrag = useOrderDrag((fromId, toId) => persistOrder(reorderIds(order, fromId, toId)));
 
     return (
         <div
@@ -179,64 +159,42 @@ export function NodeCreateMenu({ position, onCreate, onClose }: { position: Posi
             </div>
             <div className="mb-2 px-1 text-[11px] opacity-45">{t("canvas.createMenu.reorderHint")}</div>
             <div className="grid gap-1">
-                {orderedDefinitions.map((def) => (
+                {orderedDefinitions.map((def) => {
+                    const dragging = menuDrag.draggingId === def.type;
+                    const isDropTarget = menuDrag.dragOverId === def.type && Boolean(menuDrag.draggingId);
+                    // 抓手样式里 hook 也塞了 `touchAction`，这里解出来合并，别二次覆盖（TS2783）。
+                    const { style: handleStyle, ...handleProps } = menuDrag.handleProps(def.type);
+                    return (
                     <div
                         key={def.type}
-                        className={`rounded-2xl ${draggingId === def.type ? "opacity-45" : ""} ${dragOverId === def.type && draggingId && draggingId !== def.type ? "ring-1 ring-sky-400/70" : ""}`}
-                        onDragOver={(event) => {
-                            if (!draggingId) return;
-                            event.preventDefault();
-                            setDragOverId(def.type);
-                        }}
-                        onDrop={(event) => {
-                            if (!draggingId) return;
-                            event.preventDefault();
-                            event.stopPropagation();
-                            armClickSuppress();
-                            persistOrder(reorderIds(order, draggingId, def.type));
-                            clearDrag();
-                        }}
+                        {...menuDrag.rowProps(def.type)}
+                        className={`rounded-2xl ${dragging ? "opacity-45" : ""} ${isDropTarget ? "ring-1 ring-sky-400/70" : ""}`}
                     >
                         <ConnectionCreateOption
                             theme={theme}
                             icon={def.icon}
                             title={def.title}
                             description={def.description}
-                            suppressClick={Boolean(draggingId) || suppressClickRef.current}
+                            suppressClick={dragging}
                             onClick={() => {
-                                if (draggingId || suppressClickRef.current) return;
+                                if (menuDrag.draggingId) return;
                                 onCreate(def.type);
                             }}
                             dragHandle={
                                 <span
-                                    draggable
                                     className="inline-flex shrink-0 cursor-grab items-center self-stretch px-2 opacity-45 transition hover:opacity-90 active:cursor-grabbing"
-                                    style={{ color: theme.node.muted }}
+                                    {...handleProps}
+                                    style={{ ...handleStyle, color: theme.node.muted }}
                                     title={t("canvas.createMenu.dragHandle")}
                                     aria-label={t("canvas.createMenu.dragHandle")}
-                                    onPointerDown={(event) => event.stopPropagation()}
-                                    onMouseDown={(event) => event.stopPropagation()}
-                                    onDragStart={(event) => {
-                                        event.stopPropagation();
-                                        event.dataTransfer.effectAllowed = "move";
-                                        event.dataTransfer.setData("text/plain", def.type);
-                                        setDraggingId(def.type);
-                                    }}
-                                    onDragEnd={() => {
-                                        armClickSuppress();
-                                        clearDrag();
-                                    }}
-                                    onClick={(event) => {
-                                        event.preventDefault();
-                                        event.stopPropagation();
-                                    }}
                                 >
                                     <GripVertical className="size-4" />
                                 </span>
                             }
                         />
                     </div>
-                ))}
+                    );
+                })}
             </div>
         </div>
     );

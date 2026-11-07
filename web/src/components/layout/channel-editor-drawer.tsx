@@ -1,9 +1,10 @@
 import { Button, Drawer, Input, Segmented, Select, Space, Switch } from "antd";
 import { Cable, GripVertical, ListPlus, Trash2 } from "lucide-react";
-import { useEffect, useState, type DragEvent as ReactDragEvent } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { HealthDot } from "@/components/model-picker";
+import { useOrderDrag } from "@/hooks/use-order-drag";
 import { channelModelHasApiOverride, encodeChannelModel, defaultBaseUrlForApiFormat, defaultConfig, guessCapability, isChannelModelEnabled, normalizeChannelModels, parseApiKeys, resolveChannelModelApiFormat, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 import { runningHubOrigin } from "@/lib/runninghub-workflow";
 import { getModelHealth, modelHealthKey, subscribeModelHealth } from "@/services/api/model-health";
@@ -19,8 +20,6 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const [selectOpen, setSelectOpen] = useState(false);
     const [scriptTarget, setScriptTarget] = useState<ScriptTarget | null>(null);
     const [apiTargetName, setApiTargetName] = useState("");
-    const [draggingModelName, setDraggingModelName] = useState<string | null>(null);
-    const [dragOverModelName, setDragOverModelName] = useState<string | null>(null);
     const [, bumpHealth] = useState(0);
     const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
         { label: "OpenAI", value: "openai" },
@@ -34,12 +33,27 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
             // shows every stored key instead of only the primary.
             const keys = [channel.apiKey, ...(channel.apiKeys || [])].map((key) => key.trim()).filter(Boolean);
             setDraft({ ...channel, apiKey: keys.join("\n") });
-            setDraggingModelName(null);
-            setDragOverModelName(null);
         }
     }, [open, channel]);
 
     useEffect(() => subscribeModelHealth(() => bumpHealth((value) => value + 1)), []);
+
+    // 排序走指针事件（`useOrderDrag`）：原生 HTML5 drag 在抽屉里拖起即被取消
+    // （2026-11-07「模型列表小抓手拖不动」，根因见 `hooks/use-order-drag.ts`）。
+    // 放在 `if (!draft) return null` 之前，避免条件调用 Hook；顺序靠 setDraft 的函数式更新取最新值。
+    const modelDrag = useOrderDrag((fromName, toName) => {
+        if (!fromName || !toName || fromName === toName) return;
+        setDraft((current) => {
+            if (!current) return current;
+            const fromIndex = current.models.findIndex((model) => model.name === fromName);
+            const toIndex = current.models.findIndex((model) => model.name === toName);
+            if (fromIndex < 0 || toIndex < 0) return current;
+            const next = [...current.models];
+            const [moved] = next.splice(fromIndex, 1);
+            next.splice(toIndex, 0, moved);
+            return { ...current, models: next };
+        });
+    });
 
     if (!draft) return null;
 
@@ -97,36 +111,8 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
     const removeModel = (name: string) => setModels(draft.models.filter((model) => model.name !== name));
     const enabledCount = draft.models.filter((model) => isChannelModelEnabled(model)).length;
 
-    const clearModelDrag = () => {
-        setDraggingModelName(null);
-        setDragOverModelName(null);
-    };
-
-    const handleModelDragStart = (event: ReactDragEvent, name: string) => {
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("text/plain", name);
-        setDraggingModelName(name);
-    };
-
-    const handleModelDragOver = (event: ReactDragEvent, name: string) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-        if (dragOverModelName !== name) setDragOverModelName(name);
-    };
-
-    const handleModelDrop = (event: ReactDragEvent, targetName: string) => {
-        event.preventDefault();
-        const sourceName = draggingModelName || event.dataTransfer.getData("text/plain");
-        clearModelDrag();
-        if (!sourceName || sourceName === targetName) return;
-        const fromIndex = draft.models.findIndex((model) => model.name === sourceName);
-        const toIndex = draft.models.findIndex((model) => model.name === targetName);
-        if (fromIndex < 0 || toIndex < 0) return;
-        const next = [...draft.models];
-        const [moved] = next.splice(fromIndex, 1);
-        next.splice(toIndex, 0, moved);
-        setModels(next);
-    };
+    // 排序走指针事件（`useOrderDrag`），不再用 HTML5 drag：
+    // 原生 drag 在抽屉里拖起即被取消（2026-11-07 报障，根因见 `hooks/use-order-drag.ts`）。
 
     const save = () => {
         // Split the (possibly multi-line) key field into an ordered list. The first key is the
@@ -208,22 +194,21 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose }: { open: 
                     draft.models.map((model) => {
                         const enabled = isChannelModelEnabled(model);
                         const hasOwnApi = channelModelHasApiOverride(model);
+                        const dragging = modelDrag.draggingId === model.name;
+                        const isDropTarget = modelDrag.dragOverId === model.name && Boolean(modelDrag.draggingId);
                         return (
                         <div
                             key={model.name}
-                            onDragOver={(event) => handleModelDragOver(event, model.name)}
-                            onDrop={(event) => handleModelDrop(event, model.name)}
+                            {...modelDrag.rowProps(model.name)}
                             className={`flex flex-wrap items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-stone-50 dark:hover:bg-stone-900/40 ${
-                                draggingModelName === model.name ? "opacity-50" : ""
-                            } ${!enabled ? "opacity-50" : ""} ${dragOverModelName === model.name && draggingModelName !== model.name ? "bg-sky-50 ring-1 ring-sky-400 dark:bg-sky-950/40 dark:ring-sky-500" : ""}`}
+                                dragging ? "opacity-50" : ""
+                            } ${!enabled ? "opacity-50" : ""} ${isDropTarget ? "bg-sky-50 ring-1 ring-sky-400 dark:bg-sky-950/40 dark:ring-sky-500" : ""}`}
                         >
                             <span
-                                draggable
-                                onDragStart={(event) => handleModelDragStart(event, model.name)}
-                                onDragEnd={clearModelDrag}
                                 className="inline-flex shrink-0 cursor-grab touch-none text-stone-400 active:cursor-grabbing"
                                 title={t("config.channelEditor.dragHandle")}
                                 aria-label={t("config.channelEditor.dragHandle")}
+                                {...modelDrag.handleProps(model.name)}
                             >
                                 <GripVertical className="size-4" />
                             </span>

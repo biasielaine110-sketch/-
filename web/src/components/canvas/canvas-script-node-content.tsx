@@ -6,6 +6,7 @@ import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CornerDo
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
+import { useOrderDrag } from "@/hooks/use-order-drag";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasScriptBatchAssetDialog } from "@/components/canvas/canvas-script-batch-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
@@ -705,53 +706,24 @@ export function CanvasScriptNodeContent({
     };
 
     // ---- 资产池缩略图：拖拽换位 + 解除链接 ----
-    // 拖拽只认「从缩略图本体发起」的 HTML5 drag，且用私有 MIME 类型（不是 text/plain）——
-    // 否则画布的落区会把它当成从系统拖进来的文字，凭空建一个文本节点。
-    // 缩略图上的 click 仍是「轮转资产分类」：浏览器在真实拖拽结束后不会补发 click，两者不打架。
-    const [dragAssetIndex, setDragAssetIndex] = useState<number | null>(null);
-    const [dropAssetIndex, setDropAssetIndex] = useState<number | null>(null);
-    const dragAssetIndexRef = useRef<number | null>(null);
-
-    const handleAssetDragStart = (event: ReactDragEvent, index: number) => {
-        event.stopPropagation();
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("application/x-canvas-script-asset-reorder", String(index));
-        dragAssetIndexRef.current = index;
-        setDragAssetIndex(index);
-        setDropAssetIndex(null);
-    };
-
-    const handleAssetDragOver = (event: ReactDragEvent, index: number) => {
-        if (dragAssetIndexRef.current === null) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = "move";
-        if (dropAssetIndex !== index) setDropAssetIndex(index);
-    };
-
-    const handleAssetDrop = (event: ReactDragEvent, targetIndex: number) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const rawFrom = dragAssetIndexRef.current ?? Number(event.dataTransfer.getData("application/x-canvas-script-asset-reorder"));
-        dragAssetIndexRef.current = null;
-        setDragAssetIndex(null);
-        setDropAssetIndex(null);
+    // 换位走**指针事件**（`useOrderDrag`），不再用 HTML5 drag：原生 drag 在画布节点里拖起即被
+    // 取消（2026-11-07「小抓手拖不动」，根因见 `hooks/use-order-drag.ts`）。
+    // 抓手只挂在缩略图底部那条细横条上，缩略图本体保留 click = 「轮转资产分类」。
+    const reorderScriptAssets = (fromKey: string, toKey: string) => {
         if (!onReorderScriptAssets) return;
-        if (!Number.isFinite(rawFrom) || rawFrom < 0 || rawFrom >= activeReferences.length || rawFrom === targetIndex) return;
+        const fromIndex = Number(fromKey);
+        const toIndex = Number(toKey);
+        if (!Number.isFinite(fromIndex) || !Number.isFinite(toIndex) || fromIndex === toIndex) return;
+        if (fromIndex < 0 || toIndex < 0 || fromIndex >= activeReferences.length || toIndex >= activeReferences.length) return;
         const next = [...activeReferences];
-        const [moved] = next.splice(rawFrom, 1);
-        next.splice(targetIndex, 0, moved);
+        const [moved] = next.splice(fromIndex, 1);
+        next.splice(toIndex, 0, moved);
         onReorderScriptAssets(
             node.id,
             next.map((reference) => reference.nodeId),
         );
     };
-
-    const handleAssetDragEnd = () => {
-        dragAssetIndexRef.current = null;
-        setDragAssetIndex(null);
-        setDropAssetIndex(null);
-    };
+    const assetDrag = useOrderDrag(reorderScriptAssets);
 
     // 无结果时回到输入态；首次生成出结果时自动切到分镜表——否则用户停在「剧本原文」，
     // 既看不到表格，也看不到表格底部的「铺链路」入口。
@@ -1557,19 +1529,12 @@ export function CanvasScriptNodeContent({
                     const role = resolveScriptAssetRole(assetRoles?.[reference.nodeId]);
                     // 拖拽换位 / 解除链接只在有上层回调时启用（别的节点复用这个内容区时可能没有）。
                     const reorderable = Boolean(onReorderScriptAssets);
-                    const isDropTarget = dropAssetIndex === index && dragAssetIndex !== null && dragAssetIndex !== index;
-                    const dragProps = reorderable
-                        ? {
-                              draggable: true,
-                              onDragStart: (event: ReactDragEvent) => handleAssetDragStart(event, index),
-                              onDragEnd: handleAssetDragEnd,
-                          }
-                        : {};
+                    const isDragging = assetDrag.draggingId === String(index);
+                    const isDropTarget = assetDrag.dragOverId === String(index) && Boolean(assetDrag.draggingId);
                     const thumb = (
                         <span
-                            className={`relative flex size-12 items-center justify-center overflow-hidden rounded-md border ${reorderable ? "cursor-grab active:cursor-grabbing" : ""}`}
+                            className={`relative flex size-12 items-center justify-center overflow-hidden rounded-md border ${isDragging ? "opacity-45" : ""}`}
                             style={{ borderColor: isDropTarget ? "#0ea5e9" : theme.node.stroke, background: theme.node.fill, color: theme.node.text }}
-                            {...dragProps}
                         >
                             {preview ? (
                                 // 图片自带 native drag（拖出来是半透明快照），必须关掉，否则抢走缩略图的拖拽换位。
@@ -1585,8 +1550,13 @@ export function CanvasScriptNodeContent({
                             )}
                             <span className="absolute right-0.5 top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-black/45 px-0.5 text-[0.692em] leading-none text-white">{index + 1}</span>
                             {reorderable ? (
-                                // 抓手提示：底部一条细横条，一眼看出「这个能拖」。
-                                <span className="pointer-events-none absolute inset-x-0 bottom-0 flex h-3 items-center justify-center bg-black/35 text-white opacity-0 transition group-hover/asset:opacity-100">
+                                // 抓手：底部一条细横条，拖它才换位（点缩略图本体仍是轮转分类）。
+                                <span
+                                    className="absolute inset-x-0 bottom-0 flex h-3 cursor-grab touch-none items-center justify-center bg-black/35 text-white opacity-0 transition active:cursor-grabbing group-hover/asset:opacity-100"
+                                    title={t("canvas.scriptNode.poolAssetReorderHint")}
+                                    aria-label={t("canvas.scriptNode.poolAssetReorderHint")}
+                                    {...assetDrag.handleProps(String(index))}
+                                >
                                     <GripVertical className="size-2.5" />
                                 </span>
                             ) : null}
@@ -1595,10 +1565,9 @@ export function CanvasScriptNodeContent({
                     return (
                         <span
                             key={reference.nodeId}
+                            {...assetDrag.rowProps(String(index))}
                             className={`group/asset relative flex flex-col items-center gap-0.5 rounded-md ${isDropTarget ? "ring-2 ring-sky-500" : ""}`}
                             title={reorderable ? `${reference.title} · ${t("canvas.scriptNode.poolAssetReorderHint")}` : reference.title}
-                            onDragOver={reorderable ? (event: ReactDragEvent) => handleAssetDragOver(event, index) : undefined}
-                            onDrop={reorderable ? (event: ReactDragEvent) => handleAssetDrop(event, index) : undefined}
                         >
                             {classifiable && onAssetRoleChange ? (
                                 <button

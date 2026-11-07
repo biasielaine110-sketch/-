@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { App, Button, Checkbox, Modal } from "antd";
 import { Combine, GripVertical, Music2, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { formatAudioClock, loadAudioBlob, mergeAudioBlobs } from "@/lib/canvas/canvas-audio-tools";
 import { proxyMediaUrl } from "@/lib/api-proxy";
+import { useOrderDrag } from "@/hooks/use-order-drag";
 
 export type AudioMergeCandidate = {
     id: string;
@@ -41,18 +42,12 @@ export function CanvasNodeAudioMergeDialog({
     const [busy, setBusy] = useState(false);
     const [progress, setProgress] = useState(0);
     const [previewId, setPreviewId] = useState<string | null>(null);
-    // Drag-reorder state for the selected grid cards.
-    const [dragIndex, setDragIndex] = useState<number | null>(null);
-    const [dropIndex, setDropIndex] = useState<number | null>(null);
-    const dragIndexRef = useRef<number | null>(null);
 
     useEffect(() => {
         if (!open) return;
         setPreviewId(null);
         setBusy(false);
         setProgress(0);
-        setDragIndex(null);
-        setDropIndex(null);
     }, [open]);
 
     // Selected candidates, preserving the user's chosen order (selected[] order).
@@ -84,40 +79,15 @@ export function CanvasNodeAudioMergeDialog({
         onSelectedChange(next);
     };
 
-    const handleCardDragStart = (event: ReactDragEvent, index: number) => {
-        event.dataTransfer.effectAllowed = "move";
-        // Private MIME type — never text/plain, so the canvas drop handler can't mistake this
-        // for an external text drop (which would spawn a text node + editor dialog).
-        event.dataTransfer.setData("application/x-canvas-audio-reorder", String(index));
-        dragIndexRef.current = index;
-        setDragIndex(index);
-        setDropIndex(null);
-    };
-
-    const handleCardDragOver = (event: ReactDragEvent, index: number) => {
-        if (dragIndexRef.current === null) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = "move";
-        if (dropIndex !== index) setDropIndex(index);
-    };
-
-    const handleCardDrop = (event: ReactDragEvent, targetIndex: number) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const rawFrom = dragIndexRef.current ?? Number(event.dataTransfer.getData("application/x-canvas-audio-reorder"));
-        dragIndexRef.current = null;
-        setDragIndex(null);
-        setDropIndex(null);
-        if (!Number.isFinite(rawFrom) || rawFrom < 0 || rawFrom >= selected.length || rawFrom === targetIndex) return;
-        reorder(rawFrom, targetIndex);
-    };
-
-    const handleCardDragEnd = () => {
-        dragIndexRef.current = null;
-        setDragIndex(null);
-        setDropIndex(null);
-    };
+    // 排序走指针事件（`useOrderDrag`）：原生 HTML5 drag 在弹窗里拖起即被取消
+    // （2026-11-07「小抓手拖不动」，根因见 `hooks/use-order-drag.ts`）。
+    const cardDrag = useOrderDrag((fromKey, toKey) => {
+        const fromIndex = Number(fromKey);
+        const toIndex = Number(toKey);
+        if (!Number.isFinite(fromIndex) || !Number.isFinite(toIndex)) return;
+        if (fromIndex < 0 || toIndex < 0 || fromIndex >= selected.length || toIndex >= selected.length) return;
+        reorder(fromIndex, toIndex);
+    });
 
     const mergeableCount = ordered.filter((candidate) => candidate.url && !candidate.empty).length;
 
@@ -172,25 +142,22 @@ export function CanvasNodeAudioMergeDialog({
                         {ordered.length ? (
                             <div className="grid grid-cols-2 gap-2 rounded-xl border p-3 sm:grid-cols-3">
                                 {ordered.map((candidate, index) => {
-                                    const isDragging = dragIndex === index;
-                                    const isDropTarget = dropIndex === index && dragIndex !== null && dragIndex !== index;
+                                    const isDragging = cardDrag.draggingId === String(index);
+                                    const isDropTarget = cardDrag.dragOverId === String(index) && Boolean(cardDrag.draggingId);
                                     return (
                                         <div
                                             key={candidate.id}
+                                            {...cardDrag.rowProps(String(index))}
                                             data-audio-merge-card={index}
-                                            onDragOver={(event) => handleCardDragOver(event, index)}
-                                            onDrop={(event) => handleCardDrop(event, index)}
                                             className={`relative flex flex-col gap-1 rounded-lg border p-2 transition ${isDropTarget ? "ring-2 ring-sky-500" : ""} ${isDragging ? "opacity-40" : ""} ${previewId === candidate.id ? "border-blue-400 bg-blue-50/40" : ""}`}
                                             style={{ borderColor: isDropTarget ? "#0ea5e9" : undefined }}
                                         >
                                             <div className="flex items-center gap-1.5">
                                                 <span
-                                                    draggable={!busy}
-                                                    onDragStart={(event) => handleCardDragStart(event, index)}
-                                                    onDragEnd={handleCardDragEnd}
                                                     className="cursor-grab touch-none opacity-45 active:cursor-grabbing"
                                                     title={t("canvas.audioMerge.reorderHint")}
                                                     aria-label={t("canvas.audioMerge.reorderHint")}
+                                                    {...(busy ? {} : cardDrag.handleProps(String(index)))}
                                                 >
                                                     <GripVertical className="size-3.5" />
                                                 </span>

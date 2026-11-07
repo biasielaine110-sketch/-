@@ -90,9 +90,6 @@ export function CanvasChatContent({
     const [draft, setDraft] = useState("");
     const [draftEditorOpen, setDraftEditorOpen] = useState(false);
     const [previewMessageId, setPreviewMessageId] = useState<string | null>(null);
-    const [dragMediaIndex, setDragMediaIndex] = useState<number | null>(null);
-    const [dropMediaIndex, setDropMediaIndex] = useState<number | null>(null);
-    const mediaDragIndexRef = useRef<number | null>(null);
     const listRef = useRef<HTMLDivElement>(null);
     const syncedConnectedRef = useRef("");
     const restoredScrollNodeRef = useRef<string | null>(null);
@@ -203,97 +200,36 @@ export function CanvasChatContent({
         onFontSizeChange?.(node.id, next);
     };
 
-    // HTML5 drag-and-drop reordering, matching the channel-editor's model reordering
-    // interaction (draggable handle + onDragStart/onDragOver/onDrop). This is far more robust
-    // than pointer-event reordering here: the canvas node itself captures pointer events and
-    // the browser's native image drag ("plus" ghost cursor) kept hijacking the gesture. With
-    // an explicit `draggable` thumbnail + `draggable={false}` on the inner <img>/<video>, the
-    // browser performs a real HTML5 drag whose default image-drag is suppressed.
-    const handleMediaDragStart = (event: ReactDragEvent, index: number) => {
-        event.dataTransfer.effectAllowed = "move";
-        // Private MIME type (not text/plain) so the canvas drop handler can't mistake this for
-        // an external text drop and spawn a text node + dialog.
-        event.dataTransfer.setData("application/x-canvas-reference-reorder", String(index));
-        mediaDragIndexRef.current = index;
-        setDragMediaIndex(index);
-        setDropMediaIndex(null);
-    };
-
-    const handleMediaDragOver = (event: ReactDragEvent, index: number) => {
-        if (mediaDragIndexRef.current === null) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = "move";
-        if (dropMediaIndex !== index) setDropMediaIndex(index);
-    };
-
-    const handleMediaDrop = (event: ReactDragEvent, targetIndex: number) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const from = mediaDragIndexRef.current;
-        const rawFrom = event.dataTransfer.getData("application/x-canvas-reference-reorder");
-        const parsedFrom = rawFrom === "" ? null : Number(rawFrom);
-        const fromIndex = from ?? (Number.isFinite(parsedFrom) ? parsedFrom : null);
-        mediaDragIndexRef.current = null;
-        setDragMediaIndex(null);
-        setDropMediaIndex(null);
-        if (fromIndex === null || fromIndex === targetIndex) return;
+    // 两排「小抓手」拖动排序（上游媒体列表 + @ 提及 chip）—— **指针事件，不用 HTML5 drag**。
+    //
+    // 2026-11-07 报障「只有图片 / 视频窗口的抓手管用，对话窗口的抓手拖动没反应」：
+    // 这两排原来是 `draggable` + `onDragStart`，原生 drag 在画布节点里拖起即被取消
+    // （拖影一闪、光标回弹、之后不再响应）。根因与取舍见 `hooks/use-order-drag.ts` 顶部注释。
+    // 现在统一走 `useOrderDrag`（pointerdown + window 捕获 + 4px 阈值），和参考图 chip 同一套。
+    // 键用下标字符串（`String(index)`），落点换算成「移动后的下标」再写回引用顺序。
+    const reorderMedia = (fromKey: string, toKey: string) => {
+        const fromIndex = Number(fromKey);
+        const toIndex = Number(toKey);
+        if (!Number.isFinite(fromIndex) || !Number.isFinite(toIndex) || fromIndex === toIndex) return;
+        if (fromIndex < 0 || fromIndex >= linkedMedia.length || toIndex < 0 || toIndex >= linkedMedia.length) return;
         const next = [...linkedMedia];
         const [movedItem] = next.splice(fromIndex, 1);
-        next.splice(targetIndex, 0, movedItem);
+        next.splice(toIndex, 0, movedItem);
         onReorderLinkedMedia?.(node.id, next.map((reference) => reference.nodeId));
     };
+    const mediaDrag = useOrderDrag(reorderMedia);
 
-    const handleMediaDragEnd = () => {
-        mediaDragIndexRef.current = null;
-        setDragMediaIndex(null);
-        setDropMediaIndex(null);
-    };
-
-    // Same handle-only HTML5 drag reordering for the "@ mention" chips row above the composer.
-    // Only the grip handle starts a drag, so grabbing the chip's thumbnail never triggers the
-    // browser's native image drag (the "plus" cursor + zoomed snapshot the user reported).
-    const [dragChipIndex, setDragChipIndex] = useState<number | null>(null);
-    const [dropChipIndex, setDropChipIndex] = useState<number | null>(null);
-    const dragChipIndexRef = useRef<number | null>(null);
-
-    const handleChipDragStart = (event: ReactDragEvent, index: number) => {
-        event.dataTransfer.effectAllowed = "move";
-        // Private MIME type, not text/plain — the canvas drop handler would otherwise treat this
-        // reorder drag as an external text drop and create a text node + editor dialog.
-        event.dataTransfer.setData("application/x-canvas-reference-reorder", String(index));
-        dragChipIndexRef.current = index;
-        setDragChipIndex(index);
-        setDropChipIndex(null);
-    };
-
-    const handleChipDragOver = (event: ReactDragEvent, index: number) => {
-        if (dragChipIndexRef.current === null) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.dataTransfer.dropEffect = "move";
-        if (dropChipIndex !== index) setDropChipIndex(index);
-    };
-
-    const handleChipDrop = (event: ReactDragEvent, targetIndex: number) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const rawFrom = dragChipIndexRef.current ?? Number(event.dataTransfer.getData("application/x-canvas-reference-reorder"));
-        dragChipIndexRef.current = null;
-        setDragChipIndex(null);
-        setDropChipIndex(null);
-        if (!onReorderLinkedMedia || !Number.isFinite(rawFrom) || rawFrom < 0 || rawFrom >= activeReferences.length || rawFrom === targetIndex) return;
+    const reorderChips = (fromKey: string, toKey: string) => {
+        const fromIndex = Number(fromKey);
+        const toIndex = Number(toKey);
+        if (!Number.isFinite(fromIndex) || !Number.isFinite(toIndex) || fromIndex === toIndex) return;
+        if (fromIndex < 0 || fromIndex >= activeReferences.length || toIndex < 0 || toIndex >= activeReferences.length) return;
         const next = [...activeReferences];
-        const [moved] = next.splice(rawFrom, 1);
-        next.splice(targetIndex, 0, moved);
-        onReorderLinkedMedia(node.id, next.map((reference) => reference.nodeId));
+        const [moved] = next.splice(fromIndex, 1);
+        next.splice(toIndex, 0, moved);
+        onReorderLinkedMedia?.(node.id, next.map((reference) => reference.nodeId));
     };
-
-    const handleChipDragEnd = () => {
-        dragChipIndexRef.current = null;
-        setDragChipIndex(null);
-        setDropChipIndex(null);
-    };
+    const chipDrag = useOrderDrag(reorderChips);
 
     const placeholder = useMemo(() => {
         if (textEnabled && imageEnabled) return t("canvas.chat.placeholderBoth");
@@ -634,26 +570,22 @@ export function CanvasChatContent({
                                 <div className="mb-1.5 text-[20px] font-semibold uppercase opacity-50">{t("canvas.chat.linkedMediaLabel")}</div>
                                 <div className="flex flex-wrap gap-1.5">
                                     {linkedMedia.map((reference, index) => {
-                                        const isDragging = dragMediaIndex === index;
-                                        const isDropTarget = dropMediaIndex === index && dragMediaIndex != null && dragMediaIndex !== index;
+                                        const dragging = mediaDrag.draggingId === String(index);
+                                        const isDropTarget = mediaDrag.dragOverId === String(index) && Boolean(mediaDrag.draggingId) && !dragging;
                                         return (
                                             <div
                                                 key={reference.id}
-                                                data-media-index={index}
-                                                onDragOver={onReorderLinkedMedia ? (event) => handleMediaDragOver(event, index) : undefined}
-                                                onDrop={onReorderLinkedMedia ? (event) => handleMediaDrop(event, index) : undefined}
-                                                className={`relative flex h-14 items-stretch overflow-hidden rounded-lg border transition ${isDropTarget ? "ring-2 ring-sky-500" : ""} ${isDragging ? "opacity-40" : ""}`}
+                                                {...mediaDrag.rowProps(String(index))}
+                                                className={`relative flex h-14 items-stretch overflow-hidden rounded-lg border transition ${isDropTarget ? "ring-2 ring-sky-500" : ""} ${dragging ? "opacity-40" : ""}`}
                                                 style={{ borderColor: isDropTarget ? "#0ea5e9" : theme.node.stroke, touchAction: "none", userSelect: "none", WebkitUserDrag: "none" } as React.CSSProperties}
                                                 title={reference.title}
                                                 onMouseDown={(event) => event.stopPropagation()}
                                             >
                                                 <span
-                                                    draggable={Boolean(onReorderLinkedMedia)}
-                                                    onDragStart={onReorderLinkedMedia ? (event) => handleMediaDragStart(event, index) : undefined}
-                                                    onDragEnd={onReorderLinkedMedia ? handleMediaDragEnd : undefined}
                                                     className="flex w-4 shrink-0 cursor-grab touch-none items-center justify-center opacity-50 active:cursor-grabbing"
                                                     title={t("canvas.chat.reorderHint")}
                                                     aria-label={t("canvas.chat.reorderHint")}
+                                                    {...(onReorderLinkedMedia ? mediaDrag.handleProps(String(index)) : {})}
                                                 >
                                                     <GripVertical className="size-3" />
                                                 </span>
@@ -708,25 +640,23 @@ export function CanvasChatContent({
                     <div className="mb-1.5 flex flex-wrap items-center gap-1">
                         <span className="text-[20px] opacity-50">{t("canvas.chat.mentionHint")}</span>
                         {activeReferences.slice(0, 6).map((reference, index) => {
-                            const isDropTarget = dropChipIndex === index && dragChipIndex !== null && dragChipIndex !== index;
+                            const dragging = chipDrag.draggingId === String(index);
+                            const isDropTarget = chipDrag.dragOverId === String(index) && Boolean(chipDrag.draggingId) && !dragging;
                             return (
                                 <span
                                     key={reference.id}
+                                    {...chipDrag.rowProps(String(index))}
                                     data-ref-chip={index}
-                                    className={`inline-flex max-w-36 items-center gap-1 rounded-md border px-2 py-1 text-[20px] ${isDropTarget ? "ring-2 ring-sky-500" : ""}`}
-                                    style={{ borderColor: isDropTarget ? "#0ea5e9" : theme.node.stroke, background: theme.node.panel }}
+                                    className={`inline-flex max-w-36 items-center gap-1 rounded-md border px-2 py-1 text-[20px] ${isDropTarget ? "ring-2 ring-sky-500" : ""} ${dragging ? "opacity-40" : ""}`}
+                                    style={{ borderColor: isDropTarget ? "#0ea5e9" : theme.node.stroke, background: theme.node.panel, touchAction: "none", userSelect: "none" }}
                                     title={reference.title}
-                                    onDragOver={onReorderLinkedMedia ? (event) => handleChipDragOver(event, index) : undefined}
-                                    onDrop={onReorderLinkedMedia ? (event) => handleChipDrop(event, index) : undefined}
                                 >
                                     <span
                                         data-ref-chip-handle={index}
-                                        draggable={Boolean(onReorderLinkedMedia)}
-                                        onDragStart={onReorderLinkedMedia ? (event) => handleChipDragStart(event, index) : undefined}
-                                        onDragEnd={onReorderLinkedMedia ? handleChipDragEnd : undefined}
                                         className="cursor-grab touch-none opacity-45 active:cursor-grabbing"
                                         title={t("canvas.chat.reorderHint")}
                                         aria-label={t("canvas.chat.reorderHint")}
+                                        {...(onReorderLinkedMedia ? chipDrag.handleProps(String(index)) : {})}
                                     >
                                         <GripVertical className="size-3" />
                                     </span>

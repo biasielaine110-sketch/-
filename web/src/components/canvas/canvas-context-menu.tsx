@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
+
+import { useOrderDrag } from "@/hooks/use-order-drag";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -88,10 +90,6 @@ export function CanvasNodeContextMenu({
     const imageQuickTools = useConfigStore((state) => state.config.imageQuickTools);
     const imageContextMenuOrder = useConfigStore((state) => state.config.imageContextMenuOrder);
     const updateConfig = useConfigStore((state) => state.updateConfig);
-    const [draggingId, setDraggingId] = useState<string | null>(null);
-    const [dragOverId, setDragOverId] = useState<string | null>(null);
-    const suppressClickRef = useRef(false);
-    const suppressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const hasImage = Boolean(node && node.type === CanvasNodeType.Image && node.metadata?.content);
     const hasVideo = Boolean(node && node.type === CanvasNodeType.Video && node.metadata?.content);
     const hasAudio = Boolean(node && node.type === CanvasNodeType.Audio && node.metadata?.content);
@@ -285,22 +283,6 @@ export function CanvasNodeContextMenu({
         return () => window.removeEventListener("pointerdown", close, true);
     }, [onClose]);
 
-    useEffect(
-        () => () => {
-            if (suppressTimerRef.current) clearTimeout(suppressTimerRef.current);
-        },
-        [],
-    );
-
-    const armClickSuppress = () => {
-        suppressClickRef.current = true;
-        if (suppressTimerRef.current) clearTimeout(suppressTimerRef.current);
-        suppressTimerRef.current = setTimeout(() => {
-            suppressClickRef.current = false;
-            suppressTimerRef.current = null;
-        }, 250);
-    };
-
     const persistOrder = (nextOrder: string[]) => {
         updateConfig("imageContextMenuOrder", nextOrder);
         const quickSet = new Set(quickImageToolIds);
@@ -311,10 +293,9 @@ export function CanvasNodeContextMenu({
         updateConfig("imageQuickTools", { ids: nextQuick, showLabels: Boolean(imageQuickTools?.showLabels) });
     };
 
-    const clearDrag = () => {
-        setDraggingId(null);
-        setDragOverId(null);
-    };
+    // 排序走指针事件（`useOrderDrag`）：HTML5 drag 一 setState 就被 React 重渲染打断，
+    // 菜单还是 `position: fixed` 浮层，原生 drag 更容易被浏览器取消。
+    const toolDrag = useOrderDrag((fromId, toId) => persistOrder(reorderIds(menuOrder, fromId, toId)));
 
     const menuNode = (
         <div
@@ -382,46 +363,21 @@ export function CanvasNodeContextMenu({
             {canReorder ? (
                 <div className="px-3 pb-1 pt-1.5 text-[10px] opacity-45">{t("canvas.contextMenu.reorderHint")}</div>
             ) : null}
-            {orderedTools.map((tool) => (
+            {orderedTools.map((tool) => {
+                const dragging = toolDrag.draggingId === tool.id;
+                const isDropTarget = toolDrag.dragOverId === tool.id && Boolean(toolDrag.draggingId);
+                return (
                 <div
                     key={tool.id}
-                    className={`flex items-stretch ${draggingId === tool.id ? "opacity-45" : ""} ${dragOverId === tool.id && draggingId && draggingId !== tool.id ? "bg-sky-500/10" : ""}`}
-                    onDragOver={(event) => {
-                        if (!canReorder || !draggingId) return;
-                        event.preventDefault();
-                        setDragOverId(tool.id);
-                    }}
-                    onDrop={(event) => {
-                        if (!canReorder || !draggingId) return;
-                        event.preventDefault();
-                        event.stopPropagation();
-                        armClickSuppress();
-                        persistOrder(reorderIds(menuOrder, draggingId, tool.id));
-                        clearDrag();
-                    }}
+                    {...toolDrag.rowProps(tool.id)}
+                    className={`flex items-stretch ${dragging ? "opacity-45" : ""} ${isDropTarget ? "bg-sky-500/10" : ""}`}
                 >
                     {canReorder ? (
                         <span
-                            draggable
                             className="inline-flex shrink-0 cursor-grab items-center self-stretch px-2 opacity-45 transition hover:opacity-90 active:cursor-grabbing"
                             title={t("canvas.contextMenu.dragHandle")}
                             aria-label={t("canvas.contextMenu.dragHandle")}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onMouseDown={(event) => event.stopPropagation()}
-                            onDragStart={(event) => {
-                                event.stopPropagation();
-                                event.dataTransfer.effectAllowed = "move";
-                                event.dataTransfer.setData("text/plain", tool.id);
-                                setDraggingId(tool.id);
-                            }}
-                            onDragEnd={() => {
-                                armClickSuppress();
-                                clearDrag();
-                            }}
-                            onClick={(event) => {
-                                event.preventDefault();
-                                event.stopPropagation();
-                            }}
+                            {...toolDrag.handleProps(tool.id)}
                         >
                             <GripVertical className="size-3.5" />
                         </span>
@@ -432,12 +388,13 @@ export function CanvasNodeContextMenu({
                         active={tool.active}
                         danger={tool.danger}
                         onClick={() => {
-                            if (draggingId || suppressClickRef.current) return;
+                            if (toolDrag.draggingId) return;
                             tool.onClick();
                         }}
                     />
                 </div>
-            ))}
+                );
+            })}
         </div>
     );
 

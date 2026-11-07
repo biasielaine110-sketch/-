@@ -1,6 +1,6 @@
 import { App, Button, Checkbox, Form, Input, Modal, Progress, Segmented, Select, Switch, Tabs } from "antd";
 import { Download, FileUp, FolderOpen, GripVertical, HardDrive, Pencil, Plus, Trash2, Upload } from "lucide-react";
-import { useEffect, useRef, useState, type DragEvent as ReactDragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
 
@@ -76,8 +76,6 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const configInputRef = useRef<HTMLInputElement>(null);
     const [activeTab, setActiveTab] = useState<ConfigTabKey>(initialTab);
     const [editingChannelId, setEditingChannelId] = useState("");
-    const [draggingChannelId, setDraggingChannelId] = useState("");
-    const [dragOverChannelId, setDragOverChannelId] = useState("");
     const [exportOpen, setExportOpen] = useState(false);
     const [exportIncludeTextPrompts, setExportIncludeTextPrompts] = useState(true);
     const [exporting, setExporting] = useState(false);
@@ -194,30 +192,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         updateChannels(next);
     };
 
-    const handleChannelDragStart = (event: ReactDragEvent<HTMLElement>, channelId: string) => {
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("text/plain", channelId);
-        setDraggingChannelId(channelId);
-    };
-
-    const handleChannelDragOver = (event: ReactDragEvent<HTMLElement>, channelId: string) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-        if (dragOverChannelId !== channelId) setDragOverChannelId(channelId);
-    };
-
-    const handleChannelDrop = (event: ReactDragEvent<HTMLElement>, channelId: string) => {
-        event.preventDefault();
-        const fromId = event.dataTransfer.getData("text/plain") || draggingChannelId;
-        reorderChannels(fromId, channelId);
-        setDraggingChannelId("");
-        setDragOverChannelId("");
-    };
-
-    const clearChannelDrag = () => {
-        setDraggingChannelId("");
-        setDragOverChannelId("");
-    };
+    // 排序走指针事件（`useOrderDrag`），不再用 HTML5 drag：原生 drag 在画布 / 弹窗里拖起即被
+    // 取消（2026-11-07「渠道模型的小抓手拖不动」）。取舍与根因见 `hooks/use-order-drag.ts`。
+    const channelDrag = useOrderDrag(reorderChannels);
 
     return (
         <>
@@ -275,23 +252,22 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 <div className="space-y-2">
                                     {config.channels.map((channel) => {
                                         const enabled = isChannelEnabled(channel);
+                                        const dragging = channelDrag.draggingId === channel.id;
+                                        const isDropTarget = channelDrag.dragOverId === channel.id && Boolean(channelDrag.draggingId);
                                         return (
                                         <div
                                             key={channel.id}
-                                            onDragOver={(event) => handleChannelDragOver(event, channel.id)}
-                                            onDrop={(event) => handleChannelDrop(event, channel.id)}
+                                            {...channelDrag.rowProps(channel.id)}
                                             className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-3 transition-colors dark:border-stone-800 ${
-                                                draggingChannelId === channel.id || !enabled ? "opacity-50" : ""
-                                            } ${dragOverChannelId === channel.id && draggingChannelId !== channel.id ? "border-sky-400 bg-sky-50 dark:border-sky-500 dark:bg-sky-950/40" : "border-stone-200"}`}
+                                                dragging || !enabled ? "opacity-50" : ""
+                                            } ${isDropTarget ? "border-sky-400 bg-sky-50 dark:border-sky-500 dark:bg-sky-950/40" : "border-stone-200"}`}
                                         >
                                             <div className="flex min-w-0 flex-1 items-center gap-2">
                                                 <span
-                                                    draggable
-                                                    onDragStart={(event) => handleChannelDragStart(event, channel.id)}
-                                                    onDragEnd={clearChannelDrag}
                                                     className="inline-flex shrink-0 cursor-grab touch-none text-stone-400 active:cursor-grabbing"
                                                     title={t("config.channels.dragHandle")}
                                                     aria-label={t("config.channels.dragHandle")}
+                                                    {...channelDrag.handleProps(channel.id)}
                                                 >
                                                     <GripVertical className="size-4" />
                                                 </span>
@@ -644,8 +620,6 @@ function channelProtocolLabel(channel: ModelChannel, t: (key: string) => string)
 
 function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextPromptEntry[]; onChange: (prompts: TextPromptEntry[]) => void }) {
     const { t } = useTranslation();
-    const [draggingPromptId, setDraggingPromptId] = useState("");
-    const [dragOverPromptId, setDragOverPromptId] = useState("");
 
     const updatePrompt = (id: string, patch: Partial<TextPromptEntry>) => {
         onChange(prompts.map((item) => (item.id === id ? { ...item, ...patch } : item)));
@@ -681,30 +655,8 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
         movePrompt(fromIndex, toIndex);
     };
 
-    const handlePromptDragStart = (event: ReactDragEvent<HTMLElement>, promptId: string) => {
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("text/plain", promptId);
-        setDraggingPromptId(promptId);
-    };
-
-    const handlePromptDragOver = (event: ReactDragEvent<HTMLElement>, promptId: string) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-        if (dragOverPromptId !== promptId) setDragOverPromptId(promptId);
-    };
-
-    const handlePromptDrop = (event: ReactDragEvent<HTMLElement>, promptId: string) => {
-        event.preventDefault();
-        const fromId = event.dataTransfer.getData("text/plain") || draggingPromptId;
-        reorderPrompts(fromId, promptId);
-        setDraggingPromptId("");
-        setDragOverPromptId("");
-    };
-
-    const clearPromptDrag = () => {
-        setDraggingPromptId("");
-        setDragOverPromptId("");
-    };
+    // 同上：指针事件排序，避免 HTML5 drag 在拖起瞬间被 React 重渲染取消。
+    const promptDrag = useOrderDrag(reorderPrompts);
 
     return (
         <div className="mb-0">
@@ -725,27 +677,27 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
             </div>
             <div className="space-y-3">
                 {prompts.length ? (
-                    prompts.map((prompt, index) => (
+                    prompts.map((prompt, index) => {
+                        const dragging = promptDrag.draggingId === prompt.id;
+                        const isDropTarget = promptDrag.dragOverId === prompt.id && Boolean(promptDrag.draggingId);
+                        return (
                         <div
                             key={prompt.id}
-                            onDragOver={(event) => handlePromptDragOver(event, prompt.id)}
-                            onDrop={(event) => handlePromptDrop(event, prompt.id)}
+                            {...promptDrag.rowProps(prompt.id)}
                             className={`rounded-lg border p-3 transition-colors dark:border-stone-800 ${
-                                draggingPromptId === prompt.id ? "opacity-50" : ""
+                                dragging ? "opacity-50" : ""
                             } ${isTextPromptEnabled(prompt) ? "" : "opacity-60"} ${
-                                dragOverPromptId === prompt.id && draggingPromptId !== prompt.id
+                                isDropTarget
                                     ? "border-sky-400 bg-sky-50 dark:border-sky-500 dark:bg-sky-950/40"
                                     : "border-stone-200"
                             }`}
                         >
                             <div className="mb-2 flex flex-wrap items-center gap-2">
                                 <span
-                                    draggable
-                                    onDragStart={(event) => handlePromptDragStart(event, prompt.id)}
-                                    onDragEnd={clearPromptDrag}
                                     className="inline-flex shrink-0 cursor-grab touch-none text-stone-400 active:cursor-grabbing"
                                     title={t("config.preferences.textPromptDragHandle")}
                                     aria-label={t("config.preferences.textPromptDragHandle")}
+                                    {...promptDrag.handleProps(prompt.id)}
                                 >
                                     <GripVertical className="size-4" />
                                 </span>
@@ -787,7 +739,8 @@ function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextProm
                                 onChange={(content) => updatePrompt(prompt.id, { content })}
                             />
                         </div>
-                    ))
+                        );
+                    })
                 ) : (
                     <div className="rounded-lg border border-dashed border-stone-200 px-3 py-6 text-center text-sm text-stone-500 dark:border-stone-800">{t("config.preferences.textPromptEmpty")}</div>
                 )}
