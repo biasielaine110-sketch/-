@@ -110,6 +110,7 @@ import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasRe
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
 import { collectScriptAssetOccupied, planScriptAssetColumn, resolveScriptAssetColumnX, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { buildJianyingBundle, secondsToMicro, type JianyingDraftClip } from "@/lib/canvas/jianying-draft";
@@ -8620,9 +8621,14 @@ function AtelierCanvasPage() {
          * @param options.videoOnly 简洁版「只铺视频」：**跳过文本 / 图片节点**，只按分段把视频节点窗口铺出来，
          *                   视频节点照旧带该段的提示词、时长，以及资产图 / 音频的直接连线。
          *                   用户原话：「一键铺链路，需要有一个简洁版的按钮，即只铺视频节点窗口」。
+         * @param options.group 铺完把视频节点**打成一个组**（用户 2026-11-07 第 3 条）。
+         * @param options.autoGenerate 铺完对这组视频节点**逐个执行生成**，每两个之间间隔
+         *                   `SCRIPT_PIPELINE_GENERATE_INTERVAL_MS`；跑一遍即结束（不等生成完成）。
          */
-        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean }) => {
+        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean }) => {
             const videoOnly = Boolean(options?.videoOnly);
+            const groupVideos = Boolean(options?.group);
+            const autoGenerate = Boolean(options?.autoGenerate);
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             const rows = source.metadata?.scriptRows || [];
@@ -8947,6 +8953,37 @@ function AtelierCanvasPage() {
                 created.push(mergeNode);
                 for (const node of createdVideoNodes) createdConnections.push({ id: nanoid(), fromNodeId: node.id, toNodeId: mergeNode.id });
             }
+            /**
+             * 把这一批视频节点**打成一个组**（用户 2026-11-07 第 3 条：「创建视频窗口并将这些窗口打组」）。
+             *
+             * 只框视频节点，不框合并节点 —— 合并节点是下游产物，圈进来会让「整组接进去」变成自环。
+             * 组框和右键成组（`handleGroupSelected`）同一套口径：包围盒 + 留白，成员位置一个都不动。
+             */
+            let groupNode: CanvasNodeData | null = null;
+            if (groupVideos && createdVideoNodes.length >= 2) {
+                const frame = resolveGroupFrame(createdVideoNodes);
+                if (frame) {
+                    groupNode = {
+                        ...createCanvasNode(CanvasNodeType.Group, { x: 0, y: 0 }),
+                        title: t("canvas.scriptNode.pipelineVideoGroupTitle", { count: createdVideoNodes.length }),
+                        position: frame.position,
+                        width: frame.width,
+                        height: frame.height,
+                    };
+                }
+            }
+            const groupMemberIds = new Set(createdVideoNodes.map((node) => node.id));
+            /**
+             * 组框要**垫在成员下面**（数组靠前 = 渲染靠后），否则半透明的框会盖在视频窗口上方、把它们压灰。
+             * 与右键成组同一个处理：插到第一个成员的位置。
+             */
+            const applyGroup = (base: CanvasNodeData[]) => {
+                if (!groupNode) return base;
+                const next = attachNodesToGroup(base, groupMemberIds, groupNode.id);
+                const firstMemberIndex = next.findIndex((node) => groupMemberIds.has(node.id));
+                next.splice(firstMemberIndex < 0 ? next.length : firstMemberIndex, 0, groupNode);
+                return next;
+            };
 
             const shotCount = renderable.length;
             const videoCount = groups.length;
@@ -8972,9 +9009,15 @@ function AtelierCanvasPage() {
                     <div>
                         <div>{t(confirmBodyKey, { shots: shotCount, nodes: created.length, videos: videoCount, links: assetLinkCount })}</div>
                         {mergeNode ? <div className="mt-1.5 opacity-70">{t("canvas.scriptNode.pipelineMergeHint", { count: createdVideoNodes.length })}</div> : null}
+                        {groupNode ? <div className="mt-1.5 opacity-70">{t("canvas.scriptNode.pipelineVideoGroupHint", { count: createdVideoNodes.length })}</div> : null}
+                        {autoGenerate && createdVideoNodes.length ? (
+                            <div className="mt-1.5 opacity-70">
+                                {t("canvas.scriptNode.pipelineVideoGenerateHint", { count: createdVideoNodes.length, seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000 })}
+                            </div>
+                        ) : null}
                     </div>
                 ),
-                okText: t(videoOnly ? "canvas.scriptNode.pipelineVideoOnly" : "canvas.scriptNode.pipelineBuild"),
+                okText: t(autoGenerate ? "canvas.scriptNode.pipelineVideoGenerate" : videoOnly ? "canvas.scriptNode.pipelineVideoOnly" : "canvas.scriptNode.pipelineBuild"),
                 cancelText: t("common.cancel"),
                 onOk: () => {
                     // 铺链的同时把「资产名 → 图片」锁表落库，表上就能看到这些名字已经锁定。
@@ -8991,13 +9034,38 @@ function AtelierCanvasPage() {
                           )
                         : undefined;
                     const patchLocks = (item: CanvasNodeData) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: nextLocks, ...(nextMergeGroups ? { scriptMergeGroups: nextMergeGroups } : {}) } } : item);
-                    nodesRef.current = [...nodesRef.current.map(patchLocks), ...created];
-                    setNodes((prev) => [...prev.map(patchLocks), ...created]);
+                    nodesRef.current = applyGroup([...nodesRef.current.map(patchLocks), ...created]);
+                    setNodes((prev) => applyGroup([...prev.map(patchLocks), ...created]));
                     setConnections((prev) => [...prev, ...createdConnections]);
                     setSelectedNodeIds(new Set(created.map((node) => node.id)));
                     setSelectedConnectionId(null);
                     revealNodes(created, "center");
                     message.success(t(videoOnly ? "canvas.scriptNode.pipelineVideoOnlyBuilt" : "canvas.scriptNode.pipelineBuilt", { shots: shotCount, videos: videoCount }));
+                    /**
+                     * 逐个执行「生成」按钮（用户 2026-11-07 第 3 条）。
+                     *
+                     * ⚠️ **不等生成完成**：`generateNodeRef.current()` 返回的 Promise 要到整段视频出片
+                     * （几分钟、含轮询）才 resolve；await 它就成了「等上一个出完再点下一个」，与
+                     * 「生成间隔 2 秒 / 跑一遍就结束」完全不符。所以只 fire 不 await，间隔由 setTimeout 控。
+                     * ⚠️ 顺序按画布摆放（上→下），见 `planScriptPipelineGenerateOrder`。
+                     */
+                    if (autoGenerate) {
+                        const targets = planScriptPipelineGenerateOrder(createdVideoNodes);
+                        if (targets.length) {
+                            message.info(
+                                t("canvas.scriptNode.pipelineVideoGenerateStarted", {
+                                    count: targets.length,
+                                    seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000,
+                                }),
+                            );
+                            void (async () => {
+                                for (const target of targets) {
+                                    if (target.index > 0) await new Promise((resolve) => setTimeout(resolve, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS));
+                                    void Promise.resolve(generateNodeRef.current?.(target.nodeId, "video", target.prompt)).catch(() => undefined);
+                                }
+                            })();
+                        }
+                    }
                 },
             });
         },

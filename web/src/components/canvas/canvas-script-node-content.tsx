@@ -245,7 +245,7 @@ type CanvasScriptNodeContentProps = {
      * 传 `options.videoOnly` 就是简洁版「只铺视频」：只铺视频节点窗口，不建文本 / 图片节点
      * （用户原话：「一键铺链路，需要有一个简洁版的按钮，即只铺视频节点窗口」）。
      */
-    onBuildPipeline?: (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean }) => void;
+    onBuildPipeline?: (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean }) => void;
     /** 只给某一行分镜建一个视频节点（预填该镜的视频提示词与时长）。 */
     onBuildShotVideo?: (nodeId: string, rowIndex: number) => void;
     /** 勾选多镜后批量建视频节点（每镜一个节点，自带该镜的提示词 / 时长 / 素材连线）。 */
@@ -3033,6 +3033,30 @@ export function CanvasScriptNodeContent({
                         >
                             <Video className="size-3.5" />
                             {t("canvas.scriptNode.pipelineVideoOnly")}
+                        </button>
+                    ) : null}
+                    {/* 「一键铺视频链路并生成」：只铺视频窗口 + 打组 + 接进一个视频合并节点 +
+                        逐个点「生成」（间隔 2 秒，跑一遍即结束）。用户 2026-11-07 第 3 条。
+                        这是「只铺视频」的超集，所以放在它右边、样式更实一点（primary 描边）以示推荐。 */}
+                    {onBuildPipeline ? (
+                        <button
+                            type="button"
+                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                            style={{ borderColor: theme.toolbar.activeText, color: theme.node.text, opacity: 0.9 }}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, {
+                                    videoOnly: true,
+                                    group: true,
+                                    autoGenerate: true,
+                                });
+                            }}
+                            title={t("canvas.scriptNode.pipelineVideoGenerateTip")}
+                        >
+                            <Play className="size-3.5" />
+                            {t("canvas.scriptNode.pipelineVideoGenerate")}
                         </button>
                     ) : null}
                     {/* 合并为一镜 / 取消合并 + 解除合并组：成对放在这里，勾几行立刻就能点。
