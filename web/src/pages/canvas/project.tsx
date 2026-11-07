@@ -22,7 +22,7 @@ import { buildCanvasAgentSystemPrompt, resolveCanvasAgent } from "@/constant/can
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
-import { defaultConfig, modelOptionLabel, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, encodeChannelModel, modelOptionLabel, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { parseComfyApiWorkflow, resolveNativeH3VideoSettingDefaults, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import {
     cancelNativeVideoQueueJobsForNodes,
@@ -115,6 +115,17 @@ import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
 import { buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
+import {
+    ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
+    ONE_CLICK_IMAGE_FALLBACK_MODEL_NAMES,
+    ONE_CLICK_POLL_INTERVAL_MS,
+    ONE_CLICK_SCRIPT_RETRY_CHANNEL_HINTS,
+    ONE_CLICK_SCRIPT_RETRY_MODEL_NAMES,
+    ONE_CLICK_STAGE_TIMEOUT_MS,
+    pickOneClickModel,
+    withDeadline,
+    type OneClickVideoRun,
+} from "@/lib/canvas/one-click-video";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { buildJianyingBundle, secondsToMicro, type JianyingDraftClip } from "@/lib/canvas/jianying-draft";
@@ -7334,13 +7345,22 @@ function AtelierCanvasPage() {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scheduledAt: undefined } } : node)));
     }, []);
 
+    /**
+     * 分镜表一次生成的结局。`ok=false` 时 `error` 是给用户看的原因；
+     * `cancelled` = 用户点了停止 / 被超时 abort / 前置条件不满足（不算「报错」，不该触发换模型重试）。
+     */
+    type ScriptGenerationOutcome = { ok: boolean; cancelled?: boolean; error?: string; rows?: number };
+
     // 脚本生成：走文本模型通道（与 Chat 节点同一条 requestImageQuestion），把分镜表 system prompt +
     // 结构化任务发给模型，边流边把原始文本写进 scriptRaw，结束后解析成 scriptRows。
     const runScriptGeneration = useCallback(
-        async (nodeId: string, overrides?: { scriptSource?: string; scriptPrompt?: string }) => {
+        async (
+            nodeId: string,
+            overrides?: { scriptSource?: string; scriptPrompt?: string; model?: string },
+        ): Promise<ScriptGenerationOutcome> => {
             const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
-            if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return;
-            if (isNodeGenerating(nodeId)) return;
+            if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return { ok: false, cancelled: true };
+            if (isNodeGenerating(nodeId)) return { ok: false, cancelled: true };
             const manualSource = (overrides?.scriptSource ?? sourceNode.metadata?.scriptSource ?? "").trim();
             // 输出格式预设：决定系统提示词、任务书措辞与解析用的列定义（见 constant/story-script.ts）。
             const presetId = resolveStoryScriptPresetId(sourceNode.metadata?.scriptPreset);
@@ -7362,7 +7382,7 @@ function AtelierCanvasPage() {
                 .join("、");
             if (!sourceText && !context.referenceImages.length) {
                 message.warning(t("canvas.scriptNode.sourceRequired"));
-                return;
+                return { ok: false, cancelled: true };
             }
             const task = buildStoryScriptTask({
                 sourceText,
@@ -7418,10 +7438,16 @@ function AtelierCanvasPage() {
                 mashuScheme,
             });
             const textNode = { ...sourceNode, metadata: { ...sourceNode.metadata, generationMode: "text" as const } };
-            const textConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
+            const baseTextConfig = buildGenerationConfig(effectiveConfig, textNode, "text");
+            /**
+             * `overrides.model` = 「一键视频」在分镜表报错后用指定模型（`deepseek-flash(deepseek)`）重跑一次。
+             * 只覆盖 `model`：渠道 / baseUrl / apiKey 仍走 `resolveModelRequestConfig` 的统一咽喉，
+             * 绝不在这里按「渠道名」手拼。
+             */
+            const textConfig = overrides?.model ? { ...baseTextConfig, model: overrides.model } : baseTextConfig;
             if (!isAiConfigReady(textConfig, textConfig.model)) {
                 openConfigDialog(true);
-                return;
+                return { ok: false, cancelled: true };
             }
             const controller = new AbortController();
             startGenerationRequest(nodeId, nodeId, nodeId, controller);
@@ -7441,7 +7467,7 @@ function AtelierCanvasPage() {
                     (streamed) => setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptRaw: streamed } } : node))),
                     { signal: controller.signal },
                 );
-                if (controller.signal.aborted) return;
+                if (controller.signal.aborted) return { ok: false, cancelled: true };
                 let parsed = parseStoryScriptOutput(answer, presetId);
                 let lastAnswer = answer;
                 /**
@@ -7464,14 +7490,14 @@ function AtelierCanvasPage() {
                         (streamed) => setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptRaw: streamed } } : node))),
                         { signal: controller.signal },
                     );
-                    if (controller.signal.aborted) return;
+                    if (controller.signal.aborted) return { ok: false, cancelled: true };
                     lastAnswer = retried;
                     parsed = parseStoryScriptOutput(retried, presetId);
                 }
                 if (!parsed.ok) {
                     setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: parsed.error, scriptRaw: lastAnswer } } : node)));
                     message.error(t("canvas.scriptNode.parseFailed"));
-                    return;
+                    return { ok: false, error: parsed.error || t("canvas.scriptNode.parseFailed") };
                 }
                 /**
                  * 源内容是「逐镜标签模版」时，三列提示词以**模版原文**为准（模型照搬的执行率不是 100%，
@@ -7519,32 +7545,39 @@ function AtelierCanvasPage() {
                  * （「是没识别到，还是模型没生成？」），日志和 UI 都没有证据。
                  */
                 const templateShots = countStoryScriptTemplateShots(sourceText);
-                setNodes((prev) =>
-                    prev.map((node) => {
-                        if (node.id !== nodeId) return node;
-                        // 整表重生成会把行整体换掉，但**自建资产列是用户手填的**（模型不知道这几列）：
-                        // 按镜号把旧值回填回来，别让一次「重新生成整表」把「宠物 / 车辆」全抹掉。
-                        const extraKeys = normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns).map((item) => item.key);
-                        const previousRows = node.metadata?.scriptRows || [];
-                        const rowsWithExtras = extraKeys.length
-                            ? finalRows.map((row, index) => {
-                                  const previous = previousRows.find((item, position) => (Number(item.shot_no) || position + 1) === (Number(row.shot_no) || index + 1));
-                                  if (!previous) return row;
-                                  const next = { ...row };
-                                  for (const key of extraKeys) {
-                                      const kept = previous[key];
-                                      if (kept !== undefined) next[key] = kept;
-                                  }
-                                  return next;
-                              })
-                            : finalRows;
-                        return {
-                            ...node,
-                            title: parsed.title || node.title,
-                            metadata: { ...node.metadata, scriptStatus: "success", scriptRows: rowsWithExtras, scriptTitle: parsed.title, scriptRaw: answer, errorDetails: undefined },
-                        };
-                    }),
-                );
+                /**
+                 * 落库这段抽成具名函数，是为了**顺手同步 `nodesRef`**：
+                 * `nodesRef` 只在 `useLayoutEffect` 里跟 `nodes` 对齐，而「一键视频」拿到
+                 * `runScriptGeneration()` 的返回值后**立刻**就要读分镜表行数去开生图 ——
+                 * 那一刻 React 很可能还没提交最后一次 `setNodes`，读到的是上一版（甚至是空的 0 行），
+                 * 于是整条自动化会在「分镜表是空的」上误暂停。与其它建节点的地方同一口径：先写 ref 再 setState。
+                 */
+                const applyGeneratedRows = (node: CanvasNodeData): CanvasNodeData => {
+                    if (node.id !== nodeId) return node;
+                    // 整表重生成会把行整体换掉，但**自建资产列是用户手填的**（模型不知道这几列）：
+                    // 按镜号把旧值回填回来，别让一次「重新生成整表」把「宠物 / 车辆」全抹掉。
+                    const extraKeys = normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns).map((item) => item.key);
+                    const previousRows = node.metadata?.scriptRows || [];
+                    const rowsWithExtras = extraKeys.length
+                        ? finalRows.map((row, index) => {
+                              const previous = previousRows.find((item, position) => (Number(item.shot_no) || position + 1) === (Number(row.shot_no) || index + 1));
+                              if (!previous) return row;
+                              const next = { ...row };
+                              for (const key of extraKeys) {
+                                  const kept = previous[key];
+                                  if (kept !== undefined) next[key] = kept;
+                              }
+                              return next;
+                          })
+                        : finalRows;
+                    return {
+                        ...node,
+                        title: parsed.title || node.title,
+                        metadata: { ...node.metadata, scriptStatus: "success", scriptRows: rowsWithExtras, scriptTitle: parsed.title, scriptRaw: answer, errorDetails: undefined },
+                    };
+                };
+                nodesRef.current = nodesRef.current.map(applyGeneratedRows);
+                setNodes((prev) => prev.map(applyGeneratedRows));
                 message.success(t("canvas.scriptNode.generated", { count: parsedRows.length }));
                 /**
                  * 第七套：「源稿覆盖」这件事要**明说**。前六次报障里有一半是「其实没识别到源稿」
@@ -7578,11 +7611,14 @@ function AtelierCanvasPage() {
                         message.warning(t("canvas.scriptNode.templateShotCountMismatch", { expected: templateShots, actual: parsedRows.length }));
                     }
                 }
+                // 成功：把行数一起交出去，编排层据此判断「分镜表真的出来了」再往下走生图。
+                return { ok: true, rows: finalRows.length };
             } catch (error) {
-                if (controller.signal.aborted) return;
+                if (controller.signal.aborted) return { ok: false, cancelled: true };
                 const detail = error instanceof Error ? error.message : String(error);
                 setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: detail } } : node)));
                 message.error(detail);
+                return { ok: false, error: detail };
             } finally {
                 finishGenerationRequest(nodeId, controller);
             }
@@ -8393,14 +8429,19 @@ function AtelierCanvasPage() {
      * 模型**不写** `metadata.model` ⇒ 走运行时回落 = 「配置偏好里的默认生图模型」，以后改偏好这批也跟得上。
      */
     const handleDirectGenerateScriptAssets = useCallback(
-        (nodeId: string) => {
+        /**
+         * @param options.model 「一键视频」用：本批资产图**固定用这个模型**（写进节点 `metadata.model`）。
+         *                    不传 = 留空，走运行时回落「配置偏好 → 默认生图模型」（手动点这颗按钮的老口径）。
+         * @returns 本批新建的图片节点。**同步返回**（生成在后台跑），「一键视频」据此等结果 / 挑失败的重试。
+         */
+        (nodeId: string, options?: { model?: string }): { created: CanvasNodeData[] } => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
-            if (!source) return;
+            if (!source) return { created: [] };
             // 不筛「已出过图」是这里唯一的产品口径；站位图在 buildScriptAssetDirectItems 里就剔掉了。
             const wanted = buildScriptAssetDirectItems(source.metadata?.scriptRows).filter((item) => item.title.trim() && item.prompt.trim());
             if (!wanted.length) {
                 message.warning(t("canvas.scriptNode.directAssetEmpty"));
-                return;
+                return { created: [] };
             }
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             const planned = wanted.map((item) => {
@@ -8423,14 +8464,16 @@ function AtelierCanvasPage() {
             );
             if (!slots.length) {
                 message.warning(t("canvas.scriptNode.batchAssetNoRoom"));
-                return;
+                return { created: [] };
             }
             const created = planned.slice(0, slots.length).map((cell, index) => {
                 const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, {
                     prompt: cell.item.prompt,
                     status: NODE_STATUS_IDLE,
                     ...(cell.imageSize ? { size: cell.imageSize } : {}),
-                    // ⚠️ 故意不写 `model`：留空 = 生成时回落「配置偏好 → 默认生图模型」。
+                    // ⚠️ 默认**不写** `model`：留空 = 生成时回落「配置偏好 → 默认生图模型」。
+                    // 只有「一键视频」显式指定模型时才写（它要按模型分轮次重试 / 托底）。
+                    ...(options?.model ? { model: options.model } : {}),
                     scriptAssetLane: source.id,
                 });
                 return { ...node, title: cell.item.title, width: cell.width, height: cell.height, position: slots[index] };
@@ -8483,6 +8526,7 @@ function AtelierCanvasPage() {
                     );
                 }
             })();
+            return { created };
         },
         [message, revealNodes, t],
     );
@@ -8840,8 +8884,9 @@ function AtelierCanvasPage() {
          * @param options.group 铺完把视频节点**打成一个组**（用户 2026-11-07 第 3 条）。
          * @param options.autoGenerate 铺完对这组视频节点**逐个执行生成**，每两个之间间隔
          *                   `SCRIPT_PIPELINE_GENERATE_INTERVAL_MS`；跑一遍即结束（不等生成完成）。
+         * @param options.skipConfirm 不弹确认窗、直接铺（只给「一键视频」用：那条流程已经有总确认）。
          */
-        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean }) => {
+        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean; skipConfirm?: boolean }) => {
             const videoOnly = Boolean(options?.videoOnly);
             const groupVideos = Boolean(options?.group);
             const autoGenerate = Boolean(options?.autoGenerate);
@@ -9219,6 +9264,63 @@ function AtelierCanvasPage() {
                 : selection
                   ? "canvas.scriptNode.pipelineSelectedConfirmBody"
                   : "canvas.scriptNode.pipelineConfirmBody";
+            /**
+             * 真正「铺链路（+ 逐个生成）」的那段。手动点按钮时它挂在 `modal.confirm` 的 `onOk` 上，
+             * **行为一个字节不变**；「一键视频」走 `options.skipConfirm` 直接执行 ——
+             * 那条流程前面已经有一次总确认，再弹一次会把自动化卡死在弹窗上。
+             */
+            const runPipeline = () => {
+                // 铺链的同时把「资产名 → 图片」锁表落库，表上就能看到这些名字已经锁定。
+                const nextLocks = Object.keys(nameLocks).length ? nameLocks : undefined;
+                /**
+                 * 「选择铺链路」顺手把这一段记成手动合并组：表上立刻出现 `⛓ 2/3` 徽标，
+                 * 之后再点「一键铺链路」仍是同一段 —— 免得两条路径给出两种结果。
+                 * 已有组与这一段重叠的整组丢掉（后来的覆盖前面的，与 `mergeSelectedRows` 同口径）。
+                 */
+                const nextMergeGroups = selection && selection.length >= 2
+                    ? normalizeStoryScriptMergeGroups(
+                          [...(source.metadata?.scriptMergeGroups || []).filter((span) => !span.some((index) => selection.includes(index))), selection],
+                          rows.length,
+                      )
+                    : undefined;
+                const patchLocks = (item: CanvasNodeData) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: nextLocks, ...(nextMergeGroups ? { scriptMergeGroups: nextMergeGroups } : {}) } } : item);
+                nodesRef.current = applyGroup([...nodesRef.current.map(patchLocks), ...created]);
+                setNodes((prev) => applyGroup([...prev.map(patchLocks), ...created]));
+                setConnections((prev) => [...prev, ...createdConnections]);
+                setSelectedNodeIds(new Set(created.map((node) => node.id)));
+                setSelectedConnectionId(null);
+                revealNodes(created, "center");
+                message.success(t(videoOnly ? "canvas.scriptNode.pipelineVideoOnlyBuilt" : "canvas.scriptNode.pipelineBuilt", { shots: shotCount, videos: videoCount }));
+                /**
+                 * 逐个执行「生成」按钮（用户 2026-11-07 第 3 条）。
+                 *
+                 * ⚠️ **不等生成完成**：`generateNodeRef.current()` 返回的 Promise 要到整段视频出片
+                 * （几分钟、含轮询）才 resolve；await 它就成了「等上一个出完再点下一个」，与
+                 * 「生成间隔 2 秒 / 跑一遍就结束」完全不符。所以只 fire 不 await，间隔由 setTimeout 控。
+                 * ⚠️ 顺序按画布摆放（上→下），见 `planScriptPipelineGenerateOrder`。
+                 */
+                if (autoGenerate) {
+                    const targets = planScriptPipelineGenerateOrder(createdVideoNodes);
+                    if (targets.length) {
+                        message.info(
+                            t("canvas.scriptNode.pipelineVideoGenerateStarted", {
+                                count: targets.length,
+                                seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000,
+                            }),
+                        );
+                        void (async () => {
+                            for (const target of targets) {
+                                if (target.index > 0) await new Promise((resolve) => setTimeout(resolve, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS));
+                                void Promise.resolve(generateNodeRef.current?.(target.nodeId, "video", target.prompt)).catch(() => undefined);
+                            }
+                        })();
+                    }
+                }
+            };
+            if (options?.skipConfirm) {
+                runPipeline();
+                return;
+            }
             modal.confirm({
                 title: t(confirmTitleKey),
                 content: (
@@ -9235,57 +9337,225 @@ function AtelierCanvasPage() {
                 ),
                 okText: t(autoGenerate ? "canvas.scriptNode.pipelineVideoGenerate" : videoOnly ? "canvas.scriptNode.pipelineVideoOnly" : "canvas.scriptNode.pipelineBuild"),
                 cancelText: t("common.cancel"),
-                onOk: () => {
-                    // 铺链的同时把「资产名 → 图片」锁表落库，表上就能看到这些名字已经锁定。
-                    const nextLocks = Object.keys(nameLocks).length ? nameLocks : undefined;
-                    /**
-                     * 「选择铺链路」顺手把这一段记成手动合并组：表上立刻出现 `⛓ 2/3` 徽标，
-                     * 之后再点「一键铺链路」仍是同一段 —— 免得两条路径给出两种结果。
-                     * 已有组与这一段重叠的整组丢掉（后来的覆盖前面的，与 `mergeSelectedRows` 同口径）。
-                     */
-                    const nextMergeGroups = selection && selection.length >= 2
-                        ? normalizeStoryScriptMergeGroups(
-                              [...(source.metadata?.scriptMergeGroups || []).filter((span) => !span.some((index) => selection.includes(index))), selection],
-                              rows.length,
-                          )
-                        : undefined;
-                    const patchLocks = (item: CanvasNodeData) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: nextLocks, ...(nextMergeGroups ? { scriptMergeGroups: nextMergeGroups } : {}) } } : item);
-                    nodesRef.current = applyGroup([...nodesRef.current.map(patchLocks), ...created]);
-                    setNodes((prev) => applyGroup([...prev.map(patchLocks), ...created]));
-                    setConnections((prev) => [...prev, ...createdConnections]);
-                    setSelectedNodeIds(new Set(created.map((node) => node.id)));
-                    setSelectedConnectionId(null);
-                    revealNodes(created, "center");
-                    message.success(t(videoOnly ? "canvas.scriptNode.pipelineVideoOnlyBuilt" : "canvas.scriptNode.pipelineBuilt", { shots: shotCount, videos: videoCount }));
-                    /**
-                     * 逐个执行「生成」按钮（用户 2026-11-07 第 3 条）。
-                     *
-                     * ⚠️ **不等生成完成**：`generateNodeRef.current()` 返回的 Promise 要到整段视频出片
-                     * （几分钟、含轮询）才 resolve；await 它就成了「等上一个出完再点下一个」，与
-                     * 「生成间隔 2 秒 / 跑一遍就结束」完全不符。所以只 fire 不 await，间隔由 setTimeout 控。
-                     * ⚠️ 顺序按画布摆放（上→下），见 `planScriptPipelineGenerateOrder`。
-                     */
-                    if (autoGenerate) {
-                        const targets = planScriptPipelineGenerateOrder(createdVideoNodes);
-                        if (targets.length) {
-                            message.info(
-                                t("canvas.scriptNode.pipelineVideoGenerateStarted", {
-                                    count: targets.length,
-                                    seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000,
-                                }),
-                            );
-                            void (async () => {
-                                for (const target of targets) {
-                                    if (target.index > 0) await new Promise((resolve) => setTimeout(resolve, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS));
-                                    void Promise.resolve(generateNodeRef.current?.(target.nodeId, "video", target.prompt)).catch(() => undefined);
-                                }
-                            })();
-                        }
-                    }
-                },
+                onOk: runPipeline,
             });
         },
         [message, modal, t, revealNodes],
+    );
+
+    /**
+     * 「一键视频」编排（用户 2026-11-08 第 02 条）：
+     *
+     *  ① 生成分镜表 → ② 一键直接生图 → ③ 一键铺视频链路并生成
+     *
+     * 三条规则（都是用户口述，逐条落成代码，不要「优化」掉）：
+     *  - 分镜表**报错**时用 `deepseek-flash(deepseek)` 再生成一次；仍报错 → **暂停**后续流程。
+     *  - 分镜表最长等 **15 分钟**；到点既没报错也没成功 → **暂停**（并 abort 在跑的那一条）。
+     *  - 生图里**角色 / 场景**报错 → 先用「配置偏好生图模型」重跑一次 → 仍报错 → 换
+     *    `seedream-5.0-pro（猛蹬）` 对**报错的那几张**托底一次 → 仍失败 → **暂停**。
+     *  - 生图最长等 **15 分钟**；超时 → **暂停**。
+     *
+     * 「暂停」= 不再往下走 + 在节点按钮上标出暂停原因（`oneClickVideoRuns`，内存态）。
+     * 已经铺出来的图片 / 视频节点一律**保留**：用户看得到失败在哪几张，手动补比清空更有用。
+     */
+    const [oneClickVideoRuns, setOneClickVideoRuns] = useState<Record<string, OneClickVideoRun>>({});
+    /** 防连点：`useState` 更新是异步的，双击会在同一帧里进两次。 */
+    const oneClickVideoRunningRef = useRef<Set<string>>(new Set());
+
+    const patchOneClickVideoRun = useCallback((nodeId: string, run: OneClickVideoRun) => {
+        setOneClickVideoRuns((prev) => ({ ...prev, [nodeId]: run }));
+    }, []);
+
+    const handleOneClickVideo = useCallback(
+        async (nodeId: string) => {
+            const source = nodesRef.current.find((item) => item.id === nodeId);
+            if (!source || source.type !== CanvasNodeType.Script) return;
+            if (oneClickVideoRunningRef.current.has(nodeId)) return;
+            if (isNodeGenerating(nodeId)) {
+                message.warning(t("canvas.scriptNode.oneClickBusy"));
+                return;
+            }
+            oneClickVideoRunningRef.current.add(nodeId);
+
+            const notify = (stage: OneClickVideoRun["stage"], key: string, params?: Record<string, string | number>) =>
+                patchOneClickVideoRun(nodeId, { status: "running", stage, message: t(key, params) });
+            /** 暂停：按钮上留一行原因 + 一条 error 提示，然后结束整个流程。 */
+            const pauseWith = (stage: OneClickVideoRun["stage"], text: string) => {
+                patchOneClickVideoRun(nodeId, { status: "paused", stage, message: text });
+                message.error(text);
+            };
+            /** 模型名 → 画布内部编码（`channelId::model`）；找不到就返回空串（调用方据此暂停）。 */
+            const seekModel = (seek: Parameters<typeof pickOneClickModel>[1]) => {
+                const target = pickOneClickModel(effectiveConfig.channels, seek);
+                return target ? encodeChannelModel(target.channelId, target.modelName) : "";
+            };
+            /** 节点当前是否「还在跑」：`isNodeGenerating` 看请求表（同步注册，最可靠），状态位兜底。 */
+            const isNodePending = (id: string) => {
+                const node = nodesRef.current.find((item) => item.id === id);
+                return isNodeGenerating(id) || node?.metadata?.status === NODE_STATUS_LOADING;
+            };
+            /** 等到这一批**全部落定**（成功或失败）或到点；到点先把还在跑的 abort 掉。 */
+            const waitSettled = async (ids: string[], deadlineAt: number): Promise<"settled" | "timeout"> => {
+                while (true) {
+                    const pending = ids.filter(isNodePending);
+                    if (!pending.length) return "settled";
+                    if (Date.now() >= deadlineAt) {
+                        pending.forEach((id) => stopGenerationForNode(id));
+                        return "timeout";
+                    }
+                    await new Promise((resolve) => setTimeout(resolve, ONE_CLICK_POLL_INTERVAL_MS));
+                }
+            };
+            /** 这一批里**没出图**的（宽口径：不是 success 或没有内容，都算失败）。 */
+            const failedOf = (ids: string[]) =>
+                ids.filter((id) => {
+                    const node = nodesRef.current.find((item) => item.id === id);
+                    return node?.metadata?.status !== NODE_STATUS_SUCCESS || !node.metadata?.content;
+                });
+            /**
+             * 换模型再跑一批：模型只能通过 `metadata.model` 传下去（`buildGenerationConfig` 只认它），
+             * 所以先把模型写进节点、同步 `nodesRef`，再一个个 fire。
+             */
+            const retryBatch = async (ids: string[], model: string, deadlineAt: number) => {
+                const patch = (item: CanvasNodeData): CanvasNodeData =>
+                    ids.includes(item.id)
+                        ? { ...item, metadata: { ...item.metadata, ...(model ? { model } : {}), status: NODE_STATUS_IDLE, errorDetails: undefined } }
+                        : item;
+                nodesRef.current = nodesRef.current.map(patch);
+                setNodes((prev) => prev.map(patch));
+                for (let index = 0; index < ids.length; index += SCRIPT_ASSET_LAUNCH_BATCH) {
+                    for (const id of ids.slice(index, index + SCRIPT_ASSET_LAUNCH_BATCH)) {
+                        const prompt = nodesRef.current.find((item) => item.id === id)?.metadata?.prompt || "";
+                        if (!prompt.trim()) continue;
+                        void Promise.resolve(generateNodeRef.current?.(id, "image", prompt)).catch(() => undefined);
+                    }
+                }
+                return waitSettled(ids, deadlineAt);
+            };
+
+            try {
+                // ---- ① 生成分镜表（报错 → deepseek-flash 重试一次；15 分钟封顶，重试共用这段预算）----
+                const scriptDeadline = Date.now() + ONE_CLICK_STAGE_TIMEOUT_MS;
+                const stopScript = () => handleStopScriptGeneration(nodeId);
+                notify("script", "canvas.scriptNode.oneClickStageScript");
+                const firstPass = await withDeadline(runScriptGeneration(nodeId), scriptDeadline, stopScript);
+                if (firstPass.timedOut) {
+                    pauseWith("script", t("canvas.scriptNode.oneClickScriptTimeout"));
+                    return;
+                }
+                let outcome = firstPass.value;
+                if (!outcome?.ok && !outcome?.cancelled) {
+                    const retryModel = seekModel({
+                        names: ONE_CLICK_SCRIPT_RETRY_MODEL_NAMES,
+                        channelHints: ONE_CLICK_SCRIPT_RETRY_CHANNEL_HINTS,
+                        capability: "text",
+                    });
+                    if (!retryModel) {
+                        pauseWith("script", t("canvas.scriptNode.oneClickScriptRetryMissing"));
+                        return;
+                    }
+                    notify("script", "canvas.scriptNode.oneClickScriptRetry", { model: modelOptionLabel(effectiveConfig, retryModel) });
+                    const retryPass = await withDeadline(runScriptGeneration(nodeId, { model: retryModel }), scriptDeadline, stopScript);
+                    if (retryPass.timedOut) {
+                        pauseWith("script", t("canvas.scriptNode.oneClickScriptTimeout"));
+                        return;
+                    }
+                    outcome = retryPass.value;
+                }
+                if (!outcome?.ok) {
+                    if (outcome?.cancelled) {
+                        // 用户自己点了停止 / 前置条件不满足：不算报错，别弹「失败」。
+                        patchOneClickVideoRun(nodeId, { status: "paused", stage: "script", message: t("canvas.scriptNode.oneClickStopped") });
+                        return;
+                    }
+                    pauseWith("script", t("canvas.scriptNode.oneClickScriptFailed", { error: outcome?.error || t("canvas.scriptNode.parseFailed") }));
+                    return;
+                }
+                // 行数以 `runScriptGeneration` 的返回值为准（它同时已把新表同步进 `nodesRef`）。
+                const rowCount = outcome.rows ?? nodesRef.current.find((item) => item.id === nodeId)?.metadata?.scriptRows?.length ?? 0;
+                if (!rowCount) {
+                    pauseWith("script", t("canvas.scriptNode.oneClickScriptEmpty"));
+                    return;
+                }
+
+                // ---- ② 一键直接生图（偏好模型重试一次 → seedream-5.0-pro 托底一次；15 分钟封顶）----
+                const imageDeadline = Date.now() + ONE_CLICK_STAGE_TIMEOUT_MS;
+                notify("image", "canvas.scriptNode.oneClickStageImage");
+                const launched = handleDirectGenerateScriptAssets(nodeId);
+                const imageIds = launched.created.map((node) => node.id);
+                if (!imageIds.length) {
+                    // 表里没有可生成的资产 / 画布排不下：不算失败，直接进第三步（铺链路仍然有意义）。
+                    message.info(t("canvas.scriptNode.oneClickImageSkipped"));
+                } else {
+                    if ((await waitSettled(imageIds, imageDeadline)) === "timeout") {
+                        pauseWith("image", t("canvas.scriptNode.oneClickImageTimeout", { count: imageIds.length }));
+                        return;
+                    }
+                    let failed = failedOf(imageIds);
+                    if (failed.length) {
+                        const preferredModel = resolveModelForCapability(effectiveConfig, undefined, "image");
+                        notify("image", "canvas.scriptNode.oneClickImageRetry", {
+                            count: failed.length,
+                            model: modelOptionLabel(effectiveConfig, preferredModel),
+                        });
+                        // 偏好模型可能是空串（用户没配 imageModel）：空 = 保持节点原样，仍算「再跑一次」。
+                        if ((await retryBatch(failed, preferredModel, imageDeadline)) === "timeout") {
+                            pauseWith("image", t("canvas.scriptNode.oneClickImageTimeout", { count: failed.length }));
+                            return;
+                        }
+                        failed = failedOf(failed);
+                    }
+                    if (failed.length) {
+                        const fallbackModel = seekModel({
+                            names: ONE_CLICK_IMAGE_FALLBACK_MODEL_NAMES,
+                            channelHints: ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
+                            capability: "image",
+                        });
+                        if (!fallbackModel) {
+                            pauseWith("image", t("canvas.scriptNode.oneClickImageFallbackMissing", { count: failed.length }));
+                            return;
+                        }
+                        notify("image", "canvas.scriptNode.oneClickImageFallback", {
+                            count: failed.length,
+                            model: modelOptionLabel(effectiveConfig, fallbackModel),
+                        });
+                        if ((await retryBatch(failed, fallbackModel, imageDeadline)) === "timeout") {
+                            pauseWith("image", t("canvas.scriptNode.oneClickImageTimeout", { count: failed.length }));
+                            return;
+                        }
+                        failed = failedOf(failed);
+                    }
+                    if (failed.length) {
+                        pauseWith("image", t("canvas.scriptNode.oneClickImageFailed", { count: failed.length }));
+                        return;
+                    }
+                }
+
+                // ---- ③ 一键铺视频链路并生成（不再弹确认：本条流程前面已经确认过）----
+                notify("pipeline", "canvas.scriptNode.oneClickStagePipeline");
+                handleBuildScriptPipeline(nodeId, undefined, { videoOnly: true, group: true, autoGenerate: true, skipConfirm: true });
+                patchOneClickVideoRun(nodeId, { status: "done", stage: "pipeline", message: t("canvas.scriptNode.oneClickDone") });
+                message.success(t("canvas.scriptNode.oneClickDone"));
+            } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                pauseWith("script", t("canvas.scriptNode.oneClickError", { error: detail }));
+            } finally {
+                oneClickVideoRunningRef.current.delete(nodeId);
+            }
+        },
+        [
+            effectiveConfig,
+            handleBuildScriptPipeline,
+            handleDirectGenerateScriptAssets,
+            handleStopScriptGeneration,
+            isNodeGenerating,
+            message,
+            patchOneClickVideoRun,
+            resolveModelForCapability,
+            runScriptGeneration,
+            stopGenerationForNode,
+            t,
+        ],
     );
 
     /** 只给某一行分镜建一个视频节点（预填该镜视频提示词 / 时长，并把命中的角色素材 + 全局素材连上）。 */
@@ -9477,6 +9747,8 @@ function AtelierCanvasPage() {
                         onConfigChange={handleConfigNodeChange}
                         onGenerate={(nodeId, overrides) => void runScriptGeneration(nodeId, overrides)}
                         onStop={handleStopScriptGeneration}
+                        oneClickVideo={oneClickVideoRuns[contentNode.id]}
+                        onOneClickVideo={(nodeId) => void handleOneClickVideo(nodeId)}
                         onInsertPrompt={handleInsertShotPrompt}
                         references={scriptReferences}
                         onScriptAction={handleScriptAction}

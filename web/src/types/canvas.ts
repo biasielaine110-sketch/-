@@ -262,7 +262,7 @@ export type CanvasNodeMetadata = {
      */
     scriptAutoSizeKey?: string;
     /**
-     * 脚本生成器：内容基准字号（px，档位见 STORY_SCRIPT_FONT_SIZES，默认 13）。
+     * 脚本生成器：内容基准字号（px，档位见 STORY_SCRIPT_FONT_SIZES，默认 18）。
      * 组件里除外壳挂的这个 px 值外一律用 em，所以只改它就能整体缩放分镜表与各类文字。
      */
     scriptFontSize?: number;

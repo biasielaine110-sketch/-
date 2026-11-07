@@ -77,6 +77,7 @@ import {
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { buildScriptAssetBatchItems, isScriptAssetDirectRole, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import type { OneClickVideoRun } from "@/lib/canvas/one-click-video";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasNodeData } from "@/types/canvas";
 
@@ -221,6 +222,13 @@ type CanvasScriptNodeContentProps = {
      */
     onGenerate: (nodeId: string, overrides?: { scriptSource: string; scriptPrompt: string }) => void;
     onStop: (nodeId: string) => void;
+    /**
+     * 「一键视频」（用户 2026-11-08 第 02 条）：在「生成脚本」按钮**下方**，
+     * 点一下把「生成分镜表 → 一键直接生图 → 一键铺视频链路并生成」串成一条自动化。
+     * 运行态放内存（不落 metadata），所以刷新即清空 —— 见 `OneClickVideoRun` 的注释。
+     */
+    oneClickVideo?: OneClickVideoRun;
+    onOneClickVideo?: (nodeId: string) => void;
     onInsertPrompt?: (nodeId: string, text: string, title: string) => void;
     /** 「试一试」快捷动作：建上游节点并连边。 */
     onScriptAction?: (nodeId: string, action: ScriptGenAction) => void;
@@ -359,6 +367,8 @@ export function CanvasScriptNodeContent({
     onConfigChange,
     onGenerate,
     onStop,
+    oneClickVideo,
+    onOneClickVideo,
     onInsertPrompt,
     onScriptAction,
     assetCandidates,
@@ -612,6 +622,16 @@ export function CanvasScriptNodeContent({
     }, [extraPrompt]);
 
     const canGenerate = Boolean(sourceDraft.trim() || connectedTextValue) && !isRunning;
+    /**
+     * 「一键视频」的按钮文案：跑起来后显示**当前阶段**（用户不点开控制台也要知道卡在哪一步），
+     * 暂停态显示「已暂停」，让用户一眼看出这条自动化停下来了。
+     */
+    const oneClickRunning = oneClickVideo?.status === "running";
+    const oneClickLabel = oneClickRunning
+        ? t(oneClickVideo?.stage === "script" ? "canvas.scriptNode.oneClickStageScript" : oneClickVideo?.stage === "image" ? "canvas.scriptNode.oneClickStageImage" : "canvas.scriptNode.oneClickStagePipeline")
+        : oneClickVideo?.status === "paused"
+          ? t("canvas.scriptNode.oneClickPaused")
+          : t("canvas.scriptNode.oneClickVideo");
     /**
      * 源内容里认到的「逐镜模版」块数（`- **首帧图片提示词**：…` 那种）。
      * >0 就说明「分镜提示词 / 视频运动提示词 / 风格提示词」会按模版原文填进去。
@@ -1453,30 +1473,55 @@ export function CanvasScriptNodeContent({
                 {fullscreen ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
             </button>
 
-            {isRunning ? (
-                <button
-                    type="button"
-                    className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 font-medium text-white"
-                    style={{ background: "#dc2626" }}
-                    onClick={() => onStop(node.id)}
-                    title={t("canvas.scriptNode.stop")}
-                >
-                    <Square className="size-3.5 fill-current" />
-                    {t("canvas.scriptNode.stop")}
-                </button>
-            ) : (
-                <button
-                    type="button"
-                    className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 font-medium text-white transition disabled:opacity-35"
-                    style={{ background: theme.toolbar.activeBg }}
-                    disabled={!canGenerate}
-                    onClick={() => onGenerate(node.id, { scriptSource: sourceDraft, scriptPrompt: promptDraft })}
-                    title={rows.length ? t("canvas.scriptNode.regenerate") : t("canvas.scriptNode.generate")}
-                >
-                    <Play className="size-3.5" />
-                    {rows.length ? t("canvas.scriptNode.regenerate") : t("canvas.scriptNode.generate")}
-                </button>
-            )}
+            {/* 「生成脚本」和它**下面**的「一键视频」竖排（用户 2026-11-08 第 02 条点名「生成脚本按钮的下面」）。
+                竖排而不是并排：header 是 flex-wrap 的一行，并排会把右上角那排按钮整排挤到第二行。 */}
+            <div className="flex shrink-0 flex-col items-stretch gap-1">
+                {isRunning ? (
+                    <button
+                        type="button"
+                        className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full px-3 font-medium text-white"
+                        style={{ background: "#dc2626" }}
+                        onClick={() => onStop(node.id)}
+                        title={t("canvas.scriptNode.stop")}
+                    >
+                        <Square className="size-3.5 fill-current" />
+                        {t("canvas.scriptNode.stop")}
+                    </button>
+                ) : (
+                    <button
+                        type="button"
+                        className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full px-3 font-medium text-white transition disabled:opacity-35"
+                        style={{ background: theme.toolbar.activeBg }}
+                        disabled={!canGenerate}
+                        onClick={() => onGenerate(node.id, { scriptSource: sourceDraft, scriptPrompt: promptDraft })}
+                        title={rows.length ? t("canvas.scriptNode.regenerate") : t("canvas.scriptNode.generate")}
+                    >
+                        <Play className="size-3.5" />
+                        {rows.length ? t("canvas.scriptNode.regenerate") : t("canvas.scriptNode.generate")}
+                    </button>
+                )}
+                {onOneClickVideo ? (
+                    <button
+                        type="button"
+                        className="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full border px-2.5 text-[0.923em] font-medium transition disabled:opacity-35"
+                        style={{
+                            borderColor: oneClickVideo?.status === "paused" ? "#dc2626" : theme.node.stroke,
+                            color: oneClickVideo?.status === "paused" ? "#dc2626" : theme.node.text,
+                            background: `${theme.toolbar.panel}cc`,
+                        }}
+                        disabled={oneClickRunning || !canGenerate}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            onOneClickVideo(node.id);
+                        }}
+                        // 暂停原因写在 title 上：按钮太小放不下一整句，但用户能悬停看到「为什么停在这」。
+                        title={oneClickVideo?.message || t("canvas.scriptNode.oneClickVideoHint")}
+                    >
+                        {oneClickRunning ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+                        {oneClickLabel}
+                    </button>
+                ) : null}
+            </div>
         </div>
     );
 

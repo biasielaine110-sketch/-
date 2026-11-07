@@ -1439,17 +1439,31 @@ export function storyScriptMergeGroupSize(mode?: StoryScriptMergeMode | string |
  * 组件里除基准字号外**全部用 `em`**，所以改这一个值即可整体缩放；
  * 各 `em` 值是按 13px 那套像素值定的比例（12px → 0.923em 等），所以任何档位都只是等比缩放。
  *
- * 默认档 **15px**（用户两轮要求：先「默认可读」定 20，再「整体太占地方」降到 15）。
- * 觉得小可以点顶部 `A+`，档位会存进 `metadata.scriptFontSize`，只影响这一个脚本节点。
+ * 默认档 **18px**（用户三轮要求：先「默认可读」定 20，再「整体太占地方」降到 15，
+ * 2026-11-08 又要求「字体大小默认使用 18」→ 改 18）。
+ * 觉得大/小可以点顶部 `A-` / `A+`，档位会存进 `metadata.scriptFontSize`，只影响这一个脚本节点。
  */
 export const STORY_SCRIPT_FONT_SIZES: number[] = [11, 12, 13, 14, 15, 16, 18, 20];
-export const DEFAULT_STORY_SCRIPT_FONT_SIZE = 15;
+export const DEFAULT_STORY_SCRIPT_FONT_SIZE = 18;
 
 export function resolveStoryScriptFontSize(value: unknown): number {
     const size = Math.round(Number(value));
     if (!Number.isFinite(size) || size <= 0) return DEFAULT_STORY_SCRIPT_FONT_SIZE;
-    // 落到最近的档位：手写 15 之类的值时也能收敛到合法档，避免 em 基准漂移。
-    return STORY_SCRIPT_FONT_SIZES.reduce((best, current) => (Math.abs(current - size) < Math.abs(best - size) ? current : best), DEFAULT_STORY_SCRIPT_FONT_SIZE);
+    /**
+     * 落到最近的档位：手写 15 之类的值时也能收敛到合法档，避免 em 基准漂移。
+     *
+     * ⚠️ 起点必须是**最小档**，不能再用 `DEFAULT_STORY_SCRIPT_FONT_SIZE` 当种子：
+     * 17 落在 16 / 18 正中间，平局必须取小（16）。以前种子是 15、正好排在 16 前面，碰巧对；
+     * 默认档改成 18 之后种子就比 16 先占位，同一个 17 会变成 18 —— 默认档一改、
+     * 归一化结果跟着漂，这是最难查的那类 bug。
+     */
+    return STORY_SCRIPT_FONT_SIZES.reduce((best, current) => {
+        const gap = Math.abs(current - size);
+        const bestGap = Math.abs(best - size);
+        if (gap < bestGap) return current;
+        if (gap === bestGap && current < best) return current;
+        return best;
+    }, STORY_SCRIPT_FONT_SIZES[0]);
 }
 
 /** 上一档 / 下一档（到头返回 null，调用方据此置灰按钮）。 */
