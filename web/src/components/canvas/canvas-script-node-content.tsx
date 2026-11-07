@@ -75,7 +75,7 @@ import {
 } from "@/constant/story-script";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
-import { buildScriptAssetBatchItems, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { buildScriptAssetBatchItems, isScriptAssetDirectRole, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasNodeData } from "@/types/canvas";
 
@@ -637,6 +637,15 @@ export function CanvasScriptNodeContent({
             .map((reference) => ({ nodeId: reference.nodeId, title: reference.title, role: resolveScriptAssetRole(assetRoles?.[reference.nodeId]) }));
         return buildScriptAssetBatchItems(rows, existing);
     }, [activeReferences, assetRoles, onBatchGenerateAssets, rows]);
+    /**
+     * 「一键直接生图」要生的那几条（只算按钮显不显示 / 提示里的数字）。
+     *
+     * 与 `batchAssetItems` 的差别只在分类：直接生图**不管人物站位图**（用户 2026-11-07：
+     * 「站位图这一分类的图不要在一键直接生图时进行生成」）。所以这里不能复用上面那份计数 ——
+     * 否则「表里只有站位图」时按钮照样出现，点下去却什么都不生。真正的选取逻辑在 lib 里
+     * （`buildScriptAssetDirectItems`），这里只按分类过滤一遍，口径一致。
+     */
+    const directAssetItems = useMemo(() => batchAssetItems.filter((item) => isScriptAssetDirectRole(item.role)), [batchAssetItems]);
     // 「镜头图」列已从表里移除（见文件头常量处的说明），所以这里不再判断是否显示它。
     // 「按镜按资产」图位：资产列（角色1 / 场景 / 道具 / 人物站位 + 自建资产列）格子里的缩略图 + 「+」。
     const showCellAssets = Boolean(onCellAssetsChange || onCellAssetImport || onCellAssetGenerate);
@@ -3083,7 +3092,7 @@ export function CanvasScriptNodeContent({
                         两颗一起出现时才包这层 div，避免多出一条空行。 */}
                     {onBuildPipeline || onDirectGenerateAssets ? (
                         <div className="flex items-center gap-1.5">
-                            {onDirectGenerateAssets && batchAssetItems.length ? (
+                            {onDirectGenerateAssets && directAssetItems.length ? (
                                 <button
                                     type="button"
                                     className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
@@ -3094,7 +3103,7 @@ export function CanvasScriptNodeContent({
                                         event.stopPropagation();
                                         onDirectGenerateAssets(node.id);
                                     }}
-                                    title={t("canvas.scriptNode.directAssetHint", { count: batchAssetItems.length })}
+                                    title={t("canvas.scriptNode.directAssetHint", { count: directAssetItems.length })}
                                 >
                                     <ImageIcon className="size-3.5" />
                                     {t("canvas.scriptNode.directAsset")}

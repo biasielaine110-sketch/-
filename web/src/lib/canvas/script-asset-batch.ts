@@ -8,7 +8,6 @@ import {
     SCRIPT_ASSET_GENERATABLE_ROLE_IDS,
     setStoryScriptCellAssetIds,
     setStoryScriptNameLock,
-    resolveStoryScriptImageSize,
     type ScriptAssetRole,
     type StoryScriptExtraColumn,
     type StoryScriptRow,
@@ -99,29 +98,47 @@ export function defaultScriptAssetBatchSelection(items: readonly ScriptAssetBatc
 // ── 「一键直接生图」：不筛不弹窗，全量出图，画幅按分类定 ────────────────────────────
 
 /**
- * 「一键直接生图」的分类默认画幅（用户 2026-11-07 口径）：
- * **角色竖版 9:16，场景 / 道具横版 16:9**。
+ * 「一键直接生图」会生成的分类 —— **只有角色 / 场景 / 道具**。
  *
- * 与「一键批量生成」的区别就在这两点：① 不筛选（`existingNodeIds` 有图也照生）；
- * ② 画幅不再整批统一，而是按分类各给各的 —— 角色是站着的定妆照，场景 / 道具是横构图。
- * 人物站位（`blocking`）是俯视走位示意图，跟场景同一档横版。
+ * 用户 2026-11-07：「站位图这一分类的图不要在一键直接生图时进行生成」。
+ * 人物站位（`blocking`）是俯视走位示意图，天然不属于「分镜资产定妆图」那一批；
+ * 把它混进来既浪费额度，又会让左侧竖列里夹进一堆画风完全不同的示意图。
+ * ⚠️ 「一键批量生成」（弹窗）那条**仍然包含**站位图 —— 那边用户可以自己勾，不受这里影响。
  */
-export const SCRIPT_ASSET_DIRECT_SIZE_BY_ROLE: Record<ScriptAssetRole, string> = {
+export const SCRIPT_ASSET_DIRECT_ROLE_IDS: ScriptAssetRole[] = ["character", "scene", "prop"];
+
+/**
+ * 「一键直接生图」**写死的**分类画幅（用户 2026-11-07 强化口径）：
+ * **角色 9:16，场景 / 道具 16:9**。
+ *
+ * 🔴 这里**不接受任何外部覆盖**（曾经收过节点上的 `metadata.scriptImageSize`，结果那份「生图比例」
+ * 一旦是 16:9，角色也被整批改成 16:9 —— 用户报障「角色没有按照 9x16 去生」就是它）。
+ * 「生图比例」那颗选择器只作用于「添加资产 / 批量生成 / 铺链路」，与这颗「直接生图」按钮无关。
+ */
+export const SCRIPT_ASSET_DIRECT_SIZE_BY_ROLE: Partial<Record<ScriptAssetRole, string>> = {
     character: "9:16",
     scene: "16:9",
     prop: "16:9",
-    blocking: "16:9",
-    audio: "16:9",
 };
 
+/** 这个分类归「一键直接生图」管吗（站位图 / 音频都不管）。 */
+export function isScriptAssetDirectRole(role: unknown): boolean {
+    return SCRIPT_ASSET_DIRECT_ROLE_IDS.includes(role as ScriptAssetRole);
+}
+
+/** 某一类资产「一键直接生图」时用的画幅 —— 纯查表，没有 override 这条路。 */
+export function resolveScriptAssetDirectSize(role: ScriptAssetRole): string {
+    return SCRIPT_ASSET_DIRECT_SIZE_BY_ROLE[role] || "16:9";
+}
+
 /**
- * 某一类资产这次用哪个画幅。
+ * 「一键直接生图」要生成的那一批：表里全部角色 / 场景 / 道具（按分类顺序、按名字去重）。
  *
- * 节点上手动设过「生图比例」（`metadata.scriptImageSize`）就以它为准 —— 那个选择器是全画布通用的
- * 资产画幅开关，用户明确设了却被忽略会很莫名其妙；空 / `auto` 时才回落到按分类的默认值。
+ * `existing` 传空数组 = **不筛**（已经出过图的也照生，这是与「一键批量生成」的唯一区别）；
+ * 同时把人物站位 / 音频剔掉（见 `SCRIPT_ASSET_DIRECT_ROLE_IDS`）。
  */
-export function resolveScriptAssetDirectSize(role: ScriptAssetRole, override?: unknown): string {
-    return resolveStoryScriptImageSize(override) || SCRIPT_ASSET_DIRECT_SIZE_BY_ROLE[role] || "16:9";
+export function buildScriptAssetDirectItems(rows?: readonly StoryScriptRow[] | null): ScriptAssetBatchItem[] {
+    return buildScriptAssetBatchItems(rows, []).filter((item) => isScriptAssetDirectRole(item.role));
 }
 
 

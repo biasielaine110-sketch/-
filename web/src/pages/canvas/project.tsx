@@ -113,7 +113,7 @@ import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-orde
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import { buildScriptAssetBatchMounts, buildScriptAssetBatchItems, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
@@ -8383,26 +8383,29 @@ function AtelierCanvasPage() {
      * 哪些不生。生图的比例角色默认选 9x16，场景和道具选 16x9。」
      *
      * 所以与 `handleBatchGenerateScriptAssets` 只有两处不同，其余（竖列摆位 / 挂格 / 分批提交）**完全共用**：
-     *  ① **选谁**：`buildScriptAssetBatchItems(rows, [])` —— `existing` 传空数组，已经出过图的也算在内，
-     *     不做「已有就跳过」的筛选（这正是和「一键批量生成」的区别）；
-     *  ② **画幅**：逐条按分类算（角色 9:16、场景 / 道具 / 站位 16:9），不再整批一个尺寸；
+     *  ① **选谁**：`buildScriptAssetDirectItems(rows)` —— 内部 `existing` 传空数组，已经出过图的也算在内，
+     *     不做「已有就跳过」的筛选（这正是和「一键批量生成」的区别）；同时**剔除人物站位图**
+     *     （用户 2026-11-07：「站位图这一分类的图不要在一键直接生图时进行生成」）；
+     *  ② **画幅**：逐条按分类**写死**（角色 9:16、场景 / 道具 16:9），见 `resolveScriptAssetDirectSize`；
+     *     🔴 **不接受节点「生图比例」覆盖** —— 曾经收过 `metadata.scriptImageSize`，那份选择器一旦是 16:9，
+     *     角色也被整批改成 16:9，用户报障「角色没有按照 9x16 去生」就是它。那颗选择器只管
+     *     「添加资产 / 一键批量生成 / 铺链路」，与这颗按钮无关。
      * 模型**不写** `metadata.model` ⇒ 走运行时回落 = 「配置偏好里的默认生图模型」，以后改偏好这批也跟得上。
      */
     const handleDirectGenerateScriptAssets = useCallback(
         (nodeId: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source) return;
-            // existing 传空数组 = 不筛：这是「直接全生图」的唯一开关，别"顺手"改成收集已有的节点。
-            const wanted = buildScriptAssetBatchItems(source.metadata?.scriptRows, []).filter((item) => item.title.trim() && item.prompt.trim());
+            // 不筛「已出过图」是这里唯一的产品口径；站位图在 buildScriptAssetDirectItems 里就剔掉了。
+            const wanted = buildScriptAssetDirectItems(source.metadata?.scriptRows).filter((item) => item.title.trim() && item.prompt.trim());
             if (!wanted.length) {
                 message.warning(t("canvas.scriptNode.directAssetEmpty"));
                 return;
             }
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-            // 节点上手动设过「生图比例」就整批听它的；没设才按分类走 9:16 / 16:9。
-            const sizeOverride = source.metadata?.scriptImageSize;
             const planned = wanted.map((item) => {
-                const imageSize = resolveScriptAssetDirectSize(item.role, sizeOverride);
+                // ⚠️ 只传分类，没有第二个参数：比例是硬规则，任何节点字段都不许改它。
+                const imageSize = resolveScriptAssetDirectSize(item.role);
                 const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
                 return { item, imageSize, width: Math.round(dims.width), height: Math.round(dims.height) };
             });
