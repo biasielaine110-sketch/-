@@ -45,7 +45,7 @@ import { loadVideoBlob } from "@/lib/canvas/canvas-video-tools";
 import { fitNodeSize, nodeSizeFromRatio, sizeFromDisplayScalePercent } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
-import { buildStylePromptText, getStyleTemplate, mergeStyleAndCameraPrompt } from "@/constant/style-templates";
+import { buildStylePromptText, composeStyledPrompt, getStyleTemplate } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
 import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, describeMomanSourceOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMergeGroups, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptImageSize, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
 import { resolveScriptSchemeId } from "@/constant/script-scheme";
@@ -5374,14 +5374,14 @@ function AtelierCanvasPage() {
                 buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, editingTextNode ? t("canvas.projectPage.editTextPrompt", { source: sourceTextContent, prompt }) : prompt),
             );
             const effectivePrompt = generationContext.prompt.trim();
-            // 风格模板 + 摄像机：仅生图模式生效。
-            // 设定了摄像机 → 用摄像机的（merge 会剥掉风格里自带的相机/镜头段再拼上摄像机段）；
-            // 未设定摄像机 → 用选定风格里自带的相机参数；两者都为空 → 保持原提示词不变。
-            const styleTemplate = mode === "image" ? getStyleTemplate(sourceNode?.metadata?.styleTemplateId) : undefined;
+            // 风格模板：图片 + 视频都生效（用户 2026-11-08 第 04 条「视频窗口添加图片节点的风格模板」）。
+            // 摄像机只有图片节点有这个控件，视频传空串。
+            // 合成方式见 `composeStyledPrompt`：本体在前、修饰在后（只设了修饰时也不能把本体丢掉）。
+            const styleTemplateApplies = mode === "image" || mode === "video";
+            const styleTemplate = styleTemplateApplies ? getStyleTemplate(sourceNode?.metadata?.styleTemplateId) : undefined;
             const stylePromptText = styleTemplate ? buildStylePromptText(styleTemplate) : "";
             const cameraPrompt = mode === "image" ? buildCameraSelectionPrompt(sourceNode?.metadata?.cameraSelection) : "";
-            const modelPrompt =
-                stylePromptText || cameraPrompt ? mergeStyleAndCameraPrompt(stylePromptText, cameraPrompt) || effectivePrompt : effectivePrompt;
+            const modelPrompt = composeStyledPrompt(effectivePrompt, stylePromptText, cameraPrompt);
             if (runController.signal.aborted) {
                 finishGenerationRequest(nodeId, runController);
                 setRunningNodeId(null);
@@ -5822,7 +5822,8 @@ function AtelierCanvasPage() {
                               );
                     const runNativeVideoJob = async () => {
                         if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
-                        const videoResult = await requestVideoGeneration(generationConfig, effectivePrompt, referenceImages, {
+                        // 视频也吃节点上的「风格模板」（`modelPrompt` = 本体 + 风格段；文本/音频模式下两者相等）。
+                        const videoResult = await requestVideoGeneration(generationConfig, modelPrompt, referenceImages, {
                             signal: controller.signal,
                             referenceAudios: generationContext.referenceAudios || [],
                             // A clip wired into the video node is a real reference (not just a frame):
@@ -6118,6 +6119,21 @@ function AtelierCanvasPage() {
                 message.warning(t("canvas.projectPage.retryPromptMissing"));
                 return;
             }
+            /**
+             * 重试也要吃节点上的「风格模板」（图片是重跑这张图、视频是重跑这段片子，出片口径必须和首次一致）。
+             * 写回 metadata 的仍是干净的 `prompt`，`modelPrompt` 只进请求；`composeStyledPrompt` 幂等，
+             * 老节点的 `savedImageMetadata.prompt` 里若已经带了风格段也不会叠第二遍。
+             */
+            const retryStyleId = node.metadata?.styleTemplateId || sourceNode.metadata?.styleTemplateId;
+            const retryStyleTemplate = getStyleTemplate(retryStyleId);
+            const retryPrompt =
+                node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video
+                    ? composeStyledPrompt(
+                          prompt,
+                          retryStyleTemplate ? buildStylePromptText(retryStyleTemplate) : "",
+                          node.type === CanvasNodeType.Image ? buildCameraSelectionPrompt(node.metadata?.cameraSelection || sourceNode.metadata?.cameraSelection) : "",
+                      )
+                    : prompt;
             const generationType = savedImageMetadata?.generationType;
             const useReferenceImages = generationType ? generationType === "edit" : Boolean(context?.referenceImages.length);
             const resolvedRetryRefs =
@@ -6193,7 +6209,7 @@ function AtelierCanvasPage() {
                 if (node.type === CanvasNodeType.Video) {
                     const runRetryVideoJob = async () => {
                         if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
-                        const videoResult = await requestVideoGeneration(generationConfig, prompt, retryImages, {
+                        const videoResult = await requestVideoGeneration(generationConfig, retryPrompt, retryImages, {
                             signal: controller.signal,
                             referenceAudios: context?.referenceAudios || [],
                             referenceVideos: context?.referenceVideos || [],
@@ -6316,8 +6332,8 @@ function AtelierCanvasPage() {
                 }
 
                 const retryItems = useReferenceImages
-                    ? await requestEdit(generationConfig, prompt, retryImages, undefined, { signal: controller.signal })
-                    : await requestGeneration(generationConfig, prompt, { signal: controller.signal });
+                    ? await requestEdit(generationConfig, retryPrompt, retryImages, undefined, { signal: controller.signal })
+                    : await requestGeneration(generationConfig, retryPrompt, { signal: controller.signal });
                 if (retryItems[0]?.videoUrls?.length) {
                     // The request produced a clip and no image: nothing to fill the image slot
                     // with — mark the round done and spawn the video node instead.
@@ -8277,9 +8293,10 @@ function AtelierCanvasPage() {
             // 同时把节点画成对应画幅 —— 否则画布上还是正方形，用户看不出自己选的比例生效了。
             const imageSize = resolveStoryScriptImageSize(size) || resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
             const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
-            // 弹窗里挑的风格直接落到新图片节点上：生图链路读的是节点自己的 metadata.styleTemplateId，
-            // 之后在节点上的风格选择器里还能改。
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(styleTemplateId ? { styleTemplateId } : {}) });
+            // 弹窗里挑的风格直接落到新图片节点上；**没挑就跟随脚本节点上那档**（用户 2026-11-08 第 04 条）。
+            // 生图链路读的是节点自己的 metadata.styleTemplateId，之后在节点上的风格选择器里还能改。
+            const nodeStyleTemplateId = styleTemplateId || source.metadata?.styleTemplateId;
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(nodeStyleTemplateId ? { styleTemplateId: nodeStyleTemplateId } : {}) });
             const placed = attachScriptAssets(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
@@ -8335,6 +8352,8 @@ function AtelierCanvasPage() {
                 return;
             }
             const created = wanted.slice(0, slots.length).map((item, index) => {
+                // 风格：弹窗里挑的优先，没挑就跟随脚本节点上那档（2026-11-08 第 04 条）。
+                const batchStyleTemplateId = options?.styleTemplateId || source.metadata?.styleTemplateId;
                 const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, {
                     prompt: item.prompt,
                     status: NODE_STATUS_IDLE,
@@ -8342,7 +8361,7 @@ function AtelierCanvasPage() {
                     // 弹窗里挑的模型：`buildGenerationConfig` 读的就是 `metadata.model`，
                     // 所以这一批（以及之后在这个节点上点重生成）都走同一个模型。
                     ...(options?.model ? { model: options.model } : {}),
-                    ...(options?.styleTemplateId ? { styleTemplateId: options.styleTemplateId } : {}),
+                    ...(batchStyleTemplateId ? { styleTemplateId: batchStyleTemplateId } : {}),
                     // 竖列标记：续排时据此认出「这批是自己的」，铺链路据此给老画布右侧资产图让位。
                     scriptAssetLane: source.id,
                 });
@@ -8477,6 +8496,8 @@ function AtelierCanvasPage() {
                     prompt: cell.item.prompt,
                     status: NODE_STATUS_IDLE,
                     ...(cell.imageSize ? { size: cell.imageSize } : {}),
+                    // 风格模板：直接生图没有弹窗，统一跟随脚本节点上那档（2026-11-08 第 04 条）。
+                    ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
                     // ⚠️ 默认**不写** `model`：留空 = 生成时回落「配置偏好 → 默认生图模型」。
                     // 只有「一键视频」显式指定模型时才写（它要按模型分轮次重试 / 托底）。
                     ...(options?.model ? { model: options.model } : {}),
@@ -8612,7 +8633,9 @@ function AtelierCanvasPage() {
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             const imageSize = resolveStoryScriptImageSize(size) || resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
             const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(styleTemplateId ? { styleTemplateId } : {}) });
+            // 风格：弹窗里挑的优先，没挑就跟随脚本节点上那档。
+            const rowStyleTemplateId = styleTemplateId || source.metadata?.styleTemplateId;
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(rowStyleTemplateId ? { styleTemplateId: rowStyleTemplateId } : {}) });
             const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
@@ -8845,7 +8868,9 @@ function AtelierCanvasPage() {
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             const imageSize = resolveStoryScriptImageSize(size) || resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
             const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(model ? { model } : {}), ...(styleTemplateId ? { styleTemplateId } : {}) });
+            // 风格：这一格单独挑的优先，没挑就跟随脚本节点上那档。
+            const cellStyleTemplateId = styleTemplateId || source.metadata?.styleTemplateId;
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(model ? { model } : {}), ...(cellStyleTemplateId ? { styleTemplateId: cellStyleTemplateId } : {}) });
             const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
@@ -8948,6 +8973,11 @@ function AtelierCanvasPage() {
             // 铺出来的图片节点按这个画幅建、并把比例写进 `metadata.size` —— 于是「逐节点点生成」
             // 也是同一个画幅，不用再一个个改。空 = 跟随全局配置，沿用默认方形。
             const scriptImageSize = resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
+            // **风格模板**：脚本节点上选的那档（用户 2026-11-08 第 04 条「脚本生成器里也要图片节点那套风格模板」）。
+            // 铺出来的图片节点直接带上它 —— 生图链路读的就是节点自己的 `metadata.styleTemplateId`，
+            // 所以「铺完再点生成」和「铺完自动生成」都会吃到同一份风格；视频节点不继承（视频有自己的风格选择器）。
+            const scriptStyleTemplateId = source.metadata?.styleTemplateId;
+            const scriptImageStyle = scriptStyleTemplateId ? { styleTemplateId: scriptStyleTemplateId } : {};
             const imageSpec =
                 nodeSizeFromRatio(scriptImageSize, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height) ||
                 NODE_DEFAULT_SIZE[CanvasNodeType.Image];
@@ -9057,7 +9087,7 @@ function AtelierCanvasPage() {
                             position: { x: baseX, y: centeredY(rowY, textHeight) },
                         };
                         imageNode = {
-                            ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE, ...(scriptImageSize ? { size: scriptImageSize } : {}) }),
+                            ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE, ...(scriptImageSize ? { size: scriptImageSize } : {}), ...scriptImageStyle }),
                             title: t("canvas.scriptNode.pipelineImage", { no: shotNo }),
                             width: imageWidth,
                             height: imageHeight,

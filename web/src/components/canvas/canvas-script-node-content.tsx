@@ -10,6 +10,7 @@ import { useOrderDrag } from "@/hooks/use-order-drag";
 import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
 import { CanvasScriptBatchAssetDialog } from "@/components/canvas/canvas-script-batch-asset-dialog";
+import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import { buildScriptGhostPrefill, buildScriptMashuPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveSchemeDefaultMergeMode, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
@@ -1488,6 +1489,17 @@ export function CanvasScriptNodeContent({
                     </button>
                 </>
             ) : null}
+
+            {/* 脚本生成器的风格模板：控件与可选项都和图片节点那套**完全一致**（用户 2026-11-08 第 04 条）。
+                选中的模板不会去改脚本正文，而是跟着「铺链路 / 一键直接生图 / 逐镜生成 / 按格生成」
+                落到**新建的图片节点**的 `metadata.styleTemplateId` 上 —— 生图链路读的就是节点自己这个字段。
+                面板朝下开：这个控件在节点标题栏，朝上开会顶出画布顶部。 */}
+            <CanvasStylePicker
+                value={node.metadata?.styleTemplateId}
+                onChange={(styleTemplateId) => patchMetadata({ styleTemplateId })}
+                buttonClassName="!h-8 !max-w-[128px] !shrink-0 !justify-start !rounded-full !px-2.5"
+                placement="bottomLeft"
+            />
 
             {fontSizeStepper}
 

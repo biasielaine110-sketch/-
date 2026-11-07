@@ -526,6 +526,14 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         <>
                             <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} className="max-w-[160px]" />
                             <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[150px] !shrink-0 !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
+                            {/* 视频窗口的风格模板：控件与内容跟图片节点完全一致（用户 2026-11-08 第 04 条），
+                                同样落在 `metadata.styleTemplateId`，生成时由 `composeStyledPrompt` 追加到提示词尾部。 */}
+                            <CanvasStylePicker
+                                value={node.metadata?.styleTemplateId}
+                                onChange={(styleTemplateId) => onConfigChange(node.id, { styleTemplateId })}
+                                buttonClassName="!h-10 !max-w-[140px] !shrink-0 !justify-start !rounded-full !px-3"
+                                placement="topLeft"
+                            />
                         </>
                     ) : mode === "audio" ? (
                         <>

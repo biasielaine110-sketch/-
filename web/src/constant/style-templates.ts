@@ -106,3 +106,27 @@ export function mergeStyleAndCameraPrompt(stylePrompt: string, cameraPrompt?: st
     const stripped = stripCameraSegments(style);
     return stripped ? `${stripped}\n${camera}` : camera;
 }
+
+/**
+ * 原提示词 × 风格模板 × 摄像机 —— **追加**合成（图片节点 / 视频节点共用一条口径）。
+ *
+ * 为什么不是直接拿 `mergeStyleAndCameraPrompt` 当最终提示词：它只处理「风格 + 摄像机」两个修饰，
+ * 不带本体描述，直接当提示词发出去就等于把用户写的「谁、在哪、干什么」整段丢掉。
+ * 这里固定成「本体在前、修饰在后」，四条分支：
+ * - 都没设 → 原样返回 `basePrompt`（一个字节不动）；
+ * - 只设风格 → `本体\n风格模板「X」：…`（风格自带的相机参数保留）；
+ * - 只设摄像机 → `本体\n摄像机段`；
+ * - 都设 → `本体\n（剥掉相机段的风格）\n摄像机段`（摄像机的优先级规则仍由 `mergeStyleAndCameraPrompt` 决定）。
+ */
+export function composeStyledPrompt(basePrompt: string, stylePrompt?: string | null, cameraPrompt?: string | null): string {
+    const style = (stylePrompt || "").trim();
+    const camera = (cameraPrompt || "").trim();
+    if (!style && !camera) return basePrompt;
+    const modifier = mergeStyleAndCameraPrompt(style, camera);
+    const base = (basePrompt || "").trim();
+    if (!modifier) return basePrompt;
+    if (!base) return modifier;
+    // 幂等：重复跑（重试 / 重生成）时别把同一段修饰叠第二遍。
+    if (base.endsWith(modifier)) return basePrompt;
+    return `${base}\n${modifier}`;
+}
