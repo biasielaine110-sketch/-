@@ -803,7 +803,7 @@ export default {
             pipelineBuildSelectedCount: "Build selected chain ({{count}})",
             pipelineBuildSelectedHint: "Build only the selected {{count}} shots and merge them into ONE video link: one text / image node per shot, a single video node. Gaps between selected rows are filled in.",
             pipelineBuildSelectedNone: "Tick a few rows in the storyboard table first — they will be merged into one video link",
-            pipelineVideoOnly: "Video only",
+            pipelineVideoOnly: "Video windows only",
             pipelineVideoOnlyHint: "Compact build: lay out only the video node windows — video nodes are created per segment with prompt / duration / asset images / audio already wired, and no text or image nodes. Selected rows are limited to those shots (merged into one segment).",
             pipelineVideoOnlyConfirmTitle: "Lay out video node windows only",
             pipelineVideoOnlyConfirmBody: "Creates only {{videos}} video node(s) covering {{shots}} shots, plus {{links}} asset links; no text / image nodes.",
