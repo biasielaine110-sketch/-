@@ -39,8 +39,16 @@ export function CanvasScriptBatchAssetDialog({ open, theme, items, imageSize, on
     const [checkedKeys, setCheckedKeys] = useState<string[]>([]);
     const [styleId, setStyleId] = useState("");
     const [size, setSize] = useState("");
-    /** 整批共用的生图模型：空 = 跟随全局默认（`resolveModelForCapability` 补）。 */
+    /** 整批共用的生图模型：默认值 = **配置偏好里的「默认生图模型」**（打开弹窗就填好）。 */
     const [model, setModel] = useState("");
+    /**
+     * 这一次弹窗里用户有没有**真的动过**模型栏。
+     *
+     * 动过 → 把这一个模型写进每张图的 `metadata.model`（这一批就定死它）；
+     * 没动 → 提交时不写，节点继续走运行时回落，也就是**以后改偏好还能跟着变**。
+     * 不加这个标记就只有两种坏选择：写死（改偏好不再跟随）或留空（弹窗里看起来没默认值）。
+     */
+    const [modelTouched, setModelTouched] = useState(false);
     /** 风格面板展开时先让 Esc 收起面板，而不是一次把弹窗关掉。 */
     const [styleOpen, setStyleOpen] = useState(false);
 
@@ -56,12 +64,16 @@ export function CanvasScriptBatchAssetDialog({ open, theme, items, imageSize, on
             setStyleId("");
             setStyleOpen(false);
             setModel("");
+            setModelTouched(false);
             return;
         }
         setCheckedKeys(defaultScriptAssetBatchSelection(items));
         setStyleId("");
         setStyleOpen(false);
-        setModel("");
+        // 模型默认值 = 配置偏好「默认模型 → 默认生图模型」那一项（与偏好面板显示的同一个值）。
+        // 打开弹窗就填好它，用户不动就是它；不动时提交不写 `metadata.model`，改偏好以后仍然跟随。
+        setModel(resolveModelForCapability(globalConfig, undefined, "image"));
+        setModelTouched(false);
         setSize(resolveStoryScriptImageSize(imageSize));
         // items / imageSize 在打开瞬间才是「这一次」的值；开着的时候不跟着外部变化重置，否则会把勾选清掉。
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -193,15 +205,20 @@ export function CanvasScriptBatchAssetDialog({ open, theme, items, imageSize, on
                         </div>
 
                         {/* 生图模型：整批共用一个 —— 同一批资产用同一个模型，出图风格才一致。
-                            不选 = 跟随全局默认（节点上不写 `metadata.model`，以后改全局还能跟着变）。 */}
+                            默认值取自「配置偏好 → 默认生图模型」，打开就是它；没动过就不写进节点，
+                            以后改偏好还能跟着变（见 `modelTouched`）。 */}
                         <div className="flex flex-col gap-1">
                             <span className="text-[11px] opacity-60" style={{ color: theme.node.text }}>
                                 {t("canvas.scriptNode.batchAssetModelLabel")}
+                                <span className="ml-1.5 opacity-70">· {t("canvas.scriptNode.batchAssetModelHint")}</span>
                             </span>
                             <ModelPicker
                                 config={globalConfig}
                                 value={resolveModelForCapability(globalConfig, model, "image") || undefined}
-                                onChange={setModel}
+                                onChange={(next) => {
+                                    setModel(next);
+                                    setModelTouched(true);
+                                }}
                                 capability="image"
                                 placeholder={t("canvas.scriptNode.batchAssetModelPlaceholder")}
                                 onMissingConfig={() => void 0}
@@ -238,7 +255,14 @@ export function CanvasScriptBatchAssetDialog({ open, theme, items, imageSize, on
                                     type="primary"
                                     icon={<Sparkles className="size-3.5" />}
                                     disabled={!selected.length}
-                                    onClick={() => onSubmit(selected, { styleTemplateId: styleId || undefined, size: size || undefined, model: model || undefined })}
+                                    onClick={() =>
+                                        onSubmit(selected, {
+                                            styleTemplateId: styleId || undefined,
+                                            size: size || undefined,
+                                            // 只有用户真动过模型栏才写进节点；没动过留空 = 继续跟随配置偏好。
+                                            model: modelTouched ? model || undefined : undefined,
+                                        })
+                                    }
                                 >
                                     {t("canvas.scriptNode.batchAssetRun", { count: selected.length })}
                                 </Button>

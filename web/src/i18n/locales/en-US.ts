@@ -816,6 +816,7 @@ export default {
             batchAssetSkipped: "{{count}} did not fit — clear some room on the left and retry",
             batchAssetNoRoom: "No free space to the left of the script node — move that area away and retry",
             batchAssetModelLabel: "Image model",
+            batchAssetModelHint: "Defaults to the default image model in config preferences; leave it untouched to keep following preferences",
             batchAssetModelPlaceholder: "Pick the model used for batch asset generation",
             assetCandidateHint: "{{count}} linkable node(s) on the canvas",
             assetTabCanvas: "Link from canvas",

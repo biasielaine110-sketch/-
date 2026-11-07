@@ -817,6 +817,7 @@ export default {
             batchAssetSkipped: "还有 {{count}} 条没排上位置，请清理左侧空间后重试",
             batchAssetNoRoom: "脚本节点左侧没有空位了，先把那一带移开一点再试",
             batchAssetModelLabel: "生图模型",
+            batchAssetModelHint: "取自配置偏好的默认生图模型，不改则一直跟随",
             batchAssetModelPlaceholder: "选择用于批量生成资产图的模型",
             assetCandidateHint: "画布上有 {{count}} 个可链接的节点",
             assetTabCanvas: "从画布链接",

@@ -392,6 +392,18 @@ export function resolveModelForCapability(config: AiConfig, currentModel: string
     const selectable = selectableModelsByCapability(config, capability);
     if (currentModel && selectable.includes(currentModel)) return currentModel;
     if (defaultModel && selectable.includes(defaultModel)) return defaultModel;
+    /**
+     * 偏好里**显式选过**的默认模型，即便 `capability` 靠名字猜错了，也要用它。
+     *
+     * 否则会出现一类极难自查的「不同步」：偏好面板直接绑 `config.imageModel` 显示，所以那边
+     * 明明白白写着 A；但这里因为 A 的名字被 `guessCapability` 猜成文本 / 视频，不在 image 的
+     * 候选里，就静默回落成 `selectable[0]` —— 于是脚本分镜表批量生图（以及所有生图入口）
+     * 实际用的是 B。只要求「模型真实存在 + 渠道启用 + 模型启用」，能力判断不参与。
+     */
+    if (defaultModel) {
+        const entry = findChannelModel(config, defaultModel);
+        if (entry && isChannelEnabled(entry.channel) && isChannelModelEnabled(entry.model)) return defaultModel;
+    }
     if (capability === "text") {
         const preferred = findPreferredModelOption(config.channels, "text", PREFERRED_TEXT_MODEL_NAMES);
         if (preferred && selectable.includes(preferred)) return preferred;
