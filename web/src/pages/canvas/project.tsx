@@ -64,6 +64,7 @@ import { CanvasNodeAnnotateDialog, type CanvasAnnotateInpaintPayload, type Canva
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasMergeNodeContent } from "@/components/canvas/canvas-merge-node-content";
 import { CanvasVideoMergeNodeContent } from "@/components/canvas/canvas-video-merge-node-content";
+import { CanvasJianyingExportDialog } from "@/components/canvas/canvas-jianying-export-dialog";
 import { CanvasScriptNodeContent, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptGenAction } from "@/components/canvas/canvas-script-node-content";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { CanvasNodeMjUpscaleDialog } from "@/components/canvas/canvas-node-mj-upscale-dialog";
@@ -110,6 +111,7 @@ import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAs
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { buildJianyingBundle, secondsToMicro, type JianyingDraftClip } from "@/lib/canvas/jianying-draft";
+import { ensureJianyingWritePermission, joinDraftPath, loadJianyingRootPath, looksLikeAbsoluteDraftRoot, readStoredJianyingRoot, resolveJianyingPlaceholders, saveJianyingRootPath, stableJianyingDraftFolderName, storeJianyingRoot, supportsJianyingDirectWrite, writeJianyingDraft, type JianyingDraftFile } from "@/lib/canvas/jianying-direct";
 import { createZip } from "@/lib/zip";
 import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFileBase, normalizeMergeClip, probeImageSize, probeVideoMeta, resolveMergeCanvasSize, videoMergeClipFromNode, type ResolvedVideoMergeClip } from "@/lib/canvas/video-merge";
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
@@ -200,6 +202,21 @@ type CanvasGenerationRequest = {
     originNodeId: string;
     runningNodeId: string;
     controller: AbortController;
+};
+
+/**
+ * 剪映直写这一份导出的完整内容 —— 素材已经读成 blob，JSON 还是**占位符版**（写盘时才换成绝对路径）。
+ * 存在 ref 里是为了「弹窗要用户粘路径 / 授权目录」这段异步交互期间不丢数据。
+ */
+type JianyingExportPayload = {
+    mergeNodeId: string;
+    draftName: string;
+    /** 草稿文件夹名（稳定，同一个节点重复导出 = 覆盖）。 */
+    folderName: string;
+    files: JianyingDraftFile[];
+    clipCount: number;
+    totalSeconds: number;
+    skipped: number;
 };
 
 const VIDEO_NODE_MAX_WIDTH = 420;
@@ -506,6 +523,15 @@ function AtelierCanvasPage() {
     const [audioMergePicking, setAudioMergePicking] = useState(false);
     /** 正在打包剪映工程包的节点 id —— 只用来把按钮换成 loading。 */
     const [videoMergeExportingNodeId, setVideoMergeExportingNodeId] = useState<string | null>(null);
+    /**
+     * 剪映草稿「直写」：待落盘的这一份导出内容（素材已读成 blob）。
+     * 弹窗是异步的（用户要先粘路径、选目录），所以数据先攒在这里，用户确认后继续写。
+     */
+    const jianyingPendingRef = useRef<JianyingExportPayload | null>(null);
+    /** 弹窗里要显示的那几个数（渲染期读 ref 不响应，单独存一份 state）。 */
+    const [jianyingDialogMeta, setJianyingDialogMeta] = useState<{ draftName: string; clipCount: number; totalSeconds: number } | null>(null);
+    const [jianyingDialogOpen, setJianyingDialogOpen] = useState(false);
+    const [jianyingWriting, setJianyingWriting] = useState(false);
     /** 正在本地渲染合并 mp4 的节点 id + 进度（0–1）。 */
     const [videoMergeRenderingNodeId, setVideoMergeRenderingNodeId] = useState<string | null>(null);
     const [videoMergeRenderProgress, setVideoMergeRenderProgress] = useState(0);
@@ -2347,6 +2373,56 @@ function AtelierCanvasPage() {
     }, []);
 
     /**
+     * 把攒好的剪映导出内容打成 zip 下载。
+     *
+     * 这是**兜底**那条路：浏览器不支持目录授权（Firefox / Safari）、或用户在配置弹窗里
+     * 主动点「还是下载压缩包」。包内仍带 install.bat，双击即可装入剪映。
+     */
+    const packageJianyingPayload = useCallback(
+        async (payload: JianyingExportPayload) => {
+            const zip = await createZip(payload.files.map((file) => ({ name: file.name, data: file.data as BlobPart })));
+            const safeName = payload.draftName.replace(/[\\/:*?"<>|]/g, "_").slice(0, 40) || "jianying-draft";
+            saveAs(zip, `${safeName}_剪映草稿.zip`);
+            message.success(t("canvas.videoMerge.exportSuccess"));
+        },
+        [message, t],
+    );
+
+    /**
+     * 直写剪映草稿目录：占位符换成绝对路径 → 清掉同名旧草稿 → 逐文件落盘。
+     *
+     * 落盘前把 `install.bat` / `README.txt` 剔掉 —— 那两个文件只服务「下载 zip 再双击」那条路，
+     * 写进草稿目录只是脏东西（剪映不读，但用户点开文件夹会困惑）。
+     */
+    const writeJianyingPayload = useCallback(
+        async (payload: JianyingExportPayload, target: { handle: FileSystemDirectoryHandle; rootPath: string }) => {
+            const draftDir = joinDraftPath(target.rootPath, payload.folderName);
+            const hide = message.loading(t("canvas.videoMerge.exportWriting"), 0);
+            setJianyingWriting(true);
+            try {
+                // 授权句柄与路径一起记住：下次导出就不用再问（路径是给 JSON 用的，句柄是给写盘用的）
+                saveJianyingRootPath(target.rootPath);
+                await storeJianyingRoot(target.handle);
+                const files = payload.files
+                    .filter((file) => file.name !== "install.bat" && file.name !== "README.txt")
+                    .map((file) => (file.name.endsWith(".json") && typeof file.data === "string" ? { name: file.name, data: resolveJianyingPlaceholders(file.data, draftDir, target.rootPath) } : file));
+                await writeJianyingDraft(target.handle, payload.folderName, files);
+                jianyingPendingRef.current = null;
+                setJianyingDialogMeta(null);
+                setJianyingDialogOpen(false);
+                hide();
+                message.success(t("canvas.videoMerge.exportDirectSuccess", { folder: payload.folderName }));
+            } catch (error) {
+                hide();
+                message.error(t("canvas.videoMerge.exportDirectFailed", { message: error instanceof Error ? error.message : String(error) }));
+            } finally {
+                setJianyingWriting(false);
+            }
+        },
+        [message, t],
+    );
+
+    /**
      * 一键导出剪映草稿包。
      *
      * 产物是一个 zip：`draft_content.json` + `draft_meta_info.json` + `materials/` + `install.bat`。
@@ -2366,7 +2442,7 @@ function AtelierCanvasPage() {
             const createdUrls: string[] = [];
             try {
                 const sources = new Map(nodesRef.current.map((node) => [node.id, node]));
-                const files: { name: string; data: BlobPart }[] = [];
+                const files: JianyingDraftFile[] = [];
                 const draftClips: JianyingDraftClip[] = [];
                 const clipSizes: { width?: number; height?: number }[] = [];
                 let skipped = 0;
@@ -2457,12 +2533,40 @@ function AtelierCanvasPage() {
                 files.push({ name: "install.bat", data: bundle.installScript });
                 files.push({ name: "README.txt", data: `\ufeff${bundle.readme}` });
 
-                const zip = await createZip(files);
-                const safeName = draftName.replace(/[\\/:*?"<>|]/g, "_").slice(0, 40) || "jianying-draft";
-                saveAs(zip, `${safeName}_剪映草稿.zip`);
+                // 攒成一份 payload：直写与「下载压缩包」都要它（弹窗要用户粘路径 / 授权时先放 ref 里）。
+                const payload: JianyingExportPayload = {
+                    mergeNodeId,
+                    draftName,
+                    folderName: stableJianyingDraftFolderName(draftName, mergeNodeId),
+                    files,
+                    clipCount: draftClips.length,
+                    totalSeconds: bundle.totalSeconds,
+                    skipped,
+                };
+                jianyingPendingRef.current = payload;
                 hide();
                 if (skipped > 0) message.warning(t("canvas.videoMerge.exportMissing", { count: skipped }));
-                message.success(t("canvas.videoMerge.exportSuccess"));
+                // ① 浏览器不支持目录授权（Firefox / Safari）→ 直接退回压缩包，并说明原因
+                if (!supportsJianyingDirectWrite()) {
+                    message.info(t("canvas.videoMerge.exportUnsupported"));
+                    await packageJianyingPayload(payload);
+                    return;
+                }
+                // ② 已经配置过「草稿路径 + 目录授权」→ 一键直写，不再弹窗。
+                // ⚠️ 这里先 `queryPermission`（不弹系统框）再决定写不写：授权还在就直接写；
+                // 授权过期才弹配置框，让用户在**新手势**里重新选目录（requestPermission 需要用户手势）。
+                const storedHandle = await readStoredJianyingRoot();
+                const storedPath = loadJianyingRootPath();
+                if (storedHandle && looksLikeAbsoluteDraftRoot(storedPath)) {
+                    const granted = await ensureJianyingWritePermission(storedHandle);
+                    if (granted) {
+                        await writeJianyingPayload(payload, { handle: storedHandle, rootPath: storedPath.trim().replace(/[\\/]+$/, "") });
+                        return;
+                    }
+                }
+                // ③ 首次 / 授权失效 → 弹窗里粘一次草稿路径、选一次草稿文件夹
+                setJianyingDialogMeta({ draftName, clipCount: draftClips.length, totalSeconds: bundle.totalSeconds });
+                setJianyingDialogOpen(true);
             } catch (error) {
                 hide();
                 message.error(error instanceof Error ? error.message : t("canvas.videoMerge.exportFailed"));
@@ -2471,7 +2575,7 @@ function AtelierCanvasPage() {
                 setVideoMergeExportingNodeId((current) => (current === mergeNodeId ? null : current));
             }
         },
-        [t],
+        [message, packageJianyingPayload, t, writeJianyingPayload],
     );
 
     /**
@@ -9459,6 +9563,32 @@ function AtelierCanvasPage() {
                         onCapture={(payload) => void capturePanoramaShot(panoramaNode, payload)}
                     />
                 ) : null}
+
+                {/* 剪映直写：首次 / 授权失效时才打开（粘一次草稿路径 + 选一次草稿文件夹）。 */}
+                <CanvasJianyingExportDialog
+                    open={jianyingDialogOpen}
+                    draftName={jianyingDialogMeta?.draftName || ""}
+                    clipCount={jianyingDialogMeta?.clipCount || 0}
+                    totalSeconds={jianyingDialogMeta?.totalSeconds || 0}
+                    submitting={jianyingWriting}
+                    onCancel={() => {
+                        jianyingPendingRef.current = null;
+                        setJianyingDialogMeta(null);
+                        setJianyingDialogOpen(false);
+                    }}
+                    onUsePackage={() => {
+                        const pending = jianyingPendingRef.current;
+                        jianyingPendingRef.current = null;
+                        setJianyingDialogMeta(null);
+                        setJianyingDialogOpen(false);
+                        if (pending) void packageJianyingPayload(pending);
+                    }}
+                    onSubmit={(target) => {
+                        const pending = jianyingPendingRef.current;
+                        if (!pending) return;
+                        void writeJianyingPayload(pending, target);
+                    }}
+                />
 
                 <CanvasImagePreviewModal
                     open={Boolean(previewContent)}
