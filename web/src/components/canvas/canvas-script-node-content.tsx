@@ -234,7 +234,7 @@ type CanvasScriptNodeContentProps = {
      * 传进来的 `items` 已经过用户在弹窗里勾选（取消勾选 = 这个不生）；上层负责排布（脚本节点右侧整齐网格）
      * 与提交生成。
      */
-    onBatchGenerateAssets?: (nodeId: string, items: ScriptAssetBatchItem[], options?: { styleTemplateId?: string; size?: string }) => void;
+    onBatchGenerateAssets?: (nodeId: string, items: ScriptAssetBatchItem[], options?: { styleTemplateId?: string; size?: string; model?: string }) => void;
     /** 已链接素材的分类（节点 id → 分类），用于在引用条上回显 / 切换。 */
     assetRoles?: Record<string, string>;
     /** 切换某张已链接素材的分类（角色 / 场景 / 道具 / 站位图）。 */

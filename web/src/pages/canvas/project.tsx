@@ -109,7 +109,7 @@ import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import { collectScriptAssetOccupied, planScriptAssetSlots, resolveScriptAssetLaneX, scriptAssetLaneRight, scriptAssetLaneWidth, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { collectScriptAssetOccupied, planScriptAssetColumn, resolveScriptAssetColumnX, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { buildJianyingBundle, secondsToMicro, type JianyingDraftClip } from "@/lib/canvas/jianying-draft";
@@ -168,6 +168,7 @@ import {
     type CanvasNodeImage,
     type CanvasNodeMetadata,
     type CanvasNodeTypeId,
+    type CanvasVideoMergeClip,
     type ConnectionHandle,
     type ContextMenuState,
     type Position,
@@ -8195,13 +8196,14 @@ function AtelierCanvasPage() {
     /**
      * 一键批量生成资产图：把弹窗里勾好的角色 / 场景 / 道具一次铺成图片节点，再逐张触发生图。
      *
-     * 只有两点与单张不同，且都用 `lib/canvas/script-asset-batch.ts` 的口径，别在组件里另算：
-     *  ① **摆位**：落在脚本节点右侧的「资产车道」（3 列网格），已被占住的格子自动跳过 ——
-     *     所以「先铺链路再生成」会落到链路右侧，「删一张再补一张」会补回空位，永远不会叠在一起；
-     *  ② **提交**：一批可能十几张，按 `SCRIPT_ASSET_LAUNCH_BATCH` 分批，不一次打满上游。
+     * 只有三点与单张不同，且都用 `lib/canvas/script-asset-batch.ts` 的口径，别在组件里另算：
+     *  ① **摆位**：落在脚本节点**左侧 300px 的一列**（上下顺序、列高按脚本窗口高度自适应），
+     *     已被占住的格子往下挪 —— 所以「先铺链路再生成」不会盖住链路，「删一张再补一张」会补回空位；
+     *  ② **模型**：弹窗里挑的那一个模型写给每张图的 `metadata.model`，这一批（含以后单张重生成）都用它；
+     *  ③ **提交**：一批可能十几张，按 `SCRIPT_ASSET_LAUNCH_BATCH` 分批，不一次打满上游。
      */
     const handleBatchGenerateScriptAssets = useCallback(
-        (nodeId: string, items: ScriptAssetBatchItem[], options?: { styleTemplateId?: string; size?: string }) => {
+        (nodeId: string, items: ScriptAssetBatchItem[], options?: { styleTemplateId?: string; size?: string; model?: string }) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             const wanted = items.filter((item) => item.title.trim() && item.prompt.trim());
             if (!source || !wanted.length) return;
@@ -8210,11 +8212,13 @@ function AtelierCanvasPage() {
             const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
             const cellWidth = Math.round(dims.width);
             const cellHeight = Math.round(dims.height);
-            const laneX = resolveScriptAssetLaneX({ id: source.id, position: source.position, width: source.width, height: source.height }, nodesRef.current, scriptAssetLaneWidth(cellWidth));
-            const slots = planScriptAssetSlots(
-                { x: laneX, y: source.position.y },
+            const columnX = resolveScriptAssetColumnX({ id: source.id, position: source.position, width: source.width, height: source.height }, nodesRef.current, cellWidth);
+            const slots = planScriptAssetColumn(
+                { x: columnX, y: source.position.y },
                 wanted.map(() => ({ width: cellWidth, height: cellHeight })),
                 collectScriptAssetOccupied(nodesRef.current, source.id),
+                // 列高适配：把脚本窗口当前高度传进去，间距据此摊开（图太多时退回最小间距往下溢出）。
+                { span: source.height },
             );
             if (!slots.length) {
                 message.warning(t("canvas.scriptNode.batchAssetNoRoom"));
@@ -8225,8 +8229,11 @@ function AtelierCanvasPage() {
                     prompt: item.prompt,
                     status: NODE_STATUS_IDLE,
                     ...(imageSize ? { size: imageSize } : {}),
+                    // 弹窗里挑的模型：`buildGenerationConfig` 读的就是 `metadata.model`，
+                    // 所以这一批（以及之后在这个节点上点重生成）都走同一个模型。
+                    ...(options?.model ? { model: options.model } : {}),
                     ...(options?.styleTemplateId ? { styleTemplateId: options.styleTemplateId } : {}),
-                    // 车道标记：续排时据此认出「这批是自己的」，铺链路据此把三列起点让开。
+                    // 竖列标记：续排时据此认出「这批是自己的」，铺链路据此给老画布右侧资产图让位。
                     scriptAssetLane: source.id,
                 });
                 return { ...node, title: item.title, width: cellWidth, height: cellHeight, position: slots[index] };
@@ -8734,6 +8741,8 @@ function AtelierCanvasPage() {
             );
 
             const created: CanvasNodeData[] = [];
+            /** 这一批铺出来的视频节点（顺序 = 时间线顺序），末尾要一起接进一个视频合并节点。 */
+            const createdVideoNodes: CanvasNodeData[] = [];
             const createdConnections: CanvasConnection[] = [];
             let assetLinkCount = 0;
             let cursor = 0;
@@ -8880,6 +8889,7 @@ function AtelierCanvasPage() {
                 };
                 if (videoOnly) packIndex += 1;
                 created.push(videoNode);
+                createdVideoNodes.push(videoNode);
                 // 这一段里的每个关键帧都喂给同一个视频节点 → 多镜合成一段连续视频。
                 for (const imageNode of imageNodes) createdConnections.push({ id: nanoid(), fromNodeId: imageNode.id, toNodeId: videoNode.id });
                 // 资产图也直接连到视频节点：视频生成窗口本身就是「已链接资产图片」的状态。
@@ -8903,6 +8913,41 @@ function AtelierCanvasPage() {
                 }
             }
 
+            /**
+             * 把这一批视频节点**一起接进一个「视频合并」节点**（用户 2026-11-07 第 02 条）。
+             *
+             * 铺完链路不用再手动一个个连线：合并节点里已经按铺出的顺序排好时间线，
+             * 生成完直接就能「导出到剪映」。
+             *  - 只有一段视频时不建（一个片子套一个合并节点纯属噪音）；
+             *  - 时间线 `outSec` 先按该段视频节点请求的秒数占位 —— 生成前还没有真实时长，
+             *    合并节点会把这些段标成「缺失」，生成后自然有内容；
+             *  - 位置放在这一列视频节点的右侧、竖直居中，与链路之间留 `gapX`。
+             */
+            let mergeNode: CanvasNodeData | null = null;
+            if (createdVideoNodes.length >= 2) {
+                const mergeSpec = NODE_DEFAULT_SIZE[CanvasNodeType.VideoMerge];
+                const rightmost = Math.max(...createdVideoNodes.map((node) => node.position.x + node.width));
+                const top = Math.min(...createdVideoNodes.map((node) => node.position.y));
+                const bottom = Math.max(...createdVideoNodes.map((node) => node.position.y + node.height));
+                const clips: CanvasVideoMergeClip[] = createdVideoNodes.map((node) => ({
+                    nodeId: node.id,
+                    kind: "video",
+                    title: node.title || node.id,
+                    durationSec: undefined,
+                    inSec: 0,
+                    outSec: Number(node.metadata?.seconds) || 5,
+                }));
+                mergeNode = {
+                    ...createCanvasNode(CanvasNodeType.VideoMerge, { x: 0, y: 0 }, { status: NODE_STATUS_IDLE, videoMergeClips: clips }),
+                    title: t("canvas.scriptNode.pipelineMergeTitle", { count: createdVideoNodes.length }),
+                    width: mergeSpec.width,
+                    height: mergeSpec.height,
+                    position: { x: rightmost + gapX, y: top + (bottom - top - mergeSpec.height) / 2 },
+                };
+                created.push(mergeNode);
+                for (const node of createdVideoNodes) createdConnections.push({ id: nanoid(), fromNodeId: node.id, toNodeId: mergeNode.id });
+            }
+
             const shotCount = renderable.length;
             const videoCount = groups.length;
             // 确认文案三档：整表 / 选择 / 简洁版（含选择）。简洁版一个文本 / 图片节点都不建，
@@ -8923,12 +8968,12 @@ function AtelierCanvasPage() {
                   : "canvas.scriptNode.pipelineConfirmBody";
             modal.confirm({
                 title: t(confirmTitleKey),
-                content: t(confirmBodyKey, {
-                    shots: shotCount,
-                    nodes: created.length,
-                    videos: videoCount,
-                    links: assetLinkCount,
-                }),
+                content: (
+                    <div>
+                        <div>{t(confirmBodyKey, { shots: shotCount, nodes: created.length, videos: videoCount, links: assetLinkCount })}</div>
+                        {mergeNode ? <div className="mt-1.5 opacity-70">{t("canvas.scriptNode.pipelineMergeHint", { count: createdVideoNodes.length })}</div> : null}
+                    </div>
+                ),
                 okText: t(videoOnly ? "canvas.scriptNode.pipelineVideoOnly" : "canvas.scriptNode.pipelineBuild"),
                 cancelText: t("common.cancel"),
                 onOk: () => {

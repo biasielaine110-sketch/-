@@ -5,9 +5,11 @@ import { useTranslation } from "react-i18next";
 
 import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
 import { CanvasSizePicker } from "@/components/canvas/canvas-size-picker";
+import { ModelPicker } from "@/components/model-picker";
 import { resolveStoryScriptImageSize } from "@/constant/story-script";
 import { defaultScriptAssetBatchSelection, groupScriptAssetBatchItems, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import type { CanvasTheme } from "@/lib/canvas-theme";
+import { resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 
 /**
  * 脚本节点「一键批量生成资产图」的勾选弹窗。
@@ -27,15 +29,18 @@ export type CanvasScriptBatchAssetDialogProps = {
     imageSize?: string;
     onImageSizeChange?: (size: string) => void;
     onCancel: () => void;
-    /** 交回本次要生成的资产 + 本次挑的风格 / 比例。 */
-    onSubmit: (items: ScriptAssetBatchItem[], options: { styleTemplateId?: string; size?: string }) => void;
+    /** 交回本次要生成的资产 + 本次挑的风格 / 比例 / 模型。 */
+    onSubmit: (items: ScriptAssetBatchItem[], options: { styleTemplateId?: string; size?: string; model?: string }) => void;
 };
 
 export function CanvasScriptBatchAssetDialog({ open, theme, items, imageSize, onImageSizeChange, onCancel, onSubmit }: CanvasScriptBatchAssetDialogProps) {
     const { t } = useTranslation();
+    const globalConfig = useConfigStore((state) => state.config);
     const [checkedKeys, setCheckedKeys] = useState<string[]>([]);
     const [styleId, setStyleId] = useState("");
     const [size, setSize] = useState("");
+    /** 整批共用的生图模型：空 = 跟随全局默认（`resolveModelForCapability` 补）。 */
+    const [model, setModel] = useState("");
     /** 风格面板展开时先让 Esc 收起面板，而不是一次把弹窗关掉。 */
     const [styleOpen, setStyleOpen] = useState(false);
 
@@ -50,11 +55,13 @@ export function CanvasScriptBatchAssetDialog({ open, theme, items, imageSize, on
             setCheckedKeys([]);
             setStyleId("");
             setStyleOpen(false);
+            setModel("");
             return;
         }
         setCheckedKeys(defaultScriptAssetBatchSelection(items));
         setStyleId("");
         setStyleOpen(false);
+        setModel("");
         setSize(resolveStoryScriptImageSize(imageSize));
         // items / imageSize 在打开瞬间才是「这一次」的值；开着的时候不跟着外部变化重置，否则会把勾选清掉。
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -185,6 +192,23 @@ export function CanvasScriptBatchAssetDialog({ open, theme, items, imageSize, on
                             })}
                         </div>
 
+                        {/* 生图模型：整批共用一个 —— 同一批资产用同一个模型，出图风格才一致。
+                            不选 = 跟随全局默认（节点上不写 `metadata.model`，以后改全局还能跟着变）。 */}
+                        <div className="flex flex-col gap-1">
+                            <span className="text-[11px] opacity-60" style={{ color: theme.node.text }}>
+                                {t("canvas.scriptNode.batchAssetModelLabel")}
+                            </span>
+                            <ModelPicker
+                                config={globalConfig}
+                                value={resolveModelForCapability(globalConfig, model, "image") || undefined}
+                                onChange={setModel}
+                                capability="image"
+                                placeholder={t("canvas.scriptNode.batchAssetModelPlaceholder")}
+                                onMissingConfig={() => void 0}
+                                fullWidth
+                            />
+                        </div>
+
                         {/* 风格 / 比例：整批共用一套，保证一批资产看起来是一套（与「添加资产」同一个落点）。 */}
                         <div className="flex flex-wrap items-center gap-2 text-[12px]" style={{ color: theme.node.text }}>
                             <span className="text-[11px] opacity-60">{t("canvas.scriptNode.assetGenStyleLabel")}</span>
@@ -214,7 +238,7 @@ export function CanvasScriptBatchAssetDialog({ open, theme, items, imageSize, on
                                     type="primary"
                                     icon={<Sparkles className="size-3.5" />}
                                     disabled={!selected.length}
-                                    onClick={() => onSubmit(selected, { styleTemplateId: styleId || undefined, size: size || undefined })}
+                                    onClick={() => onSubmit(selected, { styleTemplateId: styleId || undefined, size: size || undefined, model: model || undefined })}
                                 >
                                     {t("canvas.scriptNode.batchAssetRun", { count: selected.length })}
                                 </Button>
