@@ -241,6 +241,13 @@ type CanvasScriptNodeContentProps = {
      * 与提交生成。
      */
     onBatchGenerateAssets?: (nodeId: string, items: ScriptAssetBatchItem[], options?: { styleTemplateId?: string; size?: string; model?: string }) => void;
+    /**
+     * 「一键直接生图」：**不弹窗、不筛选**，把表里全部角色 / 场景 / 道具一次铺成图片节点并立刻开生。
+     *
+     * 与 `onBatchGenerateAssets` 的唯一区别就是「不筛」——已经出过图的也照生；
+     * 画幅由上层按分类定（角色 9:16、场景 / 道具 16:9），模型走「配置偏好 → 默认生图模型」。
+     */
+    onDirectGenerateAssets?: (nodeId: string) => void;
     /** 已链接素材的分类（节点 id → 分类），用于在引用条上回显 / 切换。 */
     assetRoles?: Record<string, string>;
     /** 切换某张已链接素材的分类（角色 / 场景 / 道具 / 站位图）。 */
@@ -358,6 +365,7 @@ export function CanvasScriptNodeContent({
     onLinkAssets,
     onGenerateAsset,
     onBatchGenerateAssets,
+    onDirectGenerateAssets,
     assetRoles,
     onAssetRoleChange,
     onBuildPipeline,
@@ -3069,29 +3077,54 @@ export function CanvasScriptNodeContent({
                             {t("canvas.scriptNode.pipelineVideoOnly")}
                         </button>
                     ) : null}
-                    {/* 「一键铺视频链路并生成」：只铺视频窗口 + 打组 + 接进一个视频合并节点 +
-                        逐个点「生成」（间隔 2 秒，跑一遍即结束）。用户 2026-11-07 第 3 条。
-                        这是「只铺视频」的超集，所以放在它右边、样式更实一点（primary 描边）以示推荐。 */}
-                    {onBuildPipeline ? (
-                        <button
-                            type="button"
-                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-                            style={{ borderColor: theme.toolbar.activeText, color: theme.node.text, opacity: 0.9 }}
-                            onMouseDown={(event) => event.stopPropagation()}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, {
-                                    videoOnly: true,
-                                    group: true,
-                                    autoGenerate: true,
-                                });
-                            }}
-                            title={t("canvas.scriptNode.pipelineVideoGenerateTip")}
-                        >
-                            <Play className="size-3.5" />
-                            {t("canvas.scriptNode.pipelineVideoGenerate")}
-                        </button>
+                    {/* 「一键直接生图」+「一键铺视频链路并生成」同一行，**直接生图在左**（用户 2026-11-07 点名）：
+                        左边这颗只管图 —— 不弹窗、不筛选，表里全部角色 / 场景 / 道具一次全生（角色 9:16、场景 / 道具 16:9），
+                        模型走「配置偏好 → 默认生图模型」；右边那颗才是「只铺视频窗口 + 打组 + 逐段生成」。
+                        两颗一起出现时才包这层 div，避免多出一条空行。 */}
+                    {onBuildPipeline || onDirectGenerateAssets ? (
+                        <div className="flex items-center gap-1.5">
+                            {onDirectGenerateAssets && batchAssetItems.length ? (
+                                <button
+                                    type="button"
+                                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                                    style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14` }}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                        event.stopPropagation();
+                                        onDirectGenerateAssets(node.id);
+                                    }}
+                                    title={t("canvas.scriptNode.directAssetHint", { count: batchAssetItems.length })}
+                                >
+                                    <ImageIcon className="size-3.5" />
+                                    {t("canvas.scriptNode.directAsset")}
+                                </button>
+                            ) : null}
+                            {/* 「一键铺视频链路并生成」：只铺视频窗口 + 打组 + 接进一个视频合并节点 +
+                                逐个点「生成」（间隔 2 秒，跑一遍即结束）。用户 2026-11-07 第 3 条。
+                                这是「只铺视频」的超集，所以样式更实一点（primary 描边）以示推荐。 */}
+                            {onBuildPipeline ? (
+                                <button
+                                    type="button"
+                                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                                    style={{ borderColor: theme.toolbar.activeText, color: theme.node.text, opacity: 0.9 }}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                        event.stopPropagation();
+                                        onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, {
+                                            videoOnly: true,
+                                            group: true,
+                                            autoGenerate: true,
+                                        });
+                                    }}
+                                    title={t("canvas.scriptNode.pipelineVideoGenerateTip")}
+                                >
+                                    <Play className="size-3.5" />
+                                    {t("canvas.scriptNode.pipelineVideoGenerate")}
+                                </button>
+                            ) : null}
+                        </div>
                     ) : null}
                     {/* 合并为一镜 / 取消合并 + 解除合并组：成对放在这里，勾几行立刻就能点。
                         「取消合并」这个**按下态**同样不能用 activeBg（浅米色文字压浅米色底 = 看不出已选中），

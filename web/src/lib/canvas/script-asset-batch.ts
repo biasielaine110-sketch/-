@@ -8,6 +8,7 @@ import {
     SCRIPT_ASSET_GENERATABLE_ROLE_IDS,
     setStoryScriptCellAssetIds,
     setStoryScriptNameLock,
+    resolveStoryScriptImageSize,
     type ScriptAssetRole,
     type StoryScriptExtraColumn,
     type StoryScriptRow,
@@ -94,6 +95,35 @@ export function groupScriptAssetBatchItems(items: readonly ScriptAssetBatchItem[
 export function defaultScriptAssetBatchSelection(items: readonly ScriptAssetBatchItem[]) {
     return items.filter((item) => !item.existingNodeIds.length).map((item) => item.key);
 }
+
+// ── 「一键直接生图」：不筛不弹窗，全量出图，画幅按分类定 ────────────────────────────
+
+/**
+ * 「一键直接生图」的分类默认画幅（用户 2026-11-07 口径）：
+ * **角色竖版 9:16，场景 / 道具横版 16:9**。
+ *
+ * 与「一键批量生成」的区别就在这两点：① 不筛选（`existingNodeIds` 有图也照生）；
+ * ② 画幅不再整批统一，而是按分类各给各的 —— 角色是站着的定妆照，场景 / 道具是横构图。
+ * 人物站位（`blocking`）是俯视走位示意图，跟场景同一档横版。
+ */
+export const SCRIPT_ASSET_DIRECT_SIZE_BY_ROLE: Record<ScriptAssetRole, string> = {
+    character: "9:16",
+    scene: "16:9",
+    prop: "16:9",
+    blocking: "16:9",
+    audio: "16:9",
+};
+
+/**
+ * 某一类资产这次用哪个画幅。
+ *
+ * 节点上手动设过「生图比例」（`metadata.scriptImageSize`）就以它为准 —— 那个选择器是全画布通用的
+ * 资产画幅开关，用户明确设了却被忽略会很莫名其妙；空 / `auto` 时才回落到按分类的默认值。
+ */
+export function resolveScriptAssetDirectSize(role: ScriptAssetRole, override?: unknown): string {
+    return resolveStoryScriptImageSize(override) || SCRIPT_ASSET_DIRECT_SIZE_BY_ROLE[role] || "16:9";
+}
+
 
 // ── 挂载：批量生成的图要落到「具体的资产」上 ──────────────────────────────────────
 
@@ -247,6 +277,50 @@ export function planScriptAssetColumn(
 /** 除脚本节点本身之外，所有节点在画布上的占位（竖列排布的 `occupied`）。 */
 export function collectScriptAssetOccupied(nodes: readonly CanvasNodeData[], sourceId: string): ScriptAssetRect[] {
     return nodes.filter((node) => node.id !== sourceId && node.width > 0 && node.height > 0).map((node) => ({ x: node.position.x, y: node.position.y, width: node.width, height: node.height }));
+}
+
+/**
+ * 「一键直接生图」的竖列排布 —— 与 `planScriptAssetColumn` 同一条列（同一个起点、同一套让位规则），
+ * 唯一区别：**每张图按自己的真实高度往下摞**，不再塞进统一的方格里居中。
+ *
+ * 为什么不能直接用 `planScriptAssetColumn`：它假设整批同一个画幅（`cellHeight = max(高)`，
+ * 每张在图格里居中）。而「一键直接生图」是角色 9:16 + 场景 / 道具 16:9 混一批，
+ * 一张 320×569 的方格里塞一张 320×180 的横图，中间会空出两百多像素的白，一列看着像断成两截。
+ * 按真实高度摞起来才是用户要的「跟批量生成一样的排布」：还是一列、还是紧挨脚本左侧、还是避让已有节点。
+ */
+export function planScriptDirectAssetColumn(
+    origin: { x: number; y: number },
+    sizes: ReadonlyArray<{ width: number; height: number }>,
+    occupied: readonly ScriptAssetRect[],
+    options?: { gap?: number; span?: number },
+): Array<{ x: number; y: number }> {
+    if (!sizes.length) return [];
+    const minGap = Math.max(0, options?.gap ?? SCRIPT_ASSET_COLUMN_MIN_GAP);
+    const cellWidth = Math.max(1, ...sizes.map((size) => size.width));
+    const totalHeight = sizes.reduce((sum, size) => sum + Math.max(1, size.height), 0);
+    const span = Number(options?.span) || 0;
+    let gap = minGap;
+    if (span > 0 && sizes.length > 1) {
+        const slack = (span - totalHeight) / (sizes.length - 1);
+        gap = Math.min(SCRIPT_ASSET_COLUMN_MAX_GAP, Math.max(minGap, Math.round(slack)));
+    }
+    const placed: Array<{ x: number; y: number }> = [];
+    let cursorY = origin.y;
+    for (const size of sizes) {
+        const width = Math.max(1, size.width);
+        const height = Math.max(1, size.height);
+        // 同一列居中：混合画幅时左右边缘不齐，居中最稳（窄的 9:16 不会贴着左边线）。
+        const x = origin.x + (cellWidth - width) / 2;
+        let y = cursorY;
+        for (let guard = 0; guard <= occupied.length + 8; guard += 1) {
+            const hit = occupied.find((other) => rectsOverlap(other, { x, y, width, height }));
+            if (!hit) break;
+            y = hit.y + hit.height + minGap;
+        }
+        placed.push({ x, y });
+        cursorY = y + height + gap;
+    }
+    return placed;
 }
 
 /**

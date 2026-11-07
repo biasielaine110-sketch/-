@@ -113,7 +113,7 @@ import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-orde
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import { buildScriptAssetBatchMounts, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, resolveScriptAssetColumnX, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { buildScriptAssetBatchMounts, buildScriptAssetBatchItems, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
@@ -8374,6 +8374,116 @@ function AtelierCanvasPage() {
         [message, revealNodes, t],
     );
 
+    /**
+     * 「一键直接生图」：**不弹窗、不筛选**，把分镜表里的角色 / 场景 / 道具全部铺成图片节点并立刻开生。
+     *
+     * 用户 2026-11-07 口径：「在一键铺视频链路并生成按钮的左边，添加一键直接生图按钮，直接将分镜表中的
+     * 相关图进行生成，使用偏好的默认生图模型进行全部生图，并按照一键批量生成按钮出来的图片窗口排布的位置
+     * 进行排放并链接到分镜表对应的位置。跟一键批量生成的区分是一键直接生图是直接全生图，不进行筛选哪些生
+     * 哪些不生。生图的比例角色默认选 9x16，场景和道具选 16x9。」
+     *
+     * 所以与 `handleBatchGenerateScriptAssets` 只有两处不同，其余（竖列摆位 / 挂格 / 分批提交）**完全共用**：
+     *  ① **选谁**：`buildScriptAssetBatchItems(rows, [])` —— `existing` 传空数组，已经出过图的也算在内，
+     *     不做「已有就跳过」的筛选（这正是和「一键批量生成」的区别）；
+     *  ② **画幅**：逐条按分类算（角色 9:16、场景 / 道具 / 站位 16:9），不再整批一个尺寸；
+     * 模型**不写** `metadata.model` ⇒ 走运行时回落 = 「配置偏好里的默认生图模型」，以后改偏好这批也跟得上。
+     */
+    const handleDirectGenerateScriptAssets = useCallback(
+        (nodeId: string) => {
+            const source = nodesRef.current.find((item) => item.id === nodeId);
+            if (!source) return;
+            // existing 传空数组 = 不筛：这是「直接全生图」的唯一开关，别"顺手"改成收集已有的节点。
+            const wanted = buildScriptAssetBatchItems(source.metadata?.scriptRows, []).filter((item) => item.title.trim() && item.prompt.trim());
+            if (!wanted.length) {
+                message.warning(t("canvas.scriptNode.directAssetEmpty"));
+                return;
+            }
+            const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            // 节点上手动设过「生图比例」就整批听它的；没设才按分类走 9:16 / 16:9。
+            const sizeOverride = source.metadata?.scriptImageSize;
+            const planned = wanted.map((item) => {
+                const imageSize = resolveScriptAssetDirectSize(item.role, sizeOverride);
+                const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
+                return { item, imageSize, width: Math.round(dims.width), height: Math.round(dims.height) };
+            });
+            const columnX = resolveScriptAssetColumnX(
+                { id: source.id, position: source.position, width: source.width, height: source.height },
+                nodesRef.current,
+                Math.max(...planned.map((cell) => cell.width)),
+            );
+            // 混合画幅：按各自真实高度往下摞（不能塞进同一个方格居中，见 lib 里 planScriptDirectAssetColumn 注释）。
+            const slots = planScriptDirectAssetColumn(
+                { x: columnX, y: source.position.y },
+                planned.map((cell) => ({ width: cell.width, height: cell.height })),
+                collectScriptAssetOccupied(nodesRef.current, source.id),
+                { span: source.height },
+            );
+            if (!slots.length) {
+                message.warning(t("canvas.scriptNode.batchAssetNoRoom"));
+                return;
+            }
+            const created = planned.slice(0, slots.length).map((cell, index) => {
+                const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, {
+                    prompt: cell.item.prompt,
+                    status: NODE_STATUS_IDLE,
+                    ...(cell.imageSize ? { size: cell.imageSize } : {}),
+                    // ⚠️ 故意不写 `model`：留空 = 生成时回落「配置偏好 → 默认生图模型」。
+                    scriptAssetLane: source.id,
+                });
+                return { ...node, title: cell.item.title, width: cell.width, height: cell.height, position: slots[index] };
+            });
+            const roles: Record<string, ScriptAssetRole> = Object.fromEntries(created.map((node, index) => [node.id, planned[index].item.role]));
+            const mountExtras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
+            const mountTargets = buildScriptAssetBatchMounts(source.metadata?.scriptRows);
+            let mountedCells = source.metadata?.scriptCellAssets;
+            let mountedLocks = source.metadata?.scriptNameLocks;
+            created.forEach((node, index) => {
+                const cell = planned[index];
+                if (!cell) return;
+                const mounted = mountScriptAssetToCells({ cells: mountedCells, locks: mountedLocks, mounts: mountTargets[cell.item.key] || [], nodeId: node.id, extras: mountExtras });
+                mountedCells = mounted.cells;
+                mountedLocks = mounted.locks;
+            });
+            const withRoles = (item: CanvasNodeData) =>
+                item.id === nodeId
+                    ? {
+                          ...item,
+                          metadata: {
+                              ...item.metadata,
+                              scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), ...roles },
+                              scriptCellAssets: mountedCells,
+                              scriptNameLocks: mountedLocks,
+                          },
+                      }
+                    : item;
+            setNodes((prev) => [...prev.map(withRoles), ...created]);
+            setConnections((prev) => [...prev, ...created.map((node) => ({ id: nanoid(), fromNodeId: node.id, toNodeId: nodeId }))]);
+            // 紧接着的触发生成要读 nodesRef 判断「这是不是一个图片节点」（结果写回自身），必须先同步。
+            nodesRef.current = [...nodesRef.current.map(withRoles), ...created];
+            setSelectedNodeIds(new Set(created.map((node) => node.id)));
+            setSelectedConnectionId(null);
+            revealNodes(created, "center");
+            message.success(t("canvas.scriptNode.directAssetStarted", { count: created.length }));
+            if (created.length < wanted.length) message.info(t("canvas.scriptNode.batchAssetSkipped", { count: wanted.length - created.length }));
+
+            void (async () => {
+                for (let index = 0; index < created.length; index += SCRIPT_ASSET_LAUNCH_BATCH) {
+                    const chunk = created.slice(index, index + SCRIPT_ASSET_LAUNCH_BATCH);
+                    await Promise.all(
+                        chunk.map((node, offset) => {
+                            const prompt = planned[index + offset].item.prompt;
+                            // 生图会把标题改写成「提示词前 32 字」，资产节点要留住资产名，生成结束后改回来。
+                            return Promise.resolve(generateNodeRef.current?.(node.id, "image", prompt)).finally(() => {
+                                setNodes((prev) => prev.map((item) => (item.id === node.id && item.title !== node.title ? { ...item, title: node.title } : item)));
+                            });
+                        }),
+                    );
+                }
+            })();
+        },
+        [message, revealNodes, t],
+    );
+
     // ---- 逐镜「镜头图」（metadata.scriptRowAssets）----
     // 与上面那套「整表资产」并列、但语义不同：资产是整表共享的参考图（按分类逐镜分派），镜头图是
     // **按镜指定**的成片关键帧，铺链路时只连到这一镜的图片节点、并随该分组合并进视频节点。
@@ -9371,6 +9481,7 @@ function AtelierCanvasPage() {
                         onImportAssets={(nodeId, files, role) => void handleImportScriptAssets(nodeId, files, role)}
                         onGenerateAsset={handleGenerateScriptAsset}
                         onBatchGenerateAssets={handleBatchGenerateScriptAssets}
+                        onDirectGenerateAssets={handleDirectGenerateScriptAssets}
                         onLinkAssets={handleLinkScriptAssets}
                         assetRoles={contentNode.metadata?.scriptAssetRoles}
                         onAssetRoleChange={handleAssetRoleChange}
@@ -9470,7 +9581,7 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptAudioCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBatchGenerateScriptAssets, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAudioImport, handleRowAudiosChange, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, handleDetachVideoMergeClips, handleVideoMergeExport, handleVideoMergeRender, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme, videoMergeExportingNodeId, videoMergeRenderProgress, videoMergeRenderingNodeId, videoMergeResolvedByNodeId],
+        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptAudioCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBatchGenerateScriptAssets, handleDirectGenerateScriptAssets, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAudioImport, handleRowAudiosChange, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, handleDetachVideoMergeClips, handleVideoMergeExport, handleVideoMergeRender, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme, videoMergeExportingNodeId, videoMergeRenderProgress, videoMergeRenderingNodeId, videoMergeResolvedByNodeId],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;
