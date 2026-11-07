@@ -534,7 +534,7 @@ export default {
         },
         videoMerge: {
             summary: "{{count}} clips · {{duration}}",
-            pickViaConnect: "Select this node, press X, then click video/image nodes to link them in. Unlink to remove.",
+            pickViaConnect: "Select this node, press V, then click video/image nodes to add them. Use the × on a clip or unlink it to remove.",
             clear: "Clear timeline",
             remove: "Remove from timeline",
             missingSource: "Source node was deleted or is empty",
@@ -565,6 +565,7 @@ export default {
             playAllSegment: "Full timeline · {{index}}/{{count}}",
             play: "Play",
             pause: "Pause",
+            removeClip: "Remove this clip (also unlinks it)",
             playAllHint: "One continuous timeline",
         },
         mergeNode: {
@@ -1746,7 +1747,8 @@ export default {
             copyImageNodeDone: "Copied into a new node",
             copyImageFailed: "Failed to copy image",
             connect: "Select a node, press X, click nodes or groups; Shift+click a group member to link the whole group; press X or Esc to finish",
-            connectHint: "Linking: click nodes/groups, or Shift+click a member to link the whole group; press X or Esc to finish",
+            pickVideoMerge: "Select a video-merge node, press V, then click video/image nodes to add them to the timeline; the × on a clip removes just that clip",
+            connectHint: "Linking: click nodes/groups, or Shift+click a member to link the whole group; press X / V or Esc to finish",
             connectCanceled: "Linking ended",
             selectNodeToConnect: "Select a node first, then press X to connect",
             deleteSelected: "Delete the currently selected nodes",

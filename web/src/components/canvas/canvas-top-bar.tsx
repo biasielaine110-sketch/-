@@ -156,6 +156,7 @@ export function CanvasTopBar({
                     <Shortcut keys={["G"]} value={t("canvas.shortcut.resetNodeSize")} />
                     <Shortcut keys={["`"]} value={t("canvas.shortcut.resetNodeWindow")} />
                     <Shortcut keys={["X"]} value={t("canvas.shortcut.connect")} />
+                    <Shortcut keys={["V"]} value={t("canvas.shortcut.pickVideoMerge")} />
                     <Shortcut keys={["Alt", "Q"]} value={t("canvas.shortcut.deleteSelected")} />
                     <Shortcut keys={["Delete / Backspace"]} value={t("canvas.shortcut.delete")} />
                     <Shortcut keys={["Esc"]} value={t("canvas.shortcut.escape")} />

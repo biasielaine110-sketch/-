@@ -240,13 +240,24 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
         commitClips(next);
     };
 
-    const removeSelected = () => {
-        if (!selected) return;
-        const next = removeMergeClip(rawClips, safeIndex);
+    /**
+     * 时间线条上某一段右上角的叉号：移出这一段 + 顺手断掉它那根线。
+     *
+     * 以前只能「去画布上把连线删掉」才算移出，可时间线块很小、线又常常压在别的线下面，
+     * 用户实际上找不到删除入口。两条路必须都走通，而且**永远是同一件事**
+     * （时间线 = 连线，见上：只删段不断线会留下「线还在、段没了」的幽灵态）。
+     */
+    const removeClipAt = (index: number) => {
+        const target = clips[index];
+        if (!target) return;
+        const next = removeMergeClip(rawClips, index);
         commitClips(next);
-        onDetachClips?.(node.id, [selected.clip.nodeId]);
-        setSelectedIndex(Math.max(0, Math.min(safeIndex, next.length - 1)));
+        onDetachClips?.(node.id, [target.clip.nodeId]);
+        setSelectedIndex(Math.max(0, Math.min(index, next.length - 1)));
     };
+
+    /** 头部垃圾桶 = 删当前选中那一段：走同一条移除路径，别养出第二套写法。 */
+    const removeSelected = () => removeClipAt(safeIndex);
 
     /** 清空时间线 = 把这节点进来的线全断掉，否则线还在、段没了，谁也说不清哪个才算数。 */
     const clearClips = () => {
@@ -357,7 +368,7 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
                                         key={`${item.clip.nodeId}-${index}`}
                                         data-video-merge-block
                                         onPointerDown={(event) => handleBlockPointerDown(event, index)}
-                                        className={`relative min-w-0 flex-1 cursor-grab overflow-hidden rounded-md border px-1 py-0.5 text-[10px] leading-tight transition ${dragging && dragFrom === index ? "opacity-40" : ""}`}
+                                        className={`group relative min-w-0 flex-1 cursor-grab overflow-hidden rounded-md border px-1 py-0.5 text-[10px] leading-tight transition ${dragging && dragFrom === index ? "opacity-40" : ""}`}
                                         style={{
                                             flexGrow: Math.max(0.6, length),
                                             flexBasis: 0,
@@ -370,7 +381,25 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
                                         {showDropMarker ? <span className="absolute inset-y-0 -left-px w-0.5 rounded" style={{ background: "#0ea5e9" }} /> : null}
                                         <span className="block truncate font-semibold opacity-80">{index + 1}</span>
                                         <span className="block truncate opacity-55">{formatMergeClock(length)}</span>
-                                        {item.missing ? <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-red-500" /> : null}
+                                        {/* 失效标记挪到右下角：右上角让给删除叉号（两者叠在一起会误点） */}
+                                        {item.missing ? <span className="absolute bottom-0.5 right-0.5 size-1.5 rounded-full bg-red-500" /> : null}
+                                        {/* 单条删除：每段自带叉号，不必再去画布上找那根线 */}
+                                        <button
+                                            type="button"
+                                            data-video-merge-remove={index}
+                                            title={t("canvas.videoMerge.removeClip")}
+                                            aria-label={t("canvas.videoMerge.removeClip")}
+                                            /* 只 stopPropagation、**不 preventDefault**：pointerdown 一旦 preventDefault，
+                                               浏览器就不再补发兼容鼠标事件，onClick 永远不来（参考图 chip 双击踩过同一个坑）。 */
+                                            onPointerDown={(event) => event.stopPropagation()}
+                                            onClick={(event) => {
+                                                event.stopPropagation();
+                                                removeClipAt(index);
+                                            }}
+                                            className={`absolute right-0 top-0 z-10 flex size-3.5 cursor-pointer items-center justify-center rounded-bl bg-black/60 text-white transition-opacity hover:bg-red-500 ${isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}
+                                        >
+                                            <X className="size-2.5" />
+                                        </button>
                                     </div>
                                 );
                             })}

@@ -534,7 +534,7 @@ export default {
         },
         videoMerge: {
             summary: "{{count}} 段 · {{duration}}",
-            pickViaConnect: "选中本节点按 X，再点视频 / 图片节点连线即可加入时间线；断开连线即移出。",
+            pickViaConnect: "选中本节点按 V，再点视频 / 图片节点即可加入时间线；每段右上角叉号或断开连线都能移出。",
             clear: "清空时间线",
             remove: "移出时间线",
             missingSource: "源节点已删除或内容为空",
@@ -565,6 +565,7 @@ export default {
             playAllSegment: "整条 · 第 {{index}}/{{count}} 段",
             play: "播放",
             pause: "暂停",
+            removeClip: "移出这一段（同时断开它的连线）",
             playAllHint: "整条 · 一条时间线连播",
         },
         mergeNode: {
@@ -1746,7 +1747,8 @@ export default {
             copyImageNodeDone: "已复制到新节点",
             copyImageFailed: "复制图片失败",
             connect: "选中节点后按 X，可连续点击多个节点或组连线；Shift+点击组内节点=连整组；再按 X 或 Esc 结束",
-            connectHint: "连线中：可点节点/组，或 Shift+点组内节点以连接整组；再按 X 或 Esc 结束",
+            pickVideoMerge: "选中视频合并节点后按 V，再点视频 / 图片节点即可加入时间线；每段右上角叉号可移出单段",
+            connectHint: "连线中：可点节点/组，或 Shift+点组内节点以连接整组；再按 X / V 或 Esc 结束",
             connectCanceled: "已结束连线",
             selectNodeToConnect: "请先选中一个节点，再按 X 连线",
             deleteSelected: "删除当前选中的节点",

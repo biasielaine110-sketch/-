@@ -79,6 +79,7 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, isMiniMapOpe
                     <Shortcut label="G" value={t("canvas.shortcut.resetNodeSize")} />
                     <Shortcut label="`" value={t("canvas.shortcut.resetNodeWindow")} />
                     <Shortcut label="X" value={t("canvas.shortcut.connect")} />
+                    <Shortcut label="V" value={t("canvas.shortcut.pickVideoMerge")} />
                     <Shortcut label="Alt + Q" value={t("canvas.shortcut.deleteSelected")} />
                     <Shortcut label="Delete / Backspace" value={t("canvas.shortcut.delete")} />
                 </div>

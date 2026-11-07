@@ -3409,14 +3409,12 @@ function AtelierCanvasPage() {
                 return;
             }
 
-            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "x") {
-                event.preventDefault();
-                if (connectingParamsRef.current) {
-                    setConnecting(null);
-                    setPendingConnectionCreate(null);
-                    message.info(t("canvas.shortcut.connectCanceled"));
-                    return;
-                }
+            /**
+             * 起一条 sticky 连线：选中的节点当锚点，之后连点其他节点即可逐个接上。
+             * X（通用连线）与 V（视频合并拾取）共用这一份，别各写一遍 —— 两处的锚点方向
+             * （分组按 source、其余按 target）必须完全一致，复制一份迟早走偏。
+             */
+            const beginPickConnect = () => {
                 if (selectedNodeIdsRef.current.size !== 1) {
                     message.warning(t("canvas.shortcut.selectNodeToConnect"));
                     return;
@@ -3427,14 +3425,14 @@ function AtelierCanvasPage() {
                     message.warning(t("canvas.shortcut.selectNodeToConnect"));
                     return;
                 }
-                // Sticky X: selected node stays the receiver; click many providers until X/Esc.
-                // 脚本节点**不走特例**：X 选中脚本节点后逐个点其他节点，即可把它们连进脚本节点 ——
-                // 连进来的素材就成了「整表资产池」，这正是「按 X 拾取节点加入资产池」。
+                // Sticky: selected node stays the receiver; click many providers until the key/Esc again.
+                // 脚本节点**不走特例**：选中脚本节点后逐个点其他节点，即可把它们连进脚本节点 ——
+                // 连进来的素材就成了「整表资产池」，这正是「拾取节点加入资产池」。
                 // 想用弹窗添加资产，请点节点里的「+ 添加资产」按钮（节点内容区的 assetEntryRow）。
                 //
-                // ⚠️ 分组是唯一例外：它是**一捆素材**，X 打在组上时用户想的是「把这组接到我刚点的节点」，
+                // ⚠️ 分组是唯一例外：它是**一捆素材**，键打在组上时用户想的是「把这组接到我刚点的节点」，
                 // 所以按 source 起线（组 → 点到的节点），展开后就是 每个成员 → 目标。
-                // 想反过来（把某个源推给组里每个成员），拖手柄连组即可，不用 X。
+                // 想反过来（把某个源推给组里每个成员），拖手柄连组即可，不用快捷键。
                 const anchorHandleType = outputNode.type === CanvasNodeType.Group ? "source" : "target";
                 setMouseWorld({ x: anchorHandleType === "source" ? outputNode.position.x + outputNode.width : outputNode.position.x, y: outputNode.position.y + outputNode.height / 2 });
                 setConnecting({ nodeId: outputNodeId, handleType: anchorHandleType, sticky: true });
@@ -3443,6 +3441,36 @@ function AtelierCanvasPage() {
                 setSelectedConnectionId(null);
                 setPendingConnectionCreate(null);
                 message.info(t("canvas.shortcut.connectHint"));
+            };
+
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "x") {
+                event.preventDefault();
+                if (connectingParamsRef.current) {
+                    setConnecting(null);
+                    setPendingConnectionCreate(null);
+                    message.info(t("canvas.shortcut.connectCanceled"));
+                    return;
+                }
+                beginPickConnect();
+                return;
+            }
+
+            // V = 「往时间线里加素材」的专属键：只对**选中的单个视频合并节点**生效，
+            // 其他情况一律让位（连 preventDefault 都不做），免得占掉别处的 V。
+            // 方向与 X 一致（合并节点是 target，点到的素材是 source），所以复用同一份起线动作。
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "v") {
+                if (connectingParamsRef.current) {
+                    event.preventDefault();
+                    setConnecting(null);
+                    setPendingConnectionCreate(null);
+                    message.info(t("canvas.shortcut.connectCanceled"));
+                    return;
+                }
+                const singleId = selectedNodeIdsRef.current.size === 1 ? Array.from(selectedNodeIdsRef.current)[0] : null;
+                const singleNode = singleId ? nodesRef.current.find((node) => node.id === singleId) : null;
+                if (singleNode?.type !== CanvasNodeType.VideoMerge) return;
+                event.preventDefault();
+                beginPickConnect();
                 return;
             }
 
