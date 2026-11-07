@@ -234,8 +234,10 @@ type CanvasScriptNodeContentProps = {
     /**
      * 一键铺「分镜 → 图片 → 视频」链路。
      * 传 `rowIndexes` 就是「选择铺链路」：只铺勾选的这一段，且这一段合成**一个**视频节点。
+     * 传 `options.videoOnly` 就是简洁版「只铺视频」：只铺视频节点窗口，不建文本 / 图片节点
+     * （用户原话：「一键铺链路，需要有一个简洁版的按钮，即只铺视频节点窗口」）。
      */
-    onBuildPipeline?: (nodeId: string, rowIndexes?: number[]) => void;
+    onBuildPipeline?: (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean }) => void;
     /** 只给某一行分镜建一个视频节点（预填该镜的视频提示词与时长）。 */
     onBuildShotVideo?: (nodeId: string, rowIndex: number) => void;
     /** 勾选多镜后批量建视频节点（每镜一个节点，自带该镜的提示词 / 时长 / 素材连线）。 */
@@ -2833,7 +2835,8 @@ export function CanvasScriptNodeContent({
                  *
                  * 行 1：整表重生成 + 一键铺链路（原来就有）
                  * 行 2：选择铺链路（勾几镜 → 合成**一个**视频链路，新增）
-                 * 行 3：合并为一镜 / 取消合并 + 解除合并组（从左边批量条与「视频分段」旁搬来）
+                 * 行 3：只铺视频（简洁版：只铺视频节点窗口，不建文本 / 图片节点）
+                 * 行 4：合并为一镜 / 取消合并 + 解除合并组（从左边批量条与「视频分段」旁搬来）
                  */}
                 <div className="ml-auto flex flex-col items-end gap-1">
                     <div className="flex items-center gap-1.5">
@@ -2913,6 +2916,27 @@ export function CanvasScriptNodeContent({
                             {selectedRows.size
                                 ? t("canvas.scriptNode.pipelineBuildSelectedCount", { count: selectedRows.size })
                                 : t("canvas.scriptNode.pipelineBuildSelected")}
+                        </button>
+                    ) : null}
+                    {/* 「只铺视频」：一键铺链路的**简洁版**（用户原话：「需要有一个简洁版的按钮，即只铺视频节点窗口」）。
+                        只按分段把视频节点窗口铺出来 —— 提示词 / 时长 / 资产图 / 音频全都连好，但没有文本与图片节点，
+                        节点数量按分段数算（N 镜一段 = 1 个窗口），不会像完整版那样一镜变三个节点。
+                        勾了行就只铺勾的那几镜（与「选择铺链路」同口径：合成一段）。 */}
+                    {onBuildPipeline ? (
+                        <button
+                            type="button"
+                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                            style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, { videoOnly: true });
+                            }}
+                            title={t("canvas.scriptNode.pipelineVideoOnlyHint")}
+                        >
+                            <Video className="size-3.5" />
+                            {t("canvas.scriptNode.pipelineVideoOnly")}
                         </button>
                     ) : null}
                     {/* 合并为一镜 / 取消合并 + 解除合并组：成对放在这里，勾几行立刻就能点。

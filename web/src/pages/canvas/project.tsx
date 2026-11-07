@@ -8373,8 +8373,12 @@ function AtelierCanvasPage() {
         /**
          * @param rowIndexes 「选择铺链路」传勾选的行下标：只铺这一段，且这一段合成**一个**视频节点。
          *                   不传 = 整表一键铺链路（与以前逐字节一致）。
+         * @param options.videoOnly 简洁版「只铺视频」：**跳过文本 / 图片节点**，只按分段把视频节点窗口铺出来，
+         *                   视频节点照旧带该段的提示词、时长，以及资产图 / 音频的直接连线。
+         *                   用户原话：「一键铺链路，需要有一个简洁版的按钮，即只铺视频节点窗口」。
          */
-        (nodeId: string, rowIndexes?: number[]) => {
+        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean }) => {
+            const videoOnly = Boolean(options?.videoOnly);
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             const rows = source.metadata?.scriptRows || [];
@@ -8440,7 +8444,9 @@ function AtelierCanvasPage() {
             const baseX = source.position.x + source.width + 64;
             const baseY = source.position.y;
             const imageX = baseX + textWidth + gapX;
-            const videoX = imageX + imageWidth + gapX;
+            // 简洁版（只铺视频）没有文本 / 图片两列，视频节点直接贴着脚本节点排 —— 否则空出来的两列
+            // 会让整片视频窗口离节点很远，看上去像「没铺出来」。
+            const videoX = videoOnly ? baseX : imageX + imageWidth + gapX;
 
             // 先摘掉「一行连图片提示词都凑不出来」的空行，再按分段方式切组——否则空行会把合并的镜数算歪。
             // `scriptExtras` 必须传进去：风格提示词也可能活在自建列（列名带「风格」）里。
@@ -8491,6 +8497,9 @@ function AtelierCanvasPage() {
             const createdConnections: CanvasConnection[] = [];
             let assetLinkCount = 0;
             let cursor = 0;
+            // 简洁版：没有文本 / 图片节点要对齐表格行，视频节点按 0,1,2… 紧凑竖排，
+            // 不再沿用「第 N 镜 × 行高」的展开方式（否则 10 镜会拉开一整屏空白）。
+            let packIndex = 0;
             for (const group of groups) {
                 const members = renderable.slice(cursor, cursor + group.rows.length);
                 cursor += group.rows.length;
@@ -8511,23 +8520,38 @@ function AtelierCanvasPage() {
                 for (const member of members) {
                     const rowY = baseY + member.index * (rowHeight + gapY);
                     const shotNo = member.row.shot_no || member.index + 1;
-                    const textNode: CanvasNodeData = {
-                        ...createCanvasNode(CanvasNodeType.Text, { x: 0, y: 0 }, { content: member.prompts.imagePrompt, prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE }),
-                        title: t("canvas.scriptNode.pipelineText", { no: shotNo }),
-                        width: textWidth,
-                        height: textHeight,
-                        position: { x: baseX, y: centeredY(rowY, textHeight) },
+                    /**
+                     * 简洁版（只铺视频）：这一镜**不建**「文本 → 图片」两个节点，所以 `imageNode` 保持 `null`；
+                     * 下面所有「连进图片节点」的动作统一走 `linkToImage()`（没有图片节点时只跳过连线）。
+                     * 资产仍然完整收集进 `groupAssetIds` —— 铺出来的视频窗口里照样能看到全部参考图。
+                     */
+                    let imageNode: CanvasNodeData | null = null;
+                    if (!videoOnly) {
+                        const textNode: CanvasNodeData = {
+                            ...createCanvasNode(CanvasNodeType.Text, { x: 0, y: 0 }, { content: member.prompts.imagePrompt, prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE }),
+                            title: t("canvas.scriptNode.pipelineText", { no: shotNo }),
+                            width: textWidth,
+                            height: textHeight,
+                            position: { x: baseX, y: centeredY(rowY, textHeight) },
+                        };
+                        imageNode = {
+                            ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE, ...(scriptImageSize ? { size: scriptImageSize } : {}) }),
+                            title: t("canvas.scriptNode.pipelineImage", { no: shotNo }),
+                            width: imageWidth,
+                            height: imageHeight,
+                            position: { x: imageX, y: centeredY(rowY, imageHeight) },
+                        };
+                        created.push(textNode, imageNode);
+                        createdConnections.push({ id: nanoid(), fromNodeId: textNode.id, toNodeId: imageNode.id });
+                        imageNodes.push(imageNode);
+                    }
+                    // `const` 收口：闭包里用 `imageNode` 会让 TS 丢掉 `null` 收窄，而这里只需要一个「有就用的 id」。
+                    const imageTargetId = imageNode?.id;
+                    const linkToImage = (fromNodeId: string) => {
+                        if (!imageTargetId) return;
+                        createdConnections.push({ id: nanoid(), fromNodeId, toNodeId: imageTargetId });
+                        assetLinkCount += 1;
                     };
-                    const imageNode: CanvasNodeData = {
-                        ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE, ...(scriptImageSize ? { size: scriptImageSize } : {}) }),
-                        title: t("canvas.scriptNode.pipelineImage", { no: shotNo }),
-                        width: imageWidth,
-                        height: imageHeight,
-                        position: { x: imageX, y: centeredY(rowY, imageHeight) },
-                    };
-                    created.push(textNode, imageNode);
-                    createdConnections.push({ id: nanoid(), fromNodeId: textNode.id, toNodeId: imageNode.id });
-                    imageNodes.push(imageNode);
                     // 「按镜按资产」图位 + **资产锁定**：这一镜每一格该用哪张图 —— 格子图优先、资产锁兜底。
                     // 锁是按**资产名**记的，所以别的镜里出现同名（还是「张三」）时也认同一张 @图片。
                     const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, member.row, presetId, scriptExtras);
@@ -8539,9 +8563,8 @@ function AtelierCanvasPage() {
                         for (const preciseId of ref.ids) {
                             if (!existingNodeIds.has(preciseId) || linkedIntoImage.has(preciseId)) continue;
                             linkedIntoImage.add(preciseId);
-                            createdConnections.push({ id: nanoid(), fromNodeId: preciseId, toNodeId: imageNode.id });
+                            linkToImage(preciseId);
                             groupAssetIds.add(preciseId);
-                            assetLinkCount += 1;
                         }
                     }
                     // 角色素材按名字匹配到这一镜；场景 / 道具 / 站位图对每一镜都成立，直接一起连上。
@@ -8555,25 +8578,26 @@ function AtelierCanvasPage() {
                     for (const asset of barAssets) {
                         if (linkedIntoImage.has(asset.id)) continue;
                         linkedIntoImage.add(asset.id);
-                        createdConnections.push({ id: nanoid(), fromNodeId: asset.id, toNodeId: imageNode.id });
+                        linkToImage(asset.id);
                         groupAssetIds.add(asset.id);
-                        assetLinkCount += 1;
                     }
                     // 这一镜自己的「镜头图」：只连到**这一镜**的图片节点；同时进 groupAssetIds，
                     // 于是下面会把它们一并连到该段的视频节点——即「按镜头把图片连到图片节点和视频节点」。
                     for (const rowAssetId of scriptRowAssetIds(source.metadata?.scriptRowAssets, shotNo)) {
                         if (!existingNodeIds.has(rowAssetId) || linkedIntoImage.has(rowAssetId)) continue;
                         linkedIntoImage.add(rowAssetId);
-                        createdConnections.push({ id: nanoid(), fromNodeId: rowAssetId, toNodeId: imageNode.id });
+                        linkToImage(rowAssetId);
                         groupAssetIds.add(rowAssetId);
-                        assetLinkCount += 1;
                     }
                     // 资产文案：第四套写多行「资产锁定」块（`@图片1：李曼人物参考，锁定…`），
                     // 其余三套写单行「资产名@图片N」。两种都在输入框里能看到每张参考图是什么资产，
                     // 且 `@图片N` 会渲染成缩略图 chip。
                     // `linkedIntoImage` 是 Set、保序，正好就是刚才写连线的顺序（= 编号顺序），对得上输入框里的 chip。
-                    const imageBinding = assetBindingOf(Array.from(linkedIntoImage), nodesRef.current, assetNameOf, assetRoleOf);
-                    imageNode.metadata = { ...imageNode.metadata, prompt: withScriptAssetBinding(imageNode.metadata?.prompt, imageBinding) };
+                    // 简洁版没有图片节点：这段整段跳过，资产文案只落在视频节点上（见下面的 `videoBinding`）。
+                    if (imageNode) {
+                        const imageBinding = assetBindingOf(Array.from(linkedIntoImage), nodesRef.current, assetNameOf, assetRoleOf);
+                        imageNode.metadata = { ...imageNode.metadata, prompt: withScriptAssetBinding(imageNode.metadata?.prompt, imageBinding) };
+                    }
                     // 这一镜在表里「声音」列挂的音频：只属于这一镜，等下直连本组的视频节点。
                     for (const audioId of scriptRowAudioIds(source.metadata?.scriptRowAudios, shotNo)) {
                         if (existingNodeIds.has(audioId)) groupAudioIds.add(audioId);
@@ -8608,8 +8632,13 @@ function AtelierCanvasPage() {
                         : t("canvas.scriptNode.pipelineVideo", { no: shotNoFrom }),
                     width: videoWidth,
                     height: videoHeight,
-                    position: { x: videoX, y: topRow + (bottomRow - topRow - videoHeight) / 2 },
+                    // 简洁版：紧凑竖排（第 0、1、2… 段），不按表格行高铺开 —— 没有图片节点要对齐，
+                    // 按行高展开只会得到一长串带大段空白的窗口。
+                    position: videoOnly
+                        ? { x: videoX, y: baseY + packIndex * (videoHeight + gapY) }
+                        : { x: videoX, y: topRow + (bottomRow - topRow - videoHeight) / 2 },
                 };
+                if (videoOnly) packIndex += 1;
                 created.push(videoNode);
                 // 这一段里的每个关键帧都喂给同一个视频节点 → 多镜合成一段连续视频。
                 for (const imageNode of imageNodes) createdConnections.push({ id: nanoid(), fromNodeId: imageNode.id, toNodeId: videoNode.id });
@@ -8636,15 +8665,31 @@ function AtelierCanvasPage() {
 
             const shotCount = renderable.length;
             const videoCount = groups.length;
+            // 确认文案三档：整表 / 选择 / 简洁版（含选择）。简洁版一个文本 / 图片节点都不建，
+            // 文案必须写清楚，否则用户看到「{{nodes}} 个节点」会以为还是三件套。
+            const confirmTitleKey = videoOnly
+                ? selection
+                    ? "canvas.scriptNode.pipelineVideoOnlySelectedConfirmTitle"
+                    : "canvas.scriptNode.pipelineVideoOnlyConfirmTitle"
+                : selection
+                  ? "canvas.scriptNode.pipelineSelectedConfirmTitle"
+                  : "canvas.scriptNode.pipelineConfirmTitle";
+            const confirmBodyKey = videoOnly
+                ? selection
+                    ? "canvas.scriptNode.pipelineVideoOnlySelectedConfirmBody"
+                    : "canvas.scriptNode.pipelineVideoOnlyConfirmBody"
+                : selection
+                  ? "canvas.scriptNode.pipelineSelectedConfirmBody"
+                  : "canvas.scriptNode.pipelineConfirmBody";
             modal.confirm({
-                title: t(selection ? "canvas.scriptNode.pipelineSelectedConfirmTitle" : "canvas.scriptNode.pipelineConfirmTitle"),
-                content: t(selection ? "canvas.scriptNode.pipelineSelectedConfirmBody" : "canvas.scriptNode.pipelineConfirmBody", {
+                title: t(confirmTitleKey),
+                content: t(confirmBodyKey, {
                     shots: shotCount,
                     nodes: created.length,
                     videos: videoCount,
                     links: assetLinkCount,
                 }),
-                okText: t("canvas.scriptNode.pipelineBuild"),
+                okText: t(videoOnly ? "canvas.scriptNode.pipelineVideoOnly" : "canvas.scriptNode.pipelineBuild"),
                 cancelText: t("common.cancel"),
                 onOk: () => {
                     // 铺链的同时把「资产名 → 图片」锁表落库，表上就能看到这些名字已经锁定。
@@ -8667,7 +8712,7 @@ function AtelierCanvasPage() {
                     setSelectedNodeIds(new Set(created.map((node) => node.id)));
                     setSelectedConnectionId(null);
                     revealNodes(created, "center");
-                    message.success(t("canvas.scriptNode.pipelineBuilt", { shots: shotCount, videos: videoCount }));
+                    message.success(t(videoOnly ? "canvas.scriptNode.pipelineVideoOnlyBuilt" : "canvas.scriptNode.pipelineBuilt", { shots: shotCount, videos: videoCount }));
                 },
             });
         },
