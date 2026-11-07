@@ -108,6 +108,7 @@ import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
+import { collectScriptAssetOccupied, planScriptAssetSlots, resolveScriptAssetLaneX, scriptAssetLaneRight, scriptAssetLaneWidth, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { buildJianyingBundle, secondsToMicro, type JianyingDraftClip } from "@/lib/canvas/jianying-draft";
@@ -8130,6 +8131,77 @@ function AtelierCanvasPage() {
         [attachScriptAssets, message, revealNodes, t],
     );
 
+    /**
+     * 一键批量生成资产图：把弹窗里勾好的角色 / 场景 / 道具一次铺成图片节点，再逐张触发生图。
+     *
+     * 只有两点与单张不同，且都用 `lib/canvas/script-asset-batch.ts` 的口径，别在组件里另算：
+     *  ① **摆位**：落在脚本节点右侧的「资产车道」（3 列网格），已被占住的格子自动跳过 ——
+     *     所以「先铺链路再生成」会落到链路右侧，「删一张再补一张」会补回空位，永远不会叠在一起；
+     *  ② **提交**：一批可能十几张，按 `SCRIPT_ASSET_LAUNCH_BATCH` 分批，不一次打满上游。
+     */
+    const handleBatchGenerateScriptAssets = useCallback(
+        (nodeId: string, items: ScriptAssetBatchItem[], options?: { styleTemplateId?: string; size?: string }) => {
+            const source = nodesRef.current.find((item) => item.id === nodeId);
+            const wanted = items.filter((item) => item.title.trim() && item.prompt.trim());
+            if (!source || !wanted.length) return;
+            const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            const imageSize = resolveStoryScriptImageSize(options?.size) || resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
+            const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
+            const cellWidth = Math.round(dims.width);
+            const cellHeight = Math.round(dims.height);
+            const laneX = resolveScriptAssetLaneX({ id: source.id, position: source.position, width: source.width, height: source.height }, nodesRef.current, scriptAssetLaneWidth(cellWidth));
+            const slots = planScriptAssetSlots(
+                { x: laneX, y: source.position.y },
+                wanted.map(() => ({ width: cellWidth, height: cellHeight })),
+                collectScriptAssetOccupied(nodesRef.current, source.id),
+            );
+            if (!slots.length) {
+                message.warning(t("canvas.scriptNode.batchAssetNoRoom"));
+                return;
+            }
+            const created = wanted.slice(0, slots.length).map((item, index) => {
+                const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, {
+                    prompt: item.prompt,
+                    status: NODE_STATUS_IDLE,
+                    ...(imageSize ? { size: imageSize } : {}),
+                    ...(options?.styleTemplateId ? { styleTemplateId: options.styleTemplateId } : {}),
+                    // 车道标记：续排时据此认出「这批是自己的」，铺链路据此把三列起点让开。
+                    scriptAssetLane: source.id,
+                });
+                return { ...node, title: item.title, width: cellWidth, height: cellHeight, position: slots[index] };
+            });
+            // 分类写进脚本节点（内联：mergeScriptAssetRoles 声明在本回调之后，进依赖数组会 TDZ）。
+            const roles: Record<string, ScriptAssetRole> = Object.fromEntries(created.map((node, index) => [node.id, wanted[index].role]));
+            const withRoles = (item: CanvasNodeData) =>
+                item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), ...roles } } } : item;
+            setNodes((prev) => [...prev.map(withRoles), ...created]);
+            setConnections((prev) => [...prev, ...created.map((node) => ({ id: nanoid(), fromNodeId: node.id, toNodeId: nodeId }))]);
+            // 必须立刻同步 nodesRef：紧接着的触发生成会读它判断「这是不是一个图片节点」（结果写回自身）。
+            nodesRef.current = [...nodesRef.current.map(withRoles), ...created];
+            setSelectedNodeIds(new Set(created.map((node) => node.id)));
+            setSelectedConnectionId(null);
+            revealNodes(created, "center");
+            message.success(t("canvas.scriptNode.batchAssetStarted", { count: created.length }));
+            if (created.length < wanted.length) message.info(t("canvas.scriptNode.batchAssetSkipped", { count: wanted.length - created.length }));
+
+            void (async () => {
+                for (let index = 0; index < created.length; index += SCRIPT_ASSET_LAUNCH_BATCH) {
+                    const chunk = created.slice(index, index + SCRIPT_ASSET_LAUNCH_BATCH);
+                    await Promise.all(
+                        chunk.map((node, offset) => {
+                            const prompt = wanted[index + offset].prompt;
+                            // 生图会把标题改写成「提示词前 32 字」，资产节点要留住资产名，生成结束后改回来。
+                            return Promise.resolve(generateNodeRef.current?.(node.id, "image", prompt)).finally(() => {
+                                setNodes((prev) => prev.map((item) => (item.id === node.id && item.title !== node.title ? { ...item, title: node.title } : item)));
+                            });
+                        }),
+                    );
+                }
+            })();
+        },
+        [message, revealNodes, t],
+    );
+
     // ---- 逐镜「镜头图」（metadata.scriptRowAssets）----
     // 与上面那套「整表资产」并列、但语义不同：资产是整表共享的参考图（按分类逐镜分派），镜头图是
     // **按镜指定**的成片关键帧，铺链路时只连到这一镜的图片节点、并随该分组合并进视频节点。
@@ -8545,7 +8617,10 @@ function AtelierCanvasPage() {
             const gapX = 48;
             const gapY = 72;
             const rowHeight = Math.max(textHeight, imageHeight, videoHeight);
-            const baseX = source.position.x + source.width + 64;
+            // 脚本节点右侧可能已经排了一整条「资产图车道」（一键批量生成出来的角色 / 场景 / 道具）。
+            // 让开它，否则分镜链路会正好盖在资产图上；没有资产图时与改造前逐像素一致。
+            const assetLaneRight = scriptAssetLaneRight(nodesRef.current, source.id);
+            const baseX = Math.max(source.position.x + source.width + 64, (assetLaneRight ?? 0) + gapX);
             const baseY = source.position.y;
             const imageX = baseX + textWidth + gapX;
             // 简洁版（只铺视频）没有文本 / 图片两列，视频节点直接贴着脚本节点排 —— 否则空出来的两列
@@ -9018,6 +9093,7 @@ function AtelierCanvasPage() {
                         assetCandidates={getScriptAssetCandidates(contentNode.id)}
                         onImportAssets={(nodeId, files, role) => void handleImportScriptAssets(nodeId, files, role)}
                         onGenerateAsset={handleGenerateScriptAsset}
+                        onBatchGenerateAssets={handleBatchGenerateScriptAssets}
                         onLinkAssets={handleLinkScriptAssets}
                         assetRoles={contentNode.metadata?.scriptAssetRoles}
                         onAssetRoleChange={handleAssetRoleChange}
@@ -9117,7 +9193,7 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptAudioCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAudioImport, handleRowAudiosChange, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, handleDetachVideoMergeClips, handleVideoMergeExport, handleVideoMergeRender, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme, videoMergeExportingNodeId, videoMergeRenderProgress, videoMergeRenderingNodeId, videoMergeResolvedByNodeId],
+        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptAudioCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBatchGenerateScriptAssets, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAudioImport, handleRowAudiosChange, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, handleDetachVideoMergeClips, handleVideoMergeExport, handleVideoMergeRender, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme, videoMergeExportingNodeId, videoMergeRenderProgress, videoMergeRenderingNodeId, videoMergeResolvedByNodeId],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;

@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
+import { CanvasScriptBatchAssetDialog } from "@/components/canvas/canvas-script-batch-asset-dialog";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import { buildScriptGhostPrefill, buildScriptMashuPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
@@ -68,6 +69,7 @@ import {
 } from "@/constant/story-script";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { buildScriptAssetBatchItems, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasNodeData } from "@/types/canvas";
 
@@ -227,6 +229,12 @@ type CanvasScriptNodeContentProps = {
      * `styleTemplateId` 是本次挑的风格模板（落成新节点的风格），`size` 是生图比例（`9:16` / `16:9`…）。
      */
     onGenerateAsset?: (nodeId: string, role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string, size?: string) => void;
+    /**
+     * **一键批量生成资产图**：把分镜表汇总出来的角色 / 场景 / 道具一次性铺成画布上的图片节点并触发生图。
+     * 传进来的 `items` 已经过用户在弹窗里勾选（取消勾选 = 这个不生）；上层负责排布（脚本节点右侧整齐网格）
+     * 与提交生成。
+     */
+    onBatchGenerateAssets?: (nodeId: string, items: ScriptAssetBatchItem[], options?: { styleTemplateId?: string; size?: string }) => void;
     /** 已链接素材的分类（节点 id → 分类），用于在引用条上回显 / 切换。 */
     assetRoles?: Record<string, string>;
     /** 切换某张已链接素材的分类（角色 / 场景 / 道具 / 站位图）。 */
@@ -343,6 +351,7 @@ export function CanvasScriptNodeContent({
     onImportAssets,
     onLinkAssets,
     onGenerateAsset,
+    onBatchGenerateAssets,
     assetRoles,
     onAssetRoleChange,
     onBuildPipeline,
@@ -492,6 +501,8 @@ export function CanvasScriptNodeContent({
     // 全屏查看：内容区改走 portal 铺满视口（z 值卡在画布 chrome 之上、antd Modal 之下）。
     const [fullscreen, setFullscreen] = useState(false);
     const [assetDialogOpen, setAssetDialogOpen] = useState(false);
+    /** 「一键批量生成资产图」弹窗（勾选哪些不生 / 只生哪一类）。 */
+    const [batchAssetOpen, setBatchAssetOpen] = useState(false);
     /** 逐镜「镜头图」弹窗当前瞄准的那一镜（null = 未打开）。 */
     const [rowAssetTarget, setRowAssetTarget] = useState<{ shotNo: number; ids: string[] } | null>(null);
     /** 「按镜按资产」弹窗当前瞄准的那一格（null = 未打开）。 */
@@ -595,8 +606,23 @@ export function CanvasScriptNodeContent({
     const activeReferences = useMemo(() => (references || []).filter((item) => item.active), [references]);
     // 「试一试」只在真·空场景出现（没结果、没连线、没手填），否则会挤占输入区。
     const showTryActions = !rows.length && activeReferences.length === 0 && !sourceDraft.trim();
-    // 「添加资产」入口：导入 / 链接 / 生成三条里有一条能用就显示。
-    const showAssetEntry = Boolean(onImportAssets || onLinkAssets || onGenerateAsset);
+    // 「添加资产」入口：导入 / 链接 / 生成（含一键批量生成）里有一条能用就显示。
+    const showAssetEntry = Boolean(onImportAssets || onLinkAssets || onGenerateAsset || onBatchGenerateAssets);
+
+    /**
+     * 一键批量生成的候选：分镜表里能抽出来的角色 / 场景 / 道具（按名字去重）。
+     *
+     * 判断「这个资产已经有图了吗」用**已连到本节点的图片素材 + 它们的分类**：生成出来的资产图会
+     * 连成本节点的上游、标题就是资产名，所以「同名 + 同分类」= 出过图。对不上就当作没有 ——
+     * 宁可多勾一条让用户取消，也别静默漏掉一张该出的资产图。
+     */
+    const batchAssetItems = useMemo(() => {
+        if (!onBatchGenerateAssets || !rows.length) return [] as ScriptAssetBatchItem[];
+        const existing = activeReferences
+            .filter((reference) => reference.kind === "image")
+            .map((reference) => ({ nodeId: reference.nodeId, title: reference.title, role: resolveScriptAssetRole(assetRoles?.[reference.nodeId]) }));
+        return buildScriptAssetBatchItems(rows, existing);
+    }, [activeReferences, assetRoles, onBatchGenerateAssets, rows]);
     // 「镜头图」列已从表里移除（见文件头常量处的说明），所以这里不再判断是否显示它。
     // 「按镜按资产」图位：资产列（角色1 / 场景 / 道具 / 人物站位 + 自建资产列）格子里的缩略图 + 「+」。
     const showCellAssets = Boolean(onCellAssetsChange || onCellAssetImport || onCellAssetGenerate);
@@ -1569,6 +1595,24 @@ export function CanvasScriptNodeContent({
                 <Plus className="size-3.5" />
                 {t("canvas.scriptNode.addAsset")}
             </button>
+            {/* 一键批量生成：把表里的角色 / 场景 / 道具一次铺成右侧整齐的图片网格（可勾选跳过 / 只生一类）。 */}
+            {onBatchGenerateAssets && batchAssetItems.length ? (
+                <button
+                    type="button"
+                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] font-medium transition"
+                    style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14` }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        setBatchAssetOpen(true);
+                    }}
+                    title={t("canvas.scriptNode.batchAssetHint")}
+                >
+                    <Sparkles className="size-3.5" />
+                    {t("canvas.scriptNode.batchAssetOpen", { count: batchAssetItems.length })}
+                </button>
+            ) : null}
             {assetCandidates?.length ? (
                 <span className="text-[0.846em] opacity-55" style={{ color: theme.node.text }}>
                     {t("canvas.scriptNode.assetCandidateHint", { count: assetCandidates.length })}
@@ -3062,6 +3106,23 @@ export function CanvasScriptNodeContent({
         />
     ) : null;
 
+    // 一键批量生成资产图：勾选「哪些不生 / 只生哪一类」，交回上层去建节点 + 编排 + 触发生成。
+    const batchAssetDialog = onBatchGenerateAssets ? (
+        <CanvasScriptBatchAssetDialog
+            open={batchAssetOpen}
+            theme={theme}
+            items={batchAssetItems}
+            imageSize={imageSize}
+            onImageSizeChange={(size) => patchMetadata({ scriptImageSize: size || undefined })}
+            onCancel={() => setBatchAssetOpen(false)}
+            onSubmit={(selected, options) => {
+                setBatchAssetOpen(false);
+                if (!selected.length) return;
+                onBatchGenerateAssets(node.id, selected, options);
+            }}
+        />
+    ) : null;
+
     // 逐镜「镜头图」弹窗：只给这一镜关联图片。分类 / 按描述生图都不适用，所以走 rowMode。
     // 三条路的回调都直接交给上层（project.tsx 负责建节点并把 id 写回 metadata.scriptRowAssets）。
     const rowAssetDialog = rowAssetTarget ? (
@@ -3314,6 +3375,7 @@ export function CanvasScriptNodeContent({
             />
             {/* 旧的自定义提示词弹窗已合并到上面这一个（按 customPromptKind 分三种）。 */}
             {assetDialog}
+            {batchAssetDialog}
             {rowAssetDialog}
             {cellAssetDialog}
             {rowAudioDialog}

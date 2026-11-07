@@ -237,6 +237,15 @@ export type CanvasNodeMetadata = {
      * 三处都读它：「添加资产」「镜头图」「按镜按资产」弹窗的默认值，以及一键铺链路建出来的图片节点。
      */
     scriptImageSize?: string;
+    /**
+     * 脚本生成器：这张图片是**本节点「一键批量生成」出来的资产图**（值 = 脚本节点 id）。
+     *
+     * 只有两个用途，别拿它当业务分类：
+     *  ① 同一批资产图排在同一条「车道」上（脚本节点右侧的整齐网格），续排时靠它认出自己那批；
+     *  ② 「一键铺链路」把三列起点让到车道右侧，避免资产图与分镜链路两批节点叠在一起。
+     * 真正的分类仍然只认 `scriptAssetRoles`。
+     */
+    scriptAssetLane?: string;
     /** 脚本生成器：每段目标时长（none / 10 / 15），同时用于生成时的分段要求与铺链路的自动合并。 */
     scriptSegmentSeconds?: import("@/constant/story-script").StoryScriptSegmentSeconds;
     /** 脚本生成器：铺链路时每个视频节点合并几镜（shot / 2 / 3 / duration）。 */
