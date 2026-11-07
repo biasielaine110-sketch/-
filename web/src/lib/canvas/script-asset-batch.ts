@@ -141,6 +141,82 @@ export function buildScriptAssetDirectItems(rows?: readonly StoryScriptRow[] | n
     return buildScriptAssetBatchItems(rows, []).filter((item) => isScriptAssetDirectRole(item.role));
 }
 
+// ── 「一键直接生图」的视图版式：从**词库**里按标题捞一段拼到提示词后面 ──────────────────
+
+/**
+ * 「一键直接生图」默认要拼上的视图版式（用户 2026-11-08 口径）：
+ *  - 角色 → 词库里的「角色视图-------无头9x16竖版排版」
+ *  - 场景 → 词库里的「场景视图-----------2x2场景宫格图」
+ *
+ * 为什么按「标题关键词」匹配、而不是按 id 或标题全等：
+ * ① 这两条是**用户自建**的词库条目，id 是随机值，代码里写不出来；
+ * ② 用户写标题时横线数量随手打（截图上是 7 个 / 11 个 `-`），全等匹配今天能用、改天就失效。
+ * 所以判据是「归一化标题里必须出现哪些词」：角色视图 + 无头 / 场景视图 + 2x2 或宫格。
+ * 匹配不到就**不拼**（不报错、不阻塞）—— 用户删了这条词库条目，生图该照常跑。
+ */
+export const SCRIPT_ASSET_VIEW_TEMPLATE_RULES: Array<{ role: ScriptAssetRole; label: string; groups: string[][] }> = [
+    { role: "character", label: "角色视图 · 无头 9:16 竖版排版", groups: [["角色视图"], ["无头"]] },
+    { role: "scene", label: "场景视图 · 2x2 场景宫格图", groups: [["场景视图"], ["2x2", "宫格"]] },
+];
+
+/** 标题归一化：去空格 / 各种横线 / 括号 / 标点，`×` 统一成 `x`，再转小写。 */
+export function normalizeScriptViewTemplateTitle(value: unknown): string {
+    return String(value ?? "")
+        .toLowerCase()
+        .replace(/[×✕✖]/g, "x")
+        .replace(/[\s\-—–－_·•.。:：,，、;；/\\|()（）\[\]【】{}"'“”‘’]+/g, "");
+}
+
+type ViewTemplatePromptEntry = { title?: string; content?: string; enabled?: boolean };
+
+/**
+ * 从词库里捞出这一分类要追加的版式正文；没有 → 空串。
+ * 同一个分类命中多条时取**词库顺序第一条**（用户的排序就是优先级），关掉的条目跳过。
+ */
+export function resolveScriptAssetViewTemplate(role: ScriptAssetRole, textPrompts?: readonly ViewTemplatePromptEntry[] | null): string {
+    const rule = SCRIPT_ASSET_VIEW_TEMPLATE_RULES.find((item) => item.role === role);
+    if (!rule) return "";
+    for (const entry of textPrompts || []) {
+        if (entry?.enabled === false) continue;
+        const content = String(entry?.content ?? "").trim();
+        if (!content) continue;
+        const title = normalizeScriptViewTemplateTitle(entry?.title);
+        if (!title) continue;
+        const hit = rule.groups.every((group) => group.some((keyword) => title.includes(normalizeScriptViewTemplateTitle(keyword))));
+        if (hit) return content;
+    }
+    return "";
+}
+
+/**
+ * 把版式追加到资产提示词后面。
+ * ⚠️ 幂等：正文里已经含这段（用户自己粘过、或同一批被重算一次）就不再拼第二遍。
+ */
+export function appendScriptAssetViewTemplate(prompt: string, template: string): string {
+    const body = String(prompt ?? "").trim();
+    const view = String(template ?? "").trim();
+    if (!view) return body;
+    if (!body) return view;
+    if (body.includes(view)) return body;
+    return `${body}\n\n${view}`;
+}
+
+/**
+ * 「一键直接生图」的入口包装：给这一批的提示词按分类补上词库版式。
+ *
+ * 只作用于**直接生图**这一条路（画幅同样是硬规则那一条）。「一键批量生成」/「单格生成」保持原样 ——
+ * 那两条是用户手动挑资产，要不要带版式由他在弹窗里自己决定。
+ */
+export function applyScriptAssetViewTemplates(items: readonly ScriptAssetBatchItem[], textPrompts?: readonly ViewTemplatePromptEntry[] | null): ScriptAssetBatchItem[] {
+    if (!items.length || !textPrompts?.length) return items.slice();
+    return items.map((item) => {
+        const template = resolveScriptAssetViewTemplate(item.role, textPrompts);
+        if (!template) return item;
+        const prompt = appendScriptAssetViewTemplate(item.prompt, template);
+        return prompt === item.prompt ? item : { ...item, prompt };
+    });
+}
+
 
 // ── 挂载：批量生成的图要落到「具体的资产」上 ──────────────────────────────────────
 

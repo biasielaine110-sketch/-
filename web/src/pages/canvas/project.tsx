@@ -113,7 +113,7 @@ import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-orde
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import { buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { applyScriptAssetViewTemplates, buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
@@ -8438,7 +8438,13 @@ function AtelierCanvasPage() {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source) return { created: [] };
             // 不筛「已出过图」是这里唯一的产品口径；站位图在 buildScriptAssetDirectItems 里就剔掉了。
-            const wanted = buildScriptAssetDirectItems(source.metadata?.scriptRows).filter((item) => item.title.trim() && item.prompt.trim());
+            // 再按分类补上**词库里的视图版式**（用户 2026-11-08：角色 →「无头 9x16 竖版排版」、
+            // 场景 →「2x2 场景宫格图」）。这里就地改 prompt，所以「节点上显示的提示词」与
+            // 「真正发给生图模型的提示词」是同一份（下面 `cell.item.prompt` 两处读的都是它）。
+            const wanted = applyScriptAssetViewTemplates(
+                buildScriptAssetDirectItems(source.metadata?.scriptRows).filter((item) => item.title.trim() && item.prompt.trim()),
+                effectiveConfig.textPrompts,
+            );
             if (!wanted.length) {
                 message.warning(t("canvas.scriptNode.directAssetEmpty"));
                 return { created: [] };
@@ -8528,7 +8534,7 @@ function AtelierCanvasPage() {
             })();
             return { created };
         },
-        [message, revealNodes, t],
+        [effectiveConfig.textPrompts, message, revealNodes, t],
     );
 
     // ---- 逐镜「镜头图」（metadata.scriptRowAssets）----
