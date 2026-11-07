@@ -2178,11 +2178,42 @@ export function getStoryScriptAssetColumns(
  * - `audio`：不参与「按描述生成」（生成 tab 走的是生图链路），故为空数组。
  *   （storyboard 预设没有角色列时，取值自然为空串，无需按预设分支。）
  */
-const SCRIPT_ASSET_DESCRIPTION_COLUMNS: Record<ScriptAssetRole, Array<{ nameKey?: string; textKeys: string[] }>> = (() => {
-    const out: Record<ScriptAssetRole, Array<{ nameKey?: string; textKeys: string[] }>> = { character: [], scene: [], prop: [], blocking: [], audio: [] };
-    for (const spec of Object.values(SCRIPT_ASSET_COLUMN_SPECS)) out[spec.role].push({ nameKey: spec.nameKey, textKeys: spec.textKeys });
+const SCRIPT_ASSET_DESCRIPTION_COLUMNS: Record<ScriptAssetRole, Array<{ columnKey: string; nameKey?: string; textKeys: string[] }>> = (() => {
+    const out: Record<ScriptAssetRole, Array<{ columnKey: string; nameKey?: string; textKeys: string[] }>> = { character: [], scene: [], prop: [], blocking: [], audio: [] };
+    // ⚠️ `columnKey` 必须一起带上：批量生成完要把图**挂回具体的资产格位**（`scriptCellAssets`），
+    // 只按分类算标题是不够的 —— 得知道这个标题是从哪一列来的（角色1 / 角色2 都是 character）。
+    for (const [columnKey, spec] of Object.entries(SCRIPT_ASSET_COLUMN_SPECS)) out[spec.role].push({ columnKey, nameKey: spec.nameKey, textKeys: spec.textKeys });
     return out;
 })();
+
+/**
+ * 某个分类的资产在表里的**具体格位**：`{ 镜号, 资产列, 标题, 名字 }`。
+ *
+ * 与 `collectScriptAssetPromptCandidates` 用**同一份**列规格、同一套标题口径（`名字 || 描述前 24 字`），
+ * 所以两边算出来的 `title` 一定相等 —— 批量生成完就能拿它把图挂回每一格
+ * （`scriptCellAssets` 精准指定 + `scriptNameLocks` 按名字兜底），而不是只连一根线躺在脚本节点旁边。
+ *
+ * `name` 是这个格子里的**资产名**（人物站位 / 自建列没有名字列 → 空串），只有它有值才配按名字上锁。
+ */
+export type ScriptAssetCellTarget = { shotNo: number; columnKey: string; title: string; name: string };
+
+export function collectScriptAssetCellTargets(role: unknown, rows?: readonly StoryScriptRow[] | null): ScriptAssetCellTarget[] {
+    const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
+    if (!specs.length || !rows?.length) return [];
+    const out: ScriptAssetCellTarget[] = [];
+    rows.forEach((row, index) => {
+        const shotNo = Math.round(Number(row.shot_no)) || index + 1;
+        for (const spec of specs) {
+            const name = spec.nameKey ? storyScriptCellText(row[spec.nameKey]) : "";
+            const text = joinStoryScriptPromptParts(spec.textKeys.map((key) => storyScriptCellText(row[key])));
+            const title = name || text.slice(0, 24);
+            const prompt = text || name;
+            if (!title || !prompt) continue;
+            out.push({ shotNo, columnKey: spec.columnKey, title, name });
+        }
+    });
+    return out;
+}
 
 /**
  * 从分镜表里抽某一类资产的描述候选，供资产对话框一键填入生图提示词。

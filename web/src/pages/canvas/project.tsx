@@ -109,7 +109,7 @@ import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import { collectScriptAssetOccupied, planScriptAssetColumn, resolveScriptAssetColumnX, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { buildScriptAssetBatchMounts, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, resolveScriptAssetColumnX, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
@@ -8197,11 +8197,13 @@ function AtelierCanvasPage() {
     /**
      * 一键批量生成资产图：把弹窗里勾好的角色 / 场景 / 道具一次铺成图片节点，再逐张触发生图。
      *
-     * 只有三点与单张不同，且都用 `lib/canvas/script-asset-batch.ts` 的口径，别在组件里另算：
+     * 只有四点和单张不同，且都用 `lib/canvas/script-asset-batch.ts` 的口径，别在组件里另算：
      *  ① **摆位**：落在脚本节点**左侧 300px 的一列**（上下顺序、列高按脚本窗口高度自适应），
      *     已被占住的格子往下挪 —— 所以「先铺链路再生成」不会盖住链路，「删一张再补一张」会补回空位；
      *  ② **模型**：弹窗里挑的那一个模型写给每张图的 `metadata.model`，这一批（含以后单张重生成）都用它；
-     *  ③ **提交**：一批可能十几张，按 `SCRIPT_ASSET_LAUNCH_BATCH` 分批，不一次打满上游。
+     *  ③ **挂载**：每张图直接写回它那条资产出现过的**每一格**（`scriptCellAssets`）并按资产名上锁
+     *     （`scriptNameLocks`）—— 用户原话「批量生成的图也需要直接挂载到具体的资产上」；
+     *  ④ **提交**：一批可能十几张，按 `SCRIPT_ASSET_LAUNCH_BATCH` 分批，不一次打满上游。
      */
     const handleBatchGenerateScriptAssets = useCallback(
         (nodeId: string, items: ScriptAssetBatchItem[], options?: { styleTemplateId?: string; size?: string; model?: string }) => {
@@ -8241,8 +8243,38 @@ function AtelierCanvasPage() {
             });
             // 分类写进脚本节点（内联：mergeScriptAssetRoles 声明在本回调之后，进依赖数组会 TDZ）。
             const roles: Record<string, ScriptAssetRole> = Object.fromEntries(created.map((node, index) => [node.id, wanted[index].role]));
+            /**
+             * **挂到具体资产上**（用户 2026-11-07 第 4 条）。
+             *
+             * 只连一根线到脚本节点是不够的：表里的资产格还是空的、铺链路时也认不出
+             * 「这张图就是张三」。所以每张图都要写回它那条资产出现过的**每一格**：
+             *  - `scriptCellAssets`（`镜号:资产列` → 追加）：表里立刻显示出这张图，铺链按「精准指定」连；
+             *  - `scriptNameLocks`（资产名 → 并集）：同名在别的镜再次出现时认同一张图。
+             * 口径与单格生成（`appendCellAssets`）完全一致，都走 lib 的 `mountScriptAssetToCells`。
+             */
+            const mountExtras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
+            const mountTargets = buildScriptAssetBatchMounts(source.metadata?.scriptRows);
+            let mountedCells = source.metadata?.scriptCellAssets;
+            let mountedLocks = source.metadata?.scriptNameLocks;
+            created.forEach((node, index) => {
+                const item = wanted[index];
+                if (!item) return;
+                const mounted = mountScriptAssetToCells({ cells: mountedCells, locks: mountedLocks, mounts: mountTargets[item.key] || [], nodeId: node.id, extras: mountExtras });
+                mountedCells = mounted.cells;
+                mountedLocks = mounted.locks;
+            });
             const withRoles = (item: CanvasNodeData) =>
-                item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), ...roles } } } : item;
+                item.id === nodeId
+                    ? {
+                          ...item,
+                          metadata: {
+                              ...item.metadata,
+                              scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), ...roles },
+                              scriptCellAssets: mountedCells,
+                              scriptNameLocks: mountedLocks,
+                          },
+                      }
+                    : item;
             setNodes((prev) => [...prev.map(withRoles), ...created]);
             setConnections((prev) => [...prev, ...created.map((node) => ({ id: nanoid(), fromNodeId: node.id, toNodeId: nodeId }))]);
             // 必须立刻同步 nodesRef：紧接着的触发生成会读它判断「这是不是一个图片节点」（结果写回自身）。

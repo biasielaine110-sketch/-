@@ -1,4 +1,17 @@
-import { collectScriptAssetPromptCandidates, SCRIPT_ASSET_GENERATABLE_ROLE_IDS, type ScriptAssetRole, type StoryScriptRow } from "@/constant/story-script";
+import {
+    collectScriptAssetCellTargets,
+    collectScriptAssetPromptCandidates,
+    normalizeStoryScriptCellAssetMap,
+    normalizeStoryScriptNameLockMap,
+    scriptCellAssetIds,
+    scriptNameLockIds,
+    SCRIPT_ASSET_GENERATABLE_ROLE_IDS,
+    setStoryScriptCellAssetIds,
+    setStoryScriptNameLock,
+    type ScriptAssetRole,
+    type StoryScriptExtraColumn,
+    type StoryScriptRow,
+} from "@/constant/story-script";
 import type { CanvasNodeData } from "@/types/canvas";
 
 /**
@@ -80,6 +93,69 @@ export function groupScriptAssetBatchItems(items: readonly ScriptAssetBatchItem[
  */
 export function defaultScriptAssetBatchSelection(items: readonly ScriptAssetBatchItem[]) {
     return items.filter((item) => !item.existingNodeIds.length).map((item) => item.key);
+}
+
+// ── 挂载：批量生成的图要落到「具体的资产」上 ──────────────────────────────────────
+
+/**
+ * 一条资产在表里的落点（哪一镜、哪一列）。
+ *
+ * 批量生成出来的一批图，如果只连到脚本节点，它们只是「一堆上游素材」——
+ * 表里的资产格还是空的、铺链路时也认不出「这张图就是张三」。用户要的是
+ * **直接挂到具体的资产上**（2026-11-07 第 4 条），所以每个名字都要落回它出现过的每一格。
+ */
+export type ScriptAssetBatchMount = { shotNo: number; columnKey: string; name: string };
+
+/**
+ * 按「分类 + 标题」排出这一批资产各自要挂到哪些格位。
+ *
+ * 键与 `buildScriptAssetBatchItems` 的 `item.key` 完全一致（`分类:标题`），
+ * 标题口径也一致（`collectScriptAssetCellTargets` 与 `collectScriptAssetPromptCandidates` 同源），
+ * 所以「弹窗里勾了哪一条」就能精确映射到「这张图要挂哪几格」。
+ */
+export function buildScriptAssetBatchMounts(rows?: readonly StoryScriptRow[] | null): Record<string, ScriptAssetBatchMount[]> {
+    const out: Record<string, ScriptAssetBatchMount[]> = {};
+    for (const role of SCRIPT_ASSET_GENERATABLE_ROLE_IDS) {
+        for (const target of collectScriptAssetCellTargets(role, rows)) {
+            const key = scriptAssetBatchKey(role, target.title);
+            const list = out[key] || (out[key] = []);
+            // 同一镜同一列只挂一次（同名列在 extras 里重复声明之类的脏数据）。
+            if (list.some((slot) => slot.shotNo === target.shotNo && slot.columnKey === target.columnKey)) continue;
+            list.push({ shotNo: target.shotNo, columnKey: target.columnKey, name: target.name });
+        }
+    }
+    return out;
+}
+
+/**
+ * 把一张刚生成的图挂到若干格位，返回**新的** `scriptCellAssets` / `scriptNameLocks`。
+ *
+ * 与单格生成（`appendCellAssets`）同一口径，两处都写：
+ *  - `scriptCellAssets` 按「镜号:资产列」**追加**（保留这一格原本挂着的图，不覆盖）——
+ *    表里这一格立刻显示新图，铺链路时按「精准指定」连到该镜；
+ *  - `scriptNameLocks` 按**资产名**并集 —— 同名在多镜出现时，整张表所有同名格都认同一张图。
+ *    ⚠️ `name` 为空（人物站位 / 自建列没有名字列）时不写锁：锁的键是「资产名」，
+ *    拿描述前 24 字当名字去锁，永远不会命中任何一格，只会让锁表变脏。
+ */
+export function mountScriptAssetToCells(input: {
+    cells: unknown;
+    locks: unknown;
+    mounts: readonly ScriptAssetBatchMount[];
+    nodeId: string;
+    extras?: readonly StoryScriptExtraColumn[] | null;
+}): { cells: ReturnType<typeof setStoryScriptCellAssetIds>; locks: ReturnType<typeof normalizeStoryScriptNameLockMap> } {
+    const { nodeId, mounts, extras } = input;
+    // 先归一化：入参来自 metadata（`unknown`），而且脏键 / 空数组要顺手清掉，否则后面的追加会跟脏数据混在一起。
+    let cells = normalizeStoryScriptCellAssetMap(input.cells, extras);
+    const lockAdds = new Map<string, string[]>();
+    for (const mount of mounts) {
+        cells = setStoryScriptCellAssetIds(cells, mount.shotNo, mount.columnKey, [...scriptCellAssetIds(cells, mount.shotNo, mount.columnKey, extras), nodeId], extras);
+        if (!mount.name) continue;
+        lockAdds.set(mount.name, [...(lockAdds.get(mount.name) || []), nodeId]);
+    }
+    let locks = normalizeStoryScriptNameLockMap(input.locks);
+    for (const [name, ids] of lockAdds) locks = setStoryScriptNameLock(locks, name, [...scriptNameLockIds(locks, name), ...ids]);
+    return { cells, locks };
 }
 
 // ── 排布：脚本节点**左侧**的「资产竖列」─────────────────────────────────────────────
