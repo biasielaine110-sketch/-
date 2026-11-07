@@ -563,7 +563,9 @@ export default {
             playAll: "整条显示",
             playSingle: "单条显示",
             playAllSegment: "整条 · 第 {{index}}/{{count}} 段",
-            playAllHint: "整条显示：按时间线顺序连续播放，每段播到出点自动切下一段。",
+            play: "播放",
+            pause: "暂停",
+            playAllHint: "整条 · 一条时间线连播",
         },
         mergeNode: {
             empty: "将图片节点连到左侧圆点",

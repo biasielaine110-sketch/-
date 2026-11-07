@@ -563,7 +563,9 @@ export default {
             playAll: "Play all",
             playSingle: "Single clip",
             playAllSegment: "Full timeline · {{index}}/{{count}}",
-            playAllHint: "Full timeline: plays every clip in order, cutting at each out point.",
+            play: "Play",
+            pause: "Pause",
+            playAllHint: "One continuous timeline",
         },
         mergeNode: {
             empty: "Connect image nodes to the left handle",

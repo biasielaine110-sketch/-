@@ -106,6 +106,54 @@ export function normalizeMergeClips(clips: readonly CanvasVideoMergeClip[]) {
     return clips.map(normalizeMergeClip);
 }
 
+/**
+ * 整条时间线上每一段占的区间。
+ *
+ * 「整条显示」只有一条时间线：每段按 `outSec - inSec` 首尾相接排上去，进度条、播放头、
+ * 点哪跳哪全用这一份口径算 —— 不能一处按 real 长度、一处按等分，否则播放头会跑偏。
+ */
+export type MergeClipSpan = { index: number; startSec: number; lengthSec: number };
+
+export function resolveMergeSpans(clips: readonly CanvasVideoMergeClip[]) {
+    let cursor = 0;
+    const spans: MergeClipSpan[] = clips.map((clip, index) => {
+        // 和播放器一致：短于 MIN 的段在时间线上仍占 MIN，否则播放头会卡住不动。
+        const lengthSec = Math.max(MIN_MERGE_CLIP_SEC, clipLengthSec(clip));
+        const span = { index, startSec: roundSeconds(cursor), lengthSec: roundSeconds(lengthSec) };
+        cursor += lengthSec;
+        return span;
+    });
+    return { spans, totalSec: roundSeconds(cursor) };
+}
+
+/** 整条时间线上的 `sec` 落在哪一段、段内偏移多少；越界一律夹到首尾。 */
+export function locateMergePosition(spans: readonly MergeClipSpan[], totalSec: number, sec: number) {
+    const last = spans[spans.length - 1];
+    if (!last) return { index: 0, offsetSec: 0 };
+    const clamped = Math.min(Math.max(0, Number(sec) || 0), Math.max(0, Number(totalSec) || 0));
+    for (const span of spans) {
+        if (clamped < span.startSec + span.lengthSec) return { index: span.index, offsetSec: roundSeconds(clamped - span.startSec) };
+    }
+    return { index: last.index, offsetSec: last.lengthSec };
+}
+
+/**
+ * 从 `from` 起第一段「真能播」的段。
+ *
+ * 源节点被删 / 内容被清空的段在时间线上留着占位，但它没有 url 也没 ended 事件，
+ * 播放器一旦停在那一段就再也走不动 —— 所以任何切换都必须过这一层。
+ * 返回 -1 表示后面没有能播的了。
+ */
+export function nextPlayableMergeIndex(clips: ReadonlyArray<{ url: string; missing: boolean }>, from: number) {
+    let index = Math.max(0, Math.floor(Number(from) || 0));
+    while (index < clips.length) {
+        const item = clips[index];
+        if (item?.url && !item.missing) return index;
+        index += 1;
+    }
+    return -1;
+}
+
 export function moveMergeClip<T>(clips: readonly T[], from: number, to: number) {
     if (from === to || from < 0 || to < 0 || from >= clips.length || to >= clips.length) return [...clips];
     const next = [...clips];

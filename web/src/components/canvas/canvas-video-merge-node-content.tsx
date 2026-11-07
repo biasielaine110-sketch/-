@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Segmented, Tooltip } from "antd";
-import { Combine, Download, Film, ImagePlus, ListVideo, LoaderCircle, Scissors, Trash2, X } from "lucide-react";
+import { Combine, Download, Film, ImagePlus, LoaderCircle, Pause, Play, Scissors, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import {
     formatMergeClock,
+    locateMergePosition,
     MIN_MERGE_CLIP_SEC,
     moveMergeClip,
+    nextPlayableMergeIndex,
     normalizeMergeClip,
     probeMediaDuration,
     removeMergeClip,
     resolveMergeCanvasSize,
+    resolveMergeSpans,
     roundSeconds,
     totalMergeLengthSec,
     VIDEO_MERGE_ASPECTS,
@@ -47,11 +50,22 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
     const stripRef = useRef<HTMLDivElement | null>(null);
     const videoRef = useRef<HTMLVideoElement | null>(null);
     /**
-     * 「整条显示」：按时间线顺序把每段的首尾接起来演一遍，用来确认拼接效果。
-     * 关掉就回到单条预览（原来的行为）。
+     * 「整条显示」= 把时间线上所有段当成**一条片子**播：一个播放头、一个总时长，
+     * 某段走到出点就静默接到下一段（不换回"单条"、不回到 0:00），进度条横跨整条。
+     * 关掉回到单条预览（拖入出点那套）。
      */
     const [playAll, setPlayAll] = useState(false);
     const [playIndex, setPlayIndex] = useState(0);
+    /** 整条时间线上的播放头（秒，跨段累计，不是某一段的 currentTime）。 */
+    const [playheadSec, setPlayheadSec] = useState(0);
+    const [playPaused, setPlayPaused] = useState(false);
+    const playheadRef = useRef(0);
+    const playStageRef = useRef<HTMLVideoElement | null>(null);
+    /**
+     * 换段时要把新媒体元素 seek 到「段内偏移」而不是入点 —— 点了进度条中间就必须从那儿接。
+     * 用 nodeId 认领，避免 key 重挂后把上一条的值用到新段上。
+     */
+    const pendingSeekRef = useRef<{ nodeId: string; atSec: number } | null>(null);
 
     const rawClips = node.metadata?.videoMergeClips || [];
     const totalSeconds = useMemo(() => totalMergeLengthSec(rawClips), [rawClips]);
@@ -59,40 +73,103 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
     const selected = clips[safeIndex];
 
     // ── 整条显示 ────────────────────────────────────────────────────────────────
-    // 只跳「能播」的段：源被删掉的段在时间线上留着占位，但它没法演。
+    // 段区间只算一份：进度条宽度、播放头位置、点哪跳哪全走它，三处各算一套必然跑偏。
+    const { spans, totalSec: playTotalSec } = useMemo(() => resolveMergeSpans(rawClips), [rawClips]);
     const playIndexSafe = Math.min(Math.max(0, playIndex), Math.max(0, clips.length - 1));
     const playClip = clips[playIndexSafe];
-    const playLengthSec = playClip ? Math.max(MIN_MERGE_CLIP_SEC, playClip.clip.outSec - playClip.clip.inSec) : 0;
+    const playSpan = spans[playIndexSafe];
 
-    const gotoPlayClip = (index: number) => {
-        let next = index;
-        while (next < clips.length && (!clips[next].url || clips[next].missing)) next += 1;
-        if (next >= clips.length) return false;
+    /** 播放头写两处：state 给渲染，ref 给定时器 / 事件回调读最新值（不进依赖，免得反复重启）。 */
+    const setHead = (sec: number) => {
+        const clamped = Math.max(0, Math.min(playTotalSec, Number(sec) || 0));
+        playheadRef.current = clamped;
+        setPlayheadSec(clamped);
+    };
+
+    /** 切到第 index 段（自动跳过不能播的占位段），段内从 offsetSec 接着演。 */
+    const gotoPlayClip = (index: number, offsetSec = 0) => {
+        const next = nextPlayableMergeIndex(clips, index);
+        if (next < 0) return false;
+        const target = clips[next];
+        pendingSeekRef.current = { nodeId: target.clip.nodeId, atSec: Math.max(0, target.clip.inSec + offsetSec) };
         setPlayIndex(next);
+        // 时间线条上的高亮跟着播放头走：播到第几段就亮哪一块。
+        setSelectedIndex(next);
         return true;
     };
 
-    const togglePlayAll = () => {
-        if (playAll) {
-            setPlayAll(false);
-            return;
-        }
-        // 从头开始演整条 —— 用户点这个就是要看「拼起来长什么样」。
-        const first = clips.findIndex((item) => Boolean(item.url) && !item.missing);
-        setPlayIndex(Math.max(0, first));
+    /** 进入整条：从第一段能播的段起，播放头归零。已经在整条时再点一次 = 从头重播。 */
+    const startPlayAll = () => {
+        const first = nextPlayableMergeIndex(clips, 0);
+        const index = Math.max(0, first);
+        pendingSeekRef.current = null;
+        setPlayIndex(index);
+        setSelectedIndex(index);
+        setHead(spans[index]?.startSec ?? 0);
+        setPlayPaused(false);
         setPlayAll(true);
     };
 
-    /** 一段演完 → 下一段；已经是最后一段就停在尾帧，不自动循环。 */
-    const advancePlay = (element?: HTMLVideoElement | null) => {
-        element?.pause();
-        if (!gotoPlayClip(playIndexSafe + 1) && element) {
-            try {
-                element.currentTime = Math.max(0, playClip?.clip.outSec || 0);
-            } catch {
-                // 有些容器 seek 到片尾会抛，忽略即可。
+    const stopPlayAll = () => {
+        setPlayAll(false);
+        setPlayPaused(false);
+    };
+
+    /**
+     * 一段演完 → 下一段接着走；已经是最后一段就停在尾帧（不自动循环）。
+     * 刻意**不 pause 旧元素**：换 key 会直接卸载它，多一次 pause 只是白白多一帧重排。
+     */
+    const advancePlay = () => {
+        if (gotoPlayClip(playIndexSafe + 1)) return;
+        playStageRef.current?.pause();
+        setPlayPaused(true);
+        setHead(playTotalSec);
+    };
+
+    const togglePlayback = () => {
+        const video = playStageRef.current;
+        if (playPaused) {
+            // 已经播到整条尾巴了：再按播放就是「重看一遍」，不是傻站在最后 0.1 秒。
+            if (playheadRef.current >= playTotalSec - 0.05) {
+                startPlayAll();
+                return;
             }
+            setPlayPaused(false);
+            if (video) void video.play().catch(() => undefined);
+            return;
         }
+        setPlayPaused(true);
+        video?.pause();
+    };
+
+    /** 点 / 拖整条进度条：换算成「第几段 + 段内偏移」，视频就地 seek，图片靠重挂接上。 */
+    const seekMerged = (sec: number) => {
+        const located = locateMergePosition(spans, playTotalSec, sec);
+        const target = clips[located.index];
+        if (!target) return;
+        if (!target.url || target.missing) {
+            // 落在占位段上：跳到它后面第一段能播的起点，别让播放头卡死在灰段里。
+            const next = nextPlayableMergeIndex(clips, located.index);
+            if (next < 0) return;
+            pendingSeekRef.current = { nodeId: clips[next].clip.nodeId, atSec: clips[next].clip.inSec };
+            setPlayIndex(next);
+            setSelectedIndex(next);
+            setHead(spans[next]?.startSec ?? 0);
+            return;
+        }
+        setHead((spans[located.index]?.startSec ?? 0) + located.offsetSec);
+        const mediaSec = Math.max(0, target.clip.inSec + located.offsetSec);
+        if (located.index === playIndexSafe && playStageRef.current) {
+            try {
+                playStageRef.current.currentTime = Math.min(mediaSec, Math.max(0, target.clip.outSec));
+            } catch {
+                // 元数据还没好时会抛，忽略：下一帧 timeupdate 会把播放头再对一次。
+            }
+            return;
+        }
+        pendingSeekRef.current = { nodeId: target.clip.nodeId, atSec: mediaSec };
+        setPlayIndex(located.index);
+        setSelectedIndex(located.index);
     };
 
     // 时长探测只做一轮：`durationSec` 一旦回填，key 就不再命中，不会循环。
@@ -135,13 +212,21 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
         }
     }, [safeIndex, selected, playAll]);
 
-    // 整条播放里的图片段没有 ended 事件，用定时器按「停留时长」推进。
+    // 整条播放里的图片段没有 ended 事件：按「段内剩余停留时长」走，顺便把播放头匀速推出去。
     useEffect(() => {
-        if (!playAll || !playClip || playClip.clip.kind !== "image") return;
-        const timer = window.setTimeout(() => advancePlay(), Math.max(0.1, playLengthSec) * 1000);
-        return () => window.clearTimeout(timer);
+        if (!playAll || playPaused || !playClip || playClip.clip.kind !== "image" || !playSpan) return;
+        const span = playSpan;
+        const fromSec = Math.min(Math.max(span.startSec, playheadRef.current), span.startSec + span.lengthSec);
+        const startedAt = performance.now();
+        const timer = window.setInterval(() => {
+            const current = Math.min(span.startSec + span.lengthSec, fromSec + (performance.now() - startedAt) / 1000);
+            playheadRef.current = current;
+            setPlayheadSec(current);
+            if (current >= span.startSec + span.lengthSec - 0.001) advancePlay();
+        }, 80);
+        return () => window.clearInterval(timer);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [playAll, playIndexSafe, playLengthSec, playClip?.clip.kind]);
+    }, [playAll, playPaused, playIndexSafe, playSpan?.startSec, playSpan?.lengthSec, playClip?.clip.kind, playClip?.clip.nodeId]);
 
     const patch = (next: Partial<CanvasNodeMetadata>) => onConfigChange(node.id, next);
 
@@ -194,6 +279,13 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
         event.preventDefault();
         event.stopPropagation();
         setSelectedIndex(index);
+        if (playAll) {
+            // 整条播放时点某一块 = 从这一段入点重新接上，别让播放头留在上一段。
+            pendingSeekRef.current = null;
+            setPlayIndex(index);
+            setHead(spans[index]?.startSec ?? 0);
+            setPlayPaused(false);
+        }
         dragStateRef.current = { from: index, startX: event.clientX, startY: event.clientY, active: false };
         const handleMove = (moveEvent: PointerEvent) => {
             const state = dragStateRef.current;
@@ -288,20 +380,22 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
                             <div className="flex min-h-0 flex-1 flex-col gap-1.5 rounded-lg border p-2" style={{ borderColor: theme.node.stroke }}>
                                 <div className="flex items-center justify-between gap-2">
                                     <span className="truncate text-[11px] font-medium">
-                                        {playAll ? t("canvas.videoMerge.playAllSegment", { index: playIndexSafe + 1, count: clips.length }) : `${safeIndex + 1}. ${selected.clip.title}`}
+                                        {playAll ? `${t("canvas.videoMerge.playAll")} · ${formatMergeClock(playTotalSec)}` : `${safeIndex + 1}. ${selected.clip.title}`}
                                     </span>
                                     <div className="flex shrink-0 items-center gap-1">
-                                        <Tooltip title={playAll ? t("canvas.videoMerge.playSingle") : t("canvas.videoMerge.playAll")}>
-                                            <Button
-                                                size="small"
-                                                type={playAll ? "primary" : "text"}
-                                                icon={<ListVideo className="size-3.5" />}
-                                                className="!h-6 !px-1.5 !text-[10px]"
-                                                onClick={togglePlayAll}
-                                            >
-                                                {playAll ? t("canvas.videoMerge.playSingle") : t("canvas.videoMerge.playAll")}
-                                            </Button>
-                                        </Tooltip>
+                                        {/* 用双选而不是单按钮：单按钮上写「单条显示」时，用户会以为当前就是单条模式 */}
+                                        <Segmented
+                                            size="small"
+                                            value={playAll ? "all" : "single"}
+                                            options={[
+                                                { value: "single", label: t("canvas.videoMerge.playSingle") },
+                                                { value: "all", label: t("canvas.videoMerge.playAll") },
+                                            ]}
+                                            onChange={(value) => {
+                                                if (String(value) === "all") startPlayAll();
+                                                else stopPlayAll();
+                                            }}
+                                        />
                                         <Tooltip title={t("canvas.videoMerge.remove")}>
                                             <button type="button" className="rounded p-1 opacity-60 hover:bg-red-500/10 hover:text-red-500" onClick={removeSelected}>
                                                 <Trash2 className="size-3.5" />
@@ -315,29 +409,35 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
                                         playClip?.url ? (
                                             playClip.clip.kind === "video" ? (
                                                 <video
-                                                    /* 换段就换 key：旧的立刻卸载停声，新的自己从入点开始 */
+                                                    /* 换段就换 key：旧的立刻卸载停声，新的从「段内偏移」接着演 */
                                                     key={`play-all-${playIndexSafe}-${playClip.clip.nodeId}`}
+                                                    ref={playStageRef}
                                                     src={playClip.url}
                                                     className="h-full w-full object-contain"
-                                                    controls
                                                     playsInline
                                                     preload="auto"
+                                                    /* 整条模式**不挂原生 controls**：它显示的是「这一段」的进度和时长，
+                                                       正是让人以为还在单条播放的根源。进度交给下面那条贯通条。 */
                                                     onLoadedMetadata={(event) => {
                                                         const video = event.currentTarget;
+                                                        const pending = pendingSeekRef.current;
+                                                        const seekTo = pending && pending.nodeId === playClip.clip.nodeId ? pending.atSec : playClip.clip.inSec;
+                                                        pendingSeekRef.current = null;
                                                         try {
-                                                            video.currentTime = Math.max(0, playClip.clip.inSec);
+                                                            video.currentTime = Math.max(0, seekTo);
                                                         } catch {
-                                                            // 容器不支持 seek 就算了，从头播也能看个大概。
+                                                            // 容器不支持 seek 就算了，从 0 开始也能看个大概。
                                                         }
-                                                        void video.play().catch(() => undefined);
+                                                        if (!playPaused) void video.play().catch(() => undefined);
                                                     }}
                                                     onTimeUpdate={(event) => {
                                                         const video = event.currentTarget;
-                                                        // 出点判定要用 media 时间，不是时间线时间。
-                                                        if (video.currentTime < Math.max(0, playClip.clip.outSec) - 0.03) return;
-                                                        advancePlay(video);
+                                                        // 出点判定必须用 media 时间；播放头则用「段起点 + 段内已过」的累计时间。
+                                                        setHead((playSpan?.startSec ?? 0) + Math.max(0, video.currentTime - playClip.clip.inSec));
+                                                        if (video.currentTime < Math.max(0, playClip.clip.outSec) - 0.04) return;
+                                                        advancePlay();
                                                     }}
-                                                    onEnded={(event) => advancePlay(event.currentTarget)}
+                                                    onEnded={() => advancePlay()}
                                                 />
                                             ) : (
                                                 <img src={playClip.url} alt={playClip.clip.title} className="h-full w-full object-contain" />
@@ -361,7 +461,67 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
                                 </div>
 
                                 {playAll ? (
-                                    <div className="text-[11px] leading-4 opacity-55">{t("canvas.videoMerge.playAllHint")}</div>
+                                    <div className="flex flex-col gap-1">
+                                        <div className="flex items-center gap-1.5">
+                                            <button
+                                                type="button"
+                                                className="flex size-5 shrink-0 items-center justify-center rounded opacity-75 hover:opacity-100"
+                                                title={playPaused ? t("canvas.videoMerge.play") : t("canvas.videoMerge.pause")}
+                                                onClick={togglePlayback}
+                                                onPointerDown={(event) => event.stopPropagation()}
+                                            >
+                                                {playPaused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
+                                            </button>
+                                            <span className="shrink-0 font-mono text-[10px] tabular-nums opacity-70">
+                                                {formatMergeClock(playheadSec)} / {formatMergeClock(playTotalSec)}
+                                            </span>
+                                            <span className="min-w-0 flex-1 truncate text-right text-[10px] opacity-45">{t("canvas.videoMerge.playAllHint")}</span>
+                                        </div>
+                                        {/* 贯通进度条：整条 = 一条，段与段只在这里按真实长度首尾相接 */}
+                                        <div
+                                            data-video-merge-playhead-bar
+                                            className="relative h-4 w-full cursor-pointer select-none"
+                                            onPointerDown={(event) => {
+                                                if (event.button !== 0) return;
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                const bar = event.currentTarget;
+                                                const seekFromX = (clientX: number) => {
+                                                    const rect = bar.getBoundingClientRect();
+                                                    if (rect.width <= 0 || playTotalSec <= 0) return;
+                                                    seekMerged(((clientX - rect.left) / rect.width) * playTotalSec);
+                                                };
+                                                seekFromX(event.clientX);
+                                                const handleMove = (moveEvent: PointerEvent) => seekFromX(moveEvent.clientX);
+                                                const finish = () => {
+                                                    window.removeEventListener("pointermove", handleMove, true);
+                                                    window.removeEventListener("pointerup", finish, true);
+                                                    window.removeEventListener("pointercancel", finish, true);
+                                                };
+                                                window.addEventListener("pointermove", handleMove, true);
+                                                window.addEventListener("pointerup", finish, true);
+                                                window.addEventListener("pointercancel", finish, true);
+                                            }}
+                                        >
+                                            <div className="absolute inset-x-0 top-1/2 flex h-1.5 -translate-y-1/2 overflow-hidden rounded-full" style={{ background: theme.node.stroke }}>
+                                                {spans.map((span) => (
+                                                    <span
+                                                        key={`span-${span.index}`}
+                                                        className="h-full border-r border-black/20 last:border-r-0"
+                                                        style={{
+                                                            flexGrow: span.lengthSec,
+                                                            flexBasis: 0,
+                                                            background: span.index === playIndexSafe ? "#0ea5e9" : "rgba(127,127,127,0.45)",
+                                                        }}
+                                                    />
+                                                ))}
+                                            </div>
+                                            <span
+                                                className="pointer-events-none absolute top-1/2 size-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white ring-1 ring-black/40"
+                                                style={{ left: `${playTotalSec > 0 ? Math.min(100, Math.max(0, (playheadSec / playTotalSec) * 100)) : 0}%` }}
+                                            />
+                                        </div>
+                                    </div>
                                 ) : selected.clip.kind === "video" ? (
                                     <div className="flex flex-wrap items-center gap-1 text-[11px]">
                                         <TimeField
