@@ -56,6 +56,12 @@ import {
     STORY_SCRIPT_MAX_EXTRA_COLUMNS,
     storyScriptExtraColumnsToColumns,
     storyScriptGroupDuration,
+    resolveStoryScriptSegmentTargetSeconds,
+    isStoryScriptSegmentTargetAdjusted,
+    storyScriptShotSecondsLabel,
+    storyScriptMergeGroupSize,
+    STORY_SCRIPT_SHOTS_PER_15S,
+    STORY_SCRIPT_SEGMENT_TARGET_SECONDS,
     storyScriptRowNote,
     storyScriptToMarkdown,
     storyScriptToTsv,
@@ -1896,6 +1902,19 @@ export function CanvasScriptNodeContent({
     const segmentSeconds = resolveStoryScriptSegmentSeconds(node.metadata?.scriptSegmentSeconds);
     const mergeMode = resolveStoryScriptMergeMode(node.metadata?.scriptMergeMode);
     /**
+     * 「每 N 镜」这一族的**实际**每段秒数。
+     *
+     * 「每镜时长」在合并模式下被当成「每段合计」，可它的默认值 5 秒本来是**单镜上限**语义：
+     * 5 ÷ 4 = 1.25 秒/镜，任务书就成了「约每镜 1 秒」，30 秒剧本拆出十几个碎镜（2026-11-07 报障）。
+     * 所以一旦算出每镜不足 3 秒，就按「每 15 秒 4 镜」的节律把段长抬回来（4 镜那档正好 15 秒）。
+     * 这里取的就是抬完之后的值 —— 徽标必须显示真实生效的秒数，不能显示用户点过的那个数。
+     */
+    const mergeSegmentTarget = resolveStoryScriptSegmentTargetSeconds(segmentSeconds, mergeMode);
+    /** 段长是否被「每 15 秒 4 镜」的节律抬过 —— 徽标 / title 各用一套文案，别让用户以为选 5 秒就出 5 秒片。 */
+    const mergeSegmentAdjusted = isStoryScriptSegmentTargetAdjusted(segmentSeconds, mergeMode);
+    /** 每镜秒数的可写区间（`3~4`），徽标 title 里跟实际段长一起给出来。 */
+    const mergePerShotLabel = storyScriptShotSecondsLabel(mergeSegmentTarget / Math.max(1, storyScriptMergeGroupSize(mergeMode)));
+    /**
      * **手动合并组**：表里勾了几行点「合并为一镜」写进 `metadata.scriptMergeGroups`（存的是行下标）。
      * 它**优先于**上面的「视频分段」档位 —— 手动勾中的几镜一定合成一个视频节点，其余行照档位切。
      * 每次渲染都过一遍归一化：删行 / 调序之后越界或重叠的组会被自动丢掉，不会把不相邻的镜硬凑一起。
@@ -2086,8 +2105,15 @@ export function CanvasScriptNodeContent({
                 lengths: groups.map((group) => storyScriptGroupDuration(group)).join(" / "),
             });
         }
-        return t("canvas.scriptNode.segmentPreviewMerge", { shots: mergeMode, count: groups.length });
-    }, [manualMergeGroups, mergeMode, rows, segmentSeconds, t]);
+        // 「每 N 镜」：段长不再是「每镜时长」，而是「N × 每镜秒数」。按「每 15 秒 4 镜」的拆镜节律，
+        // 4 镜那档就是 15 秒；用户把「每镜时长」留在 5 秒（单镜上限的默认值）时会被节律抬上来，
+        // 所以这里必须显示**实际生效**的秒数，否则「选 5 秒却按 15 秒出片」又是一次报障。
+        return t(mergeSegmentAdjusted ? "canvas.scriptNode.segmentPreviewMergeAdjusted" : "canvas.scriptNode.segmentPreviewMerge", {
+            shots: mergeMode,
+            count: groups.length,
+            seconds: mergeSegmentTarget,
+        });
+    }, [manualMergeGroups, mergeMode, mergeSegmentAdjusted, mergeSegmentTarget, rows, segmentSeconds, t]);
     const mergeSelector = (
         <div className="flex flex-wrap items-center gap-1.5" style={{ color: theme.node.text }}>
             <span className="opacity-60">{t("canvas.scriptNode.mergeLabel")}</span>
@@ -2128,7 +2154,15 @@ export function CanvasScriptNodeContent({
                             ? t("canvas.scriptNode.segmentPreviewManualHint")
                             : mergeMode === "shot"
                               ? t(Number(segmentSeconds) < 10 ? "canvas.scriptNode.segmentPreviewShotCapHint" : "canvas.scriptNode.segmentPreviewShotHint", { seconds: segmentSeconds })
-                              : t("canvas.scriptNode.segmentPreviewHint")
+                              : mergeMode === "duration"
+                                ? t("canvas.scriptNode.segmentPreviewHint")
+                                : t(mergeSegmentAdjusted ? "canvas.scriptNode.segmentPreviewMergeAdjustedHint" : "canvas.scriptNode.segmentPreviewMergeHint", {
+                                      shots: mergeMode,
+                                      seconds: mergeSegmentTarget,
+                                      perShot: mergePerShotLabel,
+                                      density: STORY_SCRIPT_SEGMENT_TARGET_SECONDS,
+                                      perDensity: STORY_SCRIPT_SHOTS_PER_15S,
+                                  })
                     }
                 >
                     {segmentPreview}

@@ -285,8 +285,8 @@ You generate a structured story-script table from an uploaded script excerpt.
 - \`style_prompt\` describes the image style for this shot — film stock / colour grade / texture / grain / reference genre or director. Keep it identical across shots in the same scene, and write \`无\` when no particular style is needed.
 
 ## Duration guidance
-- Default to short cinematic shots.
-- Most rows should fall in the 2-5 second range unless the source clearly calls for a longer beat.
+- Split the source into shots at a fixed density of **4 shots per 15 seconds** (15s = 4 shots, 30s = 8 shots, 60s = 16 shots).
+- Most rows should fall in the 3-5 second range; never write 1-2 second fragments just to hit a count.
 - Keep the pacing readable and dramatic rather than mechanically uniform.
 
 ## Prompt formatting rules
@@ -392,7 +392,7 @@ const STORY_SCRIPT_COMMON_RULES = [
  */
 const STORY_SCRIPT_STYLE_HINT_COMMON = [
     "- 镜号连续递增",
-    "- 时长大多 2-5 秒",
+    "- 单镜时长以任务里的「时长要求」为准；没特别指定时按「每 15 秒 4 个镜头」（每镜 3~4 秒），绝不写 1~2 秒的碎镜",
     "- 景别写法类似 `近景 / 特写`、`中景 / 仰视`",
     "- 角色描述尽量写成 `[角色ID: ...]` 形式",
     "- 同一个人物在所有行里必须用完全一致的角色名",
@@ -465,23 +465,76 @@ export function resolveStoryScriptShotSeconds(duration: unknown, segmentSeconds?
 }
 
 /**
+ * 「这次该按几秒一段、几个镜头拆」——**拆镜密度的唯一换算入口**，三处任务书都读它。
+ *
+ * 为什么要单独收敛：密度以前是两个数算出来的（「每镜时长」÷「合并镜数」），
+ * 默认 5 秒 + 每 4 镜就是 1.25 秒/镜 → 30 秒剧本被拆成十几个碎镜（2026-11-07 报障）。
+ * 现在只有两种来源：
+ * - 合并档（每 2/3/4/5 镜）→ 段长由 `resolveStoryScriptSegmentTargetSeconds` 定（会被节律抬回 15 秒）；
+ * - 其余（单镜 5 秒档 / 按每段时长）→ 直接用固定节律「15 秒 4 镜」。
+ * 返回 `null` = 这次不该谈密度（没设时长 / 单镜锁 10~15 秒 / 老调用不传 mergeMode）。
+ */
+function resolveShotDensity(
+    segmentSeconds?: unknown,
+    mergeMode?: StoryScriptMergeMode | string | null,
+): { segmentTarget: number; perSegment: number } | null {
+    const value = storyScriptSegmentSecondsValue(segmentSeconds);
+    if (!value) return null;
+    const mode = mergeMode === undefined || mergeMode === null ? null : resolveStoryScriptMergeMode(mergeMode);
+    // 老调用（不传 mergeMode）：任务书必须与改造前逐字一致，不能凭空多出一段密度要求。
+    if (mode === null) return null;
+    // 单镜模式锁 10/15 时，一镜本身就是一整段成片，密度节律不适用（用户明确要「每镜 15 秒」）。
+    if (mode === "shot" && value >= 10) return null;
+    const perSegment = storyScriptMergeGroupSize(mode);
+    if (perSegment > 1) {
+        return { segmentTarget: resolveStoryScriptSegmentTargetSeconds(segmentSeconds, mode), perSegment };
+    }
+    // 单镜 5 秒档 / 按每段时长：段长由内容定，镜头按「15 秒 4 镜」的节律拆。
+    return { segmentTarget: STORY_SCRIPT_SEGMENT_TARGET_SECONDS, perSegment: STORY_SCRIPT_SHOTS_PER_15S };
+}
+
+/** 密度事实句：`每 15 秒 4 个镜头（约每镜 3~4 秒）`。 */
+function buildDensityFact(segmentTarget: number, perSegment: number): string {
+    const perShot = segmentTarget / perSegment;
+    return `每 ${segmentTarget} 秒 ${perSegment} 个镜头（约每镜 ${storyScriptShotSecondsLabel(perShot)} 秒）`;
+}
+
+/** 密度换算出来的镜数：`30 秒约 8 镜、60 秒约 16 镜`。 */
+function buildDensityCounts(segmentTarget: number, perSegment: number): string {
+    const perShot = segmentTarget / perSegment;
+    const shotsFor = (seconds: number) => Math.max(1, Math.round(seconds / perShot));
+    return `30 秒约 ${shotsFor(30)} 镜、60 秒约 ${shotsFor(60)} 镜`;
+}
+
+/** 密度那一行（带 `- ` 与「拆镜密度：」前缀），用在「分段时长要求」块里。 */
+function buildDensityLine(segmentTarget: number, perSegment: number): string {
+    return `- 拆镜密度：${buildDensityFact(segmentTarget, perSegment)} —— ${buildDensityCounts(segmentTarget, perSegment)}。**不要按每秒一个镜头拆**。`;
+}
+
+/**
  * 「每镜 / 每段时长」要求。三种口径，取决于「视频分段」怎么设：
  * - `shot`：**一镜就是一段成片** → 10/15 锁死 `duration` = N；5 秒是上限（≤N）；
  * - `duration` / `2` / `3` / `4` / `5`：若干镜合并成一段 → 连续几镜的秒数之和凑到 N；
- * - 不传 `mergeMode`（老调用 / 探针）：保持「合计约 N 秒」的老文案，与改造前逐字一致。
+ * - 不传 `mergeMode`（老调用 / 探针）：保持「合计约 N 秒」的老文案。
  * 不指定（none）时不加任何约束，保持原行为。
+ *
+ * ⚠️ **拆镜密度一律由「每 15 秒 4 镜」这条节律决定，不能由「段长 ÷ 镜数」反推**
+ * （2026-11-07 报障：默认 5 秒 + 每 4 镜 → 5÷4≈1 秒/镜，30 秒剧本拆出 16 个碎镜）。
+ * 所以合并分支里先判 `value / N < 3`，一旦会碎就把段长按节律抬回 15 秒。
  */
 function buildSegmentDurationGuidance(segmentSeconds?: unknown, mergeMode?: StoryScriptMergeMode | string | null): string {
     const value = storyScriptSegmentSecondsValue(segmentSeconds);
     if (!value) return "";
-    const maxShot = Math.max(3, Math.round(value / 2));
     const mode = mergeMode === undefined || mergeMode === null ? null : resolveStoryScriptMergeMode(mergeMode);
+    // 拆镜密度的统一说法：三档分支都要带，模型才知道「15 秒该出几个镜头」。
+    const fixedDensityLine = buildDensityLine(STORY_SCRIPT_SEGMENT_TARGET_SECONDS, STORY_SCRIPT_SHOTS_PER_15S);
     if (mode === "shot") {
         // 10 / 15 是「锁定」，5 是「上限」——用户对 5 秒的原话是「每镜头不超过 5 秒」。
         if (value < 10) {
             return [
                 "## 每镜时长要求",
-                `- 每一镜就是一整段成片，单镜 \`duration\` **不要超过 ${value} 秒**（按内容需要写 2~${value} 秒的整数）。`,
+                `- 每一镜就是一整段成片，单镜 \`duration\` 写 ${storyScriptShotSecondsRange(value)} 秒的整数 —— **不要超过 ${value} 秒**，也不要有 1 秒 / 2 秒的碎镜。`,
+                fixedDensityLine,
                 `- 铺链时每一镜直接按它自己的 \`duration\` 出片，所以**不要写超过 ${value} 秒的长镜头**。`,
                 `- \`video_motion_prompt\` 里的 \`[时长：Xs]\` 不要超过 ${value} 秒。`,
             ].join("\n");
@@ -497,26 +550,81 @@ function buildSegmentDurationGuidance(segmentSeconds?: unknown, mergeMode?: Stor
     // 「每 N 镜合并」这一族（2~5）：数字直接来自档位本身，加档位不用改这里。
     const perSegment = mode === null ? 1 : storyScriptMergeGroupSize(mode);
     if (perSegment > 1) {
+        const rawPerShot = value / perSegment;
+        // 会碎（每镜不足 3 秒）→ 由节律把段长抬回去（换算式唯一入口在 resolveStoryScriptSegmentTargetSeconds）。
+        const segmentTarget = resolveStoryScriptSegmentTargetSeconds(segmentSeconds, mode);
+        const tooFragmented = segmentTarget !== value;
+        const perShot = segmentTarget / perSegment;
+        const lines = [
+            "## 分段时长要求",
+            `- 每 ${perSegment} 镜会合并成一段，一段的成片目标是 ${segmentTarget} 秒（视频模型基本只能按这个长度出片）。`,
+            `- 因此请让**连续 ${perSegment} 镜的秒数相加正好等于 ${segmentTarget} 秒**（约每镜 ${storyScriptShotSecondsLabel(perShot)} 秒）。`,
+            buildDensityLine(segmentTarget, perSegment),
+            `- \`duration\` 填该镜的实际秒数（整数，单镜不少于 ${STORY_SCRIPT_MIN_SHOT_SECONDS} 秒），不要写成一个大超长镜头。`,
+            `- \`video_motion_prompt\` 里的 \`[时长：Xs]\` 不要超过 ${value} 秒。`,
+        ];
+        if (tooFragmented) {
+            lines.splice(
+                2,
+                0,
+                `- ⚠️ 不要拿「${value} ÷ ${perSegment}」当每镜秒数：那只有 ${Number(rawPerShot.toFixed(2))} 秒，会把镜头拆成「一秒一个」的碎片，不是要的东西。`,
+            );
+        }
+        return lines.join("\n");
+    }
+    // 老调用（不传 mergeMode）：文案保持与改造前一致，只把写死的示例换成本次 value 的真实拆分
+    // （原来写的是「3+3+4、4+6、5+5」，加起来只有 10 秒，15 秒档照着抄就会拆成 10 秒的碎镜）。
+    const sample = value >= 12 ? `4+4+4+${value - 12}` : value >= 8 ? `4+${value - 4}` : `${value}`;
+    if (mode === null) {
         return [
             "## 分段时长要求",
-            `- 本次目标成片长度约为每段 ${value} 秒（视频模型基本只能按 ${value} 秒出片）。`,
-            `- 每 ${perSegment} 镜会合并成一段，因此请让**连续 ${perSegment} 镜的秒数相加正好等于 ${value} 秒**（约每镜 ${Math.max(1, Math.round(value / perSegment))} 秒）。`,
-            `- \`duration\` 填该镜的实际秒数（整数），不要写成一个大超长镜头。`,
+            `- 本次目标成片长度约为每段 ${value} 秒（视频模型基本只能按 ${value} 秒出片，长短都算废片）。`,
+            `- \`duration\` 仍填该镜的实际秒数（整数），但请让**连续若干镜的秒数相加正好等于 ${value} 秒**：例如 ${value} 秒可以写成 ${sample}，或一镜到底直接 ${value} 秒。`,
+            `- 单镜尽量落在 ${storyScriptShotSecondsRange(Math.max(STORY_SCRIPT_MAX_SHOT_SECONDS, Math.round(value / 2)))} 秒之间，不要写成一个大超长镜头，也不要让某一段凑不满 ${value} 秒。`,
             `- \`video_motion_prompt\` 里的 \`[时长：Xs]\` 不要超过 ${value} 秒。`,
         ].join("\n");
     }
+    // 「按每段时长」（duration）：段长由内容定，但单镜仍按 3~5 秒的密度写（别为凑段塞一个 8 秒长镜头）。
     return [
         "## 分段时长要求",
         `- 本次目标成片长度约为每段 ${value} 秒（视频模型基本只能按 ${value} 秒出片，长短都算废片）。`,
-        `- \`duration\` 仍填该镜的实际秒数（整数），但请让**连续若干镜的秒数相加正好等于 ${value} 秒**：例如 ${value} 秒可以写成 3+3+4、4+6、5+5，或一镜到底直接 ${value} 秒。`,
-        `- 单镜尽量落在 2-${maxShot} 秒之间，不要写成一个大超长镜头，也不要让某一段凑不满 ${value} 秒。`,
+        `- \`duration\` 填该镜的实际秒数（整数），请让**连续若干镜的秒数相加正好等于 ${value} 秒**：例如 ${value} 秒可以写成 ${sample}，或一镜到底直接 ${value} 秒。`,
+        fixedDensityLine,
+        `- 单镜 \`duration\` 只写 ${STORY_SCRIPT_MIN_SHOT_SECONDS}~${STORY_SCRIPT_MAX_SHOT_SECONDS} 秒的整数，不要写成一个大超长镜头，也不要让某一段凑不满 ${value} 秒。`,
         `- \`video_motion_prompt\` 里的 \`[时长：Xs]\` 不要超过 ${value} 秒。`,
     ].join("\n");
 }
 
 /**
+ * **拆镜密度硬约束**（整表任务书里塞在 JSON 契约**之前**——模型对越靠后的指令越服从）。
+ *
+ * 与 `buildSegmentDurationGuidance` 里那句的分工：那边解释「怎么凑段」，这边只钉死
+ * 「N 秒几镜、单镜几秒、禁止碎镜」这一条，避免段长 / 镜数两套算法互相打架。
+ */
+function buildShotDensityRule(segmentSeconds?: unknown, mergeMode?: StoryScriptMergeMode | string | null): string {
+    const density = resolveShotDensity(segmentSeconds, mergeMode);
+    if (!density) return "";
+    const { segmentTarget, perSegment } = density;
+    const lines = [
+        "## 拆镜密度（硬约束，压过上文任何暗示）",
+        `- 按「每 ${segmentTarget} 秒 ${perSegment} 个镜头」拆：${buildDensityCounts(segmentTarget, perSegment)}（约每镜 ${storyScriptShotSecondsLabel(segmentTarget / perSegment)} 秒）。`,
+        `- 单镜 \`duration\` 只写 ${STORY_SCRIPT_MIN_SHOT_SECONDS}~${STORY_SCRIPT_MAX_SHOT_SECONDS} 秒的整数，**禁止 1 秒 / 2 秒的碎镜** —— 把时间码按秒切成镜头是错的。`,
+    ];
+    if (perSegment > 1) {
+        lines.push(
+            `- 「每 ${perSegment} 镜合并成一段」的意思是：这 ${perSegment} 镜本来就是按上面的密度拆好的，合起来正好一段（约 ${segmentTarget} 秒）；**不要**为了凑段再把 ${perSegment} 镜拆成十几个更小的镜头。`,
+        );
+    }
+    return lines.join("\n");
+}
+
+/**
  * 单镜重生成时的时长约束（一行说明，挂在行任务书里）。
  * `shot` 模式下 10/15 必须锁死 N 秒（这一镜自己就是成片）、5 秒是上限；其余模式只要求「别超过 N 秒」。
+ *
+ * ⚠️ 合并档必须用 `resolveStoryScriptSegmentTargetSeconds` 算出的**实际**段长：
+ * 默认 5 秒 + 每 4 镜会被节律抬到 15 秒，这里若还写「这一段目标 5 秒」，
+ * 单镜重生成会跟整表任务书（15 秒）打架，重写出来又是一秒一个的碎镜。
  */
 function buildRowDurationHint(segmentSeconds?: unknown, mergeMode?: StoryScriptMergeMode | string | null): string {
     const value = storyScriptSegmentSecondsValue(segmentSeconds);
@@ -524,12 +632,19 @@ function buildRowDurationHint(segmentSeconds?: unknown, mergeMode?: StoryScriptM
     const mode = mergeMode === undefined || mergeMode === null ? null : resolveStoryScriptMergeMode(mergeMode);
     if (mode === "shot") {
         if (value < 10) {
-            return `本镜时长要求：这一镜就是一整段成片，\`duration\` **不要超过 ${value} 秒**（2~${value} 秒的整数）。`;
+            return `本镜时长要求：这一镜就是一整段成片，\`duration\` 写 ${storyScriptShotSecondsRange(value)} 秒的整数 —— **不要超过 ${value} 秒**，也不要有 1 秒 / 2 秒的碎镜。`;
         }
         return `本镜时长要求：\`duration\` 必须填 ${value} —— 这一镜就是一整段 ${value} 秒的成片，镜头内部要有完整的起幅 / 过程 / 落幅，不要写成 2~3 秒的碎片。`;
     }
     if (mode === null) return "";
-    return `本镜时长要求：这一段目标成片 ${value} 秒，这一镜的 \`duration\` 控制在 ${value} 秒以内，给相邻镜留出合并空间。`;
+    const segmentTarget = resolveStoryScriptSegmentTargetSeconds(segmentSeconds, mode);
+    const perSegment = storyScriptMergeGroupSize(mode);
+    if (perSegment > 1) {
+        const perShot = segmentTarget / perSegment;
+        return `本镜时长要求：这一段目标成片 ${segmentTarget} 秒，这一镜的 \`duration\` 写 ${storyScriptShotSecondsLabel(perShot)} 秒（每 ${perSegment} 镜合计 ${segmentTarget} 秒），不要写成 1~2 秒的碎镜，也不要一个镜头吃掉整段。`;
+    }
+    const perShot = STORY_SCRIPT_SHOT_TARGET_SECONDS;
+    return `本镜时长要求：这一段目标成片 ${segmentTarget} 秒，这一镜的 \`duration\` 控制在 ${segmentTarget} 秒以内、写 ${storyScriptShotSecondsLabel(perShot)} 秒（按每 ${STORY_SCRIPT_SEGMENT_TARGET_SECONDS} 秒 ${STORY_SCRIPT_SHOTS_PER_15S} 镜的密度），给相邻镜留出合并空间。`;
 }
 
 /**
@@ -743,6 +858,9 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     // 资产描述去重：紧贴 JSON 契约之前（模型对越靠后的指令越服从），与 system 里那段是同一份文本。
     if (assetDedupe) parts.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
+    // 拆镜密度：同样紧贴契约（2026-11-07「30 秒拆 16 镜」报障，密度必须最后再说一遍）。
+    const densityRule = buildShotDensityRule(segmentSeconds, mergeMode);
+    if (densityRule) parts.push(densityRule);
     parts.push(STORY_SCRIPT_JSON_CONTRACT);
     parts.push(`源剧本内容：\n${sourceText.trim()}`);
     return parts.join("\n\n");
@@ -762,6 +880,9 @@ function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds
     // storyboard 的规则全在 system prompt 里，没有可整段替换的「参考风格要点」，所以只追加专项要求。
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     if (assetDedupe) parts.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
+    // 拆镜密度（同 classic：最后再说一遍，压过前面所有暗示）。
+    const densityRule = buildShotDensityRule(segmentSeconds, mergeMode);
+    if (densityRule) parts.push(densityRule);
     parts.push(`创意大纲 / 源内容：\n${sourceText.trim()}`);
     return parts.join("\n\n");
 }
@@ -1177,7 +1298,7 @@ export function isGlobalScriptAssetRole(role: ScriptAssetRole): boolean {
 export type StoryScriptSegmentSeconds = "none" | "5" | "10" | "15";
 /**
  * 「每镜时长」档位。**默认 5 秒**（用户拍板：「默认状态是每镜头不超过 5 秒，也可以选 10 / 15」）。
- * - `5`：**上限**——每镜写 2~5 秒都行，不许超；
+ * - `5`：**上限**——每镜写 3~5 秒都行（不要 1~2 秒的碎镜），不许超；
  * - `10` / `15`：**锁定**——每镜就是 10 / 15 秒（用户明确要「每个镜头 10 秒」）；
  * - `none`：不限制，完全按表格 `duration`（逃生口，别再塞回默认）。
  */
@@ -1193,6 +1314,81 @@ export function storyScriptSegmentSecondsValue(value: unknown): number {
     const id = resolveStoryScriptSegmentSeconds(value);
     return id === "none" ? 0 : Number(id);
 }
+
+/**
+ * **拆镜节律：每 15 秒 4 个镜头**（用户 2026-11-07 拍板）。
+ *
+ * 报障原话：「15 秒镜头固定拆 4 个镜头出来，不要每个镜头 1 秒这样，至于我最后每 4 个镜头合成一个镜头
+ * 也是想 4 个镜头满足 15 左右的内容，现在拆出来的 30 秒给我拆 16 个镜头是什么意思？」
+ *
+ * 根因有两条，都出在「拆镜密度由别的东西算出来」：
+ * ① 「每镜时长」的 `5` 秒默认值本来是**单镜上限**语义；一旦把「视频分段」改成「每 4 镜合并」，
+ *    5 ÷ 4 = 1.25 秒，任务书就变成「约每镜 1 秒」→ 模型照做，30 秒拆成十几个碎镜；
+ * ② 「按每段时长」分支里给了「单镜尽量落在 2~8 秒」，模型一律取 2 秒 → 30 秒也是 15~16 镜。
+ *
+ * 所以密度**只由这条节律决定**：15 秒 = 4 镜（每镜 3~4 秒），30 秒 = 8 镜，60 秒 = 16 镜。
+ * 合并段只是「把已经按这个密度拆好的 N 镜凑成一段」，不该反过来把镜头压碎。
+ */
+export const STORY_SCRIPT_SHOTS_PER_15S = 4;
+/** 一段成片的目标秒数（正好 = 4 镜 × 3.75 秒，也是视频模型最常见的出片长度）。 */
+export const STORY_SCRIPT_SEGMENT_TARGET_SECONDS = 15;
+/** 单镜目标秒数（15 / 4 = 3.75；写进表格时取 3~4 的整数）。 */
+export const STORY_SCRIPT_SHOT_TARGET_SECONDS = STORY_SCRIPT_SEGMENT_TARGET_SECONDS / STORY_SCRIPT_SHOTS_PER_15S;
+/** 单镜下限定：1~2 秒的碎镜就是本次报障的主体，模型不许再写。 */
+export const STORY_SCRIPT_MIN_SHOT_SECONDS = 3;
+/** 单镜秒数上限（写进表格时的上界；超过就是「一个镜头干完了四镜的事」）。 */
+export const STORY_SCRIPT_MAX_SHOT_SECONDS = 5;
+
+/** 单镜可取区间的文本，例如 `3~5`。 */
+export function storyScriptShotSecondsRange(max: number): string {
+    return `${Math.min(STORY_SCRIPT_MIN_SHOT_SECONDS, max)}~${max}`;
+}
+
+/**
+ * 把「每镜平均秒数」写成表格里能用的整数区间：`3.75 → 3~4`、`5 → 5`、`3.33 → 3~4`。
+ * 任务书里的「约每镜 X 秒」一律走这里，别在半路各写一套（写 `3.75` 会让模型四舍五入成 3 或 4 都行，写 `3~4` 才稳）。
+ */
+export function storyScriptShotSecondsLabel(perShot: number): string {
+    if (!Number.isFinite(perShot) || perShot <= 0) return `${STORY_SCRIPT_MIN_SHOT_SECONDS}~${STORY_SCRIPT_MAX_SHOT_SECONDS}`;
+    if (Number.isInteger(perShot)) return `${perShot}`;
+    const low = Math.max(STORY_SCRIPT_MIN_SHOT_SECONDS, Math.floor(perShot));
+    return `${low}~${Math.max(low + 1, Math.ceil(perShot))}`;
+}
+
+/**
+ * 按拆镜节律把「总秒数」换算成镜数（`15 秒 → 4 镜`）。给任务书写硬事实用：
+ * 用户贴 30 秒剧本时，任务书里直接写「这一段应该拆 8 镜」，比只说「每镜 3~4 秒」管用得多。
+ */
+export function storyScriptShotsForSeconds(seconds: unknown): number {
+    const total = Number(seconds);
+    if (!Number.isFinite(total) || total <= 0) return 0;
+    return Math.max(1, Math.round((total * STORY_SCRIPT_SHOTS_PER_15S) / STORY_SCRIPT_SEGMENT_TARGET_SECONDS));
+}
+
+/**
+ * **合并模式下「一段实际多少秒」**（唯一的换算入口，任务书与 UI 都读它）。
+ *
+ * 「每镜时长」那个档位在合并模式下被当成「每段合计」用，可它的默认值 5 秒本来是**单镜上限**语义：
+ * 5 秒 ÷ 4 镜 = 1.25 秒/镜 → 任务书变成「约每镜 1 秒」→ 30 秒剧本拆出十几个碎镜（2026-11-07 报障）。
+ * 所以一旦算出每镜不足 `STORY_SCRIPT_MIN_SHOT_SECONDS`，就按「每 15 秒 4 镜」的密度把段长抬回去
+ * （N 镜 × 3.75 秒，对齐到 5 的倍数、不超过 15 秒）。抬不抬都用这个函数，UI 才敢如实显示。
+ */
+export function resolveStoryScriptSegmentTargetSeconds(segmentSeconds?: unknown, mergeMode?: StoryScriptMergeMode | string | null): number {
+    const value = storyScriptSegmentSecondsValue(segmentSeconds);
+    if (!value) return 0;
+    const perSegment = storyScriptMergeGroupSize(mergeMode ?? null);
+    if (perSegment <= 1) return value;
+    if (value / perSegment >= STORY_SCRIPT_MIN_SHOT_SECONDS) return value;
+    return Math.min(STORY_SCRIPT_SEGMENT_TARGET_SECONDS, Math.max(value, Math.round((perSegment * STORY_SCRIPT_SHOT_TARGET_SECONDS) / 5) * 5));
+}
+
+/** 单镜 / 每段的目标秒数是否被节律抬过（UI 据此提示「实际按 N 秒出片」）。 */
+export function isStoryScriptSegmentTargetAdjusted(segmentSeconds?: unknown, mergeMode?: StoryScriptMergeMode | string | null): boolean {
+    const value = storyScriptSegmentSecondsValue(segmentSeconds);
+    if (!value) return false;
+    return resolveStoryScriptSegmentTargetSeconds(segmentSeconds, mergeMode) !== value;
+}
+
 
 /**
  * 脚本节点「AI 生图」的比例档位。
