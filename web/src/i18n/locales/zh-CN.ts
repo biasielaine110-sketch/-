@@ -744,6 +744,7 @@ export default {
             customPromptReset: "恢复预设提示词",
             customPromptResetDone: "已恢复预设默认提示词",
             customPromptSaved: "已保存自定义提示词（{{count}} 字）",
+            customPromptFollowLibrary: "内容与词库当前一致，继续跟随词库（词库更新后自动生效）",
             assetPromptChip: "资产提示词",
             assetPromptHint: "只控制分镜表里资产列的写法（角色 / 场景 / 道具 / 人物站位），不影响分镜提示词。它是追加在任务书里的专项要求：内容冲突时压过系统提示词，但不会关掉它。保存留空即恢复预设",
             assetPromptTitle: "资产提示词 · 角色 / 场景 / 道具 / 人物站位",

@@ -39,6 +39,7 @@ import { nanoid } from "nanoid";
 import { captureVideoFrameDataUrl, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
+import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, mergeDataUrls, resizeDataUrlByPercent, splitDataUrl, upscaleDataUrl, adjustDataUrl, type ImageAdjustParams } from "@/lib/canvas/canvas-image-data";
 import { loadVideoBlob } from "@/lib/canvas/canvas-video-tools";
@@ -48,7 +49,7 @@ import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/cons
 import { buildStylePromptText, composeStyledPrompt, getStyleTemplate } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
 import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, describeMomanSourceOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMergeGroups, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptImageSize, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
-import { resolveScriptSchemeId } from "@/constant/script-scheme";
+import { resolveScriptPromptValues, resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -113,7 +114,7 @@ import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-orde
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import { applyScriptAssetDirectDecorations, buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, describeScriptAssetAspectMismatch, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { applyScriptAssetDirectDecorations, buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, describeScriptAssetAspectMismatch, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, resolveScriptImageQuality, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
@@ -476,6 +477,11 @@ function AtelierCanvasPage() {
 
     const config = useConfigStore((state) => state.config);
     const effectiveConfig = useEffectiveConfig();
+    /**
+     * 画布技能库：第六 / 第七 / 第八套方案的分镜提示词正文从这里取（不是词库）。
+     * 生成脚本时必须和节点组件用**同一份**实时来源，否则「改了技能内容、生成还是老的」。
+     */
+    const chatSkillPacks = useChatSkillPacksStore((state) => state.packs);
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
@@ -7387,6 +7393,33 @@ function AtelierCanvasPage() {
 
     // 脚本生成：走文本模型通道（与 Chat 节点同一条 requestImageQuestion），把分镜表 system prompt +
     // 结构化任务发给模型，边流边把原始文本写进 scriptRaw，结束后解析成 scriptRows。
+    /**
+     * 脚本节点三段的**实际取值**：一律按**此刻**的词库 / 技能库重新解析（用户 2026-11-08 报障）。
+     *
+     * 改造前这里直接读 `sourceNode.metadata?.scriptSystemPrompt / scriptAssetPrompt / scriptShotPrompt`，
+     * 那三个字段是「节点建好时从词库预填进去的快照」—— 用户在设置里改了词条，节点上还是老正文，
+     * 生成出来的角色 / 场景描述全是老口径，即用户说的「固定化」。
+     *
+     * 现在只有用户在「自定义提示词」弹窗里存过**与词库不同**的内容（`scriptPromptPins`）才用节点那份，
+     * 其余一律跟随实时词库（判定细节见 `resolveScriptPromptValues`）。
+     * ⚠️ 所有脚本生成入口（整表生成 / 单镜重生成 / 补资产描述）都必须经过这一个函数，别再各读各的 metadata。
+     */
+    const resolveScriptPromptsOf = useCallback(
+        (sourceNode: CanvasNodeData) =>
+            resolveScriptPromptValues({
+                scheme: sourceNode.metadata?.scriptScheme,
+                textPrompts: effectiveConfig.textPrompts,
+                skills: chatSkillPacks,
+                pins: sourceNode.metadata?.scriptPromptPins,
+                stored: {
+                    system: sourceNode.metadata?.scriptSystemPrompt,
+                    asset: sourceNode.metadata?.scriptAssetPrompt,
+                    shot: sourceNode.metadata?.scriptShotPrompt,
+                },
+            }),
+        [chatSkillPacks, effectiveConfig.textPrompts],
+    );
+
     const runScriptGeneration = useCallback(
         async (
             nodeId: string,
@@ -7395,6 +7428,8 @@ function AtelierCanvasPage() {
             const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
             if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return { ok: false, cancelled: true };
             if (isNodeGenerating(nodeId)) return { ok: false, cancelled: true };
+            // 三段提示词按**此刻**的词库解析（不再读节点上的旧快照，见 `resolveScriptPromptsOf`）。
+            const scriptPrompts = resolveScriptPromptsOf(sourceNode);
             const manualSource = (overrides?.scriptSource ?? sourceNode.metadata?.scriptSource ?? "").trim();
             // 输出格式预设：决定系统提示词、任务书措辞与解析用的列定义（见 constant/story-script.ts）。
             const presetId = resolveStoryScriptPresetId(sourceNode.metadata?.scriptPreset);
@@ -7426,8 +7461,8 @@ function AtelierCanvasPage() {
                 segmentSeconds,
                 mergeMode,
                 // 两路专项自定义要求：资产一套、分镜提示词一套（用户要求分开控制，互不影响）。
-                assetPrompt: sourceNode.metadata?.scriptAssetPrompt,
-                shotPrompt: sourceNode.metadata?.scriptShotPrompt,
+                assetPrompt: scriptPrompts.asset,
+                shotPrompt: scriptPrompts.shot,
                 // 同名资产只在首现镜写全描述 → 输出变短，整表生成更快。
                 assetDedupe: true,
             });
@@ -7455,9 +7490,9 @@ function AtelierCanvasPage() {
              * 这两种情形都必须把预设 system prompt 里的「8 段 / 6 段 / `[a] + [b]` 链式」**显式作废**——
              * 只在任务书里写「以上不适用」压不住（模型对 system prompt 的服从度更高）。
              */
-            const scriptSystemPrompt = resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt, {
+            const scriptSystemPrompt = resolveScriptSystemPrompt(presetId, scriptPrompts.system, {
                 verbatimTemplate: hasStoryScriptShotTemplate(sourceText),
-                customShotFormat: hasScriptGenerationPrompt(sourceNode.metadata?.scriptShotPrompt),
+                customShotFormat: hasScriptGenerationPrompt(scriptPrompts.shot),
                 // 三套方案通用：第二 / 第三套的 system 是用户词库文本，只能靠这段追加去重规则。
                 assetDedupe: true,
                 // 第四套：压上「video_motion_prompt 只能是八段标签块」（见 STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT）。
@@ -7657,7 +7692,7 @@ function AtelierCanvasPage() {
                 finishGenerationRequest(nodeId, controller);
             }
         },
-        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNodeGenerating, message, openConfigDialog, startGenerationRequest, t],
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNodeGenerating, message, openConfigDialog, resolveScriptPromptsOf, startGenerationRequest, t],
     );
 
     const handleStopScriptGeneration = useCallback(
@@ -7681,6 +7716,8 @@ function AtelierCanvasPage() {
             const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
             if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return;
             if (isNodeGenerating(nodeId)) return;
+            // 三段提示词按**此刻**的词库解析（与整表生成同一口径，见 `resolveScriptPromptsOf`）。
+            const scriptPrompts = resolveScriptPromptsOf(sourceNode);
             const sourceRows = sourceNode.metadata?.scriptRows || [];
             const indexes = (Array.isArray(rowIndexes) ? rowIndexes : [rowIndexes])
                 .filter((index) => Number.isInteger(index) && index >= 0 && index < sourceRows.length)
@@ -7735,9 +7772,9 @@ function AtelierCanvasPage() {
             try {
                 const hydrated = context.referenceImages.length ? await hydrateNodeGenerationContext(context) : context;
                 // 与整表生成同一口径：模版 / 自定义分镜提示词在场 → system prompt 侧作废链式写法。
-                const systemPrompt = resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt, {
+                const systemPrompt = resolveScriptSystemPrompt(presetId, scriptPrompts.system, {
                     verbatimTemplate: hasStoryScriptShotTemplate(sourceText),
-                    customShotFormat: hasScriptGenerationPrompt(sourceNode.metadata?.scriptShotPrompt),
+                    customShotFormat: hasScriptGenerationPrompt(scriptPrompts.shot),
                     // 单镜重生成：覆盖段要说「只要这一镜」，否则会和「一模版一块」自相矛盾。
                     singleShot: true,
                     // 与整表生成同一口径：同名资产只在首现镜写全描述。
@@ -7773,8 +7810,8 @@ function AtelierCanvasPage() {
                         mergeMode,
                         extraPlot: extraPlot || undefined,
                         keepBlocking,
-                        assetPrompt: sourceNode.metadata?.scriptAssetPrompt,
-                        shotPrompt: sourceNode.metadata?.scriptShotPrompt,
+                        assetPrompt: scriptPrompts.asset,
+                        shotPrompt: scriptPrompts.shot,
                     });
                     // 第四套：单镜任务书末尾同样压「video_motion_prompt 只能是八段标签块」。
                     const rowTask = directorFormatHint ? `${task}\n\n${directorFormatHint}` : task;
@@ -7922,7 +7959,7 @@ function AtelierCanvasPage() {
                 finishGenerationRequest(nodeId, controller);
             }
         },
-        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNodeGenerating, message, openConfigDialog, startGenerationRequest, t],
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNodeGenerating, message, openConfigDialog, resolveScriptPromptsOf, startGenerationRequest, t],
     );
 
     // 二次识别「补缺失资产」：只让模型补**空着的资产列**，已有内容一个字都不改
@@ -7935,6 +7972,9 @@ function AtelierCanvasPage() {
             const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
             if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return;
             if (isNodeGenerating(nodeId)) return;
+            // 补资产描述用的两段也按**此刻**的词库解析（同 `resolveScriptPromptsOf`），
+            // 否则词库改了「资产提取 / 最佳拍档」这两条，补出来的角色 / 场景还是老口径。
+            const scriptPrompts = resolveScriptPromptsOf(sourceNode);
             const rows = sourceNode.metadata?.scriptRows || [];
             const indexes = (Array.isArray(rowIndexes) ? rowIndexes : [rowIndexes])
                 .filter((index) => Number.isInteger(index) && index >= 0 && index < rows.length)
@@ -7993,12 +8033,12 @@ function AtelierCanvasPage() {
                     const targets = collectStoryScriptAssetFillTargets(presetId, row, extras);
                     if (!targets.length) continue;
                     try {
-                        const task = buildStoryScriptAssetFillTask({ preset: presetId, sourceText, row, targets, extras, assetPrompt: sourceNode.metadata?.scriptAssetPrompt });
+                        const task = buildStoryScriptAssetFillTask({ preset: presetId, sourceText, row, targets, extras, assetPrompt: scriptPrompts.asset });
                         const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
                             ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
                             : task;
                         const answer = await requestImageQuestion(textConfig, [
-                            { role: "system", content: resolveScriptSystemPrompt(presetId, sourceNode.metadata?.scriptSystemPrompt) },
+                            { role: "system", content: resolveScriptSystemPrompt(presetId, scriptPrompts.system) },
                             { role: "user", content: userContent },
                         ], () => {}, { signal: controller.signal });
                         if (controller.signal.aborted) return;
@@ -8034,7 +8074,7 @@ function AtelierCanvasPage() {
                 finishGenerationRequest(nodeId, controller);
             }
         },
-        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNodeGenerating, message, openConfigDialog, startGenerationRequest, t],
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isNodeGenerating, message, openConfigDialog, resolveScriptPromptsOf, startGenerationRequest, t],
     );
 
     /** 整表补齐资产：把还有缺列的镜头一次补完（逐镜串行，跳过不缺的）。 */
@@ -8314,7 +8354,9 @@ function AtelierCanvasPage() {
             // 弹窗里挑的风格直接落到新图片节点上；**没挑就跟随脚本节点上那档**（用户 2026-11-08 第 04 条）。
             // 生图链路读的是节点自己的 metadata.styleTemplateId，之后在节点上的风格选择器里还能改。
             const nodeStyleTemplateId = styleTemplateId || source.metadata?.styleTemplateId;
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(nodeStyleTemplateId ? { styleTemplateId: nodeStyleTemplateId } : {}) });
+            // 画质：全局没选具体档位（空 / auto）时**按 2K 出**，避免掉回 1K（见 `resolveScriptImageQuality`）。
+            const qualityFallback = resolveScriptImageQuality(effectiveConfig.quality);
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(qualityFallback ? { quality: qualityFallback } : {}), ...(nodeStyleTemplateId ? { styleTemplateId: nodeStyleTemplateId } : {}) });
             const placed = attachScriptAssets(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
@@ -8354,6 +8396,8 @@ function AtelierCanvasPage() {
             if (!source || !wanted.length) return;
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             const imageSize = resolveStoryScriptImageSize(options?.size) || resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
+            // 画质保底：全局没选具体档位（空 / auto）时这一批按 2K 出（见 `resolveScriptImageQuality`）。
+            const batchQualityFallback = resolveScriptImageQuality(effectiveConfig.quality);
             const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
             const cellWidth = Math.round(dims.width);
             const cellHeight = Math.round(dims.height);
@@ -8376,6 +8420,8 @@ function AtelierCanvasPage() {
                     prompt: item.prompt,
                     status: NODE_STATUS_IDLE,
                     ...(imageSize ? { size: imageSize } : {}),
+                    // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
+                    ...(batchQualityFallback ? { quality: batchQualityFallback } : {}),
                     // 弹窗里挑的模型：`buildGenerationConfig` 读的就是 `metadata.model`，
                     // 所以这一批（以及之后在这个节点上点重生成）都走同一个模型。
                     ...(options?.model ? { model: options.model } : {}),
@@ -8488,6 +8534,9 @@ function AtelierCanvasPage() {
                 return { created: [] };
             }
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            // 画质保底：全局没选具体档位（空 / auto）时「一键直接生图」这一批按 2K 出
+            // —— 只写比例的节点会一路回落到 `DEFAULT_IMAGE_SHORT_SIDE` 的 1K（见 `resolveScriptImageQuality`）。
+            const directQualityFallback = resolveScriptImageQuality(effectiveConfig.quality);
             const planned = wanted.map((item) => {
                 // ⚠️ 只传分类，没有第二个参数：比例是硬规则，任何节点字段都不许改它。
                 const imageSize = resolveScriptAssetDirectSize(item.role);
@@ -8515,6 +8564,8 @@ function AtelierCanvasPage() {
                     prompt: cell.item.prompt,
                     status: NODE_STATUS_IDLE,
                     ...(cell.imageSize ? { size: cell.imageSize } : {}),
+                    // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
+                    ...(directQualityFallback ? { quality: directQualityFallback } : {}),
                     // 风格模板：直接生图没有弹窗，统一跟随脚本节点上那档（2026-11-08 第 04 条）。
                     ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
                     // ⚠️ 默认**不写** `model`：留空 = 生成时回落「配置偏好 → 默认生图模型」。
@@ -8574,7 +8625,7 @@ function AtelierCanvasPage() {
             })();
             return { created };
         },
-        [effectiveConfig.textPrompts, message, revealNodes, t],
+        [effectiveConfig.quality, effectiveConfig.textPrompts, message, revealNodes, t],
     );
 
     // ---- 逐镜「镜头图」（metadata.scriptRowAssets）----
@@ -8654,7 +8705,9 @@ function AtelierCanvasPage() {
             const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
             // 风格：弹窗里挑的优先，没挑就跟随脚本节点上那档。
             const rowStyleTemplateId = styleTemplateId || source.metadata?.styleTemplateId;
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(rowStyleTemplateId ? { styleTemplateId: rowStyleTemplateId } : {}) });
+            // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
+            const rowQualityFallback = resolveScriptImageQuality(effectiveConfig.quality);
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(rowQualityFallback ? { quality: rowQualityFallback } : {}), ...(rowStyleTemplateId ? { styleTemplateId: rowStyleTemplateId } : {}) });
             const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
@@ -8667,7 +8720,7 @@ function AtelierCanvasPage() {
                 setNodes((prev) => prev.map((item) => (item.id === created.id && item.title !== assetTitle ? { ...item, title: assetTitle } : item)));
             });
         },
-        [appendRowAssets, message, placeRowAssetNodes, revealNodes, t],
+        [appendRowAssets, effectiveConfig.quality, message, placeRowAssetNodes, revealNodes, t],
     );
 
     // ---- 逐镜声音（metadata.scriptRowAudios）----
@@ -8889,7 +8942,9 @@ function AtelierCanvasPage() {
             const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
             // 风格：这一格单独挑的优先，没挑就跟随脚本节点上那档。
             const cellStyleTemplateId = styleTemplateId || source.metadata?.styleTemplateId;
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(model ? { model } : {}), ...(cellStyleTemplateId ? { styleTemplateId: cellStyleTemplateId } : {}) });
+            // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
+            const cellQualityFallback = resolveScriptImageQuality(effectiveConfig.quality);
+            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(cellQualityFallback ? { quality: cellQualityFallback } : {}), ...(model ? { model } : {}), ...(cellStyleTemplateId ? { styleTemplateId: cellStyleTemplateId } : {}) });
             const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
@@ -8999,6 +9054,10 @@ function AtelierCanvasPage() {
             // ⚠️ 视频节点以前不继承（2026-11-08 第 05 条用户要求补上：脚本里选的风格要同时落到生图与生视频窗口）。
             const scriptStyleTemplateId = source.metadata?.styleTemplateId;
             const scriptStyle = scriptStyleTemplateId ? { styleTemplateId: scriptStyleTemplateId } : {};
+            // **生图画质**：全局没选具体档位（空 / auto）时铺出来的镜头图也按 2K 出
+            // —— 只写比例的节点会回落到 1K（见 `resolveScriptImageQuality`）。
+            const scriptImageQuality = resolveScriptImageQuality(effectiveConfig.quality);
+            const scriptImageMeta = scriptImageQuality ? { quality: scriptImageQuality } : {};
             const imageSpec =
                 nodeSizeFromRatio(scriptImageSize, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height) ||
                 NODE_DEFAULT_SIZE[CanvasNodeType.Image];
@@ -9112,7 +9171,7 @@ function AtelierCanvasPage() {
                             position: { x: baseX, y: centeredY(rowY, textHeight) },
                         };
                         imageNode = {
-                            ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE, ...(scriptImageSize ? { size: scriptImageSize } : {}), ...scriptStyle }),
+                            ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE, ...(scriptImageSize ? { size: scriptImageSize } : {}), ...scriptImageMeta, ...scriptStyle }),
                             title: t("canvas.scriptNode.pipelineImage", { no: shotNo }),
                             width: imageWidth,
                             height: imageHeight,
@@ -9406,7 +9465,7 @@ function AtelierCanvasPage() {
                 onOk: runPipeline,
             });
         },
-        [message, modal, t, revealNodes],
+        [effectiveConfig.quality, message, modal, t, revealNodes],
     );
 
     /**

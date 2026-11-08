@@ -12,7 +12,7 @@ import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type S
 import { CanvasScriptBatchAssetDialog } from "@/components/canvas/canvas-script-batch-asset-dialog";
 import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { buildScriptGhostPrefill, buildScriptMashuPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveSchemeDefaultMergeMode, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptLibrarySchemeId, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
+import { buildScriptGhostPrefill, buildScriptMashuPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveSchemeDefaultMergeMode, resolveScriptPromptValues, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, shouldPinScriptPrompt, type ScriptLibrarySchemeId, type ScriptPromptField, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import {
     buildStoryScriptAssetDescriptionHints,
@@ -475,6 +475,38 @@ export function CanvasScriptNodeContent({
     /** 当前方案对应的预填（第一套没有预填）。 */
     const schemePrefill: ScriptSchemePrefill | null = schemeId === "builtin" ? null : schemePrefills[schemeId];
     /**
+     * 三段的**实际取值** —— 默认跟随**实时词库**，只有被「固定」的那段才用节点上存的那份。
+     *
+     * 用户 2026-11-08 报障：「词库更新了，脚本生成器生图却适配不上」。根因是三段提示词在建节点时
+     * 从词库**预填一次**进 metadata，之后生成读的是那份快照 —— 词库改了也不动，等于固定化。
+     * 现在解析收在 `resolveScriptPromptValues`（与生成链路 `project.tsx` 的 `resolveScriptPromptsOf`
+     * **同一个函数**）：界面显示的就是「此刻真正会发给模型的内容」，不再有第二份真相。
+     */
+    const promptPins = node.metadata?.scriptPromptPins;
+    const scriptPromptValues = useMemo(
+        () =>
+            resolveScriptPromptValues({
+                scheme: schemeId,
+                textPrompts: globalConfig?.textPrompts,
+                skills: skillPacks,
+                pins: promptPins,
+                stored: {
+                    system: node.metadata?.scriptSystemPrompt,
+                    asset: node.metadata?.scriptAssetPrompt,
+                    shot: node.metadata?.scriptShotPrompt,
+                },
+            }),
+        [globalConfig?.textPrompts, node.metadata?.scriptAssetPrompt, node.metadata?.scriptPromptPins, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt, promptPins, schemeId, skillPacks],
+    );
+    /** 这套方案**有没有**可跟随的词库内容（第一套没有 → 三段只能靠节点自己那份）。 */
+    const schemeHasLibraryPrompts = Boolean(scriptPromptValues.live);
+    /** 取消某一段的「固定」（回到跟随词库）。 */
+    const unpinPrompt = (field: ScriptPromptField) => {
+        const next = { ...(promptPins || {}) };
+        delete next[field];
+        return next;
+    };
+    /**
      * 手动追加的资产列（用户自建：「宠物」「车辆」…）。行为与内置资产列一致 ——
      * 格子里能挂图、能上锁，铺链路时按 `role` 连进这一镜的图片节点。
      */
@@ -575,11 +607,14 @@ export function CanvasScriptNodeContent({
     //  - asset / shot：只往任务书里加一段专项要求，各管一组列（见 story-script.ts 的 *PromptSection）。
     const [customPromptKind, setCustomPromptKind] = useState<"system" | "asset" | "shot" | null>(null);
     // 是否已自定义：决定 chip 的高亮态与是否显示「恢复预设提示词」。
-    const hasCustomSystemPrompt = hasScriptSystemPromptOverride(node.metadata?.scriptSystemPrompt);
-    /** 「资产提示词」是否已设（角色 / 场景 / 道具 / 人物站位怎么写）。 */
-    const hasCustomAssetPrompt = hasScriptGenerationPrompt(node.metadata?.scriptAssetPrompt);
-    /** 「分镜提示词」是否已设（分镜提示词 / 视频运动提示词 / 风格提示词怎么写）。 */
-    const hasCustomShotPrompt = hasScriptGenerationPrompt(node.metadata?.scriptShotPrompt);
+    // ⚠️ 判据是**固定标记**（`scriptPromptPins`），不是「字段里有没有字」—— 词库方案下那三段随时都有
+    // 内容（跟随词库），按「有字」判会让每颗 chip 永远高亮（用户 2026-11-08：「不要固定化」）。
+    // 第一套没有词库内容，那时字段里有字就是用户自己写的，仍按老口径判。
+    const hasCustomSystemPrompt = Boolean(promptPins?.system) || (!schemeHasLibraryPrompts && hasScriptSystemPromptOverride(node.metadata?.scriptSystemPrompt));
+    /** 「资产提示词」是否已固定（角色 / 场景 / 道具 / 人物站位怎么写）。 */
+    const hasCustomAssetPrompt = Boolean(promptPins?.asset) || (!schemeHasLibraryPrompts && hasScriptGenerationPrompt(node.metadata?.scriptAssetPrompt));
+    /** 「分镜提示词」是否已固定（分镜提示词 / 视频运动提示词 / 风格提示词怎么写）。 */
+    const hasCustomShotPrompt = Boolean(promptPins?.shot) || (!schemeHasLibraryPrompts && hasScriptGenerationPrompt(node.metadata?.scriptShotPrompt));
     /**
      * 勾选的行（存 rowIndex，不是镜号）。只服务于「批量重生成 / 批量铺视频」。
      * 任何会改变行顺序或行数的操作（调序 / 删行 / 重新生成整表）都会把它清空——
@@ -1281,6 +1316,8 @@ export function CanvasScriptNodeContent({
             patchMetadata({
                 scriptScheme: "builtin",
                 scriptLibraryBackup: undefined,
+                // 换方案 = 换生成器：把三段固定标记一起清掉，否则「旧方案的固定文本」会压住新方案的内容。
+                scriptPromptPins: undefined,
                 ...(defaultMergeMode ? { scriptMergeMode: defaultMergeMode } : {}),
                 scriptSystemPrompt: backup?.system,
                 scriptAssetPrompt: backup?.asset,
@@ -1307,6 +1344,13 @@ export function CanvasScriptNodeContent({
              * 铺链时仍按用户原来选的档位走（不会被外面的「每 4 镜」顶掉）。
              */
             ...(next === "mashu" ? { scriptSegmentSeconds: "15" as const } : {}),
+            /**
+             * 换方案 = 换生成器：三段固定标记一并清掉。
+             * 不清的话，上一套里被固定的那段会继续压住新方案的内容（界面写着新方案、生成还用旧文本）。
+             * 下面仍照老口径把新方案的词库内容写进 metadata —— 它现在只是「词条被删时的兜底」，
+             * 生效值由 `resolveScriptPromptValues` 按实时词库算。
+             */
+            scriptPromptPins: undefined,
             // 只在**离开第一套**时备份：词库方案之间互换时若再备份，存进去的会是刚被另一套预填的文案，
             // 用户真正手写的那份就永久丢了。
             ...(schemeId === "builtin"
@@ -1939,7 +1983,8 @@ export function CanvasScriptNodeContent({
                     onPointerDown={(event) => event.stopPropagation()}
                     onClick={(event) => {
                         event.stopPropagation();
-                        patchMetadata({ scriptSystemPrompt: undefined });
+                        // 「恢复预设」= 连固定标记一起撤掉：撤了标记才会重新跟随词库（否则下次生成还用这份）。
+                        patchMetadata({ scriptSystemPrompt: undefined, scriptPromptPins: unpinPrompt("system") });
                         message.success(t("canvas.scriptNode.customPromptResetDone"));
                     }}
                     title={t("canvas.scriptNode.customPromptReset")}
@@ -3573,15 +3618,16 @@ export function CanvasScriptNodeContent({
             />
             {/* 自定义提示词：三种用途共用这个文本编辑弹窗（textarea + 字号 + 提示词库），保存留空即恢复预设。
                 - system：整段替换系统提示词（换生成器）；
-                - asset / shot：只加一段任务书专项要求（各管一组列，互不影响）。 */}
+                - asset / shot：只加一段任务书专项要求（各管一组列，互不影响）。
+                ⚠️ 弹窗里显示的是**此刻真正生效的内容**（跟随词库时就是词库正文），不是 metadata 里的旧快照。 */}
             <CanvasTextEditDialog
                 open={customPromptKind !== null}
                 value={
                     customPromptKind === "asset"
-                        ? node.metadata?.scriptAssetPrompt || ""
+                        ? scriptPromptValues.asset
                         : customPromptKind === "shot"
-                          ? node.metadata?.scriptShotPrompt || ""
-                          : node.metadata?.scriptSystemPrompt || getStoryScriptSystemPrompt(presetId)
+                          ? scriptPromptValues.shot
+                          : scriptPromptValues.system || getStoryScriptSystemPrompt(presetId)
                 }
                 title={
                     customPromptKind === "asset"
@@ -3602,12 +3648,22 @@ export function CanvasScriptNodeContent({
                     const kind = customPromptKind;
                     if (!kind) return;
                     const trimmed = value.trim();
-                    // 留空 = 恢复预设（与「自定义系统提示词」同一口径），不是存一个空字符串。
-                    if (kind === "system") patchMetadata({ scriptSystemPrompt: trimmed ? value : undefined });
-                    else if (kind === "asset") patchMetadata({ scriptAssetPrompt: trimmed ? value : undefined });
-                    else patchMetadata({ scriptShotPrompt: trimmed ? value : undefined });
+                    /**
+                     * 「固定」判定（用户 2026-11-08）：
+                     *  - 内容与**当前生效值**一致 → 不算自定义（继续跟随词库，一个字都不写进节点）；
+                     *    否则用户只是点开看了一眼再保存，就会被悄悄从「跟随词库」变成「固定」。
+                     *  - 留空 → 取消固定 = 回到跟随词库（第一套没有词库内容时就是回落到预设内置提示词）。
+                     */
+                    const pin = Boolean(trimmed) && shouldPinScriptPrompt(trimmed, scriptPromptValues[kind]);
+                    patchMetadata({
+                        ...(kind === "system" ? { scriptSystemPrompt: trimmed ? value : undefined } : {}),
+                        ...(kind === "asset" ? { scriptAssetPrompt: trimmed ? value : undefined } : {}),
+                        ...(kind === "shot" ? { scriptShotPrompt: trimmed ? value : undefined } : {}),
+                        scriptPromptPins: pin ? { ...(promptPins || {}), [kind]: true } : unpinPrompt(kind),
+                    });
                     setCustomPromptKind(null);
-                    if (trimmed) message.success(t(kind === "system" ? "canvas.scriptNode.customPromptSaved" : "canvas.scriptNode.promptOverrideSaved", { count: trimmed.length }));
+                    if (trimmed && !pin) message.success(t("canvas.scriptNode.customPromptFollowLibrary"));
+                    else if (trimmed) message.success(t(kind === "system" ? "canvas.scriptNode.customPromptSaved" : "canvas.scriptNode.promptOverrideSaved", { count: trimmed.length }));
                     else message.success(t("canvas.scriptNode.promptOverrideCleared"));
                 }}
             />

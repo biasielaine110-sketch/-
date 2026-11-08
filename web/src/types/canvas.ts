@@ -170,6 +170,15 @@ export type CanvasNodeMetadata = {
      */
     scriptShotPrompt?: string;
     /**
+     * 脚本生成器：上面三段提示词里**被固定住**的段（用户 2026-11-08 口径）。
+     *
+     * 🔴 默认（缺省）= **跟随词库**：生成脚本时按此刻的词库重新解析，用户改了词条下次生成就是新的，
+     * 不再读上面那三个字段里的旧快照（改造前就是这样「固定化」，词库更新对不上）。
+     * 只有用户在「自定义提示词」弹窗里保存了**与词库不同**的内容，那一段才会带上 `true` 变成固定，
+     * 之后词库再变也不覆盖它。见 `constant/script-scheme.ts` 的 `resolveScriptPromptValues`。
+     */
+    scriptPromptPins?: import("@/constant/script-scheme").ScriptPromptPins;
+    /**
      * 脚本生成器：**执行方案**（六套）。`builtin` = 只用预设自带的内置提示词，三个自定义字段留空；
      * `library` = 从词库预填三段（自定义 ←「分镜表------首帧图和视频提示词」/ 资产 ←「资产提取」+「最佳拍档」/
      * 分镜 ← 同自定义）；`x20` = 自定义与分镜都换「火_X20_主图分镜图_简洁版」，资产同上；

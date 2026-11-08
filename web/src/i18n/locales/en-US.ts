@@ -744,6 +744,7 @@ export default {
             customPromptReset: "Restore preset prompt",
             customPromptResetDone: "Preset default prompt restored",
             customPromptSaved: "Custom system prompt saved ({{count}} chars)",
+            customPromptFollowLibrary: "Same as the current library entry — still following the library (updates apply automatically)",
             assetPromptChip: "Asset prompt",
             assetPromptHint: "Controls only how the asset columns are written (characters / scene / prop / blocking); shot prompts are untouched. It is an extra section in the task book: it beats the system prompt on conflicting content but never switches it off. Save empty to restore the preset.",
             assetPromptTitle: "Asset prompt · characters / scene / prop / blocking",

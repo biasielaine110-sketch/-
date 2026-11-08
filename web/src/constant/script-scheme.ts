@@ -423,6 +423,86 @@ export function buildScriptMusePrefill(entries: readonly TextPromptEntry[] | nul
     return buildScriptSchemePrefill(entries, "muse");
 }
 
+// ── 「跟随词库」：生成时**按此刻的词库**解析三段，而不是读节点上那份快照 ────────────────
+
+/** 三段提示词的字段名（与节点 metadata 一一对应）。 */
+export type ScriptPromptField = "system" | "asset" | "shot";
+
+/**
+ * 某一段是否被用户**固定**过（在「自定义提示词」弹窗里改成与词库不同的内容并保存）。
+ * `true` = 用节点上那份；缺省 / `false` = 跟随词库（用户改词库，下次生成自动用新的）。
+ */
+export type ScriptPromptPins = Partial<Record<ScriptPromptField, boolean>>;
+
+/** 三段的取值（空串 = 这一段没有内容，由调用方回落到预设内置）。 */
+export type ScriptPromptValues = Record<ScriptPromptField, string>;
+
+/**
+ * 这套方案**此刻**的预填 —— 第一套没有预填（返回 `null`），其余七套各走各的来源。
+ *
+ * 与 `buildScriptSchemePrefill` 的区别只是「按 scheme 分发」：
+ * 第六 / 第七 / 第八套的三段来源互不相同（自定义 ← 词库、分镜 ← 技能库、资产 ← 词库），
+ * 所以必须走各自的 builder，不能一律 `buildScriptSchemePrefill`（那会把 ghost 匹到第二套词条上）。
+ */
+export function buildScriptSchemePrefillLive(
+    scheme: unknown,
+    entries: readonly TextPromptEntry[] | null | undefined,
+    skills?: readonly ScriptSchemeSkillSource[] | null,
+): ScriptSchemePrefill | null {
+    const id = resolveScriptSchemeId(scheme);
+    if (id === "builtin") return null;
+    if (id === "ghost") return buildScriptGhostPrefill(entries, skills);
+    if (id === "moman") return buildScriptMomanPrefill(entries, skills);
+    if (id === "mashu") return buildScriptMashuPrefill(entries, skills);
+    return buildScriptSchemePrefill(entries, id);
+}
+
+/**
+ * 生成时三段的**实际取值** —— 🔴 默认跟随**实时词库**，只有被固定的那一段才用节点上那份。
+ *
+ * 为什么需要这一层（用户 2026-11-08 报障）：「词库更新了，脚本生成器生图却适配不上」。
+ * 根因不是词库读不到，而是三段提示词在建节点时被**一次性预填进 metadata**，之后生成读的是
+ * 那份快照 —— 用户在设置里改了词条，节点上还是老正文，等于「固定化」。
+ *
+ * 判定顺序（每段独立）：
+ *  1. `pins[field] === true` → 用节点上那份（用户明确固定；即使是空串也尊重，= 回落到内置提示词）；
+ *  2. 词库这一段有内容 → 用词库里**此刻**的内容；
+ *  3. 词库这一段没有 → 保留节点上那份（不因为词条被删就把用户已有的正文清空）。
+ *
+ * ⚠️ 老节点（改造前建的、metadata 里没有 `pins`）一律按**跟随词库**处理 —— 那正是这次要修的
+ * 行为；用户在弹窗里保存过一次与词库不同的内容后就会带上 `pins`，之后不再被覆盖。
+ */
+export function resolveScriptPromptValues(options: {
+    scheme?: unknown;
+    textPrompts?: readonly TextPromptEntry[] | null;
+    skills?: readonly ScriptSchemeSkillSource[] | null;
+    pins?: ScriptPromptPins | null;
+    stored?: Partial<Record<ScriptPromptField, unknown>> | null;
+}): ScriptPromptValues & { live: ScriptSchemePrefill | null } {
+    const live = buildScriptSchemePrefillLive(options.scheme, options.textPrompts, options.skills);
+    const stored = options.stored || {};
+    const pins = options.pins || {};
+    const pick = (field: ScriptPromptField): string => {
+        const fromNode = typeof stored[field] === "string" ? String(stored[field]).trim() : "";
+        if (pins[field]) return fromNode;
+        const fromLibrary = live ? String(live[field] || "").trim() : "";
+        return fromLibrary || fromNode;
+    };
+    return { system: pick("system"), asset: pick("asset"), shot: pick("shot"), live };
+}
+
+/**
+ * 保存「自定义提示词」时该不该算「固定」—— 内容与**当前生效值**一致就不算（继续跟随词库）。
+ *
+ * 这样用户点开弹窗、看到词库正文、什么都没改就按保存，不会把「跟随词库」悄悄变成「固定」。
+ * 留空同样不算固定：留空 = 取消固定、回到跟随词库（第一套没有词库内容时就是回落到预设内置提示词）。
+ */
+export function shouldPinScriptPrompt(saved: unknown, effective: string): boolean {
+    const value = String(saved ?? "").trim();
+    if (!value) return false;
+    return value !== String(effective ?? "").trim();
+}
+
 /** 有效文本（去空白后非空）—— 只看「有没有人填过」，不关心内容。 */
 function hasText(value: unknown): boolean {
     return typeof value === "string" && value.trim().length > 0;

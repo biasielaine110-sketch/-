@@ -126,7 +126,29 @@ export function isScriptAssetDirectRole(role: unknown): boolean {
     return SCRIPT_ASSET_DIRECT_ROLE_IDS.includes(role as ScriptAssetRole);
 }
 
-/** 某一类资产「一键直接生图」时用的画幅 —— 纯查表，没有 override 这条路。 */
+/**
+ * 脚本生成器所有生图的**画质保底 = 2K**（用户 2026-11-08 报障）。
+ *
+ * 现象：没在「生图画质」里选 1k / 2k 时，脚本生成器出来的资产图是 **1K**。
+ * 根因：脚本资产生图只写了**比例**（`metadata.size = "9:16"` / `"16:9"`），画质一路回落到
+ * 「配置偏好 → quality」。偏好若为空或 `auto`（面板里那颗「自动」），`services/api/image.ts`
+ * 的 `resolveSize()` 拿不到基准像素，就走 `DEFAULT_IMAGE_SHORT_SIDE = 1024` = 1K。
+ *
+ * 所以这里只做一件事：**空 / auto → medium（`QUALITY_BASE.medium` = 2048 = 2K）**；
+ * 用户显式选过的档位（low 1K / high 4K …）原样保留，不越权改用户的选择。
+ * 返回 `null` = 不用写进节点（继续跟随全局偏好，用户以后调整偏好这批也跟得上）。
+ */
+export const SCRIPT_ASSET_DEFAULT_IMAGE_QUALITY = "medium";
+
+export function resolveScriptImageQuality(quality: unknown): string | null {
+    const value = String(quality ?? "").trim().toLowerCase();
+    if (!value || value === "auto") return SCRIPT_ASSET_DEFAULT_IMAGE_QUALITY;
+    return null;
+}
+
+/**
+ * 某一类资产「一键直接生图」时用的画幅 —— 纯查表，没有 override 这条路。
+ */
 export function resolveScriptAssetDirectSize(role: ScriptAssetRole): string {
     return SCRIPT_ASSET_DIRECT_SIZE_BY_ROLE[role] || "16:9";
 }
