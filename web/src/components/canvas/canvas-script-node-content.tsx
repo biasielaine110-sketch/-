@@ -72,6 +72,7 @@ import {
     storyScriptToMarkdown,
     storyScriptToTsv,
     STORY_SCRIPT_MERGE_MODES,
+    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP,
     STORY_SCRIPT_PRESET_IDS,
     STORY_SCRIPT_SEGMENT_SECONDS,
     STORY_SCRIPT_IMAGE_SIZES,
@@ -271,8 +272,10 @@ type CanvasScriptNodeContentProps = {
      * 传 `rowIndexes` 就是「选择铺链路」：只铺勾选的这一段，且这一段合成**一个**视频节点。
      * 传 `options.videoOnly` 就是简洁版「只铺视频」：只铺视频节点窗口，不建文本 / 图片节点
      * （用户原话：「一键铺链路，需要有一个简洁版的按钮，即只铺视频节点窗口」）。
+     * 传 `options.mergeEvery = N` 则强制「每 N 镜合并为 1 镜」的固定切片，
+     * 忽略节点上的分段档位与手动合并组（用户原话：「仍然使用每 4 镜合并为 1 镜输出的原则」）。
      */
-    onBuildPipeline?: (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean }) => void;
+    onBuildPipeline?: (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean; mergeEvery?: number }) => void;
     /** 只给某一行分镜建一个视频节点（预填该镜的视频提示词与时长）。 */
     onBuildShotVideo?: (nodeId: string, rowIndex: number) => void;
     /** 勾选多镜后批量建视频节点（每镜一个节点，自带该镜的提示词 / 时长 / 素材连线）。 */
@@ -2308,9 +2311,64 @@ export function CanvasScriptNodeContent({
                 </span>
             ) : null}
             {/*
-             * 「解除合并组」（拆开手动合并）已经搬到**右下角**「一键铺链路」下面 ——
-             * 与「合并为一镜」放一起，成对出现才不会一个在这、一个在那。
+             * 「解除合并组」按钮与「合并为一镜」成对，位置见下面的 `mergeManualActions`
+             * （用户 2026-11-09 第 03 条要求把它们放到「生图比例」左边）。
              */}
+        </div>
+    );
+
+    /**
+     * 「合并为一镜 / 取消合并」+「解除合并组」—— 用户 2026-11-09 第 03 条：
+     * **移到「生图比例」的左侧**（同一行、紧挨着），不再单独占右下角一行。
+     * 勾几行立刻就能点，与「生图比例」这个「这次怎么铺」的设定挨在一起也更顺。
+     */
+    const mergeManualActions = (
+        <div className="flex items-center gap-1.5">
+            <button
+                type="button"
+                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition disabled:cursor-not-allowed"
+                style={{
+                    borderColor: selectedAllMerged ? theme.toolbar.activeText : theme.node.stroke,
+                    background: selectedAllMerged ? theme.toolbar.activeText : "transparent",
+                    color: selectedAllMerged ? theme.node.panel : theme.node.text,
+                    opacity: selectedAllMerged ? 1 : selectedRows.size < 2 ? 0.55 : 1,
+                }}
+                disabled={selectedRows.size < 2 && !selectedAllMerged}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    if (selectedAllMerged) unmergeSelectedRows();
+                    else mergeSelectedRows();
+                }}
+                title={
+                    selectedAllMerged
+                        ? t("canvas.scriptNode.mergeManualOffHint")
+                        : selectedRows.size >= 2
+                          ? t("canvas.scriptNode.mergeManualHint")
+                          : t("canvas.scriptNode.mergeManualNeedSelect")
+                }
+            >
+                <Combine className="size-3.5" />
+                {selectedAllMerged ? t("canvas.scriptNode.mergeManualOff") : t("canvas.scriptNode.mergeManual")}
+            </button>
+            {manualMergeGroups.length ? (
+                <button
+                    type="button"
+                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                    style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        patchMetadata({ scriptMergeGroups: [] });
+                    }}
+                    title={t("canvas.scriptNode.mergeManualClearHint")}
+                >
+                    <X className="size-3.5" />
+                    {t("canvas.scriptNode.mergeManualClear", { count: manualMergeGroups.length })}
+                </button>
+            ) : null}
         </div>
     );
 
@@ -2575,6 +2633,10 @@ export function CanvasScriptNodeContent({
                                      * （红笔划的就是「宁宁、明明、佳佳」只剩宁宁那张）→ 后续铺链路也只连一张。
                                      * 所以多名字格取**并集**：格子自己的图 ∪ 各名字锁定的图；单名字格仍是老口径
                                      * （格子自己挂了图就听格子的，锁只作跨镜兜底）。
+                                     *
+                                     * ⚠️ 并集里的「锁」那一半由 `scriptCellNameLockIds` **截到 N 张**（N = 名字个数）：
+                                     * 否则一格 3 个角色会因为历史广播脏数据攒出 5 张（用户 2026-11-09 第 01 条）。
+                                     * 格子自己挂的图不截断 —— 用户手动挂几张就显示几张。
                                      */
                                     const multiName = cellNameList.length > 1;
                                     const cellDisplayIds = multiName ? Array.from(new Set([...cellIds, ...cellLockIds])) : cellIds.length ? cellIds : cellLockIds;
@@ -3205,6 +3267,30 @@ export function CanvasScriptNodeContent({
                                 <Video className="size-3.5" />
                                 {t("canvas.scriptNode.pipelineVideoOnly")}
                             </button>
+                            {/* 「一键铺视频链路」（用户 2026-11-09 第 02 条）：放在「一键铺链路」右边、
+                                「只铺视频窗口」再往右。与左边那颗的区别只有一个 —— **固定每 4 镜合并成 1 段**
+                                （不看「视频分段」档位、也不看手动合并组），铺出来的视频节点自动接进一个
+                                「视频合并」节点；不建文本 / 图片节点、不自动触发生成。
+                                所以它＝「只铺视频窗口」+「每 4 镜一段」的确定版，用户点一次就得到一条
+                                能直接往下游合并 / 导出的视频链。 */}
+                            <button
+                                type="button"
+                                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                                style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14`, opacity: 0.95 }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, {
+                                        videoOnly: true,
+                                        mergeEvery: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP,
+                                    });
+                                }}
+                                title={t("canvas.scriptNode.pipelineVideoChainHint", { count: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP })}
+                            >
+                                <Video className="size-3.5" />
+                                {t("canvas.scriptNode.pipelineVideoChain")}
+                            </button>
                         </div>
                     ) : null}
                     {/* 「视频分段」+「生图比例」：紧贴在「一键铺链路」下面（用户 2026-11-07 点名）。
@@ -3214,7 +3300,12 @@ export function CanvasScriptNodeContent({
                         ⚠️ 这里是**表体视图**的落点；「输入」视图（sourcePanel）里没有铺链路按钮，
                         那两处保留不动（读写同一个 metadata，改哪边都一样）。 */}
                     <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">{mergeSelector}</div>
-                    <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">{imageSizeSelector}</div>
+                    {/* 「合并为一镜 / 取消合并 + 解除合并组」跟「生图比例」同一行，**在它左边**
+                        （用户 2026-11-09 第 03 条）。两者都是「这次怎么铺」的设定，挨着更好找。 */}
+                    <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">
+                        {mergeManualActions}
+                        {imageSizeSelector}
+                    </div>
                     {/* 「选择铺链路」：勾几镜 → 只铺这几镜，并把它们合成一个视频链路（一段视频）。
                         勾选态必须**实心高对比**：`activeBg` 是浅米色（浅色主题 #e7e5df、深色主题 #3a3631），
                         拿它当描边 + 12% 填充 + 文字色，在同样浅/同样暗的节点面板上等于没变化，
@@ -3302,56 +3393,6 @@ export function CanvasScriptNodeContent({
                             ) : null}
                         </div>
                     ) : null}
-                    {/* 合并为一镜 / 取消合并 + 解除合并组：成对放在这里，勾几行立刻就能点。
-                        「取消合并」这个**按下态**同样不能用 activeBg（浅米色文字压浅米色底 = 看不出已选中），
-                        与上面「选择铺链路」统一改成 activeText 实心。 */}
-                    <div className="flex items-center gap-1.5">
-                        <button
-                            type="button"
-                            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition disabled:cursor-not-allowed"
-                            style={{
-                                borderColor: selectedAllMerged ? theme.toolbar.activeText : theme.node.stroke,
-                                background: selectedAllMerged ? theme.toolbar.activeText : "transparent",
-                                color: selectedAllMerged ? theme.node.panel : theme.node.text,
-                                opacity: selectedAllMerged ? 1 : selectedRows.size < 2 ? 0.55 : 1,
-                            }}
-                            disabled={selectedRows.size < 2 && !selectedAllMerged}
-                            onMouseDown={(event) => event.stopPropagation()}
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                if (selectedAllMerged) unmergeSelectedRows();
-                                else mergeSelectedRows();
-                            }}
-                            title={
-                                selectedAllMerged
-                                    ? t("canvas.scriptNode.mergeManualOffHint")
-                                    : selectedRows.size >= 2
-                                      ? t("canvas.scriptNode.mergeManualHint")
-                                      : t("canvas.scriptNode.mergeManualNeedSelect")
-                            }
-                        >
-                            <Combine className="size-3.5" />
-                            {selectedAllMerged ? t("canvas.scriptNode.mergeManualOff") : t("canvas.scriptNode.mergeManual")}
-                        </button>
-                        {manualMergeGroups.length ? (
-                            <button
-                                type="button"
-                                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-                                style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
-                                onMouseDown={(event) => event.stopPropagation()}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                onClick={(event) => {
-                                    event.stopPropagation();
-                                    patchMetadata({ scriptMergeGroups: [] });
-                                }}
-                                title={t("canvas.scriptNode.mergeManualClearHint")}
-                            >
-                                <X className="size-3.5" />
-                                {t("canvas.scriptNode.mergeManualClear", { count: manualMergeGroups.length })}
-                            </button>
-                        ) : null}
-                    </div>
                 </div>
             </div>
         </div>

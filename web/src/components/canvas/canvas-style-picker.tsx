@@ -1,11 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Button, Input } from "antd";
-import { Check, Paintbrush } from "lucide-react";
+import { Check, Paintbrush, PencilLine, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { STYLE_TEMPLATE_CATEGORIES, STYLE_TEMPLATES, getStyleTemplate, type CanvasStyleTemplate } from "@/constant/style-templates";
+import {
+    DEFAULT_CUSTOM_STYLE_CATEGORY,
+    getAllStyleTemplates,
+    getStyleTemplate,
+    getStyleTemplateCategories,
+    isBuiltinStyleTemplate,
+    normalizeCustomStyleTemplates,
+    type CanvasStyleTemplate,
+} from "@/constant/style-templates";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { useConfigStore } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 
 type CanvasStylePickerPlacement = "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
@@ -139,20 +148,86 @@ function StylePickerPortal({
         color: theme.node.text,
     } as const;
 
+    const customTemplates = useConfigStore((state) => state.config.customStyleTemplates);
+    const updateConfig = useConfigStore((state) => state.updateConfig);
+    /**
+     * 编辑态：`null` = 看列表；有值 = 就地切成表单（不弹第二个浮层）。
+     *
+     * 为什么不弹 antd Modal：面板靠 `pointerdown` 在 window 捕获阶段判「点外面就关」，
+     * Modal portal 到 body 会被当成外部点击 → 面板先关、表单跟着消失。
+     */
+    const [draft, setDraft] = useState<{ id?: string; label: string; category: string; stylePrompt: string } | null>(null);
+    const [formError, setFormError] = useState("");
+    /**
+     * 待确认删除的 id：删除按钮点一次只变红（提示「再点一次删除」），第二次才真删。
+     * 为什么不弹 Popconfirm / Modal：它们的 portal 挂在 body 上，会被上面那个「点外面就关」的
+     * pointerdown 判成外部点击 → 面板先关、确认框跟着消失，永远点不到「确定」。
+     */
+    const [pendingRemove, setPendingRemove] = useState("");
+
     const grouped = useMemo(() => {
         const keyword = query.trim().toLowerCase();
         const match = (item: CanvasStyleTemplate) =>
             !keyword || item.label.toLowerCase().includes(keyword) || item.stylePrompt.toLowerCase().includes(keyword) || item.category.toLowerCase().includes(keyword);
-        const source = STYLE_TEMPLATES.filter(match);
+        // 内置 + 自定义一起列（自定义模板由 `registerCustomStyleTemplates` 同步进来）。
+        const source = getAllStyleTemplates().filter(match);
         const buckets = new Map<string, CanvasStyleTemplate[]>();
         for (const item of source) {
             const list = buckets.get(item.category) || [];
             list.push(item);
             buckets.set(item.category, list);
         }
-        const ordered = [...STYLE_TEMPLATE_CATEGORIES, ...buckets.keys()].filter((category, index, all) => all.indexOf(category) === index);
+        const ordered = [...getStyleTemplateCategories(), ...buckets.keys()].filter((category, index, all) => all.indexOf(category) === index);
         return ordered.map((category) => ({ category, items: buckets.get(category) || [] })).filter((group) => group.items.length > 0);
-    }, [query]);
+    }, [query, customTemplates]);
+
+    /** 打开表单：不传 = 新增空表单；传 item = 编辑该条自定义模板。 */
+    const openDraft = (item?: CanvasStyleTemplate) => {
+        setFormError("");
+        setDraft(
+            item
+                ? { id: item.id, label: item.label, category: item.category, stylePrompt: item.stylePrompt }
+                : { label: "", category: DEFAULT_CUSTOM_STYLE_CATEGORY, stylePrompt: "" },
+        );
+    };
+
+    /** 保存表单：新增（分配 `custom_…` id，并顺手选中它）或改一条自定义模板；内置的永远进不到这里。 */
+    const commitDraft = () => {
+        if (!draft) return;
+        const label = draft.label.trim();
+        const stylePrompt = draft.stylePrompt.trim();
+        if (!label || !stylePrompt) {
+            setFormError(t("canvas.stylePicker.formRequired"));
+            return;
+        }
+        const category = draft.category.trim() || DEFAULT_CUSTOM_STYLE_CATEGORY;
+        const list = normalizeCustomStyleTemplates(customTemplates);
+        const createdId = draft.id ? "" : `custom_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+        const next = draft.id
+            ? list.map((item) => (item.id === draft.id ? { ...item, label, category, stylePrompt } : item))
+            : [...list, { id: createdId, label, category, stylePrompt }];
+        updateConfig("customStyleTemplates", next);
+        setDraft(null);
+        setFormError("");
+        // 新建完直接把这条用上（编辑不动当前选择）。父层 onSelect 会顺手收起面板。
+        if (createdId) onSelect(createdId);
+    };
+
+    /** 删一条自定义模板；正选中它的话顺手清空节点的选择（不留悬空 id）。 */
+    const removeTemplate = (id: string) => {
+        updateConfig("customStyleTemplates", normalizeCustomStyleTemplates(customTemplates).filter((item) => item.id !== id));
+        if (selectedId === id) onSelect(undefined);
+        setPendingRemove("");
+    };
+
+    /** 删除按钮：第一次只上膛（变红 + 换提示），第二次才真删。 */
+    const handleRemoveClick = (id: string) => {
+        if (pendingRemove === id) {
+            removeTemplate(id);
+            return;
+        }
+        setPendingRemove(id);
+    };
 
     const muted = theme.node.text;
 
@@ -171,56 +246,138 @@ function StylePickerPortal({
         >
             <div className="flex items-center justify-between gap-2">
                 <span className="text-[13px] font-medium">{t("canvas.stylePicker.title")}</span>
-                {selectedId ? (
-                    <Button size="small" type="text" className="!h-7 !rounded-full !px-2 !text-xs" style={{ color: muted, opacity: 0.75 }} onClick={() => onSelect(undefined)}>
-                        {t("canvas.stylePicker.clear")}
+                <span className="flex items-center gap-1">
+                    <Button
+                        size="small"
+                        type="text"
+                        className="!h-7 !rounded-full !px-2 !text-xs"
+                        style={{ color: muted, opacity: 0.75 }}
+                        icon={<Plus className="size-3" />}
+                        onClick={() => openDraft()}
+                    >
+                        {t("canvas.stylePicker.addNew")}
                     </Button>
-                ) : null}
+                    {selectedId ? (
+                        <Button size="small" type="text" className="!h-7 !rounded-full !px-2 !text-xs" style={{ color: muted, opacity: 0.75 }} onClick={() => onSelect(undefined)}>
+                            {t("canvas.stylePicker.clear")}
+                        </Button>
+                    ) : null}
+                </span>
             </div>
-            <Input
-                size="small"
-                allowClear
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder={t("canvas.stylePicker.search")}
-                className="mt-2"
-            />
-            <div className="mt-2 max-h-[360px] overflow-y-auto thin-scrollbar pr-1">
-                <button
-                    type="button"
-                    className="mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] transition hover:opacity-100"
-                    style={{ background: selectedId ? "transparent" : "rgba(127,119,221,0.14)", color: muted }}
-                    onClick={() => onSelect(undefined)}
-                >
-                    <span className="flex size-4 shrink-0 items-center justify-center">{selectedId ? null : <Check className="size-3.5" />}</span>
-                    <span className="truncate font-medium">{t("canvas.stylePicker.none")}</span>
-                    <span className="ml-auto shrink-0 text-[11px] opacity-50">{t("canvas.stylePicker.noneHint")}</span>
-                </button>
-                {grouped.map((group) => (
-                    <div key={group.category} className="mb-1.5">
-                        <div className="px-2 py-1 text-[11px] font-medium opacity-50">{group.category}</div>
-                        {group.items.map((item) => {
-                            const active = item.id === selectedId;
-                            return (
-                                <button
-                                    key={item.id}
-                                    type="button"
-                                    className="flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left transition hover:bg-black/5"
-                                    style={{ background: active ? "rgba(127,119,221,0.16)" : "transparent", color: muted }}
-                                    onClick={() => onSelect(item.id)}
-                                >
-                                    <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center">{active ? <Check className="size-3.5" /> : null}</span>
-                                    <span className="min-w-0 flex-1">
-                                        <span className="block truncate text-[13px] font-medium">{item.label}</span>
-                                        <span className="mt-0.5 line-clamp-2 block text-[11px] leading-4 opacity-55">{item.stylePrompt}</span>
-                                    </span>
-                                </button>
-                            );
-                        })}
+            {draft ? (
+                <div className="mt-2 space-y-2">
+                    <div className="text-[12px] font-medium opacity-70">{draft.id ? t("canvas.stylePicker.editTitle") : t("canvas.stylePicker.addTitle")}</div>
+                    <Input
+                        size="small"
+                        value={draft.label}
+                        maxLength={40}
+                        placeholder={t("canvas.stylePicker.fieldLabel")}
+                        onChange={(event) => setDraft({ ...draft, label: event.target.value })}
+                    />
+                    <Input
+                        size="small"
+                        value={draft.category}
+                        maxLength={20}
+                        placeholder={t("canvas.stylePicker.fieldCategory")}
+                        onChange={(event) => setDraft({ ...draft, category: event.target.value })}
+                    />
+                    <Input.TextArea
+                        autoSize={{ minRows: 3, maxRows: 8 }}
+                        value={draft.stylePrompt}
+                        placeholder={t("canvas.stylePicker.fieldPrompt")}
+                        onChange={(event) => setDraft({ ...draft, stylePrompt: event.target.value })}
+                    />
+                    {formError ? <div className="text-[11px]" style={{ color: "#e5484d" }}>{formError}</div> : null}
+                    <div className="flex items-center justify-end gap-1">
+                        <Button
+                            size="small"
+                            type="text"
+                            className="!h-7 !rounded-full !px-2.5 !text-xs"
+                            style={{ color: muted, opacity: 0.75 }}
+                            onClick={() => {
+                                setDraft(null);
+                                setFormError("");
+                            }}
+                        >
+                            {t("canvas.stylePicker.cancel")}
+                        </Button>
+                        <Button size="small" type="primary" className="!h-7 !rounded-full !px-3 !text-xs" onClick={commitDraft}>
+                            {t("canvas.stylePicker.save")}
+                        </Button>
                     </div>
-                ))}
-                {grouped.length === 0 ? <div className="px-2 py-6 text-center text-xs opacity-50">{t("canvas.stylePicker.empty")}</div> : null}
-            </div>
+                </div>
+            ) : (
+                <>
+                    <Input
+                        size="small"
+                        allowClear
+                        value={query}
+                        onChange={(event) => setQuery(event.target.value)}
+                        placeholder={t("canvas.stylePicker.search")}
+                        className="mt-2"
+                    />
+                    <div className="mt-2 max-h-[360px] overflow-y-auto thin-scrollbar pr-1">
+                        <button
+                            type="button"
+                            className="mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-[13px] transition hover:opacity-100"
+                            style={{ background: selectedId ? "transparent" : "rgba(127,119,221,0.14)", color: muted }}
+                            onClick={() => onSelect(undefined)}
+                        >
+                            <span className="flex size-4 shrink-0 items-center justify-center">{selectedId ? null : <Check className="size-3.5" />}</span>
+                            <span className="truncate font-medium">{t("canvas.stylePicker.none")}</span>
+                            <span className="ml-auto shrink-0 text-[11px] opacity-50">{t("canvas.stylePicker.noneHint")}</span>
+                        </button>
+                        {grouped.map((group) => (
+                            <div key={group.category} className="mb-1.5">
+                                <div className="px-2 py-1 text-[11px] font-medium opacity-50">{group.category}</div>
+                                {group.items.map((item) => {
+                                    const active = item.id === selectedId;
+                                    const builtin = isBuiltinStyleTemplate(item.id);
+                                    return (
+                                        <div
+                                            key={item.id}
+                                            className="flex w-full items-start gap-1 rounded-lg pr-1.5 transition hover:bg-black/5"
+                                            style={{ background: active ? "rgba(127,119,221,0.16)" : "transparent", color: muted }}
+                                        >
+                                            <button type="button" className="flex min-w-0 flex-1 items-start gap-2 rounded-lg px-2 py-2 text-left" onClick={() => onSelect(item.id)}>
+                                                <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center">{active ? <Check className="size-3.5" /> : null}</span>
+                                                <span className="min-w-0 flex-1">
+                                                    <span className="block truncate text-[13px] font-medium">{item.label}</span>
+                                                    <span className="mt-0.5 line-clamp-2 block text-[11px] leading-4 opacity-55">{item.stylePrompt}</span>
+                                                </span>
+                                            </button>
+                                            {builtin ? null : (
+                                                <span className="mt-1.5 flex shrink-0 items-center gap-0.5 opacity-60">
+                                                    <Button
+                                                        size="small"
+                                                        type="text"
+                                                        className="!h-6 !w-6 !min-w-6 !rounded-full !p-0"
+                                                        style={{ color: muted }}
+                                                        title={t("canvas.stylePicker.edit")}
+                                                        icon={<PencilLine className="size-3" />}
+                                                        onClick={() => openDraft(item)}
+                                                    />
+                                                    <Button
+                                                        size="small"
+                                                        type="text"
+                                                        className="!h-6 !w-6 !min-w-6 !rounded-full !p-0"
+                                                        style={pendingRemove === item.id ? { color: "#e5484d", opacity: 1 } : { color: muted }}
+                                                        title={pendingRemove === item.id ? t("canvas.stylePicker.deleteConfirm") : t("canvas.stylePicker.remove")}
+                                                        icon={<Trash2 className="size-3" />}
+                                                        onClick={() => handleRemoveClick(item.id)}
+                                                    />
+                                                </span>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ))}
+                        {grouped.length === 0 ? <div className="px-2 py-6 text-center text-xs opacity-50">{t("canvas.stylePicker.empty")}</div> : null}
+                        <div className="px-2 pb-1 pt-1.5 text-[10px] leading-3 opacity-40">{t("canvas.stylePicker.builtinLocked")}</div>
+                    </div>
+                </>
+            )}
         </div>,
         document.body,
     );

@@ -61,11 +61,73 @@ export const STYLE_TEMPLATES: CanvasStyleTemplate[] = [
 /** 分类展示顺序。 */
 export const STYLE_TEMPLATE_CATEGORIES: string[] = ["古装", "都市", "年代", "生活", "科幻", "类型", "写意", "动画", "绘画", "神话"];
 
+/** 用户自己加的风格模板默认归到这一档（他可以在表单里改成任意分类）。 */
+export const DEFAULT_CUSTOM_STYLE_CATEGORY = "我的风格";
+
 const STYLE_TEMPLATE_MAP = new Map(STYLE_TEMPLATES.map((item) => [item.id, item]));
+const BUILTIN_STYLE_TEMPLATE_IDS = new Set(STYLE_TEMPLATES.map((item) => item.id));
+
+/** 这条风格模板是不是**内置**的 —— 内置的**不允许删除 / 编辑**（用户 2026-11-09 第 04 条）。 */
+export function isBuiltinStyleTemplate(id?: unknown): boolean {
+    return typeof id === "string" && BUILTIN_STYLE_TEMPLATE_IDS.has(id);
+}
+
+/**
+ * 用户自定义风格模板的运行时注册表。
+ *
+ * 为什么放在 constant 层做模块级注册、而不是让每个调用点去读 store：
+ * `getStyleTemplate` / `getStyleTemplateLabel` / `buildStylePromptText` 被铺链路、生图、生视频、
+ * 节点提示词面板等十几处同步调用，它们不能变成 async、也不该认识 zustand。
+ * 所以由 `use-config-store` 在启动时与配置变化时把 `config.customStyleTemplates` 推进来，
+ * 这里的查询函数先查内置、再查自定义 —— 所有调用点自动支持自定义模板，一个都不用改。
+ */
+let CUSTOM_STYLE_TEMPLATES: CanvasStyleTemplate[] = [];
+const CUSTOM_STYLE_TEMPLATE_MAP = new Map<string, CanvasStyleTemplate>();
+
+/** 清理脏数据：缺 id / 名字 / 正文的丢掉；内置 id 不许被自定义顶掉；重复 id 只留第一条。 */
+export function normalizeCustomStyleTemplates(list: unknown): CanvasStyleTemplate[] {
+    if (!Array.isArray(list)) return [];
+    const out: CanvasStyleTemplate[] = [];
+    const seen = new Set<string>();
+    for (const raw of list) {
+        if (!raw || typeof raw !== "object") continue;
+        const item = raw as Partial<CanvasStyleTemplate>;
+        const id = String(item.id || "").trim();
+        const label = String(item.label || "").trim();
+        const stylePrompt = String(item.stylePrompt || "").trim();
+        if (!id || !label || !stylePrompt) continue;
+        if (BUILTIN_STYLE_TEMPLATE_IDS.has(id) || seen.has(id)) continue;
+        seen.add(id);
+        out.push({ id, label, category: String(item.category || "").trim() || DEFAULT_CUSTOM_STYLE_CATEGORY, stylePrompt });
+    }
+    return out;
+}
+
+/** 把配置里的自定义模板同步进来（幂等；空数组 = 全部清掉）。 */
+export function registerCustomStyleTemplates(list: unknown): void {
+    CUSTOM_STYLE_TEMPLATES = normalizeCustomStyleTemplates(list);
+    CUSTOM_STYLE_TEMPLATE_MAP.clear();
+    for (const item of CUSTOM_STYLE_TEMPLATES) CUSTOM_STYLE_TEMPLATE_MAP.set(item.id, item);
+}
+
+export function getCustomStyleTemplates(): CanvasStyleTemplate[] {
+    return CUSTOM_STYLE_TEMPLATES;
+}
+
+/** 选择器要展示的全集：内置在前、自定义在后（各自内部保持原顺序）。 */
+export function getAllStyleTemplates(): CanvasStyleTemplate[] {
+    return CUSTOM_STYLE_TEMPLATES.length ? [...STYLE_TEMPLATES, ...CUSTOM_STYLE_TEMPLATES] : STYLE_TEMPLATES;
+}
+
+/** 分类顺序：内置分类在前，自定义模板带出来的新分类追加在后面。 */
+export function getStyleTemplateCategories(): string[] {
+    const extra = CUSTOM_STYLE_TEMPLATES.map((item) => item.category).filter((category) => category && !STYLE_TEMPLATE_CATEGORIES.includes(category));
+    return [...STYLE_TEMPLATE_CATEGORIES, ...Array.from(new Set(extra))];
+}
 
 export function getStyleTemplate(id?: string | null): CanvasStyleTemplate | undefined {
     if (!id) return undefined;
-    return STYLE_TEMPLATE_MAP.get(id);
+    return STYLE_TEMPLATE_MAP.get(id) || CUSTOM_STYLE_TEMPLATE_MAP.get(id);
 }
 
 export function getStyleTemplateLabel(id?: string | null): string {

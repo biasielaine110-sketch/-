@@ -8848,15 +8848,27 @@ function AtelierCanvasPage() {
                     metadata: {
                         ...item.metadata,
                         scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, ids, extras),
-                        scriptNameLocks: ids.length ? setStoryScriptNameLock(item.metadata?.scriptNameLocks, row?.[columnKey], ids) : item.metadata?.scriptNameLocks,
+                        // 走统一入口而不是 `setStoryScriptNameLock(row[columnKey], ids)`：
+                        // 一格多名时那一串名字当一个 key 写进去，就是一条永远命中不了的**假资产锁**，
+                        // 并且会把整格图锁到「川晓遥、宁宁、明明」这个并不存在的资产上（用户 2026-11-09 第 01 条）。
+                        scriptNameLocks: ids.length ? addScriptNameLockForCell(item.metadata?.scriptNameLocks, row, columnKey, ids, extras) : item.metadata?.scriptNameLocks,
                     },
                 };
             }),
         );
     }, []);
 
-    /** 把新节点追加关联到某一格（保留这一格已有的图），并把新图**并进**同名资产锁。 */
-    const appendCellAssets = useCallback((nodeId: string, shotNo: number, columnKey: string, ids: string[]) => {
+    /**
+     * 把新节点追加关联到某一格（保留这一格已有的图），并把新图**并进**同名资产锁。
+     *
+     * @param name 这张新图**属于格内哪一个名字**（单格生成时就是那一格的资产标题）。
+     *             一格多名（`川晓遥、宁宁、明明`）生成出来的必须给 —— 生成的是「某一个人的定妆图」，
+     *             只该锁给那个人；不传就退化成「整格广播」（那是**手动挂图**的语义：
+     *             `handleCellAssetsChange` 不传，因为用户往这一格里挂图＝这张图是这一格的资产）。
+     *             旧实现连自动生成也一律广播，于是 3 个角色互相锁着别人的图
+     *             （用户 2026-11-09 第 01 条报障）。
+     */
+    const appendCellAssets = useCallback((nodeId: string, shotNo: number, columnKey: string, ids: string[], name?: string) => {
         if (!ids.length) return;
         setNodes((prev) =>
             prev.map((item) => {
@@ -8868,7 +8880,7 @@ function AtelierCanvasPage() {
                     metadata: {
                         ...item.metadata,
                         scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, [...scriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, extras), ...ids], extras),
-                        scriptNameLocks: addScriptNameLockForCell(item.metadata?.scriptNameLocks, row, columnKey, ids, extras),
+                        scriptNameLocks: addScriptNameLockForCell(item.metadata?.scriptNameLocks, row, columnKey, ids, extras, name),
                     },
                 };
             }),
@@ -9009,7 +9021,7 @@ function AtelierCanvasPage() {
                         : item,
                 ),
             );
-            appendCellAssets(nodeId, shotNo, columnKey, [created.id]);
+            appendCellAssets(nodeId, shotNo, columnKey, [created.id], assetTitle);
             revealNodes([created], "center");
             message.success(t("canvas.scriptNode.cellAssetGenerating", { no: shotNo, label: cellAssetColumnLabel(source, columnKey) }));
             void Promise.resolve(generateNodeRef.current?.(created.id, "image", scene)).finally(() => {
@@ -9030,11 +9042,15 @@ function AtelierCanvasPage() {
          * @param options.autoGenerate 铺完对这组视频节点**逐个执行生成**，每两个之间间隔
          *                   `SCRIPT_PIPELINE_GENERATE_INTERVAL_MS`；跑一遍即结束（不等生成完成）。
          * @param options.skipConfirm 不弹确认窗、直接铺（只给「一键视频」用：那条流程已经有总确认）。
+         * @param options.mergeEvery 强制「每 N 镜合并成 1 段」，**无视**「视频分段」档位与手动合并组。
+         *                   只给「一键铺视频链路」用（用户 2026-11-09 第 02 条：固定每 4 镜合并为 1 镜）。
          */
-        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean; skipConfirm?: boolean }) => {
+        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean; skipConfirm?: boolean; mergeEvery?: number }) => {
             const videoOnly = Boolean(options?.videoOnly);
             const groupVideos = Boolean(options?.group);
             const autoGenerate = Boolean(options?.autoGenerate);
+            // 「一键铺视频链路」：固定每 N 镜一段（N=4），不受分段档位 / 手动合并影响。
+            const mergeEvery = Math.max(0, Math.round(Number(options?.mergeEvery) || 0));
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             const rows = source.metadata?.scriptRows || [];
@@ -9160,12 +9176,19 @@ function AtelierCanvasPage() {
                 : (source.metadata?.scriptMergeGroups || [])
                       .map((span) => (Array.isArray(span) ? span.map((index) => renderableSlot.get(index)).filter((slot): slot is number => slot !== undefined) : []))
                       .filter((span) => span.length >= 2);
-            const groups = groupStoryScriptRows(
-                renderable.map((item) => item.row),
-                mergeMode,
-                segmentSeconds,
-                manualMergeGroups,
-            );
+            const groups: ReturnType<typeof groupStoryScriptRows> =
+                mergeEvery > 0
+                    ? // 「一键铺视频链路」：**固定每 mergeEvery 镜一段**，不看分段档位、也不看手动合并组
+                      // （用户 2026-11-09 第 02 条：「仍然使用每 4 镜合并为 1 镜输出的原则」）。
+                      Array.from({ length: Math.ceil(renderable.length / mergeEvery) }, (_, index) => ({
+                          rows: renderable.slice(index * mergeEvery, index * mergeEvery + mergeEvery).map((item) => item.row),
+                      }))
+                    : groupStoryScriptRows(
+                          renderable.map((item) => item.row),
+                          mergeMode,
+                          segmentSeconds,
+                          manualMergeGroups,
+                      );
 
             const created: CanvasNodeData[] = [];
             /** 这一批铺出来的视频节点（顺序 = 时间线顺序），末尾要一起接进一个视频合并节点。 */
@@ -9431,22 +9454,27 @@ function AtelierCanvasPage() {
 
             const shotCount = renderable.length;
             const videoCount = groups.length;
-            // 确认文案三档：整表 / 选择 / 简洁版（含选择）。简洁版一个文本 / 图片节点都不建，
-            // 文案必须写清楚，否则用户看到「{{nodes}} 个节点」会以为还是三件套。
-            const confirmTitleKey = videoOnly
-                ? selection
-                    ? "canvas.scriptNode.pipelineVideoOnlySelectedConfirmTitle"
-                    : "canvas.scriptNode.pipelineVideoOnlyConfirmTitle"
-                : selection
-                  ? "canvas.scriptNode.pipelineSelectedConfirmTitle"
-                  : "canvas.scriptNode.pipelineConfirmTitle";
-            const confirmBodyKey = videoOnly
-                ? selection
-                    ? "canvas.scriptNode.pipelineVideoOnlySelectedConfirmBody"
-                    : "canvas.scriptNode.pipelineVideoOnlyConfirmBody"
-                : selection
-                  ? "canvas.scriptNode.pipelineSelectedConfirmBody"
-                  : "canvas.scriptNode.pipelineConfirmBody";
+            // 确认文案四档：整表 / 选择 / 简洁版（含选择）/ 一键视频链路（固定每 N 镜一段）。
+            const confirmTitleKey =
+                mergeEvery > 0
+                    ? "canvas.scriptNode.pipelineVideoChainConfirmTitle"
+                    : videoOnly
+                      ? selection
+                          ? "canvas.scriptNode.pipelineVideoOnlySelectedConfirmTitle"
+                          : "canvas.scriptNode.pipelineVideoOnlyConfirmTitle"
+                      : selection
+                        ? "canvas.scriptNode.pipelineSelectedConfirmTitle"
+                        : "canvas.scriptNode.pipelineConfirmTitle";
+            const confirmBodyKey =
+                mergeEvery > 0
+                    ? "canvas.scriptNode.pipelineVideoChainConfirmBody"
+                    : videoOnly
+                      ? selection
+                          ? "canvas.scriptNode.pipelineVideoOnlySelectedConfirmBody"
+                          : "canvas.scriptNode.pipelineVideoOnlyConfirmBody"
+                      : selection
+                        ? "canvas.scriptNode.pipelineSelectedConfirmBody"
+                        : "canvas.scriptNode.pipelineConfirmBody";
             /**
              * 真正「铺链路（+ 逐个生成）」的那段。手动点按钮时它挂在 `modal.confirm` 的 `onOk` 上，
              * **行为一个字节不变**；「一键视频」走 `options.skipConfirm` 直接执行 ——
@@ -9460,7 +9488,7 @@ function AtelierCanvasPage() {
                  * 之后再点「一键铺链路」仍是同一段 —— 免得两条路径给出两种结果。
                  * 已有组与这一段重叠的整组丢掉（后来的覆盖前面的，与 `mergeSelectedRows` 同口径）。
                  */
-                const nextMergeGroups = selection && selection.length >= 2
+                const nextMergeGroups = selection && selection.length >= 2 && mergeEvery === 0
                     ? normalizeStoryScriptMergeGroups(
                           [...(source.metadata?.scriptMergeGroups || []).filter((span) => !span.some((index) => selection.includes(index))), selection],
                           rows.length,
@@ -9473,7 +9501,13 @@ function AtelierCanvasPage() {
                 setSelectedNodeIds(new Set(created.map((node) => node.id)));
                 setSelectedConnectionId(null);
                 revealNodes(created, "center");
-                message.success(t(videoOnly ? "canvas.scriptNode.pipelineVideoOnlyBuilt" : "canvas.scriptNode.pipelineBuilt", { shots: shotCount, videos: videoCount }));
+                message.success(
+                    t(mergeEvery > 0 ? "canvas.scriptNode.pipelineVideoChainBuilt" : videoOnly ? "canvas.scriptNode.pipelineVideoOnlyBuilt" : "canvas.scriptNode.pipelineBuilt", {
+                        shots: shotCount,
+                        videos: videoCount,
+                        count: mergeEvery,
+                    }),
+                );
                 /**
                  * 逐个执行「生成」按钮（用户 2026-11-07 第 3 条）。
                  *
@@ -9505,10 +9539,10 @@ function AtelierCanvasPage() {
                 return;
             }
             modal.confirm({
-                title: t(confirmTitleKey),
+                title: t(confirmTitleKey, { count: mergeEvery }),
                 content: (
                     <div>
-                        <div>{t(confirmBodyKey, { shots: shotCount, nodes: created.length, videos: videoCount, links: assetLinkCount })}</div>
+                        <div>{t(confirmBodyKey, { shots: shotCount, nodes: created.length, videos: videoCount, links: assetLinkCount, count: mergeEvery })}</div>
                         {mergeNode ? <div className="mt-1.5 opacity-70">{t("canvas.scriptNode.pipelineMergeHint", { count: createdVideoNodes.length })}</div> : null}
                         {groupNode ? <div className="mt-1.5 opacity-70">{t("canvas.scriptNode.pipelineVideoGroupHint", { count: createdVideoNodes.length })}</div> : null}
                         {autoGenerate && createdVideoNodes.length ? (
@@ -9518,7 +9552,7 @@ function AtelierCanvasPage() {
                         ) : null}
                     </div>
                 ),
-                okText: t(autoGenerate ? "canvas.scriptNode.pipelineVideoGenerate" : videoOnly ? "canvas.scriptNode.pipelineVideoOnly" : "canvas.scriptNode.pipelineBuild"),
+                okText: t(autoGenerate ? "canvas.scriptNode.pipelineVideoGenerate" : mergeEvery > 0 ? "canvas.scriptNode.pipelineVideoChain" : videoOnly ? "canvas.scriptNode.pipelineVideoOnly" : "canvas.scriptNode.pipelineBuild"),
                 cancelText: t("common.cancel"),
                 onOk: runPipeline,
             });

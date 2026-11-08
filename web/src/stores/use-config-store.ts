@@ -4,6 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { registerCustomStyleTemplates, type CanvasStyleTemplate } from "@/constant/style-templates";
 import { defaultTextPrompts, h3PromptOptimizerEntry, normalizeTextPrompts, type TextPromptEntry } from "@/constant/text-prompt-library";
 import { normalizeSunoVersionValue } from "@/lib/audio-generation";
 import { isNativeComfyUiBaseUrl, parseComfyApiWorkflow } from "@/lib/comfyui-native";
@@ -167,6 +168,14 @@ export type AiConfig = {
     nodeCreateMenuOrder: string[];
     /** Image node right-click menu button order. */
     imageContextMenuOrder: string[];
+    /**
+     * 用户自己加的**风格模板**（内置 45 条在 `constant/style-templates.ts` 里，不进配置）。
+     *
+     * 放在 `AiConfig` 里是为了「跟着导出配置一起走」：`exportAppConfig` 原样导出整个 config，
+     * 导入时 `...imported` 自然覆盖，不用再给配置文件加字段（用户 2026-11-09 第 04 条）。
+     * 内置模板**不可删改**，只能新增 / 编辑 / 删除这里的条目（判据 `isBuiltinStyleTemplate`）。
+     */
+    customStyleTemplates?: CanvasStyleTemplate[];
 };
 
 export type ConfigTabKey = "channels" | "preferences" | "skills" | "agents" | "backup";
@@ -914,6 +923,20 @@ export function normalizeProviderBaseUrl(baseUrl: string) {
     }
     return value;
 }
+
+/**
+ * 自定义风格模板 → `constant/style-templates` 的运行时注册表。
+ *
+ * 那些查询函数（`getStyleTemplate` / `getStyleTemplateLabel` / `buildStylePromptText`）被铺链路、生图、
+ * 生视频、节点面板等十几处**同步**调用，不能变成 async、也不该认识 zustand；所以由这里在启动时
+ * 把配置里的自定义模板推进去，并在每次配置变化（本地持久化 rehydrate 完成 / 用户在设置里改了）
+ * 时保持同步。导入配置走的是 `useConfigStore.setState`，同样会触发这条订阅。
+ */
+registerCustomStyleTemplates(useConfigStore.getState().config.customStyleTemplates);
+useConfigStore.subscribe((state, prev) => {
+    if (state.config.customStyleTemplates === prev.config.customStyleTemplates) return;
+    registerCustomStyleTemplates(state.config.customStyleTemplates);
+});
 
 export function buildApiUrl(baseUrl: string, path: string) {
     const normalizedBaseUrl = normalizeProviderBaseUrl(baseUrl);

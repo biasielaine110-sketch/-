@@ -1511,6 +1511,15 @@ export function resolveStoryScriptImageSize(value: unknown): string {
 export type StoryScriptMergeMode = "shot" | "2" | "3" | "4" | "5" | "duration";
 export const STORY_SCRIPT_MERGE_MODES: StoryScriptMergeMode[] = ["shot", "2", "3", "4", "5", "duration"];
 
+/**
+ * 「一键铺视频链路」固定每 4 镜合并成 1 段（用户 2026-11-09 第 02 条：
+ * 「执行方式为仍然使用每 4 镜合并为 1 镜输出的原则，同时只铺视频节点出来」）。
+ *
+ * 与「视频分段」档位的关系：那个档位决定的是**一键铺链路 / 只铺视频窗口**怎么分；
+ * 这颗按钮是「照 4 镜一段铺一条视频链」，所以**不看档位、也不看手动合并组**（见 `mergeEvery`）。
+ */
+export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP = 4;
+
 export function resolveStoryScriptMergeMode(value: unknown): StoryScriptMergeMode {
     return STORY_SCRIPT_MERGE_MODES.includes(value as StoryScriptMergeMode) ? (value as StoryScriptMergeMode) : "shot";
 }
@@ -2193,6 +2202,13 @@ export function setStoryScriptNameLock(map: unknown, name: unknown, ids: readonl
 /**
  * 把某一格（这一镜这一资产列）刚链接好的图**并进**它的资产名锁里。
  * 同名多镜取并集（不丢图）；这一列的名字是空 / 「无」→ 原样返回（没有可锁的名字）。
+ *
+ * @param name 这一批图**属于格内哪一个名字**。一格多名（`川晓遥、宁宁、明明`）时**自动生成 / 逐镜生成
+ *             必须给**：生成出来的是「某个人的定妆图」，只该锁给那个人。
+ *             🔴 不给（＝用户手动把一张图挂进这一格 / 导入本地图）→ 沿用「整格广播」：
+ *             这一格写着四个道具、用户往里挂一张图，意思就是「这张图是这一格的资产」，
+ *             四个名字各记一把锁是用户的意思（`script-cast-roster-probe` 一直是这么断言的）。
+ *             两类调用的分界见 `appendCellAssets`（有归属）与 `handleCellAssetsChange`（无归属）。
  */
 export function addScriptNameLockForCell(
     map: unknown,
@@ -2200,17 +2216,26 @@ export function addScriptNameLockForCell(
     columnKey: unknown,
     ids: readonly unknown[],
     extras?: readonly StoryScriptExtraColumn[] | null,
+    name?: string | null,
 ): StoryScriptNameLockMap {
     const normalized = normalizeStoryScriptNameLockMap(map);
     // 只有资产列才配锁（镜号 / 时长这类列的值不是资产名）。口径与 `parseScriptCellAssetKey` / `cellAssetMapKey` 一致。
     if (typeof columnKey !== "string" || !isScriptAssetColumn(columnKey, extras)) return normalized;
     const label = scriptNameLockName(row ? row[columnKey] : "");
     if (!label || !ids.length) return normalized;
-    // 一格多值（`苏晚、阿杰` / `宁宁的智能手机、佳佳的智能手机`）→ **每个名字各锁一份**：铺链路的名字匹配
-    // 是按「一个资产」算的，拿整串当锁名永远命中不了任何一格（那把锁等于没写，还会在锁表里留一条假资产）。
+    // 一格多值（`苏晚、阿杰` / `宁宁的智能手机、佳佳的智能手机`）→ 拆开逐个写：铺链路的名字匹配是按
+    // 「一个资产」算的，拿整串当锁名永远命中不了任何一格（那把锁等于没写，还会留一条假资产）。
     const names = isMultiNameAssetColumn(columnKey, extras) ? splitScriptAssetNames(label) : [label];
+    // 明确说了这张图是谁的 → 只锁那一个名字（且必须真的在这一格里，防止调用方传错串到别人身上）。
+    const explicit = scriptNameLockName(name);
+    if (explicit) {
+        if (names.some((one) => one === explicit || one.toLowerCase() === explicit.toLowerCase())) {
+            return setStoryScriptNameLock(normalized, explicit, [...scriptNameLockIds(normalized, explicit), ...ids]);
+        }
+        return normalized;
+    }
     let next = normalized;
-    for (const name of names) next = setStoryScriptNameLock(next, name, [...scriptNameLockIds(next, name), ...ids]);
+    for (const one of names) next = setStoryScriptNameLock(next, one, [...scriptNameLockIds(next, one), ...ids]);
     return next;
 }
 
@@ -2319,12 +2344,29 @@ export function stripStoryScriptAssetId<T extends Record<string, string[]>>(map:
  * 这一格可能只挂了苏晚那张图，另外两个人的角色卡在别处（按各自名字锁着）。
  * 拿整串当锁名永远命中不了任何一格，结果就是「这一镜只认一个人 / 一件道具」。
  * 其余分类（场景 / 站位）沿用整串口径。
+ *
+ * 🔴 **一格多名 → 最多 N 张（N = 名字个数）**（用户 2026-11-09 第 01 条报障：一格标 3 个角色，
+ * 表里却挂了 5 张图）。名字锁的语义是「这个资产长什么样，用这张图」，格子里 N 个人就只该有 N 张：
+ *  - 旧实现是 `flatMap` 取每个人的**全部**锁 → 谁被广播污染过（旧 `addScriptNameLockForCell`
+ *    把整格图写给格内每个名字），这一格就会越攒越多，3 个人攒出 5 张；
+ *  - 但**不能**改成「每人只取第一张」：广播留下的脏数据三个人的锁往往一模一样，
+ *    那样会塌成 1 张（比 5 张更错）。
+ * 所以按「名字顺序 → 各自的锁顺序」去重铺开，然后**截到 N 张**：脏数据不会涨，正常数据一张不少。
+ * 追加顺序保证各人自己的图排在前面（`mountScriptAssetToCells` 精确写、广播只是往后追加）。
  */
 export function scriptCellNameLockIds(locks: unknown, columnKey: unknown, value: unknown, extras?: readonly StoryScriptExtraColumn[] | null): string[] {
     // 角色格与**道具格**都可能是一格多值（`苏晚、阿杰` / `宁宁的智能手机、佳佳的智能手机`）→ 逐名取锁并起来。
     // 场景格不拆：场景就是「一个」，整串当一个名字。
     const names = isMultiNameAssetColumn(columnKey, extras) ? splitScriptAssetNames(value) : [];
-    if (names.length > 1) return Array.from(new Set(names.flatMap((name) => scriptNameLockIds(locks, name))));
+    if (names.length > 1) {
+        const union: string[] = [];
+        for (const name of names) {
+            for (const id of scriptNameLockIds(locks, name)) {
+                if (!union.includes(id)) union.push(id);
+            }
+        }
+        return union.slice(0, names.length);
+    }
     const label = scriptNameLockName(value);
     return label ? scriptNameLockIds(locks, label) : [];
 }
