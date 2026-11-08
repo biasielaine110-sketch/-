@@ -201,6 +201,21 @@ export function appendScriptAssetPromptSuffix(prompt: string, suffix: string): s
     return `${body}\n\n${tail}`;
 }
 
+/**
+ * 往前缀位置插一段（画幅声明那种「必须最先被读到」的句子）。
+ *
+ * 不能拿 `appendScriptAssetPromptSuffix` 反着传：那函数判幂等的是「正文是否已含尾缀」，
+ * 反过来传就变成「前缀是否含整段提示词」，永远不成立 → 重复点击会叠两份前缀。
+ */
+export function prependScriptAssetPromptPrefix(prompt: string, prefix: string): string {
+    const body = String(prompt ?? "").trim();
+    const head = String(prefix ?? "").trim();
+    if (!head) return body;
+    if (!body) return head;
+    if (body.includes(head)) return body;
+    return `${head}\n\n${body}`;
+}
+
 /** 词库视图版式的追加（等价于 `appendScriptAssetPromptSuffix`，名字保留旧口径）。 */
 export function appendScriptAssetViewTemplate(prompt: string, template: string): string {
     return appendScriptAssetPromptSuffix(prompt, template);
@@ -222,54 +237,126 @@ export function applyScriptAssetViewTemplates(items: readonly ScriptAssetBatchIt
     });
 }
 
-// ── 「一键直接生图」的固定尾缀：场景空景 + 画幅收口 ────────────────────────────────
+// ── 「一键直接生图」的固定尾缀：空景 + 画幅收口 ────────────────────────────────────
 
 /**
- * 场景资产图的**空景**尾缀（用户 2026-11-08）：
- * 「场景出图时，添加一个后缀，即图片中不要出现人物角色，为场景的空景展示。」
+ * 空景尾缀作用在**哪些分类**（用户 2026-11-08 两条口径合并）：
+ *  - 场景：「场景出图时，添加一个后缀，即图片中不要出现人物角色，为场景的空景展示」；
+ *  - 道具：「道具出图时，需要添加一个后缀，即图片中不要出现人物角色，为道具的空景展示」。
+ *
+ * 角色不加（角色图当然要有人）；站位图 / 音频不在「一键直接生图」这一批里。
+ */
+export const SCRIPT_ASSET_EMPTY_PLATE_ROLES: ScriptAssetRole[] = ["scene", "prop"];
+
+/**
+ * 场景 / 道具资产图的**空景**尾缀：
+ * 「图片中不要出现人物角色，为空景展示」。
  *
  * 为什么要写进提示词，而不是只靠 `size`：
- *  - 场景图是拿来当**背景/空间参考**的，混进人物会污染后面所有分镜（视频里「场景里多个人」的根源）；
- *  - 生图模型对「否定词」不敏感，所以不只写「不要人物」，还把「要什么」写全（建筑 / 陈设 / 环境 / 光线）。
+ *  - 这两类是拿来当**背景 / 陈设参考**的，混进人物会污染后面所有分镜（视频里「场景里多个人」的根源）；
+ *  - 生图模型对「否定词」不敏感，所以不只写「不要人物」，还把「要什么」写全（建筑 / 陈设 / 道具 / 环境 / 光线）。
+ *
+ * 场景与道具**各写一份**：场景要的是「看得见空间」，道具要的是「这一件东西的完整形态与材质」，
+ * 合成一句会两头都不准（道具图里写「建筑、陈设」会把画面拉去拍环境）。
  */
 export const SCRIPT_ASSET_EMPTY_SCENE_SUFFIX =
-    "空景要求：画面中不要出现任何人物角色——没有人物、没有人脸、没有背影或剪影、没有人群、没有手部特写，只表现场景本身的建筑、陈设、环境与光线，作为后续分镜的空镜背景。";
+    "空景要求：画面中不要出现任何人物角色——没有人物、没有人脸、没有背影或剪影、没有人群、没有手部特写，只表现建筑、陈设、环境与光线本身，作为后续分镜的空景素材。";
+
+export const SCRIPT_ASSET_EMPTY_PROP_SUFFIX =
+    "空景要求：画面中不要出现任何人物角色——没有人物、没有人手、没有人脸、没有背影或剪影，只表现这件道具本身的完整形态、材质细节与它所处的陈设、环境光线，作为后续分镜的道具空景素材。";
+
+/** 这个分类要不要加空景尾缀。 */
+export function usesScriptAssetEmptyPlate(role: ScriptAssetRole): boolean {
+    return SCRIPT_ASSET_EMPTY_PLATE_ROLES.includes(role);
+}
+
+/** 按分类取那一句空景尾缀（角色 = 空串，不加）。 */
+export function resolveScriptAssetEmptyPlateSuffix(role: ScriptAssetRole): string {
+    if (role === "scene") return SCRIPT_ASSET_EMPTY_SCENE_SUFFIX;
+    if (role === "prop") return SCRIPT_ASSET_EMPTY_PROP_SUFFIX;
+    return "";
+}
 
 /**
- * 画幅收口尾缀：把「9:16 / 16:9」**写成提示词最后一行**。
+ * 画幅收口：把「9:16 / 16:9」**写在提示词的最前面和最末尾各一次**。
  *
  * 为什么需要它：`size` 参数只对「认这个字段的模型」有效 —— 有的中转 / 有的模型家族会收下
  * `size` 却按提示词排版（尤其当词库版式里写了别的画幅时，模型会跟着版式走，出方图）。
- * 用户 2026-11-08 报障「角色出图现在出来的是 1x1 的，应该是 9x16」就是这一路。
+ * 用户 2026-11-08 连续两次报障「角色出图现在出来的是 1x1 的，应该是 9x16」就是这一路。
+ *
+ * 首尾各一次不是「啰嗦」：模型对长提示词的注意力集中在**开头和结尾**，用户自建的词库版式
+ * （「无头9x16竖版排版」）恰好落在中间；只压末尾时有版式会赢。
  *
  * ⚠️ 两个口径必须**同源**：文字里的比例由 `resolveScriptAssetDirectSize()` 推出来，
  * 不许另写一份常量，否则「画幅硬规则」与「提示词里写的画幅」会漂。
  */
-export function buildScriptAssetFrameSuffix(role: ScriptAssetRole): string {
+function scriptAssetFrameSpec(role: ScriptAssetRole): { ratio: string; orientation: string; pixels: string; wrong: string } {
     const size = resolveScriptAssetDirectSize(role);
-    if (size === "9:16") return "画面比例：9:16 竖版（宽:高 = 9:16），整张图按竖构图排版，不要做成 1:1 方图或横图。";
-    if (size === "16:9") return "画面比例：16:9 横版（宽:高 = 16:9），整张图按横构图排版，不要做成 1:1 方图或竖图。";
-    return `画面比例：${size}，整张图按这个比例排版。`;
+    if (size === "9:16") return { ratio: "9:16", orientation: "竖版", pixels: "如 1080×1920", wrong: "1:1 方图或横图" };
+    if (size === "16:9") return { ratio: "16:9", orientation: "横版", pixels: "如 1920×1080", wrong: "1:1 方图或竖图" };
+    return { ratio: size, orientation: "", pixels: "", wrong: "别的比例" };
+}
+
+/** 提示词**最前面**的画幅声明（短一行，先立规矩）。 */
+export function buildScriptAssetFramePrefix(role: ScriptAssetRole): string {
+    const spec = scriptAssetFrameSpec(role);
+    return spec.pixels
+        ? `【画幅】${spec.ratio} ${spec.orientation}（${spec.pixels}），整张图是${spec.orientation === "竖版" ? "竖的长图" : "横的长图"}，不要做成 ${spec.wrong}。`
+        : `【画幅】${spec.ratio}，整张图按这个比例排版，不要做成 ${spec.wrong}。`;
+}
+
+/** 提示词**最后一行**的画幅收口（上面的版式 / 空景可能把画幅说岔了，这里再钉一次）。 */
+export function buildScriptAssetFrameSuffix(role: ScriptAssetRole): string {
+    const spec = scriptAssetFrameSpec(role);
+    return spec.pixels
+        ? `画面比例：${spec.ratio} ${spec.orientation}（宽:高 = ${spec.ratio}），整张图按${spec.orientation === "竖版" ? "竖" : "横"}构图排版，不要做成 ${spec.wrong}。`
+        : `画面比例：${spec.ratio}，整张图按这个比例排版。`;
 }
 
 /**
  * 「一键直接生图」提示词的**最终整形**（顺序即语义，不能乱）：
  *
- *  1. 资产描述（分镜表里那一格）—— 最前，权重最高；
- *  2. 词库视图版式（角色 / 场景各一条，见 `SCRIPT_ASSET_VIEW_TEMPLATE_RULES`）；
- *  3. 场景 → 空景尾缀（只在场景加，角色 / 道具不加）；
- *  4. 画幅尾缀 —— **永远最后一行**，用来压过前面版式里可能写死的画幅。
+ *  1. 画幅声明（短前缀，先把画幅立在最前面）；
+ *  2. 资产描述（分镜表里那一格）；
+ *  3. 词库视图版式（角色 / 场景各一条，见 `SCRIPT_ASSET_VIEW_TEMPLATE_RULES`）；
+ *  4. 场景 / 道具 → 空景尾缀（`SCRIPT_ASSET_EMPTY_PLATE_ROLES`）；
+ *  5. 画幅收口 —— **永远最后一行**，压过前面版式里可能写死的画幅。
  *
  * 每一步都幂等：同一批重算、或用户手动把尾缀粘进提示词后再点，都不会出现两份。
  */
 export function applyScriptAssetDirectDecorations(items: readonly ScriptAssetBatchItem[], textPrompts?: readonly ViewTemplatePromptEntry[] | null): ScriptAssetBatchItem[] {
     if (!items.length) return [];
     return applyScriptAssetViewTemplates(items, textPrompts).map((item) => {
-        let prompt = item.prompt;
-        if (item.role === "scene") prompt = appendScriptAssetPromptSuffix(prompt, SCRIPT_ASSET_EMPTY_SCENE_SUFFIX);
+        let prompt = prependScriptAssetPromptPrefix(item.prompt, buildScriptAssetFramePrefix(item.role));
+        const plate = resolveScriptAssetEmptyPlateSuffix(item.role);
+        if (plate) prompt = appendScriptAssetPromptSuffix(prompt, plate);
         prompt = appendScriptAssetPromptSuffix(prompt, buildScriptAssetFrameSuffix(item.role));
         return prompt === item.prompt ? item : { ...item, prompt };
     });
+}
+
+/**
+ * 出图之后的自检：这一张有没有按要求的画幅出来？
+ *
+ * 为什么要它：`size` 是否被上游听见，**只有出图后的像素能证明**。用户 2026-11-08 连续两次报
+ * 「角色出图是 1x1」，而我们这边请求里确实带着 9:16 —— 没有这条提示，用户只看到一张方图、
+ * 我们也拿不到「是哪家模型没听 size」。所以：只要偏差超过 12%，就在画布上提示一次
+ * （**只提示，不重跑**：重跑要花钱，而且换不换模型是用户的判断）。
+ *
+ * @returns 实际比例文案（如 "1:1"）；比例吻合 / 参数不全 → 空串。
+ */
+export function describeScriptAssetAspectMismatch(requestedSize: unknown, naturalWidth: unknown, naturalHeight: unknown): string {
+    const wanted = String(requestedSize ?? "").trim();
+    const width = Number(naturalWidth);
+    const height = Number(naturalHeight);
+    if (!wanted || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return "";
+    const match = wanted.match(/^(\d+)\s*[:x×]\s*(\d+)$/i);
+    if (!match) return "";
+    const target = Number(match[1]) / Math.max(1, Number(match[2]));
+    const actual = width / height;
+    if (!Number.isFinite(target) || target <= 0) return "";
+    if (Math.abs(actual - target) / target <= 0.12) return "";
+    return `${Math.round(actual * 100) / 100}:1（${Math.round(width)}×${Math.round(height)}）`;
 }
 
 

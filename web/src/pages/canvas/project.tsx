@@ -113,7 +113,7 @@ import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-orde
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import { applyScriptAssetDirectDecorations, buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { applyScriptAssetDirectDecorations, buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, describeScriptAssetAspectMismatch, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
@@ -5524,6 +5524,9 @@ function AtelierCanvasPage() {
                     let hasFailure = false;
                     let firstError = "";
                     const succeededImages: GenerationHistoryImage[] = [];
+                    // 出图后画幅自检收口（用户 2026-11-08 第 07 条外挂）：只记一次，最后汇总成一条提示。
+                    // 为什么在这里而不在生图请求里：`size` 有没有被上游听见**只有返回的像素能证明**。
+                    const aspectMismatches: string[] = [];
                     const newImageIdSet = new Set(imageIds);
                     const applyGeneratedSlot = async (
                         imageId: string,
@@ -5568,6 +5571,10 @@ function AtelierCanvasPage() {
                         );
                         hasSuccess = true;
                         succeededImages.push({ storageKey: uploaded.storageKey, mimeType: uploaded.mimeType, width: uploaded.width, height: uploaded.height, bytes: uploaded.bytes });
+                        // 画幅没按要求的来（偏差 > 12%）→ 收集，末尾统一提示一次：这说明这家模型/中转
+                        // 不吃 `size`，光靠提示词也只是尽量掰，换模型才是真解。
+                        const aspectMismatch = describeScriptAssetAspectMismatch(generationConfig.size, uploaded.width, uploaded.height);
+                        if (aspectMismatch) aspectMismatches.push(aspectMismatch);
                         if (isConfigNode) setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));
                     };
                     const markSlotError = (imageId: string, errorDetails: string) => {
@@ -5698,6 +5705,17 @@ function AtelierCanvasPage() {
                     }
                     if (hasFailure) {
                         message.error(hasSuccess ? t("canvas.projectPage.partialFailed") : firstError || t("canvas.projectPage.generationFailed"));
+                    }
+                    if (aspectMismatches.length) {
+                        message.warning(
+                            t("canvas.projectPage.imageAspectMismatch", {
+                                requested: generationConfig.size,
+                                actual: aspectMismatches[0],
+                                count: aspectMismatches.length,
+                                model: generationConfig.model || "-",
+                            }),
+                            6,
+                        );
                     }
                     setNodes((prev) =>
                         prev.map((node) =>
@@ -8458,9 +8476,9 @@ function AtelierCanvasPage() {
             if (!source) return { created: [] };
             // 不筛「已出过图」是这里唯一的产品口径；站位图在 buildScriptAssetDirectItems 里就剔掉了。
             // 再按分类补上**词库里的视图版式**（用户 2026-11-08：角色 →「无头 9x16 竖版排版」、
-            // 场景 →「2x2 场景宫格图」），以及**场景空景尾缀**与**画幅尾缀**（画幅写在提示词最后一行，
-            // 见 `applyScriptAssetDirectDecorations` 的顺序说明）。这里就地改 prompt，所以
-            // 「节点上显示的提示词」与「真正发给生图模型的提示词」是同一份（下面 `cell.item.prompt` 两处读的都是它）。
+            // 场景 →「2x2 场景宫格图」），以及**场景 / 道具的空景尾缀**与**画幅的首尾声明**（画幅开头
+            // 一句、最后一行再钉一次，见 `applyScriptAssetDirectDecorations` 的顺序说明）。这里就地改 prompt，
+            // 所以「节点上显示的提示词」与「真正发给生图模型的提示词」是同一份（下面 `cell.item.prompt` 两处读的都是它）。
             const wanted = applyScriptAssetDirectDecorations(
                 buildScriptAssetDirectItems(source.metadata?.scriptRows).filter((item) => item.title.trim() && item.prompt.trim()),
                 effectiveConfig.textPrompts,
