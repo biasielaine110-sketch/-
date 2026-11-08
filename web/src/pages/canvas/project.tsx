@@ -7588,8 +7588,12 @@ function AtelierCanvasPage() {
                  * 只要这个人的名字在**本镜自己的画面描述 / 分镜提示词 / 动作 / 站位**里字面出现过
                  * （`dialogue` 不算：「苏晚呢？」提到的人不一定在画里），而角色列里没有他，就补进去。
                  * 顺带把「场景列为空」的镜头沿用上一个镜头的场景名（同场次连续镜头不该丢场景）。
+                 *
+                 * 第 17 条起把**源剧本自己的段头**也喂进去（`sourceText`）：
+                 * `【场景】…/【人物】…/【道具】…` 是作者写死的这一段 15 秒的资产清单 —— 这一段拆成 3 镜，
+                 * 每镜都得有这些人 / 这个场景 / 这些道具，不再靠模型「记不记得」。
                  */
-                const castRows = backfillStoryScriptCastNames(parsedRows, presetId);
+                const castRows = backfillStoryScriptCastNames(parsedRows, presetId, { sourceText });
                 const dedupedRows = dedupeStoryScriptAssetDescriptions(castRows.rows, presetId);
                 /**
                  * 第四套方案：把 `video_motion_prompt` 确定性收敛成八段标签块。
@@ -7659,11 +7663,20 @@ function AtelierCanvasPage() {
                 setNodes((prev) => prev.map(applyGeneratedRows));
                 message.success(t("canvas.scriptNode.generated", { count: parsedRows.length }));
                 /**
-                 * 「补了几镜的出场角色」也要明说（2026-11-08 第 15 条）：补人是有可能补错的判断
-                 * （模型没写全、我们按画面文字补的），用户得知道有这回事才能顺手复核。
+                 * 「补了几镜的出场角色 / 场景 / 道具」也要明说（2026-11-08 第 15/17 条）：补人是有可能补错的
+                 * 判断（模型没写全、我们按剧本段头与画面文字补的），用户得知道有这回事才能顺手复核。
+                 * ⚠️ 触发条件带上 `propFilled`：段头【道具】被补进表格同样是「模型漏了资产」，只判 `filled`
+                 * 时「人齐了但道具全空」这种最常见的漏法一声不响。场景沿用属常规兜底（几乎每次都发生），
+                 * 不单独弹窗，只在文案里报个数。
                  */
-                if (castRows.filled > 0) {
-                    message.info(t("canvas.scriptNode.castBackfilled", { count: castRows.filled }));
+                if (castRows.filled > 0 || castRows.propFilled > 0) {
+                    message.info(
+                        t("canvas.scriptNode.castBackfilled", {
+                            count: castRows.filled,
+                            scene: castRows.sceneFilled,
+                            prop: castRows.propFilled,
+                        }),
+                    );
                 }
                 /**
                  * 第七套：「源稿覆盖」这件事要**明说**。前六次报障里有一半是「其实没识别到源稿」
@@ -7926,8 +7939,8 @@ function AtelierCanvasPage() {
                     }
                     // 单镜重写常把「后面几镜」的描述又写全了（模型看不到整表已经去重过）——
                     // 这里再跑一遍幂等去重，保证「首现镜写全、其余留空」在单镜改动后依然成立。
-                    // 出场角色同口径兜底（单镜重写最容易只留说话的人）。
-                    workingRows = dedupeStoryScriptAssetDescriptions(backfillStoryScriptCastNames(workingRows, presetId).rows, presetId);
+                    // 出场角色同口径兜底（单镜重写最容易只留说话的人；段头名单一并喂进去）。
+                    workingRows = dedupeStoryScriptAssetDescriptions(backfillStoryScriptCastNames(workingRows, presetId, { sourceText }).rows, presetId);
                     done += 1;
                     setNodes((prev) =>
                         prev.map((node) =>

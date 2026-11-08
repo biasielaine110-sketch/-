@@ -855,7 +855,7 @@ export default {
             batchAssetModelHint: "Defaults to the default image model in config preferences; leave it untouched to keep following preferences",
             batchAssetModelPlaceholder: "Pick the model used for batch asset generation",
             assetCandidateHint: "{{count}} linkable node(s) on the canvas",
-            castBackfilled: "Cast filled in for {{count}} shot(s) from the shot text (silent characters included) — please double-check",
+            castBackfilled: "Cast filled in for {{count}} shot(s) (scene on {{scene}}, props on {{prop}}) — please double-check",
             assetTabCanvas: "Link from canvas",
             assetTabUpload: "Upload files",
             assetPickHint: "Tick the assets to use as references. They become upstream assets of this script node (images act as image-generation references).",

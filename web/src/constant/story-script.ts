@@ -340,8 +340,10 @@ Example style for \`video_motion_prompt\`:
 - When a cell holds several names, write the matching description column as one entry per name:
   \`苏晚：28岁女性，黑色短发……｜阿杰：30岁男性，灰色卫衣……\` (names joined by \`｜\`, each a compact
   character card). Never write a single paragraph that only describes the first name.
-- If the source declares the cast of a scene / segment, every shot inside that segment must carry that
-  whole cast (minus anyone the shot explicitly puts out of frame).
+- If the source declares a segment's assets as headers — \`【场景】…\` / \`【人物】…\` / \`【道具】…\` — that
+  header is the author's cast list, not a suggestion: **every shot of that segment** must carry all of its
+  characters (in \`character_1\` / \`character_2\`), the same \`scene\` name and all of its \`prop\` names.
+  Splitting the segment into 3 shots only changes framing and action, never the cast list.
 - Reuse the exact same character identifier across rows so the same person keeps one name.
 - The same character must never switch names or appearance between consecutive shots.
 
@@ -874,6 +876,10 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     // 资产描述去重：紧贴 JSON 契约之前（模型对越靠后的指令越服从），与 system 里那段是同一份文本。
     if (assetDedupe) parts.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
+    // 源内容自己标的段头（【场景】【人物】【道具】）逐段列清：这一段拆几镜都得把这些资产写全。
+    // 放在「不许漏」硬规则**之前** —— 先给名单，再给硬要求，模型照着抄就行。
+    const segmentSection = buildStoryScriptSegmentAssetSection(sourceText);
+    if (segmentSection) parts.push(segmentSection);
     // 出场角色 / 场景不许漏：同样紧贴契约 —— 这一段是「群体镜头只认说话的人」报障的最后一道拦截。
     parts.push(STORY_SCRIPT_CAST_COMPLETENESS_HINT);
     // 拆镜密度：同样紧贴契约（2026-11-07「30 秒拆 16 镜」报障，密度必须最后再说一遍）。
@@ -898,6 +904,10 @@ function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds
     // storyboard 的规则全在 system prompt 里，没有可整段替换的「参考风格要点」，所以只追加专项要求。
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     if (assetDedupe) parts.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
+    // 源内容自己标的段头（同 classic）：storyboard 没有角色列，但「画面描述里写全人、场景道具照段头写」
+    // 照样需要这份名单，否则群像会被写成「两人」。
+    const segmentSection = buildStoryScriptSegmentAssetSection(sourceText);
+    if (segmentSection) parts.push(segmentSection);
     // 出场角色 / 场景不许漏（与 classic 同口径；storyboard 没有角色列，这条的实际作用是「画面里出现的
     // 人物在画面描述里也要写全」，同一句不影响，反而防它把群像写成「两人」）。
     parts.push(STORY_SCRIPT_CAST_COMPLETENESS_HINT);
@@ -2948,39 +2958,277 @@ export function dedupeStoryScriptAssetDescriptions(
  *
  * 幂等：已经写进去的人不会被再补一遍；返回 `filled` 给调用方决定要不要提示用户。
  */
+/* ─────────── 段头声明（【场景】【人物】【道具】）：这一段 15 秒用到的资产清单 ─────────── */
+
+/**
+ * 剧本里「这一段用了什么」的段头分类。用户的剧本就是这么标的：
+ *
+ * ```
+ * 【场景】外景·街角咖啡店门口 - 午后
+ * 【人物】女人、男人
+ * 【道具】外带咖啡杯、纸巾。
+ * ```
+ *
+ * 报障原话：「剧本里已经明确标注了这一组 15 秒镜头里面有几个角色、几个场景、几个道具，一定都要识别到
+ * 具体的这组 15 秒镜头里，就算这组 15 秒拆了 3 个镜头……不要丢角色，丢了后续链路就识别不到」。
+ *
+ * 这些标签**只认这几个**：`【镜头 1】`、`【字幕】`、`【备注】` 都不是资产声明，别把整篇剧本都当成段头。
+ */
+const STORY_SCRIPT_SEGMENT_HEADER_LABELS: Record<string, "scene" | "character" | "prop"> = {
+    场景: "scene",
+    地点: "scene",
+    场景地点: "scene",
+    时间地点: "scene",
+    时空: "scene",
+    环境: "scene",
+    人物: "character",
+    角色: "character",
+    出场人物: "character",
+    主要人物: "character",
+    人物角色: "character",
+    演员: "character",
+    道具: "prop",
+    物品: "prop",
+    关键道具: "prop",
+    道具物品: "prop",
+};
+
+/** 一行段头：`【场景】xxx` / `[人物]: xxx` / `- **场景**：xxx` 都认。 */
+const STORY_SCRIPT_SEGMENT_HEADER_PATTERN = /^[\s>#*\-\u3000]*[【\[［]\s*([^】\]］]{1,10}?)\s*[】\]］]\s*[：:]?\s*(.*)$/;
+
+/** 一个「段落」在源内容里声明的资产。 */
+export type StoryScriptSegmentAssets = {
+    /** 第几段（从 1 起，按源内容出现顺序）。 */
+    index: number;
+    /** 段头原样的「场景」值（`外景·街角咖啡店门口 - 午后`）。 */
+    scene: string;
+    /** 去掉「内景 / 外景」与时段后缀的场景名（`街角咖啡店门口`），补场景格时用它更像表里的写法。 */
+    sceneName: string;
+    /** 这一段的人物名（已拆好）。 */
+    characters: string[];
+    /** 这一段的道具名（已拆好）。 */
+    props: string[];
+};
+
+/** 段头值清理：去首尾标点 / 引号 / 句号。 */
+function cleanSegmentHeaderValue(value: string): string {
+    return String(value || "")
+        .replace(/^[：:、，,\s]+/, "")
+        .replace(/[。；;，,\s]+$/, "")
+        .replace(/^[「『"“](.*)[」』"”]$/, "$1")
+        .trim();
+}
+
+/** 场景名收窄：`外景·街角咖啡店门口 - 午后` → `街角咖啡店门口`（保留原样当兜底）。 */
+function cleanSegmentSceneName(value: string): string {
+    const raw = cleanSegmentHeaderValue(value);
+    if (!raw) return "";
+    const narrowed = raw
+        .replace(/^(内景|外景|日景|夜景|内外景)\s*[·・\-—:：,]?\s*/, "")
+        .replace(/\s*[-—–·・|｜]\s*(清晨|早晨|上午|中午|午后|下午|傍晚|黄昏|入夜|夜晚|深夜|凌晨|日|夜)\S*$/, "")
+        .replace(/[（(](清晨|早晨|上午|中午|午后|下午|傍晚|黄昏|夜晚|深夜|凌晨)[）)]\s*$/, "")
+        .trim();
+    // 砍完只剩一两个字（例如原文就是「内景」）→ 不如保留原文。
+    return narrowed.length >= 2 ? narrowed : raw;
+}
+
+/** 段头里的名字列表：`女人、男人` / `女人，男人（30岁）` / `纸巾。` */
+function splitSegmentHeaderNames(value: string): string[] {
+    return splitScriptAssetNames(cleanSegmentHeaderValue(value))
+        .map((name) => name.replace(/[（(][^）)]*[）)]\s*$/, "").trim())
+        .filter(Boolean);
+}
+
+/**
+ * 从源剧本里抠出「每一段 15 秒声明了哪些资产」。
+ *
+ * 判定「另起一段」：段头是**连排**的（场景 → 人物 → 道具）；一旦中间隔了正文 / 空行之后又出现段头，
+ * 或者同一类段头重复出现（第二个 `【场景】`），就是新的一段。
+ * 纯函数，探针可直接钉。
+ */
+export function parseStoryScriptSegmentAssets(sourceText: unknown): StoryScriptSegmentAssets[] {
+    const text = typeof sourceText === "string" ? sourceText : String(sourceText ?? "");
+    if (!text.trim()) return [];
+    const out: StoryScriptSegmentAssets[] = [];
+    let current: { scene: string; characters: string[]; props: string[] } | null = null;
+    /** 当前段头里最后一条声明的分类；`null` = 上一个有内容的行是正文，再遇到段头就开新段。 */
+    let lastKind: "scene" | "character" | "prop" | null = null;
+    const flush = () => {
+        if (!current) return;
+        if (!current.scene && !current.characters.length && !current.props.length) return;
+        out.push({
+            index: out.length + 1,
+            scene: current.scene,
+            sceneName: cleanSegmentSceneName(current.scene),
+            characters: current.characters,
+            props: current.props,
+        });
+    };
+    for (const rawLine of text.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        const match = STORY_SCRIPT_SEGMENT_HEADER_PATTERN.exec(line);
+        const kind = match ? STORY_SCRIPT_SEGMENT_HEADER_LABELS[match[1].replace(/[\s\u3000]/g, "")] : undefined;
+        if (!match || !kind) {
+            // 正文行：结束「段头连排」状态。
+            lastKind = null;
+            continue;
+        }
+        const value = cleanSegmentHeaderValue(match[2]);
+        const repeatScene = kind === "scene" && Boolean(current?.scene);
+        if (!current || lastKind === null || lastKind === kind || repeatScene) {
+            flush();
+            current = { scene: "", characters: [], props: [] };
+        }
+        if (value) {
+            if (kind === "scene") current.scene = value;
+            else if (kind === "character") current.characters.push(...splitSegmentHeaderNames(value));
+            else current.props.push(...splitSegmentHeaderNames(value));
+        }
+        lastKind = kind;
+    }
+    flush();
+    return out.map((segment) => ({
+        ...segment,
+        characters: Array.from(new Set(segment.characters)),
+        props: Array.from(new Set(segment.props)),
+    }));
+}
+
+/**
+ * 把表格里的每一行**归到某一段**（源内容里那些段头）。
+ *
+ * 三步，从硬到软：
+ *  1. **场景对上**：行里的场景名与段头场景名双向包含（取命中长度最长的那个段）；
+ *  2. **镜号归零**：剩下的行按「镜号变小 = 新一段」切成组，组数刚好等于段数时按顺序对上；
+ *  3. **接上一行**：段落是连续的，还没认出来的行沿用上一行的段（开头那几行用后面第一个认出来的）。
+ *
+ * 都认不出来（源内容里根本没有段头、或者只有一段）→ 全部落在同一段上（一段时）或全 `null`。
+ */
+export function assignStoryScriptSegmentAssets(
+    rows: readonly StoryScriptRow[] | null | undefined,
+    segments: readonly StoryScriptSegmentAssets[] | null | undefined,
+): Array<StoryScriptSegmentAssets | null> {
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) return [];
+    const blocks = Array.isArray(segments) ? segments : [];
+    if (!blocks.length) return list.map(() => null);
+    if (blocks.length === 1) return list.map(() => blocks[0]);
+    const assigned: Array<StoryScriptSegmentAssets | null> = list.map((row) => {
+        const scene = normalizeScriptAssetMatchText(storyScriptCellText(row.scene));
+        if (!scene) return null;
+        let best: StoryScriptSegmentAssets | null = null;
+        let bestLength = 0;
+        for (const block of blocks) {
+            const declared = normalizeScriptAssetMatchText(block.scene);
+            if (!declared) continue;
+            if (!scene.includes(declared) && !declared.includes(scene)) continue;
+            const length = Math.min(scene.length, declared.length);
+            if (length > bestLength) {
+                bestLength = length;
+                best = block;
+            }
+        }
+        return best;
+    });
+    if (assigned.some((item) => item === null)) {
+        const groups: number[][] = [];
+        let previousShot = Number.POSITIVE_INFINITY;
+        list.forEach((row, index) => {
+            const shot = Math.round(Number(row.shot_no)) || index + 1;
+            if (!groups.length || shot <= previousShot) groups.push([]);
+            groups[groups.length - 1].push(index);
+            previousShot = shot;
+        });
+        if (groups.length === blocks.length) {
+            groups.forEach((group, groupIndex) => {
+                for (const index of group) if (!assigned[index]) assigned[index] = blocks[groupIndex];
+            });
+        }
+    }
+    const firstKnown = assigned.find((item) => Boolean(item)) || null;
+    let carry: StoryScriptSegmentAssets | null = firstKnown;
+    return assigned.map((item) => {
+        if (item) {
+            carry = item;
+            return item;
+        }
+        return carry;
+    });
+}
+
+/**
+ * 解析后的**确定性兜底**：按这一镜自己的文字，把漏掉的主角补回角色列（2026-11-08 第 15 条）。
+ *
+ * 报障原话：「5 个人一起旅游，后面镜头只有 2 个人说话，5 人一起合拍照片时，分镜表对这部分镜头
+ * 就识别不到其他没说话的人物角色挂载」。提示词已经要求「画面里有谁就写谁」，但模型仍会漏；
+ * 这里用一条**不会瞎编**的规则补：**只补「本镜文字里字面出现过、且全表当过角色名」的人**。
+ *
+ * 为什么不是「同场次把整组角色都灌进去」：同一场里也常有「只有主角在」的镜头，一律灌进去 =
+ * 给每张视频节点挂上所有角色图，正是用户 2026-11-08 另一条报障（「一个镜头挂 16 张图」）。
+ *
+ * 2026-11-08 第 17 条补上**源内容自己的段头**（第二条报障）：「剧本里已经明确标注了这一组 15 秒里面
+ * 有几个角色、几个场景、几个道具，一定要都识别到这组镜头里」。段头是**作者写死的名单**，不是模型的
+ * 推断，所以它比「画面文字里提到」更强：这一段的每一镜都要有这些人 / 这个场景 / 这些道具。
+ * 传 `options.sourceText` 才会启用这一层（不传 = 老行为，探针与旧调用点不受影响）。
+ *
+ * 口径：
+ *  - 名册（roster）= 全表 `character_1/2` 里出现过的所有名字（含一格多名拆出来的）**＋ 段头【人物】里
+ *    声明过、但表里还没出现的名字**（否则「声明了却没人写」的角色永远补不进来）；
+ *  - 「本镜画面提到谁」的检索范围 = `visual_description` / `shot_prompt` / `character_action` / `blocking`
+ *    —— 🔴 **不含 `dialogue`**：「苏晚呢？」这种台词提到的人不一定在画里，补进去就是错的；
+ *  - 段落归属见 `assignStoryScriptSegmentAssets`；这一段的【人物】全部补进角色格，【场景】补进空的场景格，
+ *    【道具】补进空的道具格（多个用 `、`，与角色格同一套写法）；
+ *  - 补人时挑**名字最少的那个角色格**追加（没有就新起一格），用 `、` 连接；
+ *  - 场景兜底：这一镜场景为空（或写了 `无`）→ 段头场景名优先，其次沿用上一镜。
+ *
+ * 幂等：已经写进去的人 / 场景 / 道具不会被再补一遍；返回 `filled` / `sceneFilled` / `propFilled`
+ * 给调用方决定要不要提示用户。
+ */
 export function backfillStoryScriptCastNames(
     rows: readonly StoryScriptRow[] | null | undefined,
     preset?: StoryScriptPresetId | string | null,
-): { rows: StoryScriptRow[]; filled: number; sceneFilled: number } {
+    options?: { sourceText?: string | null },
+): { rows: StoryScriptRow[]; filled: number; sceneFilled: number; propFilled: number } {
     const list = Array.isArray(rows) ? rows : [];
-    if (!list.length) return { rows: [], filled: 0, sceneFilled: 0 };
+    if (!list.length) return { rows: [], filled: 0, sceneFilled: 0, propFilled: 0 };
     const presetColumns = new Set(getStoryScriptPreset(preset).columns.map((column) => column.key));
     const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS.character.filter((spec) => Boolean(spec.nameKey) && presetColumns.has(String(spec.nameKey)));
     // 没有角色列（storyboard）也**不能提前返回**：场景沿用那一步照样要做。
     const hasSceneColumn = presetColumns.has("scene");
+    const hasPropColumn = presetColumns.has("prop");
 
-    // 名册：全表出现过的角色名（拆多名字格），归一化去重，保留第一次出现的原始写法。
+    // 段头声明（源内容自己标的「这一段用了什么」）。
+    const segments = parseStoryScriptSegmentAssets(options?.sourceText);
+    const rowSegments = assignStoryScriptSegmentAssets(list, segments);
+
+    // 名册：全表出现过的角色名（拆多名字格）+ 段头声明过的人，归一化去重，保留第一次出现的原始写法。
     const roster: string[] = [];
     const rosterKeys = new Set<string>();
+    const remember = (name: string) => {
+        const key = normalizeScriptAssetMatchText(name);
+        if (key.length < 2 || rosterKeys.has(key)) return;
+        rosterKeys.add(key);
+        roster.push(name);
+    };
     for (const row of list) {
         for (const spec of specs) {
-            for (const name of splitScriptAssetNames(row[String(spec.nameKey)])) {
-                const key = normalizeScriptAssetMatchText(name);
-                if (key.length < 2 || rosterKeys.has(key)) continue;
-                rosterKeys.add(key);
-                roster.push(name);
-            }
+            for (const name of splitScriptAssetNames(row[String(spec.nameKey)])) remember(name);
         }
     }
+    for (const segment of segments) for (const name of segment.characters) remember(name);
 
     /** 本镜「画面里提到了谁」的检索串（**不含对白**）。 */
     const frameTextKeys = ["visual_description", "shot_prompt", "character_action", "blocking"];
     const orderedRoster = [...roster].sort((left, right) => normalizeScriptAssetMatchText(right).length - normalizeScriptAssetMatchText(left).length);
+    /** 真正算「空」的格子：`无` / `-` / 空串都算没写。 */
+    const blankCell = (value: unknown) => !scriptNameLockName(value);
 
     let filled = 0;
     let sceneFilled = 0;
+    let propFilled = 0;
     let previousScene = "";
-    const next = list.map((row) => {
+    const next = list.map((row, index) => {
         let copy: StoryScriptRow | null = null;
         const ensure = (): StoryScriptRow => {
             if (copy) return copy;
@@ -2988,6 +3236,7 @@ export function backfillStoryScriptCastNames(
             copy = cloned;
             return cloned;
         };
+        const declared = rowSegments[index];
         // ① 补人
         if (orderedRoster.length) {
             const present = new Set<string>();
@@ -3003,6 +3252,17 @@ export function backfillStoryScriptCastNames(
                 if (haystack.includes(key)) haystack = haystack.split(key).join("\u0000");
             }
             const missing: string[] = [];
+            /**
+             * 段头名单先来：这一段声明了谁，这一镜就必须有谁（作者写死的，不是推断）。
+             * 之后才是「画面文字里提到、但漏挂」的人 —— 后者只补**全表当过角色名**的，避免瞎编。
+             */
+            for (const name of declared?.characters || []) {
+                const key = normalizeScriptAssetMatchText(name);
+                if (!key || present.has(key)) continue;
+                present.add(key);
+                if (haystack.includes(key)) haystack = haystack.split(key).join("\u0000");
+                missing.push(name);
+            }
             for (const name of orderedRoster) {
                 const key = normalizeScriptAssetMatchText(name);
                 if (!key || present.has(key) || !haystack.includes(key)) continue;
@@ -3026,19 +3286,29 @@ export function backfillStoryScriptCastNames(
                 filled += 1;
             }
         }
-        // ② 补场景（同场次连续镜头不该把场景丢了）
+        // ② 补场景（段头场景优先，其次沿用上一镜 —— 同场次连续镜头不该把场景丢了）
         if (hasSceneColumn) {
-            const sceneName = storyScriptCellText(row.scene);
-            if (sceneName) previousScene = sceneName;
-            else if (previousScene) {
-                ensure().scene = previousScene;
-                sceneFilled += 1;
+            if (blankCell(row.scene)) {
+                const fill = declared?.sceneName || declared?.scene || previousScene;
+                if (fill) {
+                    ensure().scene = fill;
+                    sceneFilled += 1;
+                }
+            } else {
+                previousScene = storyScriptCellText(row.scene);
             }
+        }
+        // ③ 补道具（段头【道具】一栏往往就是这一组镜头要出的三张道具资产；空着等于丢了）
+        if (hasPropColumn && declared?.props.length && blankCell(row.prop)) {
+            ensure().prop = declared.props.join("、");
+            propFilled += 1;
         }
         return copy || row;
     });
-    return { rows: filled || sceneFilled ? next : (list as StoryScriptRow[]), filled, sceneFilled };
+    const changed = filled || sceneFilled || propFilled;
+    return { rows: changed ? next : (list as StoryScriptRow[]), filled, sceneFilled, propFilled };
 }
+
 
 /**
  * 表格占位用：`镜号:描述列key` → 首现镜号。只对**当前为空、且前面（或全表）已经有描述**的格子给提示。
@@ -3102,9 +3372,39 @@ export const STORY_SCRIPT_CAST_COMPLETENESS_HINT = [
     "- 每一镜都要先回答一句「**这个画面里到底有谁**」：只要人在画框里（哪怕一句台词都没有、只是站着、合影、从背景走过），就必须把名字写进角色列。只有明确不在这个画面里的人才能不写；不要因为「这一镜的台词是别人说的」就把其他人删掉。",
     "- 表里只有 `character_1` / `character_2` 两个角色格，但**一格可以写多个人**：多个名字用 `、` 分隔，例如 `苏晚、阿杰、小雨、老周、莉莉`。画面里出现的所有人必须分布在这两格之中，不许因为「只有两格」就丢人。",
     "- 一格写了多个名字时，`character_description_N` 必须**逐人分条**：`苏晚：28岁女性……｜阿杰：30岁男性……｜小雨：……`（用 `｜` 分隔），每个人都有自己的一条外观卡；只描述第一个人的写法视为不合格。",
-    "- 源内容如果已经按场次 / 段落标注了「出场角色 / 人物」「场景 / 地点」（例如某 15 秒段落写明用了哪几个角色、发生在哪里），这一段里的**每一镜都要照着它写**：角色一个不少，场景名与它一致（除非这一镜明确写了人物离场或换景）。",
+    "- 源内容里的段头 `【场景】` / `【人物】` / `【道具】` 是**作者写死的这一段资产清单**（例如 `【场景】外景·街角咖啡店门口 - 午后` / `【人物】女人、男人` / `【道具】外带咖啡杯、纸巾`）：这一段就算拆成 3 个镜头，**每一镜都要把这段的人物全写进角色列、场景列写同一个场景名、道具列写全这些道具**（多个用 `、`）。拆分镜只改变景别 / 机位 / 动作，**不许改出场名单**。",
     "- 场景列每一镜都必须有名字：同一场次沿用同一个场景名，不要写 `无`、不要留空。",
 ].join("\n");
+
+/**
+ * 把源内容里的段头声明**逐段列成任务书里的一张清单**（2026-11-08 第 17 条）。
+ *
+ * 为什么不能只靠 system prompt 里那句「段头要照写」：一份剧本里常常有 6~10 个 15 秒段落，每段的人不一样；
+ * 只是「要求照写」，模型很容易把上一段的人带到下一段、或者整段只留说话的二个人。把它抠出来**编号列清**，
+ * 模型就有一张可对照的表（「第 2 段：女人、男人 + 街角咖啡店门口 + 外带咖啡杯、纸巾」），逐段照抄即可。
+ *
+ * 源内容没有这种段头 → 返回空串（任务书逐字不变）。
+ */
+export function buildStoryScriptSegmentAssetSection(sourceText: unknown): string {
+    const segments = parseStoryScriptSegmentAssets(sourceText);
+    if (!segments.length) return "";
+    const lines = segments.map((segment) => {
+        const parts: string[] = [];
+        if (segment.scene) parts.push(`【场景】${segment.scene}`);
+        if (segment.characters.length) parts.push(`【人物】${segment.characters.join("、")}`);
+        if (segment.props.length) parts.push(`【道具】${segment.props.join("、")}`);
+        return `${segment.index}. ${parts.join("　")}`;
+    });
+    return [
+        "## 源内容已标注的每一段资产（逐段照写，一镜都不许漏）",
+        "下面这些段头是**源内容自己写的**，不是建议：",
+        ...lines,
+        "硬要求：",
+        "1. 每一段拆成几镜都可以，但**这一段里的每一镜**都必须把该段【人物】全部写进角色列（一格可写多人，用 `、`）、场景列写同一个场景名、道具列写全该段【道具】（多个用 `、`）。",
+        "2. 拆镜只改变景别 / 机位 / 动作 / 台词分配，**不许改出场名单**；不要因为某个人这一镜不说话就把他从角色列删掉。",
+        "3. 不同段落的人物不要互相串：第 2 段的人物不许出现在第 1 段的镜头里（除非源内容正文明确写了）。",
+    ].join("\n");
+}
 
 /** 构建分镜脚本生成任务；不传 preset 时保持旧行为（classic）。 */
 export function buildStoryScriptTask({

@@ -2566,7 +2566,17 @@ export function CanvasScriptNodeContent({
                                     const cellName = cellNameList.join("、") || scriptNameLockName(row[column.key]);
                                     const cellLocked = cellLockIds.length > 0;
                                     const cellFromLock = cellIds.length === 0 && cellLockIds.length > 0;
-                                    const cellDisplayIds = cellIds.length ? cellIds : cellLockIds;
+                                    /**
+                                     * 一格多角色（`宁宁、明明、佳佳`）：这一格要显示**每个人自己的图**，
+                                     * 不是「格子挂了哪张就只显示哪张」。
+                                     *
+                                     * 用户 2026-11-08 第 17 条报障：单镜头识别到多个资产时，表里只挂上一张图
+                                     * （红笔划的就是「宁宁、明明、佳佳」只剩宁宁那张）→ 后续铺链路也只连一张。
+                                     * 所以多名字格取**并集**：格子自己的图 ∪ 各名字锁定的图；单名字格仍是老口径
+                                     * （格子自己挂了图就听格子的，锁只作跨镜兜底）。
+                                     */
+                                    const multiName = cellNameList.length > 1;
+                                    const cellDisplayIds = multiName ? Array.from(new Set([...cellIds, ...cellLockIds])) : cellIds.length ? cellIds : cellLockIds;
                                     return (
                                         <Fragment key={column.key}>
                                             <td
@@ -2620,6 +2630,9 @@ export function CanvasScriptNodeContent({
                                                 <div className="mt-0.5 flex flex-wrap items-center gap-1" onDoubleClick={(event) => event.stopPropagation()}>
                                                     {cellDisplayIds.map((imageId) => {
                                                         const meta = imageLookup.get(imageId);
+                                                        // 这张图是不是「名字锁落下来的」：一格多角色时并集里既有本格自己挂的图，
+                                                        // 也有各人名字锁带进来的图 —— 逐张算，不能再用整格一个布尔。
+                                                        const idFromLock = !cellIds.includes(imageId);
                                                         // 缩略图 56px（原 84px）：行高按用户要求压掉约 1/3，图也一起收一号，
                                                         // 否则资产列会把整行撑到 84px 起。表里仍能看清是谁。
                                                         return (
@@ -2627,11 +2640,11 @@ export function CanvasScriptNodeContent({
                                                                 key={imageId}
                                                                 className="group relative flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-md border"
                                                                 style={{
-                                                                    borderColor: cellLocked ? theme.toolbar.activeBg : theme.node.stroke,
+                                                                    borderColor: idFromLock || cellLocked ? theme.toolbar.activeBg : theme.node.stroke,
                                                                     background: theme.node.fill,
                                                                     color: theme.node.text,
                                                                     // 这个资产名已上锁 → 缩略图描一圈高亮边，一眼看出「已经锁定」。
-                                                                    boxShadow: cellLocked ? `0 0 0 1px ${theme.toolbar.activeBg}` : undefined,
+                                                                    boxShadow: idFromLock || cellLocked ? `0 0 0 1px ${theme.toolbar.activeBg}` : undefined,
                                                                 }}
                                                                 title={
                                                                     cellFromLock
@@ -2648,13 +2661,13 @@ export function CanvasScriptNodeContent({
                                                                 }}
                                                             >
                                                                 {meta?.previewUrl ? <img src={meta.previewUrl} alt={meta.title} className="size-full object-cover" /> : <ImageIcon className="size-6" />}
-                                                                {cellFromLock ? (
-                                                                    // 这一格的图不是「格子自己的链接」，而是同名的资产锁落下来的 —— 挂个小锁标。
+                                                                {idFromLock ? (
+                                                                    // 这张图不是「格子自己链接的」，而是同名的资产锁落下来的 —— 挂个小锁标。
                                                                     <span className="absolute left-0 top-0 flex size-5 items-center justify-center rounded-br-md bg-black/55 text-white">
                                                                         <Lock className="size-3" />
                                                                     </span>
                                                                 ) : null}
-                                                                {cellFromLock ? (
+                                                                {idFromLock ? (
                                                                     // 锁来的图：点 × 是「解开这个资产名的锁」（格子自己没有链接可删）。
                                                                     onNameLockChange ? (
                                                                         <button
