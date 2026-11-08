@@ -1349,6 +1349,31 @@ export function resolveScriptAssetRole(value: unknown): ScriptAssetRole {
     return SCRIPT_ASSET_ROLE_IDS.includes(value as ScriptAssetRole) ? (value as ScriptAssetRole) : "character";
 }
 
+/**
+ * 这一类资产的「名字格」是不是可以一格写多个名字（`、` 分隔）→ 逐名拆开处理。
+ *
+ * - `character`：表里只有两个角色格，群像必须一格写多人（2026-11-08 第 15 条）；
+ * - `prop`：🔴 也必须是多值 —— 用户 2026-11-08 第 19 条报障「资产表里通过顿号分开的资产，他是多个资产，
+ *   需要识别链接具体的资产图，不要当成一个资产去单独生成」（截图：`宁宁的智能手机、佳佳的智能手机、
+ *   川晓遥的浅棕色单肩挎包、川晓遥的智能手机` 四件道具挤在一格，最后只出了一张图、锁成了一条假资产名）；
+ * - `scene`：**不拆** —— 场景就是「一个」，`海边栈道` 里出现顿号也是同一个场景的一部分；
+ * - `blocking` / `audio`：没有名字列，无所谓。
+ *
+ * ⚠️ 拆与不拆是**同一个口径**贯穿五处：名字匹配（`scriptRowAssetRoleTexts`）、格位（`collectScriptAssetCellTargets`）、
+ * 候选（`collectScriptAssetPromptCandidates`）、锁表（`scriptCellNameLockIds` / `addScriptNameLockForCell`）、
+ * 表格显示（`canvas-script-node-content.tsx`）。只改一处 = 「生成出来了但挂不回去」或反过来。
+ */
+export function isMultiNameAssetRole(role: unknown): boolean {
+    const id = resolveScriptAssetRole(role);
+    return id === "character" || id === "prop";
+}
+
+/** 按**列 key** 判这件事（表格渲染 / 锁表只有列 key，没有 role）。自建列按它自己的 role 算。 */
+export function isMultiNameAssetColumn(columnKey: unknown, extras?: readonly StoryScriptExtraColumn[] | null): boolean {
+    const role = scriptAssetColumnRole(columnKey, extras);
+    return Boolean(role) && isMultiNameAssetRole(role);
+}
+
 /** 点击分类胶囊时的轮转顺序：角色 → 场景 → 道具 → 站位图 → 音频 → 角色。 */
 export function nextScriptAssetRole(current: unknown): ScriptAssetRole {
     const index = SCRIPT_ASSET_ROLE_IDS.indexOf(resolveScriptAssetRole(current));
@@ -2174,15 +2199,16 @@ export function addScriptNameLockForCell(
     row: StoryScriptRow | undefined | null,
     columnKey: unknown,
     ids: readonly unknown[],
+    extras?: readonly StoryScriptExtraColumn[] | null,
 ): StoryScriptNameLockMap {
     const normalized = normalizeStoryScriptNameLockMap(map);
     // 只有资产列才配锁（镜号 / 时长这类列的值不是资产名）。口径与 `parseScriptCellAssetKey` / `cellAssetMapKey` 一致。
-    if (typeof columnKey !== "string" || !isScriptAssetColumn(columnKey)) return normalized;
+    if (typeof columnKey !== "string" || !isScriptAssetColumn(columnKey, extras)) return normalized;
     const label = scriptNameLockName(row ? row[columnKey] : "");
     if (!label || !ids.length) return normalized;
-    // 一格多角色（`苏晚、阿杰`）→ **每个名字各锁一份**：铺链路的名字匹配是按「一个人」算的，
-    // 拿 `苏晚、阿杰` 整串当锁名永远命中不了任何一格（那把锁等于没写）。
-    const names = scriptAssetColumnRole(columnKey) === "character" ? splitScriptAssetNames(label) : [label];
+    // 一格多值（`苏晚、阿杰` / `宁宁的智能手机、佳佳的智能手机`）→ **每个名字各锁一份**：铺链路的名字匹配
+    // 是按「一个资产」算的，拿整串当锁名永远命中不了任何一格（那把锁等于没写，还会在锁表里留一条假资产）。
+    const names = isMultiNameAssetColumn(columnKey, extras) ? splitScriptAssetNames(label) : [label];
     let next = normalized;
     for (const name of names) next = setStoryScriptNameLock(next, name, [...scriptNameLockIds(next, name), ...ids]);
     return next;
@@ -2210,7 +2236,7 @@ export function syncStoryScriptNameLocks(
         if (!parsed || !Array.isArray(value)) continue;
         const row = byShot.get(parsed.shotNo);
         if (!row) continue;
-        next = addScriptNameLockForCell(next, row, parsed.columnKey, value);
+        next = addScriptNameLockForCell(next, row, parsed.columnKey, value, extras);
     }
     return next;
 }
@@ -2289,13 +2315,15 @@ export function stripStoryScriptAssetId<T extends Record<string, string[]>>(map:
 /**
  * 这一格的「名字锁」对应哪些图。
  *
- * 角色格允许一格多名（`苏晚、阿杰、小雨`）—— 这时必须**逐人取锁再并集**：
+ * 角色格 / 道具格允许一格多名（`苏晚、阿杰、小雨` / `宁宁的智能手机、佳佳的智能手机`）—— 这时必须**逐名取锁再并集**：
  * 这一格可能只挂了苏晚那张图，另外两个人的角色卡在别处（按各自名字锁着）。
- * 拿整串当锁名永远命中不了任何一格，结果就是「这一镜只认一个人」。
- * 其余分类（场景 / 道具 / 站位）沿用整串口径。
+ * 拿整串当锁名永远命中不了任何一格，结果就是「这一镜只认一个人 / 一件道具」。
+ * 其余分类（场景 / 站位）沿用整串口径。
  */
 export function scriptCellNameLockIds(locks: unknown, columnKey: unknown, value: unknown, extras?: readonly StoryScriptExtraColumn[] | null): string[] {
-    const names = scriptAssetColumnRole(columnKey, extras) === "character" ? splitScriptAssetNames(value) : [];
+    // 角色格与**道具格**都可能是一格多值（`苏晚、阿杰` / `宁宁的智能手机、佳佳的智能手机`）→ 逐名取锁并起来。
+    // 场景格不拆：场景就是「一个」，整串当一个名字。
+    const names = isMultiNameAssetColumn(columnKey, extras) ? splitScriptAssetNames(value) : [];
     if (names.length > 1) return Array.from(new Set(names.flatMap((name) => scriptNameLockIds(locks, name))));
     const label = scriptNameLockName(value);
     return label ? scriptNameLockIds(locks, label) : [];
@@ -2327,9 +2355,9 @@ export function scriptShotPreciseAssetRefs(
         const name = scriptNameLockName(row[column.key]);
         const cellIds = scriptCellAssetIds(cells, shotNo, column.key, extras);
         const lockedIds = scriptCellNameLockIds(locks, column.key, row[column.key], extras);
-        // 一格多角色：格子图 + 各人的锁**并起来**（这一格本来就该挂好几个人）；
+        // 一格多值（角色 / 道具都算）：格子图 + 各名字的锁**并起来**（这一格本来就该挂好几个资产）；
         // 单名字沿用老口径：格子自己挂了图就只听格子的（锁是同名跨镜兜底，不往这一格叠）。
-        const multiName = role === "character" && splitScriptAssetNames(row[column.key]).length > 1;
+        const multiName = isMultiNameAssetRole(role) && splitScriptAssetNames(row[column.key]).length > 1;
         const ids = multiName ? Array.from(new Set([...cellIds, ...lockedIds])) : cellIds;
         if (ids.length) {
             out.push({ columnKey: column.key, role, name, ids, source: cellIds.length ? "cell" : "lock" });
@@ -2599,15 +2627,16 @@ export function scriptRowAssetRoleTexts(
     const covered = options?.coveredColumns;
     const names: string[] = [];
     const texts: string[] = [];
-    const characterRole = resolveScriptAssetRole(role) === "character";
+    const multiNameRole = isMultiNameAssetRole(role);
     for (const spec of SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)]) {
         if (!available.has(spec.columnKey)) continue;
         if (covered?.has(spec.columnKey)) continue;
         if (spec.nameKey) {
             const name = storyScriptCellText(row[spec.nameKey]);
-            // 角色列允许一格写多人（`苏晚、阿杰、小雨`）：**拆开逐个参与名字匹配**。
-            // 拿整串去算相似度时谁都对不上（0.0x），群体镜头就会「一个人都挂不上」。
-            if (name) names.push(...(characterRole ? splitScriptAssetNames(name) : [name]));
+            // 角色格 / 道具格允许一格写多个（`苏晚、阿杰、小雨` / `宁宁的智能手机、佳佳的智能手机`）：
+            // **拆开逐个参与名字匹配**。拿整串去算相似度时谁都对不上（0.0x），群体镜头「一个人都挂不上」、
+            // 道具格则是「四件道具只认到一件」。
+            if (name) names.push(...(multiNameRole ? splitScriptAssetNames(name) : [name]));
         }
         for (const key of spec.textKeys) {
             const text = storyScriptCellText(row[key]);
@@ -2718,7 +2747,7 @@ export type ScriptAssetCellTarget = { shotNo: number; columnKey: string; title: 
 export function collectScriptAssetCellTargets(role: unknown, rows?: readonly StoryScriptRow[] | null): ScriptAssetCellTarget[] {
     const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
     if (!specs.length || !rows?.length) return [];
-    const characterRole = resolveScriptAssetRole(role) === "character";
+    const multiNameRole = isMultiNameAssetRole(role);
     const out: ScriptAssetCellTarget[] = [];
     rows.forEach((row, index) => {
         const shotNo = Math.round(Number(row.shot_no)) || index + 1;
@@ -2726,13 +2755,15 @@ export function collectScriptAssetCellTargets(role: unknown, rows?: readonly Sto
             const name = spec.nameKey ? storyScriptCellText(row[spec.nameKey]) : "";
             const text = joinStoryScriptPromptParts(spec.textKeys.map((key) => storyScriptCellText(row[key])));
             /**
-             * 一格写了多个角色 → **每个角色各占一个格位**。
+             * 一格写了多个资产（角色 / 道具都算）→ **每个资产各占一个格位**。
              *
-             * 群体镜头在表里只有一个 `character_1` 格，但它挂着 5 个人：批量 / 一键生图的图要**逐人**挂回
-             * 这一格（`scriptCellAssets` 的值本来就是 id 数组，一个格子挂 5 张图是合法状态）。
-             * 不拆的话这 5 个人只会得到一张「五人合照卡」，后面铺链路也认不出谁是谁。
+             * 群体镜头在表里只有一个 `character_1` 格，但它挂着 5 个人；道具格同理，一格可能写着
+             * `宁宁的智能手机、佳佳的智能手机、川晓遥的浅棕色单肩挎包`——三件道具。批量 / 一键生图的图要
+             * **逐个**挂回这一格（`scriptCellAssets` 的值本来就是 id 数组，一格挂多张是合法状态）。
+             * 不拆的话这 5 个人 / 3 件道具只会得到一张「合照卡 / 一堆道具堆在一起」的图，
+             * 后面铺链路也认不出谁是谁（用户 2026-11-08 第 19 条报障）。
              */
-            const names = characterRole && name ? splitScriptAssetNames(name) : [];
+            const names = multiNameRole && name ? splitScriptAssetNames(name) : [];
             if (names.length > 1) {
                 for (const one of names) out.push({ shotNo, columnKey: spec.columnKey, title: one, name: one });
                 continue;
@@ -2757,7 +2788,7 @@ export function collectScriptAssetCellTargets(role: unknown, rows?: readonly Sto
 export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonly StoryScriptRow[] | null): ScriptAssetPromptCandidate[] {
     const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
     if (!specs.length || !rows?.length) return [];
-    const characterRole = resolveScriptAssetRole(role) === "character";
+    const multiNameRole = isMultiNameAssetRole(role);
     const out: ScriptAssetPromptCandidate[] = [];
     const seen = new Map<string, number>();
     /** 按标题去重 + 「只剩名字 → 有真描述就升级」的唯一入口（单名字 / 多名字两条路共用）。 */
@@ -2776,12 +2807,13 @@ export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonl
             const name = spec.nameKey ? storyScriptCellText(row[spec.nameKey]) : "";
             const text = joinStoryScriptPromptParts(spec.textKeys.map((key) => storyScriptCellText(row[key])));
             /**
-             * 一格多角色 → **逐人一条候选**（`苏晚、阿杰、小雨` 出三条，而不是「三人成组」一条）。
+             * 一格多值 → **逐个一条候选**（`苏晚、阿杰、小雨` 出三条；`宁宁的智能手机、佳佳的智能手机` 出两条）。
              *
-             * 提示词优先级：这个人在别处的首现描述（最完整、最像角色卡）→ 本格里按名字分条的那一句 →
-             * 本格整段描述 → 名字本身。绝不把「一群人的描述」整段塞给某一个人（那样五张角色卡会长一样）。
+             * 提示词优先级：这个资产在别处的首现描述（最完整）→ 本格里按名字分条的那一句 → 本格整段描述
+             * → 名字本身。绝不把「一群人的描述」整段塞给某一个人（那样五张角色卡会长一样），
+             * 也绝不把「四件道具」当成一条去生一张「道具全家福」（用户 2026-11-08 第 19 条报障）。
              */
-            if (characterRole && name) {
+            if (multiNameRole && name) {
                 const names = splitScriptAssetNames(name);
                 if (names.length > 1) {
                     for (const one of names) {

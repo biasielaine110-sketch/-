@@ -8868,7 +8868,7 @@ function AtelierCanvasPage() {
                     metadata: {
                         ...item.metadata,
                         scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, [...scriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, extras), ...ids], extras),
-                        scriptNameLocks: addScriptNameLockForCell(item.metadata?.scriptNameLocks, row, columnKey, ids),
+                        scriptNameLocks: addScriptNameLockForCell(item.metadata?.scriptNameLocks, row, columnKey, ids, extras),
                     },
                 };
             }),

@@ -41,11 +41,11 @@ import {
     resolveScriptAssetRole,
     resolveStoryScriptDisplayColumns,
     resolveStoryScriptFontSize,
+    isMultiNameAssetColumn,
     resolveStoryScriptImageSize,
     resolveStoryScriptMergeMode,
     resolveStoryScriptPresetId,
     resolveStoryScriptSegmentSeconds,
-    scriptAssetColumnRole,
     scriptCellAssetIds,
     scriptCellNameLockIds,
     scriptNameLockIds,
@@ -2556,11 +2556,12 @@ export function CanvasScriptNodeContent({
                                     // 一格多角色（「苏晚、阿杰、小雨」）时逐人取锁再并起来，与铺链路的
                                     // `scriptShotPreciseAssetRefs` 同口径 —— 否则群里只挂到第一个人的图。
                                     const cellLockIds = scriptCellNameLockIds(nameLocks, column.key, row[column.key], extraColumns);
-                                    // 角色列一格可以写好几个人（「苏晚、阿杰、小雨」）：拆开逐人上锁 / 逐人解锁，
-                                    // 不能把整串当成一个资产名（那样锁出来的是叫「苏晚、阿杰、小雨」的假资产）。
-                                    // 场景 / 道具列仍按整格一个名字。
+                                    // 角色列 / 道具列一格可以写好多个（「苏晚、阿杰、小雨」/「宁宁的智能手机、佳佳的智能手机」）：
+                                    // 拆开逐个上锁 / 逐个解锁，不能把整串当成一个资产名（那样锁出来的是叫
+                                    // 「宁宁的智能手机、佳佳的智能手机」的假资产，永远命中不了任何一格）。
+                                    // 场景列仍按整格一个名字（场景就是「一个」）。
                                     const cellNameList =
-                                        showCellSlot && scriptAssetColumnRole(column.key, extraColumns) === "character"
+                                        showCellSlot && isMultiNameAssetColumn(column.key, extraColumns)
                                             ? splitScriptAssetNames(row[column.key])
                                             : [scriptNameLockName(row[column.key])].filter(Boolean);
                                     const cellName = cellNameList.join("、") || scriptNameLockName(row[column.key]);
