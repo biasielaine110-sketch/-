@@ -9248,13 +9248,16 @@ function AtelierCanvasPage() {
              *
              * 铺完链路不用再手动一个个连线：合并节点里已经按铺出的顺序排好时间线，
              * 生成完直接就能「导出到剪映」。
-             *  - 只有一段视频时不建（一个片子套一个合并节点纯属噪音）；
+             *  - ⚠️ **只有一段视频也建、也连**（用户 2026-11-08 第 10 条报障）：
+             *    原实现判 `>= 2`，于是「只铺出一个视频节点」时下游什么都没有，用户还得手动接一条线。
+             *    现在的口径是「铺出来的每个视频节点都要有下游」——1 段照样建合并节点（标题写「1 段」，
+             *    之后手动拖进第二段也直接可用）。判据只看「至少有一段」，别再加回 `>= 2`；
              *  - 时间线 `outSec` 先按该段视频节点请求的秒数占位 —— 生成前还没有真实时长，
              *    合并节点会把这些段标成「缺失」，生成后自然有内容；
              *  - 位置放在这一列视频节点的右侧、竖直居中，与链路之间留 `gapX`。
              */
             let mergeNode: CanvasNodeData | null = null;
-            if (createdVideoNodes.length >= 2) {
+            if (createdVideoNodes.length >= 1) {
                 const mergeSpec = NODE_DEFAULT_SIZE[CanvasNodeType.VideoMerge];
                 const rightmost = Math.max(...createdVideoNodes.map((node) => node.position.x + node.width));
                 const top = Math.min(...createdVideoNodes.map((node) => node.position.y));
