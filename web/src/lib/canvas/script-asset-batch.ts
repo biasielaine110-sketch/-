@@ -511,8 +511,19 @@ export const SCRIPT_ASSET_COLUMN_SHIFT_GAP = 48;
  * 批次再大也只是往下多排一行，不会把画布横向拉到天边。
  */
 export const SCRIPT_ASSET_GRID_MAX_COLUMNS = 3;
-/** 一批最多同时提交几张生图（十几张一起打上游容易被限流）。 */
-export const SCRIPT_ASSET_LAUNCH_BATCH = 3;
+/**
+ * 一批最多**同时**提交几张生图（十几张全打上游容易被限流）。
+ *
+ * 2026-11-08 口径：**并行 5 张**。原来是 3，用户报障「一键生图现在是一次最多执行 3 张，
+ * 我需要增加一键生图的并行数到 5 张」。
+ *
+ * 三处共用这一个数（改这里就全改，别在调用点写死）：
+ *  - `handleBatchGenerateScriptAssets`（一键批量生图）：按它切片 + `Promise.all` 等这一批回来再下一批；
+ *  - `handleDirectGenerateScriptAssets`（一键直接生图）：同上；
+ *  - 一键视频里的 `retryBatch`（换模型重跑）。
+ * ⚠️ 上游有并发/限流就会 429/503，调到 5 是用户实测口径；再往上要用户点头。
+ */
+export const SCRIPT_ASSET_LAUNCH_BATCH = 5;
 
 export type ScriptAssetRect = { x: number; y: number; width: number; height: number };
 
