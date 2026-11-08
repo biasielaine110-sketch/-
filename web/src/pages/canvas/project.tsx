@@ -114,7 +114,7 @@ import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-orde
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import { applyScriptAssetDirectDecorations, buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, describeScriptAssetAspectMismatch, mountScriptAssetToCells, planScriptAssetColumn, planScriptDirectAssetColumn, resolveScriptAssetColumnX, resolveScriptAssetDirectSize, resolveScriptImageQuality, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { applyScriptAssetDirectDecorations, buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, describeScriptAssetAspectMismatch, mountScriptAssetToCells, planScriptAssetGrid, resolveScriptAssetDirectSize, resolveScriptImageQuality, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
@@ -8381,8 +8381,9 @@ function AtelierCanvasPage() {
      * 一键批量生成资产图：把弹窗里勾好的角色 / 场景 / 道具一次铺成图片节点，再逐张触发生图。
      *
      * 只有四点和单张不同，且都用 `lib/canvas/script-asset-batch.ts` 的口径，别在组件里另算：
-     *  ① **摆位**：落在脚本节点**左侧 300px 的一列**（上下顺序、列高按脚本窗口高度自适应），
-     *     已被占住的格子往下挪 —— 所以「先铺链路再生成」不会盖住链路，「删一张再补一张」会补回空位；
+     *  ① **摆位**：贴脚本节点**左侧**排成一片（右边缘距脚本左边缘 48px，竖向排在脚本窗口高度里、
+     *     塞不下往左开新列，最多 3 列，整块以脚本窗口垂直中线为中心）—— 用户 2026-11-08 口径：
+     *     「紧挨着左侧边框，最多间隔一个图片窗口节点的间距」，不再是一列往脚本下方拖长尾；
      *  ② **模型**：默认取「配置偏好 → 默认模型 → 默认生图模型」；只有用户在弹窗里改过模型栏才写进
      *     每张图的 `metadata.model`（没改就不写 = 继续跟随偏好，以后改偏好这批也跟得上）；
      *  ③ **挂载**：每张图直接写回它那条资产出现过的**每一格**（`scriptCellAssets`）并按资产名上锁
@@ -8401,14 +8402,14 @@ function AtelierCanvasPage() {
             const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
             const cellWidth = Math.round(dims.width);
             const cellHeight = Math.round(dims.height);
-            const columnX = resolveScriptAssetColumnX({ id: source.id, position: source.position, width: source.width, height: source.height }, nodesRef.current, cellWidth);
-            const slots = planScriptAssetColumn(
-                { x: columnX, y: source.position.y },
-                wanted.map(() => ({ width: cellWidth, height: cellHeight })),
-                collectScriptAssetOccupied(nodesRef.current, source.id),
-                // 列高适配：把脚本窗口当前高度传进去，间距据此摊开（图太多时退回最小间距往下溢出）。
-                { span: source.height },
-            );
+            // 资产阵：贴脚本左边框（48px）、竖向排在脚本窗口高度里、塞不下往左开新列（最多 3 列），
+            // 整块以脚本窗口垂直中线为中心 —— 所以不会再出现「一排图甩到脚本下方」或「图飘在一条街外」。
+            const layout = planScriptAssetGrid({
+                source: { id: source.id, position: source.position, width: source.width, height: source.height },
+                sizes: wanted.map(() => ({ width: cellWidth, height: cellHeight })),
+                occupied: collectScriptAssetOccupied(nodesRef.current, source.id),
+            });
+            const slots = layout.slots;
             if (!slots.length) {
                 message.warning(t("canvas.scriptNode.batchAssetNoRoom"));
                 return;
@@ -8426,7 +8427,8 @@ function AtelierCanvasPage() {
                     // 所以这一批（以及之后在这个节点上点重生成）都走同一个模型。
                     ...(options?.model ? { model: options.model } : {}),
                     ...(batchStyleTemplateId ? { styleTemplateId: batchStyleTemplateId } : {}),
-                    // 竖列标记：续排时据此认出「这批是自己的」，铺链路据此给老画布右侧资产图让位。
+                    // 资产阵标记：铺链路据此给老画布右侧资产图让位（本批新增的图不再据它在左侧续排，
+                    // 新一批会整块让到左边另起一片，见 lib 的 planScriptAssetGrid）。
                     scriptAssetLane: source.id,
                 });
                 return { ...node, title: item.title, width: cellWidth, height: cellHeight, position: slots[index] };
@@ -8501,7 +8503,7 @@ function AtelierCanvasPage() {
      * 进行排放并链接到分镜表对应的位置。跟一键批量生成的区分是一键直接生图是直接全生图，不进行筛选哪些生
      * 哪些不生。生图的比例角色默认选 9x16，场景和道具选 16x9。」
      *
-     * 所以与 `handleBatchGenerateScriptAssets` 只有两处不同，其余（竖列摆位 / 挂格 / 分批提交）**完全共用**：
+     * 所以与 `handleBatchGenerateScriptAssets` 只有两处不同，其余（资产阵摆位 / 挂格 / 分批提交）**完全共用**：
      *  ① **选谁**：`buildScriptAssetDirectItems(rows)` —— 内部 `existing` 传空数组，已经出过图的也算在内，
      *     不做「已有就跳过」的筛选（这正是和「一键批量生成」的区别）；同时**剔除人物站位图**
      *     （用户 2026-11-07：「站位图这一分类的图不要在一键直接生图时进行生成」）；
@@ -8543,18 +8545,14 @@ function AtelierCanvasPage() {
                 const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
                 return { item, imageSize, width: Math.round(dims.width), height: Math.round(dims.height) };
             });
-            const columnX = resolveScriptAssetColumnX(
-                { id: source.id, position: source.position, width: source.width, height: source.height },
-                nodesRef.current,
-                Math.max(...planned.map((cell) => cell.width)),
-            );
-            // 混合画幅：按各自真实高度往下摞（不能塞进同一个方格居中，见 lib 里 planScriptDirectAssetColumn 注释）。
-            const slots = planScriptDirectAssetColumn(
-                { x: columnX, y: source.position.y },
-                planned.map((cell) => ({ width: cell.width, height: cell.height })),
-                collectScriptAssetOccupied(nodesRef.current, source.id),
-                { span: source.height },
-            );
+            // 混合画幅（角色 9:16 / 场景道具 16:9）走同一个资产阵：每张按自己的真实宽高落在格子中央，
+            // 不再塞进统一方格，也不再「从脚本顶边一路往下摞」。
+            const layout = planScriptAssetGrid({
+                source: { id: source.id, position: source.position, width: source.width, height: source.height },
+                sizes: planned.map((cell) => ({ width: cell.width, height: cell.height })),
+                occupied: collectScriptAssetOccupied(nodesRef.current, source.id),
+            });
+            const slots = layout.slots;
             if (!slots.length) {
                 message.warning(t("canvas.scriptNode.batchAssetNoRoom"));
                 return { created: [] };

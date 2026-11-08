@@ -20,11 +20,12 @@ import type { CanvasNodeData } from "@/types/canvas";
  * 两件事都刻意放在 lib 里（不写进组件），因为它们在浏览器里看起来都对、错了只有用户能发现：
  *  - 选哪些：按分类从分镜表汇总去重（角色按名字、场景 / 道具按名字 + 描述），
  *    已经生成过的那条要标出来并默认不勾 —— 否则「再点一次批量」会把已有的图再出一遍；
- *  - 摆哪儿：批量出来的图排在脚本节点**左侧的一列**（距脚本左边缘 300px，上下顺序，列高随脚本窗口
- *    高度自适应），并且要避开已有的资产图 / 已经铺好的分镜链路，否则第二次生成会和第一批叠在一起。
+ *  - 摆哪儿：批量出来的图贴在脚本节点**左侧**排成一片（距脚本左边缘 48px，竖向排在脚本窗口高度里，
+ *    塞不下就往左开新的一列，最多 3 列），并且要避开已有的资产图 / 已经铺好的分镜链路，
+ *    否则第二次生成会和第一批叠在一起。
  *
- * 竖列上的节点依然带 `metadata.scriptAssetLane = 脚本节点 id`（字段名沿用旧版，见 types/canvas.ts）：
- * 它既是「这批是本节点生成的」标记，也是「铺链路让位」与「续排」的判据。
+ * 资产阵里的节点依然带 `metadata.scriptAssetLane = 脚本节点 id`（字段名沿用旧版，见 types/canvas.ts）：
+ * 它既是「这批是本节点生成的」标记，也是「铺链路让位」（存量画布右侧车道）的判据。
  */
 
 export type ScriptAssetBatchItem = {
@@ -102,7 +103,7 @@ export function defaultScriptAssetBatchSelection(items: readonly ScriptAssetBatc
  *
  * 用户 2026-11-07：「站位图这一分类的图不要在一键直接生图时进行生成」。
  * 人物站位（`blocking`）是俯视走位示意图，天然不属于「分镜资产定妆图」那一批；
- * 把它混进来既浪费额度，又会让左侧竖列里夹进一堆画风完全不同的示意图。
+ * 把它混进来既浪费额度，又会让脚本左侧那片资产阵里夹进一堆画风完全不同的示意图。
  * ⚠️ 「一键批量生成」（弹窗）那条**仍然包含**站位图 —— 那边用户可以自己勾，不受这里影响。
  */
 export const SCRIPT_ASSET_DIRECT_ROLE_IDS: ScriptAssetRole[] = ["character", "scene", "prop"];
@@ -445,19 +446,30 @@ export function mountScriptAssetToCells(input: {
     return { cells, locks };
 }
 
-// ── 排布：脚本节点**左侧**的「资产竖列」─────────────────────────────────────────────
+// ── 排布：脚本节点**左侧**的「资产图阵」─────────────────────────────────────────────
 
 /**
- * 竖列与脚本节点**左边缘**的水平间距。用户口径就一句：「紧挨着脚本窗口的最左侧，
- * 距离脚本窗口大概间隔 300px」。所以是「图右边缘 → 脚本左边缘 = 300px」，不是 300 起算。
+ * 资产图**右边缘** ↔ 脚本节点**左边缘**的水平间距（用户 2026-11-08 改口径）。
+ *
+ * 旧口径是 300px。问题在于资产图本身很小：`nodeSizeFromRatio("9:16", 340, 240)` 出来的竖版角色图只有
+ * **135×240**，300px 的空档比节点还宽一倍多 —— 画面上就是「图飘在左边一条街以外」。
+ * 现在收成 48，与单张「添加资产」（`attachScriptAssets` 里那颗 48）同源：贴边、只留一口气。
  */
-export const SCRIPT_ASSET_COLUMN_GAP_X = 300;
-/** 竖列里两张图之间的最小间距。 */
+export const SCRIPT_ASSET_COLUMN_GAP_X = 48;
+/** 资产阵里两张图之间的最小间距（同列上下 / 相邻两列左右）。 */
 export const SCRIPT_ASSET_COLUMN_MIN_GAP = 24;
-/** 自适应脚本节点高度时允许的最大间距 —— 再大就散成两截，看着像没排。 */
+/** 行间距自适应时允许的最大间距 —— 再大就散成两截，看着像没排。 */
 export const SCRIPT_ASSET_COLUMN_MAX_GAP = 240;
-/** 竖列被别的节点占住时，整条往左让开后再留的间距。 */
+/** 整块被别的节点占住时，往左让开后再留的间距。 */
 export const SCRIPT_ASSET_COLUMN_SHIFT_GAP = 48;
+/**
+ * 资产阵最多排几列（用户 2026-11-08：「紧挨着脚本左侧、不要往下方拖」）。
+ *
+ * 排法：**竖向先塞满脚本窗口高度，塞不下就往左开新列**，列数封顶 3。
+ * 于是三五张资产全部落在脚本窗口左边那一片里，不会有节点被甩到下方几百像素外；
+ * 批次再大也只是往下多排一行，不会把画布横向拉到天边。
+ */
+export const SCRIPT_ASSET_GRID_MAX_COLUMNS = 3;
 /** 一批最多同时提交几张生图（十几张一起打上游容易被限流）。 */
 export const SCRIPT_ASSET_LAUNCH_BATCH = 3;
 
@@ -470,114 +482,105 @@ function rectsOverlap(a: ScriptAssetRect, b: ScriptAssetRect) {
     return a.x < b.x + b.width - 1 && b.x < a.x + a.width - 1 && a.y < b.y + b.height - 1 && b.y < a.y + a.height - 1;
 }
 
-/**
- * 竖列起点（= 这一列**左边缘**的 x）。
- *
- * 默认在脚本节点左侧 300px 处；**这一竖条已经被别的节点占了就整条往左让**（同 X 区间就算占，
- * 与右侧那版同口径 —— 竖列是整条贯穿的，不按 Y 逐段挑空隙）。
- * 本节点自己的资产图（`scriptAssetLane === 本节点 id`）不算占位 —— 否则第二次生成会把列推得越来越远。
- */
-export function resolveScriptAssetColumnX(source: ScriptAssetLaneSource, nodes: readonly CanvasNodeData[], cellWidth: number) {
-    const width = Math.max(1, cellWidth);
-    let right = source.position.x - SCRIPT_ASSET_COLUMN_GAP_X;
-    for (let guard = 0; guard < 32; guard += 1) {
-        const left = right - width;
-        const blockers = nodes.filter(
-            (node) => node.id !== source.id && node.metadata?.scriptAssetLane !== source.id && node.position.x < right - 1 && node.position.x + node.width > left + 1,
-        );
-        if (!blockers.length) return left;
-        right = Math.min(...blockers.map((node) => node.position.x)) - SCRIPT_ASSET_COLUMN_SHIFT_GAP;
-    }
-    return right - width;
-}
-
-/**
- * 把一批资产图排成**一列**（从上到下），列高按脚本节点高度适配。
- *
- * - 间距自适应：`(脚本高 - 整列图高) / 间隔数` 夹进 `[MIN_GAP, MAX_GAP]`。脚本窗口拉高 → 图跟着摊开；
- *   图太多、整列比脚本窗口还高 → 退回 `MIN_GAP` 往下溢出（**不缩图**：用户要看清楚资产）。
- * - 已被占住的格子往下挪（只有一列，没有「换行」这一步），挪完继续按原节奏往下走。
- */
-export function planScriptAssetColumn(
-    origin: { x: number; y: number },
-    sizes: ReadonlyArray<{ width: number; height: number }>,
-    occupied: readonly ScriptAssetRect[],
-    options?: { gap?: number; span?: number },
-): Array<{ x: number; y: number }> {
-    if (!sizes.length) return [];
-    const minGap = Math.max(0, options?.gap ?? SCRIPT_ASSET_COLUMN_MIN_GAP);
-    const cellWidth = Math.max(1, ...sizes.map((size) => size.width));
-    const cellHeight = Math.max(1, ...sizes.map((size) => size.height));
-    const span = Number(options?.span) || 0;
-    let gap = minGap;
-    if (span > 0 && sizes.length > 1) {
-        const slack = (span - cellHeight * sizes.length) / (sizes.length - 1);
-        gap = Math.min(SCRIPT_ASSET_COLUMN_MAX_GAP, Math.max(minGap, Math.round(slack)));
-    }
-    const placed: Array<{ x: number; y: number }> = [];
-    let cursorY = origin.y;
-    for (const size of sizes) {
-        const x = origin.x + (cellWidth - size.width) / 2;
-        let rect: ScriptAssetRect = { x, y: cursorY + (cellHeight - size.height) / 2, width: size.width, height: size.height };
-        for (let guard = 0; guard <= occupied.length + 8; guard += 1) {
-            const hit = occupied.find((other) => rectsOverlap(other, rect));
-            if (!hit) break;
-            cursorY = hit.y + hit.height + minGap;
-            rect = { x, y: cursorY + (cellHeight - size.height) / 2, width: size.width, height: size.height };
-        }
-        placed.push({ x: rect.x, y: rect.y });
-        cursorY += cellHeight + gap;
-    }
-    return placed;
-}
-
-/** 除脚本节点本身之外，所有节点在画布上的占位（竖列排布的 `occupied`）。 */
+/** 除脚本节点本身之外，所有节点在画布上的占位（资产阵排布的 `occupied`）。 */
 export function collectScriptAssetOccupied(nodes: readonly CanvasNodeData[], sourceId: string): ScriptAssetRect[] {
     return nodes.filter((node) => node.id !== sourceId && node.width > 0 && node.height > 0).map((node) => ({ x: node.position.x, y: node.position.y, width: node.width, height: node.height }));
 }
 
+export type ScriptAssetGridSlot = { x: number; y: number; width: number; height: number };
+
+export type ScriptAssetGridLayout = {
+    /** 与入参 `sizes` **一一对应**（同下标 = 同一张图），顺序 = 资产顺序。 */
+    slots: ScriptAssetGridSlot[];
+    columns: number;
+    rows: number;
+    cellWidth: number;
+    cellHeight: number;
+    gapX: number;
+    gapY: number;
+    /** 整块的外接矩形（让位判断、探针都看它）。 */
+    block: ScriptAssetRect;
+};
+
 /**
- * 「一键直接生图」的竖列排布 —— 与 `planScriptAssetColumn` 同一条列（同一个起点、同一套让位规则），
- * 唯一区别：**每张图按自己的真实高度往下摞**，不再塞进统一的方格里居中。
+ * 脚本节点**左侧**的资产图阵：贴边、竖向排、塞不下往左开新列。
  *
- * 为什么不能直接用 `planScriptAssetColumn`：它假设整批同一个画幅（`cellHeight = max(高)`，
- * 每张在图格里居中）。而「一键直接生图」是角色 9:16 + 场景 / 道具 16:9 混一批，
- * 一张 320×569 的方格里塞一张 320×180 的横图，中间会空出两百多像素的白，一列看着像断成两截。
- * 按真实高度摞起来才是用户要的「跟批量生成一样的排布」：还是一列、还是紧挨脚本左侧、还是避让已有节点。
+ * 用户 2026-11-08 报障两条，这里的每一行都是为它们服务的：
+ *  ① 「离得太远」→ 右边缘距脚本左边缘只有 `gapX`（48），不是旧的 300；
+ *  ② 「有节点被创建到下方」→ 旧实现从脚本**顶边**开始一直往下摞，一列十几张就拖出一条几百像素的长尾。
+ *     现在先按脚本窗口高度算「一列能站几行」（`fitRows`），站不下的往**左**开新列（封顶
+ *     `SCRIPT_ASSET_GRID_MAX_COLUMNS`），整块再以脚本窗口**垂直中线**为中心摆好 ——
+ *     于是所有资产都落在脚本左边那一片，而不是甩到它下面去。
+ *
+ * 排布方向：第 0 列在最**右**（贴着脚本），往下走完再往左一列。资产顺序是「角色 → 场景 → 道具」，
+ * 把第一张放最近，用户一眼就能对上「这张是主角」。
+ *
+ * 让位：整块（含间距）与已有节点重叠时**整块往左挪** `gapX`（不是逐格往下推）。
+ * 逐格往下推是旧实现「第二次生成又往下一截」的根源 —— 块级让位才能保证「再来一批 = 旁边再来一片」。
+ * ⚠️ 这里**不再排除**本节点自己的资产图（`scriptAssetLane === 本节点 id`）：新的一批就该让到左边去，
+ * 与上一批并列，而不是把上一批当空气、直接盖上去。
  */
-export function planScriptDirectAssetColumn(
-    origin: { x: number; y: number },
-    sizes: ReadonlyArray<{ width: number; height: number }>,
-    occupied: readonly ScriptAssetRect[],
-    options?: { gap?: number; span?: number },
-): Array<{ x: number; y: number }> {
-    if (!sizes.length) return [];
-    const minGap = Math.max(0, options?.gap ?? SCRIPT_ASSET_COLUMN_MIN_GAP);
-    const cellWidth = Math.max(1, ...sizes.map((size) => size.width));
-    const totalHeight = sizes.reduce((sum, size) => sum + Math.max(1, size.height), 0);
-    const span = Number(options?.span) || 0;
-    let gap = minGap;
-    if (span > 0 && sizes.length > 1) {
-        const slack = (span - totalHeight) / (sizes.length - 1);
-        gap = Math.min(SCRIPT_ASSET_COLUMN_MAX_GAP, Math.max(minGap, Math.round(slack)));
+export function planScriptAssetGrid(input: {
+    source: ScriptAssetLaneSource;
+    sizes: ReadonlyArray<{ width: number; height: number }>;
+    occupied?: readonly ScriptAssetRect[];
+    options?: { maxColumns?: number; gapX?: number; gapY?: number };
+}): ScriptAssetGridLayout {
+    const sizes = input.sizes;
+    const gapX = Math.max(0, input.options?.gapX ?? SCRIPT_ASSET_COLUMN_GAP_X);
+    const minGapY = Math.max(0, input.options?.gapY ?? SCRIPT_ASSET_COLUMN_MIN_GAP);
+    const occupied = input.occupied || [];
+    const originX = input.source.position.x;
+    const originY = input.source.position.y;
+    const span = Math.max(0, Number(input.source.height) || 0);
+    if (!sizes.length) {
+        return { slots: [], columns: 0, rows: 0, cellWidth: 0, cellHeight: 0, gapX, gapY: minGapY, block: { x: originX, y: originY, width: 0, height: 0 } };
     }
-    const placed: Array<{ x: number; y: number }> = [];
-    let cursorY = origin.y;
-    for (const size of sizes) {
-        const width = Math.max(1, size.width);
-        const height = Math.max(1, size.height);
-        // 同一列居中：混合画幅时左右边缘不齐，居中最稳（窄的 9:16 不会贴着左边线）。
-        const x = origin.x + (cellWidth - width) / 2;
-        let y = cursorY;
-        for (let guard = 0; guard <= occupied.length + 8; guard += 1) {
-            const hit = occupied.find((other) => rectsOverlap(other, { x, y, width, height }));
-            if (!hit) break;
-            y = hit.y + hit.height + minGap;
-        }
-        placed.push({ x, y });
-        cursorY = y + height + gap;
+    const cellWidth = Math.max(1, ...sizes.map((size) => Math.max(1, Number(size.width) || 1)));
+    const cellHeight = Math.max(1, ...sizes.map((size) => Math.max(1, Number(size.height) || 1)));
+    const maxColumns = Math.min(sizes.length, Math.max(1, Math.round(input.options?.maxColumns ?? SCRIPT_ASSET_GRID_MAX_COLUMNS)));
+    // 一列能站几行：脚本窗口越高站得越多（不知道高度时按 1 行算 → 一行一张，横向摊开）。
+    const fitRows = span > 0 ? Math.max(1, Math.floor((span + minGapY) / (cellHeight + minGapY))) : 1;
+    // 先按「塞满脚本高度」定列数，再被 `maxColumns` 封顶；封顶后只能往下多排几行。
+    const columns = Math.min(maxColumns, Math.max(1, Math.ceil(sizes.length / fitRows)));
+    const rows = Math.ceil(sizes.length / columns);
+    // 行间距：整块比脚本窗口矮时按比例摊开（夹在 [MIN, MAX]）；塞不下就退回最小间距。
+    const gapY = rows > 1 && span > 0 ? Math.min(SCRIPT_ASSET_COLUMN_MAX_GAP, Math.max(minGapY, Math.round((span - rows * cellHeight) / (rows - 1)))) : minGapY;
+    // 每列按自己最宽的那张算宽（混合画幅时，135 宽的竖版图不该被 340 的横版撑出一大片空白）。
+    const columnWidths = Array.from({ length: columns }, (_, column) => {
+        const slice = sizes.slice(column * rows, (column + 1) * rows);
+        return Math.max(1, ...slice.map((size) => Math.max(1, Number(size.width) || 1)));
+    });
+    const blockWidth = columnWidths.reduce((sum, width) => sum + width, 0) + (columns - 1) * gapX;
+    const blockHeight = rows * cellHeight + (rows - 1) * gapY;
+    // 竖向以脚本窗口中线为中心（块比窗口高时上下对称溢出，不会全甩到下方）。
+    const top = span > 0 ? originY + (span - blockHeight) / 2 : originY;
+    let right = originX - gapX;
+    let block: ScriptAssetRect = { x: right - blockWidth, y: top, width: blockWidth, height: blockHeight };
+    for (let guard = 0; guard < 32; guard += 1) {
+        const hits = occupied.filter((other) => rectsOverlap(other, block));
+        if (!hits.length) break;
+        right = Math.min(...hits.map((other) => other.x)) - SCRIPT_ASSET_COLUMN_SHIFT_GAP;
+        block = { ...block, x: right - blockWidth };
     }
-    return placed;
+    const slots: ScriptAssetGridSlot[] = [];
+    let columnRight = right;
+    for (let column = 0; column < columns; column += 1) {
+        const columnWidth = columnWidths[column];
+        const columnLeft = columnRight - columnWidth;
+        sizes.slice(column * rows, (column + 1) * rows).forEach((size, rowIndex) => {
+            const width = Math.max(1, Number(size.width) || 1);
+            const height = Math.max(1, Number(size.height) || 1);
+            slots.push({
+                x: columnLeft + (columnWidth - width) / 2,
+                y: top + rowIndex * (cellHeight + gapY) + (cellHeight - height) / 2,
+                width,
+                height,
+            });
+        });
+        columnRight = columnLeft - gapX;
+    }
+    return { slots, columns, rows, cellWidth, cellHeight, gapX, gapY, block };
 }
 
 /**
