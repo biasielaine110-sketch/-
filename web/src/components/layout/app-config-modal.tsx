@@ -4,8 +4,10 @@ import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as Reac
 import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
 
-/** 打开配置前的固定口令（仅前端门禁，防误触/随手打开）。 */
-export const CONFIG_GATE_PASSWORD = "zhangbiwen123456";
+import { ACCESS_GATE_PASSWORD } from "@/lib/access-gate";
+
+/** 打开配置前的固定口令（仅前端门禁，防误触/随手打开）。站点访问密码与它同源，见 `lib/access-gate.ts`。 */
+export const CONFIG_GATE_PASSWORD = ACCESS_GATE_PASSWORD;
 
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasFindReplaceTextArea } from "@/components/canvas/canvas-find-replace-textarea";

@@ -6,6 +6,15 @@ export default {
     theme: {
         toggle: "Toggle theme",
     },
+    accessGate: {
+        title: "Enter the access password",
+        hint: "This canvas is password protected. Once unlocked, you stay signed in for 1 day, then you will be asked again.",
+        placeholder: "Access password",
+        wrong: "Wrong password, please try again.",
+        submit: "Enter canvas",
+        remember: "No password needed for 1 day, counted from this entry.",
+        expiredAt: "Your previous pass expired at {{expiry}}.",
+    },
     common: {
         cancel: "Cancel",
         save: "Save",

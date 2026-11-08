@@ -6,6 +6,15 @@ export default {
     theme: {
         toggle: "切换主题",
     },
+    accessGate: {
+        title: "请输入访问密码",
+        hint: "这个画布需要密码才能进入。通过后 1 天内打开都不再询问，到期后需要重新输入一次。",
+        placeholder: "访问密码",
+        wrong: "密码不对，请重新输入。",
+        submit: "进入画布",
+        remember: "免密时长 1 天，从这次输入算起。",
+        expiredAt: "上一次的免密已于 {{expiry}} 到期。",
+    },
     common: {
         cancel: "取消",
         save: "保存",
