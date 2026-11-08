@@ -8974,10 +8974,12 @@ function AtelierCanvasPage() {
             // 也是同一个画幅，不用再一个个改。空 = 跟随全局配置，沿用默认方形。
             const scriptImageSize = resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
             // **风格模板**：脚本节点上选的那档（用户 2026-11-08 第 04 条「脚本生成器里也要图片节点那套风格模板」）。
-            // 铺出来的图片节点直接带上它 —— 生图链路读的就是节点自己的 `metadata.styleTemplateId`，
-            // 所以「铺完再点生成」和「铺完自动生成」都会吃到同一份风格；视频节点不继承（视频有自己的风格选择器）。
+            // 铺出来的图片节点**和视频节点**都直接带上它 —— 生图 / 生视频链路读的都是节点自己的
+            // `metadata.styleTemplateId`，所以「铺完再点生成」和「铺完自动生成」都会吃到同一份风格；
+            // 铺完想换风格，改节点自己那颗风格按钮即可（不会回写脚本节点）。
+            // ⚠️ 视频节点以前不继承（2026-11-08 第 05 条用户要求补上：脚本里选的风格要同时落到生图与生视频窗口）。
             const scriptStyleTemplateId = source.metadata?.styleTemplateId;
-            const scriptImageStyle = scriptStyleTemplateId ? { styleTemplateId: scriptStyleTemplateId } : {};
+            const scriptStyle = scriptStyleTemplateId ? { styleTemplateId: scriptStyleTemplateId } : {};
             const imageSpec =
                 nodeSizeFromRatio(scriptImageSize, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height) ||
                 NODE_DEFAULT_SIZE[CanvasNodeType.Image];
@@ -9087,7 +9089,7 @@ function AtelierCanvasPage() {
                             position: { x: baseX, y: centeredY(rowY, textHeight) },
                         };
                         imageNode = {
-                            ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE, ...(scriptImageSize ? { size: scriptImageSize } : {}), ...scriptImageStyle }),
+                            ...createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: member.prompts.imagePrompt, status: NODE_STATUS_IDLE, ...(scriptImageSize ? { size: scriptImageSize } : {}), ...scriptStyle }),
                             title: t("canvas.scriptNode.pipelineImage", { no: shotNo }),
                             width: imageWidth,
                             height: imageHeight,
@@ -9178,7 +9180,9 @@ function AtelierCanvasPage() {
                     ? resolveStoryScriptShotSeconds(first.row.duration, segmentSeconds)
                     : Math.min(20, storyScriptGroupDuration({ rows: members.map((member) => member.row) }));
                 const videoNode: CanvasNodeData = {
-                    ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { prompt: videoPrompt, status: NODE_STATUS_IDLE, ...(seconds ? { seconds: String(seconds) } : {}) }),
+                    // 视频节点同样继承脚本节点选的风格模板（用户 2026-11-08 第 05 条）：铺完点生成时
+                    // `composeStyledPrompt` 会把它拼到提示词尾部；窗口里的风格按钮显示同一档，可随时改。
+                    ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { prompt: videoPrompt, status: NODE_STATUS_IDLE, ...(seconds ? { seconds: String(seconds) } : {}), ...scriptStyle }),
                     title: merged
                         ? t("canvas.scriptNode.pipelineVideoRange", { from: shotNoFrom, to: shotNoTo, count: members.length })
                         : t("canvas.scriptNode.pipelineVideo", { no: shotNoFrom }),
@@ -9620,6 +9624,9 @@ function AtelierCanvasPage() {
                     prompt: buildVideoNodePrompt(prompts.videoPrompt),
                     status: NODE_STATUS_IDLE,
                     ...(seconds ? { seconds: String(seconds) } : {}),
+                    // 与「一键铺链路」同口径：单行建出来的视频节点也默认继承脚本节点的风格模板
+                    // （2026-11-08 第 05 条：脚本里选了风格，生图与生视频窗口都默认跟着走）。
+                    ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
                 }),
                 title: t("canvas.scriptNode.pipelineVideo", { no: shotNo }),
                 width: videoWidth,

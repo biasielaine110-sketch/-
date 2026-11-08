@@ -161,6 +161,10 @@ function StylePickerPortal({
             ref={panelRef}
             className="canvas-style-picker"
             style={style}
+            // 面板 portal 到 body，但 React 合成事件仍沿组件树冒回画布容器 → 不拦就会「在面板里滚轮
+            // 反而缩放画布」。`data-canvas-no-zoom` 喂给画布的两处 wheel 守卫，stopPropagation 再兜一层。
+            data-canvas-no-zoom
+            onWheel={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}

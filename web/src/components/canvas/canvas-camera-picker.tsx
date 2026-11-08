@@ -245,7 +245,7 @@ function CameraPickerPortal({
     ];
 
     return createPortal(
-        <div ref={panelRef} className="canvas-camera-picker" style={style} onPointerDown={stopEvent} onMouseDown={stopEvent} onClick={stopEvent}>
+        <div ref={panelRef} className="canvas-camera-picker" style={style} data-canvas-no-zoom onWheel={stopEvent} onPointerDown={stopEvent} onMouseDown={stopEvent} onClick={stopEvent}>
             <div className="flex h-11 items-center justify-between px-4">
                 <span className="text-[13px] font-medium">{t("canvas.cameraPicker.title")}</span>
                 <button

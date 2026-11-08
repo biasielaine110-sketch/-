@@ -152,7 +152,10 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
         const target = event.target instanceof Element ? event.target : null;
         // Text inputs (contentEditable prompt boxes, chat composer, text nodes) scroll their own
         // content on wheel — never let that gesture fall through to canvas zoom.
-        if (target?.closest("[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown,.ant-picker-dropdown,[contenteditable='true'],[data-canvas-text-input]")) return;
+        // `.canvas-style-picker` / `.canvas-camera-picker` 是 portal 到 body 的浮层：DOM 上早已脱离
+        // 节点，但 React 19 的合成事件仍沿**组件树**冒到这里 → 在浮层里滚轮会缩画布。按容器类名拦掉
+        // （与 `isOverlayEventTarget` 的 mousedown 白名单保持一致）。
+        if (target?.closest("[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown,.ant-picker-dropdown,.canvas-style-picker,.canvas-camera-picker,[contenteditable='true'],[data-canvas-text-input]")) return;
 
         onUserInteractRef.current?.();
         const current = nextViewportRef.current || viewportLiveRef.current;
@@ -280,7 +283,7 @@ export function AtelierCanvas({ containerRef, viewport, tool, backgroundMode = "
         // node panels marked data-canvas-no-zoom (chat history, text editors, dialogs).
         const preventWheelScroll = (event: WheelEvent) => {
             const target = event.target instanceof Element ? event.target : null;
-            if (target?.closest("[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown,.ant-picker-dropdown")) return;
+            if (target?.closest("[data-canvas-no-zoom],.ant-modal,.ant-popover,.ant-dropdown,.ant-select-dropdown,.ant-picker-dropdown,.canvas-style-picker,.canvas-camera-picker")) return;
             event.preventDefault();
         };
         container.addEventListener("wheel", preventWheelScroll, { passive: false });
