@@ -286,7 +286,7 @@ You generate a structured story-script table from an uploaded script excerpt.
 - \`scene\` should be a short, stable location name (e.g. \`深夜办公室\`, \`盛唐宫殿·内\`), reused verbatim wherever the same place appears.
 - \`scene_description\` should describe the location concretely enough to be used directly as an image-generation prompt.
 - \`prop\` should name **only the key object(s) this shot really depends on**, at most **3 per shot**, joined by \`、\` when several; \`prop_description\` describes their look, material and state.
-- 🔴 Every prop you list becomes **its own generated asset image**. One-off tableware, ornaments, tissues, packaging and background clutter must **not** go into \`prop\` — describe them in one clause inside \`visual_description\` or \`prop_description\` instead. Write \`无\` when the shot has no key prop.
+- 🔴 Every prop you list becomes **its own generated asset image**. One-off tableware, ornaments, tissues, packaging and background clutter must **not** go into \`prop\` — describe them in one clause inside \`visual_description\` instead (that column feeds the shot prompt, so the frame still shows them); \`prop_description\` only adds their material / state detail. Write \`无\` when the shot has no key prop.
 - \`blocking\` should read like a floor plan in words: left / right / centre, foreground / midground / background, facing direction, and how far apart the characters are.
 - \`style_prompt\` describes the image style for this shot — film stock / colour grade / texture / grain / reference genre or director. Keep it identical across shots in the same scene, and write \`无\` when no particular style is needed.
 
@@ -430,7 +430,7 @@ const STORY_SCRIPT_STYLE_HINT_SHOT = [
 const STORY_SCRIPT_STYLE_HINT_ASSET = [
     "- 每一镜都要填「场景 / 场景描述 / 道具 / 道具描述 / 人物站位」，同一场景或同一道具在多镜里必须复用完全一致的名字",
     "- 🔴 道具列**只写这一镜真正依赖、且需要跨镜保持一致的关键道具**，**一镜最多 3 件**（多件用 `、` 分隔）；这一镜没有关键道具就写 `无`",
-    "- 🔴 **道具列里每写一件，就会单独生成一张资产图**。餐具、摆件、纸巾、包装、背景小物这类用过就不再出现的次要道具**不要**写进道具列，改成在「画面描述」或「道具描述」里一句话带过 —— 它们跟着画面一起生，不单独出图",
+    "- 🔴 **道具列里每写一件，就会单独生成一张资产图**。餐具、摆件、纸巾、包装、背景小物这类用过就不再出现的次要道具**不要**写进道具列，改成在「画面描述」里一句话带过（这一列会进分镜提示词，画面才带得出来；道具描述只补材质与状态）—— 它们跟着画面一起生，不单独出图",
     "- 人物站位要写清谁在画面左侧 / 右侧 / 前景 / 后景、朝向、彼此的远近；除非这一镜人物确实移动，否则保持与上一镜一致",
     "- 人物移动时写清从上一位置到新位置的移动过程，不要让角色在两镜之间凭空换位",
 ];
@@ -457,7 +457,7 @@ export const STORY_SCRIPT_STORYBOARD_SYSTEM_PROMPT = `你是一名资深分镜�
 - 输出 Markdown 表格；也可以改输出一个 JSON 对象：{"title":"标题","rows":[{…}]}，键名用上表列名对应的英文（shot_no / duration / shot / visual_description / key_visual / style_prompt / scene / scene_description / prop / prop_description / character_action / blocking / camera_movement / dialogue / sound / transition / emotion）
 - 镜号用 1、2、3 这样的整数（不要写 S01）；时长用整数秒（不要写 3.5秒）
 - 同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位（blocking）写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）
-- 🔴 道具列**只写这一镜真正依赖、且需要跨镜保持一致的关键道具**，**一镜最多 3 件**（多件用 \`、\` 分隔），没有就写 \`无\`；**每写一件就会单独生成一张资产图** —— 餐具、摆件、纸巾、包装、背景小物这类次要道具不写进道具列，改用一句话写在「画面描述」或「道具描述」里
+- 🔴 道具列**只写这一镜真正依赖、且需要跨镜保持一致的关键道具**，**一镜最多 3 件**（多件用 \`、\` 分隔），没有就写 \`无\`；**每写一件就会单独生成一张资产图** —— 餐具、摆件、纸巾、包装、背景小物这类次要道具不写进道具列，改用一句话写进「画面描述」（这一列会进分镜提示词，画面才带得出来），「道具描述」只补材质与状态
 - 某一格没有内容时写 \`无\``;
 
 const STORY_SCRIPT_STORYBOARD_COMMON_RULES = [
@@ -3539,7 +3539,7 @@ export function buildStoryScriptSegmentAssetSection(sourceText: unknown): string
         ...lines,
         "硬要求：",
         "1. 每一段拆成几镜都可以，但**这一段里的每一镜**都必须把该段【人物】全部写进角色列（一格可写多人，用 `、`）、场景列写同一个场景名。",
-        "2. 🔴 道具列**不要**照抄该段【道具】：只挑**这一镜真正依赖、且跨镜要保持同一个样子**的关键道具，**一镜最多 3 件**（多个用 `、`）；段头里剩下的餐具 / 摆件 / 纸巾 / 包装这类次要道具一律不写进道具列，改用一句话写进「画面描述」或「道具描述」—— 道具列里每写一件就会单独生成一张资产图。这一镜确实没有关键道具就写 `无`。",
+        "2. 🔴 道具列**不要**照抄该段【道具】：只挑**这一镜真正依赖、且跨镜要保持同一个样子**的关键道具，**一镜最多 3 件**（多个用 `、`）；段头里剩下的餐具 / 摆件 / 纸巾 / 包装这类次要道具一律不写进道具列，改用一句话写进「画面描述」（这一列会进分镜提示词，画面才带得出来），「道具描述」只补材质与状态 —— 道具列里每写一件就会单独生成一张资产图。这一镜确实没有关键道具就写 `无`。",
         "3. 拆镜只改变景别 / 机位 / 动作 / 台词分配，**不许改出场名单**；不要因为某个人这一镜不说话就把他从角色列删掉。",
         "4. 不同段落的人物不要互相串：第 2 段的人物不许出现在第 1 段的镜头里（除非源内容正文明确写了）。",
     ].join("\n");
