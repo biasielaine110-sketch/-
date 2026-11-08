@@ -324,12 +324,18 @@ function isAxiosTimeoutError(error: unknown) {
     return /timeout of \d+ms exceeded/i.test(String(error.message || ""));
 }
 
+function axiosErrorCode(error: unknown): string {
+    // axios.isAxiosError 在这个版本里只返回 boolean（不是类型谓词），不能让 TS 从它收窄出 .code
+    const code = (error as { code?: unknown } | null | undefined)?.code;
+    return typeof code === "string" ? code : "";
+}
+
 function explainRunningHubError(error: unknown, workflowId: string): Error {
     const message = errorText(error);
     const url = axios.isAxiosError(error) && typeof error.config?.url === "string" ? error.config.url : "";
     if (
         /runninghub\.ai/i.test(url) &&
-        (isRunningHubTransportFailure(error) || /ERR_HTTP2|ERR_HTTP3|CONNECTION_RESET|CONNECTION_CLOSED|timeout of \d+ms exceeded/i.test(`${String(axios.isAxiosError(error)?.code || "")} ${message}`))
+        (isRunningHubTransportFailure(error) || /ERR_HTTP2|ERR_HTTP3|CONNECTION_RESET|CONNECTION_CLOSED|timeout of \d+ms exceeded/i.test(`${axiosErrorCode(error)} ${message}`))
     ) {
         return new Error(apiText("runningHubAiUnreachable"));
     }

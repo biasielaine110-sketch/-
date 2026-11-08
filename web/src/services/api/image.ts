@@ -2565,7 +2565,7 @@ function toResponseInput(messages: ResponseInputMessage[]): ResponseInputItem[] 
 function toResponseContent(content: ResponseMessageContent): string | ResponseInputContent[] {
     if (!Array.isArray(content)) return String(content || "");
     // Responses API 没有稳定的 video 部件：视频改写成文字 URL，真正的 video_url 走 Chat Completions / Gemini。
-    return content.flatMap((item) => {
+    return content.flatMap((item): ResponseInputContent[] => {
         if (item.type === "text") return [{ type: "input_text" as const, text: item.text }];
         if (item.type === "video_url") return [{ type: "input_text" as const, text: `[video] ${item.video_url.url}` }];
         return [{ type: "input_image" as const, image_url: item.image_url.url }];

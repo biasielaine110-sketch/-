@@ -476,7 +476,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                                     <span className="inline-flex items-center gap-1">
                                         {t(`settingsPanels.video.rhInstances.${item.labelKey}`)}
                                         {item.recommended ? (
-                                            <span className="rounded px-1 text-[9px] leading-4" style={{ background: theme.node.text, color: theme.node.bg || "#111" }}>
+                                            <span className="rounded px-1 text-[9px] leading-4" style={{ background: theme.node.text, color: theme.node.panel || "#111" }}>
                                                 {t("settingsPanels.video.rhInstanceRecommended")}
                                             </span>
                                         ) : null}
