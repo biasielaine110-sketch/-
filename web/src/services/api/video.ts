@@ -1145,6 +1145,11 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
     if (isRelayMiniMaxH3Video(config, model)) {
         return createRelayMiniMaxH3VideoTask(config, model, prompt, references, options);
     }
+    // aicost.me 的 Seedance 中转只认 JSON（参考图走 `images: string[]`）。走通用 multipart
+    // 分支会被 Go 服务端把表单值当字符串再反序列化进 bool 字段 → HTTP 400。
+    if (isAicostJsonVideoHost(config.baseUrl)) {
+        return createJsonReferenceVideoTask(config, model, prompt, references, options);
+    }
 
     const ratio = normalizeVideoRatio(config.size);
     const seedance = isSeedanceVideoModel(model);
@@ -1218,8 +1223,131 @@ async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: st
         if (!created.id) throw new Error(apiText("noVideoTaskId"));
         return { id: created.id, provider: "openai", model };
     } catch (error) {
+        const mapped = mapOversizeUploadError(error, bypass);
+        // 部分 New API 系（Go）中转把 multipart 字段一律当字符串再反序列化进结构体：
+        // `json: cannot unmarshal string into Go struct field .Alias.generate_audio of type bool`
+        // → 挂了参考图必 400（文生视频走 JSON 反而正常）。这类渠道只能换 JSON + `images[]` 再试。
+        if (isGoFormBoolUnmarshalError(mapped)) {
+            try {
+                return await createJsonReferenceVideoTask(config, model, prompt, references, options);
+            } catch (fallbackError) {
+                throw new Error(readAxiosError(fallbackError, apiText("videoTaskCreateFailed")));
+            }
+        }
+        throw new Error(readAxiosError(mapped, apiText("videoTaskCreateFailed")));
+    }
+}
+
+/**
+ * JSON + `images: string[]` 提交：aicost.me 的 Seedance 契约（https://www.aicost.me/api-docs），
+ * 同时作为 New API 系中转「multipart 字段被字符串化」的兜底形状。
+ *
+ *   POST /v1/videos   application/json
+ *   { model, prompt, seconds, aspect_ratio, resolution, images?: string[] }
+ *   查询 GET /v1/videos/{id}（结果在 `result_url`），下载 GET /v1/videos/{id}/content
+ *
+ * 🔴 关键：**一个字符串化的 bool 都不能发**。Go 端 `generate_audio bool` / `watermark bool`
+ *    收到 `"true"` 会直接 unmarshal 失败；`seconds` 也发数字而不是 `"5"`。文档里没有的
+ *    `preset` / `size` / `duration` / `resolution_name` 也一律不发，少一个字段少一种 400。
+ */
+export type JsonVideoRequestBody = {
+    model: string;
+    prompt: string;
+    seconds: number;
+    aspect_ratio: string;
+    resolution: string;
+    images?: string[];
+};
+
+/**
+ * 模型名自带分辨率后缀时以它为准：aicost 的模型广场就按这个规则命名
+ * （`seedance2.0-xxx-720p`、`seedance2.0-xxx-1080p`、用户的 `2.5-480p-…`），
+ * 官方文档也写明「720p 专属模型只收 720p，传别的值返回参数错误」。
+ */
+function resolutionFromModelName(model: string) {
+    const matched = modelOptionName(model).match(/(?:^|[^0-9])(480|720|1080)\s*p(?:[^a-z0-9]|$)/i);
+    return matched ? `${matched[1]}p` : "";
+}
+
+/**
+ * 纯函数：aicost.me / New API 系「JSON 视频」请求体。
+ * 只发文档里有的字段，且 `seconds` 是**数字**——Go 端 `json.Unmarshal` 不会帮我们做
+ * `"6"` → `6` 的转换，类型不对就是 400。
+ */
+export function buildJsonVideoRequestBody(
+    config: Pick<AiConfig, "size" | "vquality" | "videoSeconds">,
+    model: string,
+    prompt: string,
+    images: string[] = [],
+): JsonVideoRequestBody {
+    const body: JsonVideoRequestBody = {
+        model: modelOptionName(model),
+        prompt,
+        seconds: Math.max(4, Math.min(15, Math.floor(Number(config.videoSeconds) || 5))),
+        aspect_ratio: normalizeVideoRatio(config.size),
+        resolution: resolutionFromModelName(model) || normalizeVideoResolution(config.vquality),
+    };
+    if (images.length) body.images = images;
+    return body;
+}
+
+async function createJsonReferenceVideoTask(
+    config: AiConfig,
+    model: string,
+    prompt: string,
+    references: ReferenceImage[],
+    options?: RequestOptions,
+): Promise<VideoGenerationTask> {
+    if (!prompt.trim()) throw new Error(apiText("videoTaskCreateFailed"));
+    const images = await buildJsonReferenceImages(references);
+    const payload = buildJsonVideoRequestBody(config, model, prompt, images);
+    // 参考图是 data URL 时 body 会很大：交给 aiUrlForBody 决定是否绕开站点代理。
+    const { url: postUrl, bypass } = aiUrlForBody(config, "/videos", payload);
+    try {
+        const created = unwrapVideoResponse(
+            (await retryAlternateTransport(config, "/videos", postUrl, payload, (url) => axios.post<ApiVideoResponse>(url, payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal }))).data,
+        );
+        if (!created.id) throw new Error(apiText("noVideoTaskId"));
+        return { id: created.id, provider: "openai", model };
+    } catch (error) {
         throw new Error(readAxiosError(mapOversizeUploadError(error, bypass), apiText("videoTaskCreateFailed")));
     }
+}
+
+/**
+ * 参考图 → `images[]`：公网 URL 原样用，本地图转 data URL（aicost 明确接受
+ * `data:image/...;base64,...`）并按张数压体积，别把 body 顶到对方 413 线上。
+ */
+async function buildJsonReferenceImages(references: ReferenceImage[]): Promise<string[]> {
+    if (!references.length) return [];
+    const count = Math.max(1, references.length);
+    const maxBytes = Math.min(650_000, Math.floor(2_200_000 / count));
+    const images: string[] = [];
+    for (const image of references.slice(0, 7)) {
+        const remote = [image.url, image.dataUrl]
+            .map((value) => String(value || "").trim())
+            .find((value) => isPublicHttpUrl(value) && !value.startsWith("data:") && !/^blob:/i.test(value));
+        if (remote) {
+            images.push(remote);
+            continue;
+        }
+        try {
+            const dataUrl = await imageToDataUrl(image);
+            if (!dataUrl?.startsWith("data:image/")) continue;
+            images.push(await compressReferenceDataUrl(dataUrl, count, { maxEdge: 1280, maxBytes }));
+        } catch {
+            // 单张读不出来就跳过，别让整单失败（与 H3 路径一致）。
+        }
+    }
+    return images;
+}
+
+/** 识别「multipart 表单值被字符串化后再反序列化进 bool 字段」这一类 Go 中转错误。 */
+function isGoFormBoolUnmarshalError(error: unknown) {
+    if (!axios.isAxiosError(error)) return false;
+    const data = error.response?.data;
+    const text = typeof data === "string" ? data : data ? JSON.stringify(data) : String(error.message || "");
+    return /cannot unmarshal .* into Go struct field .* of type bool/i.test(text);
 }
 
 /**
@@ -1524,6 +1652,26 @@ async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, pr
     }
 
     throw new Error(readAxiosError(lastError, apiText("videoTaskCreateFailed")));
+}
+
+function videoHostname(value: string) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    try {
+        return new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`).hostname.toLowerCase();
+    } catch {
+        return "";
+    }
+}
+
+/**
+ * aicost.me（含子域）：Seedance 中转只收 `application/json`，参考图走 `images: string[]`。
+ * 走通用 multipart 会被 Go 端反序列化进 `generate_audio bool` 失败 → 400。
+ * 导出给探针用。
+ */
+export function isAicostJsonVideoHost(baseUrl: string) {
+    const hostname = videoHostname(baseUrl);
+    return hostname === "aicost.me" || hostname.endsWith(".aicost.me");
 }
 
 function isMetasoH3Video(config: AiConfig, _model: string) {
@@ -1873,6 +2021,7 @@ function statusMessage(status: number | undefined, fallback: string) {
     if (status === 401 || status === 403) return apiText("authenticationFailed");
     if (status === 413) return apiText("payloadTooLarge");
     if (status === 429) return apiText("rateLimited");
+    if (status === 503) return apiText("videoServiceBusy");
     if (status === 502) return apiText("badGateway");
     if (status === 504) return apiText("proxyTimedOut");
     return status ? `${fallback}（${status}）` : fallback;

@@ -369,6 +369,8 @@ export default {
         noPlayableVideo: "视频接口没有返回可播放的视频",
         noVideoTaskId: "视频接口没有返回任务 ID",
         videoTaskCreateFailed: "视频任务创建失败",
+        videoServiceBusy:
+            "视频服务繁忙（503）：请求已经到达服务商，但该视频模型当前没有可用渠道（No available channel）—— 渠道被禁用、额度耗尽或上游过载。请稍后重试；仍失败请到中转后台确认该模型的渠道分组，或换用同站其它视频模型。",
         metasoH3ImageRequired: "秘塔 MiniMax-H3（OpenAI 协议）必须连接一张参考图。请把图片节点连到视频配置后再生成。",
         metasoH3ImageUnreadable: "已连接参考图，但无法读取图片数据（常见于本地 blob 预览失效）。请重新上传或拖入图片后再生成。",
         metasoH3PublicImageRequired: "秘塔 H3 需要公网参考图。自动上传临时图床失败，请稍后重试，或改用已经是 https 链接的图片。",

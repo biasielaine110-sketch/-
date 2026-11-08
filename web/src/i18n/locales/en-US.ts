@@ -369,6 +369,8 @@ export default {
         noPlayableVideo: "The video API did not return a playable video",
         noVideoTaskId: "The video API did not return a task ID",
         videoTaskCreateFailed: "Failed to create video task",
+        videoServiceBusy:
+            "Video service busy (503): the request reached the provider, but this video model has no available channel (No available channel) — channel disabled, quota exhausted, or upstream overloaded. Retry later; if it keeps failing, check the model's channel group in the relay console or switch to another video model on the same site.",
         metasoH3ImageRequired: "Metaso MiniMax-H3 (OpenAI protocol) requires one reference image. Connect an image node to the video config first.",
         metasoH3ImageUnreadable: "A reference image is connected but its bytes could not be read (often a stale local blob preview). Re-upload or drop the image, then generate again.",
         metasoH3PublicImageRequired: "Metaso H3 needs a public image URL. Uploading the local image to a temporary host failed. Retry, or use an image that is already an https link.",
