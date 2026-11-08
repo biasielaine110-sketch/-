@@ -329,8 +329,19 @@ Example style for \`video_motion_prompt\`:
 - Preserve story logic and character-state progression across rows.
 
 ## Character consistency
+- Cast **every character who is visibly in frame**, including the ones who never speak in this shot.
+  A silent character standing in the shot still belongs in the row — never drop them just because the
+  dialogue belongs to someone else.
 - When two distinct characters appear in one shot, fill \`character_2\` /
   \`character_description_2\` the same way as \`character_1\` / \`character_description_1\`.
+- \`character_1\` is the character the shot is built around; \`character_2\` is the other key presence.
+  If more than two appear, **put several names in one cell separated by \`、\`**
+  (e.g. \`苏晚、阿杰、小雨\`) — every person in frame must be named in exactly one of the two cells.
+- When a cell holds several names, write the matching description column as one entry per name:
+  \`苏晚：28岁女性，黑色短发……｜阿杰：30岁男性，灰色卫衣……\` (names joined by \`｜\`, each a compact
+  character card). Never write a single paragraph that only describes the first name.
+- If the source declares the cast of a scene / segment, every shot inside that segment must carry that
+  whole cast (minus anyone the shot explicitly puts out of frame).
 - Reuse the exact same character identifier across rows so the same person keeps one name.
 - The same character must never switch names or appearance between consecutive shots.
 
@@ -863,6 +874,8 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     // 资产描述去重：紧贴 JSON 契约之前（模型对越靠后的指令越服从），与 system 里那段是同一份文本。
     if (assetDedupe) parts.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
+    // 出场角色 / 场景不许漏：同样紧贴契约 —— 这一段是「群体镜头只认说话的人」报障的最后一道拦截。
+    parts.push(STORY_SCRIPT_CAST_COMPLETENESS_HINT);
     // 拆镜密度：同样紧贴契约（2026-11-07「30 秒拆 16 镜」报障，密度必须最后再说一遍）。
     const densityRule = buildShotDensityRule(segmentSeconds, mergeMode);
     if (densityRule) parts.push(densityRule);
@@ -885,6 +898,9 @@ function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds
     // storyboard 的规则全在 system prompt 里，没有可整段替换的「参考风格要点」，所以只追加专项要求。
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
     if (assetDedupe) parts.push(STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE);
+    // 出场角色 / 场景不许漏（与 classic 同口径；storyboard 没有角色列，这条的实际作用是「画面里出现的
+    // 人物在画面描述里也要写全」，同一句不影响，反而防它把群像写成「两人」）。
+    parts.push(STORY_SCRIPT_CAST_COMPLETENESS_HINT);
     // 拆镜密度（同 classic：最后再说一遍，压过前面所有暗示）。
     const densityRule = buildShotDensityRule(segmentSeconds, mergeMode);
     if (densityRule) parts.push(densityRule);
@@ -2154,7 +2170,12 @@ export function addScriptNameLockForCell(
     if (typeof columnKey !== "string" || !isScriptAssetColumn(columnKey)) return normalized;
     const label = scriptNameLockName(row ? row[columnKey] : "");
     if (!label || !ids.length) return normalized;
-    return setStoryScriptNameLock(normalized, label, [...scriptNameLockIds(normalized, label), ...ids]);
+    // 一格多角色（`苏晚、阿杰`）→ **每个名字各锁一份**：铺链路的名字匹配是按「一个人」算的，
+    // 拿 `苏晚、阿杰` 整串当锁名永远命中不了任何一格（那把锁等于没写）。
+    const names = scriptAssetColumnRole(columnKey) === "character" ? splitScriptAssetNames(label) : [label];
+    let next = normalized;
+    for (const name of names) next = setStoryScriptNameLock(next, name, [...scriptNameLockIds(next, name), ...ids]);
+    return next;
 }
 
 /**
@@ -2256,11 +2277,28 @@ export function stripStoryScriptAssetId<T extends Record<string, string[]>>(map:
 }
 
 /**
+ * 这一格的「名字锁」对应哪些图。
+ *
+ * 角色格允许一格多名（`苏晚、阿杰、小雨`）—— 这时必须**逐人取锁再并集**：
+ * 这一格可能只挂了苏晚那张图，另外两个人的角色卡在别处（按各自名字锁着）。
+ * 拿整串当锁名永远命中不了任何一格，结果就是「这一镜只认一个人」。
+ * 其余分类（场景 / 道具 / 站位）沿用整串口径。
+ */
+export function scriptCellNameLockIds(locks: unknown, columnKey: unknown, value: unknown, extras?: readonly StoryScriptExtraColumn[] | null): string[] {
+    const names = scriptAssetColumnRole(columnKey, extras) === "character" ? splitScriptAssetNames(value) : [];
+    if (names.length > 1) return Array.from(new Set(names.flatMap((name) => scriptNameLockIds(locks, name))));
+    const label = scriptNameLockName(value);
+    return label ? scriptNameLockIds(locks, label) : [];
+}
+
+/**
  * 这一镜「已经被精准指定过」的资产格 —— **格子图优先、资产锁兜底**。铺链路的「精准优先、资产条兜底」
  * 就建立在这上面：
  *  1. 这一镜这一格自己挂了图（`scriptCellAssets`）→ 用这一格的图（`source: "cell"`）；
  *  2. 没挂，但这一格的名字在资产锁里（「张三」锁了 @图片1）→ 用锁定的图，**跨镜生效**（`source: "lock"`）；
  *  3. 都没有 → 这一格不参与，交给资产条按分类兜底（`coveredRoles` 里不会有它的分类）。
+ *
+ * 「一格多角色」是**并集**：格子图 + 各人的锁都算这一格的（这一格本来就该挂好几个人）。
  *
  * 输出顺序 = 预设列序（连线先后与表格从左到右一致）。
  */
@@ -2278,11 +2316,15 @@ export function scriptShotPreciseAssetRefs(
         const role = scriptAssetColumnRole(column.key, extras) || "character";
         const name = scriptNameLockName(row[column.key]);
         const cellIds = scriptCellAssetIds(cells, shotNo, column.key, extras);
-        if (cellIds.length) {
-            out.push({ columnKey: column.key, role, name, ids: cellIds, source: "cell" });
+        const lockedIds = scriptCellNameLockIds(locks, column.key, row[column.key], extras);
+        // 一格多角色：格子图 + 各人的锁**并起来**（这一格本来就该挂好几个人）；
+        // 单名字沿用老口径：格子自己挂了图就只听格子的（锁是同名跨镜兜底，不往这一格叠）。
+        const multiName = role === "character" && splitScriptAssetNames(row[column.key]).length > 1;
+        const ids = multiName ? Array.from(new Set([...cellIds, ...lockedIds])) : cellIds;
+        if (ids.length) {
+            out.push({ columnKey: column.key, role, name, ids, source: cellIds.length ? "cell" : "lock" });
             continue;
         }
-        const lockedIds = name ? scriptNameLockIds(locks, name) : [];
         if (lockedIds.length) out.push({ columnKey: column.key, role, name, ids: lockedIds, source: "lock" });
     }
     return out;
@@ -2462,6 +2504,75 @@ export function orderScriptRefIds<T>(items: readonly T[], kindOf: (item: T) => u
         .map((entry) => entry.item);
 }
 
+/* ─────────── 一格写多个角色（2026-11-08 第 15 条：群体镜头不许只认「说话的人」） ─────────── */
+
+/**
+ * 角色名格里的分隔符：`苏晚、阿杰`、`苏晚，阿杰`、`苏晚/阿杰`、`苏晚+阿杰`、`苏晚&阿杰`、`苏晚；阿杰`。
+ *
+ * 🔴 **不含空格**：`Shen Zhaozhao` 这种英文名会被劈成两个人。
+ */
+const SCRIPT_ASSET_NAME_SEPARATOR = /[、，,／/＋+&＆;；]+/;
+
+/**
+ * 把一格「角色名」拆成多个名字；单名字 → 长度 1 的数组，空 / 「无」→ 空数组。
+ *
+ * 为什么需要它：分镜表只有**两个角色列**（`character_1` / `character_2`），而一场戏常有一群人
+ * （用户报障：「5 个人一起旅游，后面只有 2 个人说话，镜头里 5 人合拍时其他角色就挂不上」）。
+ * 所以口径改成「**一格可以写多个名字**」：`character_1 = 苏晚、阿杰、小雨`。
+ * 但匹配 / 挂图 / 生图都必须**逐名字**做 —— 拿整串去算相似度谁都对不上，等于没写。
+ *
+ * 纯函数，探针可直接钉。
+ */
+export function splitScriptAssetNames(value: unknown): string[] {
+    const text = storyScriptCellText(value);
+    if (!text) return [];
+    const out: string[] = [];
+    for (const raw of text.split(SCRIPT_ASSET_NAME_SEPARATOR)) {
+        const name = cleanScriptAssetName(raw);
+        if (!name || out.includes(name)) continue;
+        out.push(name);
+    }
+    return out.length ? out : [text];
+}
+
+/**
+ * 清理一个名字外面的包装：`（同一画面）苏晚` → `苏晚`、`【苏晚】` → `苏晚`、`「苏晚」` → `苏晚`。
+ *
+ * 两种情形必须分开处理，不能一律「剥首尾括号」：
+ *  - **前置注释**（`（同一画面）苏晚`）：括号在前、后面还有正文 → 整段括号注释丢掉；
+ *  - **括号就是包装**（`【苏晚】`）：括号里是名字本身、后面没别的 → 取括号里的内容。
+ */
+function cleanScriptAssetName(raw: string): string {
+    let name = raw.trim();
+    const leading = /^[（(【\[「『]([^）)】\]」』]*)[）)】\]」』]/.exec(name);
+    if (leading) {
+        const rest = name.slice(leading[0].length).trim();
+        name = rest || leading[1].trim();
+    }
+    return name.replace(/^[（(【\[「『]+/, "").replace(/[）)】\]」』]+$/, "").trim();
+}
+
+/**
+ * 从一段「按名字分条」的描述里捞出**这个角色自己那一条**。
+ *
+ * 模型被要求「一格多角色时，描述按 `名字：外观｜名字：外观` 逐条写」之后，描述格是一个大字符串。
+ * 直接把整串当某一个人的角色卡去生图，出来的必然串味（用户报障「排版对不上」）。
+ * 命中规则：`名字` 后面紧跟 `：` / `:` ，取到下一个 `｜` / `|` / 换行 / `；` 为止。
+ */
+export function pickScriptNamedDescription(text: unknown, name: unknown): string {
+    const body = String(text ?? "");
+    const wanted = String(name ?? "").trim();
+    if (!body || !wanted) return "";
+    const index = body.indexOf(wanted);
+    if (index < 0) return "";
+    const rest = body.slice(index + wanted.length);
+    const lead = rest.match(/^\s*[：:]/);
+    if (!lead) return "";
+    const tail = rest.slice(lead[0].length);
+    const end = tail.search(/[｜|；;\n]/);
+    return (end < 0 ? tail : tail.slice(0, end)).trim();
+}
+
 /**
  * 某一镜在「某一类资产」下的表格值：`names` = 名字列（角色1/角色2/场景/道具/自建列），
  * `texts` = 描述列（场景描述、道具描述、人物站位…）。
@@ -2478,12 +2589,15 @@ export function scriptRowAssetRoleTexts(
     const covered = options?.coveredColumns;
     const names: string[] = [];
     const texts: string[] = [];
+    const characterRole = resolveScriptAssetRole(role) === "character";
     for (const spec of SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)]) {
         if (!available.has(spec.columnKey)) continue;
         if (covered?.has(spec.columnKey)) continue;
         if (spec.nameKey) {
             const name = storyScriptCellText(row[spec.nameKey]);
-            if (name) names.push(name);
+            // 角色列允许一格写多人（`苏晚、阿杰、小雨`）：**拆开逐个参与名字匹配**。
+            // 拿整串去算相似度时谁都对不上（0.0x），群体镜头就会「一个人都挂不上」。
+            if (name) names.push(...(characterRole ? splitScriptAssetNames(name) : [name]));
         }
         for (const key of spec.textKeys) {
             const text = storyScriptCellText(row[key]);
@@ -2594,12 +2708,25 @@ export type ScriptAssetCellTarget = { shotNo: number; columnKey: string; title: 
 export function collectScriptAssetCellTargets(role: unknown, rows?: readonly StoryScriptRow[] | null): ScriptAssetCellTarget[] {
     const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
     if (!specs.length || !rows?.length) return [];
+    const characterRole = resolveScriptAssetRole(role) === "character";
     const out: ScriptAssetCellTarget[] = [];
     rows.forEach((row, index) => {
         const shotNo = Math.round(Number(row.shot_no)) || index + 1;
         for (const spec of specs) {
             const name = spec.nameKey ? storyScriptCellText(row[spec.nameKey]) : "";
             const text = joinStoryScriptPromptParts(spec.textKeys.map((key) => storyScriptCellText(row[key])));
+            /**
+             * 一格写了多个角色 → **每个角色各占一个格位**。
+             *
+             * 群体镜头在表里只有一个 `character_1` 格，但它挂着 5 个人：批量 / 一键生图的图要**逐人**挂回
+             * 这一格（`scriptCellAssets` 的值本来就是 id 数组，一个格子挂 5 张图是合法状态）。
+             * 不拆的话这 5 个人只会得到一张「五人合照卡」，后面铺链路也认不出谁是谁。
+             */
+            const names = characterRole && name ? splitScriptAssetNames(name) : [];
+            if (names.length > 1) {
+                for (const one of names) out.push({ shotNo, columnKey: spec.columnKey, title: one, name: one });
+                continue;
+            }
             const title = name || text.slice(0, 24);
             const prompt = text || name;
             if (!title || !prompt) continue;
@@ -2620,23 +2747,44 @@ export function collectScriptAssetCellTargets(role: unknown, rows?: readonly Sto
 export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonly StoryScriptRow[] | null): ScriptAssetPromptCandidate[] {
     const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
     if (!specs.length || !rows?.length) return [];
+    const characterRole = resolveScriptAssetRole(role) === "character";
     const out: ScriptAssetPromptCandidate[] = [];
     const seen = new Map<string, number>();
+    /** 按标题去重 + 「只剩名字 → 有真描述就升级」的唯一入口（单名字 / 多名字两条路共用）。 */
+    const upsert = (title: string, prompt: string, meaningful: boolean) => {
+        const existing = seen.get(title);
+        if (existing !== undefined) {
+            // 已经有这一条了：只在「之前只剩名字、这次有真描述」时升级，别把完整描述换掉。
+            if (meaningful && out[existing].prompt === title) out[existing] = { title, prompt };
+            return;
+        }
+        seen.set(title, out.length);
+        out.push({ title, prompt });
+    };
     for (const row of rows) {
         for (const spec of specs) {
             const name = spec.nameKey ? storyScriptCellText(row[spec.nameKey]) : "";
             const text = joinStoryScriptPromptParts(spec.textKeys.map((key) => storyScriptCellText(row[key])));
+            /**
+             * 一格多角色 → **逐人一条候选**（`苏晚、阿杰、小雨` 出三条，而不是「三人成组」一条）。
+             *
+             * 提示词优先级：这个人在别处的首现描述（最完整、最像角色卡）→ 本格里按名字分条的那一句 →
+             * 本格整段描述 → 名字本身。绝不把「一群人的描述」整段塞给某一个人（那样五张角色卡会长一样）。
+             */
+            if (characterRole && name) {
+                const names = splitScriptAssetNames(name);
+                if (names.length > 1) {
+                    for (const one of names) {
+                        const own = findStoryScriptAssetDescription(rows, spec, one, row) || pickScriptNamedDescription(text, one);
+                        upsert(one, own || one, Boolean(own));
+                    }
+                    continue;
+                }
+            }
             const title = name || text.slice(0, 24);
             const prompt = text || name;
             if (!title || !prompt) continue;
-            const existing = seen.get(title);
-            if (existing !== undefined) {
-                // 已经有这一条了：只在「之前只剩名字、这次有真描述」时升级，别把完整描述换掉。
-                if (out[existing].prompt === name && hasMeaningfulAssetDescription(text)) out[existing] = { title, prompt };
-                continue;
-            }
-            seen.set(title, out.length);
-            out.push({ title, prompt });
+            upsert(title, prompt, hasMeaningfulAssetDescription(text));
         }
     }
     return out;
@@ -2702,6 +2850,15 @@ function readStoryScriptAssetDescription(row: StoryScriptRow, textKeys: readonly
     return joinStoryScriptPromptParts(textKeys.map((key) => storyScriptCellText(row[key]))).trim();
 }
 
+/** 这一格的名字里有没有「这个人」：整格全等 **或** 多名字格里的其中一个（`苏晚、阿杰` 里认得出 `阿杰`）。 */
+function scriptCellHasAssetName(value: unknown, normalizedWanted: string): boolean {
+    if (!normalizedWanted) return false;
+    const text = storyScriptCellText(value);
+    if (!text) return false;
+    if (normalizeScriptAssetMatchText(text) === normalizedWanted) return true;
+    return splitScriptAssetNames(text).some((name) => normalizeScriptAssetMatchText(name) === normalizedWanted);
+}
+
 /** 找同名的「首现描述」：优先这一镜之前（按镜号），没有再退到全表（顺序反了也能救回来）。 */
 export function findStoryScriptAssetDescription(
     rows: readonly StoryScriptRow[] | null | undefined,
@@ -2714,12 +2871,16 @@ export function findStoryScriptAssetDescription(
     if (!wanted || !nameKey) return "";
     const currentShot = Number(current?.shot_no) || 0;
     const matches = (rows || [])
-        .filter((row) => row && normalizeScriptAssetMatchText(storyScriptCellText(row[nameKey])) === wanted)
+        .filter((row) => row && scriptCellHasAssetName(row[nameKey], wanted))
         .sort((left, right) => (Number(left.shot_no) || 0) - (Number(right.shot_no) || 0));
     const earlier = currentShot ? matches.filter((row) => (Number(row.shot_no) || 0) < currentShot) : matches;
     for (const row of [...earlier, ...matches]) {
         const text = readStoryScriptAssetDescription(row, spec.textKeys);
-        if (hasMeaningfulAssetDescription(text)) return text;
+        if (!hasMeaningfulAssetDescription(text)) continue;
+        // 多名字格的描述是按 `名字：外观｜名字：外观` 分条写的 → 只取这个人的那一条，
+        // 整串拿去当角色卡一定会串味（其他角色的外观会跑到这张图上）。
+        const own = pickScriptNamedDescription(text, name);
+        return own || text;
     }
     return "";
 }
@@ -2768,6 +2929,118 @@ export function dedupeStoryScriptAssetDescriptions(
 }
 
 /**
+ * 解析后的**确定性兜底**：按这一镜自己的文字，把漏掉的主角补回角色列（2026-11-08 第 15 条）。
+ *
+ * 报障原话：「5 个人一起旅游，后面镜头只有 2 个人说话，5 人一起合拍照片时，分镜表对这部分镜头
+ * 就识别不到其他没说话的人物角色挂载」。提示词已经要求「画面里有谁就写谁」，但模型仍会漏；
+ * 这里用一条**不会瞎编**的规则补：**只补「本镜文字里字面出现过、且全表当过角色名」的人**。
+ *
+ * 为什么不是「同场次把整组角色都灌进去」：同一场里也常有「只有主角在」的镜头，一律灌进去 =
+ * 给每张视频节点挂上所有角色图，正是用户 2026-11-08 另一条报障（「一个镜头挂 16 张图」）。
+ *
+ * 口径：
+ *  - 名册（roster）= 全表 `character_1/2` 里出现过的所有名字（含一格多名拆出来的）；
+ *  - 检索范围 = `visual_description` / `shot_prompt` / `character_action` / `blocking`
+ *    —— 🔴 **不含 `dialogue`**：「苏晚呢？」这种台词提到的人不一定在画里，补进去就是错的；
+ *  - 长名字优先匹配并从检索串里挖掉，避免「苏晚」在「苏晚晴」里再命中一次；
+ *  - 补人时挑**名字最少的那个角色格**追加（没有就新起一格），用 `、` 连接；
+ *  - 顺带补场景：某一镜场景列为空、前面有过场景名 → 沿用（同场次连续镜头不该丢场景）。
+ *
+ * 幂等：已经写进去的人不会被再补一遍；返回 `filled` 给调用方决定要不要提示用户。
+ */
+export function backfillStoryScriptCastNames(
+    rows: readonly StoryScriptRow[] | null | undefined,
+    preset?: StoryScriptPresetId | string | null,
+): { rows: StoryScriptRow[]; filled: number; sceneFilled: number } {
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) return { rows: [], filled: 0, sceneFilled: 0 };
+    const presetColumns = new Set(getStoryScriptPreset(preset).columns.map((column) => column.key));
+    const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS.character.filter((spec) => Boolean(spec.nameKey) && presetColumns.has(String(spec.nameKey)));
+    // 没有角色列（storyboard）也**不能提前返回**：场景沿用那一步照样要做。
+    const hasSceneColumn = presetColumns.has("scene");
+
+    // 名册：全表出现过的角色名（拆多名字格），归一化去重，保留第一次出现的原始写法。
+    const roster: string[] = [];
+    const rosterKeys = new Set<string>();
+    for (const row of list) {
+        for (const spec of specs) {
+            for (const name of splitScriptAssetNames(row[String(spec.nameKey)])) {
+                const key = normalizeScriptAssetMatchText(name);
+                if (key.length < 2 || rosterKeys.has(key)) continue;
+                rosterKeys.add(key);
+                roster.push(name);
+            }
+        }
+    }
+
+    /** 本镜「画面里提到了谁」的检索串（**不含对白**）。 */
+    const frameTextKeys = ["visual_description", "shot_prompt", "character_action", "blocking"];
+    const orderedRoster = [...roster].sort((left, right) => normalizeScriptAssetMatchText(right).length - normalizeScriptAssetMatchText(left).length);
+
+    let filled = 0;
+    let sceneFilled = 0;
+    let previousScene = "";
+    const next = list.map((row) => {
+        let copy: StoryScriptRow | null = null;
+        const ensure = (): StoryScriptRow => {
+            if (copy) return copy;
+            const cloned: StoryScriptRow = { ...row };
+            copy = cloned;
+            return cloned;
+        };
+        // ① 补人
+        if (orderedRoster.length) {
+            const present = new Set<string>();
+            for (const spec of specs) {
+                for (const name of splitScriptAssetNames(row[String(spec.nameKey)])) {
+                    const key = normalizeScriptAssetMatchText(name);
+                    if (key) present.add(key);
+                }
+            }
+            let haystack = frameTextKeys.map((key) => normalizeScriptAssetMatchText(storyScriptCellText(row[key]))).join("\n");
+            // 已经在角色列里的人先从检索串里挖掉：否则「苏晚晴」在场时「苏晚」会被算成第二个漏掉的人。
+            for (const key of [...present].sort((left, right) => right.length - left.length)) {
+                if (haystack.includes(key)) haystack = haystack.split(key).join("\u0000");
+            }
+            const missing: string[] = [];
+            for (const name of orderedRoster) {
+                const key = normalizeScriptAssetMatchText(name);
+                if (!key || present.has(key) || !haystack.includes(key)) continue;
+                haystack = haystack.split(key).join("\u0000");
+                missing.push(name);
+            }
+            if (missing.length) {
+                // 追加到「当前名字最少」的那一格（都没有名字时就是 character_1）。
+                let target = specs[0];
+                let targetCount = Number.POSITIVE_INFINITY;
+                for (const spec of specs) {
+                    const count = splitScriptAssetNames(row[String(spec.nameKey)]).length;
+                    if (count < targetCount) {
+                        targetCount = count;
+                        target = spec;
+                    }
+                }
+                const nameKey = String(target.nameKey);
+                const merged = Array.from(new Set([...splitScriptAssetNames(row[nameKey]), ...missing]));
+                ensure()[nameKey] = merged.join("、");
+                filled += 1;
+            }
+        }
+        // ② 补场景（同场次连续镜头不该把场景丢了）
+        if (hasSceneColumn) {
+            const sceneName = storyScriptCellText(row.scene);
+            if (sceneName) previousScene = sceneName;
+            else if (previousScene) {
+                ensure().scene = previousScene;
+                sceneFilled += 1;
+            }
+        }
+        return copy || row;
+    });
+    return { rows: filled || sceneFilled ? next : (list as StoryScriptRow[]), filled, sceneFilled };
+}
+
+/**
  * 表格占位用：`镜号:描述列key` → 首现镜号。只对**当前为空、且前面（或全表）已经有描述**的格子给提示。
  * 纯显示口径，不改数据；空描述本身仍然是空（导出 / 下游看到的是空，不是「（同第 3 镜）」）。
  *
@@ -2811,6 +3084,26 @@ export const STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE = [
     "- 但**资产名字列每一镜都必须照常填写**（角色1 / 角色2 / 场景 / 道具），一个字都不许省略 —— 图位与铺链路靠名字逐镜匹配，名字空了这一镜的资产就丢了。",
     "- 这一镜确实没有某个资产时，仍按原规则把名字与描述都写「无」（「无」不算「已写过描述」）。",
     "- **分镜提示词 / 视频运动提示词不受本条限制**：这两列每一镜都要能独立当生图提示词看，角色外貌必须写全；这一镜的描述列为空时，就按该资产第一次出现时写的描述来写。",
+].join("\n");
+
+/**
+ * 任务书里的「出场角色不许漏人」硬规则（2026-11-08 第 15 条）。
+ *
+ * 用户报障两段原话：「该场次是 5 个人一起旅游，后面镜头只有 2 个人说话，但镜头里 5 人一起合拍照片时，
+ * 分镜表对这部分镜头就识别不到其他没说话的人物角色挂载」＋「我给到的剧本里已经明确标注了这一个 15 秒
+ * 段落的场次里用了角色是什么、场景是什么，输出到表里就能在部分镜头丢失」。
+ *
+ * 为什么必须写在**紧贴 JSON 契约之前**：模型对越靠后的指令越服从 —— 这段是「补人 / 补场景」的最后一压，
+ * 与 system prompt 里 `## Character consistency` 那几条同口径（那边管「怎么填」，这边管「不许漏」）。
+ * ⚠️ 同时它把「一格可以写多个名字」这件事明说出来：表只有两个角色格，不点破模型就会按「格数不够」丢人。
+ */
+export const STORY_SCRIPT_CAST_COMPLETENESS_HINT = [
+    "## 出场角色与场景不许漏（硬规则，优先于上文任何相反说明）",
+    "- 每一镜都要先回答一句「**这个画面里到底有谁**」：只要人在画框里（哪怕一句台词都没有、只是站着、合影、从背景走过），就必须把名字写进角色列。只有明确不在这个画面里的人才能不写；不要因为「这一镜的台词是别人说的」就把其他人删掉。",
+    "- 表里只有 `character_1` / `character_2` 两个角色格，但**一格可以写多个人**：多个名字用 `、` 分隔，例如 `苏晚、阿杰、小雨、老周、莉莉`。画面里出现的所有人必须分布在这两格之中，不许因为「只有两格」就丢人。",
+    "- 一格写了多个名字时，`character_description_N` 必须**逐人分条**：`苏晚：28岁女性……｜阿杰：30岁男性……｜小雨：……`（用 `｜` 分隔），每个人都有自己的一条外观卡；只描述第一个人的写法视为不合格。",
+    "- 源内容如果已经按场次 / 段落标注了「出场角色 / 人物」「场景 / 地点」（例如某 15 秒段落写明用了哪几个角色、发生在哪里），这一段里的**每一镜都要照着它写**：角色一个不少，场景名与它一致（除非这一镜明确写了人物离场或换景）。",
+    "- 场景列每一镜都必须有名字：同一场次沿用同一个场景名，不要写 `无`、不要留空。",
 ].join("\n");
 
 /** 构建分镜脚本生成任务；不传 preset 时保持旧行为（classic）。 */
@@ -3040,7 +3333,7 @@ export function buildStoryScriptAssetFillTask({
         .join("、");
     const parts = [
         `下面是一张分镜表的第 ${row.shot_no} 镜。这一镜的**部分资产还没有统计出来**，请只补齐这些资产：${wantedLabels}。`,
-        "## 硬性要求\n1. 只输出下面列出的字段，其它字段一律不要输出；\n2. 这一镜已经写好的内容（画面 / 动作 / 提示词等）一个字都不要改，也不要重复输出；\n3. 确实没有的资产就写 `无`，不要编造无关内容；\n4. 资产名要与表里其它镜头已有的写法保持一致：同一个场景 / 道具用同一个名字，同一个角色用同一套名字；\n5. 输出单个 JSON 对象（不要 markdown 代码块、不要解释、不要前后缀）。",
+        "## 硬性要求\n1. 只输出下面列出的字段，其它字段一律不要输出；\n2. 这一镜已经写好的内容（画面 / 动作 / 提示词等）一个字都不要改，也不要重复输出；\n3. 确实没有的资产就写 `无`，不要编造无关内容；\n4. 资产名要与表里其它镜头已有的写法保持一致：同一个场景 / 道具用同一个名字，同一个角色用同一套名字；\n5. 角色格**可以一格写多个名字**（用 `、` 分隔）：只要这个人出现在这一镜的画框里（哪怕一句台词都没有），就要把他的名字写进去，不许只写说话的人；\n6. 输出单个 JSON 对象（不要 markdown 代码块、不要解释、不要前后缀）。",
         `输出字段（只允许这些键）：\n${wanted.map((key) => `- \`${key}\`（${columns.find((column) => column.key === key)?.label || key}）`).join("\n")}`,
         `JSON 形状示例：${JSON.stringify(Object.fromEntries(wanted.map((key) => [key, ""])))}`,
         buildScriptAssetPromptSection(assetPrompt),

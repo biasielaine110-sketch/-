@@ -3,6 +3,7 @@ import {
     collectScriptAssetPromptCandidates,
     normalizeStoryScriptCellAssetMap,
     normalizeStoryScriptNameLockMap,
+    resolveStoryScriptImageSize,
     scriptCellAssetIds,
     scriptNameLockIds,
     SCRIPT_ASSET_GENERATABLE_ROLE_IDS,
@@ -155,6 +156,23 @@ export function resolveScriptAssetDirectSize(role: ScriptAssetRole): string {
 }
 
 /**
+ * 「一键批量生成 / 单格生成」该用多宽 —— **与「一键直接生图」同一口径**（2026-11-08 第 16 条）。
+ *
+ * 用户报障：「一键生图和一键批量生图，现在在执行角色生图时，角色出来的排版跟词库里的有差异……
+ * 有的角色生图比例不对」。根因是两条路的画幅来源不同：
+ *  - 直接生图：`resolveScriptAssetDirectSize()` —— 角色 9:16 硬规则；
+ *  - 批量生图：把**同一个** `scriptImageSize` 套给整批，没设时连 `size` 字段都不写
+ *    → 节点画成 340×240、请求回落上游默认比例（多半是 1:1 方图）。
+ *
+ * 现在收敛成：**角色永远是 9:16（任何选择器都改不动）**；场景 / 道具用用户在这颗选择器里选的比例，
+ * 没选就是 16:9。这样两条路出来的角色图比例一致，用户也仍然能改场景宫格的比例。
+ */
+export function resolveScriptAssetSizeForRole(role: ScriptAssetRole, preferred?: unknown): string {
+    if (role === "character") return resolveScriptAssetDirectSize("character");
+    return resolveStoryScriptImageSize(preferred) || resolveScriptAssetDirectSize(role);
+}
+
+/**
  * 「一键直接生图」要生成的那一批：表里全部角色 / 场景 / 道具（按分类顺序、按名字去重）。
  *
  * `existing` 传空数组 = **不筛**（已经出过图的也照生，这是与「一键批量生成」的唯一区别）；
@@ -245,10 +263,12 @@ export function appendScriptAssetViewTemplate(prompt: string, template: string):
 }
 
 /**
- * 「一键直接生图」的入口包装：给这一批的提示词按分类补上词库版式。
+ * 给这一批的提示词按分类补上词库版式（只补版式，不带画幅声明 / 空景）。
  *
- * 只作用于**直接生图**这一条路（画幅同样是硬规则那一条）。「一键批量生成」/「单格生成」保持原样 ——
- * 那两条是用户手动挑资产，要不要带版式由他在弹窗里自己决定。
+ * ⚠️ 2026-11-08 第 16 条之后**两条生图路都走它**：以前只有「一键直接生图」套版式、「一键批量生成」
+ * 不套，同一批角色图就会一半有版式一半没有（用户报障「有的有头有的无头、有的排版不对」）。
+ * 真实入口是 `applyScriptAssetDirectDecorations`（版式 + 空景 + 画幅首尾），这个函数只单独用得上
+ * 在「只想追加版式、不要画幅句」的场景。
  */
 export function applyScriptAssetViewTemplates(items: readonly ScriptAssetBatchItem[], textPrompts?: readonly ViewTemplatePromptEntry[] | null): ScriptAssetBatchItem[] {
     if (!items.length || !textPrompts?.length) return items.slice();
@@ -300,6 +320,17 @@ export function resolveScriptAssetEmptyPlateSuffix(role: ScriptAssetRole): strin
     return "";
 }
 
+/** 各种比例对应的「版式说明」（只用于**提示词里的文字**，不影响请求参数）。 */
+const SCRIPT_ASSET_FRAME_WORDING: Record<string, { orientation: string; pixels: string; wrong: string }> = {
+    "9:16": { orientation: "竖版", pixels: "如 1080×1920", wrong: "1:1 方图或横图" },
+    "3:4": { orientation: "竖版", pixels: "如 1200×1600", wrong: "1:1 方图或横图" },
+    "2:3": { orientation: "竖版", pixels: "如 1024×1536", wrong: "1:1 方图或横图" },
+    "16:9": { orientation: "横版", pixels: "如 1920×1080", wrong: "1:1 方图或竖图" },
+    "4:3": { orientation: "横版", pixels: "如 1600×1200", wrong: "1:1 方图或竖图" },
+    "3:2": { orientation: "横版", pixels: "如 1536×1024", wrong: "1:1 方图或竖图" },
+    "1:1": { orientation: "方形", pixels: "如 1024×1024", wrong: "横图或竖图" },
+};
+
 /**
  * 画幅收口：把「9:16 / 16:9」**写在提示词的最前面和最末尾各一次**。
  *
@@ -310,34 +341,35 @@ export function resolveScriptAssetEmptyPlateSuffix(role: ScriptAssetRole): strin
  * 首尾各一次不是「啰嗦」：模型对长提示词的注意力集中在**开头和结尾**，用户自建的词库版式
  * （「无头9x16竖版排版」）恰好落在中间；只压末尾时有版式会赢。
  *
- * ⚠️ 两个口径必须**同源**：文字里的比例由 `resolveScriptAssetDirectSize()` 推出来，
- * 不许另写一份常量，否则「画幅硬规则」与「提示词里写的画幅」会漂。
+ * ⚠️ 两个口径必须**同源**：文字里的比例和请求里的 `size` 是**同一个** `size` 参数（两条生图路都从
+ * `resolveScriptAssetSizeForRole` / `resolveScriptAssetDirectSize` 取，别处不许再拼一份比例常量），
+ * 否则「画幅硬规则」与「提示词里写的画幅」会漂。
  */
-function scriptAssetFrameSpec(role: ScriptAssetRole): { ratio: string; orientation: string; pixels: string; wrong: string } {
-    const size = resolveScriptAssetDirectSize(role);
-    if (size === "9:16") return { ratio: "9:16", orientation: "竖版", pixels: "如 1080×1920", wrong: "1:1 方图或横图" };
-    if (size === "16:9") return { ratio: "16:9", orientation: "横版", pixels: "如 1920×1080", wrong: "1:1 方图或竖图" };
-    return { ratio: size, orientation: "", pixels: "", wrong: "别的比例" };
+function scriptAssetFrameSpec(role: ScriptAssetRole, size?: string): { ratio: string; orientation: string; pixels: string; wrong: string } {
+    const ratio = String(size || resolveScriptAssetDirectSize(role)).trim() || resolveScriptAssetDirectSize(role);
+    const wording = SCRIPT_ASSET_FRAME_WORDING[ratio];
+    if (wording) return { ratio, ...wording };
+    return { ratio, orientation: "", pixels: "", wrong: "别的比例" };
 }
 
-/** 提示词**最前面**的画幅声明（短一行，先立规矩）。 */
-export function buildScriptAssetFramePrefix(role: ScriptAssetRole): string {
-    const spec = scriptAssetFrameSpec(role);
+/** 提示词**最前面**的画幅声明（短一行，先立规矩）。`size` 不传 = 按分类的硬规则画幅。 */
+export function buildScriptAssetFramePrefix(role: ScriptAssetRole, size?: string): string {
+    const spec = scriptAssetFrameSpec(role, size);
     return spec.pixels
-        ? `【画幅】${spec.ratio} ${spec.orientation}（${spec.pixels}），整张图是${spec.orientation === "竖版" ? "竖的长图" : "横的长图"}，不要做成 ${spec.wrong}。`
+        ? `【画幅】${spec.ratio} ${spec.orientation}（${spec.pixels}），整张图是${spec.orientation === "竖版" ? "竖的长图" : spec.orientation === "方形" ? "方形图" : "横的长图"}，不要做成 ${spec.wrong}。`
         : `【画幅】${spec.ratio}，整张图按这个比例排版，不要做成 ${spec.wrong}。`;
 }
 
 /** 提示词**最后一行**的画幅收口（上面的版式 / 空景可能把画幅说岔了，这里再钉一次）。 */
-export function buildScriptAssetFrameSuffix(role: ScriptAssetRole): string {
-    const spec = scriptAssetFrameSpec(role);
+export function buildScriptAssetFrameSuffix(role: ScriptAssetRole, size?: string): string {
+    const spec = scriptAssetFrameSpec(role, size);
     return spec.pixels
-        ? `画面比例：${spec.ratio} ${spec.orientation}（宽:高 = ${spec.ratio}），整张图按${spec.orientation === "竖版" ? "竖" : "横"}构图排版，不要做成 ${spec.wrong}。`
+        ? `画面比例：${spec.ratio} ${spec.orientation}（宽:高 = ${spec.ratio}），整张图按${spec.orientation === "竖版" ? "竖" : spec.orientation === "方形" ? "方" : "横"}构图排版，不要做成 ${spec.wrong}。`
         : `画面比例：${spec.ratio}，整张图按这个比例排版。`;
 }
 
 /**
- * 「一键直接生图」提示词的**最终整形**（顺序即语义，不能乱）：
+ * 资产图提示词的**最终整形**（顺序即语义，不能乱）：
  *
  *  1. 画幅声明（短前缀，先把画幅立在最前面）；
  *  2. 资产描述（分镜表里那一格）；
@@ -346,14 +378,23 @@ export function buildScriptAssetFrameSuffix(role: ScriptAssetRole): string {
  *  5. 画幅收口 —— **永远最后一行**，压过前面版式里可能写死的画幅。
  *
  * 每一步都幂等：同一批重算、或用户手动把尾缀粘进提示词后再点，都不会出现两份。
+ *
+ * @param resolveSize 这一批怎么定画幅；默认 =「一键直接生图」的硬规则（角色 9:16、场景/道具 16:9）。
+ *                    「一键批量生成」传 `resolveScriptAssetSizeForRole` 的柯里化版本 —— 两条路**必须**共用
+ *                    这一份整形逻辑，否则用户看到的还是「一键生图有版式、批量生图没版式」（2026-11-08 第 16 条）。
  */
-export function applyScriptAssetDirectDecorations(items: readonly ScriptAssetBatchItem[], textPrompts?: readonly ViewTemplatePromptEntry[] | null): ScriptAssetBatchItem[] {
+export function applyScriptAssetDirectDecorations(
+    items: readonly ScriptAssetBatchItem[],
+    textPrompts?: readonly ViewTemplatePromptEntry[] | null,
+    resolveSize: (role: ScriptAssetRole) => string = resolveScriptAssetDirectSize,
+): ScriptAssetBatchItem[] {
     if (!items.length) return [];
     return applyScriptAssetViewTemplates(items, textPrompts).map((item) => {
-        let prompt = prependScriptAssetPromptPrefix(item.prompt, buildScriptAssetFramePrefix(item.role));
+        const size = resolveSize(item.role);
+        let prompt = prependScriptAssetPromptPrefix(item.prompt, buildScriptAssetFramePrefix(item.role, size));
         const plate = resolveScriptAssetEmptyPlateSuffix(item.role);
         if (plate) prompt = appendScriptAssetPromptSuffix(prompt, plate);
-        prompt = appendScriptAssetPromptSuffix(prompt, buildScriptAssetFrameSuffix(item.role));
+        prompt = appendScriptAssetPromptSuffix(prompt, buildScriptAssetFrameSuffix(item.role, size));
         return prompt === item.prompt ? item : { ...item, prompt };
     });
 }

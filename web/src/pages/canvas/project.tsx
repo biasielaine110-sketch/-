@@ -48,7 +48,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, composeStyledPrompt, getStyleTemplate } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, describeMomanSourceOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchScriptRowAssetsByRole, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMergeGroups, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, orderScriptRefIds, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptImageSize, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole, type ScriptRefLinkKind } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, backfillStoryScriptCastNames, describeMomanSourceOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchScriptRowAssetsByRole, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMergeGroups, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, orderScriptRefIds, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptImageSize, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole, type ScriptRefLinkKind } from "@/constant/story-script";
 import { resolveScriptPromptValues, resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -114,7 +114,7 @@ import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-orde
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import { applyScriptAssetDirectDecorations, buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, describeScriptAssetAspectMismatch, mountScriptAssetToCells, planScriptAssetGrid, resolveScriptAssetDirectSize, resolveScriptImageQuality, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { applyScriptAssetDirectDecorations, buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, describeScriptAssetAspectMismatch, mountScriptAssetToCells, planScriptAssetGrid, resolveScriptAssetDirectSize, resolveScriptAssetSizeForRole, resolveScriptImageQuality, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
@@ -7580,7 +7580,17 @@ function AtelierCanvasPage() {
                  * 所以图位 / 资产锁 / 铺链路不受影响；描述为空的行，表格会给「（同第 N 镜）」占位，
                  * 逐格「AI 生成」也会回填首现镜的描述（`findStoryScriptAssetDescription`）。幂等。
                  */
-                const dedupedRows = dedupeStoryScriptAssetDescriptions(parsedRows, presetId);
+                /**
+                 * 出场角色兜底（用户 2026-11-08 第 15 条）：「5 人一起合拍，分镜表只认说话的那 2 个人」。
+                 *
+                 * 提示词侧已经写了硬规则（`STORY_SCRIPT_CAST_COMPLETENESS_HINT` + system 里的
+                 * `## Character consistency`），但模型仍会漏 —— 这里用一条**不会瞎编**的确定性规则补：
+                 * 只要这个人的名字在**本镜自己的画面描述 / 分镜提示词 / 动作 / 站位**里字面出现过
+                 * （`dialogue` 不算：「苏晚呢？」提到的人不一定在画里），而角色列里没有他，就补进去。
+                 * 顺带把「场景列为空」的镜头沿用上一个镜头的场景名（同场次连续镜头不该丢场景）。
+                 */
+                const castRows = backfillStoryScriptCastNames(parsedRows, presetId);
+                const dedupedRows = dedupeStoryScriptAssetDescriptions(castRows.rows, presetId);
                 /**
                  * 第四套方案：把 `video_motion_prompt` 确定性收敛成八段标签块。
                  * 模版在场时上面那层覆盖已经给了逐字原文（本函数幂等，合规就一个字都不动）；
@@ -7648,6 +7658,13 @@ function AtelierCanvasPage() {
                 nodesRef.current = nodesRef.current.map(applyGeneratedRows);
                 setNodes((prev) => prev.map(applyGeneratedRows));
                 message.success(t("canvas.scriptNode.generated", { count: parsedRows.length }));
+                /**
+                 * 「补了几镜的出场角色」也要明说（2026-11-08 第 15 条）：补人是有可能补错的判断
+                 * （模型没写全、我们按画面文字补的），用户得知道有这回事才能顺手复核。
+                 */
+                if (castRows.filled > 0) {
+                    message.info(t("canvas.scriptNode.castBackfilled", { count: castRows.filled }));
+                }
                 /**
                  * 第七套：「源稿覆盖」这件事要**明说**。前六次报障里有一半是「其实没识别到源稿」
                  * ——覆盖层静默返回原表，视频列留着模型自编的一段（形态一样、时间码不一样），
@@ -7909,7 +7926,8 @@ function AtelierCanvasPage() {
                     }
                     // 单镜重写常把「后面几镜」的描述又写全了（模型看不到整表已经去重过）——
                     // 这里再跑一遍幂等去重，保证「首现镜写全、其余留空」在单镜改动后依然成立。
-                    workingRows = dedupeStoryScriptAssetDescriptions(workingRows, presetId);
+                    // 出场角色同口径兜底（单镜重写最容易只留说话的人）。
+                    workingRows = dedupeStoryScriptAssetDescriptions(backfillStoryScriptCastNames(workingRows, presetId).rows, presetId);
                     done += 1;
                     setNodes((prev) =>
                         prev.map((node) =>
@@ -8389,24 +8407,35 @@ function AtelierCanvasPage() {
      *  ③ **挂载**：每张图直接写回它那条资产出现过的**每一格**（`scriptCellAssets`）并按资产名上锁
      *     （`scriptNameLocks`）—— 用户原话「批量生成的图也需要直接挂载到具体的资产上」；
      *  ④ **提交**：一批可能十几张，按 `SCRIPT_ASSET_LAUNCH_BATCH` 分批，不一次打满上游。
+     *
+     * 🔴 2026-11-08 第 16 条：**版式与画幅跟「一键直接生图」完全同一条公式**
+     * （`applyScriptAssetDirectDecorations` + `resolveScriptAssetSizeForRole`）。以前这一条路既不加
+     * 词库视图版式、又把同一个 `scriptImageSize` 套给整批（角色因此可能是 16:9 甚至方图），
+     * 用户看到的「有的有头有的无头、比例不对」就是这两条路的差异造成的。
      */
     const handleBatchGenerateScriptAssets = useCallback(
         (nodeId: string, items: ScriptAssetBatchItem[], options?: { styleTemplateId?: string; size?: string; model?: string }) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
-            const wanted = items.filter((item) => item.title.trim() && item.prompt.trim());
-            if (!source || !wanted.length) return;
+            const raw = items.filter((item) => item.title.trim() && item.prompt.trim());
+            if (!source || !raw.length) return;
+            // 画幅：角色 9:16 硬规则；场景 / 道具用弹窗里选的比例（没选 = 16:9）。见 `resolveScriptAssetSizeForRole`。
+            const preferredSize = options?.size || source.metadata?.scriptImageSize;
+            const resolveSize = (role: ScriptAssetRole) => resolveScriptAssetSizeForRole(role, preferredSize);
+            const wanted = applyScriptAssetDirectDecorations(raw, effectiveConfig.textPrompts, resolveSize);
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
-            const imageSize = resolveStoryScriptImageSize(options?.size) || resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
             // 画质保底：全局没选具体档位（空 / auto）时这一批按 2K 出（见 `resolveScriptImageQuality`）。
             const batchQualityFallback = resolveScriptImageQuality(effectiveConfig.quality);
-            const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
-            const cellWidth = Math.round(dims.width);
-            const cellHeight = Math.round(dims.height);
+            // 逐张按**自己的**画幅算格子：角色竖版、场景横版混在同一片资产阵里，不再硬塞成一个统一方格。
+            const planned = wanted.map((item) => {
+                const imageSize = resolveSize(item.role);
+                const dims = nodeSizeFromRatio(imageSize, spec.width, spec.height) || { width: spec.width, height: spec.height };
+                return { item, imageSize, width: Math.round(dims.width), height: Math.round(dims.height) };
+            });
             // 资产阵：贴脚本左边框（48px）、竖向排在脚本窗口高度里、塞不下往左开新列（最多 3 列），
             // 整块以脚本窗口垂直中线为中心 —— 所以不会再出现「一排图甩到脚本下方」或「图飘在一条街外」。
             const layout = planScriptAssetGrid({
                 source: { id: source.id, position: source.position, width: source.width, height: source.height },
-                sizes: wanted.map(() => ({ width: cellWidth, height: cellHeight })),
+                sizes: planned.map((cell) => ({ width: cell.width, height: cell.height })),
                 occupied: collectScriptAssetOccupied(nodesRef.current, source.id),
             });
             const slots = layout.slots;
@@ -8414,13 +8443,13 @@ function AtelierCanvasPage() {
                 message.warning(t("canvas.scriptNode.batchAssetNoRoom"));
                 return;
             }
-            const created = wanted.slice(0, slots.length).map((item, index) => {
+            const created = planned.slice(0, slots.length).map((cell, index) => {
                 // 风格：弹窗里挑的优先，没挑就跟随脚本节点上那档（2026-11-08 第 04 条）。
                 const batchStyleTemplateId = options?.styleTemplateId || source.metadata?.styleTemplateId;
                 const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, {
-                    prompt: item.prompt,
+                    prompt: cell.item.prompt,
                     status: NODE_STATUS_IDLE,
-                    ...(imageSize ? { size: imageSize } : {}),
+                    ...(cell.imageSize ? { size: cell.imageSize } : {}),
                     // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
                     ...(batchQualityFallback ? { quality: batchQualityFallback } : {}),
                     // 弹窗里挑的模型：`buildGenerationConfig` 读的就是 `metadata.model`，
@@ -8431,10 +8460,10 @@ function AtelierCanvasPage() {
                     // 新一批会整块让到左边另起一片，见 lib 的 planScriptAssetGrid）。
                     scriptAssetLane: source.id,
                 });
-                return { ...node, title: item.title, width: cellWidth, height: cellHeight, position: slots[index] };
+                return { ...node, title: cell.item.title, width: cell.width, height: cell.height, position: slots[index] };
             });
             // 分类写进脚本节点（内联：mergeScriptAssetRoles 声明在本回调之后，进依赖数组会 TDZ）。
-            const roles: Record<string, ScriptAssetRole> = Object.fromEntries(created.map((node, index) => [node.id, wanted[index].role]));
+            const roles: Record<string, ScriptAssetRole> = Object.fromEntries(created.map((node, index) => [node.id, planned[index].item.role]));
             /**
              * **挂到具体资产上**（用户 2026-11-07 第 4 条）。
              *

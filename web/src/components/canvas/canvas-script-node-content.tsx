@@ -45,7 +45,9 @@ import {
     resolveStoryScriptMergeMode,
     resolveStoryScriptPresetId,
     resolveStoryScriptSegmentSeconds,
+    scriptAssetColumnRole,
     scriptCellAssetIds,
+    scriptCellNameLockIds,
     scriptNameLockIds,
     scriptNameLockName,
     scriptRowAssetIds,
@@ -55,6 +57,7 @@ import {
     shiftStoryScriptMergeGroupsAfterDelete,
     shiftStoryScriptRowAssetsAfterDelete,
     shiftStoryScriptRowAudiosAfterDelete,
+    splitScriptAssetNames,
     stepStoryScriptFontSize,
     STORY_SCRIPT_MAX_EXTRA_COLUMNS,
     storyScriptExtraColumnsToColumns,
@@ -2550,8 +2553,17 @@ export function CanvasScriptNodeContent({
                                     // 表里**别的镜**再出现同一个名字就直接显示同一张图 —— 也就是「同样的资产名
                                     // 只链接一次，就落到所有小格子里」。口径与铺链路的 `scriptShotPreciseAssetRefs`
                                     // 完全一致：**格子图优先、名字锁兜底**（格子自己挂了图就听格子的）。
-                                    const cellName = scriptNameLockName(row[column.key]);
-                                    const cellLockIds = cellName ? scriptNameLockIds(nameLocks, cellName) : [];
+                                    // 一格多角色（「苏晚、阿杰、小雨」）时逐人取锁再并起来，与铺链路的
+                                    // `scriptShotPreciseAssetRefs` 同口径 —— 否则群里只挂到第一个人的图。
+                                    const cellLockIds = scriptCellNameLockIds(nameLocks, column.key, row[column.key], extraColumns);
+                                    // 角色列一格可以写好几个人（「苏晚、阿杰、小雨」）：拆开逐人上锁 / 逐人解锁，
+                                    // 不能把整串当成一个资产名（那样锁出来的是叫「苏晚、阿杰、小雨」的假资产）。
+                                    // 场景 / 道具列仍按整格一个名字。
+                                    const cellNameList =
+                                        showCellSlot && scriptAssetColumnRole(column.key, extraColumns) === "character"
+                                            ? splitScriptAssetNames(row[column.key])
+                                            : [scriptNameLockName(row[column.key])].filter(Boolean);
+                                    const cellName = cellNameList.join("、") || scriptNameLockName(row[column.key]);
                                     const cellLocked = cellLockIds.length > 0;
                                     const cellFromLock = cellIds.length === 0 && cellLockIds.length > 0;
                                     const cellDisplayIds = cellIds.length ? cellIds : cellLockIds;
@@ -2652,7 +2664,9 @@ export function CanvasScriptNodeContent({
                                                                             onPointerDown={(event) => event.stopPropagation()}
                                                                             onClick={(event) => {
                                                                                 event.stopPropagation();
-                                                                                onNameLockChange(node.id, cellName, []);
+                                                                                // 一格多角色：只解「这张图所属的那个人」，别把同格另外两人的锁一起清掉。
+                                                                                const owner = cellNameList.find((name) => scriptNameLockIds(nameLocks, name).includes(imageId));
+                                                                                onNameLockChange(node.id, owner || cellName, []);
                                                                             }}
                                                                             title={t("canvas.scriptNode.nameLockToggleOff", { name: cellName })}
                                                                         >
@@ -2705,16 +2719,24 @@ export function CanvasScriptNodeContent({
                                                             onPointerDown={(event) => event.stopPropagation()}
                                                             onClick={(event) => {
                                                                 event.stopPropagation();
-                                                                // 已锁 → 解锁；未锁 → 把这一格当前的图锁成「这个资产名 → 这几张图」。
+                                                                // 已锁 → 解锁（一格多角色就逐人解）；未锁 → 把这一格当前的图锁成「这个资产名 → 这几张图」。
+                                                                const targets = cellNameList.length ? cellNameList : [cellName];
                                                                 if (cellLocked) {
-                                                                    onNameLockChange(node.id, cellName, []);
+                                                                    for (const name of targets) onNameLockChange(node.id, name, []);
                                                                     return;
                                                                 }
                                                                 if (!cellDisplayIds.length) {
                                                                     message.warning(t("canvas.scriptNode.nameLockNeedImage", { name: cellName }));
                                                                     return;
                                                                 }
-                                                                onNameLockChange(node.id, cellName, cellDisplayIds);
+                                                                // 一格多角色：只锁「还没自己的图」的那几个人（已锁好的人不覆盖），
+                                                                // 且只锁本格自己链接的图 —— 否则一群人会被共享成同一张图。
+                                                                const pending =
+                                                                    cellNameList.length > 1
+                                                                        ? cellNameList.filter((name) => scriptNameLockIds(nameLocks, name).length === 0)
+                                                                        : targets;
+                                                                const lockIds = cellNameList.length > 1 && cellIds.length ? cellIds : cellDisplayIds;
+                                                                for (const name of pending.length ? pending : targets) onNameLockChange(node.id, name, lockIds);
                                                             }}
                                                             title={cellLocked ? t("canvas.scriptNode.nameLockToggleOff", { name: cellName }) : t("canvas.scriptNode.nameLockToggleOn", { name: cellName })}
                                                         >

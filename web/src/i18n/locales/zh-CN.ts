@@ -856,6 +856,7 @@ export default {
             batchAssetModelHint: "取自配置偏好的默认生图模型，不改则一直跟随",
             batchAssetModelPlaceholder: "选择用于批量生成资产图的模型",
             assetCandidateHint: "画布上有 {{count}} 个可链接的节点",
+            castBackfilled: "有 {{count}} 个镜头按画面文字补全了出场角色（不说话的也在内），请顺手复核一下",
             assetTabCanvas: "从画布链接",
             assetTabUpload: "上传文件",
             assetPickHint: "勾选要作为参考的资产，确认后会连成脚本节点的上游素材（图片会作为生图的参考图）",
