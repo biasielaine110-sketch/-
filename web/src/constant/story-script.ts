@@ -285,7 +285,8 @@ You generate a structured story-script table from an uploaded script excerpt.
 - \`character_description_1\` should prefer bracketed character-card format, e.g. \`[沈昭昭_现代: 28岁女性，面色苍白，神情疲惫，身穿现代简约职业装……]\`.
 - \`scene\` should be a short, stable location name (e.g. \`深夜办公室\`, \`盛唐宫殿·内\`), reused verbatim wherever the same place appears.
 - \`scene_description\` should describe the location concretely enough to be used directly as an image-generation prompt.
-- \`prop\` should name the key object(s) this shot depends on; \`prop_description\` describes their look, material and state.
+- \`prop\` should name **only the key object(s) this shot really depends on**, at most **3 per shot**, joined by \`、\` when several; \`prop_description\` describes their look, material and state.
+- 🔴 Every prop you list becomes **its own generated asset image**. One-off tableware, ornaments, tissues, packaging and background clutter must **not** go into \`prop\` — describe them in one clause inside \`visual_description\` or \`prop_description\` instead. Write \`无\` when the shot has no key prop.
 - \`blocking\` should read like a floor plan in words: left / right / centre, foreground / midground / background, facing direction, and how far apart the characters are.
 - \`style_prompt\` describes the image style for this shot — film stock / colour grade / texture / grain / reference genre or director. Keep it identical across shots in the same scene, and write \`无\` when no particular style is needed.
 
@@ -428,6 +429,8 @@ const STORY_SCRIPT_STYLE_HINT_SHOT = [
 
 const STORY_SCRIPT_STYLE_HINT_ASSET = [
     "- 每一镜都要填「场景 / 场景描述 / 道具 / 道具描述 / 人物站位」，同一场景或同一道具在多镜里必须复用完全一致的名字",
+    "- 🔴 道具列**只写这一镜真正依赖、且需要跨镜保持一致的关键道具**，**一镜最多 3 件**（多件用 `、` 分隔）；这一镜没有关键道具就写 `无`",
+    "- 🔴 **道具列里每写一件，就会单独生成一张资产图**。餐具、摆件、纸巾、包装、背景小物这类用过就不再出现的次要道具**不要**写进道具列，改成在「画面描述」或「道具描述」里一句话带过 —— 它们跟着画面一起生，不单独出图",
     "- 人物站位要写清谁在画面左侧 / 右侧 / 前景 / 后景、朝向、彼此的远近；除非这一镜人物确实移动，否则保持与上一镜一致",
     "- 人物移动时写清从上一位置到新位置的移动过程，不要让角色在两镜之间凭空换位",
 ];
@@ -454,6 +457,7 @@ export const STORY_SCRIPT_STORYBOARD_SYSTEM_PROMPT = `你是一名资深分镜�
 - 输出 Markdown 表格；也可以改输出一个 JSON 对象：{"title":"标题","rows":[{…}]}，键名用上表列名对应的英文（shot_no / duration / shot / visual_description / key_visual / style_prompt / scene / scene_description / prop / prop_description / character_action / blocking / camera_movement / dialogue / sound / transition / emotion）
 - 镜号用 1、2、3 这样的整数（不要写 S01）；时长用整数秒（不要写 3.5秒）
 - 同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位（blocking）写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）
+- 🔴 道具列**只写这一镜真正依赖、且需要跨镜保持一致的关键道具**，**一镜最多 3 件**（多件用 \`、\` 分隔），没有就写 \`无\`；**每写一件就会单独生成一张资产图** —— 餐具、摆件、纸巾、包装、背景小物这类次要道具不写进道具列，改用一句话写在「画面描述」或「道具描述」里
 - 某一格没有内容时写 \`无\``;
 
 const STORY_SCRIPT_STORYBOARD_COMMON_RULES = [
@@ -1373,6 +1377,57 @@ export function isMultiNameAssetColumn(columnKey: unknown, extras?: readonly Sto
     const role = scriptAssetColumnRole(columnKey, extras);
     return Boolean(role) && isMultiNameAssetRole(role);
 }
+
+/**
+ * 🔴 单镜「道具」最多算几件资产（默认 3）。
+ *
+ * 用户 2026-11-09 报障：「分镜表的道具拆的太碎了，直接一个镜头给我拆了 10 个道具资产出来
+ * （青花瓷面碗、竹筷、汤勺、长筷、鸡蛋、小碟、半颗卤蛋、花生碟、酒杯、门帘）」，
+ * 要求「使用频率不高、不重要的道具直接用文字描述生成，不用单独生成」。
+ *
+ * 提示词侧已经写明「只写关键道具、一镜最多 3 件、其余写进画面描述」，但模型不保证照做；
+ * 而**道具列里每多一件 = 多一张资产图**（真金白银），所以生成侧必须再兜一层：
+ * 超出的按原文顺序丢弃 —— 文字仍留在格子里，画面照样按提示词生成，只是不再单独出图 / 单独上锁。
+ *
+ * 想放开就改这一个常量（角色**不**受它影响：一格多角色是刚需，道具才是被拆碎的那一头）。
+ */
+export const SCRIPT_PROP_ASSET_LIMIT = 3;
+
+/**
+ * 道具名按上限取前 N 件；**超限时**先按「全表出现镜数」降序排（同频次保持表里原顺序）。
+ *
+ * 为什么不是简单取前 N：用户要的是「**使用频率不高**、不重要的道具不单独生成」——
+ * 一格里写了 6 件，其中两件在别的镜头也出现（需要跨镜一致），它们才是该留下出图的；
+ * 按顿号顺序一刀切很可能把这两件切掉、留下三只一次性碗。未超限时原样返回（顺序不动）。
+ */
+export function pickScriptPropAssetNames(names: readonly string[], frequency?: ReadonlyMap<string, number> | null, limit = SCRIPT_PROP_ASSET_LIMIT): string[] {
+    const list = names.filter(Boolean);
+    if (list.length <= limit) return list;
+    if (!frequency) return list.slice(0, limit);
+    return list
+        .map((name, index) => ({ name, index, hits: frequency.get(name) || 0 }))
+        .sort((left, right) => right.hits - left.hits || left.index - right.index)
+        .slice(0, limit)
+        .map((entry) => entry.name);
+}
+
+/** 全表每个道具名出现在几镜（`使用频率不高` 的量化口径；只在需要截断时参与排序）。 */
+function scriptPropShotFrequency(rows: readonly StoryScriptRow[], specs: ReadonlyArray<{ nameKey?: string; textKeys: string[] }>): Map<string, number> {
+    const freq = new Map<string, number>();
+    for (const row of rows) {
+        const seen = new Set<string>();
+        for (const spec of specs) {
+            if (!spec.nameKey) continue;
+            for (const one of splitScriptAssetNames(row[spec.nameKey])) {
+                if (seen.has(one)) continue;
+                seen.add(one);
+                freq.set(one, (freq.get(one) || 0) + 1);
+            }
+        }
+    }
+    return freq;
+}
+
 
 /** 点击分类胶囊时的轮转顺序：角色 → 场景 → 道具 → 站位图 → 音频 → 角色。 */
 export function nextScriptAssetRole(current: unknown): ScriptAssetRole {
@@ -2790,6 +2845,8 @@ export function collectScriptAssetCellTargets(role: unknown, rows?: readonly Sto
     const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
     if (!specs.length || !rows?.length) return [];
     const multiNameRole = isMultiNameAssetRole(role);
+    const propRole = resolveScriptAssetRole(role) === "prop";
+    const propFrequency = propRole ? scriptPropShotFrequency(rows, specs) : null;
     const out: ScriptAssetCellTarget[] = [];
     rows.forEach((row, index) => {
         const shotNo = Math.round(Number(row.shot_no)) || index + 1;
@@ -2805,7 +2862,10 @@ export function collectScriptAssetCellTargets(role: unknown, rows?: readonly Sto
              * 不拆的话这 5 个人 / 3 件道具只会得到一张「合照卡 / 一堆道具堆在一起」的图，
              * 后面铺链路也认不出谁是谁（用户 2026-11-08 第 19 条报障）。
              */
-            const names = multiNameRole && name ? splitScriptAssetNames(name) : [];
+            const splitNames = multiNameRole && name ? splitScriptAssetNames(name) : [];
+            // 道具一格列 10 件（餐具 / 摆件全单列）→ 一次生成 10 张图（用户 2026-11-09 报障）：
+            // 生成侧按 `SCRIPT_PROP_ASSET_LIMIT` 收口，超出的只当文字，不再占格位。
+            const names = propRole ? pickScriptPropAssetNames(splitNames, propFrequency) : splitNames;
             if (names.length > 1) {
                 for (const one of names) out.push({ shotNo, columnKey: spec.columnKey, title: one, name: one });
                 continue;
@@ -2831,6 +2891,8 @@ export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonl
     const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
     if (!specs.length || !rows?.length) return [];
     const multiNameRole = isMultiNameAssetRole(role);
+    const propRole = resolveScriptAssetRole(role) === "prop";
+    const propFrequency = propRole ? scriptPropShotFrequency(rows, specs) : null;
     const out: ScriptAssetPromptCandidate[] = [];
     const seen = new Map<string, number>();
     /** 按标题去重 + 「只剩名字 → 有真描述就升级」的唯一入口（单名字 / 多名字两条路共用）。 */
@@ -2856,7 +2918,9 @@ export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonl
              * 也绝不把「四件道具」当成一条去生一张「道具全家福」（用户 2026-11-08 第 19 条报障）。
              */
             if (multiNameRole && name) {
-                const names = splitScriptAssetNames(name);
+                const splitNames = splitScriptAssetNames(name);
+                // 道具：只保留 `SCRIPT_PROP_ASSET_LIMIT` 件（出现镜数多的优先），其余留在文字里、不单独出图。
+                const names = propRole ? pickScriptPropAssetNames(splitNames, propFrequency) : splitNames;
                 if (names.length > 1) {
                     for (const one of names) {
                         const own = findStoryScriptAssetDescription(rows, spec, one, row) || pickScriptNamedDescription(text, one);
@@ -3470,13 +3534,14 @@ export function buildStoryScriptSegmentAssetSection(sourceText: unknown): string
         return `${segment.index}. ${parts.join("　")}`;
     });
     return [
-        "## 源内容已标注的每一段资产（逐段照写，一镜都不许漏）",
+        "## 源内容已标注的每一段资产（人物 / 场景逐段照写，一镜都不许漏）",
         "下面这些段头是**源内容自己写的**，不是建议：",
         ...lines,
         "硬要求：",
-        "1. 每一段拆成几镜都可以，但**这一段里的每一镜**都必须把该段【人物】全部写进角色列（一格可写多人，用 `、`）、场景列写同一个场景名、道具列写全该段【道具】（多个用 `、`）。",
-        "2. 拆镜只改变景别 / 机位 / 动作 / 台词分配，**不许改出场名单**；不要因为某个人这一镜不说话就把他从角色列删掉。",
-        "3. 不同段落的人物不要互相串：第 2 段的人物不许出现在第 1 段的镜头里（除非源内容正文明确写了）。",
+        "1. 每一段拆成几镜都可以，但**这一段里的每一镜**都必须把该段【人物】全部写进角色列（一格可写多人，用 `、`）、场景列写同一个场景名。",
+        "2. 🔴 道具列**不要**照抄该段【道具】：只挑**这一镜真正依赖、且跨镜要保持同一个样子**的关键道具，**一镜最多 3 件**（多个用 `、`）；段头里剩下的餐具 / 摆件 / 纸巾 / 包装这类次要道具一律不写进道具列，改用一句话写进「画面描述」或「道具描述」—— 道具列里每写一件就会单独生成一张资产图。这一镜确实没有关键道具就写 `无`。",
+        "3. 拆镜只改变景别 / 机位 / 动作 / 台词分配，**不许改出场名单**；不要因为某个人这一镜不说话就把他从角色列删掉。",
+        "4. 不同段落的人物不要互相串：第 2 段的人物不许出现在第 1 段的镜头里（除非源内容正文明确写了）。",
     ].join("\n");
 }
 

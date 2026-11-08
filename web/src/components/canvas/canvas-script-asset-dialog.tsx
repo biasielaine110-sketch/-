@@ -7,7 +7,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
 import { CanvasSizePicker } from "@/components/canvas/canvas-size-picker";
-import { collectScriptAssetPromptCandidates, resolveStoryScriptImageSize, scriptAssetColumnRole, SCRIPT_ASSET_GENERATABLE_ROLE_IDS, SCRIPT_ASSET_ROLE_IDS, type ScriptAssetPromptCandidate, type ScriptAssetRole, type StoryScriptRow } from "@/constant/story-script";
+import { collectScriptAssetPromptCandidates, resolveStoryScriptImageSize, scriptAssetColumnRole, SCRIPT_ASSET_GENERATABLE_ROLE_IDS, SCRIPT_ASSET_ROLE_IDS, SCRIPT_PROP_ASSET_LIMIT, type ScriptAssetPromptCandidate, type ScriptAssetRole, type StoryScriptRow } from "@/constant/story-script";
 import { resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import { isAudioFile } from "@/lib/canvas/canvas-generation-helpers";
@@ -496,6 +496,10 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                     ) : (
                         <div className="text-[11px] opacity-50">{t("canvas.scriptNode.assetGenNoCandidate")}</div>
                     )}
+                    {/* 道具为什么只有几条：一格道具列可能写了十几件，但只有关键道具单独出图（用户 2026-11-09 报障）。 */}
+                    {genRole === "prop" ? (
+                        <div className="text-[11px] opacity-50">{t("canvas.scriptNode.assetPropLimitHint", { n: SCRIPT_PROP_ASSET_LIMIT })}</div>
+                    ) : null}
                 </>
             )}
             <div className="flex flex-col gap-1">
