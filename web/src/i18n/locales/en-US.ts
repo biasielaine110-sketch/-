@@ -801,7 +801,7 @@ export default {
             batchAssetOpen: "Generate all ({{count}})",
             batchAssetHint: "Generate every character / scene / prop from the storyboard in one go: untick the ones you don't want, or just generate one type; the images land in a tidy grid on the right",
             directAsset: "Direct generate",
-            directAssetHint: "No dialog, no filtering: generate all {{count}} characters / scenes / props at once (characters locked to 9:16, scenes & props to 16:9, ignoring the size selector above; blocking diagrams excluded) with the default image model from your preferences",
+            directAssetHint: "No dialog, no filtering: generate all {{count}} characters / scenes / props at once (characters locked to 9:16, scenes & props to 16:9, ignoring the size selector above; blocking diagrams excluded). Scene prompts also get an empty-plate suffix (no people) and every prompt ends with its aspect ratio; the default image model from your preferences is used",
             directAssetStarted: "Started generating {{count}} asset image(s)",
             directAssetEmpty: "No asset to generate yet — the character / scene / prop columns need content",
             oneClickVideo: "One-click video",

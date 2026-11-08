@@ -189,16 +189,21 @@ export function resolveScriptAssetViewTemplate(role: ScriptAssetRole, textPrompt
 }
 
 /**
- * 把版式追加到资产提示词后面。
+ * 把一段后缀追加到资产提示词后面。
  * ⚠️ 幂等：正文里已经含这段（用户自己粘过、或同一批被重算一次）就不再拼第二遍。
  */
-export function appendScriptAssetViewTemplate(prompt: string, template: string): string {
+export function appendScriptAssetPromptSuffix(prompt: string, suffix: string): string {
     const body = String(prompt ?? "").trim();
-    const view = String(template ?? "").trim();
-    if (!view) return body;
-    if (!body) return view;
-    if (body.includes(view)) return body;
-    return `${body}\n\n${view}`;
+    const tail = String(suffix ?? "").trim();
+    if (!tail) return body;
+    if (!body) return tail;
+    if (body.includes(tail)) return body;
+    return `${body}\n\n${tail}`;
+}
+
+/** 词库视图版式的追加（等价于 `appendScriptAssetPromptSuffix`，名字保留旧口径）。 */
+export function appendScriptAssetViewTemplate(prompt: string, template: string): string {
+    return appendScriptAssetPromptSuffix(prompt, template);
 }
 
 /**
@@ -212,7 +217,57 @@ export function applyScriptAssetViewTemplates(items: readonly ScriptAssetBatchIt
     return items.map((item) => {
         const template = resolveScriptAssetViewTemplate(item.role, textPrompts);
         if (!template) return item;
-        const prompt = appendScriptAssetViewTemplate(item.prompt, template);
+        const prompt = appendScriptAssetPromptSuffix(item.prompt, template);
+        return prompt === item.prompt ? item : { ...item, prompt };
+    });
+}
+
+// ── 「一键直接生图」的固定尾缀：场景空景 + 画幅收口 ────────────────────────────────
+
+/**
+ * 场景资产图的**空景**尾缀（用户 2026-11-08）：
+ * 「场景出图时，添加一个后缀，即图片中不要出现人物角色，为场景的空景展示。」
+ *
+ * 为什么要写进提示词，而不是只靠 `size`：
+ *  - 场景图是拿来当**背景/空间参考**的，混进人物会污染后面所有分镜（视频里「场景里多个人」的根源）；
+ *  - 生图模型对「否定词」不敏感，所以不只写「不要人物」，还把「要什么」写全（建筑 / 陈设 / 环境 / 光线）。
+ */
+export const SCRIPT_ASSET_EMPTY_SCENE_SUFFIX =
+    "空景要求：画面中不要出现任何人物角色——没有人物、没有人脸、没有背影或剪影、没有人群、没有手部特写，只表现场景本身的建筑、陈设、环境与光线，作为后续分镜的空镜背景。";
+
+/**
+ * 画幅收口尾缀：把「9:16 / 16:9」**写成提示词最后一行**。
+ *
+ * 为什么需要它：`size` 参数只对「认这个字段的模型」有效 —— 有的中转 / 有的模型家族会收下
+ * `size` 却按提示词排版（尤其当词库版式里写了别的画幅时，模型会跟着版式走，出方图）。
+ * 用户 2026-11-08 报障「角色出图现在出来的是 1x1 的，应该是 9x16」就是这一路。
+ *
+ * ⚠️ 两个口径必须**同源**：文字里的比例由 `resolveScriptAssetDirectSize()` 推出来，
+ * 不许另写一份常量，否则「画幅硬规则」与「提示词里写的画幅」会漂。
+ */
+export function buildScriptAssetFrameSuffix(role: ScriptAssetRole): string {
+    const size = resolveScriptAssetDirectSize(role);
+    if (size === "9:16") return "画面比例：9:16 竖版（宽:高 = 9:16），整张图按竖构图排版，不要做成 1:1 方图或横图。";
+    if (size === "16:9") return "画面比例：16:9 横版（宽:高 = 16:9），整张图按横构图排版，不要做成 1:1 方图或竖图。";
+    return `画面比例：${size}，整张图按这个比例排版。`;
+}
+
+/**
+ * 「一键直接生图」提示词的**最终整形**（顺序即语义，不能乱）：
+ *
+ *  1. 资产描述（分镜表里那一格）—— 最前，权重最高；
+ *  2. 词库视图版式（角色 / 场景各一条，见 `SCRIPT_ASSET_VIEW_TEMPLATE_RULES`）；
+ *  3. 场景 → 空景尾缀（只在场景加，角色 / 道具不加）；
+ *  4. 画幅尾缀 —— **永远最后一行**，用来压过前面版式里可能写死的画幅。
+ *
+ * 每一步都幂等：同一批重算、或用户手动把尾缀粘进提示词后再点，都不会出现两份。
+ */
+export function applyScriptAssetDirectDecorations(items: readonly ScriptAssetBatchItem[], textPrompts?: readonly ViewTemplatePromptEntry[] | null): ScriptAssetBatchItem[] {
+    if (!items.length) return [];
+    return applyScriptAssetViewTemplates(items, textPrompts).map((item) => {
+        let prompt = item.prompt;
+        if (item.role === "scene") prompt = appendScriptAssetPromptSuffix(prompt, SCRIPT_ASSET_EMPTY_SCENE_SUFFIX);
+        prompt = appendScriptAssetPromptSuffix(prompt, buildScriptAssetFrameSuffix(item.role));
         return prompt === item.prompt ? item : { ...item, prompt };
     });
 }
