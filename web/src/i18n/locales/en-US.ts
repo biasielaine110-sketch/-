@@ -983,7 +983,7 @@ export default {
             assetRole_prop: "Prop",
             assetRole_blocking: "Blocking",
             assetRole_audio: "Audio",
-            assetRoleHint: "Cycle this asset's type: characters are matched per shot by name; scene / prop / blocking are linked to every shot; audio links to video nodes only",
+            assetRoleHint: "Cycle this asset's type: character / scene / prop / blocking are all matched by name to the shots that actually use them (no longer linked to every shot), in the order character → scene → prop → blocking; audio links to video nodes only",
             poolAssetRemove: "Unlink (drops the upstream connection and clears table references to it)",
             poolAssetReorderHint: "Drag to reorder · click to cycle type · × in the corner unlinks",
             assetRolePickHint: "Tick it, then pick a type (default: character)",

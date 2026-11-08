@@ -984,7 +984,7 @@ export default {
             assetRole_prop: "道具",
             assetRole_blocking: "站位图",
             assetRole_audio: "音频",
-            assetRoleHint: "点击切换这张素材的分类：角色按名字匹配到对应镜头，场景 / 道具 / 站位图会连到每一镜，音频只连到视频节点",
+            assetRoleHint: "点击切换这张素材的分类：角色 / 场景 / 道具 / 站位图都按名字匹配到用到它的那几个镜头（不再每镜全连），连线顺序是角色 → 场景 → 道具 → 站位图；音频只连到视频节点",
             poolAssetRemove: "解除链接（断开这条上游连线，并清掉表里对它的引用）",
             poolAssetReorderHint: "拖动可调整顺序 · 点一下切换分类 · 右上角 × 解除链接",
             assetRolePickHint: "勾选后可以为它选分类（默认「角色」）",

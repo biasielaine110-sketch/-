@@ -48,7 +48,7 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, composeStyledPrompt, getStyleTemplate } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, describeMomanSourceOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchStoryScriptRowAssets, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMergeGroups, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptImageSize, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole } from "@/constant/story-script";
+import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, describeMomanSourceOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchScriptRowAssetsByRole, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMergeGroups, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, orderScriptRefIds, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptImageSize, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole, type ScriptRefLinkKind } from "@/constant/story-script";
 import { resolveScriptPromptValues, resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -9034,8 +9034,8 @@ function AtelierCanvasPage() {
             const upstreamAssets = upstreamNodes
                 .filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content))
                 .map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
-            const characterRefs = upstreamAssets.filter((asset) => asset.role === "character");
-            const globalRefs = upstreamAssets.filter((asset) => asset.role !== "character");
+            // ⚠️ 这里**不再**分「角色 / 全局」两拨：所有素材都交给 `matchScriptRowAssetsByRole` 按分类逐镜匹配。
+            // 老实现把场景 / 道具 / 站位无条件连到每一镜，一张表十几个资产 → 每个视频节点挂十几张图（用户报障）。
             const audioRefs = upstreamNodes
                 .filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey))
                 .map((node) => ({ id: node.id, title: node.title }));
@@ -9147,9 +9147,14 @@ function AtelierCanvasPage() {
 
                 // 每一镜仍然各自保留「文本 → 图片」（关键帧按镜给），只有视频节点才合并（运镜按段给）。
                 const imageNodes: CanvasNodeData[] = [];
-                // 这一段视频用到的全部资产：角色按各镜角色名匹配，场景 / 道具 / 站位图每镜都算。
-                // 汇总后直接连到视频节点 —— 生成的「视频生成窗口」里就能看到并引用这些资产图。
+                // 这一段视频用到的全部资产：角色按各镜角色名匹配，场景 / 道具 / 站位**也按各镜自己的列**匹配
+                // （2026-11-08 第 13 条：不再整类全连）。汇总后直接连到视频节点 —— 生成的「视频生成窗口」
+                // 里就能看到并引用这些资产图。
                 const groupAssetIds = new Set<string>();
+                // 每张参考图属于哪一档（角色 / 场景 / 道具 / 站位 / 镜头图）：写连线前按它排序，
+                // 于是视频节点的参考图顺序恒为「角色 → 场景 → 道具 → 特效/站位 → 镜头图」
+                //（顺序 = 输入框里 chip 的顺序，见 `orderScriptRefIds`）。
+                const groupAssetKinds = new Map<string, ScriptRefLinkKind>();
                 // 这一段里各镜自己的声音（表里「声音」列）：与 `groupAssetIds` 分开存 —— 音频只连视频节点，
                 // 既要跳过图片节点，也不能混进「资产绑定」提示词（那是给图片编号用的）。
                 const groupAudioIds = new Set<string>();
@@ -9191,9 +9196,8 @@ function AtelierCanvasPage() {
                     // 「按镜按资产」图位 + **资产锁定**：这一镜每一格该用哪张图 —— 格子图优先、资产锁兜底。
                     // 锁是按**资产名**记的，所以别的镜里出现同名（还是「张三」）时也认同一张 @图片。
                     const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, member.row, presetId, scriptExtras);
-                    const coveredRoles = new Set(preciseRefs.map((ref) => ref.role));
                     // 同一张图可能同时被「图位」「资产锁」「资产条」「镜头图」命中，连线去重，
-                    // 免得画布上出现两条并行同源线（以前靠 coveredRoles 间接避开，现在直接去重更稳）。
+                    // 免得画布上出现两条并行同源线。
                     const linkedIntoImage = new Set<string>();
                     for (const ref of preciseRefs) {
                         for (const preciseId of ref.ids) {
@@ -9201,21 +9205,25 @@ function AtelierCanvasPage() {
                             linkedIntoImage.add(preciseId);
                             linkToImage(preciseId);
                             groupAssetIds.add(preciseId);
+                            groupAssetKinds.set(preciseId, ref.role);
                         }
                     }
-                    // 角色素材按名字匹配到这一镜；场景 / 道具 / 站位图对每一镜都成立，直接一起连上。
-                    // 但「已经被图位 / 资产锁精准指定过」的那一路让位：角色列留空的不再参与名字匹配
-                    // （`blankPreciseAssetColumns`），场景 / 道具 / 站位按 coveredRoles 跳过——精准优先、资产条兜底。
+                    // 角色 / 场景 / 道具 / 站位**各自按这一镜自己的名字**匹配（2026-11-08 第 13 条）：
+                    // 以前「场景 / 道具 / 站位无条件每镜全连」→ 16 张图挂到一个镜头用不上的视频节点上。
+                    // 现在只连这一镜真的写到的那几个；已被图位 / 资产锁精准指定过的列由
+                    // `blankPreciseAssetColumns` + `coveredColumns` 让位 —— 精准优先、资产条兜底。
                     const barRow = blankPreciseAssetColumns(member.row, preciseRefs);
-                    const barAssets = [
-                        ...matchStoryScriptRowAssets(presetId, barRow, characterRefs),
-                        ...globalRefs.filter((asset) => !coveredRoles.has(asset.role)),
-                    ];
+                    const barAssets = matchScriptRowAssetsByRole(barRow, upstreamAssets, {
+                        preset: presetId,
+                        extras: scriptExtras,
+                        coveredColumns: new Set(preciseRefs.map((ref) => ref.columnKey)),
+                    });
                     for (const asset of barAssets) {
                         if (linkedIntoImage.has(asset.id)) continue;
                         linkedIntoImage.add(asset.id);
                         linkToImage(asset.id);
                         groupAssetIds.add(asset.id);
+                        groupAssetKinds.set(asset.id, resolveScriptAssetRole(asset.role));
                     }
                     // 这一镜自己的「镜头图」：只连到**这一镜**的图片节点；同时进 groupAssetIds，
                     // 于是下面会把它们一并连到该段的视频节点——即「按镜头把图片连到图片节点和视频节点」。
@@ -9224,6 +9232,8 @@ function AtelierCanvasPage() {
                         linkedIntoImage.add(rowAssetId);
                         linkToImage(rowAssetId);
                         groupAssetIds.add(rowAssetId);
+                        // 镜头图不是「资产」，排在资产之后（档位 `shot`）。
+                        groupAssetKinds.set(rowAssetId, "shot");
                     }
                     // 资产文案：第四套写多行「资产锁定」块（`@图片1：李曼人物参考，锁定…`），
                     // 其余三套写单行「资产名@图片N」。两种都在输入框里能看到每张参考图是什么资产，
@@ -9249,9 +9259,16 @@ function AtelierCanvasPage() {
                     // 分镜提示词已经在本镜的文本 / 图片节点上，视频节点拿的是它的关键帧首帧。
                     videoPrompt: member.prompts.videoPrompt,
                 }));
+                /**
+                 * 参考图**连线顺序**（用户 2026-11-08 第 13 条）：角色 → 场景 → 道具 → 站位/特效 → 镜头图。
+                 * 多个镜合成一个视频节点时，先把这几个镜涉及的角色都排上，再场景、再道具 —— 与「哪一镜写的」
+                 * 无关，只按档位。⚠️ 这个顺序同时决定：① 写连线的先后；② 输入框里 chip 的先后（chip 顺序 =
+                 * 上游连线数组顺序）；③ 「资产绑定 / 资产锁定」文案里 `@图片N` 的编号。三处必须同源。
+                 */
+                const orderedGroupAssetIds = orderScriptRefIds([...groupAssetIds], (assetId) => groupAssetKinds.get(assetId));
                 // 视频节点的资产文案（第四套=资产锁定块，其余=资产绑定行）：本段所有资产图都是直连视频节点的，
-                // 顺序与写连线时一致 —— groupAssetIds（Set 保序）→ 音频（音频只连视频、但不进「图片资产」文案，拼装时按 kind 过滤掉）。
-                const videoBinding = assetBindingOf([...groupAssetIds, ...audioRefs.map((asset) => asset.id)], nodesRef.current, assetNameOf, assetRoleOf);
+                // 顺序与写连线时一致 —— orderedGroupAssetIds → 音频（音频只连视频、但不进「图片资产」文案，拼装时按 kind 过滤掉）。
+                const videoBinding = assetBindingOf([...orderedGroupAssetIds, ...audioRefs.map((asset) => asset.id)], nodesRef.current, assetNameOf, assetRoleOf);
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
                 const videoPrompt = withScriptAssetBinding(baseVideoPrompt, videoBinding);
                 // 单镜模式：10/15 秒 = 锁定成片秒数（不抄表里旧值，否则「选了 10 秒铺出来还是 3 秒」）；
@@ -9283,7 +9300,8 @@ function AtelierCanvasPage() {
                 for (const imageNode of imageNodes) createdConnections.push({ id: nanoid(), fromNodeId: imageNode.id, toNodeId: videoNode.id });
                 // 资产图也直接连到视频节点：视频生成窗口本身就是「已链接资产图片」的状态。
                 // 脚本节点没连任何资产时 groupAssetIds 为空，这里自然一条都不加。
-                for (const assetId of groupAssetIds) {
+                // ⚠️ 一定要用排好序的 `orderedGroupAssetIds`（不是原始 Set）：参考图顺序就是连线顺序。
+                for (const assetId of orderedGroupAssetIds) {
                     createdConnections.push({ id: nanoid(), fromNodeId: assetId, toNodeId: videoNode.id });
                     assetLinkCount += 1;
                 }
@@ -9741,14 +9759,15 @@ function AtelierCanvasPage() {
             // 第四套用多行「资产锁定」块，其余三套保持老的单行「资产绑定」（与整条铺链路同口径）。
             const assetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
             const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId, shotExtras);
-            const coveredRoles = new Set(preciseRefs.map((ref) => ref.role));
             const cellAssetRefs = preciseRefs.flatMap((ref) => ref.ids).filter((id) => nodesRef.current.some((node) => node.id === id));
-            // 角色按这一镜的角色名匹配（已被图位 / 锁定过的角色列不再参与），场景 / 道具 / 站位图无条件连上。
+            // 与整条铺链路同口径（2026-11-08 第 13 条）：角色 / 场景 / 道具 / 站位都**按这一镜自己的列**匹配，
+            // 不再「场景 / 道具 / 站位无条件全连」——否则一镜搭上整张表的十几张资产图。
             const barRow = blankPreciseAssetColumns(row, preciseRefs);
-            const assets = [
-                ...matchStoryScriptRowAssets(presetId, barRow, upstreamAssets.filter((asset) => asset.role === "character")),
-                ...upstreamAssets.filter((asset) => asset.role !== "character" && !coveredRoles.has(asset.role)),
-            ];
+            const assets = matchScriptRowAssetsByRole(barRow, upstreamAssets, {
+                preset: presetId,
+                extras: shotExtras,
+                coveredColumns: new Set(preciseRefs.map((ref) => ref.columnKey)),
+            });
             // 音频素材只连视频节点（不参与生图），与整条铺链路一致。
             const audioRefs = upstreamNodes.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey));
             // 这一镜自己的「镜头图」也直连视频节点；已删掉的图片节点直接跳过。
@@ -9757,10 +9776,19 @@ function AtelierCanvasPage() {
             const rowAudioRefs = scriptRowAudioIds(source.metadata?.scriptRowAudios, shotNo).filter((id) => nodesRef.current.some((node) => node.id === id));
             // 去重：同一张图可能同时是「图位 / 锁的图」和「镜头图」，别连出两条并行线。
             const linkIds = Array.from(new Set([...assets.map((asset) => asset.id), ...audioRefs.map((asset) => asset.id), ...rowAudioRefs, ...rowAssetRefs, ...cellAssetRefs]));
-            const links = linkIds.map((id) => ({ id: nanoid(), fromNodeId: id, toNodeId: videoNode.id }));
+            // 连线顺序（2026-11-08 第 13 条）：角色 → 场景 → 道具 → 站位/特效 → 镜头图 → 音频。
+            // 顺序 = 视频节点输入框里 chip 的顺序 = `@图片N` 的编号，所以必须在建 line / 拼文案之前排好。
+            const linkKinds = new Map<string, ScriptRefLinkKind>();
+            for (const ref of preciseRefs) for (const id of ref.ids) linkKinds.set(id, ref.role);
+            for (const asset of assets) linkKinds.set(asset.id, resolveScriptAssetRole(asset.role));
+            for (const id of rowAssetRefs) linkKinds.set(id, "shot");
+            for (const asset of audioRefs) linkKinds.set(asset.id, "other");
+            for (const id of rowAudioRefs) linkKinds.set(id, "other");
+            const orderedLinkIds = orderScriptRefIds(linkIds, (id) => linkKinds.get(id));
+            const links = orderedLinkIds.map((id) => ({ id: nanoid(), fromNodeId: id, toNodeId: videoNode.id }));
             // 资产文案：本镜连进视频节点的图片资产 → 第四套写多行「资产锁定」块、其余三套写「资产名@图片N」
-            //（编号顺序 = linkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
-            const videoBinding = assetBindingOf(linkIds, nodesRef.current, assetNameOf, assetRoleOf);
+            //（编号顺序 = orderedLinkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
+            const videoBinding = assetBindingOf(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
             videoNode.metadata = { ...videoNode.metadata, prompt: withScriptAssetBinding(videoNode.metadata?.prompt, videoBinding) };
             nodesRef.current = [...nodesRef.current, videoNode];
             setNodes((prev) => [...prev, videoNode]);

@@ -1294,10 +1294,14 @@ export function buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }:
 export type StoryScriptAssetRef = { id: string; title: string };
 
 /**
- * 脚本节点上游「资产」的分类。分类决定铺链路时这张素材会连到哪些节点：
- *  - character 角色：按分镜里的角色名逐镜匹配（沿用 `matchStoryScriptRowAssets`），连到图片节点；
- *  - scene / prop / blocking 场景 / 道具 / 站位图：与具体某个人物无关，对每一镜都成立，逐镜全连（图片节点）；
+ * 脚本节点上游「资产」的分类。分类决定铺链路时这张素材会连到哪些节点、以及连线的先后：
+ *  - character 角色：按分镜里的角色名逐镜匹配（`matchScriptRowAssetsByRole`），连到图片节点；
+ *  - scene / prop / blocking 场景 / 道具 / 站位图：**也按各自的列名逐镜匹配**（2026-11-08 第 13 条：
+ *    以前是「每镜全连」，一张表十几个资产就会给每个视频节点挂十几张图），只有这一镜写到它们时才连；
  *  - audio 音频：不是画面素材，铺链路时**只直连视频节点**（音频是成片的一部分，塞给图片节点没意义）。
+ *
+ * 连线顺序（视频节点参考图 / chip / `@图片N` 编号）：角色 → 场景 → 道具 → 站位图 → 镜头图 → 音频，
+ * 见 `SCRIPT_REF_LINK_ORDER` / `orderScriptRefIds`。
  */
 export type ScriptAssetRole = "character" | "scene" | "prop" | "blocking" | "audio";
 
@@ -1741,6 +1745,9 @@ export const STORY_SCRIPT_ASSET_MATCH_THRESHOLD = 0.5;
  *   再按 `storyScriptAssetNameSimilarity` 算相似度，≥ 0.5 就算同一个资产）；
  * - 这一镜的资产列全是「无」→ 不连（纯环境镜头不该被塞进角色图）；
  * - 有名字但一个都没对上（模型可能改写了角色名）→ 退回全部连，宁可多连也不要漏角色。
+ *
+ * ⚠️ 铺链路已改用 `matchScriptRowAssetsByRole`（按分类逐镜匹配，不再整类全连）。
+ * 这个函数保留给「只关心角色名」的老调用方 / 探针，别再往铺链路里加回来。
  */
 export function matchStoryScriptRowAssets(
     preset: StoryScriptPresetId | string | null | undefined,
@@ -1764,7 +1771,8 @@ export function matchStoryScriptRowAssets(
  * **逐镜图片**：镜号 → 画布上图片节点 id 的列表。存在脚本节点的 `metadata.scriptRowAssets`。
  *
  * 与 `metadata.scriptAssetRoles`（脚本节点级：这张素材属于哪一类，供铺链路时按类分派）刻意分开：
- *  - 「资产」是**整表共享**的参考图（角色卡 / 场景 / 道具 / 站位图），铺链路时对每一镜都成立；
+ *  - 「资产」是**整表共享**的参考图（角色卡 / 场景 / 道具 / 站位图），铺链路时按分类逐镜匹配
+ *    （只连这一镜真的写到的那几个）；
  *  - 「镜头图」是**按镜指定**的成片关键帧 —— 用户在分镜表某一行的「镜头图」列里直接导入 / 链接 /
  *    生成，铺链路时只连到**这一镜**的图片节点（并随该分组合并进视频节点）。
  *
@@ -2039,8 +2047,8 @@ export function scriptShotCellAssetSlots(
 /**
  * 把某一镜「已用单元格图位精准指定过」的资产列的**名字值清空**，返回一行副本。
  *
- * 铺链路时拿它去喂 `matchStoryScriptRowAssets`：例如第 3 镜的「场景」格已经挂了图，
- * 这一镜就只剩「还没指定的角色列」参与资产条匹配，资产条里的场景素材不会再糊到这一镜上。
+ * 铺链路时拿它去喂 `matchScriptRowAssetsByRole`：例如第 3 镜的「场景」格已经挂了图，
+ * 这一镜就只剩「还没指定的角色列」参与匹配，资产条里的场景素材不会再糊到这一镜上。
  */
 export function blankFilledAssetColumns(
     map: unknown,
@@ -2418,8 +2426,145 @@ export function getStoryScriptAssetColumns(
     return [...presetColumns, ...extraColumns];
 }
 
+/* ─────────── 铺链路参考图：按分类逐镜匹配 + 连线顺序（2026-11-08 第 13 条） ─────────── */
+
+/** 候选素材：`role` 来自 `metadata.scriptAssetRoles`（缺省 = 角色，与 `resolveScriptAssetRole` 同口径）。 */
+export type ScriptRowAssetCandidate = StoryScriptAssetRef & { role?: ScriptAssetRole };
+
+/**
+ * 参考图**连线档位**：角色 → 场景 → 道具 → 站位 / 特效 → 镜头图 → 其它（音频）。
+ *
+ * 用户原话：「铺出来的视频节点，首先需要按照角色，场景，道具和特效这样的先后顺序去链接，
+ * 若多个镜头铺一个视频节点也是先把这几个镜头涉及的角色先都链接参考，然后链接这几个镜头用到的场景，
+ * 然后链接这几个镜头用到的道具和特效。」
+ *
+ * ⚠️ 档位顺序 = `connections` 数组的先后 = 视频节点输入框里参考图 chip 的顺序
+ * （`getContextResourceNodes` 按上游连线数组顺序出 chip，见 `canvas-reference-order`）。
+ */
+export type ScriptRefLinkKind = ScriptAssetRole | "shot" | "other";
+
+export const SCRIPT_REF_LINK_ORDER: ScriptRefLinkKind[] = ["character", "scene", "prop", "blocking", "shot", "other"];
+
+/** 档位排序权重；未知档位一律排到最后（宁可排在音频后面，也不许插进角色前面）。 */
+export function scriptRefLinkRank(kind: unknown): number {
+    const index = SCRIPT_REF_LINK_ORDER.indexOf(kind as ScriptRefLinkKind);
+    return index < 0 ? SCRIPT_REF_LINK_ORDER.length - 1 : index;
+}
+
+/**
+ * 按档位**稳定**排序（同档保持传入顺序 = 镜头先后），纯函数、探针可直接钉。
+ * 传进来的通常是 `[...groupAssetIds]`（Set 保序 = 收集顺序），排序后才是真正写连线的顺序。
+ */
+export function orderScriptRefIds<T>(items: readonly T[], kindOf: (item: T) => unknown): T[] {
+    return items
+        .map((item, index) => ({ item, index, rank: scriptRefLinkRank(kindOf(item)) }))
+        .sort((left, right) => left.rank - right.rank || left.index - right.index)
+        .map((entry) => entry.item);
+}
+
+/**
+ * 某一镜在「某一类资产」下的表格值：`names` = 名字列（角色1/角色2/场景/道具/自建列），
+ * `texts` = 描述列（场景描述、道具描述、人物站位…）。
+ * - `coveredColumns`：已被图位 / 资产锁**精准指定**过的列，这里不再出值（那一列不参与兜底匹配）；
+ * - 预设里没有的列自然取不到值（storyboard 没有角色列）；
+ * - 自建资产列（`extra_*`）没有单独名字列，整格文本既当名字也当文本。
+ */
+export function scriptRowAssetRoleTexts(
+    row: StoryScriptRow,
+    role: ScriptAssetRole,
+    options?: { preset?: StoryScriptPresetId | string | null; extras?: readonly StoryScriptExtraColumn[] | null; coveredColumns?: ReadonlySet<string> },
+): { names: string[]; texts: string[] } {
+    const available = new Set(getStoryScriptAssetColumns(options?.preset, options?.extras).map((column) => column.key));
+    const covered = options?.coveredColumns;
+    const names: string[] = [];
+    const texts: string[] = [];
+    for (const spec of SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)]) {
+        if (!available.has(spec.columnKey)) continue;
+        if (covered?.has(spec.columnKey)) continue;
+        if (spec.nameKey) {
+            const name = storyScriptCellText(row[spec.nameKey]);
+            if (name) names.push(name);
+        }
+        for (const key of spec.textKeys) {
+            const text = storyScriptCellText(row[key]);
+            if (text) texts.push(text);
+        }
+    }
+    for (const extra of options?.extras || []) {
+        if (extra.role !== role || covered?.has(extra.key)) continue;
+        const text = storyScriptCellText(row[extra.key]);
+        if (!text) continue;
+        names.push(text);
+        texts.push(text);
+    }
+    return { names, texts };
+}
+
+/** 这个预设（含自建列）里到底有没有这一类资产的列 —— 没有就无从判断，只能维持「全部连」。 */
+function hasScriptAssetRoleColumn(role: ScriptAssetRole, preset?: StoryScriptPresetId | string | null, extras?: readonly StoryScriptExtraColumn[] | null): boolean {
+    const available = new Set(getStoryScriptAssetColumns(preset, extras).map((column) => column.key));
+    if (SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)].some((spec) => available.has(spec.columnKey))) return true;
+    return Boolean(extras?.some((extra) => extra.role === role));
+}
+
+/**
+ * **按分类逐镜匹配上游素材**（取代「角色按名字、场景 / 道具 / 站位无条件每镜全连」）。
+ *
+ * 报障现场（用户 2026-11-08）：「铺出来的视频节点给我链接了 16 张图？明明这个视频镜头用不到那么多」——
+ * 老实现把上游所有非角色素材（场景 / 道具 / 站位）**每一镜都连**，一张表里 13 个场景 / 道具图
+ * 就会让每个视频节点都挂 13 张，叠加角色后正好十几张。
+ *
+ * 现在的口径：**只连这一镜真的写到的那几个**。
+ *  - 名字列有值 → 与素材标题做相近匹配（`storyScriptAssetNameSimilarity`，含「双向包含 = 0.9」）；
+ *  - 名字对不上 → 再看描述列文本里有没有出现素材标题（人物站位没有名字列，全靠这一条）；
+ *  - 这一类列这一镜**整片为空** → 这一镜不涉及这类资产 → 一张都不连；
+ *  - 这一类只有**一张**候选、而这一镜确实写了这类资产、却又没匹配上（模型改写 / 图标题被手改）
+ *    → 连它（唯一解不会连错，避免「明明用了场景却一张没连」）；
+ *  - 预设里压根没有这一类列 → 全部连（没有信息可判，维持老行为）；
+ *  - 已经被图位 / 资产锁精准指定过的列（`coveredColumns`）→ 不再参与，精准优先。
+ */
+export function matchScriptRowAssetsByRole(
+    row: StoryScriptRow,
+    assets: readonly ScriptRowAssetCandidate[],
+    options?: { preset?: StoryScriptPresetId | string | null; extras?: readonly StoryScriptExtraColumn[] | null; coveredColumns?: ReadonlySet<string> },
+): ScriptRowAssetCandidate[] {
+    if (!row || !assets.length) return [];
+    const grouped = new Map<ScriptAssetRole, ScriptRowAssetCandidate[]>();
+    for (const asset of assets) {
+        const role = resolveScriptAssetRole(asset.role);
+        const list = grouped.get(role);
+        if (list) list.push(asset);
+        else grouped.set(role, [asset]);
+    }
+    // 输出按档位排一遍：调用方拿到就是「角色 → 场景 → 道具 → 站位」的顺序。
+    const orderedRoles = orderScriptRefIds([...grouped.keys()], (role) => role);
+    const out: ScriptRowAssetCandidate[] = [];
+    for (const role of orderedRoles) {
+        const list = grouped.get(role) || [];
+        // `audio` 不是图片资产；真混进来也一句不连（音频只连视频节点，走 `audioRefs` 那条路）。
+        if (role === "audio") continue;
+        if (!hasScriptAssetRoleColumn(role, options?.preset, options?.extras)) {
+            out.push(...list);
+            continue;
+        }
+        const { names, texts } = scriptRowAssetRoleTexts(row, role, options);
+        if (!names.length && !texts.length) continue;
+        const haystack = texts.map((text) => normalizeScriptAssetMatchText(text)).join("\n");
+        const matched = list.filter((asset) => {
+            const title = normalizeScriptAssetMatchText(asset.title);
+            if (!title) return false;
+            if (names.some((name) => storyScriptAssetNameSimilarity(name, asset.title) >= STORY_SCRIPT_ASSET_MATCH_THRESHOLD)) return true;
+            return Boolean(haystack) && haystack.includes(title);
+        });
+        if (matched.length) out.push(...matched);
+        else if (list.length === 1) out.push(list[0]);
+    }
+    return out;
+}
+
 /**
  * 每个分类能从分镜表里取到的「描述」列（由 `SCRIPT_ASSET_COLUMN_SPECS` 派生，改列只改上面一处）。
+
  * - `character`：两张角色卡（角色1/角色描述1、角色2/角色描述2）；
  * - `scene`：场景（名字，充当标题）+ 场景描述（提示词）；
  * - `prop`：道具（名字）+ 道具描述；
