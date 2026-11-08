@@ -9003,8 +9003,12 @@ function AtelierCanvasPage() {
             // 先摘掉「一行连图片提示词都凑不出来」的空行，再按分段方式切组——否则空行会把合并的镜数算歪。
             // `scriptExtras` 必须传进去：风格提示词也可能活在自建列（列名带「风格」）里。
             // 第四套：末尾追加的风格行写成 `- **视觉风格：**…`。
+            // `dropVideoStyle`：脚本节点**选了风格模板**时，视频段的提示词不带风格行
+            //（用户 2026-11-08 第 06 条：视频窗口里不填「视觉风格：…」，风格改由模板在生成时拼）。
+            // 没选模板时照旧带上，否则视频就一点风格信息都没有了。图片提示词两边都不动。
+            const dropScriptVideoStyle = Boolean(scriptStyleTemplateId);
             const allRenderable = rows
-                .map((row, index) => ({ row, index, prompts: preset.buildShotPrompts(row, scriptExtras, { directorScheme }) }))
+                .map((row, index) => ({ row, index, prompts: preset.buildShotPrompts(row, scriptExtras, { directorScheme, dropVideoStyle: dropScriptVideoStyle }) }))
                 .filter((item) => Boolean(item.prompts.imagePrompt));
             /**
              * 「选择铺链路」：只铺勾选的那一段，**且这一段合成一个视频节点**（用户 2026-11-06 要求）。
@@ -9610,8 +9614,9 @@ function AtelierCanvasPage() {
             const preset = getStoryScriptPreset(presetId);
             const directorScheme = resolveScriptSchemeId(source.metadata?.scriptScheme) === "director";
             // 与「一键铺链」同口径：风格提示词可能来自自建列（列名带「风格」），所以 extras 必须一起传。
+            // `dropVideoStyle` 同理：脚本节点选了风格模板 → 这个视频节点的提示词不带「视觉风格：…」那一行。
             const shotExtras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
-            const prompts = preset.buildShotPrompts(row, shotExtras, { directorScheme });
+            const prompts = preset.buildShotPrompts(row, shotExtras, { directorScheme, dropVideoStyle: Boolean(source.metadata?.styleTemplateId) });
             const shotNo = row.shot_no || rowIndex + 1;
             // 与「一键铺链」同口径：单镜时长档位（10/15 锁定、5 是上限、none 按表里）。
             const seconds = resolveStoryScriptShotSeconds(row.duration, source.metadata?.scriptSegmentSeconds);

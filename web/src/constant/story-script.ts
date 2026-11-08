@@ -131,11 +131,16 @@ export type StoryScriptPreset = {
      *
      * `options.directorScheme`：第四套铺链路时，末尾追加的风格行写成 `- **视觉风格：**…`
      *（与同套其它字段同一口径）；其它套仍是 `视觉风格：…`。
+     *
+     * `options.dropVideoStyle`：**视频提示词不追加风格行**（用户 2026-11-08 第 06 条）。
+     * 脚本节点上选了风格模板时，风格由 `composeStyledPrompt` 在生成时拼到提示词尾部；
+     * 视频节点里再抄一遍 `视觉风格：…` 就是两份，而且 H3 会把那段中文当旁白念出来。
+     * 图片提示词**不受影响**（图片那边保留这一行，风格文字对出图有用）。
      */
     buildShotPrompts: (
         row: StoryScriptRow,
         extras?: readonly StoryScriptExtraColumn[] | null,
-        options?: { directorScheme?: boolean },
+        options?: { directorScheme?: boolean; dropVideoStyle?: boolean },
     ) => StoryScriptShotPrompts;
     /**
      * 行内哪几列是「角色 / 资产名」：铺链路时拿这些值去和上游图片节点的标题匹配，只把命中的
@@ -988,6 +993,37 @@ export function isStoryScriptStyleLine(line: unknown): boolean {
 }
 
 /**
+ * 「风格类字段行」的宽口径：`视觉风格 / 画面风格 / 影像风格 / 风格提示词 / 独立风格提示词 / 风格`，
+ * 兼容 `- **视觉风格：**…`（第四套）与裸写 `视觉风格：…`（其余套）。
+ * 与 H3 那份 `H3_SCAFFOLD_STYLE_LABELS` 同一份名单，但这里是**铺链路**用的，别混。
+ */
+export function isStoryScriptStyleFieldLine(line: unknown): boolean {
+    return /^\s*(?:[-*]\s*)?\*{0,2}\s*(?:独立风格提示词|风格提示词|视觉风格|画面风格|影像风格|风格)\s*\*{0,2}\s*[：:]/.test(String(line ?? "").trim());
+}
+
+/**
+ * 剥掉提示词里的风格类字段行（用户 2026-11-08 第 06 条）。
+ *
+ * 用在**视频节点**提示词上：脚本节点选了风格模板后，风格由生成时的 `composeStyledPrompt` 拼到尾部，
+ * 视频窗口里再带一行 `视觉风格：…` 就是两份 —— 而且 H3 会把那段裸中文当旁白念出来
+ * （`keepStyleFields` 默认关就是为这个）。图片节点不吃这一刀：风格文字对出图还是有用的。
+ *
+ * 只按「整行是风格字段」删，行内混着别的字段（对白 + 风格挤一行）不在这里处理 —— 那是 H3 那层的活。
+ * 删完把连续空行收成一段，免得每镜末尾留个空洞。
+ */
+export function stripStoryScriptStyleLines(prompt: unknown): string {
+    const text = storyScriptCellText(prompt);
+    if (!text) return "";
+    const lines = text.split("\n");
+    if (!lines.some((line) => isStoryScriptStyleFieldLine(line))) return text;
+    return lines
+        .filter((line) => !isStoryScriptStyleFieldLine(line))
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}
+
+/**
  * 把这一镜的「风格提示词」拼进图片 / 视频提示词。
  *
  * 为什么是「追加在末尾」而不是塞进分镜提示词的第 7 段：分镜提示词由模型生成、用户可能手改，
@@ -1027,12 +1063,13 @@ export function resolveStoryScriptStyleText(row: StoryScriptRow, extras?: readon
 /**
  * 经典预设：`shot_prompt` / `video_motion_prompt` 本身已是成段的完整提示词（8 段 / 6 段），
  * 有就直接用；模型偶尔漏列，此时用可见描述兜底拼一条，避免这一行铺不出链路。
- * 两条提示词最后都拼上「风格提示词」列（见 `withStoryScriptStyle`）。
+ * 两条提示词最后都拼上「风格提示词」列（见 `withStoryScriptStyle`）；唯一例外是
+ * `options.dropVideoStyle` —— 视频段不拼（脚本节点选了风格模板时，风格由生成时合成）。
  */
 function buildClassicShotPrompts(
     row: StoryScriptRow,
     extras?: readonly StoryScriptExtraColumn[] | null,
-    options?: { directorScheme?: boolean },
+    options?: { directorScheme?: boolean; dropVideoStyle?: boolean },
 ): StoryScriptShotPrompts {
     const imagePrompt =
         storyScriptCellText(row.shot_prompt) ||
@@ -1044,7 +1081,8 @@ function buildClassicShotPrompts(
     const styleOpts = options?.directorScheme ? { directorFormat: true } : undefined;
     return {
         imagePrompt: withStoryScriptStyle(imagePrompt, style, styleOpts),
-        videoPrompt: withStoryScriptStyle(videoPrompt, style, styleOpts),
+        // 视频段：选了风格模板时不追风格行（风格由生成时 `composeStyledPrompt` 拼），见类型注释。
+        videoPrompt: options?.dropVideoStyle ? stripStoryScriptStyleLines(videoPrompt) : withStoryScriptStyle(videoPrompt, style, styleOpts),
     };
 }
 
@@ -1052,13 +1090,14 @@ function buildClassicShotPrompts(
 function buildStoryboardShotPrompts(
     row: StoryScriptRow,
     extras?: readonly StoryScriptExtraColumn[] | null,
-    options?: { directorScheme?: boolean },
+    options?: { directorScheme?: boolean; dropVideoStyle?: boolean },
 ): StoryScriptShotPrompts {
     const style = resolveStoryScriptStyleText(row, extras);
     const styleOpts = options?.directorScheme ? { directorFormat: true } : undefined;
+    const videoPrompt = joinStoryScriptPromptParts([row.camera_movement, row.character_action, row.visual_description, row.emotion]);
     return {
         imagePrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.visual_description, row.key_visual]), style, styleOpts),
-        videoPrompt: withStoryScriptStyle(joinStoryScriptPromptParts([row.camera_movement, row.character_action, row.visual_description, row.emotion]), style, styleOpts),
+        videoPrompt: options?.dropVideoStyle ? stripStoryScriptStyleLines(videoPrompt) : withStoryScriptStyle(videoPrompt, style, styleOpts),
     };
 }
 
