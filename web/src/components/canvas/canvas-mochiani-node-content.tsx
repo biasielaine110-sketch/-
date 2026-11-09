@@ -19,8 +19,10 @@ import {
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { buildStylePromptText, composeStyledPrompt, getStyleTemplate } from "@/constant/style-templates";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
+import { CanvasNodePromptPanel } from "./canvas-node-prompt-panel";
 
 /**
  * 「MochiAni 生视频」**节点**的内容区 —— 整个视频生成窗口就是画布上的一个节点。
@@ -129,6 +131,10 @@ type Props = {
     references?: CanvasResourceReference[];
     /** 点素材 chip 上的 × 时断开那根线（素材从参考里移除）。 */
     onDetachReference?: (sourceNodeId: string) => void;
+    /** 拖动提示词上方那排 chip 改顺序（与视频节点同一套 pointer 拖拽）。 */
+    onReorderReferences?: (orderedNodeIds: string[]) => void;
+    /** 双击参考图 chip → 画布的全屏预览。 */
+    onPreviewReference?: (referenceNodeId: string) => void;
     onCreateVideo: (videoUrl: string, prompt?: string) => Promise<string>;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
 };
@@ -262,7 +268,7 @@ const MEDIA_KIND_META = {
 
 type MediaKind = keyof typeof MEDIA_KIND_META;
 
-export function CanvasMochianiNodeContent({ node, references, onDetachReference, onCreateVideo, onConfigChange }: Props) {
+export function CanvasMochianiNodeContent({ node, references, onDetachReference, onReorderReferences, onPreviewReference, onCreateVideo, onConfigChange }: Props) {
     const { message } = App.useApp();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
 
@@ -285,7 +291,9 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     const [channelId, setChannelId] = useState(node.metadata?.mochianiConfig?.channelId || "");
     const [params, setParams] = useState<Record<string, string>>(node.metadata?.mochianiConfig?.params || {});
 
-    const [prompt, setPrompt] = useState(node.metadata?.mochianiPrompt || "");
+    // 提示词由嵌入的 `CanvasNodePromptPanel` 维护（它写 `metadata.prompt`），
+    // 这里再把同一份文本镜像到 `mochianiPrompt`（预检读它，同时兼容老数据）。
+    const prompt = node.metadata?.mochianiPrompt ?? node.metadata?.prompt ?? "";
     const [refImages, setRefImages] = useState<RefImage[]>([]);
     const [job, setJob] = useState<MochianiJob | null>(null);
     const [busy, setBusy] = useState("");
@@ -336,6 +344,25 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         },
         [node.id, onConfigChange],
     );
+
+    /** 提示词面板的写回：两处都写，面板靠 `prompt` 回填，预检靠 `mochianiPrompt`。 */
+    const handlePromptChange = useCallback(
+        (_nodeId: string, value: string) => {
+            patchMetadata({ prompt: value, mochianiPrompt: value });
+        },
+        [patchMetadata],
+    );
+
+    /**
+     * 老节点只有 `mochianiPrompt`（做节点之前那版留下的），而面板按 `composerContent ?? prompt` 回填。
+     * 补写一份 `prompt` 并 bump `promptSyncAt` —— 面板的同步 effect 只认 node.id / promptSyncAt。
+     */
+    useEffect(() => {
+        const legacy = node.metadata?.mochianiPrompt;
+        if (!legacy || node.metadata?.prompt === legacy) return;
+        patchMetadata({ prompt: legacy, promptSyncAt: Date.now() });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const checkHealth = useCallback(async () => {
         try {
@@ -598,12 +625,24 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         if (accepted.length) setRefImages((prev) => [...prev, ...accepted].slice(0, imageLimit));
     };
 
-    const runPlan = async () => {
-        const text = prompt.trim();
-        if (!text) {
+    /**
+     * 预检。`promptOverride` 由提示词面板的主按钮（文案「预检」）传进来，避免 state 落后一帧。
+     *
+     * 风格模板与视频节点同一条路：`composeStyledPrompt` 只在**发出去的那一版**提示词尾部追加，
+     * metadata 里存的仍是干净正文（幂等，重复预检不会叠第二遍）。
+     */
+    const runPlan = async (promptOverride?: string) => {
+        const base = (promptOverride ?? prompt).trim();
+        if (!base) {
             message.warning("先写提示词");
             return;
         }
+        if (!healthOk || !target) {
+            message.warning("先连上本机桥并读到 MochiAni 页面（点右上角「刷新」）");
+            return;
+        }
+        const styleTemplate = getStyleTemplate(node.metadata?.styleTemplateId);
+        const text = composeStyledPrompt(base, styleTemplate ? buildStylePromptText(styleTemplate) : "", "");
         const media = collectMediaPayload();
         if (imageRequired && media.images.length < imageRequired) {
             message.warning(`这个模型至少要 ${imageRequired} 张参考图（现在 ${media.images.length} 张）`);
@@ -720,6 +759,8 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     const estimatePoints = job?.estimate?.points ?? null;
     const notEnoughPoints = Number.isFinite(balance) && estimatePoints != null && balance < estimatePoints;
     const locked = Boolean(job) && ["planning", "submitting", "generating", "ready"].includes(jobStage);
+    /** 提示词面板的「运行中」：预检请求在飞 / 任务在跑，主按钮变成「停止」。 */
+    const panelRunning = busy === "plan" || ["planning", "submitting", "generating"].includes(jobStage);
     const stageColor = jobStage === "done" ? "success" : jobStage === "error" || jobStage === "blocked" ? "error" : jobStage ? "processing" : "default";
 
     const workLabel = target
@@ -885,17 +926,29 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                     </div>
                 </div>
 
-                {/* ④ 提示词 */}
-                <Input.TextArea
-                    value={prompt}
-                    onChange={(event) => {
-                        setPrompt(event.target.value);
-                        patchMetadata({ mochianiPrompt: event.target.value });
-                    }}
-                    rows={3}
-                    placeholder="例：一个穿雨衣的女孩在深夜便利店门口抬头看雨，霓虹反光，缓慢推镜"
-                    disabled={locked}
-                />
+                {/* ④ 提示词 —— 直接复用视频节点的提示词面板（内嵌形态）：
+                       @ 引用 chip（图 / 视频 / 音频 / 文案）+ 风格模板 + 主按钮＝预检。
+                       与视频窗口的唯一差别是这里没有模型/参数行（模型目录来自桥）和排期。 */}
+                <div className="rounded-md px-1.5 py-1.5" style={{ border: softBorder }}>
+                    <CanvasNodePromptPanel
+                        embedded
+                        hideModelRow
+                        hideSchedule
+                        allowSubmitWhileRunning={false}
+                        generateLabel="预检"
+                        modeOverride="video"
+                        node={node}
+                        isRunning={panelRunning}
+                        mentionReferences={references || []}
+                        onPromptChange={handlePromptChange}
+                        onConfigChange={(nodeId, patch) => onConfigChange(nodeId, patch as Partial<CanvasNodeMetadata>)}
+                        onGenerate={(_nodeId, _mode, text) => void runPlan(text)}
+                        onStop={() => void runCancel()}
+                        onReorderReferences={onReorderReferences}
+                        onRemoveReference={onDetachReference}
+                        onPreviewReference={onPreviewReference}
+                    />
+                </div>
 
                 {/* ⑤ 参考素材：连线接入的图 / 视频 / 音频 + 手动加的图 */}
                 <div>
@@ -1048,7 +1101,6 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 {!job || ["error", "cancelled"].includes(jobStage) ? (
                     <Button
                         size="small"
-                        type="primary"
                         icon={<Sparkles size={13} />}
                         loading={busy === "plan"}
                         onClick={() => void runPlan()}

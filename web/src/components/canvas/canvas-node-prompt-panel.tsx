@@ -63,9 +63,28 @@ type CanvasNodePromptPanelProps = {
     /** 取消当前排期。 */
     onCancelSchedule?: () => void;
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
+    /**
+     * 内嵌模式：去掉浮层的固定宽度 / 边框 / 阴影，铺满父容器。
+     * MochiAni 节点把这个面板**装进节点内容区**（不再是盖在画布上的浮窗）。
+     */
+    embedded?: boolean;
+    /**
+     * 藏掉「模型 + 参数」这一行（只留风格 / 镜头）。
+     * MochiAni 的模型和参数来自桥那边的 `/api/models`，本地渠道的 ModelPicker 在这里是无效控件。
+     */
+    hideModelRow?: boolean;
+    /** 藏掉排期入口：MochiAni 那条链路没有排期调度器，留着就是个点了没反应的按钮。 */
+    hideSchedule?: boolean;
+    /**
+     * 运行中是否还允许再点一次提交（原生 H3 视频节点会排队）。
+     * 不给就沿用老规则「只有视频模式能排队」；MochiAni 桥不排队，传 false 只剩「停止」。
+     */
+    allowSubmitWhileRunning?: boolean;
+    /** 覆盖主按钮文案（默认「生成」；纯图标按钮会用它当 aria-label）。 */
+    generateLabel?: string;
 };
 
-export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onReorderReferences, onRemoveReference, onPreviewReference, onImageSettingsOpenChange, scheduledAt, onSchedule, onCancelSchedule, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onContentChange, onGenerate, onStop, mentionReferences = [], onReorderReferences, onRemoveReference, onPreviewReference, onImageSettingsOpenChange, scheduledAt, onSchedule, onCancelSchedule, modeOverride, embedded, hideModelRow, hideSchedule, allowSubmitWhileRunning, generateLabel }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
@@ -91,6 +110,8 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const running = isRunning || localRunning;
     const elapsed = useElapsedSeconds(running, node.id);
     const promptPlaceholder = t(`canvas.promptPanel.${mode === "text" && hasTextContent ? "editText" : mode}`);
+    // 主按钮文案：默认走词库的「生成」，内嵌方（MochiAni 的「预检」）可以整条覆盖。
+    const submitLabel = generateLabel ?? t("canvas.promptPanel.generate");
 
     // Restore prompts when switching nodes, or when chat skills / external writers bump promptSyncAt.
     useEffect(() => {
@@ -328,7 +349,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
     // Native H3 video: allow another submit while one is running — canvas FIFO queues it.
     // Other modes still block until the current run finishes (button becomes Stop).
-    const allowQueueWhileRunning = mode === "video";
+    const allowQueueWhileRunning = allowSubmitWhileRunning ?? mode === "video";
 
     // 已有排期时，发送不再直接生成——避免「刚设好排期就被立刻跑掉」。要马上跑请用「立即生成」。
     const submit = () => {
@@ -410,8 +431,18 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     return (
         <div
             data-canvas-no-zoom
-            className="min-w-0 overflow-hidden rounded-2xl border p-3 shadow-2xl backdrop-blur"
-            style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text, width: 600, maxWidth: 600 }}
+            className={
+                // 内嵌形态**不写 `h-full`**：宿主（MochiAni 节点）把它放在一个高度 auto 的滚动列里，
+                // `h-full` 会被解析成「整个滚动区的高度」，把面板抻成一整屏。高度交给内容自己撑。
+                embedded
+                    ? "flex w-full min-w-0 flex-col overflow-hidden"
+                    : "min-w-0 overflow-hidden rounded-2xl border p-3 shadow-2xl backdrop-blur"
+            }
+            style={
+                embedded
+                    ? { color: theme.node.text }
+                    : { background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text, width: 600, maxWidth: 600 }
+            }
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
@@ -488,7 +519,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                 onChange={updatePrompt}
                 onSubmit={submit}
                 onDoubleClick={textEdit.handleDoubleClick}
-                className="thin-scrollbar h-40 min-w-0 w-full max-w-full cursor-text resize-none rounded-xl px-3 py-2 text-sm leading-5 outline-none"
+                className={`thin-scrollbar min-w-0 w-full max-w-full cursor-text resize-none rounded-xl px-3 py-2 text-sm leading-5 outline-none ${embedded ? "min-h-24 flex-1" : "h-40"}`}
                 style={{ background: "transparent", color: theme.node.text }}
                 placeholder={promptPlaceholder}
             />
@@ -524,8 +555,14 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         </>
                     ) : mode === "video" ? (
                         <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} className="max-w-[160px]" />
-                            <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[150px] !shrink-0 !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
+                            {/* hideModelRow：模型和参数由调用方自己给（MochiAni 节点的模型目录来自桥，
+                                本地渠道的 ModelPicker 在那儿选了也不生效）。风格 / 镜头照旧保留。 */}
+                            {hideModelRow ? null : (
+                                <>
+                                    <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} className="max-w-[160px]" />
+                                    <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[150px] !shrink-0 !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
+                                </>
+                            )}
                             {/* 视频窗口的风格模板：控件与内容跟图片节点完全一致（用户 2026-11-08 第 04 条），
                                 同样落在 `metadata.styleTemplateId`，生成时由 `composeStyledPrompt` 追加到提示词尾部。 */}
                             <CanvasStylePicker
@@ -563,7 +600,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                     )}
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
-                    {scheduledAt ? (
+                    {scheduledAt && !hideSchedule ? (
                         <>
                             {/* 已排期：发送不再直接生成——「立即生成」才是马上跑，主按钮改为打开排期面板（改时间/取消）。 */}
                             <Button
@@ -597,22 +634,25 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         </>
                     ) : (
                         <>
-                            <Tooltip title={t("canvas.promptPanel.schedule")}>
-                                <span className="shrink-0">
-                                    <Button
-                                        type="text"
-                                        size="small"
-                                        className="!h-10 !w-10 !min-w-10 !rounded-full !p-0"
-                                        style={{ color: theme.node.text }}
-                                        disabled={running}
-                                        onClick={() => setScheduleOpen(true)}
-                                        onMouseDown={(event) => event.stopPropagation()}
-                                        onPointerDown={(event) => event.stopPropagation()}
-                                        icon={<Clock className="size-4" />}
-                                        aria-label={t("canvas.promptPanel.schedule")}
-                                    />
-                                </span>
-                            </Tooltip>
+                            {/* hideSchedule：没有排期调度器的宿主（MochiAni 节点）不显示这颗点了没反应的按钮。 */}
+                            {hideSchedule ? null : (
+                                <Tooltip title={t("canvas.promptPanel.schedule")}>
+                                    <span className="shrink-0">
+                                        <Button
+                                            type="text"
+                                            size="small"
+                                            className="!h-10 !w-10 !min-w-10 !rounded-full !p-0"
+                                            style={{ color: theme.node.text }}
+                                            disabled={running}
+                                            onClick={() => setScheduleOpen(true)}
+                                            onMouseDown={(event) => event.stopPropagation()}
+                                            onPointerDown={(event) => event.stopPropagation()}
+                                            icon={<Clock className="size-4" />}
+                                            aria-label={t("canvas.promptPanel.schedule")}
+                                        />
+                                    </span>
+                                </Tooltip>
+                            )}
                             {running && allowQueueWhileRunning ? (
                                 <>
                                     <Button
@@ -620,9 +660,12 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                         className="!h-10 !min-w-12 shrink-0 !rounded-full !px-3"
                                         disabled={!canSubmit}
                                         onClick={submit}
-                                        aria-label={t("canvas.promptPanel.generate")}
+                                        aria-label={submitLabel}
                                     >
-                                        <ArrowUp className="size-4" />
+                                        <span className="flex items-center gap-1.5">
+                                            <ArrowUp className="size-4" />
+                                            {generateLabel ? <span className="text-xs font-medium">{generateLabel}</span> : null}
+                                        </span>
                                     </Button>
                                     <Button
                                         type="primary"
@@ -648,7 +691,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                     danger={running}
                                     disabled={!running && !canSubmit}
                                     onClick={() => (running ? handleStop() : submit())}
-                                    aria-label={t(running ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
+                                    aria-label={running ? t("canvas.promptPanel.stopGeneration") : submitLabel}
                                 >
                                     <span className="flex items-center gap-1.5">
                                         {running ? (
@@ -661,7 +704,10 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                                                 </span>
                                             </>
                                         ) : (
-                                            <ArrowUp className="size-4" />
+                                            <>
+                                                <ArrowUp className="size-4" />
+                                                {generateLabel ? <span className="text-xs font-medium">{generateLabel}</span> : null}
+                                            </>
                                         )}
                                     </span>
                                 </Button>
@@ -670,7 +716,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                     )}
                 </div>
             </div>
-            {onSchedule ? (
+            {onSchedule && !hideSchedule ? (
                 <CanvasScheduleDialog
                     open={scheduleOpen}
                     scheduledAt={scheduledAt}

@@ -10432,6 +10432,12 @@ function AtelierCanvasPage() {
                         node={contentNode}
                         references={getMentionReferences(contentNode.id)}
                         onDetachReference={(sourceNodeId) => handleRemoveLinkedMedia(contentNode.id, sourceNodeId)}
+                        onReorderReferences={(orderedNodeIds) => handleReorderLinkedMedia(contentNode.id, orderedNodeIds)}
+                        onPreviewReference={(referenceNodeId) => {
+                            // 双击参考图 chip → 画布统一的全屏预览（与视频节点的提示词面板一致）。
+                            const reference = nodesRef.current.find((item) => item.id === referenceNodeId);
+                            if (reference) handleNodeViewImage(reference);
+                        }}
                         onCreateVideo={createBridgeVideoNode}
                         onConfigChange={handleConfigNodeChange}
                     />
@@ -10523,6 +10529,8 @@ function AtelierCanvasPage() {
             handleNameLockChange,
             handleRegenerateScriptAll,
             handleRemoveLinkedMedia,
+            handleReorderLinkedMedia,
+            handleNodeViewImage,
             handleRowAssetGenerate,
             handleRowAudioImport,
             handleRowAudiosChange,
