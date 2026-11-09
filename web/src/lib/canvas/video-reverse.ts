@@ -21,8 +21,28 @@ export type VideoReverseResult = {
 /** 反推用的技能名（按优先级）。用户口径是「视频反推-分镜提示词」。 */
 export const VIDEO_REVERSE_SKILL_HINTS = ["视频反推-分镜提示词", "视频反推分镜提示词", "视频反推", "分镜提示词"] as const;
 
-/** 02 / 03 要求框的默认文案（用户口径：自动写入「反推视频并生成同款风格文案」）。 */
-export const DEFAULT_VIDEO_REVERSE_REQUIREMENT = "反推视频并生成同款风格文案";
+/**
+ * 02 / 03 要求框的默认文案骨架（用户 2026-11-09 口径）：
+ * 「根据我提供的视频反推该视频提示词及文案，同时使用 @图片1 作为文案中的道具，重新输出一份类似的剧本文案。」
+ *
+ * 为什么拆成「前半句 + 参考图子句 + 后半句」三段：**参考图数量是变量**。
+ *  - 一张参考图都没连：不许出现 `@图片1` —— 模型找不到对应图片，只会瞎猜一件道具；
+ *  - 连了 N 张：逐张点名，标签必须与 `sendChatMessage` 里的 mention 编号**逐字一致**
+ *    （`imageReferenceLabel(index)`：从 1 开始、按连线顺序数），否则那段文字只会退化成纯文本。
+ *
+ * ⚠️ 标签由调用方传进来，本模块**不 import i18n**：它是纯逻辑模块，探针直接 import，
+ * 而 `@/i18n` 的模块顶层会读 `localStorage`，在 Node 里会直接崩。
+ */
+export function buildDefaultVideoReverseRequirement(imageMentions: readonly string[] = []): string {
+    const head = "根据我提供的视频反推该视频提示词及文案";
+    const tail = "重新输出一份类似的剧本文案";
+    const mentions = Array.from(new Set((imageMentions || []).map((item) => String(item || "").trim()).filter(Boolean))).map((item) => (item.startsWith("@") ? item : `@${item}`));
+    if (!mentions.length) return `${head}，${tail}`;
+    return `${head}，同时使用${mentions.join("、")}作为文案中的道具，${tail}`;
+}
+
+/** 没有任何参考图时的默认文案（也用作输入框 placeholder）。 */
+export const DEFAULT_VIDEO_REVERSE_REQUIREMENT = buildDefaultVideoReverseRequirement();
 
 export const VIDEO_REVERSE_MODES = [
     {
@@ -35,7 +55,7 @@ export const VIDEO_REVERSE_MODES = [
         mode: 2 as const,
         no: "02",
         label: "反推视频生成同款文案",
-        hint: "同 01，先弹窗填特殊要求（默认「反推视频并生成同款风格文案」），输出同款文案",
+        hint: "同 01，先弹窗填特殊要求（默认「根据我提供的视频反推该视频提示词及文案…」），输出同款文案",
     },
     {
         mode: 3 as const,

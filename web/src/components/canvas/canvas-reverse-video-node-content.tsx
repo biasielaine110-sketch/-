@@ -3,7 +3,8 @@ import { App, Button, Input, Modal, Tag } from "antd";
 import { CircleAlert, Clapperboard, FileText, Images, Link2, Loader2, Sparkles, Video, Wand2 } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
-import { DEFAULT_VIDEO_REVERSE_REQUIREMENT, VIDEO_REVERSE_MODES, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { DEFAULT_VIDEO_REVERSE_REQUIREMENT, VIDEO_REVERSE_MODES, buildDefaultVideoReverseRequirement, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 
@@ -90,6 +91,15 @@ export function CanvasReverseVideoNodeContent({
     const scrollRef = useRef<HTMLDivElement | null>(null);
 
     const run = node.metadata?.reverseVideoRun;
+    /**
+     * 02 / 03 要求框的**默认文案**（用户 2026-11-09 口径）：
+     * 「根据我提供的视频反推该视频提示词及文案，同时使用 @图片1 作为文案中的道具，重新输出一份类似的剧本文案。」
+     *
+     * `@图片N` 必须按「连进本节点的参考图」逐张点名：没有参考图时不提（提了模型只会瞎猜一件道具），
+     * 有 N 张就写 `@图片1、@图片2…` —— 编号与 `project.tsx: runVideoReverse` 把这批图连进对话节点后
+     * `sendChatMessage` 用的 mention 编号同源（`imageReferenceLabel`，按连线顺序、从 1 开始）。
+     */
+    const requirementDefault = useCallback(() => buildDefaultVideoReverseRequirement((referenceImages || []).map((_, index) => imageReferenceLabel(index))), [referenceImages]);
     const attached = useMemo(() => videos.find((item) => item.id === attachedVideoId) || null, [attachedVideoId, videos]);
     const selectedVideo = useMemo(() => videos.find((item) => item.id === selectedVideoId) || null, [selectedVideoId, videos]);
     /** 状态位是 running 但已经很久没更新 = 上次被刷新 / 关页面掐断了，别把按钮永久锁死。 */
@@ -198,11 +208,11 @@ export function CanvasReverseVideoNodeContent({
                 void runMode(1);
                 return;
             }
-            // 02 / 03：先弹特殊要求，默认已经把「反推视频并生成同款风格文案」写好。
-            setRequirementText(DEFAULT_VIDEO_REVERSE_REQUIREMENT);
+            // 02 / 03：先弹特殊要求，默认已经把「反推视频 + 用参考图当道具 + 重新输出文案」写好。
+            setRequirementText(requirementDefault());
             setRequirementMode(mode);
         },
-        [attached, message, runMode, running],
+        [attached, message, requirementDefault, runMode, running],
     );
 
     const confirmRequirement = useCallback(() => {
@@ -274,12 +284,15 @@ export function CanvasReverseVideoNodeContent({
                         </div>
                     ) : null}
 
-                    {/* 参考图（连进来的图片节点）：02 / 03 会按名字把它们挂到分镜表的道具格 */}
+                    {/* 参考图（连进来的图片节点）：02 / 03 会一起带进对话（`@图片N`），并按其名字把对得上的挂到分镜表道具格 */}
                     {referenceImages?.length ? (
                         <div className="mt-2 rounded-md px-2 py-1.5" style={{ border: softBorder }}>
                             <div className="flex items-start gap-1.5 text-[11px] leading-relaxed opacity-70">
                                 <Images size={11} className="mt-0.5 shrink-0" />
-                                <span className="min-w-0 flex-1">参考图 {referenceImages.length} 张：执行 02 / 03 时，名字对上分镜表「道具」的那几张会直接挂成道具素材，并且不再生成该道具的资产图。</span>
+                                <span className="min-w-0 flex-1">
+                                    参考图 {referenceImages.length} 张：执行 02 / 03 时会一起带进 AI 对话（{referenceImages.map((_, index) => imageReferenceLabel(index)).slice(0, 3).join("、")}
+                                    {referenceImages.length > 3 ? "…" : ""}，按连线顺序），其中名字对上分镜表「道具」的那几张会直接挂成道具素材，并且不再生成该道具的资产图。
+                                </span>
                             </div>
                             <div className="mt-1 flex flex-wrap gap-1">
                                 {referenceImages.map((item) => (
@@ -385,8 +398,11 @@ export function CanvasReverseVideoNodeContent({
                 destroyOnHidden={false}
             >
                 <div className="flex flex-col gap-2 text-sm">
-                    <div className="text-xs opacity-60">这段会作为「特殊要求」跟着视频一起发进 AI 对话，可以直接改。</div>
-                    <Input.TextArea value={requirementText} onChange={(event) => setRequirementText(event.target.value)} rows={3} placeholder={DEFAULT_VIDEO_REVERSE_REQUIREMENT} />
+                    <div className="text-xs opacity-60">
+                        这段会作为「特殊要求」跟着视频一起发进 AI 对话，可以直接改。
+                        {referenceImages?.length ? `连进来的 ${referenceImages.length} 张参考图会一起带进对话，${imageReferenceLabel(0)} 就是第一张（连线顺序）。` : "（本节点还没连参考图，所以默认文案里没有 @图片N。）"}
+                    </div>
+                    <Input.TextArea value={requirementText} onChange={(event) => setRequirementText(event.target.value)} rows={4} placeholder={DEFAULT_VIDEO_REVERSE_REQUIREMENT} />
                     {requirementMode === 3 ? <div className="text-[11px] opacity-50">确定后会接着把文本节点接到脚本生成器，并执行一键视频。</div> : null}
                 </div>
             </Modal>

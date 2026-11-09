@@ -6868,7 +6868,16 @@ function AtelierCanvasPage() {
                     }
                 }
 
-                const referenceImages = Array.from(new Map([...linkedImages, ...resolvedMentionImages, ...videoFrames].filter((image) => Boolean(image?.dataUrl)).map((image) => [image.id || image.dataUrl, image])).values());
+                /**
+                 * 去重键：同一张图会从两条路同时进来 ——
+                 *  ① 连线：`readReferenceImage` 给的 `id` 是**裸 nodeId**；
+                 *  ② `@图片N` 的 mention 解析：`resolveCanvasReferenceImages` 给的 `id` 是 `canvas:nodeId`。
+                 * 两个 id 前缀不同，直接拿 `id` 当键就会让同一张图被发**两遍**（白烧 token，
+                 * 模型还会以为给了两张参考图 —— 反推 02/03 现在正是「参考图连线 + 文案里点名 @图片1」同时成立，
+                 * 一定会撞上）。所以先剥掉 `canvas:` 前缀再比，都没有 id 才退化成比 dataUrl。
+                 */
+                const referenceImageKey = (image: ReferenceImage) => String(image.id || "").replace(/^canvas:/, "") || image.dataUrl;
+                const referenceImages = Array.from(new Map([...linkedImages, ...resolvedMentionImages, ...videoFrames].filter((image) => Boolean(image?.dataUrl)).map((image) => [referenceImageKey(image), image])).values());
 
                 const videoTitles = uniqueVideos.map((item) => item.title).join("、");
                 const videoNote = uniqueVideos.length
@@ -10046,7 +10055,27 @@ function AtelierCanvasPage() {
                     chatSkillIds: [skill.id],
                 },
             );
-            pushNodes([chatNode], resolveConnectionPairs(videoNode.id, chatNode.id, [...nodesRef.current, chatNode], "source"));
+            /**
+             * 视频必连：模型只看得到**连线传入**的内容。
+             *
+             * 02 / 03 再把连进反推节点的参考图**一起连进这个对话节点**（用户 2026-11-09 口径：
+             * 「要求框里写 @图片1 当文案中的道具」）。为什么非连不可：`sendChatMessage` 认的
+             * mention 是 `buildNodeMentionReferences`（= 连在**对话节点**上的资源，按连线顺序编号），
+             * 只在文字里写 `@图片1` 而图没连上，模型拿到的是一个指不到任何图片的标签 ——
+             * 而这里逐张 `push` 的顺序与 `referenceAssets`（= 反推节点上的连线顺序）一致，
+             * `@图片1` 才对得上用户看到的第一张。
+             *
+             * 01 不连：01 是纯反推，没有 `@图片N` 可引用，多塞几张参考图只会干扰它对原视频的判断。
+             */
+            const chatPairs = resolveConnectionPairs(videoNode.id, chatNode.id, [...nodesRef.current, chatNode], "source");
+            if (input.mode !== 1) {
+                for (const asset of referenceAssets) {
+                    const imageNode = nodesRef.current.find((item) => item.id === asset.nodeId);
+                    if (!imageNode) continue;
+                    chatPairs.push(...resolveConnectionPairs(imageNode.id, chatNode.id, [...nodesRef.current, chatNode], "source"));
+                }
+            }
+            pushNodes([chatNode], chatPairs);
 
             // ② 把视频链接 + 要求发进对话，等它把反推结果说完
             report("把视频链接发进对话，反推中…");
