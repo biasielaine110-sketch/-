@@ -656,13 +656,20 @@ export function matchScriptAssetReferences(
 ): { matches: ScriptAssetReferenceMatch[]; unmatched: ScriptAssetReference[] } {
     const refs = (references || []).filter((item) => Boolean(item?.nodeId));
     if (!refs.length || !rows?.length) return { matches: [], unmatched: refs };
-    const candidates: Array<{ role: ScriptAssetRole; title: string; key: string; norm: string }> = [];
+    const candidates: Array<{ role: ScriptAssetRole; title: string; key: string; norm: string; matchable: boolean }> = [];
     for (const role of roles) {
         for (const item of collectScriptAssetPromptCandidates(role, rows)) {
             const norm = normalizeScriptAssetReferenceName(item.title);
-            // 单字名字（「刀」「碗」）太容易误命中，直接不参与参考图匹配 —— 那种还是老实生图。
-            if (norm.length < 2) continue;
-            candidates.push({ role, title: item.title, key: scriptAssetBatchKey(role, item.title), norm });
+            if (!norm) continue;
+            /**
+             * 单字名字（「刀」「碗」）**不参与名字匹配** —— `text.includes("刀")` 几乎必然误命中，
+             * 那种还是老实生图。
+             *
+             * ⚠️ 但它必须留在候选里：下面「主角道具兜底」**根本不看名字**（用户连进来的图就要挂到
+             * 出现镜数最多的那件道具上），以前这里直接 `continue` 掉，导致表里道具叫「刀」「剑」时
+             * 参考图永远挂不上、那件道具也照旧被生图（用户 2026-11-09 报障的一种形态）。
+             */
+            candidates.push({ role, title: item.title, key: scriptAssetBatchKey(role, item.title), norm, matchable: norm.length >= 2 });
         }
     }
     if (!candidates.length) return { matches: [], unmatched: refs };
@@ -685,6 +692,7 @@ export function matchScriptAssetReferences(
         let best: (typeof candidates)[number] | null = null;
         let bestTier = 0;
         for (const candidate of candidates) {
+            if (!candidate.matchable) continue;
             if (claimed.has(candidate.key)) continue;
             let tier = 0;
             for (const text of texts) {

@@ -8663,7 +8663,18 @@ function AtelierCanvasPage() {
         (nodeId: string, options?: { model?: string; skipAssetKeys?: readonly string[] }): { created: CanvasNodeData[] } => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source) return { created: [] };
-            const skipKeys = new Set((options?.skipAssetKeys || []).map((key) => String(key || "")).filter(Boolean));
+            /**
+             * 跳过表 = 本次调用方点名的键 ∪ **节点上落库的「参考图已挂载」键**。
+             *
+             * 后者是 2026-11-09 报障的修法：用户把产品图连到反推节点、一键视频挂上了、道具也不再单独生图，
+             * 但他**再点一次「批量生成资产图」**（或第二次跑一键视频时 03 没把参考图传下来）时，
+             * 这个函数只认调用方传进来的 `skipAssetKeys`，于是给那件道具重新生了一张图、
+             * 还把挂好的产品图从格子里顶掉。清单落库之后，任何一轮批量生图都绕不开它。
+             */
+            const skipKeys = new Set([
+                ...(options?.skipAssetKeys || []).map((key) => String(key || "")),
+                ...(source.metadata?.scriptReferenceAssetKeys || []).map((key) => String(key || "")),
+            ].filter(Boolean));
             // 不筛「已出过图」是这里唯一的产品口径；站位图在 buildScriptAssetDirectItems 里就剔掉了。
             // 再按分类补上**词库里的视图版式**（用户 2026-11-08：角色 →「无头 9x16 竖版排版」、
             // 场景 →「2x2 场景宫格图」），以及**场景 / 道具的空景尾缀**与**画幅的首尾声明**（画幅开头
@@ -9750,10 +9761,25 @@ function AtelierCanvasPage() {
      */
     const mountReferenceAssetsToScript = useCallback((scriptNodeId: string, references: readonly ScriptAssetReference[]) => {
         const source = nodesRef.current.find((item) => item.id === scriptNodeId);
-        if (!source || !references.length) return { matched: [] as Array<{ nodeId: string; title: string; via: "name" | "hero" }>, skipAssetKeys: [] as string[] };
+        const unmatchedAll: ScriptAssetReference[] = [];
+        if (!source) return { matched: [] as Array<{ nodeId: string; title: string; via: "name" | "hero" }>, skipAssetKeys: [] as string[], unmatched: unmatchedAll };
         const rows = source.metadata?.scriptRows;
-        const { matches } = matchScriptAssetReferences(rows, references);
-        if (!matches.length) return { matched: [] as Array<{ nodeId: string; title: string; via: "name" | "hero" }>, skipAssetKeys: [] as string[] };
+        const { matches, unmatched } = references.length ? matchScriptAssetReferences(rows, references) : { matches: [], unmatched: [] as ScriptAssetReference[] };
+        unmatchedAll.push(...unmatched);
+        const skipAssetKeys = matches.map((match) => match.key);
+        if (!matches.length) {
+            /**
+             * 一张都没挂上（含「这次根本没传参考图」）也要把上一次的挂载清单**清掉**：
+             * 那份清单是「这些道具不许再生图」的唯一依据，留着会让用户把参考图删了以后
+             * 那件道具永远不出图（改了剧本也照样不出）。
+             */
+            if (source.metadata?.scriptReferenceAssetKeys?.length) {
+                const clear = (item: CanvasNodeData): CanvasNodeData => (item.id === scriptNodeId ? { ...item, metadata: { ...item.metadata, scriptReferenceAssetKeys: [] } } : item);
+                nodesRef.current = nodesRef.current.map(clear);
+                setNodes((prev) => prev.map(clear));
+            }
+            return { matched: [] as Array<{ nodeId: string; title: string; via: "name" | "hero" }>, skipAssetKeys: [] as string[], unmatched: unmatchedAll };
+        }
         const extras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
         let cells = source.metadata?.scriptCellAssets;
         let locks = source.metadata?.scriptNameLocks;
@@ -9772,7 +9798,19 @@ function AtelierCanvasPage() {
             roles[match.reference.nodeId] = match.role;
         }
         const patch = (item: CanvasNodeData): CanvasNodeData =>
-            item.id === scriptNodeId ? { ...item, metadata: { ...item.metadata, scriptCellAssets: cells, scriptNameLocks: locks, scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), ...roles } } } : item;
+            item.id === scriptNodeId
+                ? {
+                      ...item,
+                      metadata: {
+                          ...item.metadata,
+                          scriptCellAssets: cells,
+                          scriptNameLocks: locks,
+                          scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), ...roles },
+                          // 落库：之后任何一轮「批量生成资产图」都靠它跳过这些道具（见 metadata 注释）。
+                          scriptReferenceAssetKeys: skipAssetKeys,
+                      },
+                  }
+                : item;
         // state 与 ref 同时写：紧接着的 `handleDirectGenerateScriptAssets` / 铺链路读的都是 ref。
         nodesRef.current = nodesRef.current.map(patch);
         setNodes((prev) => prev.map(patch));
@@ -9785,7 +9823,7 @@ function AtelierCanvasPage() {
             connectionsRef.current = [...connectionsRef.current, ...additions];
             setConnections((prev) => [...prev, ...additions]);
         }
-        return { matched: mounted, skipAssetKeys: matches.map((match) => match.key) };
+        return { matched: mounted, skipAssetKeys, unmatched: unmatchedAll };
     }, []);
 
     const handleOneClickVideo = useCallback(
@@ -9861,6 +9899,20 @@ function AtelierCanvasPage() {
                 const scriptDeadline = Date.now() + ONE_CLICK_STAGE_TIMEOUT_MS;
                 const stopScript = () => handleStopScriptGeneration(nodeId);
                 notify("script", "canvas.scriptNode.oneClickStageScript");
+                /**
+                 * 失败提示要**点名试过哪几个模型**（用户 2026-11-09：报错只看到「HTTP 402 / 500」，
+                 * 分不清是哪条渠道挂了 —— 他手上两条文本渠道一条 402（没钱）一条 500（对方服务端故障））。
+                 * 标签走 `modelOptionLabel`，会带上渠道名，用户才知道该去改哪个。
+                 */
+                const scriptTriedModels: string[] = [];
+                const noteScriptModel = (model?: string) => {
+                    const label = model ? modelOptionLabel(effectiveConfig, model) : "";
+                    const text = label || t("canvas.scriptNode.oneClickScriptModelUnknown");
+                    if (!scriptTriedModels.includes(text)) scriptTriedModels.push(text);
+                };
+                noteScriptModel(
+                    nodesRef.current.find((item) => item.id === nodeId)?.metadata?.model || effectiveConfig.textModel || "",
+                );
                 const firstPass = await withDeadline(runScriptGeneration(nodeId), scriptDeadline, stopScript);
                 if (firstPass.timedOut) {
                     pauseWith("script", t("canvas.scriptNode.oneClickScriptTimeout"));
@@ -9877,6 +9929,7 @@ function AtelierCanvasPage() {
                         pauseWith("script", t("canvas.scriptNode.oneClickScriptRetryMissing"));
                         return;
                     }
+                    noteScriptModel(retryModel);
                     notify("script", "canvas.scriptNode.oneClickScriptRetry", { model: modelOptionLabel(effectiveConfig, retryModel) });
                     const retryPass = await withDeadline(runScriptGeneration(nodeId, { model: retryModel }), scriptDeadline, stopScript);
                     if (retryPass.timedOut) {
@@ -9891,7 +9944,13 @@ function AtelierCanvasPage() {
                         patchOneClickVideoRun(nodeId, { status: "paused", stage: "script", message: t("canvas.scriptNode.oneClickStopped") });
                         return;
                     }
-                    pauseWith("script", t("canvas.scriptNode.oneClickScriptFailed", { error: outcome?.error || t("canvas.scriptNode.parseFailed") }));
+                    pauseWith(
+                        "script",
+                        t("canvas.scriptNode.oneClickScriptFailed", {
+                            models: scriptTriedModels.join(" → ") || t("canvas.scriptNode.oneClickScriptModelUnknown"),
+                            error: outcome?.error || t("canvas.scriptNode.parseFailed"),
+                        }),
+                    );
                     return;
                 }
                 // 行数以 `runScriptGeneration` 的返回值为准（它同时已把新表同步进 `nodesRef`）。
@@ -9908,13 +9967,25 @@ function AtelierCanvasPage() {
                  * 自动认的东西必须让用户看得见，否则他只会疑惑「这张图凭什么挂到这件道具上」。
                  */
                 let skipAssetKeys: string[] = [];
-                if (options?.referenceAssets?.length) {
+                /**
+                 * ⚠️ 判的是「传没传这个字段」，不是「有没有图」：
+                 * 03 永远会传（可能是空数组），空数组意味着**用户把参考图删了** → 要把上一次落库的
+                 * `scriptReferenceAssetKeys` 清掉，否则那件道具会永远不再生图。手动点脚本节点的
+                 * 「一键视频」不传（undefined）→ 不动这份清单，只沿用。
+                 */
+                if (options?.referenceAssets) {
                     const result = mountReferenceAssetsToScript(nodeId, options.referenceAssets);
                     skipAssetKeys = result.skipAssetKeys;
                     const named = result.matched.filter((item) => item.via !== "hero").map((item) => item.title);
                     const heroes = result.matched.filter((item) => item.via === "hero").map((item) => item.title);
                     if (named.length) message.success(t("canvas.scriptNode.oneClickReferenceMounted", { names: named.join("、") }));
                     if (heroes.length) message.info(t("canvas.scriptNode.oneClickReferenceHeroMounted", { names: heroes.join("、") }));
+                    /**
+                     * 没挂上的必须**说出来**：以前这里是静默的，用户只会看到「道具图又生了一张」，
+                     * 完全不知道是名字没对上、还是表里压根没有道具格（2026-11-09 报障）。
+                     */
+                    const missed = result.unmatched.map((item) => item.title).filter(Boolean);
+                    if (missed.length) message.warning(t("canvas.scriptNode.oneClickReferenceUnmounted", { names: missed.join("、") }));
                 }
 
                 // ---- ② 一键直接生图（偏好模型重试一次 → seedream-5.0-pro 托底一次；15 分钟封顶）----

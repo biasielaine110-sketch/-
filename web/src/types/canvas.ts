@@ -341,6 +341,17 @@ export type CanvasNodeMetadata = {
      * 真正的分类仍然只认 `scriptAssetRoles`。
      */
     scriptAssetLane?: string;
+    /**
+     * 脚本生成器：**反推节点连进来的参考图挂到了哪些资产格**（键 = `分类:资产名`，与
+     * `scriptAssetBatchKey` 同一口径）。
+     *
+     * 为什么必须落库：挂载发生在「一键视频」的 ①.5 步，而**之后**任何一次「批量生成资产图」
+     * （含脚本节点上那颗按钮、或第二次跑一键视频）都会重新算一遍要生成哪些资产 ——
+     * 不记住这份清单，用户连进来的产品图就会被一张新生成的图顶掉（用户 2026-11-09 报障：
+     * 「还是重新生了图，也没用我链接进去的道具图」）。
+     * 每次 03 带参考图跑一遍就整份覆盖；03 不带参考图跑（= 用户把图删了）就写成空数组。
+     */
+    scriptReferenceAssetKeys?: string[];
     /** 脚本生成器：每段目标时长（none / 10 / 15），同时用于生成时的分段要求与铺链路的自动合并。 */
     scriptSegmentSeconds?: import("@/constant/story-script").StoryScriptSegmentSeconds;
     /** 脚本生成器：铺链路时每个视频节点合并几镜（shot / 2 / 3 / duration）。 */

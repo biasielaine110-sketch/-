@@ -1841,9 +1841,14 @@ function clarifyEdgeError(message: string) {
 
 function readStatusError(status: number | undefined, fallback: string, requestUrl = "") {
     if (status === 401 || status === 403) return apiText("authenticationFailed");
+    // 402 = 渠道没钱 / 没开通这个模型。以前落到 `httpFailed`（「请检查 Base URL 和 API Key」），
+    // 用户照着改地址和 Key 永远改不好 —— 这类错误必须点名「去充值 / 换渠道」。
+    if (status === 402) return apiText("paymentRequired");
     if (status === 413) return apiText("payloadTooLarge");
     if (status === 429) return apiText("rateLimited");
     if (status === 404) return /\/models(\/|\?|$)/i.test(requestUrl) ? apiText("notFoundModels") : apiText("notFound");
+    // 500 同样不是「地址填错了」：请求已经到服务商，是对方服务端炸了（或该站没实现这条路由）。
+    if (status === 500) return apiText("upstreamServerError");
     if (status === 502) return apiText("badGateway");
     if (status === 503) return apiText("serviceBusy");
     if (status === 504) return apiText("proxyTimedOut");
@@ -2643,11 +2648,38 @@ async function readFetchError(response: Response, fallback: string) {
             }
             // Reverse proxies and CDN edges often return an HTML error page instead of JSON.
             if (/<[a-z][\s\S]*>/i.test(text)) message = apiText("htmlError", { preview: `${text.slice(0, 80)}...` });
-            else message = clarifyEdgeError(text.slice(0, 300)) || readStatusError(response.status, fallback, requestUrl);
+            else {
+                /**
+                 * 纯文本正文（网关默认页、`upstream exploded` 这类短语）**看不出状态码**，而 402（没钱）
+                 * 和 500（对方服务端炸了）该给的处理办法完全不同 —— 所以这两种状态把状态码说明放前面，
+                 * 把上游原文当补充证据留在后面，别让用户对着一句英文短语猜。
+                 */
+                const preview = clarifyEdgeError(text.slice(0, 300)).trim();
+                const statusMessage = readStatusError(response.status, fallback, requestUrl);
+                const statusFirst = response.status === 402 || response.status >= 500;
+                message = statusFirst && preview ? `${statusMessage}\n${preview}` : preview || statusMessage;
+            }
         }
     }
     if (response.status === 404 && requestUrl && !message.includes(requestUrl)) return `${message}\n${requestUrl}`;
     return clarifyAuthError(message);
+}
+
+/**
+ * 把 HTTP 状态码挂在 Error 上。
+ *
+ * 为什么不用正则读文案：`readFetchError` 在**纯文本**报错正文时会优先用正文当消息
+ * （`upstream exploded` / 网关默认页），状态码就丢了 —— 而「500 要不要再试一跳 chat」这个判断
+ * 只看状态码才可靠。这里只加一个不可枚举的附加字段，`message` 一个字都不动。
+ */
+function withHttpStatus(error: Error, status: number) {
+    Object.defineProperty(error, "httpStatus", { value: status, enumerable: false, configurable: true });
+    return error;
+}
+
+function readHttpStatus(error: unknown) {
+    const value = (error as { httpStatus?: unknown } | null | undefined)?.httpStatus;
+    return typeof value === "number" ? value : undefined;
 }
 
 function clarifyAuthError(message: string) {
@@ -2717,7 +2749,7 @@ async function requestStreamingResponse(config: AiConfig, body: Record<string, u
         body: JSON.stringify(await compressBodyImagesForProxy({ ...body, stream: true })),
         signal: options?.signal,
     });
-    if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
+    if (!response.ok) throw withHttpStatus(new Error(await readFetchError(response, apiText("requestFailed"))), response.status);
     if (!response.body) {
         const payload = (await response.json()) as ResponseApiPayload;
         validateResponsePayload(payload);
@@ -3647,6 +3679,16 @@ export async function requestChatWithTools(
  */
 const chatOnlyBaseUrls = new Set<string>();
 
+/**
+ * 已经试过「500 → chat」救护跳、并且**也失败**的 baseUrl：本会话不再重复试。
+ *
+ * 为什么需要这一层：500 通常是瞬时的，不该像 404 那样把整站钉到 chat（见上一条注释）；
+ * 但「这家只实现了 `/chat/completions`，对 `/responses` 直接 500」的站也真实存在（实测 `www.aicost.me`）。
+ * 折中：**每家一次机会**。试成功就照常返回；试失败就记住，后续请求不再为此多打一跳、
+ * 也不再多刷一条红色 500。
+ */
+const chatRescueExhausted = new Set<string>();
+
 function chatCapabilityKey(config: AiConfig) {
     return (config.baseUrl || "").trim().replace(/\/+$/, "").toLowerCase();
 }
@@ -3726,8 +3768,24 @@ async function requestChatTurn(
         );
     } catch (responsesError) {
         if (!shouldFallbackToChatCompletions(responsesError)) throw responsesError;
-        if (isResponsesRouteMissing(responsesError)) chatOnlyBaseUrls.add(capabilityKey);
-        return requestChatCompletionsTurn(config, messages, onDelta, options);
+        const routeMissing = isResponsesRouteMissing(responsesError);
+        if (routeMissing) chatOnlyBaseUrls.add(capabilityKey);
+        else {
+            /**
+             * 非 404（= 500 这一类「也许只是没实现 /responses」的现场）：只救护一次。
+             * 已经试过且失败过，就直接把首发错误抛出去，不再白白多打一跳。
+             */
+            if (chatRescueExhausted.has(capabilityKey)) throw responsesError;
+        }
+        try {
+            return await requestChatCompletionsTurn(config, messages, onDelta, options);
+        } catch (chatError) {
+            if (routeMissing) throw chatError;
+            // 救护跳也失败：记住这家别再试，并保留**首发错误**（它描述的是真正的现场：
+            // 对方服务端 500 / 该站没有这条路由），别让第二条路的错误把原因盖掉。
+            chatRescueExhausted.add(capabilityKey);
+            throw responsesError;
+        }
     }
 }
 
@@ -3808,7 +3866,15 @@ function readChatCompletionToolCalls(message: Record<string, unknown> | null): R
 
 function shouldFallbackToChatCompletions(error: unknown) {
     const message = error instanceof Error ? error.message : String(error || "");
-    return /404|not\s*found|接口地址不存在|unsupported|not\s*support|unknown\s*url|invalid\s*url|responses?/i.test(message);
+    if (/404|not\s*found|接口地址不存在|unsupported|not\s*support|unknown\s*url|invalid\s*url|responses?/i.test(message)) return true;
+    /**
+     * 500 也要试一跳 chat：很多中转**只实现了 `/chat/completions`**，对 `/responses` 不用 404 而是直接 500
+     * （实测 `www.aicost.me`）。以前只认 404 类文案，遇到这种站整条任务直接判死。
+     * 与 404 的区别：这里**不记忆** baseUrl（见 `chatRescueExhausted` 的注释）—— 500 可能只是某个模型的瞬时故障，
+     * 不该把一个还能用 Responses 的站永久钉到 chat 上；每站只给一次机会，失败就不再试。
+     * 状态码优先读 `httpStatus`（纯文本报错正文会把状态码从文案里抹掉）。
+     */
+    return readHttpStatus(error) === 500 || /HTTP\s*500\b/i.test(message);
 }
 
 async function requestStreamingChatCompletions(config: AiConfig, messages: ResponseInputMessage[], onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
