@@ -70,6 +70,33 @@ const TOOLS = [
         },
     },
     {
+        name: "create_video_node",
+        description: "在当前打开的画布中创建视频节点。videoUrl 必须是浏览器可直接播放的视频地址（mp4/webm）或 data URL。适合把 MochiAni 等外部渠道生成好的视频直接落成画布节点。",
+        inputSchema: {
+            type: "object",
+            properties: {
+                projectId: { type: "string", description: "可选。目标画布项目 id。" },
+                videoUrl: { type: "string", description: "视频地址或 data URL" },
+                prompt: { type: "string", description: "可选。写入节点的提示词或来源说明。" },
+                x: { type: "number", description: "可选。画布坐标 x。" },
+                y: { type: "number", description: "可选。画布坐标 y。" },
+            },
+            required: ["videoUrl"],
+        },
+    },
+    {
+        name: "export_video_data",
+        description: "读取画布中某个视频节点的地址与提示词，用于把画布视频送去外部处理（例如去字幕、高清）。",
+        inputSchema: {
+            type: "object",
+            properties: {
+                projectId: { type: "string", description: "可选。目标画布项目 id。" },
+                nodeId: { type: "string", description: "视频节点 id" },
+            },
+            required: ["nodeId"],
+        },
+    },
+    {
         name: "export_image_data",
         description: "按 storageKey 从当前打开的画布浏览器中导出图片 data URL。通常由 /api/canvas-bridge/image 使用。",
         inputSchema: {

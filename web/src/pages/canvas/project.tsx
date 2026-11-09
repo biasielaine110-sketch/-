@@ -24,14 +24,7 @@ import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audi
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
 import { defaultConfig, encodeChannelModel, modelOptionLabel, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { parseComfyApiWorkflow, resolveNativeH3VideoSettingDefaults, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
-import {
-    cancelNativeVideoQueueJobsForNodes,
-    enqueueNativeComfyVideoJob,
-    getNativeVideoQueueSnapshot,
-    isSerializedNativeVideoBaseUrl,
-    pickNativeVideoQueueEntryForNode,
-    subscribeNativeVideoQueue,
-} from "@/lib/canvas/native-video-job-queue";
+import { cancelNativeVideoQueueJobsForNodes, enqueueNativeComfyVideoJob, getNativeVideoQueueSnapshot, isSerializedNativeVideoBaseUrl, pickNativeVideoQueueEntryForNode, subscribeNativeVideoQueue } from "@/lib/canvas/native-video-job-queue";
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { subscribeLocalMediaLibraryAccess } from "@/services/local-media-library";
@@ -48,7 +41,66 @@ import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, composeStyledPrompt, getStyleTemplate } from "@/constant/style-templates";
 import { buildCameraSelectionPrompt } from "@/constant/camera-options";
-import { addScriptNameLockForCell, applyGhostVideoScriptOverlay, applyMashuVideoScriptOverlay, applyMomanVideoScriptOverlay, applyMuseVideoScriptOverlay, backfillStoryScriptCastNames, describeMomanSourceOverlay, applyStoryScriptTemplateOverlay, applyStoryScriptTemplateOverlayToShot, blankPreciseAssetColumns, buildMergedVideoNodePrompt, buildStoryScriptAssetFillTask, buildStoryScriptRowTask, buildStoryScriptSchemeFormatHint, buildStoryScriptTask, buildVideoNodePrompt, collectStoryScriptAssetFillTargets, countStoryScriptTemplateShots, dedupeStoryScriptAssetDescriptions, getStoryScriptColumns, getStoryScriptColumnsWithExtras, getStoryScriptPreset, groupStoryScriptRows, hasScriptGenerationPrompt, hasStoryScriptShotTemplate, matchScriptRowAssetsByRole, mergeStoryScriptAssetFill, normalizeStoryScriptDirectorRows, normalizeStoryScriptExtraColumns, normalizeStoryScriptGhostRows, normalizeStoryScriptMashuRows, normalizeStoryScriptMergeGroups, normalizeStoryScriptMomanRows, normalizeStoryScriptMuseRows, orderScriptRefIds, parseStoryScriptOutput, resolveScriptAssetRole, resolveScriptSystemPrompt, resolveStoryScriptMergeMode, resolveStoryScriptPresetId, resolveStoryScriptImageSize, resolveStoryScriptShotSeconds, scriptAssetColumnRole, scriptCellAssetIds, scriptRowAssetIds, scriptRowAudioIds, scriptShotPreciseAssetRefs, setStoryScriptCellAssetIds, setStoryScriptNameLock, setStoryScriptRowAssetIds, setStoryScriptRowAudioIds, setStoryScriptRowNote, storyScriptGroupDuration, storyScriptToMarkdown, stripStoryScriptAssetId, syncStoryScriptNameLocks, type ScriptAssetRole, type ScriptRefLinkKind } from "@/constant/story-script";
+import {
+    addScriptNameLockForCell,
+    applyGhostVideoScriptOverlay,
+    applyMashuVideoScriptOverlay,
+    applyMomanVideoScriptOverlay,
+    applyMuseVideoScriptOverlay,
+    backfillStoryScriptCastNames,
+    describeMomanSourceOverlay,
+    applyStoryScriptTemplateOverlay,
+    applyStoryScriptTemplateOverlayToShot,
+    blankPreciseAssetColumns,
+    buildMergedVideoNodePrompt,
+    buildStoryScriptAssetFillTask,
+    buildStoryScriptRowTask,
+    buildStoryScriptSchemeFormatHint,
+    buildStoryScriptTask,
+    buildVideoNodePrompt,
+    collectStoryScriptAssetFillTargets,
+    countStoryScriptTemplateShots,
+    dedupeStoryScriptAssetDescriptions,
+    getStoryScriptColumns,
+    getStoryScriptColumnsWithExtras,
+    getStoryScriptPreset,
+    groupStoryScriptRows,
+    hasScriptGenerationPrompt,
+    hasStoryScriptShotTemplate,
+    matchScriptRowAssetsByRole,
+    mergeStoryScriptAssetFill,
+    normalizeStoryScriptDirectorRows,
+    normalizeStoryScriptExtraColumns,
+    normalizeStoryScriptGhostRows,
+    normalizeStoryScriptMashuRows,
+    normalizeStoryScriptMergeGroups,
+    normalizeStoryScriptMomanRows,
+    normalizeStoryScriptMuseRows,
+    orderScriptRefIds,
+    parseStoryScriptOutput,
+    resolveScriptAssetRole,
+    resolveScriptSystemPrompt,
+    resolveStoryScriptMergeMode,
+    resolveStoryScriptPresetId,
+    resolveStoryScriptImageSize,
+    resolveStoryScriptShotSeconds,
+    scriptAssetColumnRole,
+    scriptCellAssetIds,
+    scriptRowAssetIds,
+    scriptRowAudioIds,
+    scriptShotPreciseAssetRefs,
+    setStoryScriptCellAssetIds,
+    setStoryScriptNameLock,
+    setStoryScriptRowAssetIds,
+    setStoryScriptRowAudioIds,
+    setStoryScriptRowNote,
+    storyScriptGroupDuration,
+    storyScriptToMarkdown,
+    stripStoryScriptAssetId,
+    syncStoryScriptNameLocks,
+    type ScriptAssetRole,
+    type ScriptRefLinkKind,
+} from "@/constant/story-script";
 import { resolveScriptPromptValues, resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -103,6 +155,8 @@ import {
 import { startCanvasWorkbuddyBridge } from "@/lib/canvas/canvas-workbuddy-bridge";
 import { CanvasNodePromptPanel, type CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { CanvasToolbar } from "@/components/canvas/canvas-toolbar";
+import { CanvasMochianiPanel } from "@/components/canvas/canvas-mochiani-panel";
+import { CanvasReverseVideoNodeContent } from "@/components/canvas/canvas-reverse-video-node-content";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
@@ -110,11 +164,32 @@ import { DirectorPanel } from "@/components/canvas/director-panel";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores/canvas/use-generation-history-store";
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { collectCanvasOccupied, findFreeColumnX, planRightwardChainSlots } from "@/lib/canvas/canvas-free-space";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
+import { buildVideoReversePrompt, pickVideoReverseSkill, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
-import { applyScriptAssetDirectDecorations, buildScriptAssetBatchMounts, buildScriptAssetDirectItems, buildScriptAssetBatchItems, collectScriptAssetOccupied, describeScriptAssetAspectMismatch, mountScriptAssetToCells, planScriptAssetGrid, resolveScriptAssetDirectSize, resolveScriptAssetSizeForRole, resolveScriptImageQuality, scriptAssetLaneRight, SCRIPT_ASSET_LAUNCH_BATCH, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import {
+    applyScriptAssetDirectDecorations,
+    buildScriptAssetBatchMounts,
+    buildScriptAssetDirectItems,
+    buildScriptAssetBatchItems,
+    collectScriptAssetOccupied,
+    describeScriptAssetAspectMismatch,
+    matchScriptAssetReferences,
+    mountScriptAssetToCells,
+    planScriptAssetGrid,
+    resolveScriptAssetDirectSize,
+    resolveScriptAssetSizeForRole,
+    resolveMissingScriptAssetViewTemplates,
+    resolveScriptImageQuality,
+    scriptAssetLaneRight,
+    SCRIPT_ASSET_LAUNCH_BATCH,
+    type ScriptAssetBatchItem,
+    type ScriptAssetReference,
+} from "@/lib/canvas/script-asset-batch";
 import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
@@ -130,7 +205,23 @@ import {
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { buildJianyingBundle, secondsToMicro, type JianyingDraftClip } from "@/lib/canvas/jianying-draft";
-import { cleanWindowsPathSegment, ensureJianyingWritePermission, jianyingDraftFolderExists, jianyingDraftFolderName, joinDraftPath, loadJianyingRootPath, looksLikeAbsoluteDraftRoot, readStoredJianyingRoot, resolveJianyingPlaceholders, saveJianyingRootPath, storeJianyingRoot, suggestAvailableDraftFolderName, supportsJianyingDirectWrite, writeJianyingDraft, type JianyingDraftFile } from "@/lib/canvas/jianying-direct";
+import {
+    cleanWindowsPathSegment,
+    ensureJianyingWritePermission,
+    jianyingDraftFolderExists,
+    jianyingDraftFolderName,
+    joinDraftPath,
+    loadJianyingRootPath,
+    looksLikeAbsoluteDraftRoot,
+    readStoredJianyingRoot,
+    resolveJianyingPlaceholders,
+    saveJianyingRootPath,
+    storeJianyingRoot,
+    suggestAvailableDraftFolderName,
+    supportsJianyingDirectWrite,
+    writeJianyingDraft,
+    type JianyingDraftFile,
+} from "@/lib/canvas/jianying-direct";
 import { createZip } from "@/lib/zip";
 import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFileBase, normalizeMergeClip, probeImageSize, probeVideoMeta, resolveMergeCanvasSize, videoMergeClipFromNode, type ResolvedVideoMergeClip } from "@/lib/canvas/video-merge";
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
@@ -160,13 +251,7 @@ import {
     videoExtension,
 } from "@/lib/canvas/canvas-generation-helpers";
 import { buildDocxBlob, buildMarkdownBlob, isDocumentFile, readDocumentAsText, type TextExportFormat } from "@/lib/canvas/document-text";
-import {
-    clipboardTextSnapshot,
-    extractClipboardRemoteImage,
-    isPasteableNodeFile,
-    mediaFileFromClipboardText,
-    resolveClipboardMediaKind,
-} from "@/lib/canvas/clipboard-paste";
+import { clipboardTextSnapshot, extractClipboardRemoteImage, isPasteableNodeFile, mediaFileFromClipboardText, resolveClipboardMediaKind } from "@/lib/canvas/clipboard-paste";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType } from "@/lib/canvas/node-registry";
 import { convertNodeType, convertedNodeKeptMedia, nodeConversionTarget } from "@/lib/canvas/node-type-conversion";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
@@ -262,10 +347,7 @@ const MAX_IMAGE_NODE_HISTORY = 24;
  * 表现为「弹窗里只能移动窗口、输入框点不了」。这里按目标是否落在浮层容器内统一拦掉。
  */
 function isOverlayEventTarget(target: EventTarget | null): boolean {
-    return (
-        target instanceof Element &&
-        Boolean(target.closest(".ant-modal, .ant-drawer, .ant-popover, .ant-dropdown, .ant-select-dropdown, .ant-picker-dropdown, .ant-tooltip, .canvas-style-picker, .canvas-h3-optimize-progress"))
-    );
+    return target instanceof Element && Boolean(target.closest(".ant-modal, .ant-drawer, .ant-popover, .ant-dropdown, .ant-select-dropdown, .ant-picker-dropdown, .ant-tooltip, .canvas-style-picker, .canvas-h3-optimize-progress"));
 }
 
 /** Remap edges for copied nodes, keeping links to uncopied neighbors (AâB becomes A'âB). */
@@ -408,7 +490,6 @@ function dataUrlToClipboardFile(dataUrl: string): File | null {
         return null;
     }
 }
-
 
 async function uploadGeneratedImage(image: Pick<GeneratedImageResult, "dataUrl" | "fallbackUrls">) {
     const candidates = [...new Set([image.dataUrl, ...(image.fallbackUrls || [])].filter(Boolean))];
@@ -641,39 +722,30 @@ function AtelierCanvasPage() {
         [cleanupAssetImages],
     );
 
-    const startGenerationRequest = useCallback(
-        (
-            targetNodeId: string,
-            originNodeId: string,
-            runningId = originNodeId,
-            controller = new AbortController(),
-            options?: { replaceTarget?: boolean },
-        ) => {
-            // Default replaceTarget=true keeps prior behaviour (re-generate aborts the same target).
-            // Native H3 video FIFO passes replaceTarget=false so queueing the next clip does not
-            // abort()/interrupt the job that is still running on the pod.
-            const replaceTarget = options?.replaceTarget !== false;
-            if (replaceTarget) {
-                for (const [jobId, request] of [...generationRequestsRef.current]) {
-                    if (request.targetNodeId === targetNodeId && request.controller !== controller) {
-                        request.controller.abort();
-                        generationRequestsRef.current.delete(jobId);
-                    }
+    const startGenerationRequest = useCallback((targetNodeId: string, originNodeId: string, runningId = originNodeId, controller = new AbortController(), options?: { replaceTarget?: boolean }) => {
+        // Default replaceTarget=true keeps prior behaviour (re-generate aborts the same target).
+        // Native H3 video FIFO passes replaceTarget=false so queueing the next clip does not
+        // abort()/interrupt the job that is still running on the pod.
+        const replaceTarget = options?.replaceTarget !== false;
+        if (replaceTarget) {
+            for (const [jobId, request] of [...generationRequestsRef.current]) {
+                if (request.targetNodeId === targetNodeId && request.controller !== controller) {
+                    request.controller.abort();
+                    generationRequestsRef.current.delete(jobId);
                 }
             }
-            const jobId = nanoid(10);
-            generationRequestsRef.current.set(jobId, {
-                jobId,
-                targetNodeId,
-                originNodeId,
-                runningNodeId: runningId,
-                controller,
-            });
-            setGenerationEpoch((value) => value + 1);
-            return controller;
-        },
-        [],
-    );
+        }
+        const jobId = nanoid(10);
+        generationRequestsRef.current.set(jobId, {
+            jobId,
+            targetNodeId,
+            originNodeId,
+            runningNodeId: runningId,
+            controller,
+        });
+        setGenerationEpoch((value) => value + 1);
+        return controller;
+    }, []);
 
     const finishGenerationRequest = useCallback((_targetNodeId: string, controller: AbortController) => {
         for (const [jobId, request] of [...generationRequestsRef.current]) {
@@ -703,10 +775,7 @@ function AtelierCanvasPage() {
             setGenerationEpoch((value) => value + 1);
             setNodes((prev) =>
                 prev.map((node) =>
-                    affectedNodeIds.has(node.id) &&
-                    (node.metadata?.status === NODE_STATUS_LOADING ||
-                        node.metadata?.images?.some((image) => image.status === NODE_STATUS_LOADING) ||
-                        node.metadata?.nativeVideoQueuePosition != null)
+                    affectedNodeIds.has(node.id) && (node.metadata?.status === NODE_STATUS_LOADING || node.metadata?.images?.some((image) => image.status === NODE_STATUS_LOADING) || node.metadata?.nativeVideoQueuePosition != null)
                         ? {
                               ...node,
                               metadata: {
@@ -716,11 +785,7 @@ function AtelierCanvasPage() {
                                   nativeVideoQueuePosition: undefined,
                                   nativeVideoQueueTotal: undefined,
                                   nativeVideoQueuePhase: undefined,
-                                  images: node.metadata.images?.map((image) =>
-                                      image.status === NODE_STATUS_LOADING
-                                          ? { ...image, status: NODE_STATUS_ERROR, errorDetails: t("common.requestCanceled") }
-                                          : image,
-                                  ),
+                                  images: node.metadata.images?.map((image) => (image.status === NODE_STATUS_LOADING ? { ...image, status: NODE_STATUS_ERROR, errorDetails: t("common.requestCanceled") } : image)),
                               },
                           }
                         : node,
@@ -842,11 +907,7 @@ function AtelierCanvasPage() {
         const restore = async () => {
             // Fast hydrate: primary media only âdo not block first paint on every history blob.
             const restoredNodes = (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes), { mode: "fast" })).map((node) =>
-                node.type === CanvasNodeType.Chat && (node.height === 520 || node.height === 1040 || node.width === 420)
-                    ? { ...node, width: 840, height: 1387 }
-                    : node.type === CanvasNodeType.Text && node.height === 240
-                      ? { ...node, height: 480 }
-                      : node,
+                node.type === CanvasNodeType.Chat && (node.height === 520 || node.height === 1040 || node.width === 420) ? { ...node, width: 840, height: 1387 } : node.type === CanvasNodeType.Text && node.height === 240 ? { ...node, height: 480 } : node,
             );
             setNodes(restoredNodes);
             setConnections(project.connections);
@@ -1141,18 +1202,14 @@ function AtelierCanvasPage() {
             if (!pairs.length) {
                 const anchor = nodesSnapshot.find((node) => node.id === current.nodeId);
                 const target = nodesSnapshot.find((node) => node.id === targetNodeId);
-                const emptyGroup =
-                    (anchor?.type === CanvasNodeType.Group && getGroupMemberNodes(anchor.id, nodesSnapshot).length === 0) ||
-                    (target?.type === CanvasNodeType.Group && getGroupMemberNodes(target.id, nodesSnapshot).length === 0);
+                const emptyGroup = (anchor?.type === CanvasNodeType.Group && getGroupMemberNodes(anchor.id, nodesSnapshot).length === 0) || (target?.type === CanvasNodeType.Group && getGroupMemberNodes(target.id, nodesSnapshot).length === 0);
                 message.warning(t(emptyGroup ? "canvas.projectPage.emptyGroupConnection" : "canvas.projectPage.configConnection"));
                 return;
             }
 
             setConnections((prev) => {
                 const existing = new Set(prev.map((conn) => `${conn.fromNodeId}->${conn.toNodeId}`));
-                const additions = pairs
-                    .filter((pair) => !existing.has(`${pair.fromNodeId}->${pair.toNodeId}`))
-                    .map((pair) => ({ id: nanoid(), fromNodeId: pair.fromNodeId, toNodeId: pair.toNodeId }));
+                const additions = pairs.filter((pair) => !existing.has(`${pair.fromNodeId}->${pair.toNodeId}`)).map((pair) => ({ id: nanoid(), fromNodeId: pair.fromNodeId, toNodeId: pair.toNodeId }));
                 return additions.length ? [...prev, ...additions] : prev;
             });
 
@@ -1196,12 +1253,7 @@ function AtelierCanvasPage() {
                 const annotateTarget = toNode?.type === CanvasNodeType.Annotate ? toNode : fromNode?.type === CanvasNodeType.Annotate ? fromNode : null;
                 const imageSource = annotateTarget ? (annotateTarget.id === toNodeId ? fromNode : toNode) : null;
                 const sourceMeta = imageSource?.metadata;
-                const canLoadIntoAnnotate =
-                    annotateTarget &&
-                    imageSource &&
-                    imageSource.id !== annotateTarget.id &&
-                    (imageSource.type === CanvasNodeType.Image || imageSource.type === CanvasNodeType.Annotate) &&
-                    Boolean(sourceMeta?.content);
+                const canLoadIntoAnnotate = annotateTarget && imageSource && imageSource.id !== annotateTarget.id && (imageSource.type === CanvasNodeType.Image || imageSource.type === CanvasNodeType.Annotate) && Boolean(sourceMeta?.content);
                 if (!canLoadIntoAnnotate || !sourceMeta) continue;
 
                 const primary = sourceMeta.images?.find((image) => image.id === (sourceMeta.primaryImageId || sourceMeta.images?.[0]?.id) && image.content);
@@ -1213,12 +1265,7 @@ function AtelierCanvasPage() {
                 const naturalHeight = primary?.naturalHeight || sourceMeta.naturalHeight || imageSource.height;
                 const bytes = primary?.bytes || sourceMeta.bytes || 0;
                 const mimeType = primary?.mimeType || sourceMeta.mimeType || "image/png";
-                const size = fitNodeSize(
-                    naturalWidth || annotateTarget.width,
-                    naturalHeight || annotateTarget.height,
-                    Math.max(annotateTarget.width, 320),
-                    Math.max(annotateTarget.height, 240),
-                );
+                const size = fitNodeSize(naturalWidth || annotateTarget.width, naturalHeight || annotateTarget.height, Math.max(annotateTarget.width, 320), Math.max(annotateTarget.height, 240));
                 setNodes((prev) =>
                     prev.map((node) =>
                         node.id === annotateTarget.id
@@ -1431,39 +1478,45 @@ function AtelierCanvasPage() {
     // invalidates `renderNodePanel`/`renderNodeContentPanel` on every node/connection edit and
     // forces all nodes to re-render; compute on demand instead.
     const configInputsCacheRef = useRef<{ nodes: CanvasNodeData[]; connections: CanvasConnection[]; map: Map<string, NodeGenerationInput[]> } | null>(null);
-    const getConfigInputs = useCallback((nodeId: string) => {
-        const cache = configInputsCacheRef.current;
-        if (!cache || cache.nodes !== nodes || cache.connections !== connections) {
-            configInputsCacheRef.current = { nodes, connections, map: new Map() };
-        }
-        const current = configInputsCacheRef.current!;
-        const hit = current.map.get(nodeId);
-        if (hit) return hit;
-        const node = nodeById.get(nodeId);
-        if (!node || (node.type !== CanvasNodeType.Config && node.type !== CanvasNodeType.Merge)) return [];
-        const inputs = buildNodeGenerationInputs(nodeId, nodes, connections);
-        current.map.set(nodeId, inputs);
-        return inputs;
-    }, [connections, nodeById, nodes]);
+    const getConfigInputs = useCallback(
+        (nodeId: string) => {
+            const cache = configInputsCacheRef.current;
+            if (!cache || cache.nodes !== nodes || cache.connections !== connections) {
+                configInputsCacheRef.current = { nodes, connections, map: new Map() };
+            }
+            const current = configInputsCacheRef.current!;
+            const hit = current.map.get(nodeId);
+            if (hit) return hit;
+            const node = nodeById.get(nodeId);
+            if (!node || (node.type !== CanvasNodeType.Config && node.type !== CanvasNodeType.Merge)) return [];
+            const inputs = buildNodeGenerationInputs(nodeId, nodes, connections);
+            current.map.set(nodeId, inputs);
+            return inputs;
+        },
+        [connections, nodeById, nodes],
+    );
     // Lazy, per-node mention references. Building this eagerly for every node is O(N²) over
     // connections and nodes, and the map's reference changing on any node/connection edit
     // invalidates `renderNodePanel` and forces EVERY node to re-render. Compute on demand and
     // cache per node, invalidating only when nodes/connections actually change.
     const mentionCacheRef = useRef<{ nodes: CanvasNodeData[]; connections: CanvasConnection[]; map: Map<string, ReturnType<typeof buildNodeMentionReferences>> } | null>(null);
-    const getMentionReferences = useCallback((nodeId: string) => {
-        const cache = mentionCacheRef.current;
-        if (!cache || cache.nodes !== nodes || cache.connections !== connections) {
-            mentionCacheRef.current = { nodes, connections, map: new Map() };
-        }
-        const current = mentionCacheRef.current!;
-        const hit = current.map.get(nodeId);
-        if (hit) return hit;
-        const node = nodeById.get(nodeId);
-        if (!node) return EMPTY_REFERENCES;
-        const refs = buildNodeMentionReferences(node, nodes, connections);
-        current.map.set(nodeId, refs);
-        return refs;
-    }, [connections, nodeById, nodes]);
+    const getMentionReferences = useCallback(
+        (nodeId: string) => {
+            const cache = mentionCacheRef.current;
+            if (!cache || cache.nodes !== nodes || cache.connections !== connections) {
+                mentionCacheRef.current = { nodes, connections, map: new Map() };
+            }
+            const current = mentionCacheRef.current!;
+            const hit = current.map.get(nodeId);
+            if (hit) return hit;
+            const node = nodeById.get(nodeId);
+            if (!node) return EMPTY_REFERENCES;
+            const refs = buildNodeMentionReferences(node, nodes, connections);
+            current.map.set(nodeId, refs);
+            return refs;
+        },
+        [connections, nodeById, nodes],
+    );
     // 脚本节点：上游（连线接入）的文本，是「剧本原文」没手填时的兜底来源。与上面两个缓存同理，
     // 按节点懒计算，避免每次节点/连线变动把整张画布重算一遍。
     const scriptSourceCacheRef = useRef<{ nodes: CanvasNodeData[]; connections: CanvasConnection[]; map: Map<string, { text: string; count: number }> } | null>(null);
@@ -1484,6 +1537,55 @@ function AtelierCanvasPage() {
             return value;
         },
         [connections, nodes],
+    );
+    /**
+     * 反推视频节点：解析「接入的视频」+ 「连进来的参考图」。
+     * 连线优先 —— 用户当下看得见的那根线比他 N 天前从列表里挑的记录更可信；
+     * 没有连线才回落到 `metadata.reverseVideoSourceId`（手动接入）。两者都失效就是没接入。
+     *
+     * 参考图（`references`）只认**连线**：02/03 跑一键视频时，名字对上道具的会在分镜表出来后
+     * 直接挂成道具资产（`mountReferenceAssetsToScript`），所以这里要把它显示出来，
+     * 用户才知道「我连的这张产品图被认到了」。
+     */
+    type ReverseVideoSource = {
+        videoId: string;
+        source: "connection" | "manual";
+        references: Array<{ id: string; title: string; url: string }>;
+    };
+    const reverseVideoSourceCacheRef = useRef<{ nodes: CanvasNodeData[]; connections: CanvasConnection[]; map: Map<string, ReverseVideoSource | null> } | null>(null);
+    const getReverseVideoSource = useCallback(
+        (nodeId: string) => {
+            const cache = reverseVideoSourceCacheRef.current;
+            if (!cache || cache.nodes !== nodes || cache.connections !== connections) {
+                reverseVideoSourceCacheRef.current = { nodes, connections, map: new Map() };
+            }
+            const current = reverseVideoSourceCacheRef.current!;
+            const hit = current.map.get(nodeId);
+            if (hit !== undefined) return hit;
+            const isUsableVideo = (id: string) => {
+                const candidate = nodeById.get(id);
+                return candidate?.type === CanvasNodeType.Video && Boolean(candidate.metadata?.content);
+            };
+            const edge = connections.find((connection) => connection.toNodeId === nodeId && isUsableVideo(connection.fromNodeId));
+            const manualId = nodeById.get(nodeId)?.metadata?.reverseVideoSourceId || "";
+            // 参考图：连进本节点的图片节点（去重、按连线顺序 = 用户连接顺序）。
+            const references: ReverseVideoSource["references"] = [];
+            for (const connection of connections) {
+                if (connection.toNodeId !== nodeId) continue;
+                const candidate = nodeById.get(connection.fromNodeId);
+                if (candidate?.type !== CanvasNodeType.Image || !candidate.metadata?.content) continue;
+                if (references.some((item) => item.id === candidate.id)) continue;
+                references.push({ id: candidate.id, title: candidate.title || "参考图", url: candidate.metadata.content });
+            }
+            const resolved: ReverseVideoSource | null = edge
+                ? { videoId: edge.fromNodeId, source: "connection", references }
+                : manualId && isUsableVideo(manualId)
+                  ? { videoId: manualId, source: "manual", references }
+                  : null;
+            current.map.set(nodeId, resolved);
+            return resolved;
+        },
+        [connections, nodeById, nodes],
     );
     const createNode = useCallback(
         (type: CanvasNodeTypeId, position?: Position) => {
@@ -1514,7 +1616,11 @@ function AtelierCanvasPage() {
             // Display-only plugin nodes with hidePanel do not open a panel; custom Panels require autoOpenPanel on creation.
             // Plugin nodes declaring useBuiltinPanel open the built-in generation panel on creation, like image nodes.
             // Built-in image, video, and config nodes retain their existing open-on-create behavior.
-            const wantsPanel = definition?.hidePanel ? false : definition?.useBuiltinPanel ? true : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group && type !== CanvasNodeType.Chat && type !== CanvasNodeType.Merge;
+            const wantsPanel = definition?.hidePanel
+                ? false
+                : definition?.useBuiltinPanel
+                  ? true
+                  : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group && type !== CanvasNodeType.Chat && type !== CanvasNodeType.Merge;
             if (wantsPanel) setDialogNodeId(newNode.id);
             return newNode.id;
         },
@@ -1547,12 +1653,25 @@ function AtelierCanvasPage() {
         [createNode],
     );
 
+    const createBridgeVideoNode = useCallback(
+        async (videoUrl: string, prompt?: string, position?: Position) => {
+            const nodeId = createNode(CanvasNodeType.Video, position);
+            const patch = {
+                content: videoUrl,
+                status: NODE_STATUS_SUCCESS,
+                ...(prompt ? { prompt, composerContent: prompt, promptSyncAt: Date.now() } : {}),
+            };
+            setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node)));
+            nodesRef.current = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node));
+            return nodeId;
+        },
+        [createNode],
+    );
+
     const createMergeNode = useCallback(
         (position?: Position, sourceImageIds?: string[]) => {
             const mergeId = createNode(CanvasNodeType.Merge, position);
-            const sources =
-                sourceImageIds ||
-                nodesRef.current.filter((node) => selectedNodeIds.has(node.id) && node.type === CanvasNodeType.Image && node.metadata?.content).map((node) => node.id);
+            const sources = sourceImageIds || nodesRef.current.filter((node) => selectedNodeIds.has(node.id) && node.type === CanvasNodeType.Image && node.metadata?.content).map((node) => node.id);
             if (sources.length) {
                 const layoutCount = Math.max(4, sources.length);
                 const columns = Math.ceil(Math.sqrt(layoutCount));
@@ -1591,9 +1710,7 @@ function AtelierCanvasPage() {
                     // 合并节点的时间线跟着连线走：源节点被删 = 线也没了，时间线上那段一起收掉，
                     // 否则会留下一条永远连不回来的「源节点已删除」幽灵行。
                     const clips = node.metadata?.videoMergeClips;
-                    const pruned = clips?.some((clip) => allIds.has(clip.nodeId))
-                        ? { ...node, metadata: { ...node.metadata, videoMergeClips: clips.filter((clip) => !allIds.has(clip.nodeId)) } }
-                        : node;
+                    const pruned = clips?.some((clip) => allIds.has(clip.nodeId)) ? { ...node, metadata: { ...node.metadata, videoMergeClips: clips.filter((clip) => !allIds.has(clip.nodeId)) } } : node;
                     const groupId = pruned.metadata?.groupId;
                     if (groupId && allIds.has(groupId)) return { ...pruned, metadata: { ...pruned.metadata, groupId: undefined } };
                     return pruned;
@@ -1650,9 +1767,7 @@ function AtelierCanvasPage() {
     //    在直连为空时会回落到 hub）。只认直连时 `incoming.length` 恒为 0，同样静默失效。
     const handleReorderLinkedMedia = useCallback((nodeId: string, orderedNodeIds: string[]) => {
         setConnections((prev) => {
-            const hubIds = prev
-                .filter((conn) => conn.fromNodeId === nodeId && nodesRef.current.some((node) => node.id === conn.toNodeId && node.type === CanvasNodeType.Config))
-                .map((conn) => conn.toNodeId);
+            const hubIds = prev.filter((conn) => conn.fromNodeId === nodeId && nodesRef.current.some((node) => node.id === conn.toNodeId && node.type === CanvasNodeType.Config)).map((conn) => conn.toNodeId);
             return reorderConnectionsForTargets(prev, [nodeId, ...new Set(hubIds)], orderedNodeIds) ?? prev;
         });
     }, []);
@@ -1774,42 +1889,41 @@ function AtelierCanvasPage() {
         clipboardRef.current = {
             nodes: copiedNodes,
             // Keep internal edges and edges to unselected neighbors so paste can reattach them.
-            connections: connectionsRef.current
-                .filter((connection) => selectedIds.has(connection.fromNodeId) || selectedIds.has(connection.toNodeId))
-                .map((connection) => ({ ...connection })),
+            connections: connectionsRef.current.filter((connection) => selectedIds.has(connection.fromNodeId) || selectedIds.has(connection.toNodeId)).map((connection) => ({ ...connection })),
         };
 
         // 同步把「这段剪贴板是画布自己的」这个事实写进系统剪贴板：粘贴时用它区分内部复制与外部内容。
         // 失败（iframe / 未授权）不影响内部 Ctrl+V —— `clipboardFingerprintRef.at` 还有一段宽限窗口。
         const snapshot = clipboardTextSnapshot(copiedNodes);
         clipboardFingerprintRef.current = { text: snapshot, at: Date.now() };
-        void navigator.clipboard
-            ?.writeText(snapshot)
-            .catch(() => {
-                // 写入失败时不清空指纹：宽限窗口内的粘贴仍按内部复制处理。
-            });
+        void navigator.clipboard?.writeText(snapshot).catch(() => {
+            // 写入失败时不清空指纹：宽限窗口内的粘贴仍按内部复制处理。
+        });
     }, []);
 
-    const copyNodeImageToClipboard = useCallback(async (nodeId: string) => {
-        const node = nodesRef.current.find((item) => item.id === nodeId);
-        if (!node || node.type !== CanvasNodeType.Image || !node.metadata?.content) {
-            message.warning(t("canvas.shortcut.copyImageNeedSelect"));
-            return;
-        }
-        try {
-            const primary = node.metadata.images?.find((image) => image.id === (node.metadata?.primaryImageId || node.metadata?.images?.[0]?.id) && image.content) || null;
-            const dataUrl = await imageToDataUrl({
-                url: primary?.content || node.metadata.content,
-                storageKey: primary?.storageKey || node.metadata.storageKey,
-            });
-            const sourceBlob = await (await fetch(dataUrl)).blob();
-            const clipboardBlob = await ensureClipboardImageBlob(sourceBlob);
-            await navigator.clipboard.write([new ClipboardItem({ [clipboardBlob.type]: clipboardBlob })]);
-            message.success(t("canvas.shortcut.copyImageDone"));
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : t("canvas.shortcut.copyImageFailed"));
-        }
-    }, [message, t]);
+    const copyNodeImageToClipboard = useCallback(
+        async (nodeId: string) => {
+            const node = nodesRef.current.find((item) => item.id === nodeId);
+            if (!node || node.type !== CanvasNodeType.Image || !node.metadata?.content) {
+                message.warning(t("canvas.shortcut.copyImageNeedSelect"));
+                return;
+            }
+            try {
+                const primary = node.metadata.images?.find((image) => image.id === (node.metadata?.primaryImageId || node.metadata?.images?.[0]?.id) && image.content) || null;
+                const dataUrl = await imageToDataUrl({
+                    url: primary?.content || node.metadata.content,
+                    storageKey: primary?.storageKey || node.metadata.storageKey,
+                });
+                const sourceBlob = await (await fetch(dataUrl)).blob();
+                const clipboardBlob = await ensureClipboardImageBlob(sourceBlob);
+                await navigator.clipboard.write([new ClipboardItem({ [clipboardBlob.type]: clipboardBlob })]);
+                message.success(t("canvas.shortcut.copyImageDone"));
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("canvas.shortcut.copyImageFailed"));
+            }
+        },
+        [message, t],
+    );
 
     /**
      * C: 复制创建选中节点的内容。
@@ -1951,9 +2065,7 @@ function AtelierCanvasPage() {
         const remappedIds = new Set(idMap.values());
         const existingIds = new Set(nodesRef.current.map((node) => node.id));
         const nextConnections = cloneConnectionsForCopiedNodes(clipboard.connections, idMap).filter(
-            (connection) =>
-                (remappedIds.has(connection.fromNodeId) || existingIds.has(connection.fromNodeId)) &&
-                (remappedIds.has(connection.toNodeId) || existingIds.has(connection.toNodeId)),
+            (connection) => (remappedIds.has(connection.fromNodeId) || existingIds.has(connection.fromNodeId)) && (remappedIds.has(connection.toNodeId) || existingIds.has(connection.toNodeId)),
         );
 
         setNodes((prev) => [...prev, ...pastedNodes]);
@@ -2542,7 +2654,13 @@ function AtelierCanvasPage() {
                     const storageKey = source.metadata?.storageKey;
                     const url = String(source.metadata?.content || "") || (storageKey ? await resolveMediaUrl(storageKey, "") : "");
                     const stored = storageKey ? await getMediaBlob(storageKey) : null;
-                    const blob = stored ?? (url ? await fetch(url).then((response) => response.blob()).catch(() => null) : null);
+                    const blob =
+                        stored ??
+                        (url
+                            ? await fetch(url)
+                                  .then((response) => response.blob())
+                                  .catch(() => null)
+                            : null);
                     if (!blob) {
                         skipped += 1;
                         continue;
@@ -2701,7 +2819,13 @@ function AtelierCanvasPage() {
                     const storageKey = source.metadata?.storageKey;
                     const url = String(source.metadata?.content || "") || (storageKey ? await resolveMediaUrl(storageKey, "") : "");
                     const stored = storageKey ? await getMediaBlob(storageKey) : null;
-                    const blob = stored ?? (url ? await fetch(url).then((response) => response.blob()).catch(() => null) : null);
+                    const blob =
+                        stored ??
+                        (url
+                            ? await fetch(url)
+                                  .then((response) => response.blob())
+                                  .catch(() => null)
+                            : null);
                     if (!blob) {
                         skipped += 1;
                         continue;
@@ -2831,52 +2955,55 @@ function AtelierCanvasPage() {
         [connectNodes, selectNodeByEvent, setConnecting, toggleAudioMergePick],
     );
 
-    const handleNodeMouseDown = useCallback((event: ReactMouseEvent, nodeId: string) => {
-        event.stopPropagation();
-        // 弹窗 / 浮层内的按下不能开始拖节点：portal 事件沿组件树冒泡，弹窗挂在节点子树里时会误触。
-        if (isOverlayEventTarget(event.target)) return;
-        // Audio-merge "pick" mode: a click on an audio node only toggles it in the merge list and
-        // must never start a node drag.
-        if (audioMergePickingRef.current) {
-            const clicked = nodesRef.current.find((node) => node.id === nodeId);
-            if (clicked?.type === CanvasNodeType.Audio) {
+    const handleNodeMouseDown = useCallback(
+        (event: ReactMouseEvent, nodeId: string) => {
+            event.stopPropagation();
+            // 弹窗 / 浮层内的按下不能开始拖节点：portal 事件沿组件树冒泡，弹窗挂在节点子树里时会误触。
+            if (isOverlayEventTarget(event.target)) return;
+            // Audio-merge "pick" mode: a click on an audio node only toggles it in the merge list and
+            // must never start a node drag.
+            if (audioMergePickingRef.current) {
+                const clicked = nodesRef.current.find((node) => node.id === nodeId);
+                if (clicked?.type === CanvasNodeType.Audio) {
+                    pendingSelectionRef.current = null;
+                    return;
+                }
+            }
+            // While sticky-linking, clicks only create edges âdo not start a drag on the clicked peer.
+            if (connectingParamsRef.current?.sticky) {
                 pendingSelectionRef.current = null;
                 return;
             }
-        }
-        // While sticky-linking, clicks only create edges âdo not start a drag on the clicked peer.
-        if (connectingParamsRef.current?.sticky) {
+            // Windows: Alt+click otherwise focuses the browser menu bar and can cancel the drag.
+            if (event.altKey) event.preventDefault();
+            // Capture already selected the node; this only starts dragging, with a fallback selection if capture did not run.
+            const currentNodes = nodesRef.current;
+            const nextSelected = pendingSelectionRef.current ?? selectNodeByEvent(event, nodeId).nextSelected;
             pendingSelectionRef.current = null;
-            return;
-        }
-        // Windows: Alt+click otherwise focuses the browser menu bar and can cancel the drag.
-        if (event.altKey) event.preventDefault();
-        // Capture already selected the node; this only starts dragging, with a fallback selection if capture did not run.
-        const currentNodes = nodesRef.current;
-        const nextSelected = pendingSelectionRef.current ?? selectNodeByEvent(event, nodeId).nextSelected;
-        pendingSelectionRef.current = null;
-        const dragIds = new Set(nextSelected);
-        currentNodes.forEach((node) => {
-            if (!nextSelected.has(node.id)) return;
-            if (node.type === CanvasNodeType.Group) {
-                currentNodes.forEach((child) => {
-                    if (child.metadata?.groupId === node.id) dragIds.add(child.id);
-                });
-            }
-        });
-        dragRef.current = {
-            isDraggingNode: true,
-            hasMoved: false,
-            isAltCopyDrag: event.altKey,
-            copySpawned: false,
-            startX: event.clientX,
-            startY: event.clientY,
-            initialSelectedNodes: currentNodes.filter((node) => dragIds.has(node.id)).map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
-        };
-        historyPausedRef.current = true;
-        nodeDraggingRef.current = true;
-        setIsNodeDragging(true);
-    }, [selectNodeByEvent]);
+            const dragIds = new Set(nextSelected);
+            currentNodes.forEach((node) => {
+                if (!nextSelected.has(node.id)) return;
+                if (node.type === CanvasNodeType.Group) {
+                    currentNodes.forEach((child) => {
+                        if (child.metadata?.groupId === node.id) dragIds.add(child.id);
+                    });
+                }
+            });
+            dragRef.current = {
+                isDraggingNode: true,
+                hasMoved: false,
+                isAltCopyDrag: event.altKey,
+                copySpawned: false,
+                startX: event.clientX,
+                startY: event.clientY,
+                initialSelectedNodes: currentNodes.filter((node) => dragIds.has(node.id)).map((node) => ({ id: node.id, x: node.position.x, y: node.position.y })),
+            };
+            historyPausedRef.current = true;
+            nodeDraggingRef.current = true;
+            setIsNodeDragging(true);
+        },
+        [selectNodeByEvent],
+    );
 
     const spawnAltCopyDragNodes = useCallback(() => {
         const sourceIds = new Set(dragRef.current.initialSelectedNodes.map((item) => item.id));
@@ -3286,10 +3413,11 @@ function AtelierCanvasPage() {
                 if (kind === "document") void createDocumentTextNode(file, position);
                 else if (kind === "audio") void createAudioFileNode(file, position);
                 else if (kind === "video") void createVideoFileNode(file, position);
-                else void createImageFileNode(file, position).catch((error) => {
-                    console.error("[canvas] file node failed", error);
-                    message.error(t("canvas.projectPage.clipboardImageFailed"));
-                });
+                else
+                    void createImageFileNode(file, position).catch((error) => {
+                        console.error("[canvas] file node failed", error);
+                        message.error(t("canvas.projectPage.clipboardImageFailed"));
+                    });
             });
         },
         [createAudioFileNode, createDocumentTextNode, createImageFileNode, createVideoFileNode, message, t],
@@ -3341,55 +3469,58 @@ function AtelierCanvasPage() {
         [createImageFileNode, getPastePosition, message, t],
     );
 
-    const resetSelectedNodesToOriginalSize = useCallback((explicitIds?: Iterable<string>) => {
-        const selectedIds = new Set(explicitIds || selectedNodeIdsRef.current);
-        if (!selectedIds.size) {
-            const fallbackId = toolbarNodeIdRef.current || hoveredNodeIdRef.current;
-            if (fallbackId) selectedIds.add(fallbackId);
-        }
-        if (!selectedIds.size) {
-            message.warning(t("canvas.shortcut.selectNodeToResetSize"));
-            return;
-        }
+    const resetSelectedNodesToOriginalSize = useCallback(
+        (explicitIds?: Iterable<string>) => {
+            const selectedIds = new Set(explicitIds || selectedNodeIdsRef.current);
+            if (!selectedIds.size) {
+                const fallbackId = toolbarNodeIdRef.current || hoveredNodeIdRef.current;
+                if (fallbackId) selectedIds.add(fallbackId);
+            }
+            if (!selectedIds.size) {
+                message.warning(t("canvas.shortcut.selectNodeToResetSize"));
+                return;
+            }
 
-        const eligible = nodesRef.current.filter((node) => {
-            if (!selectedIds.has(node.id)) return false;
-            if (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Annotate) return false;
-            return Boolean(resolveNodeMediaNaturalSize(node));
-        });
+            const eligible = nodesRef.current.filter((node) => {
+                if (!selectedIds.has(node.id)) return false;
+                if (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Annotate) return false;
+                return Boolean(resolveNodeMediaNaturalSize(node));
+            });
 
-        if (!eligible.length) {
-            message.warning(t("canvas.shortcut.resetSizeNeedMedia"));
-            return;
-        }
+            if (!eligible.length) {
+                message.warning(t("canvas.shortcut.resetSizeNeedMedia"));
+                return;
+            }
 
-        const eligibleIds = new Set(eligible.map((node) => node.id));
-        setNodes((prev) =>
-            prev.map((node) => {
-                if (!eligibleIds.has(node.id)) return node;
-                const natural = resolveNodeMediaNaturalSize(node);
-                if (!natural) return node;
-                const size = defaultFitSizeForNode(node, natural);
-                const nextWidth = Math.max(1, Math.round(size.width));
-                const nextHeight = Math.max(1, Math.round(size.height));
-                const centerX = node.position.x + node.width / 2;
-                const centerY = node.position.y + node.height / 2;
-                return {
-                    ...node,
-                    width: nextWidth,
-                    height: nextHeight,
-                    position: { x: centerX - nextWidth / 2, y: centerY - nextHeight / 2 },
-                    metadata: {
-                        ...node.metadata,
-                        freeResize: false,
-                        naturalWidth: node.metadata?.naturalWidth || natural.width,
-                        naturalHeight: node.metadata?.naturalHeight || natural.height,
-                    },
-                };
-            }),
-        );
-        message.success(t("canvas.shortcut.restoreSizeDone", { count: eligible.length }));
-    }, [message, t]);
+            const eligibleIds = new Set(eligible.map((node) => node.id));
+            setNodes((prev) =>
+                prev.map((node) => {
+                    if (!eligibleIds.has(node.id)) return node;
+                    const natural = resolveNodeMediaNaturalSize(node);
+                    if (!natural) return node;
+                    const size = defaultFitSizeForNode(node, natural);
+                    const nextWidth = Math.max(1, Math.round(size.width));
+                    const nextHeight = Math.max(1, Math.round(size.height));
+                    const centerX = node.position.x + node.width / 2;
+                    const centerY = node.position.y + node.height / 2;
+                    return {
+                        ...node,
+                        width: nextWidth,
+                        height: nextHeight,
+                        position: { x: centerX - nextWidth / 2, y: centerY - nextHeight / 2 },
+                        metadata: {
+                            ...node.metadata,
+                            freeResize: false,
+                            naturalWidth: node.metadata?.naturalWidth || natural.width,
+                            naturalHeight: node.metadata?.naturalHeight || natural.height,
+                        },
+                    };
+                }),
+            );
+            message.success(t("canvas.shortcut.restoreSizeDone", { count: eligible.length }));
+        },
+        [message, t],
+    );
 
     // Backquote shortcut: put the selected node window(s) back to the size they were created
     // with. Media nodes are filled into a per-type default box the moment their content
@@ -3399,63 +3530,66 @@ function AtelierCanvasPage() {
     // an image window jump to a size the user never saw (that is what the "." shortcut and the
     // image toolbar "original size" action do). Every non-media node falls back to its registry
     // default size. Windows keep their centre and the free-resize lock is restored.
-    const resetSelectedNodesWindowSize = useCallback((explicitIds?: Iterable<string>) => {
-        const selectedIds = new Set(explicitIds || selectedNodeIdsRef.current);
-        if (!selectedIds.size) {
-            const fallbackId = toolbarNodeIdRef.current || hoveredNodeIdRef.current;
-            if (fallbackId) selectedIds.add(fallbackId);
-        }
-        if (!selectedIds.size) {
-            message.warning(t("canvas.shortcut.selectNodeToResetWindow"));
-            return;
-        }
-
-        const targetSizeFor = (node: CanvasNodeData) => {
-            const spec = getNodeSpec(node.type);
-            if (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Annotate) {
-                const natural = resolveNodeMediaNaturalSize(node);
-                if (natural && natural.width > 0 && natural.height > 0) {
-                    if (node.type === CanvasNodeType.Video) return fitNodeSize(natural.width, natural.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
-                    return fitNodeSize(natural.width, natural.height, spec.width, spec.height);
-                }
+    const resetSelectedNodesWindowSize = useCallback(
+        (explicitIds?: Iterable<string>) => {
+            const selectedIds = new Set(explicitIds || selectedNodeIdsRef.current);
+            if (!selectedIds.size) {
+                const fallbackId = toolbarNodeIdRef.current || hoveredNodeIdRef.current;
+                if (fallbackId) selectedIds.add(fallbackId);
             }
-            return { width: spec.width, height: spec.height };
-        };
+            if (!selectedIds.size) {
+                message.warning(t("canvas.shortcut.selectNodeToResetWindow"));
+                return;
+            }
 
-        const eligible = nodesRef.current.filter((node) => {
-            if (!selectedIds.has(node.id)) return false;
-            // A group is a container region, not a window: shrinking it would strand its children.
-            if (node.type === CanvasNodeType.Group) return false;
-            const target = targetSizeFor(node);
-            const sizeChanged = Math.abs(target.width - node.width) >= 1 || Math.abs(target.height - node.height) >= 1;
-            return sizeChanged || Boolean(node.metadata?.freeResize);
-        });
+            const targetSizeFor = (node: CanvasNodeData) => {
+                const spec = getNodeSpec(node.type);
+                if (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Annotate) {
+                    const natural = resolveNodeMediaNaturalSize(node);
+                    if (natural && natural.width > 0 && natural.height > 0) {
+                        if (node.type === CanvasNodeType.Video) return fitNodeSize(natural.width, natural.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
+                        return fitNodeSize(natural.width, natural.height, spec.width, spec.height);
+                    }
+                }
+                return { width: spec.width, height: spec.height };
+            };
 
-        if (!eligible.length) {
-            message.info(t("canvas.shortcut.resetWindowAlready"));
-            return;
-        }
-
-        const eligibleIds = new Set(eligible.map((node) => node.id));
-        setNodes((prev) =>
-            prev.map((node) => {
-                if (!eligibleIds.has(node.id)) return node;
+            const eligible = nodesRef.current.filter((node) => {
+                if (!selectedIds.has(node.id)) return false;
+                // A group is a container region, not a window: shrinking it would strand its children.
+                if (node.type === CanvasNodeType.Group) return false;
                 const target = targetSizeFor(node);
-                const nextWidth = Math.max(1, Math.round(target.width));
-                const nextHeight = Math.max(1, Math.round(target.height));
-                const centerX = node.position.x + node.width / 2;
-                const centerY = node.position.y + node.height / 2;
-                return {
-                    ...node,
-                    width: nextWidth,
-                    height: nextHeight,
-                    position: { x: centerX - nextWidth / 2, y: centerY - nextHeight / 2 },
-                    metadata: { ...node.metadata, freeResize: false },
-                };
-            }),
-        );
-        message.success(t("canvas.shortcut.resetWindowDone", { count: eligible.length }));
-    }, [message, t]);
+                const sizeChanged = Math.abs(target.width - node.width) >= 1 || Math.abs(target.height - node.height) >= 1;
+                return sizeChanged || Boolean(node.metadata?.freeResize);
+            });
+
+            if (!eligible.length) {
+                message.info(t("canvas.shortcut.resetWindowAlready"));
+                return;
+            }
+
+            const eligibleIds = new Set(eligible.map((node) => node.id));
+            setNodes((prev) =>
+                prev.map((node) => {
+                    if (!eligibleIds.has(node.id)) return node;
+                    const target = targetSizeFor(node);
+                    const nextWidth = Math.max(1, Math.round(target.width));
+                    const nextHeight = Math.max(1, Math.round(target.height));
+                    const centerX = node.position.x + node.width / 2;
+                    const centerY = node.position.y + node.height / 2;
+                    return {
+                        ...node,
+                        width: nextWidth,
+                        height: nextHeight,
+                        position: { x: centerX - nextWidth / 2, y: centerY - nextHeight / 2 },
+                        metadata: { ...node.metadata, freeResize: false },
+                    };
+                }),
+            );
+            message.success(t("canvas.shortcut.resetWindowDone", { count: eligible.length }));
+        },
+        [message, t],
+    );
 
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
@@ -3695,7 +3829,25 @@ function AtelierCanvasPage() {
 
         window.addEventListener("keydown", handleKeyDown);
         return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [copySelectedNodes, createNode, deleteConnection, deleteNodes, duplicateSelectedMediaAsNode, focusNode, handleDraftShortcut, message, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, resetSelectedNodesToOriginalSize, resetSelectedNodesWindowSize, selectedConnectionId, setConnecting, t, undoCanvas]);
+    }, [
+        copySelectedNodes,
+        createNode,
+        deleteConnection,
+        deleteNodes,
+        duplicateSelectedMediaAsNode,
+        focusNode,
+        handleDraftShortcut,
+        message,
+        pasteCopiedNodes,
+        pasteSystemClipboard,
+        redoCanvas,
+        resetSelectedNodesToOriginalSize,
+        resetSelectedNodesWindowSize,
+        selectedConnectionId,
+        setConnecting,
+        t,
+        undoCanvas,
+    ]);
 
     // Space toggles the active media node (an activated video, or a single-selected audio). This
     // runs in the capture phase so it can consume the event before the canvas pan listener (also
@@ -3988,12 +4140,7 @@ function AtelierCanvasPage() {
             return;
         }
 
-        const eligible = nodesRef.current.filter(
-            (node) =>
-                selectedIds.has(node.id) &&
-                (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Annotate) &&
-                Boolean(node.metadata?.content),
-        );
+        const eligible = nodesRef.current.filter((node) => selectedIds.has(node.id) && (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Annotate) && Boolean(node.metadata?.content));
         if (!eligible.length) {
             message.warning(t("canvas.shortcut.scaleNeedMedia"));
             return;
@@ -4148,26 +4295,13 @@ function AtelierCanvasPage() {
                     // Manual vquality / audioMode edits after that stay until the next model switch
                     // (explicit values in the same patch win over the family default).
                     if (typeof basePatch.model === "string" && basePatch.model) {
-                        const mode =
-                            node.metadata?.generationMode ||
-                            (node.type === CanvasNodeType.Video
-                                ? "video"
-                                : node.type === CanvasNodeType.Audio
-                                  ? "audio"
-                                  : node.type === CanvasNodeType.Text
-                                    ? "text"
-                                    : "image");
+                        const mode = node.metadata?.generationMode || (node.type === CanvasNodeType.Video ? "video" : node.type === CanvasNodeType.Audio ? "audio" : node.type === CanvasNodeType.Text ? "text" : "image");
                         if (mode === "video" || node.type === CanvasNodeType.Video) {
-                            const defaults = resolveNativeH3VideoSettingDefaults(
-                                basePatch.model,
-                                resolveModelScript(effectiveConfig, basePatch.model),
-                            );
+                            const defaults = resolveNativeH3VideoSettingDefaults(basePatch.model, resolveModelScript(effectiveConfig, basePatch.model));
                             nextPatch = {
                                 ...basePatch,
                                 ...(defaults.vquality && basePatch.vquality === undefined ? { vquality: defaults.vquality } : {}),
-                                ...(defaults.videoAudioMode && basePatch.audioMode === undefined
-                                    ? { audioMode: defaults.videoAudioMode }
-                                    : {}),
+                                ...(defaults.videoAudioMode && basePatch.audioMode === undefined ? { audioMode: defaults.videoAudioMode } : {}),
                             };
                         }
                     }
@@ -4185,7 +4319,12 @@ function AtelierCanvasPage() {
                     const content = (node.metadata?.content || node.metadata?.prompt || "").trim();
                     if (!content) return message.error(t("canvas.projectPage.noTextToSave"));
                     const rawName = (node.title || t("canvas.projectPage.canvasText")).trim() || "document";
-                    const safeName = rawName.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, " ").trim().slice(0, 48) || "document";
+                    const safeName =
+                        rawName
+                            .replace(/[\\/:*?"<>|]+/g, "_")
+                            .replace(/\s+/g, " ")
+                            .trim()
+                            .slice(0, 48) || "document";
                     // Word is the default: the node's markdown is turned into real headings/lists, so
                     // the .docx opens formatted rather than showing raw "#" and "**" markers.
                     // Markdown is kept verbatim for people who want the source.
@@ -4358,21 +4497,27 @@ function AtelierCanvasPage() {
         setAdjustNodeId(null);
     }, []);
 
-    const openVideoTools = useCallback((node: CanvasNodeData) => {
-        if (!node.metadata?.content) {
-            message.warning(t("canvas.node.emptyVideo"));
-            return;
-        }
-        setVideoToolsNodeId(node.id);
-    }, [message, t]);
+    const openVideoTools = useCallback(
+        (node: CanvasNodeData) => {
+            if (!node.metadata?.content) {
+                message.warning(t("canvas.node.emptyVideo"));
+                return;
+            }
+            setVideoToolsNodeId(node.id);
+        },
+        [message, t],
+    );
 
-    const openAudioTools = useCallback((node: CanvasNodeData) => {
-        if (!node.metadata?.content) {
-            message.warning(t("canvas.node.emptyAudio"));
-            return;
-        }
-        setAudioToolsNodeId(node.id);
-    }, [message, t]);
+    const openAudioTools = useCallback(
+        (node: CanvasNodeData) => {
+            if (!node.metadata?.content) {
+                message.warning(t("canvas.node.emptyAudio"));
+                return;
+            }
+            setAudioToolsNodeId(node.id);
+        },
+        [message, t],
+    );
 
     const createAdjacentVideoNode = useCallback(async (source: CanvasNodeData, videoFile: Awaited<ReturnType<typeof storeGeneratedVideo>>, title: string) => {
         const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
@@ -4590,9 +4735,7 @@ function AtelierCanvasPage() {
             return;
         }
         // Pre-select the currently selected audio nodes when possible; otherwise select all.
-        const preSelected = audioMergeCandidates
-            .filter((candidate) => selectedNodeIdsRef.current.has(candidate.id))
-            .map((candidate) => candidate.id);
+        const preSelected = audioMergeCandidates.filter((candidate) => selectedNodeIdsRef.current.has(candidate.id)).map((candidate) => candidate.id);
         const initial = preSelected.length >= 2 ? preSelected : audioMergeCandidates.map((candidate) => candidate.id);
         setAudioMergeSelected(initial);
         audioMergeSelectedRef.current = initial;
@@ -4660,9 +4803,7 @@ function AtelierCanvasPage() {
             if (!source?.metadata?.content) return;
             const blob = await loadVideoBlob(source.metadata.content);
             const upscaleConfig = { ...effectiveConfig, model: result.model, videoModel: result.model };
-            const publicUrl = /^https?:\/\//i.test(source.metadata.content)
-                ? source.metadata.content
-                : await uploadProviderMediaFile(upscaleConfig, blob, "source.mp4", { signal });
+            const publicUrl = /^https?:\/\//i.test(source.metadata.content) ? source.metadata.content : await uploadProviderMediaFile(upscaleConfig, blob, "source.mp4", { signal });
             const generated = await requestVideoUpscale(upscaleConfig, { videoUrl: publicUrl, resolution: result.resolution, signal });
             const stored = await storeGeneratedVideo(generated);
             await createAdjacentVideoNode(source, stored, t("canvas.videoTools.upscaleSuccess"));
@@ -4791,9 +4932,7 @@ function AtelierCanvasPage() {
                         ...imageMetadata(uploaded),
                     },
                 };
-                const sourceIds = pieces
-                    .map((_, index) => slots[index])
-                    .filter((id): id is string => Boolean(id));
+                const sourceIds = pieces.map((_, index) => slots[index]).filter((id): id is string => Boolean(id));
                 setNodes((prev) => [...prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : item)), child]);
                 setConnections((prev) => [...prev, ...sourceIds.map((fromNodeId) => ({ id: nanoid(), fromNodeId, toNodeId: childId }))]);
                 setSelectedNodeIds(new Set([childId]));
@@ -4914,10 +5053,14 @@ function AtelierCanvasPage() {
 
     const addTextNodeFromAnnotate = useCallback(
         (node: CanvasNodeData, text: string) => {
-            const textNode = createCanvasNode(CanvasNodeType.Text, {
-                x: node.position.x + node.width + 96 + getNodeSpec(CanvasNodeType.Text).width / 2,
-                y: node.position.y + getNodeSpec(CanvasNodeType.Text).height / 2,
-            }, { content: text, status: "idle", fontSize: DEFAULT_CANVAS_FONT_SIZE });
+            const textNode = createCanvasNode(
+                CanvasNodeType.Text,
+                {
+                    x: node.position.x + node.width + 96 + getNodeSpec(CanvasNodeType.Text).width / 2,
+                    y: node.position.y + getNodeSpec(CanvasNodeType.Text).height / 2,
+                },
+                { content: text, status: "idle", fontSize: DEFAULT_CANVAS_FONT_SIZE },
+            );
             setNodes((prev) => [...prev, textNode]);
             setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: textNode.id }]);
             setSelectedNodeIds(new Set([textNode.id]));
@@ -5333,9 +5476,7 @@ function AtelierCanvasPage() {
                         // The request produced a clip and no image (the H3 four-view card's previews
                         // and the 氛围感短视频 graph's only output both come back this way): leave the
                         // node content as-is, mark the round done and spawn the video instead.
-                        setNodes((prev) =>
-                            prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
-                        );
+                        setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));
                         void spawnExtraVideoNodes(nodeId, items[0].videoUrls, { prompt: scene, model: generationConfig.model });
                         setDialogNodeId(null);
                     } else {
@@ -5344,7 +5485,11 @@ function AtelierCanvasPage() {
                             prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
                         );
                         if (items.length > 1) {
-                            void spawnExtraImageNodes(nodeId, items.slice(1).map((item) => item.dataUrl), { prompt: scene, model: generationConfig.model });
+                            void spawnExtraImageNodes(
+                                nodeId,
+                                items.slice(1).map((item) => item.dataUrl),
+                                { prompt: scene, model: generationConfig.model },
+                            );
                         }
                         if (items[0]?.extraVideos?.length) {
                             void spawnExtraVideoNodes(nodeId, items[0].extraVideos, { prompt: scene, model: generationConfig.model });
@@ -5367,13 +5512,7 @@ function AtelierCanvasPage() {
             setRunningNodeId(nodeId);
             // 公司h3 pod FIFO: do not abort an in-flight job when another submit is queued.
             const queuedVideoSerial = mode === "video" && isQueuedVideoConfig(generationConfig);
-            const runController = startGenerationRequest(
-                nodeId,
-                nodeId,
-                nodeId,
-                new AbortController(),
-                queuedVideoSerial ? { replaceTarget: false } : undefined,
-            );
+            const runController = startGenerationRequest(nodeId, nodeId, nodeId, new AbortController(), queuedVideoSerial ? { replaceTarget: false } : undefined);
             const sourceTextContent = sourceNode?.type === CanvasNodeType.Text ? sourceNode.metadata?.content?.trim() || "" : "";
             const editingTextNode = mode === "text" && Boolean(sourceTextContent);
             const generationContext = await hydrateNodeGenerationContext(
@@ -5416,9 +5555,7 @@ function AtelierCanvasPage() {
                     const selfStorageKey = sourceNode?.metadata?.storageKey;
                     const selfContent = sourceNode?.metadata?.content;
                     const generatedChildIds = new Set(connectionsRef.current.filter((connection) => connection.fromNodeId === nodeId).map((connection) => connection.toNodeId));
-                    let referenceImages = generationContext.referenceImages.filter(
-                        (ref) => ref.id !== nodeId && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.dataUrl !== selfContent,
-                    );
+                    let referenceImages = generationContext.referenceImages.filter((ref) => ref.id !== nodeId && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.dataUrl !== selfContent);
                     if (isImageNode && sourceNode?.metadata?.content && !referenceImages.length && sourceNode.metadata.generationType === "edit") {
                         // Upstream may have been disconnected; reuse original edit refs but still exclude self.
                         const savedRefs = (await resolveMetadataReferences(sourceNode.metadata)) || [];
@@ -5433,10 +5570,7 @@ function AtelierCanvasPage() {
                     const imageIds = Array.from({ length: count }, () => nanoid());
                     const previousImages = writeImageToSelf ? collectSuccessfulImageHistory(sourceNode) : [];
                     const appendImageHistory = writeImageToSelf && previousImages.length > 0;
-                    const retainedImages =
-                        appendImageHistory && previousImages.length + count > MAX_IMAGE_NODE_HISTORY
-                            ? previousImages.slice(Math.max(0, previousImages.length - (MAX_IMAGE_NODE_HISTORY - count)))
-                            : previousImages;
+                    const retainedImages = appendImageHistory && previousImages.length + count > MAX_IMAGE_NODE_HISTORY ? previousImages.slice(Math.max(0, previousImages.length - (MAX_IMAGE_NODE_HISTORY - count))) : previousImages;
                     const loadingImages: CanvasNodeImage[] = imageIds.map((id) => ({ id, status: NODE_STATUS_LOADING, content: "", storageKey: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" }));
                     const nextImages = appendImageHistory ? [...retainedImages, ...loadingImages] : loadingImages;
                     const retainedPrimaryId = appendImageHistory ? sourceNode?.metadata?.primaryImageId || retainedImages[0]?.id : undefined;
@@ -5534,10 +5668,7 @@ function AtelierCanvasPage() {
                     // 为什么在这里而不在生图请求里：`size` 有没有被上游听见**只有返回的像素能证明**。
                     const aspectMismatches: string[] = [];
                     const newImageIdSet = new Set(imageIds);
-                    const applyGeneratedSlot = async (
-                        imageId: string,
-                        image: GeneratedImageResult,
-                    ) => {
+                    const applyGeneratedSlot = async (imageId: string, image: GeneratedImageResult) => {
                         const uploaded = await uploadGeneratedImage(image);
                         const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                         const item = canvasNodeImageFromUpload(imageId, uploaded, {
@@ -5647,9 +5778,7 @@ function AtelierCanvasPage() {
                                                   ...node,
                                                   metadata: {
                                                       ...node.metadata,
-                                                      images: node.metadata?.images?.map((image) =>
-                                                          newImageIdSet.has(image.id) ? { ...image, status: NODE_STATUS_ERROR, errorDetails } : image,
-                                                      ),
+                                                      images: node.metadata?.images?.map((image) => (newImageIdSet.has(image.id) ? { ...image, status: NODE_STATUS_ERROR, errorDetails } : image)),
                                                   },
                                               }
                                             : node,
@@ -5671,9 +5800,7 @@ function AtelierCanvasPage() {
                                         hasSuccess = true;
                                         setNodes((prev) =>
                                             prev.map((node) =>
-                                                node.id === rootId
-                                                    ? { ...node, metadata: { ...node.metadata, images: node.metadata?.images?.map((current) => (current.id === imageId ? { ...current, status: NODE_STATUS_SUCCESS } : current)) } }
-                                                    : node,
+                                                node.id === rootId ? { ...node, metadata: { ...node.metadata, images: node.metadata?.images?.map((current) => (current.id === imageId ? { ...current, status: NODE_STATUS_SUCCESS } : current)) } } : node,
                                             ),
                                         );
                                         void spawnExtraVideoNodes(rootId, items[0].videoUrls, { prompt: effectivePrompt, model: generationConfig.model });
@@ -5682,7 +5809,11 @@ function AtelierCanvasPage() {
                                         // Storyboard-style workflows return every frame regardless of the count
                                         // param; place the leftovers instead of silently dropping them.
                                         if (items.length > 1) {
-                                            void spawnExtraImageNodes(rootId, items.slice(1).map((item) => item.dataUrl), { prompt: effectivePrompt, model: generationConfig.model });
+                                            void spawnExtraImageNodes(
+                                                rootId,
+                                                items.slice(1).map((item) => item.dataUrl),
+                                                { prompt: effectivePrompt, model: generationConfig.model },
+                                            );
                                         }
                                         if (items[0]?.extraVideos?.length) {
                                             void spawnExtraVideoNodes(rootId, items[0].extraVideos, { prompt: effectivePrompt, model: generationConfig.model });
@@ -5751,17 +5882,12 @@ function AtelierCanvasPage() {
                     const selfStorageKey = sourceNode?.metadata?.storageKey;
                     const selfContent = sourceNode?.metadata?.content;
                     const generatedChildIds = new Set(connectionsRef.current.filter((connection) => connection.fromNodeId === nodeId).map((connection) => connection.toNodeId));
-                    const referenceImages = generationContext.referenceImages.filter(
-                        (ref) => ref.id !== nodeId && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.dataUrl !== selfContent,
-                    );
+                    const referenceImages = generationContext.referenceImages.filter((ref) => ref.id !== nodeId && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.dataUrl !== selfContent);
                     const videoId = writeVideoToSelf ? nodeId : nanoid();
                     const versionId = nanoid();
                     const previousVideos = writeVideoToSelf ? collectSuccessfulImageHistory(sourceNode) : [];
                     const appendVideoHistory = writeVideoToSelf && previousVideos.length > 0;
-                    const retainedVideos =
-                        appendVideoHistory && previousVideos.length + 1 > MAX_IMAGE_NODE_HISTORY
-                            ? previousVideos.slice(Math.max(0, previousVideos.length - (MAX_IMAGE_NODE_HISTORY - 1)))
-                            : previousVideos;
+                    const retainedVideos = appendVideoHistory && previousVideos.length + 1 > MAX_IMAGE_NODE_HISTORY ? previousVideos.slice(Math.max(0, previousVideos.length - (MAX_IMAGE_NODE_HISTORY - 1))) : previousVideos;
                     const loadingVideo: CanvasNodeImage = { id: versionId, status: NODE_STATUS_LOADING, content: "", storageKey: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" };
                     const nextImages = appendVideoHistory ? [...retainedVideos, loadingVideo] : [loadingVideo];
                     const retainedPrimaryId = appendVideoHistory ? sourceNode?.metadata?.primaryImageId || retainedVideos[0]?.id : undefined;
@@ -5834,16 +5960,7 @@ function AtelierCanvasPage() {
                     setDialogNodeId(nodeId);
                     // Own AbortController per child clip; replaceTarget=false so queueing the next
                     // native job never abort()/interrupt the one still running on the pod.
-                    const controller =
-                        videoId === nodeId
-                            ? runController
-                            : startGenerationRequest(
-                                  videoId,
-                                  nodeId,
-                                  nodeId,
-                                  new AbortController(),
-                                  queuedVideoSerial ? { replaceTarget: false } : undefined,
-                              );
+                    const controller = videoId === nodeId ? runController : startGenerationRequest(videoId, nodeId, nodeId, new AbortController(), queuedVideoSerial ? { replaceTarget: false } : undefined);
                     const runNativeVideoJob = async () => {
                         if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
                         // 视频也吃节点上的「风格模板」（`modelPrompt` = 本体 + 风格段；文本/音频模式下两者相等）。
@@ -5947,9 +6064,7 @@ function AtelierCanvasPage() {
                     const selfStorageKey = sourceNode?.metadata?.storageKey;
                     const selfContent = sourceNode?.metadata?.content;
                     const generatedChildIds = new Set(connectionsRef.current.filter((connection) => connection.fromNodeId === nodeId).map((connection) => connection.toNodeId));
-                    const referenceAudios = (generationContext.referenceAudios || []).filter(
-                        (ref) => ref.id !== nodeId && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.url !== selfContent,
-                    );
+                    const referenceAudios = (generationContext.referenceAudios || []).filter((ref) => ref.id !== nodeId && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.url !== selfContent);
                     const audioId = writeAudioToSelf ? nodeId : nanoid();
                     const parent = sourceNode?.position || { x: 0, y: 0 };
                     const audioNode: CanvasNodeData = {
@@ -5985,11 +6100,25 @@ function AtelierCanvasPage() {
                     if (!writeAudioToSelf) setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: nodeId, toNodeId: audioId }]);
                     const controller = audioId === nodeId ? runController : startGenerationRequest(audioId, nodeId, nodeId, runController);
                     try {
-                        const audio = await storeGeneratedAudio(
-                            await requestAudioGeneration(generationConfig, effectivePrompt, { signal: controller.signal, referenceAudios }),
-                            generationConfig.audioFormat,
+                        const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, effectivePrompt, { signal: controller.signal, referenceAudios }), generationConfig.audioFormat);
+                        setNodes((prev) =>
+                            prev.map((node) =>
+                                node.id === audioId
+                                    ? {
+                                          ...node,
+                                          metadata: {
+                                              ...node.metadata,
+                                              ...audioMetadata(audio),
+                                              prompt: effectivePrompt,
+                                              ...buildAudioGenerationMetadata(generationConfig),
+                                              references: generationReferenceUrls({ referenceImages: [], referenceVideos: [], referenceAudios }),
+                                              status: NODE_STATUS_SUCCESS,
+                                              errorDetails: undefined,
+                                          },
+                                      }
+                                    : node,
+                            ),
                         );
-                        setNodes((prev) => prev.map((node) => (node.id === audioId ? { ...node, metadata: { ...node.metadata, ...audioMetadata(audio), prompt: effectivePrompt, ...buildAudioGenerationMetadata(generationConfig), references: generationReferenceUrls({ referenceImages: [], referenceVideos: [], referenceAudios }), status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));
                     } catch (error) {
                         if (!isGenerationCanceled(error)) {
                             const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
@@ -6104,6 +6233,7 @@ function AtelierCanvasPage() {
             getNodes: () => nodesRef.current,
             createTextNode: createBridgeTextNode,
             createImageNode: createBridgeImageNode,
+            createVideoNode: createBridgeVideoNode,
             setPrompt: (nodeId, prompt) => {
                 handleConfigNodeChange(nodeId, { prompt, composerContent: prompt, promptSyncAt: Date.now() });
                 nodesRef.current = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt, composerContent: prompt } } : node));
@@ -6114,7 +6244,7 @@ function AtelierCanvasPage() {
             },
             generate: (nodeId, mode, prompt) => generateNodeRef.current?.(nodeId, mode, prompt) || Promise.resolve(),
         });
-    }, [createBridgeImageNode, createBridgeTextNode, handleConfigNodeChange, projectId, projectLoaded]);
+    }, [createBridgeImageNode, createBridgeTextNode, createBridgeVideoNode, handleConfigNodeChange, projectId, projectLoaded]);
 
     const handleRetryNode = useCallback(
         async (node: CanvasNodeData, imageId?: string) => {
@@ -6160,15 +6290,8 @@ function AtelierCanvasPage() {
                     : prompt;
             const generationType = savedImageMetadata?.generationType;
             const useReferenceImages = generationType ? generationType === "edit" : Boolean(context?.referenceImages.length);
-            const resolvedRetryRefs =
-                hasSavedImageMetadata && savedImageMetadata
-                    ? await resolveMetadataReferences(savedImageMetadata)
-                    : useReferenceImages
-                      ? context?.referenceImages || []
-                      : [];
-            const retryImages = (resolvedRetryRefs || []).filter(
-                (ref) => ref.id !== node.id && ref.storageKey !== node.metadata?.storageKey && ref.dataUrl !== node.metadata?.content,
-            );
+            const resolvedRetryRefs = hasSavedImageMetadata && savedImageMetadata ? await resolveMetadataReferences(savedImageMetadata) : useReferenceImages ? context?.referenceImages || [] : [];
+            const retryImages = (resolvedRetryRefs || []).filter((ref) => ref.id !== node.id && ref.storageKey !== node.metadata?.storageKey && ref.dataUrl !== node.metadata?.content);
             if (useReferenceImages && !retryImages.length) {
                 message.error(t("canvas.projectPage.referenceMissing"));
                 setNodes((prev) =>
@@ -6206,13 +6329,7 @@ function AtelierCanvasPage() {
                 ),
             );
             const queuedVideoSerial = node.type === CanvasNodeType.Video && isQueuedVideoConfig(generationConfig);
-            const controller = startGenerationRequest(
-                node.id,
-                sourceNode.id,
-                node.id,
-                new AbortController(),
-                queuedVideoSerial ? { replaceTarget: false } : undefined,
-            );
+            const controller = startGenerationRequest(node.id, sourceNode.id, node.id, new AbortController(), queuedVideoSerial ? { replaceTarget: false } : undefined);
 
             try {
                 if (node.type === CanvasNodeType.Text) {
@@ -6307,13 +6424,8 @@ function AtelierCanvasPage() {
                         const selfStorageKey = node.metadata?.storageKey;
                         const selfContent = node.metadata?.content;
                         const generatedChildIds = new Set(connectionsRef.current.filter((connection) => connection.fromNodeId === node.id).map((connection) => connection.toNodeId));
-                        const referenceAudios = (context?.referenceAudios || []).filter(
-                            (ref) => ref.id !== node.id && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.url !== selfContent,
-                        );
-                        const audio = await storeGeneratedAudio(
-                            await requestAudioGeneration(generationConfig, prompt, { signal: controller.signal, referenceAudios }),
-                            generationConfig.audioFormat,
-                        );
+                        const referenceAudios = (context?.referenceAudios || []).filter((ref) => ref.id !== node.id && !generatedChildIds.has(ref.id) && ref.storageKey !== selfStorageKey && ref.url !== selfContent);
+                        const audio = await storeGeneratedAudio(await requestAudioGeneration(generationConfig, prompt, { signal: controller.signal, referenceAudios }), generationConfig.audioFormat);
                         setNodes((prev) =>
                             prev.map((item) =>
                                 item.id === node.id
@@ -6355,19 +6467,11 @@ function AtelierCanvasPage() {
                     return;
                 }
 
-                const retryItems = useReferenceImages
-                    ? await requestEdit(generationConfig, retryPrompt, retryImages, undefined, { signal: controller.signal })
-                    : await requestGeneration(generationConfig, retryPrompt, { signal: controller.signal });
+                const retryItems = useReferenceImages ? await requestEdit(generationConfig, retryPrompt, retryImages, undefined, { signal: controller.signal }) : await requestGeneration(generationConfig, retryPrompt, { signal: controller.signal });
                 if (retryItems[0]?.videoUrls?.length) {
                     // The request produced a clip and no image: nothing to fill the image slot
                     // with — mark the round done and spawn the video node instead.
-                    setNodes((prev) =>
-                        prev.map((item) =>
-                            item.id === node.id
-                                ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined } }
-                                : item,
-                        ),
-                    );
+                    setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : item)));
                     void spawnExtraVideoNodes(node.id, retryItems[0].videoUrls, { prompt, model: generationConfig.model });
                     return;
                 }
@@ -6415,7 +6519,11 @@ function AtelierCanvasPage() {
                     }),
                 );
                 if (retryItems.length > 1) {
-                    void spawnExtraImageNodes(node.id, retryItems.slice(1).map((item) => item.dataUrl), { prompt, model: generationConfig.model });
+                    void spawnExtraImageNodes(
+                        node.id,
+                        retryItems.slice(1).map((item) => item.dataUrl),
+                        { prompt, model: generationConfig.model },
+                    );
                 }
                 if (retryItems[0]?.extraVideos?.length) {
                     void spawnExtraVideoNodes(node.id, retryItems[0].extraVideos, { prompt, model: generationConfig.model });
@@ -6593,13 +6701,18 @@ function AtelierCanvasPage() {
     );
 
     const sendChatMessage = useCallback(
-        async (nodeId: string, text: string, options: ChatSendOptions = { text: true, image: false }) => {
+        /**
+         * 返回值 = 这次对话的**回复正文**（拿不到就是空串）。
+         * 「反推视频」这类编排要拿它去建文本节点，所以不能只靠 `metadata.messages` 回读 ——
+         * 状态更新是异步的，`await` 回来时 `nodesRef` 未必已经有那条 assistant 消息。
+         */
+        async (nodeId: string, text: string, options: ChatSendOptions = { text: true, image: false }): Promise<string> => {
             const { text: runText, image: runImage, linkedMedia = [] } = options;
-            if (!runText && !runImage) return;
+            if (!runText && !runImage) return "";
 
             const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
-            if (!sourceNode || sourceNode.type !== CanvasNodeType.Chat) return;
-            if (sourceNode.metadata?.status === NODE_STATUS_LOADING) return;
+            if (!sourceNode || sourceNode.type !== CanvasNodeType.Chat) return "";
+            if (sourceNode.metadata?.status === NODE_STATUS_LOADING) return "";
 
             const linkedContext = await hydrateNodeGenerationContext(buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, ""));
             const linkedText = linkedContext.prompt.trim() || (sourceNode.metadata?.content || "").trim();
@@ -6609,7 +6722,7 @@ function AtelierCanvasPage() {
             const composerLinkedImages = linkedMedia.length ? await resolveCanvasReferenceImages(linkedMedia, nodesRef.current) : [];
             const hasLinkedMedia = (linkedContext.imageCount || 0) > 0 || (linkedContext.videoCount || 0) > 0 || composerLinkedImages.length > 0;
             const userText = typedText || linkedText || (hasLinkedMedia ? t("canvas.chat.defaultMediaPrompt") : "");
-            if (!userText) return;
+            if (!userText) return "";
 
             const userMessage: CanvasAssistantMessage = { id: nanoid(), role: "user", text: userText };
             const assistantId = nanoid();
@@ -6653,12 +6766,12 @@ function AtelierCanvasPage() {
             if (runText && textConfig && !isAiConfigReady(textConfig, textConfig.model)) {
                 openConfigDialog(true);
                 rollbackMessages();
-                return;
+                return "";
             }
             if (runImage && imageConfig && !isAiConfigReady(imageConfig, imageConfig.model)) {
                 openConfigDialog(true);
                 rollbackMessages();
-                return;
+                return "";
             }
 
             const controller = new AbortController();
@@ -6694,9 +6807,7 @@ function AtelierCanvasPage() {
             };
 
             const runTextTask = async () => {
-                const historyMessages: AiTextMessage[] = previousMessages
-                    .filter((message) => message.role === "user" || message.role === "assistant")
-                    .map((message) => ({ role: message.role as "user" | "assistant", content: message.text }));
+                const historyMessages: AiTextMessage[] = previousMessages.filter((message) => message.role === "user" || message.role === "assistant").map((message) => ({ role: message.role as "user" | "assistant", content: message.text }));
 
                 const mentionRefs = buildNodeMentionReferences(sourceNode, nodesRef.current, connectionsRef.current).filter((reference) => reference.active);
                 const mentionedImages = mentionRefs.filter((reference) => reference.kind === "image" && userText.includes(reference.label));
@@ -6756,30 +6867,15 @@ function AtelierCanvasPage() {
                     }
                 }
 
-                const referenceImages = Array.from(
-                    new Map(
-                        [...linkedImages, ...resolvedMentionImages, ...videoFrames]
-                            .filter((image) => Boolean(image?.dataUrl))
-                            .map((image) => [image.id || image.dataUrl, image]),
-                    ).values(),
-                );
+                const referenceImages = Array.from(new Map([...linkedImages, ...resolvedMentionImages, ...videoFrames].filter((image) => Boolean(image?.dataUrl)).map((image) => [image.id || image.dataUrl, image])).values());
 
                 const videoTitles = uniqueVideos.map((item) => item.title).join("、");
                 const videoNote = uniqueVideos.length
-                    ? `\n\n${
-                          videoParts.length
-                              ? t("canvas.chat.linkedVideoNativeNote", { count: videoParts.length, titles: videoTitles })
-                              : t("canvas.chat.linkedVideoNote", { count: uniqueVideos.length, titles: videoTitles })
-                      }`
+                    ? `\n\n${videoParts.length ? t("canvas.chat.linkedVideoNativeNote", { count: videoParts.length, titles: videoTitles }) : t("canvas.chat.linkedVideoNote", { count: uniqueVideos.length, titles: videoTitles })}`
                     : "";
                 const promptText = `${userText}${videoNote}`;
-                const mediaParts: AiTextContentPart[] = [
-                    ...referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } })),
-                    ...videoParts,
-                ];
-                const userContent: AiTextMessage["content"] = mediaParts.length
-                    ? [{ type: "text" as const, text: promptText }, ...mediaParts]
-                    : promptText;
+                const mediaParts: AiTextContentPart[] = [...referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } })), ...videoParts];
+                const userContent: AiTextMessage["content"] = mediaParts.length ? [{ type: "text" as const, text: promptText }, ...mediaParts] : promptText;
 
                 const requestMessages: AiTextMessage[] = [
                     ...(typedText && linkedText && typedText !== linkedText ? [{ role: "system" as const, content: `${t("canvas.chat.contextLabel")}:\n${linkedText}` }] : []),
@@ -6798,82 +6894,71 @@ function AtelierCanvasPage() {
                 const skillTools = resolveChatSkillTools(skillIds);
                 const skillsHint = chatSkillsSystemHint(skillIds);
                 const agentHint = agent ? buildCanvasAgentSystemPrompt(agent) : "";
-                const messagesWithSkills: AiTextMessage[] = [
-                    ...(agentHint ? [{ role: "system" as const, content: agentHint }] : []),
-                    ...(skillsHint ? [{ role: "system" as const, content: skillsHint }] : []),
-                    ...requestMessages,
-                ];
+                const messagesWithSkills: AiTextMessage[] = [...(agentHint ? [{ role: "system" as const, content: agentHint }] : []), ...(skillsHint ? [{ role: "system" as const, content: skillsHint }] : []), ...requestMessages];
                 // agent 建的文本节点按顺序往下排，避免全叠在同一个点上。
                 let agentCreatedNodes = 0;
-                const answer = await requestImageQuestion(
-                    textConfig!,
-                    messagesWithSkills,
-                    (streamed) => updateAssistantMessage({ text: streamed }),
-                    {
-                        signal: controller.signal,
-                        ...(agent ? { maxToolRounds: agent.maxToolRounds } : {}),
-                        ...(skillTools.length
-                            ? {
-                                  tools: skillTools,
-                                  executeTool: (name, args) =>
-                                      executeChatSkillTool(name, args, {
-                                          chatNodeId: nodeId,
-                                          nodes: nodesRef.current,
-                                          connections: connectionsRef.current,
-                                          updateNodeMetadata: (targetId, patch) => {
-                                              // 记住 agent 写过的提示词，「写词出图」开关用它当生图提示词。
-                                              const written = typeof patch.prompt === "string" ? patch.prompt.trim() : "";
-                                              if (written) agentWrittenPrompt = written;
-                                              setNodes((prev) => {
-                                                  const next = prev.map((node) => (node.id === targetId ? applyNodeConfigPatch(node, patch) : node));
-                                                  nodesRef.current = next;
-                                                  return next;
-                                              });
-                                          },
-                                          selectNode: (targetId) => {
-                                              setSelectedNodeIds(new Set([targetId]));
-                                              setDialogNodeId(targetId);
-                                          },
-                                          /**
-                                           * 让 agent 真能在画布上留下东西（而不只是改提示词）。
-                                           * 这里**不能**用上面的 `createNode`：它只 setNodes 不同步 nodesRef，
-                                           * 同一轮里紧接着的 connect_nodes 会找不到刚建的节点。
-                                           */
-                                          createTextNode: ({ title, text }) => {
-                                              // 新建文本节点也是 agent 的产物：它就是「写好的词」，同样算进生图提示词候选。
-                                              const written = (text || "").trim();
-                                              if (written) agentWrittenPrompt = written;
-                                              const anchor = nodesRef.current.find((item) => item.id === nodeId) || sourceNode;
-                                              const index = agentCreatedNodes++;
-                                              const created = createCanvasNode(
-                                                  CanvasNodeType.Text,
-                                                  { x: anchor.position.x + anchor.width + 200, y: anchor.position.y + 80 + index * 90 },
-                                                  { content: text, prompt: text, composerContent: text, promptSyncAt: Date.now() },
-                                              );
-                                              const next = [...nodesRef.current, title ? { ...created, title } : created];
+                const answer = await requestImageQuestion(textConfig!, messagesWithSkills, (streamed) => updateAssistantMessage({ text: streamed }), {
+                    signal: controller.signal,
+                    ...(agent ? { maxToolRounds: agent.maxToolRounds } : {}),
+                    ...(skillTools.length
+                        ? {
+                              tools: skillTools,
+                              executeTool: (name, args) =>
+                                  executeChatSkillTool(name, args, {
+                                      chatNodeId: nodeId,
+                                      nodes: nodesRef.current,
+                                      connections: connectionsRef.current,
+                                      updateNodeMetadata: (targetId, patch) => {
+                                          // 记住 agent 写过的提示词，「写词出图」开关用它当生图提示词。
+                                          const written = typeof patch.prompt === "string" ? patch.prompt.trim() : "";
+                                          if (written) agentWrittenPrompt = written;
+                                          setNodes((prev) => {
+                                              const next = prev.map((node) => (node.id === targetId ? applyNodeConfigPatch(node, patch) : node));
                                               nodesRef.current = next;
-                                              setNodes(next);
-                                              return created.id;
-                                          },
-                                          connectNodes: (fromNodeId, toNodeId) => {
-                                              const pairs = resolveConnectionPairs(fromNodeId, toNodeId, nodesRef.current, "source");
-                                              if (!pairs.length) return false;
-                                              const existing = new Set(connectionsRef.current.map((conn) => `${conn.fromNodeId}->${conn.toNodeId}`));
-                                              const additions = pairs
-                                                  .filter((pair) => !existing.has(`${pair.fromNodeId}->${pair.toNodeId}`))
-                                                  .map((pair) => ({ id: nanoid(), ...pair }));
-                                              if (!additions.length) return true;
-                                              const next = [...connectionsRef.current, ...additions];
-                                              connectionsRef.current = next;
-                                              setConnections(next);
-                                              return true;
-                                          },
-                                      }),
-                                  onToolStart: (name) => updateAssistantMessage({ text: t("canvas.chat.skillsUsing", { name }) }),
-                              }
-                            : {}),
-                    },
-                );
+                                              return next;
+                                          });
+                                      },
+                                      selectNode: (targetId) => {
+                                          setSelectedNodeIds(new Set([targetId]));
+                                          setDialogNodeId(targetId);
+                                      },
+                                      /**
+                                       * 让 agent 真能在画布上留下东西（而不只是改提示词）。
+                                       * 这里**不能**用上面的 `createNode`：它只 setNodes 不同步 nodesRef，
+                                       * 同一轮里紧接着的 connect_nodes 会找不到刚建的节点。
+                                       */
+                                      createTextNode: ({ title, text }) => {
+                                          // 新建文本节点也是 agent 的产物：它就是「写好的词」，同样算进生图提示词候选。
+                                          const written = (text || "").trim();
+                                          if (written) agentWrittenPrompt = written;
+                                          const anchor = nodesRef.current.find((item) => item.id === nodeId) || sourceNode;
+                                          const index = agentCreatedNodes++;
+                                          const created = createCanvasNode(
+                                              CanvasNodeType.Text,
+                                              { x: anchor.position.x + anchor.width + 200, y: anchor.position.y + 80 + index * 90 },
+                                              { content: text, prompt: text, composerContent: text, promptSyncAt: Date.now() },
+                                          );
+                                          const next = [...nodesRef.current, title ? { ...created, title } : created];
+                                          nodesRef.current = next;
+                                          setNodes(next);
+                                          return created.id;
+                                      },
+                                      connectNodes: (fromNodeId, toNodeId) => {
+                                          const pairs = resolveConnectionPairs(fromNodeId, toNodeId, nodesRef.current, "source");
+                                          if (!pairs.length) return false;
+                                          const existing = new Set(connectionsRef.current.map((conn) => `${conn.fromNodeId}->${conn.toNodeId}`));
+                                          const additions = pairs.filter((pair) => !existing.has(`${pair.fromNodeId}->${pair.toNodeId}`)).map((pair) => ({ id: nanoid(), ...pair }));
+                                          if (!additions.length) return true;
+                                          const next = [...connectionsRef.current, ...additions];
+                                          connectionsRef.current = next;
+                                          setConnections(next);
+                                          return true;
+                                      },
+                                  }),
+                              onToolStart: (name) => updateAssistantMessage({ text: t("canvas.chat.skillsUsing", { name }) }),
+                          }
+                        : {}),
+                });
                 updateAssistantMessage({ text: answer });
                 return answer;
             };
@@ -6906,11 +6991,7 @@ function AtelierCanvasPage() {
                     )
                 ).filter((item): item is ReferenceImage => Boolean(item));
                 const referenceImages = Array.from(
-                    new Map(
-                        [...composerLinkedImages, ...(resolvedMentions.length ? resolvedMentions : imageContext.referenceImages), ...videoFrames]
-                            .filter((image) => Boolean(image?.dataUrl))
-                            .map((image) => [image.id || image.dataUrl, image]),
-                    ).values(),
+                    new Map([...composerLinkedImages, ...(resolvedMentions.length ? resolvedMentions : imageContext.referenceImages), ...videoFrames].filter((image) => Boolean(image?.dataUrl)).map((image) => [image.id || image.dataUrl, image])).values(),
                 );
                 const finalPrompt = imageContext.prompt || imagePrompt;
                 const results = referenceImages.length
@@ -6955,10 +7036,13 @@ function AtelierCanvasPage() {
                           return [textResult, imageResult] as const;
                       })()
                     : await Promise.allSettled([runText ? runTextTask() : Promise.resolve(null), runImage ? runImageTask() : Promise.resolve(null)]);
-                if (!settled) return;
+                if (!settled) return "";
                 const [textResult, imageResult] = settled;
 
-                if (controller.signal.aborted) return;
+                // 「反推视频」要拿这段正文去建文本节点：这里是唯一可靠的取词点（runTextTask 的返回值）。
+                const textAnswer = textResult.status === "fulfilled" ? String(textResult.value || "").trim() : "";
+
+                if (controller.signal.aborted) return "";
 
                 const errors: string[] = [];
                 if (textResult.status === "rejected") {
@@ -6970,7 +7054,7 @@ function AtelierCanvasPage() {
                     if (!isGenerationCanceled(reason)) errors.push(reason instanceof Error ? reason.message : String(reason));
                 }
 
-                if (controller.signal.aborted) return;
+                if (controller.signal.aborted) return "";
 
                 setNodes((prev) =>
                     prev.map((node) => {
@@ -6981,9 +7065,7 @@ function AtelierCanvasPage() {
                         const allFailed = errors.length > 0 && !hasText && !hasImages;
 
                         if (allFailed) {
-                            const messages = (node.metadata?.messages || []).map((message) =>
-                                message.id === assistantId ? { ...message, role: "error" as const, text: errors.join("\n") } : message,
-                            );
+                            const messages = (node.metadata?.messages || []).map((message) => (message.id === assistantId ? { ...message, role: "error" as const, text: errors.join("\n") } : message));
                             return { ...node, metadata: { ...node.metadata, messages, status: NODE_STATUS_ERROR, errorDetails: errors.join("\n") } };
                         }
 
@@ -6993,9 +7075,7 @@ function AtelierCanvasPage() {
                             nextText = nextText ? `${nextText}\n\n${note}` : note;
                         }
 
-                        const messages = (node.metadata?.messages || []).map((message) =>
-                            message.id === assistantId ? { ...message, text: nextText || message.text, role: "assistant" as const } : message,
-                        );
+                        const messages = (node.metadata?.messages || []).map((message) => (message.id === assistantId ? { ...message, text: nextText || message.text, role: "assistant" as const } : message));
                         return {
                             ...node,
                             metadata: {
@@ -7007,8 +7087,9 @@ function AtelierCanvasPage() {
                         };
                     }),
                 );
+                return textAnswer;
             } catch (error) {
-                if (isGenerationCanceled(error) || controller.signal.aborted) return;
+                if (isGenerationCanceled(error) || controller.signal.aborted) return "";
                 const errorDetails = error instanceof Error ? error.message : String(error);
                 setNodes((prev) =>
                     prev.map((node) => {
@@ -7017,6 +7098,7 @@ function AtelierCanvasPage() {
                         return { ...node, metadata: { ...node.metadata, messages, status: NODE_STATUS_ERROR, errorDetails } };
                     }),
                 );
+                return "";
             } finally {
                 finishGenerationRequest(nodeId, controller);
                 setRunningNodeId((current) => (current === nodeId ? null : current));
@@ -7327,15 +7409,9 @@ function AtelierCanvasPage() {
     // node on every interaction (a major source of lag on dense canvases).
     const handleChatModelChange = useCallback((nodeId: string, model: string) => handleConfigNodeChange(nodeId, { model }), [handleConfigNodeChange]);
     const handleChatImageModelChange = useCallback((nodeId: string, model: string) => handleConfigNodeChange(nodeId, { imageModel: model }), [handleConfigNodeChange]);
-    const handleChatModesChange = useCallback(
-        (nodeId: string, options: { text: boolean; image: boolean }) => handleConfigNodeChange(nodeId, { chatTextEnabled: options.text, chatImageEnabled: options.image }),
-        [handleConfigNodeChange],
-    );
+    const handleChatModesChange = useCallback((nodeId: string, options: { text: boolean; image: boolean }) => handleConfigNodeChange(nodeId, { chatTextEnabled: options.text, chatImageEnabled: options.image }), [handleConfigNodeChange]);
     // 「Agent 写词 + 出图」：写 false 也要落盘（关掉是一种明确状态），所以不能用 undefined 省略。
-    const handleChatImageUseAgentPromptChange = useCallback(
-        (nodeId: string, enabled: boolean) => handleConfigNodeChange(nodeId, { chatImageUseAgentPrompt: enabled }),
-        [handleConfigNodeChange],
-    );
+    const handleChatImageUseAgentPromptChange = useCallback((nodeId: string, enabled: boolean) => handleConfigNodeChange(nodeId, { chatImageUseAgentPrompt: enabled }), [handleConfigNodeChange]);
     const handleChatSkillsChange = useCallback((nodeId: string, skillIds: string[]) => handleConfigNodeChange(nodeId, { chatSkillIds: skillIds }), [handleConfigNodeChange]);
     // 解绑时写 undefined 会被 patch 忽略，所以显式落成空串再在读取侧当「无 agent」处理。
     const handleChatAgentChange = useCallback((nodeId: string, agentId: string | undefined) => handleConfigNodeChange(nodeId, { agentId: agentId || "" }), [handleConfigNodeChange]);
@@ -7421,10 +7497,7 @@ function AtelierCanvasPage() {
     );
 
     const runScriptGeneration = useCallback(
-        async (
-            nodeId: string,
-            overrides?: { scriptSource?: string; scriptPrompt?: string; model?: string },
-        ): Promise<ScriptGenerationOutcome> => {
+        async (nodeId: string, overrides?: { scriptSource?: string; scriptPrompt?: string; model?: string }): Promise<ScriptGenerationOutcome> => {
             const sourceNode = nodesRef.current.find((item) => item.id === nodeId);
             if (!sourceNode || sourceNode.type !== CanvasNodeType.Script) return { ok: false, cancelled: true };
             if (isNodeGenerating(nodeId)) return { ok: false, cancelled: true };
@@ -7612,10 +7685,7 @@ function AtelierCanvasPage() {
                 const finalRows = directorScheme
                     ? normalizeStoryScriptDirectorRows(dedupedRows, presetId)
                     : museScheme
-                      ? normalizeStoryScriptMuseRows(
-                            applyMuseVideoScriptOverlay(dedupedRows, sourceText, presetId),
-                            presetId,
-                        )
+                      ? normalizeStoryScriptMuseRows(applyMuseVideoScriptOverlay(dedupedRows, sourceText, presetId), presetId)
                       : ghostScheme
                         ? normalizeStoryScriptGhostRows(applyGhostVideoScriptOverlay(dedupedRows, sourceText, presetId), presetId)
                         : momanScheme
@@ -7848,10 +7918,15 @@ function AtelierCanvasPage() {
                     const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
                         ? [{ type: "text" as const, text: rowTask }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
                         : rowTask;
-                    let answer = await requestImageQuestion(textConfig, [
-                        { role: "system", content: systemPrompt },
-                        { role: "user", content: userContent },
-                    ], () => {}, { signal: controller.signal });
+                    let answer = await requestImageQuestion(
+                        textConfig,
+                        [
+                            { role: "system", content: systemPrompt },
+                            { role: "user", content: userContent },
+                        ],
+                        () => {},
+                        { signal: controller.signal },
+                    );
                     if (controller.signal.aborted) return;
                     let parsed = parseStoryScriptOutput(answer, presetId);
                     // 模型反问而不是出表 → 压死一次「直接按内容写这一镜」，与整表路径同口径。
@@ -7860,10 +7935,15 @@ function AtelierCanvasPage() {
                         const retryContent: AiTextMessage["content"] = hydrated.referenceImages.length
                             ? [{ type: "text" as const, text: retryTask }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
                             : retryTask;
-                        answer = await requestImageQuestion(textConfig, [
-                            { role: "system", content: systemPrompt },
-                            { role: "user", content: retryContent },
-                        ], () => {}, { signal: controller.signal });
+                        answer = await requestImageQuestion(
+                            textConfig,
+                            [
+                                { role: "system", content: systemPrompt },
+                                { role: "user", content: retryContent },
+                            ],
+                            () => {},
+                            { signal: controller.signal },
+                        );
                         if (controller.signal.aborted) return;
                         parsed = parseStoryScriptOutput(answer, presetId);
                     }
@@ -7943,11 +8023,7 @@ function AtelierCanvasPage() {
                     workingRows = dedupeStoryScriptAssetDescriptions(backfillStoryScriptCastNames(workingRows, presetId, { sourceText }).rows, presetId);
                     done += 1;
                     setNodes((prev) =>
-                        prev.map((node) =>
-                            node.id === nodeId
-                                ? { ...node, metadata: { ...node.metadata, scriptStatus: "loading", scriptRows: workingRows, scriptRaw: storyScriptToMarkdown(workingRows, node.metadata?.scriptTitle, presetId) } }
-                                : node,
-                        ),
+                        prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "loading", scriptRows: workingRows, scriptRaw: storyScriptToMarkdown(workingRows, node.metadata?.scriptTitle, presetId) } } : node)),
                     );
                 }
                 if (!done) {
@@ -8068,18 +8144,21 @@ function AtelierCanvasPage() {
                         const userContent: AiTextMessage["content"] = hydrated.referenceImages.length
                             ? [{ type: "text" as const, text: task }, ...hydrated.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))]
                             : task;
-                        const answer = await requestImageQuestion(textConfig, [
-                            { role: "system", content: resolveScriptSystemPrompt(presetId, scriptPrompts.system) },
-                            { role: "user", content: userContent },
-                        ], () => {}, { signal: controller.signal });
+                        const answer = await requestImageQuestion(
+                            textConfig,
+                            [
+                                { role: "system", content: resolveScriptSystemPrompt(presetId, scriptPrompts.system) },
+                                { role: "user", content: userContent },
+                            ],
+                            () => {},
+                            { signal: controller.signal },
+                        );
                         if (controller.signal.aborted) return;
                         const parsed = parseStoryScriptOutput(answer, presetId);
                         // 补资产的回答是「单个对象 / 单行 JSON」——解析器照样能认（裸对象也算一行）。
                         const patch = parsed.ok ? parsed.rows[0] : undefined;
                         const merged = mergeStoryScriptAssetFill(row, patch, columns);
-                        const filledKeys = Object.keys(merged).filter(
-                            (key) => columns.some((column) => column.key === key) && String(merged[key] ?? "") !== String(row[key] ?? ""),
-                        );
+                        const filledKeys = Object.keys(merged).filter((key) => columns.some((column) => column.key === key) && String(merged[key] ?? "") !== String(row[key] ?? ""));
                         if (!filledKeys.length) continue;
                         workingRows = workingRows.map((item, index) => (index === rowIndex ? merged : item));
                         filledRowCount += 1;
@@ -8116,9 +8195,7 @@ function AtelierCanvasPage() {
             const rows = sourceNode.metadata?.scriptRows || [];
             const presetId = resolveStoryScriptPresetId(sourceNode.metadata?.scriptPreset);
             const extras = normalizeStoryScriptExtraColumns(sourceNode.metadata?.scriptExtraColumns);
-            const indexes = rows
-                .map((row, index) => (collectStoryScriptAssetFillTargets(presetId, row, extras).length ? index : -1))
-                .filter((index) => index >= 0);
+            const indexes = rows.map((row, index) => (collectStoryScriptAssetFillTargets(presetId, row, extras).length ? index : -1)).filter((index) => index >= 0);
             if (!indexes.length) {
                 message.info(t("canvas.scriptNode.assetFillNothing"));
                 return;
@@ -8224,9 +8301,7 @@ function AtelierCanvasPage() {
     const getScriptAudioCandidates = useCallback(() => {
         const cache = scriptAudioCacheRef.current;
         if (cache && cache.nodes === nodes) return cache.list;
-        const list = nodes
-            .filter((node) => node.type === CanvasNodeType.Audio)
-            .map((node): ScriptAssetCandidate => ({ id: node.id, title: node.title, kind: "audio", previewUrl: node.metadata?.content || undefined }));
+        const list = nodes.filter((node) => node.type === CanvasNodeType.Audio).map((node): ScriptAssetCandidate => ({ id: node.id, title: node.title, kind: "audio", previewUrl: node.metadata?.content || undefined }));
         scriptAudioCacheRef.current = { nodes, list };
         return list;
     }, [nodes]);
@@ -8356,10 +8431,7 @@ function AtelierCanvasPage() {
             const groupWidth = Math.max(1, right - left);
             const groupHeight = Math.max(1, bottom - top);
             const padding = 96;
-            const k =
-                mode === "fit"
-                    ? Math.min(Math.max(Math.min((size.width - padding * 2) / groupWidth, (size.height - padding * 2) / groupHeight), 0.05), 1.2)
-                    : Math.min(Math.max(viewportRef.current.k, 0.4), 1.2);
+            const k = mode === "fit" ? Math.min(Math.max(Math.min((size.width - padding * 2) / groupWidth, (size.height - padding * 2) / groupHeight), 0.05), 1.2) : Math.min(Math.max(viewportRef.current.k, 0.4), 1.2);
             const centerX = mode === "fit" ? left + groupWidth / 2 : left + Math.min(groupWidth, size.width / k) / 2;
             const centerY = mode === "fit" ? top + groupHeight / 2 : top + Math.min(groupHeight, size.height / k) / 2;
             cancelFocusAnimation();
@@ -8387,13 +8459,16 @@ function AtelierCanvasPage() {
             const nodeStyleTemplateId = styleTemplateId || source.metadata?.styleTemplateId;
             // 画质：全局没选具体档位（空 / auto）时**按 2K 出**，避免掉回 1K（见 `resolveScriptImageQuality`）。
             const qualityFallback = resolveScriptImageQuality(effectiveConfig.quality);
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(qualityFallback ? { quality: qualityFallback } : {}), ...(nodeStyleTemplateId ? { styleTemplateId: nodeStyleTemplateId } : {}) });
+            const node = createCanvasNode(
+                CanvasNodeType.Image,
+                { x: 0, y: 0 },
+                { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(qualityFallback ? { quality: qualityFallback } : {}), ...(nodeStyleTemplateId ? { styleTemplateId: nodeStyleTemplateId } : {}) },
+            );
             const placed = attachScriptAssets(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
             // 分类写进脚本节点（内联：mergeScriptAssetRoles 声明在本回调之后，进依赖数组会 TDZ）。
-            const withRole = (item: CanvasNodeData) =>
-                item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), [created.id]: role } } } : item;
+            const withRole = (item: CanvasNodeData) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), [created.id]: role } } } : item);
             // 必须立刻同步 nodesRef：attachScriptAssets 只改 state，而紧接着的触发生成会读 nodesRef
             // 判断「这是不是一个图片节点（结果写回自身）」——不同步就会在旁边多长出一个空节点。
             nodesRef.current = [...nodesRef.current, created].map(withRole);
@@ -8459,20 +8534,24 @@ function AtelierCanvasPage() {
             const created = planned.slice(0, slots.length).map((cell, index) => {
                 // 风格：弹窗里挑的优先，没挑就跟随脚本节点上那档（2026-11-08 第 04 条）。
                 const batchStyleTemplateId = options?.styleTemplateId || source.metadata?.styleTemplateId;
-                const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, {
-                    prompt: cell.item.prompt,
-                    status: NODE_STATUS_IDLE,
-                    ...(cell.imageSize ? { size: cell.imageSize } : {}),
-                    // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
-                    ...(batchQualityFallback ? { quality: batchQualityFallback } : {}),
-                    // 弹窗里挑的模型：`buildGenerationConfig` 读的就是 `metadata.model`，
-                    // 所以这一批（以及之后在这个节点上点重生成）都走同一个模型。
-                    ...(options?.model ? { model: options.model } : {}),
-                    ...(batchStyleTemplateId ? { styleTemplateId: batchStyleTemplateId } : {}),
-                    // 资产阵标记：铺链路据此给老画布右侧资产图让位（本批新增的图不再据它在左侧续排，
-                    // 新一批会整块让到左边另起一片，见 lib 的 planScriptAssetGrid）。
-                    scriptAssetLane: source.id,
-                });
+                const node = createCanvasNode(
+                    CanvasNodeType.Image,
+                    { x: 0, y: 0 },
+                    {
+                        prompt: cell.item.prompt,
+                        status: NODE_STATUS_IDLE,
+                        ...(cell.imageSize ? { size: cell.imageSize } : {}),
+                        // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
+                        ...(batchQualityFallback ? { quality: batchQualityFallback } : {}),
+                        // 弹窗里挑的模型：`buildGenerationConfig` 读的就是 `metadata.model`，
+                        // 所以这一批（以及之后在这个节点上点重生成）都走同一个模型。
+                        ...(options?.model ? { model: options.model } : {}),
+                        ...(batchStyleTemplateId ? { styleTemplateId: batchStyleTemplateId } : {}),
+                        // 资产阵标记：铺链路据此给老画布右侧资产图让位（本批新增的图不再据它在左侧续排，
+                        // 新一批会整块让到左边另起一片，见 lib 的 planScriptAssetGrid）。
+                        scriptAssetLane: source.id,
+                    },
+                );
                 return { ...node, title: cell.item.title, width: cell.width, height: cell.height, position: slots[index] };
             });
             // 分类写进脚本节点（内联：mergeScriptAssetRoles 声明在本回调之后，进依赖数组会 TDZ）。
@@ -8559,24 +8638,37 @@ function AtelierCanvasPage() {
         /**
          * @param options.model 「一键视频」用：本批资产图**固定用这个模型**（写进节点 `metadata.model`）。
          *                    不传 = 留空，走运行时回落「配置偏好 → 默认生图模型」（手动点这颗按钮的老口径）。
+         * @param options.skipAssetKeys 这一批**不要生成**的资产键（`分类:标题`）。给「一键视频」用：
+         *                    反推节点上连进来的产品参考图已经直接挂到道具格了（见 `matchScriptAssetReferences`），
+         *                    再生成一张同名道具图就是白花钱、而且会和真产品图抢资产锁。
          * @returns 本批新建的图片节点。**同步返回**（生成在后台跑），「一键视频」据此等结果 / 挑失败的重试。
          */
-        (nodeId: string, options?: { model?: string }): { created: CanvasNodeData[] } => {
+        (nodeId: string, options?: { model?: string; skipAssetKeys?: readonly string[] }): { created: CanvasNodeData[] } => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source) return { created: [] };
+            const skipKeys = new Set((options?.skipAssetKeys || []).map((key) => String(key || "")).filter(Boolean));
             // 不筛「已出过图」是这里唯一的产品口径；站位图在 buildScriptAssetDirectItems 里就剔掉了。
             // 再按分类补上**词库里的视图版式**（用户 2026-11-08：角色 →「无头 9x16 竖版排版」、
             // 场景 →「2x2 场景宫格图」），以及**场景 / 道具的空景尾缀**与**画幅的首尾声明**（画幅开头
             // 一句、最后一行再钉一次，见 `applyScriptAssetDirectDecorations` 的顺序说明）。这里就地改 prompt，
             // 所以「节点上显示的提示词」与「真正发给生图模型的提示词」是同一份（下面 `cell.item.prompt` 两处读的都是它）。
+            // ⚠️ `skipAssetKeys` 必须在**整形之前**过滤：键是 `分类:标题`，与整形无关，早过滤少算一批提示词。
             const wanted = applyScriptAssetDirectDecorations(
-                buildScriptAssetDirectItems(source.metadata?.scriptRows).filter((item) => item.title.trim() && item.prompt.trim()),
+                buildScriptAssetDirectItems(source.metadata?.scriptRows)
+                    .filter((item) => !skipKeys.has(item.key))
+                    .filter((item) => item.title.trim() && item.prompt.trim()),
                 effectiveConfig.textPrompts,
             );
             if (!wanted.length) {
                 message.warning(t("canvas.scriptNode.directAssetEmpty"));
                 return { created: [] };
             }
+            /**
+             * 「有没有调用词库里那条版式」以前只能靠猜：匹配不上是**静默跳过**的。
+             * 现在没命中就明说一句（只提示、不阻塞），用户一眼能分辨「没挂上」和「挂上了但模型没听」。
+             */
+            const missingViews = resolveMissingScriptAssetViewTemplates(wanted, effectiveConfig.textPrompts);
+            if (missingViews.length) message.info(t("canvas.scriptNode.viewTemplateMissing", { names: missingViews.join(" / ") }));
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             // 画质保底：全局没选具体档位（空 / auto）时「一键直接生图」这一批按 2K 出
             // —— 只写比例的节点会一路回落到 `DEFAULT_IMAGE_SHORT_SIDE` 的 1K（见 `resolveScriptImageQuality`）。
@@ -8600,19 +8692,23 @@ function AtelierCanvasPage() {
                 return { created: [] };
             }
             const created = planned.slice(0, slots.length).map((cell, index) => {
-                const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, {
-                    prompt: cell.item.prompt,
-                    status: NODE_STATUS_IDLE,
-                    ...(cell.imageSize ? { size: cell.imageSize } : {}),
-                    // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
-                    ...(directQualityFallback ? { quality: directQualityFallback } : {}),
-                    // 风格模板：直接生图没有弹窗，统一跟随脚本节点上那档（2026-11-08 第 04 条）。
-                    ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
-                    // ⚠️ 默认**不写** `model`：留空 = 生成时回落「配置偏好 → 默认生图模型」。
-                    // 只有「一键视频」显式指定模型时才写（它要按模型分轮次重试 / 托底）。
-                    ...(options?.model ? { model: options.model } : {}),
-                    scriptAssetLane: source.id,
-                });
+                const node = createCanvasNode(
+                    CanvasNodeType.Image,
+                    { x: 0, y: 0 },
+                    {
+                        prompt: cell.item.prompt,
+                        status: NODE_STATUS_IDLE,
+                        ...(cell.imageSize ? { size: cell.imageSize } : {}),
+                        // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
+                        ...(directQualityFallback ? { quality: directQualityFallback } : {}),
+                        // 风格模板：直接生图没有弹窗，统一跟随脚本节点上那档（2026-11-08 第 04 条）。
+                        ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
+                        // ⚠️ 默认**不写** `model`：留空 = 生成时回落「配置偏好 → 默认生图模型」。
+                        // 只有「一键视频」显式指定模型时才写（它要按模型分轮次重试 / 托底）。
+                        ...(options?.model ? { model: options.model } : {}),
+                        scriptAssetLane: source.id,
+                    },
+                );
                 return { ...node, title: cell.item.title, width: cell.width, height: cell.height, position: slots[index] };
             });
             const roles: Record<string, ScriptAssetRole> = Object.fromEntries(created.map((node, index) => [node.id, planned[index].item.role]));
@@ -8683,9 +8779,7 @@ function AtelierCanvasPage() {
         if (!ids.length) return;
         setNodes((prev) =>
             prev.map((item) =>
-                item.id === nodeId
-                    ? { ...item, metadata: { ...item.metadata, scriptRowAssets: setStoryScriptRowAssetIds(item.metadata?.scriptRowAssets, shotNo, [...scriptRowAssetIds(item.metadata?.scriptRowAssets, shotNo), ...ids]) } }
-                    : item,
+                item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptRowAssets: setStoryScriptRowAssetIds(item.metadata?.scriptRowAssets, shotNo, [...scriptRowAssetIds(item.metadata?.scriptRowAssets, shotNo), ...ids]) } } : item,
             ),
         );
     }, []);
@@ -8726,7 +8820,11 @@ function AtelierCanvasPage() {
             }
             const placed = placeRowAssetNodes(source, images);
             if (!placed.length) return;
-            appendRowAssets(nodeId, shotNo, placed.map((node) => node.id));
+            appendRowAssets(
+                nodeId,
+                shotNo,
+                placed.map((node) => node.id),
+            );
             revealNodes(placed, "center");
             message.success(t("canvas.scriptNode.rowImageImported", { count: placed.length, no: shotNo }));
         },
@@ -8747,7 +8845,11 @@ function AtelierCanvasPage() {
             const rowStyleTemplateId = styleTemplateId || source.metadata?.styleTemplateId;
             // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
             const rowQualityFallback = resolveScriptImageQuality(effectiveConfig.quality);
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(rowQualityFallback ? { quality: rowQualityFallback } : {}), ...(rowStyleTemplateId ? { styleTemplateId: rowStyleTemplateId } : {}) });
+            const node = createCanvasNode(
+                CanvasNodeType.Image,
+                { x: 0, y: 0 },
+                { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(rowQualityFallback ? { quality: rowQualityFallback } : {}), ...(rowStyleTemplateId ? { styleTemplateId: rowStyleTemplateId } : {}) },
+            );
             const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
@@ -8778,9 +8880,7 @@ function AtelierCanvasPage() {
         if (!ids.length) return;
         setNodes((prev) =>
             prev.map((item) =>
-                item.id === nodeId
-                    ? { ...item, metadata: { ...item.metadata, scriptRowAudios: setStoryScriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo, [...scriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo), ...ids]) } }
-                    : item,
+                item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptRowAudios: setStoryScriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo, [...scriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo), ...ids]) } } : item,
             ),
         );
     }, []);
@@ -8966,7 +9066,12 @@ function AtelierCanvasPage() {
             }
             const placed = placeRowAssetNodes(source, images);
             if (!placed.length) return;
-            appendCellAssets(nodeId, shotNo, columnKey, placed.map((node) => node.id));
+            appendCellAssets(
+                nodeId,
+                shotNo,
+                columnKey,
+                placed.map((node) => node.id),
+            );
             revealNodes(placed, "center");
             message.success(t("canvas.scriptNode.cellAssetImported", { count: placed.length, no: shotNo, label: cellAssetColumnLabel(source, columnKey) }));
         },
@@ -8996,7 +9101,18 @@ function AtelierCanvasPage() {
             const cellStyleTemplateId = styleTemplateId || source.metadata?.styleTemplateId;
             // 画质：全局没选具体档位（空 / auto）时按 2K 出（见 `resolveScriptImageQuality`）。
             const cellQualityFallback = resolveScriptImageQuality(effectiveConfig.quality);
-            const node = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { prompt: scene, status: NODE_STATUS_IDLE, ...(imageSize ? { size: imageSize } : {}), ...(cellQualityFallback ? { quality: cellQualityFallback } : {}), ...(model ? { model } : {}), ...(cellStyleTemplateId ? { styleTemplateId: cellStyleTemplateId } : {}) });
+            const node = createCanvasNode(
+                CanvasNodeType.Image,
+                { x: 0, y: 0 },
+                {
+                    prompt: scene,
+                    status: NODE_STATUS_IDLE,
+                    ...(imageSize ? { size: imageSize } : {}),
+                    ...(cellQualityFallback ? { quality: cellQualityFallback } : {}),
+                    ...(model ? { model } : {}),
+                    ...(cellStyleTemplateId ? { styleTemplateId: cellStyleTemplateId } : {}),
+                },
+            );
             const placed = placeRowAssetNodes(source, [{ node: { ...node, title: assetTitle }, width: dims.width, height: dims.height }]);
             const created = placed[0];
             if (!created) return;
@@ -9087,14 +9203,10 @@ function AtelierCanvasPage() {
             const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
                 .map((id) => nodesRef.current.find((node) => node.id === id))
                 .filter((node): node is CanvasNodeData => Boolean(node));
-            const upstreamAssets = upstreamNodes
-                .filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content))
-                .map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
+            const upstreamAssets = upstreamNodes.filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content)).map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
             // ⚠️ 这里**不再**分「角色 / 全局」两拨：所有素材都交给 `matchScriptRowAssetsByRole` 按分类逐镜匹配。
             // 老实现把场景 / 道具 / 站位无条件连到每一镜，一张表十几个资产 → 每个视频节点挂十几张图（用户报障）。
-            const audioRefs = upstreamNodes
-                .filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey))
-                .map((node) => ({ id: node.id, title: node.title }));
+            const audioRefs = upstreamNodes.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey)).map((node) => ({ id: node.id, title: node.title }));
 
             const textWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Text].width;
             // 文本节点默认 480 高，铺链路时压到 240：否则每一镜的横向三件套会占掉整屏。
@@ -9114,9 +9226,7 @@ function AtelierCanvasPage() {
             // —— 只写比例的节点会回落到 1K（见 `resolveScriptImageQuality`）。
             const scriptImageQuality = resolveScriptImageQuality(effectiveConfig.quality);
             const scriptImageMeta = scriptImageQuality ? { quality: scriptImageQuality } : {};
-            const imageSpec =
-                nodeSizeFromRatio(scriptImageSize, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height) ||
-                NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            const imageSpec = nodeSizeFromRatio(scriptImageSize, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height) || NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             const imageWidth = imageSpec.width;
             const imageHeight = imageSpec.height;
             const videoWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Video].width;
@@ -9127,8 +9237,25 @@ function AtelierCanvasPage() {
             // 脚本节点右侧可能已经排了一整条「资产图车道」（一键批量生成出来的角色 / 场景 / 道具）。
             // 让开它，否则分镜链路会正好盖在资产图上；没有资产图时与改造前逐像素一致。
             const assetLaneRight = scriptAssetLaneRight(nodesRef.current, source.id);
-            const baseX = Math.max(source.position.x + source.width + 64, (assetLaneRight ?? 0) + gapX);
+            const desiredBaseX = Math.max(source.position.x + source.width + 64, (assetLaneRight ?? 0) + gapX);
+            /**
+             * 再往外让一层（用户 2026-11-09）：「创建出来的窗口都堆在一起」。
+             *
+             * 锚点永远是这个脚本节点，所以同一个脚本节点铺第二次、或右侧已经躺着上一轮铺出来的
+             * 视频 / 合并窗口时，新的一整列会精确压在旧的上面。整条车道（文本 / 图片 / 视频三列）
+             * 当成一个矩形，走 `findFreeColumnX` 往右找第一块空地 —— 没占位时 x 完全不变。
+             */
+            const laneWidth = videoOnly ? videoWidth : textWidth + gapX + imageWidth + gapX + videoWidth;
+            const laneHeight = Math.max(rowHeight, rows.length * (rowHeight + gapY) - gapY);
             const baseY = source.position.y;
+            const baseX = findFreeColumnX({
+                desiredX: desiredBaseX,
+                width: laneWidth,
+                top: baseY,
+                height: laneHeight,
+                occupied: collectCanvasOccupied(nodesRef.current, [source.id]),
+                gap: gapX,
+            });
             const imageX = baseX + textWidth + gapX;
             // 简洁版（只铺视频）没有文本 / 图片两列，视频节点直接贴着脚本节点排 —— 否则空出来的两列
             // 会让整片视频窗口离节点很远，看上去像「没铺出来」。
@@ -9141,9 +9268,7 @@ function AtelierCanvasPage() {
             //（用户 2026-11-08 第 06 条：视频窗口里不填「视觉风格：…」，风格改由模板在生成时拼）。
             // 没选模板时照旧带上，否则视频就一点风格信息都没有了。图片提示词两边都不动。
             const dropScriptVideoStyle = Boolean(scriptStyleTemplateId);
-            const allRenderable = rows
-                .map((row, index) => ({ row, index, prompts: preset.buildShotPrompts(row, scriptExtras, { directorScheme, dropVideoStyle: dropScriptVideoStyle }) }))
-                .filter((item) => Boolean(item.prompts.imagePrompt));
+            const allRenderable = rows.map((row, index) => ({ row, index, prompts: preset.buildShotPrompts(row, scriptExtras, { directorScheme, dropVideoStyle: dropScriptVideoStyle }) })).filter((item) => Boolean(item.prompts.imagePrompt));
             /**
              * 「选择铺链路」：只铺勾选的那一段，**且这一段合成一个视频节点**（用户 2026-11-06 要求）。
              *
@@ -9153,12 +9278,8 @@ function AtelierCanvasPage() {
              * 不是 `allRenderable` 里的位置 —— 下面一律用 `item.index` 比较。
              */
             const picked = (rowIndexes || []).filter((index) => Number.isInteger(index) && index >= 0 && index < rows.length);
-            const selection = picked.length
-                ? (normalizeStoryScriptMergeGroups([picked], rows.length)[0] ?? [Math.min(...picked)])
-                : undefined;
-            const renderable = selection
-                ? allRenderable.filter((item) => item.index >= selection[0] && item.index <= selection[selection.length - 1])
-                : allRenderable;
+            const selection = picked.length ? (normalizeStoryScriptMergeGroups([picked], rows.length)[0] ?? [Math.min(...picked)]) : undefined;
+            const renderable = selection ? allRenderable.filter((item) => item.index >= selection[0] && item.index <= selection[selection.length - 1]) : allRenderable;
             if (!renderable.length) {
                 message.warning(t("canvas.scriptNode.pipelineEmpty"));
                 return;
@@ -9172,10 +9293,10 @@ function AtelierCanvasPage() {
             const manualMergeGroups = selection
                 ? // 选择铺链路：选中的这一段**整体**成一段，不理表里原有的手动合并组 ——
                   // 点这个按钮要的就是「一段视频」，勾了 3 镜却铺出 2 段是错的。
-                  (renderable.length > 1 ? [[...Array.from({ length: renderable.length }, (_, slot) => slot)]] : [])
-                : (source.metadata?.scriptMergeGroups || [])
-                      .map((span) => (Array.isArray(span) ? span.map((index) => renderableSlot.get(index)).filter((slot): slot is number => slot !== undefined) : []))
-                      .filter((span) => span.length >= 2);
+                  renderable.length > 1
+                    ? [[...Array.from({ length: renderable.length }, (_, slot) => slot)]]
+                    : []
+                : (source.metadata?.scriptMergeGroups || []).map((span) => (Array.isArray(span) ? span.map((index) => renderableSlot.get(index)).filter((slot): slot is number => slot !== undefined) : [])).filter((span) => span.length >= 2);
             const groups: ReturnType<typeof groupStoryScriptRows> =
                 mergeEvery > 0
                     ? // 「一键铺视频链路」：**固定每 mergeEvery 镜一段**，不看分段档位、也不看手动合并组
@@ -9338,23 +9459,17 @@ function AtelierCanvasPage() {
                 // 5 秒 = 上限（表里更短就按表里）。合并模式仍按本段各镜 duration 累加。
                 // ⚠️ 判据是 `merged`（本段真的有多镜）而**不是**档位：手动合并组在「单镜」档位下也是多镜，
                 // 只看档位会把 3 镜合一的视频切成「第一镜的 5 秒」，画面却是三段连续动作。
-                const seconds = !merged && mergeMode === "shot"
-                    ? resolveStoryScriptShotSeconds(first.row.duration, segmentSeconds)
-                    : Math.min(20, storyScriptGroupDuration({ rows: members.map((member) => member.row) }));
+                const seconds = !merged && mergeMode === "shot" ? resolveStoryScriptShotSeconds(first.row.duration, segmentSeconds) : Math.min(20, storyScriptGroupDuration({ rows: members.map((member) => member.row) }));
                 const videoNode: CanvasNodeData = {
                     // 视频节点同样继承脚本节点选的风格模板（用户 2026-11-08 第 05 条）：铺完点生成时
                     // `composeStyledPrompt` 会把它拼到提示词尾部；窗口里的风格按钮显示同一档，可随时改。
                     ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { prompt: videoPrompt, status: NODE_STATUS_IDLE, ...(seconds ? { seconds: String(seconds) } : {}), ...scriptStyle }),
-                    title: merged
-                        ? t("canvas.scriptNode.pipelineVideoRange", { from: shotNoFrom, to: shotNoTo, count: members.length })
-                        : t("canvas.scriptNode.pipelineVideo", { no: shotNoFrom }),
+                    title: merged ? t("canvas.scriptNode.pipelineVideoRange", { from: shotNoFrom, to: shotNoTo, count: members.length }) : t("canvas.scriptNode.pipelineVideo", { no: shotNoFrom }),
                     width: videoWidth,
                     height: videoHeight,
                     // 简洁版：紧凑竖排（第 0、1、2… 段），不按表格行高铺开 —— 没有图片节点要对齐，
                     // 按行高展开只会得到一长串带大段空白的窗口。
-                    position: videoOnly
-                        ? { x: videoX, y: baseY + packIndex * (videoHeight + gapY) }
-                        : { x: videoX, y: topRow + (bottomRow - topRow - videoHeight) / 2 },
+                    position: videoOnly ? { x: videoX, y: baseY + packIndex * (videoHeight + gapY) } : { x: videoX, y: topRow + (bottomRow - topRow - videoHeight) / 2 },
                 };
                 if (videoOnly) packIndex += 1;
                 created.push(videoNode);
@@ -9488,12 +9603,10 @@ function AtelierCanvasPage() {
                  * 之后再点「一键铺链路」仍是同一段 —— 免得两条路径给出两种结果。
                  * 已有组与这一段重叠的整组丢掉（后来的覆盖前面的，与 `mergeSelectedRows` 同口径）。
                  */
-                const nextMergeGroups = selection && selection.length >= 2 && mergeEvery === 0
-                    ? normalizeStoryScriptMergeGroups(
-                          [...(source.metadata?.scriptMergeGroups || []).filter((span) => !span.some((index) => selection.includes(index))), selection],
-                          rows.length,
-                      )
-                    : undefined;
+                const nextMergeGroups =
+                    selection && selection.length >= 2 && mergeEvery === 0
+                        ? normalizeStoryScriptMergeGroups([...(source.metadata?.scriptMergeGroups || []).filter((span) => !span.some((index) => selection.includes(index))), selection], rows.length)
+                        : undefined;
                 const patchLocks = (item: CanvasNodeData) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: nextLocks, ...(nextMergeGroups ? { scriptMergeGroups: nextMergeGroups } : {}) } } : item);
                 nodesRef.current = applyGroup([...nodesRef.current.map(patchLocks), ...created]);
                 setNodes((prev) => applyGroup([...prev.map(patchLocks), ...created]));
@@ -9546,9 +9659,7 @@ function AtelierCanvasPage() {
                         {mergeNode ? <div className="mt-1.5 opacity-70">{t("canvas.scriptNode.pipelineMergeHint", { count: createdVideoNodes.length })}</div> : null}
                         {groupNode ? <div className="mt-1.5 opacity-70">{t("canvas.scriptNode.pipelineVideoGroupHint", { count: createdVideoNodes.length })}</div> : null}
                         {autoGenerate && createdVideoNodes.length ? (
-                            <div className="mt-1.5 opacity-70">
-                                {t("canvas.scriptNode.pipelineVideoGenerateHint", { count: createdVideoNodes.length, seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000 })}
-                            </div>
+                            <div className="mt-1.5 opacity-70">{t("canvas.scriptNode.pipelineVideoGenerateHint", { count: createdVideoNodes.length, seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000 })}</div>
                         ) : null}
                     </div>
                 ),
@@ -9583,8 +9694,68 @@ function AtelierCanvasPage() {
         setOneClickVideoRuns((prev) => ({ ...prev, [nodeId]: run }));
     }, []);
 
+    /**
+     * 「参考图直接当资产」：把反推节点上连进来的产品图挂到分镜表的道具格（用户 2026-11-09 口径）。
+     *
+     * 为什么要有这一步：用户拍/画好的产品图已经在手上了，再让模型照着分镜表描述生一张「差不多的口红」
+     * 既是白花钱，也会让真产品在视频里走形。所以：
+     *  ① 按名字把参考图对齐到表里的道具（`matchScriptAssetReferences`，只认道具）；
+     *  ② 对齐上的 → 走 `mountScriptAssetToCells` 直接挂进那一格（`scriptCellAssets` 精准指定 +
+     *     `scriptNameLocks` 按名兜底 + `scriptAssetRoles` 标成道具），铺链路时这一镜的视频节点就直连这张图；
+     *  ③ 顺手把参考图连到脚本节点 —— 与「一键直接生图」出来的资产图同一个位置，用户看得出它是本表素材。
+     * 返回命中资产的键（`分类:标题`），调用方把它交给 `handleDirectGenerateScriptAssets`
+     * 的 `skipAssetKeys`，于是**已经挂上的产品不再生图**。
+     *
+     * ⚠️ 对齐不上（名字不一致 / 表里没这件道具）就**什么都不做**：不挂、也不跳过生成，
+     * 保持「一键视频」原来的行为 —— 静默吞掉一张产品图比多生一张更让用户困惑。
+     */
+    const mountReferenceAssetsToScript = useCallback((scriptNodeId: string, references: readonly ScriptAssetReference[]) => {
+        const source = nodesRef.current.find((item) => item.id === scriptNodeId);
+        if (!source || !references.length) return { matched: [] as Array<{ nodeId: string; title: string }>, skipAssetKeys: [] as string[] };
+        const rows = source.metadata?.scriptRows;
+        const { matches } = matchScriptAssetReferences(rows, references);
+        if (!matches.length) return { matched: [] as Array<{ nodeId: string; title: string }>, skipAssetKeys: [] as string[] };
+        const extras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
+        let cells = source.metadata?.scriptCellAssets;
+        let locks = source.metadata?.scriptNameLocks;
+        const roles: Record<string, ScriptAssetRole> = {};
+        const mounted: Array<{ nodeId: string; title: string }> = [];
+        for (const match of matches) {
+            // 表里查不到格位（名字被道具上限截掉之类）：跳过生成就够，不硬写一个空挂载。
+            if (match.mounts.length) {
+                const next = mountScriptAssetToCells({ cells, locks, mounts: match.mounts, nodeId: match.reference.nodeId, extras });
+                cells = next.cells;
+                locks = next.locks;
+                mounted.push({ nodeId: match.reference.nodeId, title: match.title });
+            }
+            // 角色标记必须写：铺链路拼「资产绑定」文案时靠它认分类，缺了会被 `resolveScriptAssetRole`
+            // 兜成「角色」，提示词里就会写成「XX人物参考」。
+            roles[match.reference.nodeId] = match.role;
+        }
+        const patch = (item: CanvasNodeData): CanvasNodeData =>
+            item.id === scriptNodeId ? { ...item, metadata: { ...item.metadata, scriptCellAssets: cells, scriptNameLocks: locks, scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), ...roles } } } : item;
+        // state 与 ref 同时写：紧接着的 `handleDirectGenerateScriptAssets` / 铺链路读的都是 ref。
+        nodesRef.current = nodesRef.current.map(patch);
+        setNodes((prev) => prev.map(patch));
+        const existing = new Set(connectionsRef.current.map((conn) => `${conn.fromNodeId}->${conn.toNodeId}`));
+        const additions = matches
+            .map((match) => match.reference.nodeId)
+            .filter((nodeId) => Boolean(nodeId) && !existing.has(`${nodeId}->${scriptNodeId}`))
+            .map((nodeId) => ({ id: nanoid(), fromNodeId: nodeId, toNodeId: scriptNodeId }));
+        if (additions.length) {
+            connectionsRef.current = [...connectionsRef.current, ...additions];
+            setConnections((prev) => [...prev, ...additions]);
+        }
+        return { matched: mounted, skipAssetKeys: matches.map((match) => match.key) };
+    }, []);
+
     const handleOneClickVideo = useCallback(
-        async (nodeId: string) => {
+        /**
+         * @param options.referenceAssets 反推节点上连进来的参考图（只有 03 会传）：分镜表出来后先按名字
+         *        把它们挂到道具格，并把命中的道具从「一键直接生图」那一批里剔掉 —— 见
+         *        `mountReferenceAssetsToScript`。不传 = 与以前完全一致。
+         */
+        async (nodeId: string, options?: { referenceAssets?: readonly ScriptAssetReference[] }) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             if (oneClickVideoRunningRef.current.has(nodeId)) return;
@@ -9594,8 +9765,7 @@ function AtelierCanvasPage() {
             }
             oneClickVideoRunningRef.current.add(nodeId);
 
-            const notify = (stage: OneClickVideoRun["stage"], key: string, params?: Record<string, string | number>) =>
-                patchOneClickVideoRun(nodeId, { status: "running", stage, message: t(key, params) });
+            const notify = (stage: OneClickVideoRun["stage"], key: string, params?: Record<string, string | number>) => patchOneClickVideoRun(nodeId, { status: "running", stage, message: t(key, params) });
             /** 暂停：按钮上留一行原因 + 一条 error 提示，然后结束整个流程。 */
             const pauseWith = (stage: OneClickVideoRun["stage"], text: string) => {
                 patchOneClickVideoRun(nodeId, { status: "paused", stage, message: text });
@@ -9634,10 +9804,7 @@ function AtelierCanvasPage() {
              * 所以先把模型写进节点、同步 `nodesRef`，再一个个 fire。
              */
             const retryBatch = async (ids: string[], model: string, deadlineAt: number) => {
-                const patch = (item: CanvasNodeData): CanvasNodeData =>
-                    ids.includes(item.id)
-                        ? { ...item, metadata: { ...item.metadata, ...(model ? { model } : {}), status: NODE_STATUS_IDLE, errorDetails: undefined } }
-                        : item;
+                const patch = (item: CanvasNodeData): CanvasNodeData => (ids.includes(item.id) ? { ...item, metadata: { ...item.metadata, ...(model ? { model } : {}), status: NODE_STATUS_IDLE, errorDetails: undefined } } : item);
                 nodesRef.current = nodesRef.current.map(patch);
                 setNodes((prev) => prev.map(patch));
                 for (let index = 0; index < ids.length; index += SCRIPT_ASSET_LAUNCH_BATCH) {
@@ -9695,10 +9862,21 @@ function AtelierCanvasPage() {
                     return;
                 }
 
+                // ---- ①.5 参考图（产品）直接挂成道具资产，并把这些道具剔出下一步的生图清单 ----
+                // 必须排在这里：分镜表刚出来（stage ①）才有「道具名」可对齐；而 stage ② 要读挂载结果 + 跳过表。
+                let skipAssetKeys: string[] = [];
+                if (options?.referenceAssets?.length) {
+                    const result = mountReferenceAssetsToScript(nodeId, options.referenceAssets);
+                    skipAssetKeys = result.skipAssetKeys;
+                    if (result.matched.length) {
+                        message.success(t("canvas.scriptNode.oneClickReferenceMounted", { names: result.matched.map((item) => item.title).join("、") }));
+                    }
+                }
+
                 // ---- ② 一键直接生图（偏好模型重试一次 → seedream-5.0-pro 托底一次；15 分钟封顶）----
                 const imageDeadline = Date.now() + ONE_CLICK_STAGE_TIMEOUT_MS;
                 notify("image", "canvas.scriptNode.oneClickStageImage");
-                const launched = handleDirectGenerateScriptAssets(nodeId);
+                const launched = handleDirectGenerateScriptAssets(nodeId, { skipAssetKeys });
                 const imageIds = launched.created.map((node) => node.id);
                 if (!imageIds.length) {
                     // 表里没有可生成的资产 / 画布排不下：不算失败，直接进第三步（铺链路仍然有意义）。
@@ -9760,20 +9938,170 @@ function AtelierCanvasPage() {
                 oneClickVideoRunningRef.current.delete(nodeId);
             }
         },
-        [
-            effectiveConfig,
-            handleBuildScriptPipeline,
-            handleDirectGenerateScriptAssets,
-            handleStopScriptGeneration,
-            isNodeGenerating,
-            message,
-            patchOneClickVideoRun,
-            resolveModelForCapability,
-            runScriptGeneration,
-            stopGenerationForNode,
-            t,
-        ],
+        [effectiveConfig, handleBuildScriptPipeline, handleDirectGenerateScriptAssets, handleStopScriptGeneration, isNodeGenerating, message, mountReferenceAssetsToScript, patchOneClickVideoRun, resolveModelForCapability, runScriptGeneration, stopGenerationForNode, t],
     );
+
+    /**
+     * 反推固定用 `gemini-3.8-flash`（toapis 渠道）—— 用户口径：「执行反推命令时默认选它」。
+     *
+     * 走 `pickOneClickModel` 而不是直接拼 `encodeChannelModel`：渠道可能改名、模型可能挂在别的渠道上，
+     * 按「模型名 + 渠道名提示」找比写死 id 稳（和「一键视频」挑模型同一套口径）。
+     * 找不到（渠道被禁用 / 模型被删）就返回空串，调用方回落到偏好里的文本模型 ——
+     * 硬塞一个画布上不存在的 model 只会换来一次 400。
+     */
+    const reverseVideoModel = useMemo(() => {
+        const target = pickOneClickModel(effectiveConfig.channels, { names: ["gemini-3.8-flash"], channelHints: ["toapis"], capability: "text" });
+        return target ? encodeChannelModel(target.channelId, target.modelName) : "";
+    }, [effectiveConfig.channels]);
+    const reverseVideoModelLabel = useMemo(() => (reverseVideoModel ? modelOptionLabel(effectiveConfig, reverseVideoModel) : ""), [effectiveConfig, reverseVideoModel]);
+
+    /**
+     * 「反推视频」三条命令的编排（节点 `CanvasReverseVideoNodeContent` → 这里）。
+     *
+     * 统一骨架：
+     *  ① 建一个 AI 对话节点，把**接入的视频从左侧连进去** —— 模型能看到的视频输入只认连线，
+     *     光在提示词里写一句链接对本地视频毫无意义（`sendChatMessage` 会把连线视频转成 video_url 或抽帧）。
+     *  ② 这个对话节点上只勾「视频反推-分镜提示词」一个技能：反推是一次性任务，多勾会把输出带偏。
+     *  ③ 技能挑不到就**直接报错返回**，绝不静默换成「不带技能硬跑」——那样模型自由发挥，用户还以为反推过了。
+     *  ④ 回复正文落成文本节点（内容三件套一起写：`content` / `prompt` / `composerContent`）。
+     *  ⑤ 只有 03 才继续：文本节点 → 脚本生成器 → `handleOneClickVideo`（一键视频）。
+     */
+    const runVideoReverse = useCallback(
+        async (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string }, report: (stage: string) => void = () => undefined): Promise<VideoReverseResult> => {
+            const videoNode = nodesRef.current.find((item) => item.id === input.videoNodeId);
+            if (!videoNode || videoNode.type !== CanvasNodeType.Video || !videoNode.metadata?.content) {
+                return { ok: false, error: "接入的视频节点已经不在了，请重新接入一次" };
+            }
+            /**
+             * 反推节点上**除视频以外**连进来的参考图（图节点）—— 用户 2026-11-09 口径：
+             * 「链接了参考图和视频再去执行 02/03 时，若参考图是产品，需要把该产品道具在一键视频时
+             * 直接挂到具体的产品道具中」。这里只负责**收集**，是不是产品 / 挂哪一格由
+             * `mountReferenceAssetsToScript` 在分镜表出来之后按名字判断。
+             */
+            const referenceAssets: ScriptAssetReference[] = [];
+            if (input.reverseNodeId) {
+                for (const connection of connectionsRef.current) {
+                    if (connection.toNodeId !== input.reverseNodeId) continue;
+                    const node = nodesRef.current.find((item) => item.id === connection.fromNodeId);
+                    if (!node || node.type !== CanvasNodeType.Image || !node.metadata?.content) continue;
+                    if (referenceAssets.some((item) => item.nodeId === node.id)) continue;
+                    referenceAssets.push({ nodeId: node.id, title: node.title || "", prompt: node.metadata?.prompt || "" });
+                }
+            }
+            const skill = pickVideoReverseSkill(listChatSkills());
+            if (!skill) {
+                return { ok: false, error: "技能库里没找到「视频反推-分镜提示词」：先在 AI 对话节点的技能列表里确认它已经装好" };
+            }
+
+            const videoUrl = videoNode.metadata.content;
+            const gap = 120;
+            /**
+             * 落位（用户 2026-11-09）：「创建出来的窗口都堆在同一个点上」。
+             *
+             * 以前三件套按 `视频节点.right + 间距` 依次排 —— 锚点永远是这个视频节点，
+             * 同一个视频跑两次，两条链的坐标一模一样，第二次就精确盖在第一次上；
+             * 视频节点右侧本来就有别的窗口时，第一条链也就直接压上去了。
+             * 现在统一走 `planRightwardChainSlots`：从视频节点右侧开始**往右找空地**，
+             * 不压任何已有窗口、也不在原点附近打转。三个尺寸要一起算，所以 spec 先取好。
+             */
+            const chainSlots = planRightwardChainSlots({
+                source: { position: videoNode.position, width: videoNode.width, height: videoNode.height },
+                sizes: [NODE_DEFAULT_SIZE[CanvasNodeType.Chat], NODE_DEFAULT_SIZE[CanvasNodeType.Text], NODE_DEFAULT_SIZE[CanvasNodeType.Script]],
+                occupied: collectCanvasOccupied(nodesRef.current),
+                gap,
+            });
+            const [chatSlot, textSlot, scriptSlot] = chainSlots;
+            /**
+             * 一次落盘（state + nodesRef 同时写）。
+             * ⚠️ 必须同步 `nodesRef`：`handleOneClickVideo` / `runScriptGeneration` 全都读 ref，
+             * 只 `setNodes` 的话同一次点击里后续步骤根本看不到刚建的节点。
+             */
+            const pushNodes = (created: CanvasNodeData[], pairs: Array<{ fromNodeId: string; toNodeId: string }> = []) => {
+                const nodesNext = [...nodesRef.current, ...created];
+                const existing = new Set(connectionsRef.current.map((conn) => `${conn.fromNodeId}->${conn.toNodeId}`));
+                const additions = pairs.filter((pair) => !existing.has(`${pair.fromNodeId}->${pair.toNodeId}`)).map((pair) => ({ id: nanoid(), ...pair }));
+                const connectionsNext = [...connectionsRef.current, ...additions];
+                nodesRef.current = nodesNext;
+                connectionsRef.current = connectionsNext;
+                setNodes(nodesNext);
+                setConnections(connectionsNext);
+                setSelectedNodeIds(new Set(created.map((node) => node.id)));
+                setSelectedConnectionId(null);
+            };
+
+            // ① 对话节点（视频从左侧连入）
+            report("创建 AI 对话节点…");
+            const chatNode = createCanvasNode(
+                CanvasNodeType.Chat,
+                chatSlot,
+                {
+                    status: NODE_STATUS_IDLE,
+                    messages: [],
+                    chatTextEnabled: true,
+                    chatImageEnabled: false,
+                    // 反推固定走 gemini-3.8-flash（toapis 渠道）；该模型不可用时才回落到偏好里的文本模型。
+                    model: reverseVideoModel || resolveModelForCapability(effectiveConfig, effectiveConfig.textModel, "text"),
+                    imageModel: resolveModelForCapability(effectiveConfig, effectiveConfig.imageModel, "image"),
+                    chatSkillIds: [skill.id],
+                },
+            );
+            pushNodes([chatNode], resolveConnectionPairs(videoNode.id, chatNode.id, [...nodesRef.current, chatNode], "source"));
+
+            // ② 把视频链接 + 要求发进对话，等它把反推结果说完
+            report("把视频链接发进对话，反推中…");
+            const answer = await sendChatMessage(chatNode.id, buildVideoReversePrompt({ videoUrl, mode: input.mode, requirement: input.requirement }), { text: true, image: false });
+            const body = answer.trim();
+            if (!body) {
+                return {
+                    ok: false,
+                    error: "对话没有返回文本：检查文本模型是否已配置、技能「视频反推-分镜提示词」是否可用（也可能被手动停止了）",
+                    chatNodeId: chatNode.id,
+                };
+            }
+
+            // ③ 结果落文本节点
+            report("把反推结果写进文本节点…");
+            const textNode = {
+                ...createCanvasNode(
+                    CanvasNodeType.Text,
+                    textSlot,
+                    {
+                        content: body,
+                        prompt: body,
+                        composerContent: body,
+                        promptSyncAt: Date.now(),
+                        status: NODE_STATUS_SUCCESS,
+                        fontSize: DEFAULT_CANVAS_FONT_SIZE,
+                    },
+                ),
+                title: input.mode === 1 ? "反推分镜提示词" : "同款文案",
+            };
+            pushNodes([textNode]);
+
+            if (input.mode !== 3) return { ok: true, chatNodeId: chatNode.id, textNodeId: textNode.id };
+
+            // ④ 03：文本节点 → 脚本生成器（新节点，右接），然后一键视频
+            report("创建脚本生成器节点并接上文案…");
+            const scriptNode = createCanvasNode(CanvasNodeType.Script, scriptSlot, { status: NODE_STATUS_IDLE, scriptSource: "", scriptPrompt: "", scriptRows: [] });
+            pushNodes([scriptNode], resolveConnectionPairs(textNode.id, scriptNode.id, [...nodesRef.current, scriptNode], "source"));
+
+            report(referenceAssets.length ? `执行一键视频（参考图 ${referenceAssets.length} 张会先按名字挂到道具格，最长约 45 分钟）…` : "执行一键视频（进度见脚本节点，最长约 45 分钟）…");
+            await handleOneClickVideo(scriptNode.id, { referenceAssets });
+            return { ok: true, chatNodeId: chatNode.id, textNodeId: textNode.id, scriptNodeId: scriptNode.id };
+        },
+        [effectiveConfig.imageModel, effectiveConfig.textModel, handleOneClickVideo, resolveModelForCapability, reverseVideoModel, sendChatMessage],
+    );
+
+    /** 「反推视频」节点里可选的目标：画布上所有有内容的视频节点。 */
+    const videoReverseOptions = useMemo(() => nodes.filter((node) => node.type === CanvasNodeType.Video && Boolean(node.metadata?.content)).map((node) => ({ id: node.id, title: node.title || "视频", url: node.metadata?.content || "" })), [nodes]);
+    /** 当前选中的视频节点：节点里「接入视频」优先接它，少一步选择。 */
+    const videoReverseSelectedId = useMemo(() => {
+        for (const nodeId of selectedNodeIds) {
+            const node = nodes.find((item) => item.id === nodeId);
+            if (node?.type === CanvasNodeType.Video && node.metadata?.content) return node.id;
+        }
+        return null;
+    }, [nodes, selectedNodeIds]);
 
     /** 只给某一行分镜建一个视频节点（预填该镜视频提示词 / 时长，并把命中的角色素材 + 全局素材连上）。 */
     const handleBuildShotVideo = useCallback(
@@ -9798,14 +10126,18 @@ function AtelierCanvasPage() {
             // 与「一键铺链路」同口径：视频节点只放视频段，不再拼分镜提示词（用户 2026-10-19 要求）；
             // 也不再拿 imagePrompt 兜底 —— 那一兜就是把分镜提示词整段灌进视频节点。
             const videoNode: CanvasNodeData = {
-                ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, {
-                    prompt: buildVideoNodePrompt(prompts.videoPrompt),
-                    status: NODE_STATUS_IDLE,
-                    ...(seconds ? { seconds: String(seconds) } : {}),
-                    // 与「一键铺链路」同口径：单行建出来的视频节点也默认继承脚本节点的风格模板
-                    // （2026-11-08 第 05 条：脚本里选了风格，生图与生视频窗口都默认跟着走）。
-                    ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
-                }),
+                ...createCanvasNode(
+                    CanvasNodeType.Video,
+                    { x: 0, y: 0 },
+                    {
+                        prompt: buildVideoNodePrompt(prompts.videoPrompt),
+                        status: NODE_STATUS_IDLE,
+                        ...(seconds ? { seconds: String(seconds) } : {}),
+                        // 与「一键铺链路」同口径：单行建出来的视频节点也默认继承脚本节点的风格模板
+                        // （2026-11-08 第 05 条：脚本里选了风格，生图与生视频窗口都默认跟着走）。
+                        ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
+                    },
+                ),
                 title: t("canvas.scriptNode.pipelineVideo", { no: shotNo }),
                 width: videoWidth,
                 height: videoHeight,
@@ -9816,9 +10148,7 @@ function AtelierCanvasPage() {
             const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
                 .map((id) => nodesRef.current.find((node) => node.id === id))
                 .filter((node): node is CanvasNodeData => Boolean(node));
-            const upstreamAssets = upstreamNodes
-                .filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content))
-                .map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
+            const upstreamAssets = upstreamNodes.filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content)).map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
             // 「按镜按资产」图位 + **资产锁定**：这一镜每一格该用哪张图（格子图优先、按资产名的锁兜底）；
             // 它们精准指定过的那几个分类，让资产条不再对同一镜重复分派。
             const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows, shotExtras);
@@ -9925,7 +10255,20 @@ function AtelierCanvasPage() {
                     }}
                 />
             ),
-        [getConfigInputs, getMentionReferences, handleCancelNodeSchedule, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, handleNodeSchedule, handleNodeViewImage, handleRemoveLinkedMedia, handleReorderLinkedMedia, isNodeGenerating, stopGenerationForNode],
+        [
+            getConfigInputs,
+            getMentionReferences,
+            handleCancelNodeSchedule,
+            handleConfigNodeChange,
+            handleGenerateNode,
+            handleNodePromptChange,
+            handleNodeSchedule,
+            handleNodeViewImage,
+            handleRemoveLinkedMedia,
+            handleReorderLinkedMedia,
+            isNodeGenerating,
+            stopGenerationForNode,
+        ],
     );
 
     const handleDirectorExport = useCallback(
@@ -10029,6 +10372,23 @@ function AtelierCanvasPage() {
                     />
                 );
             }
+            if (contentNode.type === CanvasNodeType.ReverseVideo) {
+                const reverseSource = getReverseVideoSource(contentNode.id);
+                return (
+                    <CanvasReverseVideoNodeContent
+                        node={contentNode}
+                        videos={videoReverseOptions}
+                        selectedVideoId={videoReverseSelectedId}
+                        attachedVideoId={reverseSource?.videoId || null}
+                        attachSource={reverseSource?.source || null}
+                        referenceImages={reverseSource?.references || []}
+                        reverseModelLabel={reverseVideoModelLabel}
+                        onConfigChange={handleConfigNodeChange}
+                        onCreateVideoFromUrl={createBridgeVideoNode}
+                        onRun={runVideoReverse}
+                    />
+                );
+            }
             if (contentNode.type === CanvasNodeType.VideoMerge) {
                 return (
                     <CanvasVideoMergeNodeContent
@@ -10087,7 +10447,58 @@ function AtelierCanvasPage() {
                 />
             );
         },
-        [getConfigInputs, getMentionReferences, getScriptAssetCandidates, getScriptAudioCandidates, getScriptImageCandidates, getScriptSource, handleAssetRoleChange, handleBatchGenerateScriptAssets, handleDirectGenerateScriptAssets, handleBuildScriptPipeline, handleBuildShotVideo, handleCellAssetGenerate, handleCellAssetImport, handleCellAssetsChange, handleCellModelChange, handleClearNameLocks, handleConfigNodeChange, handleGenerateNode, handleGenerateScriptAsset, handleImportScriptAssets, handleInsertShotPrompt, handleLinkScriptAssets, handleNameLockChange, handleRegenerateScriptAll, handleRowAssetGenerate, handleRowAudioImport, handleRowAudiosChange, handleRowAssetImport, handleRowAssetsChange, handleScriptAction, handleStopScriptGeneration, handleDetachVideoMergeClips, handleVideoMergeExport, handleVideoMergeRender, isNodeGenerating, runMergeNode, runScriptGeneration, runScriptShotGeneration, stopGenerationForNode, theme, videoMergeExportingNodeId, videoMergeRenderProgress, videoMergeRenderingNodeId, videoMergeResolvedByNodeId],
+        [
+            createBridgeVideoNode,
+            getConfigInputs,
+            getMentionReferences,
+            getReverseVideoSource,
+            getScriptAssetCandidates,
+            getScriptAudioCandidates,
+            getScriptImageCandidates,
+            getScriptSource,
+            handleAssetRoleChange,
+            handleBatchGenerateScriptAssets,
+            handleDirectGenerateScriptAssets,
+            handleBuildScriptPipeline,
+            handleBuildShotVideo,
+            handleCellAssetGenerate,
+            handleCellAssetImport,
+            handleCellAssetsChange,
+            handleCellModelChange,
+            handleClearNameLocks,
+            handleConfigNodeChange,
+            handleGenerateNode,
+            handleGenerateScriptAsset,
+            handleImportScriptAssets,
+            handleInsertShotPrompt,
+            handleLinkScriptAssets,
+            handleNameLockChange,
+            handleRegenerateScriptAll,
+            handleRowAssetGenerate,
+            handleRowAudioImport,
+            handleRowAudiosChange,
+            handleRowAssetImport,
+            handleRowAssetsChange,
+            handleScriptAction,
+            handleStopScriptGeneration,
+            handleDetachVideoMergeClips,
+            handleVideoMergeExport,
+            handleVideoMergeRender,
+            isNodeGenerating,
+            reverseVideoModelLabel,
+            runMergeNode,
+            runScriptGeneration,
+            runScriptShotGeneration,
+            runVideoReverse,
+            stopGenerationForNode,
+            theme,
+            videoMergeExportingNodeId,
+            videoMergeRenderProgress,
+            videoMergeRenderingNodeId,
+            videoMergeResolvedByNodeId,
+            videoReverseOptions,
+            videoReverseSelectedId,
+        ],
     );
 
     if (!projectLoaded) return <CanvasRefreshShell />;
@@ -10162,7 +10573,14 @@ function AtelierCanvasPage() {
                                 />
                             );
                         })}
-                        {connectingParams ? <ActiveConnectionPath node={withDragPreview(nodeById.get(connectingParams.nodeId))} handle={connectingParams} mouseWorld={mouseWorld} target={connectionTargetNodeId ? withDragPreview(nodeById.get(connectionTargetNodeId)) : undefined} /> : null}
+                        {connectingParams ? (
+                            <ActiveConnectionPath
+                                node={withDragPreview(nodeById.get(connectingParams.nodeId))}
+                                handle={connectingParams}
+                                mouseWorld={mouseWorld}
+                                target={connectionTargetNodeId ? withDragPreview(nodeById.get(connectionTargetNodeId)) : undefined}
+                            />
+                        ) : null}
                     </svg>
 
                     {visibleNodes.map((node) => (
@@ -10377,14 +10795,25 @@ function AtelierCanvasPage() {
                     />
                 ) : null}
 
-                {h3OptimizeOpen ? (
-                    <CanvasH3OptimizeDialog open targets={h3OptimizeSnapshot} config={h3OptimizeConfig} onStart={runH3OptimizeBatch} onClose={() => setH3OptimizeOpen(false)} />
-                ) : null}
+                {h3OptimizeOpen ? <CanvasH3OptimizeDialog open targets={h3OptimizeSnapshot} config={h3OptimizeConfig} onStart={runH3OptimizeBatch} onClose={() => setH3OptimizeOpen(false)} /> : null}
 
                 {/* 后台队列的进度 / 停止入口：弹窗关掉以后仍然显示，不挡画布操作。 */}
                 <CanvasH3OptimizeProgress />
 
-                <input ref={imageInputRef} type="file" multiple accept="image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav,text/*,.txt,.md,.markdown,.csv,.json,.docx,.pdf,.rtf,.html,.xml,.yaml,.yml" className="hidden" onChange={handleImageInputChange} />
+                {/* MochiAni 生视频：本机桥（tools/mochiani-bridge）→ MochiAni MCP → 视频回画布。 */}
+                <CanvasMochianiPanel onCreateVideo={createBridgeVideoNode} />
+
+                {/* 反推视频不再是右下角浮层：它已经做成可右键创建的内置节点（CanvasNodeType.ReverseVideo），
+                    内容区在 renderNodeContentPanel 里渲染。 */}
+
+                <input
+                    ref={imageInputRef}
+                    type="file"
+                    multiple
+                    accept="image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav,text/*,.txt,.md,.markdown,.csv,.json,.docx,.pdf,.rtf,.html,.xml,.yaml,.yml"
+                    className="hidden"
+                    onChange={handleImageInputChange}
+                />
 
                 <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} />
 
@@ -10496,11 +10925,7 @@ function AtelierCanvasPage() {
                     <CanvasNodeMjUpscaleDialog
                         open={Boolean(mjUpscaleNode)}
                         previewUrl={mjUpscaleNode.metadata?.content}
-                        defaultIndex={
-                            mjUpscaleNode.metadata?.midjourneyIndex ||
-                            mjUpscaleNode.metadata?.images?.find((image) => image.id === mjUpscaleNode.metadata?.primaryImageId)?.midjourneyIndex ||
-                            1
-                        }
+                        defaultIndex={mjUpscaleNode.metadata?.midjourneyIndex || mjUpscaleNode.metadata?.images?.find((image) => image.id === mjUpscaleNode.metadata?.primaryImageId)?.midjourneyIndex || 1}
                         onClose={() => setMjUpscaleNodeId(null)}
                         onConfirm={(index) => void midjourneyUpscaleImageNode(mjUpscaleNode, index)}
                     />
@@ -10519,14 +10944,7 @@ function AtelierCanvasPage() {
                     />
                 ) : null}
 
-                {adjustNode?.metadata?.content ? (
-                    <CanvasNodeAdjustDialog
-                        dataUrl={adjustNode.metadata.content}
-                        open={Boolean(adjustNode)}
-                        onClose={() => setAdjustNodeId(null)}
-                        onConfirm={(params) => void adjustImageNode(adjustNode!, params)}
-                    />
-                ) : null}
+                {adjustNode?.metadata?.content ? <CanvasNodeAdjustDialog dataUrl={adjustNode.metadata.content} open={Boolean(adjustNode)} onClose={() => setAdjustNodeId(null)} onConfirm={(params) => void adjustImageNode(adjustNode!, params)} /> : null}
 
                 <Modal title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode?.metadata?.content)} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>
                     <div className="py-8 text-center text-base font-medium">{t("canvas.projectPage.notImplemented")}</div>
@@ -10535,12 +10953,7 @@ function AtelierCanvasPage() {
                 {angleNode?.metadata?.content ? <CanvasNodeAngleDialog dataUrl={angleNode.metadata.content} open={Boolean(angleNode)} onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode!, params)} /> : null}
 
                 {panoramaNode?.metadata?.content ? (
-                    <CanvasNodePanoramaDialog
-                        dataUrl={panoramaNode.metadata.content}
-                        open={Boolean(panoramaNode)}
-                        onClose={() => setPanoramaNodeId(null)}
-                        onCapture={(payload) => void capturePanoramaShot(panoramaNode, payload)}
-                    />
+                    <CanvasNodePanoramaDialog dataUrl={panoramaNode.metadata.content} open={Boolean(panoramaNode)} onClose={() => setPanoramaNodeId(null)} onCapture={(payload) => void capturePanoramaShot(panoramaNode, payload)} />
                 ) : null}
 
                 {/* 剪映直写：首次 / 授权失效时才打开（粘一次草稿路径 + 选一次草稿文件夹）。 */}
@@ -10595,11 +11008,7 @@ function AtelierCanvasPage() {
                     src={previewContent}
                     title={previewNode?.title || t("canvas.projectPage.imageDetails")}
                     projectId={projectId}
-                    fileName={
-                        previewContent
-                            ? `canvas-${previewNode?.type || "image"}-${previewNode?.id || "preview"}.${imageExtension(previewContent)}`
-                            : undefined
-                    }
+                    fileName={previewContent ? `canvas-${previewNode?.type || "image"}-${previewNode?.id || "preview"}.${imageExtension(previewContent)}` : undefined}
                     info={
                         previewNode
                             ? (() => {

@@ -119,6 +119,7 @@ export function startCanvasWorkbuddyBridge(options: {
     getNodes: () => CanvasNodeData[];
     createTextNode: (content: string, position?: { x: number; y: number }) => string;
     createImageNode: (imageUrl: string, prompt?: string, position?: { x: number; y: number }) => Promise<string>;
+    createVideoNode: (videoUrl: string, prompt?: string, position?: { x: number; y: number }) => Promise<string>;
     setPrompt: (nodeId: string, prompt: string) => void;
     setSize: (nodeId: string, size: string) => void;
     generate: (nodeId: string, mode: CanvasGenerationMode, prompt: string) => Promise<void>;
@@ -202,6 +203,26 @@ async function runCommand(command: BridgeCommand, nodes: CanvasNodeData[], optio
         const prompt = String(command.args.prompt || "");
         const nodeId = await options.createImageNode(imageUrl, prompt, position);
         return { ok: true, nodeId, type: CanvasNodeType.Image, imageUrl };
+    }
+    if (command.name === "create_video_node") {
+        const videoUrl = String(command.args.videoUrl || "");
+        if (!videoUrl.trim()) return { ok: false, error: "videoUrl 不能为空" };
+        const prompt = String(command.args.prompt || "");
+        const nodeId = await options.createVideoNode(videoUrl, prompt, position);
+        return { ok: true, nodeId, type: CanvasNodeType.Video, videoUrl };
+    }
+    if (command.name === "export_video_data") {
+        const nodeId = String(command.args.nodeId || "");
+        const node = nodes.find((item) => item.id === nodeId && item.type === CanvasNodeType.Video);
+        const videoUrl = String(node?.metadata?.content || "");
+        if (!node || !videoUrl) return { ok: false, error: `找不到视频节点 ${nodeId || "(未指定 nodeId)"}` };
+        return {
+            ok: true,
+            nodeId: node.id,
+            videoUrl,
+            prompt: String(node.metadata?.prompt || node.metadata?.composerContent || ""),
+            storageKey: String(node.metadata?.storageKey || ""),
+        };
     }
     if (command.name === "export_image_data") {
         const storageKey = String(command.args.storageKey || "");
