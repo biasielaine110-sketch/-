@@ -1720,16 +1720,29 @@ async function handleModels(query) {
                 return { ok: false, code: "NO_CARTON_MODELS", error: "读到了漫剧编辑器，但视频模型目录是空的（去编辑器里看一眼当前模型）" };
             }
             const currentModelKey = video?.model_id ? `${CARTON_MODEL_PREFIX}${video.model_id}` : "";
-            // 「生成模式」候选：从模型目录里实际出现的分类倒推（没出现的模式不给，免得选了没模型）。
+            /**
+             * 「生成模式」候选：优先用设置里直接给的 `video_categories`（原生面板口径），
+             * 没有就从模型目录里实际出现的分类倒推 —— 没出现的模式不给，免得选了没模型。
+             */
+            const nativeCategories = Array.isArray(video?.video_categories) ? video.video_categories : [];
             const categoryKeys = [...new Set(models.map((item) => item.specificType).filter((value) => value != null))].sort((a, b) => a - b);
-            const videoCategories = categoryKeys.map((key) => ({
-                key,
-                label: VIDEO_CATEGORY_LABEL[key] || `分类 ${key}`,
-                compatible: true,
-                modelCount: models.filter((item) => item.specificType === key).length,
-            }));
+            const videoCategories = nativeCategories.length
+                ? nativeCategories.map((item) => ({
+                      key: Number(item?.key ?? item?.value ?? item?.specific_type),
+                      label: String(item?.label || VIDEO_CATEGORY_LABEL[Number(item?.key ?? item?.value)] || ""),
+                      compatible: item?.compatible !== false,
+                      reason: String(item?.reason || ""),
+                  }))
+                : categoryKeys.map((key) => ({
+                      key,
+                      label: VIDEO_CATEGORY_LABEL[key] || `分类 ${key}`,
+                      compatible: true,
+                      modelCount: models.filter((item) => item.specificType === key).length,
+                  }));
             const currentCategory =
-                videoCategories.find((item) => item.key === models.find((m) => m.modelKey === currentModelKey)?.specificType)?.key ?? null;
+                video?.active_video_category != null
+                    ? Number(video.active_video_category)
+                    : (videoCategories.find((item) => item.key === models.find((m) => m.modelKey === currentModelKey)?.specificType)?.key ?? null);
             return {
                 ok: true,
                 kind: "carton",
