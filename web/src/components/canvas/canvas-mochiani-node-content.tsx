@@ -5,16 +5,20 @@ import {
     CircleCheck,
     Clapperboard,
     Coins,
+    Film,
     ImagePlus,
     Loader2,
+    Music4,
     PlugZap,
     RefreshCw,
     Sparkles,
+    Unlink,
     Wrench,
     X,
 } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 
@@ -63,6 +67,8 @@ type MochianiJob = {
     model: { id?: string; key?: string; supplierId?: string } | null;
     modelTarget: { modelKey?: string; channelId?: string; params?: Record<string, string> } | null;
     imageCount: number;
+    videoCount?: number;
+    audioCount?: number;
     warnings: string[];
     error: string;
     createdAt: string;
@@ -119,6 +125,10 @@ type BridgeBody = Record<string, unknown> & {
 
 type Props = {
     node: CanvasNodeData;
+    /** 连进本节点的素材（`X 拾取` / 拖线）—— 图 / 视频 / 音频都会当成参考素材发给 MochiAni。 */
+    references?: CanvasResourceReference[];
+    /** 点素材 chip 上的 × 时断开那根线（素材从参考里移除）。 */
+    onDetachReference?: (sourceNodeId: string) => void;
     onCreateVideo: (videoUrl: string, prompt?: string) => Promise<string>;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
 };
@@ -235,7 +245,24 @@ function readFileAsDataUrl(file: File) {
     });
 }
 
-export function CanvasMochianiNodeContent({ node, onCreateVideo, onConfigChange }: Props) {
+/** 连进来的素材节点 → 桥能收的一条参考素材（http 地址让桥自己下载，data: 直接传）。 */
+function toReferencePayload(reference: CanvasResourceReference) {
+    const url = String(reference.previewUrl || "").trim();
+    if (/^https?:\/\//i.test(url)) return { url };
+    if (url.startsWith("data:")) return { dataUrl: url };
+    // blob: / 空 —— 那是只在本页内存里的临时文件，桥（可能在另一台机器）够不着。
+    return null;
+}
+
+const MEDIA_KIND_META = {
+    image: { label: "图", icon: ImagePlus, color: "#60a5fa" },
+    video: { label: "视频", icon: Film, color: "#a78bfa" },
+    audio: { label: "音频", icon: Music4, color: "#34d399" },
+} as const;
+
+type MediaKind = keyof typeof MEDIA_KIND_META;
+
+export function CanvasMochianiNodeContent({ node, references, onDetachReference, onCreateVideo, onConfigChange }: Props) {
     const { message } = App.useApp();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
 
@@ -454,6 +481,61 @@ export function CanvasMochianiNodeContent({ node, onCreateVideo, onConfigChange 
 
     const imageLimit = selectedModel?.mediaLimits?.image?.max ?? 9;
     const imageRequired = selectedModel?.mediaLimits?.image?.required ?? 0;
+    /** 视频 / 音频上限：模型没声明（0）就不拦，交给 MochiAni 侧的原生端口去拒。 */
+    const videoLimit = selectedModel?.mediaLimits?.video?.max ?? 0;
+    const audioLimit = selectedModel?.mediaLimits?.audio?.max ?? 0;
+
+    /**
+     * 连进本节点的素材（`X 拾取` 或直接拖线连进来）。
+     *
+     * ⚠️ 这一层以前完全没有 —— 节点只认「手动上传」的图，`X 拾取` 连进来的图 / 视频 / 音频
+     *    在画布上有线、在这节点里看不见，自然也不会发给 MochiAni。所以「连线即参考」这件事
+     *    必须在这里落地：连线 → chip → 预检时上传。
+     */
+    const linkedMedia = useMemo(
+        () => (references || []).filter((item) => item.kind === "image" || item.kind === "video" || item.kind === "audio"),
+        [references],
+    );
+    const linkedByKind = useMemo(() => {
+        const bucket: Record<MediaKind, CanvasResourceReference[]> = { image: [], video: [], audio: [] };
+        for (const item of linkedMedia) bucket[item.kind as MediaKind].push(item);
+        return bucket;
+    }, [linkedMedia]);
+
+    /** 组装给桥的参考素材：连线的优先（用户刚连的那根线更可信），手动上传的补在后面。 */
+    const collectMediaPayload = useCallback(() => {
+        const unusable: string[] = [];
+        const pick = (list: CanvasResourceReference[], limit: number) => {
+            const out: Array<{ url?: string; dataUrl?: string }> = [];
+            for (const reference of list) {
+                if (limit > 0 && out.length >= limit) {
+                    unusable.push(`${reference.title || reference.label} 超过上限，没发`);
+                    continue;
+                }
+                const entry = toReferencePayload(reference);
+                if (!entry) {
+                    unusable.push(`${reference.title || reference.label} 只是本页临时文件，桥读不到`);
+                    continue;
+                }
+                out.push(entry);
+            }
+            return out;
+        };
+        const images = pick(linkedByKind.image, imageLimit);
+        for (const item of refImages) {
+            if (imageLimit > 0 && images.length >= imageLimit) {
+                unusable.push(`${item.name} 超过参考图上限，没发`);
+                continue;
+            }
+            images.push({ dataUrl: item.dataUrl });
+        }
+        return {
+            images,
+            videos: pick(linkedByKind.video, videoLimit),
+            audios: pick(linkedByKind.audio, audioLimit),
+            unusable,
+        };
+    }, [audioLimit, imageLimit, linkedByKind, refImages, videoLimit]);
 
     const modelOptions = useMemo(() => {
         const counter = new Map<string, number>();
@@ -496,7 +578,7 @@ export function CanvasMochianiNodeContent({ node, onCreateVideo, onConfigChange 
 
     const addImages = async (files: File[]) => {
         if (!files.length) return;
-        const room = Math.max(0, imageLimit - refImages.length);
+        const room = Math.max(0, imageLimit - refImages.length - linkedByKind.image.length);
         if (!room) {
             message.warning(`这个模型最多 ${imageLimit} 张参考图`);
             return;
@@ -522,10 +604,12 @@ export function CanvasMochianiNodeContent({ node, onCreateVideo, onConfigChange 
             message.warning("先写提示词");
             return;
         }
-        if (imageRequired && refImages.length < imageRequired) {
-            message.warning(`这个模型至少要 ${imageRequired} 张参考图`);
+        const media = collectMediaPayload();
+        if (imageRequired && media.images.length < imageRequired) {
+            message.warning(`这个模型至少要 ${imageRequired} 张参考图（现在 ${media.images.length} 张）`);
             return;
         }
+        if (media.unusable.length) message.warning(media.unusable.slice(0, 2).join("；"));
         setBusy("plan");
         setError("");
         setPlacedNodeId("");
@@ -538,7 +622,9 @@ export function CanvasMochianiNodeContent({ node, onCreateVideo, onConfigChange 
                     modelKey: modelKey || undefined,
                     channelId: channelId || undefined,
                     params,
-                    images: refImages.map((item) => ({ dataUrl: item.dataUrl })),
+                    images: media.images,
+                    videos: media.videos,
+                    audios: media.audios,
                 }),
             });
             if (data.job) {
@@ -792,6 +878,8 @@ export function CanvasMochianiNodeContent({ node, onCreateVideo, onConfigChange 
                         {selectedModel ? (
                             <div className="text-[10px] opacity-45">
                                 参考图{imageRequired ? ` 至少 ${imageRequired} 张 /` : ""} 最多 {imageLimit} 张
+                                {videoLimit ? ` · 视频最多 ${videoLimit} 个` : ""}
+                                {audioLimit ? ` · 音频最多 ${audioLimit} 个` : ""}
                             </div>
                         ) : null}
                     </div>
@@ -809,15 +897,49 @@ export function CanvasMochianiNodeContent({ node, onCreateVideo, onConfigChange 
                     disabled={locked}
                 />
 
-                {/* ⑤ 参考图 */}
+                {/* ⑤ 参考素材：连线接入的图 / 视频 / 音频 + 手动加的图 */}
                 <div>
                     <div className="mb-1 flex items-center justify-between text-[11px]">
-                        <span className="opacity-55">参考图（可选）</span>
+                        <span className="opacity-55">参考素材</span>
                         <span className="opacity-35">
-                            {refImages.length}/{imageLimit}
+                            图 {linkedByKind.image.length + refImages.length}/{imageLimit}
+                            {linkedByKind.video.length ? ` · 视频 ${linkedByKind.video.length}${videoLimit ? `/${videoLimit}` : ""}` : ""}
+                            {linkedByKind.audio.length ? ` · 音频 ${linkedByKind.audio.length}${audioLimit ? `/${audioLimit}` : ""}` : ""}
                         </span>
                     </div>
                     <div className="flex flex-wrap items-start gap-1.5">
+                        {linkedMedia.map((reference) => {
+                            const meta = MEDIA_KIND_META[reference.kind as MediaKind];
+                            const Icon = meta.icon;
+                            const showThumb = reference.kind === "image" && Boolean(reference.previewUrl);
+                            return (
+                                <div
+                                    key={reference.id}
+                                    className="group relative flex h-14 w-14 flex-col items-center justify-center overflow-hidden rounded text-[9px]"
+                                    style={{ border: softBorder, color: meta.color }}
+                                    title={`${reference.title}（连线接入 · ${meta.label}）`}
+                                >
+                                    {showThumb ? (
+                                        <img src={reference.previewUrl} alt={reference.title} className="h-full w-full object-cover" />
+                                    ) : (
+                                        <>
+                                            <Icon size={16} />
+                                            <span className="mt-0.5 max-w-full truncate px-0.5 opacity-80">{reference.title}</span>
+                                        </>
+                                    )}
+                                    {!locked && onDetachReference ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => onDetachReference(reference.nodeId)}
+                                            className="absolute right-0.5 top-0.5 rounded bg-black/70 p-0.5 opacity-0 transition group-hover:opacity-100"
+                                            title="断开这根线（不再当参考素材）"
+                                        >
+                                            <Unlink size={10} color="#fff" />
+                                        </button>
+                                    ) : null}
+                                </div>
+                            );
+                        })}
                         {refImages.map((item) => (
                             <div key={item.uid} className="group relative h-14 w-14 overflow-hidden rounded" style={{ border: softBorder }}>
                                 <img src={item.dataUrl} alt={item.name} className="h-full w-full object-cover" />
@@ -833,7 +955,7 @@ export function CanvasMochianiNodeContent({ node, onCreateVideo, onConfigChange 
                                 ) : null}
                             </div>
                         ))}
-                        {refImages.length < imageLimit && !locked ? (
+                        {refImages.length + linkedByKind.image.length < imageLimit && !locked ? (
                             <Upload
                                 accept="image/*"
                                 multiple
@@ -853,6 +975,11 @@ export function CanvasMochianiNodeContent({ node, onCreateVideo, onConfigChange 
                             </Upload>
                         ) : null}
                     </div>
+                    {!linkedMedia.length ? (
+                        <div className="mt-1 text-[10px] leading-snug opacity-40">
+                            选中本节点按 X，再点图片 / 视频 / 音频节点 —— 连进来的素材会出现在这里，预检时一起传进 MochiAni 当参考。
+                        </div>
+                    ) : null}
                 </div>
 
                 {/* ⑥ 任务状态 */}
@@ -871,6 +998,8 @@ export function CanvasMochianiNodeContent({ node, onCreateVideo, onConfigChange 
                                 <span className="opacity-45">{Object.values(job.estimate.labels).join(" / ")}</span>
                             ) : null}
                             {job.imageCount ? <span className="opacity-45">参考图 {job.imageCount} 张</span> : null}
+                            {job.videoCount ? <span className="opacity-45">参考视频 {job.videoCount} 个</span> : null}
+                            {job.audioCount ? <span className="opacity-45">参考音频 {job.audioCount} 个</span> : null}
                         </div>
                         {notEnoughPoints ? (
                             <div className="mt-1 text-[11px]" style={{ color: "#fbbf24" }}>

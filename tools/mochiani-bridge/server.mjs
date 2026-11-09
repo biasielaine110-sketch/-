@@ -21,7 +21,7 @@
  *
  * 面板侧接口：
  *   GET  /api/models   真实模型目录（46 个模型 + 各自渠道/参数/媒体上限）
- *   POST /api/plan     {prompt, pageId, modelKey, channelId, params, images:[{dataUrl}]}
+ *   POST /api/plan     {prompt, pageId, modelKey, channelId, params, images/videos/audios:[{dataUrl}|{url}]}
  *
  * 依赖：本机已安装 mochiani-mcp（npm -g），浏览器已登录 mochiani.com 且页面连上 MCP。
  * 启动：node tools/mochiani-bridge/server.mjs（或 start.bat）
@@ -393,16 +393,58 @@ async function applyModelConfig(job, pageId, origin, nodeId, controls) {
     return current;
 }
 
-const IMAGE_EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp", "image/gif": ".gif" };
+const MEDIA_EXT = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/aac": ".aac",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/ogg": ".ogg",
+};
 
-/** 浏览器只能给到 base64，MochiAni 的导入工具只认本机绝对路径 —— 所以先落盘。 */
-function decodeDataUrl(dataUrl) {
+/** 拿不到 content-type 时的兜底后缀 —— 按素材类型给原生端口最认的那个。 */
+const KIND_FALLBACK_EXT = { image: ".png", video: ".mp4", audio: ".mp3" };
+
+/** 日志/告警里的人话名字。 */
+const KIND_LABEL = { image: "参考图", video: "参考视频", audio: "参考音频" };
+
+function mediaExt(mime, kind) {
+    return MEDIA_EXT[String(mime || "").toLowerCase()] || KIND_FALLBACK_EXT[kind] || ".bin";
+}
+
+/** 浏览器只能给到 base64（或给一个我们够得着的 URL），MochiAni 的导入工具只认本机绝对路径 —— 所以先落盘。 */
+function decodeDataUrl(dataUrl, kind = "image") {
     const match = /^data:([^;,]+)?(;base64)?,([\s\S]*)$/.exec(String(dataUrl || ""));
     if (!match) return null;
-    const mime = (match[1] || "image/png").toLowerCase();
+    const mime = (match[1] || "").toLowerCase() || (kind === "video" ? "video/mp4" : kind === "audio" ? "audio/mpeg" : "image/png");
     const buffer = match[2] ? Buffer.from(match[3], "base64") : Buffer.from(decodeURIComponent(match[3]), "utf8");
     if (!buffer.length) return null;
-    return { mime, buffer, ext: IMAGE_EXT[mime] || ".png" };
+    return { mime, buffer, ext: mediaExt(mime, kind) };
+}
+
+/** 一条参考素材落成临时文件：优先 `dataUrl`（浏览器直传），没有就下载 `url`。 */
+async function materializeReference(item, kind, timeoutMs = 180000) {
+    const record = typeof item === "string" ? { dataUrl: item } : item || {};
+    const dataUrl = String(record.dataUrl || "");
+    if (dataUrl.startsWith("data:")) return decodeDataUrl(dataUrl, kind);
+    const url = String(record.url || "").trim();
+    if (!/^https?:\/\//i.test(url)) return null;
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: "follow" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length) return null;
+    const mime = String(response.headers.get("content-type") || "").split(";")[0].trim();
+    return { mime, buffer, ext: mediaExt(mime, kind) };
 }
 
 /** 等素材上传真的完成（节点建出来 ≠ 图已经在 MochiAni 侧可用）。 */
@@ -420,24 +462,36 @@ async function waitNodeMedia(pageId, origin, nodeId, timeoutMs = 30000) {
 }
 
 /**
- * 参考图：落盘 → upload_and_connect（导入 + 按原生端口规则连线一步到位）。
+ * 参考素材：落盘 → upload_and_connect（导入 + 按原生端口规则连线一步到位）。
  * 连完再核一次媒体上传状态，没传完的如实标出来，不假装成功。
+ *
+ * 图 / 视频 / 音频走同一条路，只有 `mediaType` 不同 —— MCP 那边
+ * `mochiani_canvas_upload_and_connect` 支持三种，端口不兼容时它会拒。
  */
-async function importReferenceImages(job, pageId, origin, nodeId, position) {
-    const images = Array.isArray(job.images) ? job.images : [];
+async function importReferenceMedia(job, pageId, origin, nodeId, kind) {
+    const list = Array.isArray(job[`${kind}s`]) ? job[`${kind}s`] : [];
     const connected = [];
-    if (!images.length) return connected;
+    if (!list.length) return connected;
+    const label = KIND_LABEL[kind] || "参考素材";
 
     const dir = path.join(os.tmpdir(), "mochiani-bridge-refs");
     fs.mkdirSync(dir, { recursive: true });
 
-    for (let index = 0; index < images.length; index += 1) {
-        const decoded = decodeDataUrl(images[index]?.dataUrl || images[index]);
-        if (!decoded) {
-            pushLog(job, `第 ${index + 1} 张参考图不是合法图片数据，跳过`);
+    for (let index = 0; index < list.length; index += 1) {
+        let decoded = null;
+        try {
+            decoded = await materializeReference(list[index], kind);
+        } catch (error) {
+            pushLog(job, `${label} ${index + 1} 取不回来：${error?.message || error}`);
+            job.warnings.push(`${label} ${index + 1} 下载失败`);
             continue;
         }
-        const file = path.join(dir, `${job.id}-ref-${index + 1}${decoded.ext}`);
+        if (!decoded) {
+            pushLog(job, `${label} ${index + 1} 既不是可导入的文件、也不是能下载的地址，跳过`);
+            job.warnings.push(`${label} ${index + 1} 无法读取`);
+            continue;
+        }
+        const file = path.join(dir, `${job.id}-${kind}-${index + 1}${decoded.ext}`);
         fs.writeFileSync(file, decoded.buffer);
         const read = await canvasRead(pageId, origin);
         const receipt = await callTool("mochiani_canvas_upload_and_connect", {
@@ -446,29 +500,28 @@ async function importReferenceImages(job, pageId, origin, nodeId, position) {
             expectedRevision: read.revision,
             idempotencyKey: randomUUID(),
             localPath: file,
-            mediaType: "image",
+            mediaType: kind,
             targetNodeId: nodeId,
         });
-        const imageNodeId = pickNodeId(receipt);
-        if (!imageNodeId) {
-            pushLog(job, `第 ${index + 1} 张参考图没读到节点 ID，可能没导进去`);
-            job.warnings.push(`参考图 ${index + 1} 导入回执里没有节点 ID`);
+        const mediaNodeId = pickNodeId(receipt);
+        if (!mediaNodeId) {
+            pushLog(job, `${label} ${index + 1} 没读到节点 ID，可能没导进去`);
+            job.warnings.push(`${label} ${index + 1} 导入回执里没有节点 ID`);
             continue;
         }
         if (receipt?.connectionVerified === false) {
-            pushLog(job, `参考图 ${index + 1} 已导入，但连线未确认（端口可能不兼容）`);
-            job.warnings.push(`参考图 ${index + 1} 连线未确认`);
+            pushLog(job, `${label} ${index + 1} 已导入，但连线未确认（端口可能不兼容）`);
+            job.warnings.push(`${label} ${index + 1} 连线未确认`);
         } else {
-            pushLog(job, `参考图 ${index + 1} 已导入并连上视频节点`);
+            pushLog(job, `${label} ${index + 1} 已导入并连上视频节点`);
         }
-        const uploaded = await waitNodeMedia(pageId, origin, imageNodeId);
+        const uploaded = await waitNodeMedia(pageId, origin, mediaNodeId);
         if (!uploaded) {
-            pushLog(job, `参考图 ${index + 1} 上传还没确认，别急着下单`);
-            job.warnings.push(`参考图 ${index + 1} 上传未确认`);
+            pushLog(job, `${label} ${index + 1} 上传还没确认，别急着下单`);
+            job.warnings.push(`${label} ${index + 1} 上传未确认`);
         }
-        connected.push(imageNodeId);
+        connected.push(mediaNodeId);
     }
-    void position;
     return connected;
 }
 
@@ -543,9 +596,10 @@ async function planCanvasJob(job, ctx) {
         params: controls?.configParams || {},
     };
 
-    // 2) 参考图
-    if (Array.isArray(job.images) && job.images.length) {
-        await importReferenceImages(job, pageId, origin, nodeId, position);
+    // 2) 参考素材：图 → 视频 → 音频（顺序固定，原生端口有容量上限，主素材先占位）
+    for (const kind of ["image", "video", "audio"]) {
+        const list = job[`${kind}s`];
+        if (Array.isArray(list) && list.length) await importReferenceMedia(job, pageId, origin, nodeId, kind);
     }
 
     // 3) 提示词
@@ -814,6 +868,8 @@ function publicJob(job) {
         model: job.model,
         modelTarget: job.modelTarget || null,
         imageCount: Array.isArray(job.images) ? job.images.length : 0,
+        videoCount: Array.isArray(job.videos) ? job.videos.length : 0,
+        audioCount: Array.isArray(job.audios) ? job.audios.length : 0,
         warnings: job.warnings || [],
         error: job.error,
         createdAt: job.createdAt,
@@ -838,11 +894,13 @@ function createJob(kind, prompt, page, extras = {}) {
         estimate: null,
         model: null,
         modelTarget: null,
-        // 用户在面板里选的「模型 / 渠道 / 参数 / 参考图」
+        // 用户在面板里选的「模型 / 渠道 / 参数 / 参考素材（图 / 视频 / 音频）」
         modelKey: String(extras.modelKey || "").trim(),
         channelId: String(extras.channelId || "").trim(),
         params: extras.params && typeof extras.params === "object" ? { ...extras.params } : {},
         images: Array.isArray(extras.images) ? extras.images : [],
+        videos: Array.isArray(extras.videos) ? extras.videos : [],
+        audios: Array.isArray(extras.audios) ? extras.audios : [],
         warnings: [],
         receipt: null,
         error: "",
@@ -1075,7 +1133,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.3.0",
+            version: "1.4.0",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
@@ -1136,6 +1194,8 @@ async function handle(req, res) {
                 channelId: body.channelId,
                 params: body.params,
                 images: body.images,
+                videos: body.videos,
+                audios: body.audios,
             });
             send(res, 200, { ok: true, job: publicJob(job) });
         } catch (error) {

@@ -22,7 +22,10 @@ const webDir = dirname(fileURLToPath(import.meta.url));
  * 请求体里没有密钥（Authorization 在 header，不落盘）。
  */
 function isWorkFisherVideoUrl(url: URL) {
-    return /(^|\.)work-fisher\.com$/i.test(url.hostname) && /^\/v1\/videos(\/|$)/i.test(url.pathname);
+    if (!/(^|\.)work-fisher\.com$/i.test(url.hostname)) return false;
+    // 只认创建（`/v1/videos`）与单任务轮询（`/v1/videos/<id>`）。
+    // `/v1/videos/<id>/content` 是**视频字节**本身 —— 抓它会把整条片子读进内存。
+    return /^\/v1\/videos\/?$/i.test(url.pathname) || /^\/v1\/videos\/[^/]+\/?$/i.test(url.pathname);
 }
 
 async function captureVideoDiag(targetUrl: URL, method: string, body: Uint8Array | undefined, upstream: { status: number; clone(): { text(): Promise<string> } }) {
@@ -43,7 +46,7 @@ async function captureVideoDiag(targetUrl: URL, method: string, body: Uint8Array
         }
         const requestPreview = body ? Buffer.from(body).toString("utf8").slice(0, 1500) : "";
         appendFileSync(
-            "video-diag.log",
+            resolve(webDir, "video-diag.log"),
             `[${new Date().toISOString()}] ${method} ${upstream.status} ${targetUrl.href}\nrequest: ${requestPreview}\nresponse: ${text.slice(0, 4000)}\n\n`,
         );
     } catch {
@@ -61,7 +64,9 @@ function describeError(error: unknown): string {
 // Transient stream/network errors must not take down the whole dev server (an unhandled
 // Readable 'error' event crashes Node). Only swallow these known-benign categories; real
 // bugs still propagate through the outer catch / crash normally.
-const BENIGN_STREAM_ERROR = /timeout|abort|ECONNRESET|EPIPE|premature close|fetch failed|UND_ERR/i;
+// `terminated` 是 undici 在 AbortSignal 超时/客户端断开时抛的 —— 之前没列进来，
+// 一次视频下载被中断就把整个 vite dev server 干掉了（fatal uncaught exception）。
+const BENIGN_STREAM_ERROR = /timeout|abort|terminated|ECONNRESET|EPIPE|premature close|fetch failed|UND_ERR|other side closed/i;
 process.on("uncaughtException", (error) => {
     if (BENIGN_STREAM_ERROR.test(`${error.message} ${error.name}`)) {
         console.warn(`[api-proxy] ignored transient error: ${describeError(error)}`);

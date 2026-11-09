@@ -90,22 +90,32 @@ POST /api/jobs/:id/confirm               ← 从这一步开始扣余额
 
 最后「放到画布」复用画布的 `createBridgeVideoNode`，把 videoUrl 落成视频节点。
 
-## 参考图怎么进 MochiAni
+## 参考素材怎么进 MochiAni（图 / 视频 / 音频）
 
-画布页面只能给到**图片字节**（`<input type="file">` 拿到的是 File，不是路径），
-而 MochiAni 的导入工具只吃**本机绝对路径**。所以桥里做了两件事：
+画布页面只能给到**文件字节或一个 URL**（`<input type="file">` 拿到的是 File，不是路径），
+而 MochiAni 的导入工具只吃**本机绝对路径**。所以桥里做了三件事：
 
-1. 把 `dataUrl` 解成 Buffer，落到 `%TEMP%\mochiani-bridge-refs\`；
-2. 调 `mochiani_canvas_upload_and_connect(localPath, mediaType:"image", targetNodeId)`，
+1. `dataUrl` → 解成 Buffer；纯 `http(s)` 地址 → 桥自己下载（视频几十 MB 时比 base64 省得多）；
+   两种都落到 `%TEMP%\mochiani-bridge-refs\`；
+2. 调 `mochiani_canvas_upload_and_connect(localPath, mediaType:"image"|"video"|"audio", targetNodeId)`，
    一步完成「导入素材节点 + 按原生端口规则连到视频节点」，再 `get_node` 等
-   `media.uploadConfirmed` 为真才放行。
+   `media.uploadConfirmed` 为真才放行；
+3. 顺序固定 **图 → 视频 → 音频**（原生端口有容量上限，主素材先占位）；端口不兼容时
+   MCP 会拒，回执里 `connectionVerified:false` 会如实写进 job.warnings，不假装成功。
 
-> ⚠️ 连完参考图后，该节点的提示词就变成**结构化文档**（带 `documentToken` + `references`），
+画布侧对应的是「连线即参考」：选中 MochiAni 节点按 `X` 再点图片 / 视频 / 音频节点，
+素材就以 chip 出现在节点里（图显示缩略图，视频/音频显示类型徽标），`预检` 时随请求发出去。
+chip 上的 × 断开的是那根连线（`handleRemoveLinkedMedia`，Config 汇流点上的也算）。
+
+> ⚠️ chip 只有「http(s) 地址」或「data: 内联」才发得出去。`blob:` 是只在本页内存里的
+> 临时文件，桥（可能在另一台机器）够不着 —— 这种会在预检前用 toast 明确告诉你没发。
+
+> ⚠️ 连完参考素材后，该节点的提示词就变成**结构化文档**（带 `documentToken` + `references`），
 > 此时 `mochiani_canvas_set_prompt` 会被页面拒绝，而且报的是一个没填模板的
 > `画布操作未执行：{reason}`（看不出真实原因）。必须改走 `mochiani_canvas_edit_references`。
 > 桥里先读 `mochiani_canvas_references` 判断，有引用就自动切过去。
 
-> ⚠️ 模型/渠道切换必须在连参考图**之前**：MochiAni 不允许带上游连线的节点再切模型。
+> ⚠️ 模型/渠道切换必须在连参考素材**之前**：MochiAni 不允许带上游连线的节点再切模型。
 
 ## 花钱的闸门
 
@@ -122,7 +132,7 @@ POST /api/jobs/:id/confirm               ← 从这一步开始扣余额
 | GET | `/api/context?pageId=` | 当前作品 + 已连接页面列表 |
 | GET | `/api/account?pageId=` | MochiAni 账户灵点 |
 | GET | `/api/models?pageId=&nodeId=` | **真实模型目录**（模型 / 渠道 / 参数 / 媒体上限）+ 面板当前配置 |
-| POST | `/api/plan` | `{prompt, pageId?, modelKey?, channelId?, params?, images?}` → 建节点 + 切配置 + 导图 + 预检，返回 job（`stage=ready`） |
+| POST | `/api/plan` | `{prompt, pageId?, modelKey?, channelId?, params?, images?, videos?, audios?}` → 建节点 + 切配置 + 导素材 + 预检，返回 job（`stage=ready`）。三个素材数组的元素是 `{url}` 或 `{dataUrl}` |
 | POST | `/api/jobs/:id/confirm` | 确认下单，开始轮询 |
 | POST | `/api/jobs/:id/cancel` | 停止本机轮询 |
 | GET | `/api/jobs` / `/api/jobs/:id` | 任务列表 / 单个任务 |
@@ -148,35 +158,38 @@ POST /api/jobs/:id/confirm               ← 从这一步开始扣余额
 2. 拷走 `tools/mochiani-bridge/`，双击 `start.bat`
 3. 节点里保持默认 `http://127.0.0.1:17399`
 
-**B. 一台常开的机器当「服务器」，其它电脑只开网页**
+**B. 一台常开的机器当「服务器」，其它电脑只开网页**（本机就是这么跑的）
 
-机器 A 上跑桥 + 一个登录着 MochiAni 的浏览器窗口（别关），把桥暴露到公网：
+机器 A 上跑桥 + 一个登录着 MochiAni 的浏览器窗口（别关）。桥**不用绑 0.0.0.0**：
+Tailscale Funnel 在同机反代 `127.0.0.1:17399`，所以只加令牌、不动监听地址更安全。
 
 ```bash
-# 1) 开令牌 + 允许外部访问（不给令牌 = 谁拿到地址都能花你的灵点）
-set MOCHIANI_BRIDGE_HOST=0.0.0.0
-set MOCHIANI_BRIDGE_TOKEN=自己编一个长串
-start.bat
-
-# 2) 用 Tailscale Funnel 给它一个固定 HTTPS 地址（见 skill permanent-public-url-tailscale-funnel）
-tailscale funnel --bg 17399
-# → https://<机器名>.<tailnet>.ts.net/
+# 1) 令牌放 tools/mochiani-bridge/remote.env（已在 .gitignore 里，别提交）
+#    MOCHIANI_BRIDGE_TOKEN=mochi…（模板见 remote.env.example）
+# 2) 双击 start-remote.bat —— 它读 remote.env、带令牌启动，并把可填的地址打在窗口里
+# 3) 给桥一个固定 HTTPS 入口（只用一次，配置会留着）
+tailscale funnel --bg --https=8443 17399
 ```
 
-机器 B/C 上打开前端，节点里的「本机桥」填：
+本机现在的固定地址（画布节点里「本机桥」直接填这一整行）：
 
 ```
-https://<机器名>.<tailnet>.ts.net/?token=自己编那个长串
+https://wb2api.tailb5bc86.ts.net:8443/?token=mochia6262f1472a18dc7fe55c9c5
 ```
 
-`?token=` 会被前端剥出来改成 `x-mochiani-token` 请求头（不留在 URL 里）。
+> 8443 是 Funnel 允许的端口之一；443 已经被本机别的服务（`/`、`/qf`）占着，
+> 所以桥单独走 8443，互不影响。`tailscale funnel status` 能同时看到两条映射。
+
+`?token=` 会被前端剥出来改成 `x-mochiani-token` 请求头（不留在 URL 里，折叠显示时打码成 `token=***`）。
 桥这侧：`/health` 永远放行（画布要能区分「桥没开」和「令牌不对」），其它 `/api/*` 一律验令牌，
 401 时画布会直接提示「地址要带 ?token=」。
 
 注意：
 - A 机的浏览器窗口必须保持登录态 + 停在无限画布/作品页；机器休眠 = 全挂。
+- 桥和浏览器要一起活着：重启后先开浏览器登录，再双击 `start-remote.bat`。
 - 灵点是**机器 A 那个账号**的余额，所有电脑共用。
-- 公网暴露时别用 `ry` 之类弱令牌；这个桥没有任何限流。
+- 公网暴露时别用 `ry` 之类弱令牌；这个桥没有任何限流，拿到令牌 = 能花你的灵点。
+- 换令牌：改 `remote.env` → 重启桥 → 各机器节点里把新地址粘一遍（存在 localStorage 里，不会自动更新）。
 
 
 ## 排障

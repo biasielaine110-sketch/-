@@ -10430,6 +10430,8 @@ function AtelierCanvasPage() {
                 return (
                     <CanvasMochianiNodeContent
                         node={contentNode}
+                        references={getMentionReferences(contentNode.id)}
+                        onDetachReference={(sourceNodeId) => handleRemoveLinkedMedia(contentNode.id, sourceNodeId)}
                         onCreateVideo={createBridgeVideoNode}
                         onConfigChange={handleConfigNodeChange}
                     />
@@ -10520,6 +10522,7 @@ function AtelierCanvasPage() {
             handleLinkScriptAssets,
             handleNameLockChange,
             handleRegenerateScriptAll,
+            handleRemoveLinkedMedia,
             handleRowAssetGenerate,
             handleRowAudioImport,
             handleRowAudiosChange,
