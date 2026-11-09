@@ -364,6 +364,22 @@ async function applyModelConfig(job, pageId, origin, nodeId, controls) {
     let token = String(controls?.configToken || "");
     if (!token) throw new BridgeError("没读到配置令牌，无法切换模型", "NO_CONFIG_TOKEN", controls);
 
+    // 0) 先切「生成模式」（视频分类）—— 换模式会把模型/参数整套换掉，
+    //    所以必须在换模型之前做，否则刚切好的模型会被模式切换重置。
+    const wantedCategory = job.videoCategory;
+    const categories = Array.isArray(current.videoCategories) ? current.videoCategories : [];
+    if (wantedCategory != null && categories.length) {
+        const hit = categories.find((item) => Number(item.key) === Number(wantedCategory));
+        const activeKey = current.activeVideoCategory == null ? null : Number(current.activeVideoCategory);
+        if (!hit) {
+            job.warnings.push(`MochiAni 当前没有「${VIDEO_CATEGORY_LABEL[wantedCategory] || wantedCategory}」这个生成模式，沿用节点现在的模式`);
+        } else if (hit.compatible === false) {
+            job.warnings.push(`「${hit.label}」在这个节点上不可用（${hit.reason || "当前渠道不支持"}），没有切换`);
+        } else if (activeKey !== Number(wantedCategory)) {
+            await step({ action: "video_category", value: String(wantedCategory) }, `生成模式切到 ${hit.label}`);
+        }
+    }
+
     const step = async (payload, label) => {
         await callTool("mochiani_canvas_configure_model", {
             pageId,
@@ -587,8 +603,16 @@ async function planCanvasJob(job, ctx) {
 
     // 1) 面板 + 模型/渠道/参数（必须在连参考图之前完成：带连线的节点不让切模型）
     let controls = await waitPanelControls(pageId, origin, nodeId);
-    if (job.modelKey || job.channelId || Object.keys(job.params || {}).length) {
+    if (job.modelKey || job.channelId || Object.keys(job.params || {}).length || job.videoCategory != null) {
         controls = await applyModelConfig(job, pageId, origin, nodeId, controls);
+    }
+    if (job.videoCategory != null) {
+        const active = controls?.activeVideoCategory;
+        if (active != null && Number(active) !== Number(job.videoCategory)) {
+            job.warnings.push(
+                `生成模式没切成功：要 ${VIDEO_CATEGORY_LABEL[job.videoCategory] || job.videoCategory}，节点上是 ${VIDEO_CATEGORY_LABEL[Number(active)] || active}`,
+            );
+        }
     }
     job.modelTarget = {
         modelKey: String(controls?.modelKey || ""),
@@ -733,6 +757,35 @@ const CARTON_MODEL_PREFIX = "carton:";
 
 const CARTON_ASSET_LABEL = { character: "出场人物", scene: "场景", prop: "道具", other: "其他素材" };
 
+/**
+ * 视频「生成模式」= MochiAni 的 `specific_type`（视频分类），不是模型参数。
+ *
+ * 来源：MochiAni 前端自己的映射表（`{0:智能参考,1:首尾帧,3:多参考图,4:首帧,9:文生视频,11:全能参考,12:合规资产}`），
+ * 它的视频面板默认就是「取第一个 specific_type=11（全能参考）的模型」——
+ * 所以我们这边默认也走 11，跟原生一致。
+ *
+ * ⚠️ 各模式能吃什么素材完全不同：11/3/0 收图+视频+音频，1（首尾帧）只收 2 张图，9（文生视频）不收素材。
+ */
+const VIDEO_CATEGORY_LABEL = {
+    0: "智能参考",
+    1: "首尾帧",
+    3: "多参考图",
+    4: "首帧",
+    9: "文生视频",
+    11: "全能参考",
+    12: "合规资产",
+};
+
+/** 默认生成模式：全能参考（MochiAni 原生视频面板的默认值）。 */
+const DEFAULT_VIDEO_CATEGORY = 11;
+
+/** 一条模型候选上的分类字段 —— 页面侧几种写法都兜住，别因为换了个 key 就整块失效。 */
+function readVideoCategory(item) {
+    const raw = item?.specific_type ?? item?.specificType ?? item?.model_specific_type;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 function readGenerationSettings(pageId, origin) {
     return callTool("mochiani_get_generation_settings", { pageId, origin });
 }
@@ -793,6 +846,8 @@ function buildCartonVideoModels(video) {
                 configInfo: {},
                 channels: [],
                 mediaLimits: null,
+                /** 视频分类（11=全能参考）—— 前端按它做「生成模式」筛选与默认选中。 */
+                specificType: readVideoCategory(item),
             });
         }
         const entry = models.get(modelKey);
@@ -1124,12 +1179,37 @@ async function planCartonJob(job, ctx) {
     const settings = await readGenerationSettings(pageId, origin);
     const video = settingsSection(settings, "video");
     const wantedModelId = job.modelKey.startsWith(CARTON_MODEL_PREFIX) ? job.modelKey.slice(CARTON_MODEL_PREFIX.length) : "";
-    const option = wantedModelId ? findCartonOption(video, wantedModelId, job.channelId) : null;
+    let option = wantedModelId ? findCartonOption(video, wantedModelId, job.channelId) : null;
+
+    /**
+     * 生成模式（视频分类）在漫剧编辑器里**是模型自带的**，不是单独的开关 ——
+     * 「全能参考」= 挑一个 `specific_type=11` 的模型。所以没指定模型时按模式挑第一个可用的，
+     * 指定了但不是那个模式就如实告警（不偷偷换成别的模型）。
+     */
+    const wantedCategory = job.videoCategory == null ? null : Number(job.videoCategory);
+    if (!option && wantedCategory != null) {
+        const options = Array.isArray(video?.available_options) ? video.available_options : [];
+        const hit = options.find((item) => readVideoCategory(item) === wantedCategory && item?.is_available !== false);
+        if (hit) {
+            option = hit;
+            pushLog(job, `生成模式「${VIDEO_CATEGORY_LABEL[wantedCategory] || wantedCategory}」→ 选模型 ${hit.model_name || hit.model_id}`);
+        } else {
+            job.warnings.push(`漫剧编辑器里没有「${VIDEO_CATEGORY_LABEL[wantedCategory] || wantedCategory}」模式可用的模型，沿用当前模型`);
+        }
+    }
+    if (option && wantedCategory != null) {
+        const actual = readVideoCategory(option);
+        if (actual != null && actual !== wantedCategory) {
+            job.warnings.push(
+                `你选的模型属于「${VIDEO_CATEGORY_LABEL[actual] || actual}」模式，不是「${VIDEO_CATEGORY_LABEL[wantedCategory] || wantedCategory}」；以模型为准`,
+            );
+        }
+    }
     const modelId = String(option?.model_id || job.modelKey.replace(CARTON_MODEL_PREFIX, "") || video?.model_id || "");
     const supplierId = String(option?.supplier_id || job.channelId || video?.supplier_id || "");
     const selectedConfig = { ...(video?.selected_config || {}), ...coerceCartonParams(job.params, option) };
     job.modelTarget = { modelKey: modelId ? `${CARTON_MODEL_PREFIX}${modelId}` : "", channelId: supplierId, params: selectedConfig };
-    job.model = { id: modelId, key: String(video?.model_name || option?.model_name || ""), supplierId };
+    job.model = { id: modelId, key: String(option?.model_name || video?.model_name || ""), supplierId };
 
     const configChanged =
         String(video?.model_id || "") !== modelId ||
@@ -1418,6 +1498,8 @@ function publicJob(job) {
         estimate: job.estimate,
         model: job.model,
         modelTarget: job.modelTarget || null,
+        videoCategory: job.videoCategory ?? null,
+        videoCategoryLabel: job.videoCategory == null ? "" : VIDEO_CATEGORY_LABEL[job.videoCategory] || "",
         imageCount: Array.isArray(job.images) ? job.images.length : 0,
         videoCount: Array.isArray(job.videos) ? job.videos.length : 0,
         audioCount: Array.isArray(job.audios) ? job.audios.length : 0,
@@ -1456,6 +1538,11 @@ function createJob(kind, prompt, page, extras = {}) {
         modelKey: String(extras.modelKey || "").trim(),
         channelId: String(extras.channelId || "").trim(),
         params: extras.params && typeof extras.params === "object" ? { ...extras.params } : {},
+        /**
+         * 视频生成模式（MochiAni 的 `specific_type`）：11=全能参考。
+         * 空 = 不干预，沿用编辑器/节点当前模式。
+         */
+        videoCategory: extras.videoCategory == null || extras.videoCategory === "" ? null : Number(extras.videoCategory),
         images: Array.isArray(extras.images) ? extras.images : [],
         videos: Array.isArray(extras.videos) ? extras.videos : [],
         audios: Array.isArray(extras.audios) ? extras.audios : [],
@@ -1633,10 +1720,22 @@ async function handleModels(query) {
                 return { ok: false, code: "NO_CARTON_MODELS", error: "读到了漫剧编辑器，但视频模型目录是空的（去编辑器里看一眼当前模型）" };
             }
             const currentModelKey = video?.model_id ? `${CARTON_MODEL_PREFIX}${video.model_id}` : "";
+            // 「生成模式」候选：从模型目录里实际出现的分类倒推（没出现的模式不给，免得选了没模型）。
+            const categoryKeys = [...new Set(models.map((item) => item.specificType).filter((value) => value != null))].sort((a, b) => a - b);
+            const videoCategories = categoryKeys.map((key) => ({
+                key,
+                label: VIDEO_CATEGORY_LABEL[key] || `分类 ${key}`,
+                compatible: true,
+                modelCount: models.filter((item) => item.specificType === key).length,
+            }));
+            const currentCategory =
+                videoCategories.find((item) => item.key === models.find((m) => m.modelKey === currentModelKey)?.specificType)?.key ?? null;
             return {
                 ok: true,
                 kind: "carton",
                 models,
+                videoCategories,
+                activeVideoCategory: currentCategory,
                 current: {
                     modelKey: currentModelKey,
                     channelId: String(video?.supplier_id || ""),
@@ -1853,6 +1952,8 @@ async function handle(req, res) {
                 images: body.images,
                 videos: body.videos,
                 audios: body.audios,
+                // 视频生成模式（11=全能参考）；不传就沿用页面当前模式
+                videoCategory: body.videoCategory,
                 // 漫剧编辑器：出场素材（名字数组）+ 配音台词 + 是否一起生成配音
                 cast: body.cast,
                 voiceover: body.voiceover,

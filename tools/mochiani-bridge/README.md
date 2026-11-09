@@ -130,6 +130,18 @@ POST /api/jobs/:id/confirm               ← 从这一步开始扣余额
 **渠道不是模型名的一部分**：同一个模型下挂的是线路池（实测 `Minimax H3` = Tencent / AD【优质】 / AutoDL托管，价格与成功率不同）。
 所以面板默认自动选一条、只显示一行灰字，`>1` 条时才给「换渠道」。
 
+**「生成模式」不是开关，是模型的 `specific_type`**（视频分类）：`0 智能参考 / 1 首尾帧 / 3 多参考图 / 4 首帧 / 9 文生视频 / 11 全能参考 / 12 合规资产`。
+MochiAni 自己的视频面板默认就是「取第一个 `specific_type=11`（全能参考）的模型」，所以：
+
+- 漫剧编辑器：`/api/models` 会把每个模型的 `specificType` 带出来，前端按模式筛模型、默认落到 11；
+  桥在预检时只做一致性校验（模型不属于所选模式 → 写 warning，**不偷偷换模型**）。
+- 无限画布：模式是节点面板上的原生开关（`mochiani_canvas_model_controls.videoCategories`），
+  桥走 `mochiani_canvas_configure_model({action:"video_category", value:"11"})`，**必须在换模型之前切**
+  （换模式会把模型/参数整套重置）。
+
+> ⚠️ 各模式能吃的素材完全不同：`11/3/0` 收图+视频+音频，`1`（首尾帧）只收 2 张图，`9`（文生视频）不收素材。
+> 所以模式选错不是「效果差点」，而是素材根本发不进去。
+
 最后「放到画布」复用画布的 `createBridgeVideoNode`，把 videoUrl 落成视频节点。
 
 ## 参考素材怎么进 MochiAni（图 / 视频 / 音频）
@@ -151,6 +163,12 @@ chip 上的 × 断开的是那根连线（`handleRemoveLinkedMedia`，Config 汇
 
 > ⚠️ chip 只有「http(s) 地址」或「data: 内联」才发得出去。`blob:` 是只在本页内存里的
 > 临时文件，桥（可能在另一台机器）够不着 —— 这种会在预检前用 toast 明确告诉你没发。
+
+> ⚠️ **音频只有无限画布吃得下**。漫剧编辑器的参考素材来自作品素材库（人物/场景/道具/其他），
+> 分镜媒体上传只认 image / video（`mochiani_upload_shot_media`），配音项只收「文本 + 角色音色」。
+> 外部音频想进漫剧编辑器，只有两条绕路：① `mochiani_upsert_more_assets` 传成「其他」素材
+> （音频可以，但 MochiAni 要求素材名出现在分镜文案里）；② `mochiani_upload_clone_voice_sample`
+> 传成角色样音（≤15s，必须给准确文本）。所以连到 carton 节点的音频目前**不会**被发出去。
 
 > ⚠️ 连完参考素材后，该节点的提示词就变成**结构化文档**（带 `documentToken` + `references`），
 > 此时 `mochiani_canvas_set_prompt` 会被页面拒绝，而且报的是一个没填模板的

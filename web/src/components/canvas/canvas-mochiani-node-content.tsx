@@ -69,6 +69,9 @@ type MochianiJob = {
     estimate: JobEstimate | null;
     model: { id?: string; key?: string; supplierId?: string } | null;
     modelTarget: { modelKey?: string; channelId?: string; params?: Record<string, string> } | null;
+    /** 视频生成模式（11=全能参考）；桥会回传实际生效的那个。 */
+    videoCategory?: number | null;
+    videoCategoryLabel?: string;
     imageCount: number;
     videoCount?: number;
     audioCount?: number;
@@ -119,7 +122,26 @@ type ModelOption = {
     mediaLimits?: { image?: { required?: number; max?: number }; video?: { max?: number }; audio?: { max?: number } };
     channels?: ModelChannel[];
     defaultParams?: Record<string, string>;
+    /**
+     * 视频「生成模式」= MochiAni 的 `specific_type`（漫剧编辑器的模型目录会带）。
+     * 11=全能参考 / 3=多参考图 / 1=首尾帧 / 9=文生视频 / 0=智能参考 / 4=首帧。
+     */
+    specificType?: number | null;
 };
+
+/** 生成模式中文名 —— 与 MochiAni 前端自己的映射表一致。 */
+const VIDEO_CATEGORY_LABEL: Record<number, string> = {
+    0: "智能参考",
+    1: "首尾帧",
+    3: "多参考图",
+    4: "首帧",
+    9: "文生视频",
+    11: "全能参考",
+    12: "合规资产",
+};
+
+/** 默认生成模式：全能参考（MochiAni 原生视频面板默认也是它）。 */
+const DEFAULT_VIDEO_CATEGORY = 11;
 
 type RefImage = { uid: string; name: string; dataUrl: string };
 
@@ -202,7 +224,17 @@ type BridgeBody = Record<string, unknown> & {
     models?: ModelOption[];
     /** 漫剧编辑器：桥回传的「编辑器当前用的模型 / 渠道 / 参数」。 */
     current?: { modelKey?: string; channelId?: string; params?: Record<string, string> };
-    panel?: { modelKey?: string; channelId?: string; configParams?: Record<string, string> } | null;
+    panel?: {
+        modelKey?: string;
+        channelId?: string;
+        configParams?: Record<string, string>;
+        /** 画布节点生成面板的真实「生成模式」候选（11=全能参考）。 */
+        videoCategories?: Array<{ key: number; label: string; compatible?: boolean; reason?: string; modelCount?: number }>;
+        activeVideoCategory?: number | null;
+    } | null;
+    /** 漫剧编辑器：从模型目录倒推出的「生成模式」候选。 */
+    videoCategories?: Array<{ key: number; label: string; compatible?: boolean; reason?: string; modelCount?: number }>;
+    activeVideoCategory?: number | null;
 };
 
 type Props = {
@@ -394,6 +426,21 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     const [channelId, setChannelId] = useState(node.metadata?.mochianiConfig?.channelId || "");
     const [params, setParams] = useState<Record<string, string>>(node.metadata?.mochianiConfig?.params || {});
     /**
+     * 视频「生成模式」（MochiAni 的 `specific_type`）。
+     *
+     * 默认 **11 = 全能参考** —— MochiAni 自己的视频面板就是「取第一个全能参考模型」，
+     * 这里保持一致。只有页面真的给了分类候选（或者模型的 `specificType` 读得到）才显示这个选择器；
+     * 老页面读不到分类就当没这回事，不硬塞。
+     */
+    const [videoCategory, setVideoCategory] = useState<number | null>(() => {
+        const saved = node.metadata?.mochianiConfig?.videoCategory;
+        return typeof saved === "number" ? saved : DEFAULT_VIDEO_CATEGORY;
+    });
+    /** 页面回传的真实生成模式候选（canvas 来自面板，carton 来自模型目录倒推）。 */
+    const [categoryOptions, setCategoryOptions] = useState<Array<{ key: number; label: string; compatible?: boolean; reason?: string; modelCount?: number }>>(
+        [],
+    );
+    /**
      * 渠道选择器是否展开。
      *
      * 同一个模型下面的渠道只是「供应商池」，模型名本身已经区分开了（同一模型有多个 id 的会在
@@ -556,7 +603,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     }, [bridgeBase]);
 
     const loadModels = useCallback(
-        async (preferred?: { modelKey?: string; channelId?: string; params?: Record<string, string> }) => {
+        async (preferred?: { modelKey?: string; channelId?: string; params?: Record<string, string>; videoCategory?: number | null }) => {
             setModelsLoading(true);
             try {
                 // 带上锁定过的 pageId：桥不传就会自己挑活动页，双开页面时容易串到另一个页面。
@@ -570,13 +617,31 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 const list = Array.isArray(data.models) ? data.models : [];
                 setModels(list);
                 setModelsError("");
+                // 生成模式候选：画布来自生成面板，漫剧编辑器来自模型目录倒推。
+                const categories = data.videoCategories?.length ? data.videoCategories : data.panel?.videoCategories || [];
+                setCategoryOptions(categories);
+                const savedCategory =
+                    typeof preferred?.videoCategory === "number" ? preferred.videoCategory : videoCategory;
+                /** 模型目录里到底有没有分类字段 —— 没有就别用分类挑模型（挑不出来）。 */
+                const hasSpecificType = list.some((item) => typeof item.specificType === "number");
+
                 // 漫剧编辑器的目录是「模型 × 渠道」，桥会把它当前的配置一起给回来；
                 // 用户没存过偏好时优先落到「编辑里正在用的那套」，而不是列表第一个。
-                const preferKey = preferred?.modelKey || data.current?.modelKey || data.panel?.modelKey || "";
+                const savedModelKey = preferred?.modelKey || "";
+                const preferKey = savedModelKey || data.current?.modelKey || data.panel?.modelKey || "";
                 // 没偏好时别直接取第一个：目录里混着生图模型，默认落到生视频那一组更合理。
+                // 目录带 specificType 时，再优先落到用户选的「生成模式」（默认全能参考）那一类。
                 const nextModel =
-                    list.find((item) => item.modelKey === preferKey) || list.find((item) => modelKindInfo(item).key === "video") || list[0];
+                    (savedModelKey ? list.find((item) => item.modelKey === savedModelKey) : undefined) ||
+                    (hasSpecificType && savedCategory != null ? list.find((item) => item.specificType === savedCategory) : undefined) ||
+                    list.find((item) => item.modelKey === preferKey) ||
+                    list.find((item) => modelKindInfo(item).key === "video") ||
+                    list[0];
                 if (!nextModel) return;
+                if (hasSpecificType && savedCategory != null && nextModel.specificType != null && nextModel.specificType !== savedCategory) {
+                    // 存过的模型不属于所选模式：以模型为准，别偷偷换。
+                    setVideoCategory(nextModel.specificType);
+                }
                 const preferChannel = preferred?.channelId || data.current?.channelId || data.panel?.channelId || "";
                 const nextChannel = nextModel.channels?.find((item) => item.id === preferChannel) || nextModel.channels?.[0];
                 const nextParams =
@@ -590,7 +655,12 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 setModelKey(nextModel.modelKey);
                 setChannelId(nextChannel?.id || "");
                 setParams(nextParams);
-                saveConfig({ modelKey: nextModel.modelKey, channelId: nextChannel?.id || "", params: nextParams });
+                saveConfig({
+                    modelKey: nextModel.modelKey,
+                    channelId: nextChannel?.id || "",
+                    params: nextParams,
+                    ...(hasSpecificType && savedCategory != null && nextModel.specificType != null ? { videoCategory: nextModel.specificType } : {}),
+                });
             } catch (err) {
                 setModels([]);
                 setModelsError(err instanceof Error ? err.message : String(err));
@@ -598,7 +668,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 setModelsLoading(false);
             }
         },
-        [bridgeBase, saveConfig],
+        [bridgeBase, saveConfig, videoCategory],
     );
 
     // 挂载：连桥 → 读页面 / 余额 / 模型目录 → 恢复上次任务
@@ -730,6 +800,19 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     }, [audioLimit, imageLimit, linkedByKind, refImages, videoLimit]);
 
     /**
+     * 选了「生成模式」且模型目录带分类时，模型下拉只留这一类的模型 ——
+     * 全能参考和多参考图能吃的素材完全不一样，混在一起选必然选错。
+     * 目录不带分类（画布那边的 model_options 就没有）时不过滤，保持原样。
+     */
+    const hasModelCategory = useMemo(() => models.some((item) => typeof item.specificType === "number"), [models]);
+    const visibleModels = useMemo(() => {
+        if (!hasModelCategory || videoCategory == null) return models;
+        const hit = models.filter((item) => item.specificType === videoCategory);
+        // 这一类一个都没有时别把下拉清空，退回全量并告警。
+        return hit.length ? hit : models;
+    }, [hasModelCategory, models, videoCategory]);
+
+    /**
      * 下拉选项：按模态分组（生视频 / 生图 / 音频 / 文本 / 其他）。
      *
      * - 只有一组时**不加组标题**（多一行灰字纯噪音）；
@@ -738,10 +821,10 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
      */
     const modelOptions = useMemo<NonNullable<SelectProps["options"]>>(() => {
         const counter = new Map<string, number>();
-        for (const item of models) counter.set(item.modelName, (counter.get(item.modelName) || 0) + 1);
+        for (const item of visibleModels) counter.set(item.modelName, (counter.get(item.modelName) || 0) + 1);
 
         const groups = new Map<string, { order: number; label: string; items: { value: string; label: string }[] }>();
-        for (const item of models) {
+        for (const item of visibleModels) {
             const info = modelKindInfo(item);
             const group = groups.get(info.key) || { order: info.order, label: info.label, items: [] };
             group.items.push({
@@ -754,7 +837,33 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         const ordered = Array.from(groups.values()).sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
         if (ordered.length <= 1) return ordered[0]?.items || [];
         return ordered.map((group) => ({ label: `${group.label}（${group.items.length}）`, options: group.items }));
-    }, [models]);
+    }, [visibleModels]);
+
+    /**
+     * 「生成模式」下拉候选。
+     *
+     * 优先用页面给的真实候选（画布面板的 `videoCategories` 带 compatible），
+     * 漫剧编辑器没有面板分类就从模型的 `specificType` 倒推。两边都读不到就不显示这个选择器。
+     */
+    const categorySelectOptions = useMemo(() => {
+        const source = categoryOptions.length
+            ? categoryOptions
+            : hasModelCategory
+              ? [...new Set(models.map((item) => item.specificType).filter((value): value is number => typeof value === "number"))]
+                    .sort((a, b) => a - b)
+                    .map((key) => ({
+                        key,
+                        label: VIDEO_CATEGORY_LABEL[key] || `分类 ${key}`,
+                        compatible: true,
+                        modelCount: models.filter((item) => item.specificType === key).length,
+                    }))
+              : [];
+        return source.map((item) => ({
+            value: item.key,
+            label: `${item.label}${item.modelCount ? ` · ${item.modelCount}` : ""}`,
+            disabled: item.compatible === false,
+        }));
+    }, [categoryOptions, hasModelCategory, models]);
 
     /** 选中模型的分组 —— 在「生视频」节点上选到生图模型基本是选错了，给一句轻提示。 */
     const selectedModelGroup = selectedModel ? modelKindInfo(selectedModel).key : "";
@@ -782,6 +891,31 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         saveConfig({ modelKey: value, channelId: nextChannel?.id || "", params: nextParams });
         const nextMax = next?.mediaLimits?.image?.max ?? 9;
         setRefImages((prev) => prev.slice(0, nextMax));
+    };
+
+    /**
+     * 换「生成模式」。
+     *
+     * 漫剧编辑器里模式是模型自带的 → 直接落到该类模式的第一个模型（参数一起换成它的默认值）；
+     * 画布那边模式是独立开关（桥会调原生 `video_category`），模型不用动。
+     */
+    const changeVideoCategory = (value: number) => {
+        setVideoCategory(value);
+        if (!hasModelCategory) {
+            saveConfig({ videoCategory: value });
+            return;
+        }
+        const hit = models.find((item) => item.specificType === value);
+        if (!hit) {
+            saveConfig({ videoCategory: value });
+            return;
+        }
+        const nextChannel = hit.channels?.[0];
+        const nextParams = defaultParams(hit, nextChannel);
+        setModelKey(hit.modelKey);
+        setChannelId(nextChannel?.id || "");
+        setParams(nextParams);
+        saveConfig({ videoCategory: value, modelKey: hit.modelKey, channelId: nextChannel?.id || "", params: nextParams });
     };
 
     const changeChannel = (value: string) => {
@@ -913,6 +1047,8 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                     modelKey: modelKey || undefined,
                     channelId: channelId || undefined,
                     params,
+                    // 生成模式（11=全能参考）：空 = 不干预，沿用页面当前模式
+                    videoCategory: videoCategory ?? undefined,
                     images: media.images,
                     videos: media.videos,
                     audios: media.audios,
@@ -1128,7 +1264,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                         <span className="opacity-60">模型 / 渠道</span>
                         <button
                             type="button"
-                            onClick={() => void loadModels({ modelKey, channelId, params })}
+                            onClick={() => void loadModels({ modelKey, channelId, params, videoCategory })}
                             className="flex items-center gap-1 opacity-50 transition hover:opacity-100"
                             disabled={modelsLoading}
                         >
@@ -1141,6 +1277,19 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                         </div>
                     ) : null}
                     <div className="flex flex-col gap-1.5">
+                        {categorySelectOptions.length ? (
+                            <div className="flex items-center gap-1.5">
+                                <span className="shrink-0 text-[10px] opacity-45">生成模式</span>
+                                <Select
+                                    size="small"
+                                    style={{ flex: 1, minWidth: 0 }}
+                                    value={videoCategory ?? undefined}
+                                    options={categorySelectOptions}
+                                    onChange={changeVideoCategory}
+                                    disabled={locked || modelsLoading}
+                                />
+                            </div>
+                        ) : null}
                         <Select
                             size="small"
                             showSearch
@@ -1168,6 +1317,12 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                         {selectedModelIsImage ? (
                             <div className="text-[10px]" style={{ color: "#fbbf24" }}>
                                 选中的是生图模型，这个节点是拿来生视频的 —— 可能出不来视频。
+                            </div>
+                        ) : null}
+                        {hasModelCategory && videoCategory != null && selectedModel?.specificType != null && selectedModel.specificType !== videoCategory ? (
+                            <div className="text-[10px]" style={{ color: "#fbbf24" }}>
+                                当前模型属于「{VIDEO_CATEGORY_LABEL[selectedModel.specificType] || selectedModel.specificType}」模式，
+                                不是「{VIDEO_CATEGORY_LABEL[videoCategory] || videoCategory}」—— 以模型为准。
                             </div>
                         ) : null}
                         {/* 渠道：默认自动。同一个模型下的一堆渠道只是供应商池，模型名已经区分开了，

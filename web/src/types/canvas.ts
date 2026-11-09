@@ -528,6 +528,11 @@ export type CanvasNodeMetadata = {
         modelKey?: string;
         channelId?: string;
         params?: Record<string, string>;
+        /**
+         * 视频「生成模式」= MochiAni 的 `specific_type`（11=全能参考 / 3=多参考图 / 1=首尾帧 / 9=文生视频）。
+         * 默认 11；漫剧编辑器里模式跟着模型走，画布那边桥会调原生 `video_category`。
+         */
+        videoCategory?: number | null;
         cast?: { characters?: string; scenes?: string; props?: string };
         voiceover?: string;
         generateVoice?: boolean;
