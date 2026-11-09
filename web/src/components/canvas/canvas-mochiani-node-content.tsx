@@ -144,6 +144,21 @@ const VIDEO_CATEGORY_LABEL: Record<number, string> = {
 /** 默认生成模式：全能参考（MochiAni 原生视频面板默认也是它）。 */
 const DEFAULT_VIDEO_CATEGORY = 11;
 
+/**
+ * 兜底候选表 —— 页面没回读到分类时用。
+ *
+ * ⚠️ 画布口径下分类只能从 `model_controls.videoCategories` 回读，而那个接口**要求面板真的挂在视口里**
+ * （`panelMounted=false` 时只返 pageId/revision，模型目录干脆没有 `specificType`）。
+ * 之前这里两边都读不到就 `[]`，结果「生成模式」下拉根本不渲染 —— 用户看不到任何东西。
+ * 固定表照 MochiAni 自己的映射来，全能参考排第一，和默认值对齐。
+ */
+const FALLBACK_VIDEO_CATEGORIES = [11, 3, 0, 1, 4, 9, 12].map((key) => ({
+    key,
+    label: VIDEO_CATEGORY_LABEL[key] || `分类 ${key}`,
+    compatible: true,
+    modelCount: 0,
+}));
+
 type RefImage = { uid: string; name: string; dataUrl: string };
 
 /**
@@ -884,8 +899,11 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
      * 「生成模式」下拉候选。
      *
      * 优先用页面给的真实候选（画布面板的 `videoCategories` 带 compatible），
-     * 漫剧编辑器没有面板分类就从模型的 `specificType` 倒推。两边都读不到就不显示这个选择器。
+     * 漫剧编辑器没有面板分类就从模型的 `specificType` 倒推。
+     * 🔴 两边都读不到（画布面板没挂载 / 页面在后台）时**必须退回固定表** ——
+     *    以前这里给空数组，等于把整个下拉藏起来，用户只会觉得「根本没做」。
      */
+    const usingFallbackCategories = !categoryOptions.length && !hasModelCategory;
     const categorySelectOptions = useMemo(() => {
         const source = categoryOptions.length
             ? categoryOptions
@@ -898,7 +916,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                         compatible: true,
                         modelCount: models.filter((item) => item.specificType === key).length,
                     }))
-              : [];
+              : FALLBACK_VIDEO_CATEGORIES;
         return source.map((item) => ({
             value: item.key,
             label: `${item.label}${item.modelCount ? ` · ${item.modelCount}` : ""}`,
@@ -1329,6 +1347,11 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                                     onChange={changeVideoCategory}
                                     disabled={locked || modelsLoading}
                                 />
+                            </div>
+                        ) : null}
+                        {usingFallbackCategories ? (
+                            <div className="text-[10px] opacity-40">
+                                没读到面板分类（MochiAni 那个标签页在后台时不回读），按固定表列出；生成时会按这里选的值切。
                             </div>
                         ) : null}
                         <Select

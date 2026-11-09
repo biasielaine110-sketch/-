@@ -364,22 +364,8 @@ async function applyModelConfig(job, pageId, origin, nodeId, controls) {
     let token = String(controls?.configToken || "");
     if (!token) throw new BridgeError("没读到配置令牌，无法切换模型", "NO_CONFIG_TOKEN", controls);
 
-    // 0) 先切「生成模式」（视频分类）—— 换模式会把模型/参数整套换掉，
-    //    所以必须在换模型之前做，否则刚切好的模型会被模式切换重置。
-    const wantedCategory = job.videoCategory;
-    const categories = Array.isArray(current.videoCategories) ? current.videoCategories : [];
-    if (wantedCategory != null && categories.length) {
-        const hit = categories.find((item) => Number(item.key) === Number(wantedCategory));
-        const activeKey = current.activeVideoCategory == null ? null : Number(current.activeVideoCategory);
-        if (!hit) {
-            job.warnings.push(`MochiAni 当前没有「${VIDEO_CATEGORY_LABEL[wantedCategory] || wantedCategory}」这个生成模式，沿用节点现在的模式`);
-        } else if (hit.compatible === false) {
-            job.warnings.push(`「${hit.label}」在这个节点上不可用（${hit.reason || "当前渠道不支持"}），没有切换`);
-        } else if (activeKey !== Number(wantedCategory)) {
-            await step({ action: "video_category", value: String(wantedCategory) }, `生成模式切到 ${hit.label}`);
-        }
-    }
-
+    // ⚠️ step 必须定义在「切模式」之前：v1 把它写在后面，切模式那句会踩 TDZ
+    //    （Cannot access 'step' before initialization），只要用户选了生成模式就整单失败。
     const step = async (payload, label) => {
         await callTool("mochiani_canvas_configure_model", {
             pageId,
@@ -394,6 +380,28 @@ async function applyModelConfig(job, pageId, origin, nodeId, controls) {
         token = String(current.configToken || "");
         pushLog(job, label);
     };
+
+    // 0) 先切「生成模式」（视频分类）—— 换模式会把模型/参数整套换掉，
+    //    所以必须在换模型之前做，否则刚切好的模型会被模式切换重置。
+    const wantedCategory = job.videoCategory;
+    const categories = Array.isArray(current.videoCategories) ? current.videoCategories : [];
+    if (wantedCategory != null) {
+        const hit = categories.find((item) => Number(item.key) === Number(wantedCategory));
+        const activeKey = current.activeVideoCategory == null ? null : Number(current.activeVideoCategory);
+        if (categories.length && !hit) {
+            job.warnings.push(`MochiAni 当前没有「${VIDEO_CATEGORY_LABEL[wantedCategory] || wantedCategory}」这个生成模式，沿用节点现在的模式`);
+        } else if (hit && hit.compatible === false) {
+            job.warnings.push(`「${hit.label}」在这个节点上不可用（${hit.reason || "当前渠道不支持"}），没有切换`);
+        } else if (activeKey !== Number(wantedCategory)) {
+            // 面板没回读分类时（页面在后台）categories 是空的，这时也照切 ——
+            // 失败只记 warning，别把整单带崩；真正生效与否看页面。
+            try {
+                await step({ action: "video_category", value: String(wantedCategory) }, `生成模式切到 ${hit?.label || VIDEO_CATEGORY_LABEL[wantedCategory] || wantedCategory}`);
+            } catch (error) {
+                job.warnings.push(`生成模式没切成功（${error?.message || error}），沿用页面当前模式`);
+            }
+        }
+    }
 
     if (job.modelKey && job.modelKey !== String(current.modelKey || "")) {
         await step({ action: "model", value: job.modelKey }, `模型切到 ${job.modelKey}`);
