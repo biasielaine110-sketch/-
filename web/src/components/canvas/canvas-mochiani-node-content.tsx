@@ -405,6 +405,13 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
 
     const pollingRef = useRef<number | null>(null);
     const lastSnapshotRef = useRef("");
+    /**
+     * 已锁定的页面 id。
+     *
+     * 桥的 `/api/*` 不传 pageId 时会自己挑「当前活动页」—— 同一个人同时开着无限画布和漫剧编辑器时，
+     * 节点锁着 A 页却去 B 页拿模型目录，会拿到完全另一套模型。所以读上下文时记下它，之后处处带上。
+     */
+    const targetPageRef = useRef("");
     const restoredRef = useRef(false);
 
     const stopPolling = useCallback(() => {
@@ -506,6 +513,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         try {
             const data = await bridgeFetch(bridgeBase, "/api/context");
             if (data.ok && data.target) {
+                targetPageRef.current = String(data.target.pageId || "");
                 setTarget(data.target);
                 setWork(data.work || null);
                 setContextError("");
@@ -513,12 +521,14 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 setPoints(acc?.ok ? acc.points || null : null);
                 setAccountUser(acc?.ok ? acc.user || "" : "");
             } else {
+                targetPageRef.current = "";
                 setTarget(null);
                 setWork(null);
                 setPoints(null);
                 setContextError(data.error || "读不到当前页面");
             }
         } catch (err) {
+            targetPageRef.current = "";
             setTarget(null);
             setWork(null);
             setContextError(err instanceof Error ? err.message : String(err));
@@ -531,7 +541,9 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         async (preferred?: { modelKey?: string; channelId?: string; params?: Record<string, string> }) => {
             setModelsLoading(true);
             try {
-                const data = await bridgeFetch(bridgeBase, "/api/models");
+                // 带上锁定过的 pageId：桥不传就会自己挑活动页，双开页面时容易串到另一个页面。
+                const pinnedPage = targetPageRef.current;
+                const data = await bridgeFetch(bridgeBase, `/api/models${pinnedPage ? `?pageId=${encodeURIComponent(pinnedPage)}` : ""}`);
                 if (!data.ok) {
                     setModels([]);
                     setModelsError(data.error || "读不到模型目录");
