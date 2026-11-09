@@ -985,6 +985,47 @@ function composeCartonScript(prompt, groups) {
 }
 
 /**
+ * 把前端给的图（`dataUrl` 或 `http(s)` 地址）落成本机临时文件。
+ *
+ * 为什么必须落盘：MochiAni 的 `mochiani_upload_asset_images` 只收**本机绝对路径**，
+ * 不认 URL、更不认 base64。画布上的图通常是图床/R2 的公网地址，桥所在机器能直接下载。
+ */
+const CAST_IMAGE_MAX_BYTES = 12 * 1024 * 1024;
+const CAST_IMAGE_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+
+async function materializeReferenceImage(entry, sink) {
+    const dir = path.join(os.tmpdir(), "mochiani-bridge-images");
+    await fs.promises.mkdir(dir, { recursive: true });
+
+    const write = async (buffer, mime) => {
+        if (!buffer?.length) throw new Error("图是空的");
+        if (buffer.length > CAST_IMAGE_MAX_BYTES) throw new Error(`图超过 ${CAST_IMAGE_MAX_BYTES / 1024 / 1024}MB`);
+        const ext = CAST_IMAGE_EXT[String(mime || "").toLowerCase()] || "png";
+        const file = path.join(dir, `${randomUUID()}.${ext}`);
+        await fs.promises.writeFile(file, buffer);
+        sink.push(file);
+        return file;
+    };
+
+    const dataUrl = String(entry?.dataUrl || "");
+    if (dataUrl.startsWith("data:")) {
+        const match = /^data:([^;,]+)?(;base64)?,([\s\S]*)$/.exec(dataUrl);
+        if (!match) throw new Error("dataUrl 格式不对");
+        const buffer = match[2] ? Buffer.from(match[3], "base64") : Buffer.from(decodeURIComponent(match[3]), "utf8");
+        return write(buffer, match[1] || "image/png");
+    }
+
+    const url = String(entry?.url || "");
+    if (/^https?:\/\//i.test(url)) {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`下载失败 HTTP ${response.status}`);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        return write(buffer, response.headers.get("content-type") || "image/png");
+    }
+    throw new Error("既没有 dataUrl 也没有 http 地址");
+}
+
+/**
  * 素材名 → 真实 ID。库里没有的按用户选择自动新建（`mochiani_create_asset`）。
  * 返回三类 ID 数组 + 新建/匹配的日志行。
  */
@@ -992,6 +1033,8 @@ async function resolveCartonAssets({ pageId, origin, projectId, projectName, wor
     const outcome = {
         ids: { character: [], scene: [], prop: [], other: [] },
         resolvedNames: { character: [], scene: [], prop: [], other: [] },
+        /** 名字 → 真实素材 ID（匹配到别名/新建都记），上传素材图时按它对齐。 */
+        byName: { character: {}, scene: {}, prop: {}, other: {} },
         created: [],
         missing: [],
         notes: [],
@@ -1019,6 +1062,9 @@ async function resolveCartonAssets({ pageId, origin, projectId, projectName, wor
                     outcome.ids[bucket].push(hit.id);
                     outcome.resolvedNames[bucket].push(hit.name);
                 }
+                // 原名和命中名都记一份：用户填「林晚」、库里叫「林晚_正式」，图也得挂得上。
+                outcome.byName[bucket][name] = hit.id;
+                outcome.byName[bucket][hit.name] = hit.id;
                 if (hit.name !== name) outcome.notes.push(`「${name}」匹配到素材「${hit.name}」`);
                 continue;
             }
@@ -1043,6 +1089,7 @@ async function resolveCartonAssets({ pageId, origin, projectId, projectName, wor
                 if (!newId) throw new Error("新建成功但没读到素材 ID");
                 outcome.ids[kind].push(newId);
                 outcome.resolvedNames[kind].push(name);
+                outcome.byName[kind][name] = newId;
                 outcome.created.push(`${CARTON_ASSET_LABEL[kind]}「${name}」`);
                 assets.push({ id: newId, name, kind });
             } catch (error) {
@@ -1131,6 +1178,43 @@ async function planCartonJob(job, ctx) {
             job,
             `关联素材：人物 ${resolved.ids.character.length} · 场景 ${resolved.ids.scene.length} · 道具 ${resolved.ids.prop.length}`,
         );
+    }
+
+    /**
+     * 2.5) 素材图 —— 节点上「图块」挂到的图，按名字对齐刚解析出的 assetId 传进去。
+     *
+     * 图只补形象，不参与分镜文案；一张传失败不影响出片，只记 warning。
+     * 顺序必须在素材解析之后（要真 ID）、上传完再建分镜（MochiAni 建分镜时就要用到素材现图）。
+     */
+    const castImages = Array.isArray(cast.images) ? cast.images : [];
+    if (castImages.length) {
+        const typeOfKind = { characters: "character", scenes: "scene", props: "prop" };
+        const items = [];
+        const tempFiles = [];
+        for (const entry of castImages) {
+            const assetType = typeOfKind[String(entry?.kind || "")];
+            const name = String(entry?.name || "").trim();
+            if (!assetType || !name) continue;
+            const assetId = String(resolved.byName?.[assetType]?.[name] || "");
+            if (!assetId) {
+                job.warnings.push(`素材图「${name}」没对上素材 ID，跳过`);
+                continue;
+            }
+            try {
+                items.push({ assetType, assetId, localPath: await materializeReferenceImage(entry, tempFiles) });
+            } catch (error) {
+                job.warnings.push(`素材图「${name}」没传：${error.message}`);
+            }
+        }
+        if (items.length) {
+            try {
+                await callTool("mochiani_upload_asset_images", { ...workRef, items });
+                pushLog(job, `素材图已上传 ${items.length} 张（人物/场景/道具的形象图）`);
+            } catch (error) {
+                job.warnings.push(`素材图上传失败，仍按文字素材继续：${error.message}`);
+            }
+        }
+        for (const file of tempFiles) fs.promises.rm(file, { force: true }).catch(() => {});
     }
 
     // 3) 分镜文案：素材正式名必须出现在文案里，缺的补一行
@@ -1521,6 +1605,14 @@ async function handleAccount(query) {
     }
 }
 
+/** `model_options` 的数组可能叫 options / list / models，取第一个有内容的；都没有就是空。 */
+function readOptionList(payload) {
+    for (const candidate of [payload?.options, payload?.list, payload?.models]) {
+        if (Array.isArray(candidate) && candidate.length) return candidate;
+    }
+    return [];
+}
+
 /**
  * 真实模型目录 —— 面板要像「视频生成窗口」那样先选模型/渠道，就必须读 MochiAni 自己的
  * model_options，不能凭模型名猜（46 个模型里有同名不同 id 的）。
@@ -1577,14 +1669,75 @@ async function handleModels(query) {
         }
         if (!nodeId) return { ok: false, error: "画布上没有视频节点，临时建一个也没成功" };
 
-        const options = await callTool("mochiani_canvas_model_options", { pageId, origin, nodeId });
-        const controls = await callTool("mochiani_canvas_model_controls", { pageId, origin, nodeId }).catch(() => null);
+        // ⚠️ MochiAni 的 model_options 是从「已挂载的生成面板」里读的，不是现成的接口。
+        // 节点在视口外（画布做了虚拟化）或页面被浏览器挂起时，panelMounted=false、
+        // options=[] —— 这时**不是没有模型**。按 MCP 自己的建议先 locate_node 把节点
+        // 挪进视口、唤醒面板，再重读一次；还是空就明确报错，别让面板安静地留个空下拉。
+        let options = await callTool("mochiani_canvas_model_options", { pageId, origin, nodeId });
+        let controls = await callTool("mochiani_canvas_model_controls", { pageId, origin, nodeId }).catch(() => null);
+
+        /**
+         * 空目录 ≠ 没模型。实测最常见的两种情况：
+         *  ① 桥跑久了，MCP 侧还捏着旧的页面会话 —— 节点 id 对得上，读出来却是空数组。
+         *     （重启桥立刻恢复 44 个模型，所以这是**会话陈旧**，不是页面本身的问题。）
+         *  ② 视频节点在视口外 / 页面被浏览器挂起，生成面板没挂载。
+         * 所以先掐掉 MCP 连接重连一次（不重启进程），还空再去 locate 唤醒面板。
+         */
+        let wokePanel = false;
+        let reconnected = false;
+        if (!readOptionList(options).length) {
+            resetClient("模型目录为空，掐掉 MCP 连接重读一次");
+            reconnected = true;
+            try {
+                options = await callTool("mochiani_canvas_model_options", { pageId, origin, nodeId });
+                controls = await callTool("mochiani_canvas_model_controls", { pageId, origin, nodeId }).catch(() => null);
+            } catch {
+                // 重连也读不到就往下走 locate，别在这里抛 —— 报错文案要能同时覆盖两种情况。
+            }
+        }
+        if (!readOptionList(options).length) {
+            wokePanel = true;
+            try {
+                await callTool("mochiani_canvas_locate_node", { pageId, origin, nodeId });
+            } catch (error) {
+                // locate 需要页面回执。超时 = 浏览器把 MochiAni 那个标签页挂起了（冻结的后台页
+                // 不跑 JS），纯读还能拿到缓存，所以只有这一步会超时。
+                if (/超时|timeout|暂停|suspend/i.test(String(error?.message || ""))) {
+                    return {
+                        ok: false,
+                        code: "PAGE_SUSPENDED",
+                        error: "MochiAni 页面被浏览器挂起了，模型目录读不到。切到那个标签页点一下（或刷新）再点「重新读取」。",
+                        nodeId,
+                        probeCreated,
+                    };
+                }
+                throw error;
+            }
+            await sleep(400);
+            options = await callTool("mochiani_canvas_model_options", { pageId, origin, nodeId });
+            controls = await callTool("mochiani_canvas_model_controls", { pageId, origin, nodeId }).catch(() => null);
+        }
+        const models = readOptionList(options);
+        if (!models.length) {
+            return {
+                ok: false,
+                code: "MODEL_OPTIONS_EMPTY",
+                error: reconnected
+                    ? "MochiAni 的模型目录读出来是空的（已自动重连 + 定位节点重试过）。去 MochiAni 页面看一眼那个视频节点的模型/渠道还在不在，然后点「重新读取」。"
+                    : "MochiAni 读到了生成面板，但模型目录是空的：去看一眼那个视频节点当前的模型/渠道还在不在。",
+                nodeId,
+                probeCreated,
+                revision: String(options?.revision || read.revision || ""),
+            };
+        }
         return {
             ok: true,
             nodeId,
             probeCreated,
+            wokePanel,
+            reconnected,
             revision: String(options?.revision || read.revision || ""),
-            models: Array.isArray(options?.options) ? options.options : [],
+            models,
             panel: controls?.panelMounted
                 ? {
                       modelKey: controls.modelKey,

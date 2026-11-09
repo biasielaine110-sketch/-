@@ -393,6 +393,24 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     const [modelKey, setModelKey] = useState(node.metadata?.mochianiConfig?.modelKey || "");
     const [channelId, setChannelId] = useState(node.metadata?.mochianiConfig?.channelId || "");
     const [params, setParams] = useState<Record<string, string>>(node.metadata?.mochianiConfig?.params || {});
+    /**
+     * 渠道选择器是否展开。
+     *
+     * 同一个模型下面的渠道只是「供应商池」，模型名本身已经区分开了（同一模型有多个 id 的会在
+     * 模型下拉里带 `#id`），所以默认**自动选一个**、不给用户看一堆渠道；只有真需要换线路时
+     * 才点「换」展开。
+     */
+    const [channelPickerOpen, setChannelPickerOpen] = useState(false);
+    /**
+     * 漫剧编辑器的「出场素材 / 配音」是否展开。
+     *
+     * 这块**可填可不填**：不填就让 MochiAni 自己按分镜文案解析。已经填过内容的默认展开，
+     * 免得用户以为自己的素材被清掉了。
+     */
+    const [castOpen, setCastOpen] = useState(() => {
+        const saved = node.metadata?.mochianiConfig;
+        return Boolean(saved?.cast?.characters || saved?.cast?.scenes || saved?.cast?.props || saved?.voiceover);
+    });
 
     // 提示词由嵌入的 `CanvasNodePromptPanel` 维护（它写 `metadata.prompt`），
     // 这里再把同一份文本镜像到 `mochianiPrompt`（预检读它，同时兼容老数据）。
@@ -790,6 +808,41 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         saveConfig({ cast: { ...current, [kind]: value } });
     };
 
+    /**
+     * 给某个名字找一张「它的图」。
+     *
+     * 规则：拿画布上**连线进来的图片**按节点标题对名字（「林晚定妆照」→ 林晚）。
+     * 不猜内容、不看提示词描述 —— 标题对不上就是没图，宁缺勿错（把 A 的脸挂到 B 身上比没图更糟）。
+     */
+    const matchCastImage = useCallback(
+        (name: string) => {
+            const key = name.trim();
+            if (!key) return null;
+            for (const item of linkedByKind.image) {
+                const title = String(item.title || item.label || "").trim();
+                if (!title) continue;
+                if (title === key) return item;
+                if (title.length >= 2 && (title.includes(key) || key.includes(title))) return item;
+            }
+            return null;
+        },
+        [linkedByKind.image],
+    );
+
+    const castNames = useCallback((kind: "characters" | "scenes" | "props") => splitInputLines(cast?.[kind]), [cast]);
+
+    const addCastName = (kind: "characters" | "scenes" | "props", raw: string) => {
+        const name = raw.trim();
+        if (!name) return;
+        const names = castNames(kind);
+        if (names.includes(name)) return;
+        changeCast(kind, [...names, name].join("\n"));
+    };
+
+    const removeCastName = (kind: "characters" | "scenes" | "props", name: string) => {
+        changeCast(kind, castNames(kind).filter((item) => item !== name).join("\n"));
+    };
+
     const addImages = async (files: File[]) => {
         if (!files.length) return;
         const room = Math.max(0, imageLimit - refImages.length - linkedByKind.image.length);
@@ -837,6 +890,17 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             return;
         }
         if (media.unusable.length) message.warning(media.unusable.slice(0, 2).join("；"));
+        /** 图块上挂到的图一起发：桥在素材建好 / 匹配到真 ID 之后按 assetId 上传。没图的素材只发名字。 */
+        const castImages: Array<{ kind: string; name: string; url?: string; dataUrl?: string }> = [];
+        if (isCarton) {
+            for (const field of CARTON_CAST_FIELDS) {
+                for (const name of castNames(field.key)) {
+                    const reference = matchCastImage(name);
+                    const payload = reference ? toReferencePayload(reference) : null;
+                    if (payload) castImages.push({ kind: field.key, name, ...payload });
+                }
+            }
+        }
         setBusy("plan");
         setError("");
         setPlacedNodeId("");
@@ -860,6 +924,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                                   scenes: splitInputLines(cast?.scenes),
                                   props: splitInputLines(cast?.props),
                                   autoCreate: true,
+                                  images: castImages,
                               },
                               voiceover: voiceoverText || "",
                               generateVoice,
@@ -1105,18 +1170,53 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                                 选中的是生图模型，这个节点是拿来生视频的 —— 可能出不来视频。
                             </div>
                         ) : null}
-                        <Select
-                            size="small"
-                            placeholder="选择渠道"
-                            value={channelId || undefined}
-                            style={{ width: "100%" }}
-                            options={(selectedModel?.channels || []).map((item) => ({
-                                value: item.id,
-                                label: `${item.name}${item.avgTime ? ` · ${item.avgTime}s` : ""}`,
-                            }))}
-                            onChange={changeChannel}
-                            disabled={locked || !selectedModel}
-                        />
+                        {/* 渠道：默认自动。同一个模型下的一堆渠道只是供应商池，模型名已经区分开了，
+                            全都摆出来纯噪音。只在用户主动点「换」时才展开，选完再收回去。 */}
+                        {selectedModel ? (
+                            channelPickerOpen && (selectedModel.channels?.length || 0) > 1 ? (
+                                <div className="flex items-center gap-1">
+                                    <Select
+                                        size="small"
+                                        placeholder="选择渠道"
+                                        value={channelId || undefined}
+                                        style={{ flex: 1, minWidth: 0 }}
+                                        options={(selectedModel.channels || []).map((item) => ({
+                                            value: item.id,
+                                            label: `${item.name}${item.avgTime ? ` · ${item.avgTime}s` : ""}`,
+                                        }))}
+                                        onChange={(value) => {
+                                            changeChannel(value);
+                                            setChannelPickerOpen(false);
+                                        }}
+                                        disabled={locked}
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => setChannelPickerOpen(false)}
+                                        className="shrink-0 text-[10px] opacity-45 transition hover:opacity-80"
+                                    >
+                                        收起
+                                    </button>
+                                </div>
+                            ) : (
+                                <div className="flex items-center justify-between gap-2 text-[10px]">
+                                    <span className="min-w-0 truncate opacity-45">
+                                        渠道 {selectedChannel ? selectedChannel.name : "自动"}
+                                        {selectedChannel?.avgTime ? ` · ${selectedChannel.avgTime}s` : ""}
+                                    </span>
+                                    {!locked && (selectedModel.channels?.length || 0) > 1 ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => setChannelPickerOpen(true)}
+                                            className="shrink-0 opacity-45 transition hover:opacity-90"
+                                            title={`这个模型有 ${selectedModel.channels?.length} 条渠道，默认自动选一条`}
+                                        >
+                                            换渠道
+                                        </button>
+                                    ) : null}
+                                </div>
+                            )
+                        ) : null}
                         {Object.keys(paramSource).length ? (
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                                 {Object.entries(paramSource).map(([key, options]) => (
@@ -1147,48 +1247,123 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
 
                 {/* ③.5 漫剧编辑器专有：出场素材 / 配音
                       两套口径别混：无限画布是「节点 + 上传参考图」，漫剧编辑器是「分镜 + 素材库 ID + 配音项」。
-                      这里只负责收**名字**，真实 ID 由桥按当前作品的素材库现解析（换个作品同一份节点还能用）。 */}
+                      这里只负责收**名字**，真实 ID 由桥按当前作品的素材库现解析（换个作品同一份节点还能用）。
+
+                      这块**可填可不填**：不填就让 MochiAni 按分镜文案自己解析。填了以「图块」形态出现 ——
+                      图来自画布上连线进来的图片节点，按节点标题跟名字对上（「林晚定妆照」→ 林晚）；
+                      对不上就留空，绝不乱挂（把 A 的脸挂到 B 身上比没图更糟）。 */}
                 {isCarton ? (
                     <div className="rounded-md px-2 py-1.5" style={{ border: softBorder }}>
-                        <div className="mb-1 flex items-center gap-1 text-[11px]">
-                            <Clapperboard size={11} className="opacity-60" />
-                            <span className="opacity-60">漫剧编辑器 · 出场素材 / 配音</span>
+                        <div className="flex items-center justify-between text-[11px]">
+                            <span className="flex min-w-0 items-center gap-1">
+                                <Clapperboard size={11} className="shrink-0 opacity-60" />
+                                <span className="truncate opacity-60">出场素材 / 配音</span>
+                                <span className="shrink-0 opacity-30">可选</span>
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setCastOpen((prev) => !prev)}
+                                className="shrink-0 text-[10px] opacity-45 transition hover:opacity-90"
+                            >
+                                {castOpen ? "收起" : "填写"}
+                            </button>
                         </div>
-                        <div className="flex flex-col gap-1.5">
-                            {CARTON_CAST_FIELDS.map((field) => (
-                                <label key={field.key} className="flex flex-col gap-0.5">
-                                    <span className="text-[10px] opacity-45">{field.label}（每行一个正式名，库里没有会新建）</span>
+                        {castOpen ? (
+                            <div className="mt-1.5 flex flex-col gap-2">
+                                {CARTON_CAST_FIELDS.map((field) => {
+                                    const names = castNames(field.key);
+                                    return (
+                                        <div key={field.key}>
+                                            <div className="mb-1 flex items-center justify-between text-[10px]">
+                                                <span className="opacity-45">{field.label}</span>
+                                                <span className="opacity-25">{names.length ? `${names.length} 个` : "空"}</span>
+                                            </div>
+                                            <div className="flex flex-wrap items-start gap-1.5">
+                                                {names.map((name) => {
+                                                    const image = matchCastImage(name);
+                                                    const thumb = image ? String(image.previewUrl || "") : "";
+                                                    return (
+                                                        <div key={name} className="group relative w-[52px]">
+                                                            <div
+                                                                className="relative h-[52px] w-[52px] overflow-hidden rounded"
+                                                                style={{ border: softBorder }}
+                                                                title={
+                                                                    image
+                                                                        ? `用图：${image.title || image.label}`
+                                                                        : "没找到同名图片 —— 把画布上的图片节点改名成这个角色的名字（例如「林晚定妆照」）再连进来，就会自动挂上"
+                                                                }
+                                                            >
+                                                                {thumb ? (
+                                                                    <img src={thumb} alt={name} className="h-full w-full object-cover" />
+                                                                ) : (
+                                                                    <div className="flex h-full w-full items-center justify-center opacity-20">
+                                                                        <ImagePlus size={14} />
+                                                                    </div>
+                                                                )}
+                                                                {!locked ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => removeCastName(field.key, name)}
+                                                                        className="absolute right-0 top-0 rounded bg-black/70 p-0.5 opacity-0 transition group-hover:opacity-100"
+                                                                        title="从素材里移除这个名字（不会断线）"
+                                                                    >
+                                                                        <X size={9} color="#fff" />
+                                                                    </button>
+                                                                ) : null}
+                                                            </div>
+                                                            <div className="mt-0.5 truncate text-center text-[9px] opacity-60" title={name}>
+                                                                {name}
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                                <Input
+                                                    size="small"
+                                                    placeholder="+ 名字"
+                                                    disabled={locked}
+                                                    style={{ width: 74 }}
+                                                    onPressEnter={(event) => {
+                                                        const input = event.target as HTMLInputElement;
+                                                        addCastName(field.key, input.value);
+                                                        input.value = "";
+                                                    }}
+                                                    onBlur={(event) => {
+                                                        const input = event.target as HTMLInputElement;
+                                                        if (!input.value.trim()) return;
+                                                        addCastName(field.key, input.value);
+                                                        input.value = "";
+                                                    }}
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                                <label className="flex flex-col gap-0.5">
+                                    <span className="text-[10px] opacity-45">配音（角色名：台词，一行一条）</span>
                                     <Input.TextArea
                                         size="small"
-                                        autoSize={{ minRows: 1, maxRows: 4 }}
-                                        value={cast?.[field.key] || ""}
-                                        placeholder={field.placeholder}
-                                        onChange={(event) => changeCast(field.key, event.target.value)}
+                                        autoSize={{ minRows: 1, maxRows: 6 }}
+                                        value={voiceoverText}
+                                        placeholder={"林晚：这门我从来没开过。\n陆沉：那你现在开。"}
+                                        onChange={(event) => saveConfig({ voiceover: event.target.value })}
                                         disabled={locked}
                                     />
                                 </label>
-                            ))}
-                            <label className="flex flex-col gap-0.5">
-                                <span className="text-[10px] opacity-45">配音（角色名：台词，一行一条）</span>
-                                <Input.TextArea
-                                    size="small"
-                                    autoSize={{ minRows: 1, maxRows: 6 }}
-                                    value={voiceoverText}
-                                    placeholder={"林晚：这门我从来没开过。\n陆沉：那你现在开。"}
-                                    onChange={(event) => saveConfig({ voiceover: event.target.value })}
-                                    disabled={locked}
-                                />
-                            </label>
-                            <label className="flex items-center justify-between text-[11px]">
-                                <span className="opacity-55">确认时一起生成配音</span>
-                                <Switch
-                                    size="small"
-                                    checked={generateVoice}
-                                    onChange={(checked) => saveConfig({ generateVoice: checked })}
-                                    disabled={locked}
-                                />
-                            </label>
-                        </div>
+                                <label className="flex items-center justify-between text-[11px]">
+                                    <span className="opacity-55">确认时一起生成配音</span>
+                                    <Switch
+                                        size="small"
+                                        checked={generateVoice}
+                                        onChange={(checked) => saveConfig({ generateVoice: checked })}
+                                        disabled={locked}
+                                    />
+                                </label>
+                            </div>
+                        ) : (
+                            <div className="mt-1 text-[10px] leading-snug opacity-40">
+                                不填就只发提示词，出场人物 / 场景 / 道具交给 MochiAni 按分镜自己解析。
+                            </div>
+                        )}
                     </div>
                 ) : null}
 
