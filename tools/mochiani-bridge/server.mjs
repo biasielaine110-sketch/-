@@ -1088,6 +1088,9 @@ async function planCartonJob(job, ctx) {
         String(video?.model_id || "") !== modelId ||
         String(video?.supplier_id || "") !== supplierId ||
         Object.entries(coerceCartonParams(job.params, option)).some(([key, value]) => String(video?.selected_config?.[key]) !== String(value));
+    // 只有真的切了才把 modelId / supplierId 显式带给 generate_video ——
+    // 没切就让它沿用编辑器当前配置，别让 MochiAni 以为我们在「未经用户要求改配置」。
+    job.modelSwitched = configChanged;
     if (configChanged && modelId && supplierId) {
         try {
             await callTool("mochiani_update_video_generation_config", {
@@ -1242,8 +1245,14 @@ async function confirmCartonJob(job) {
         ...workRef,
         shotId: job.nodeId,
         count: 1,
-        modelId: job.model?.id || undefined,
-        supplierId: job.model?.supplierId || undefined,
+        ...(job.modelSwitched
+            ? {
+                  modelId: job.model?.id || undefined,
+                  supplierId: job.model?.supplierId || undefined,
+                  userExplicitlyRequestedModelOrChannelChange: true,
+                  userRequest: `开源画布节点指定：${job.model?.key || job.model?.id || ""}`,
+              }
+            : {}),
         idempotencyKey: `atelier-gen-${job.id}`,
     });
     job.receipt = receipt;
