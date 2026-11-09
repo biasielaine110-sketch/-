@@ -21,6 +21,7 @@ import {
 import { canvasThemes } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { buildStylePromptText, composeStyledPrompt, getStyleTemplate } from "@/constant/style-templates";
+import { imageToDataUrl } from "@/services/image-storage";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 import { CanvasNodePromptPanel } from "./canvas-node-prompt-panel";
@@ -371,13 +372,53 @@ function readFileAsDataUrl(file: File) {
     });
 }
 
-/** 连进来的素材节点 → 桥能收的一条参考素材（http 地址让桥自己下载，data: 直接传）。 */
-function toReferencePayload(reference: CanvasResourceReference) {
+/** 桥收得下的单条素材上限（base64 会再胖 1/3，别把桥的内存撑爆）。 */
+const REFERENCE_PAYLOAD_MAX_BYTES = {
+    image: 32 * 1024 * 1024,
+    video: 400 * 1024 * 1024,
+    audio: 64 * 1024 * 1024,
+} as const;
+
+function readBlobAsDataUrl(blob: Blob) {
+    return new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("读取素材失败"));
+        reader.readAsDataURL(blob);
+    });
+}
+
+/**
+ * 连进来的素材节点 → 桥能收的一条参考素材（http 地址让桥自己下载，data: 直接传）。
+ *
+ * ⚠️ 这里以前只认 `http(s)://` 和 `data:`，其它一律当「本页临时文件」丢掉。
+ * 但本地上传 / 粘贴进来的图，`metadata.content` 存的是 `uploadImage()` 给的
+ * **objectURL（`blob:`）** —— 结果就是画布上明明有图、线也连了，节点里一张都发不出去
+ * （只在 toast 里留一句「只是本页临时文件」）。现在 blob: 先就地读成 dataUrl 再发：
+ * 图走 `imageToDataUrl`（还能兜住 IndexedDB 已迁移、只剩 storageKey / 页面上那张 <img> 的情况），
+ * 视频 / 音频直接 fetch blob 读。
+ */
+async function toReferencePayload(reference: CanvasResourceReference, kind: "image" | "video" | "audio") {
     const url = String(reference.previewUrl || "").trim();
     if (/^https?:\/\//i.test(url)) return { url };
     if (url.startsWith("data:")) return { dataUrl: url };
-    // blob: / 空 —— 那是只在本页内存里的临时文件，桥（可能在另一台机器）够不着。
-    return null;
+
+    try {
+        if (kind === "image") {
+            // 空 content（本地库迁移过）也交给它：会按 storageKey / 页面上的 <img> 找回原图。
+            const dataUrl = await imageToDataUrl({ url, nodeId: reference.nodeId });
+            return dataUrl.startsWith("data:image/") ? { dataUrl } : null;
+        }
+        if (!/^blob:/i.test(url)) return null;
+        const response = await fetch(url);
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        if (!blob.size || blob.size > REFERENCE_PAYLOAD_MAX_BYTES[kind]) return null;
+        return { dataUrl: await readBlobAsDataUrl(blob) };
+    } catch {
+        // blob 已释放 / 存储读不到 —— 如实返回 null，让调用方提示用户重传。
+        return null;
+    }
 }
 
 /** 「每行一个名字」→ 名字数组（也容忍逗号 / 顿号 / 分号分隔）。 */
@@ -765,25 +806,25 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     }, [linkedMedia]);
 
     /** 组装给桥的参考素材：连线的优先（用户刚连的那根线更可信），手动上传的补在后面。 */
-    const collectMediaPayload = useCallback(() => {
+    const collectMediaPayload = useCallback(async () => {
         const unusable: string[] = [];
-        const pick = (list: CanvasResourceReference[], limit: number) => {
+        const pick = async (list: CanvasResourceReference[], limit: number, kind: "image" | "video" | "audio") => {
             const out: Array<{ url?: string; dataUrl?: string }> = [];
             for (const reference of list) {
                 if (limit > 0 && out.length >= limit) {
                     unusable.push(`${reference.title || reference.label} 超过上限，没发`);
                     continue;
                 }
-                const entry = toReferencePayload(reference);
+                const entry = await toReferencePayload(reference, kind);
                 if (!entry) {
-                    unusable.push(`${reference.title || reference.label} 只是本页临时文件，桥读不到`);
+                    unusable.push(`${reference.title || reference.label} 读不出来（本地缓存已失效），重新上传一次`);
                     continue;
                 }
                 out.push(entry);
             }
             return out;
         };
-        const images = pick(linkedByKind.image, imageLimit);
+        const images = await pick(linkedByKind.image, imageLimit, "image");
         for (const item of refImages) {
             if (imageLimit > 0 && images.length >= imageLimit) {
                 unusable.push(`${item.name} 超过参考图上限，没发`);
@@ -793,8 +834,8 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         }
         return {
             images,
-            videos: pick(linkedByKind.video, videoLimit),
-            audios: pick(linkedByKind.audio, audioLimit),
+            videos: await pick(linkedByKind.video, videoLimit, "video"),
+            audios: await pick(linkedByKind.audio, audioLimit, "audio"),
             unusable,
         };
     }, [audioLimit, imageLimit, linkedByKind, refImages, videoLimit]);
@@ -1017,7 +1058,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         }
         const styleTemplate = getStyleTemplate(node.metadata?.styleTemplateId);
         const text = composeStyledPrompt(base, styleTemplate ? buildStylePromptText(styleTemplate) : "", "");
-        const media = collectMediaPayload();
+        const media = await collectMediaPayload();
         // 漫剧编辑器的参考素材来自作品素材库（人物/场景/道具），不走上传，别拿 imageRequired 拦它。
         if (!isCarton && imageRequired && media.images.length < imageRequired) {
             message.warning(`这个模型至少要 ${imageRequired} 张参考图（现在 ${media.images.length} 张）`);
@@ -1030,7 +1071,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             for (const field of CARTON_CAST_FIELDS) {
                 for (const name of castNames(field.key)) {
                     const reference = matchCastImage(name);
-                    const payload = reference ? toReferencePayload(reference) : null;
+                    const payload = reference ? await toReferencePayload(reference, "image") : null;
                     if (payload) castImages.push({ kind: field.key, name, ...payload });
                 }
             }
