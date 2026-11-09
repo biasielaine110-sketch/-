@@ -9,24 +9,41 @@
  *
  * 两条生成链（按已连接页面的 siteKind 自动分流）：
  *   mochiani-canvas（无限画布）
- *     canvas_read → canvas_create_nodes → canvas_set_prompt
- *     → canvas_generation_context(拿 contextToken / estimatedPoints)
- *     → canvas_generate_node → canvas_generation_operation → canvas_get_node
+ *     canvas_read → canvas_create_nodes
+ *     → locate_node + model_controls(等面板挂上拿 configToken)
+ *     → configure_model(模型/渠道/参数，每步重读 token)
+ *     → upload_and_connect(参考图本机落盘后导入并连线)
+ *     → set_prompt → generation_context(拿 contextToken / estimatedPoints)
+ *     → generate_node → generation_operation → get_node
  *   carton-editor（漫剧编辑器）
  *     get_work_summary → create_shot → preflight_generation
  *     → generate_video → get_shot_media_versions
+ *
+ * 面板侧接口：
+ *   GET  /api/models   真实模型目录（46 个模型 + 各自渠道/参数/媒体上限）
+ *   POST /api/plan     {prompt, pageId, modelKey, channelId, params, images:[{dataUrl}]}
  *
  * 依赖：本机已安装 mochiani-mcp（npm -g），浏览器已登录 mochiani.com 且页面连上 MCP。
  * 启动：node tools/mochiani-bridge/server.mjs（或 start.bat）
  */
 
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 const PORT = Number(process.env.MOCHIANI_BRIDGE_PORT || 17399);
 const HOST = process.env.MOCHIANI_BRIDGE_HOST || "127.0.0.1";
+/**
+ * 远程访问令牌。默认空 = 只监听 127.0.0.1、不做鉴权（本机用最省事）。
+ *
+ * 要把画布装成「别的电脑也能用」的网站形态，就得把桥暴露到公网（Tailscale Funnel /
+ * 反代 / 花生壳…）。那时**必须**设一个令牌，否则任何拿到地址的人都能花你的 MochiAni 灵点：
+ *   画布节点里填 `https://你的域名/?token=xxxx`，浏览器会带上 `x-mochiani-token` 头。
+ */
+const TOKEN = String(process.env.MOCHIANI_BRIDGE_TOKEN || "").trim();
 
 const MCP_ROOT =
     process.env.MOCHIANI_MCP_ROOT || path.join(process.env.APPDATA || "", "npm", "node_modules", "mochiani-mcp");
@@ -71,7 +88,7 @@ async function ensureClient() {
             },
             stderr: "pipe",
         });
-        const next = new Client({ name: "atelier-mochiani-bridge", version: "1.1.0" });
+        const next = new Client({ name: "atelier-mochiani-bridge", version: "1.2.0" });
         next.onclose = () => resetClient("MCP 连接已断开");
         await next.connect(transport);
         client = next;
@@ -277,6 +294,226 @@ function nextNodePosition(read) {
     return { x: Math.round(right + 360), y: Math.round(avgY) };
 }
 
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 画布里第一个视频节点（模型目录要靠它读，model_options 必须给 nodeId）。 */
+function pickVideoNode(read) {
+    const nodes = Array.isArray(read?.nodes) ? read.nodes : [];
+    return nodes.find((node) => String(node?.kind || "") === "video") || null;
+}
+
+/**
+ * 从 create_nodes / upload_and_connect 的回执里挑新节点 id。
+ * 不同工具用不同键名（affectedIds / createdNodeIds / nodeIds），别只认一个。
+ */
+function pickNodeId(payload) {
+    for (const key of ["affectedIds", "createdNodeIds", "nodeIds", "createdNodeId", "nodeId"]) {
+        const value = payload?.[key];
+        if (Array.isArray(value) && value.length && typeof value[0] === "string" && value[0]) return value[0];
+        if (typeof value === "string" && value) return value;
+    }
+    const guessed = collectStrings(
+        payload,
+        (value) => /^(video|image|media|audio|text|music)-[A-Za-z0-9_-]{3,}$/.test(value),
+    );
+    return guessed[0] || "";
+}
+
+/**
+ * 等视频节点的生成面板真挂上，拿到 configToken。
+ *
+ * locate_node 只是把视图挪过去；面板挂没挂上只能看 model_controls.panelMounted。
+ * panelMounted=false 时 configure_model 无从下手（它要 expectedConfig），所以这里必须轮询。
+ */
+async function waitPanelControls(pageId, origin, nodeId, timeoutMs = 25000) {
+    const deadline = Date.now() + timeoutMs;
+    let located = false;
+    let last = null;
+    while (Date.now() < deadline) {
+        if (!located) {
+            located = true;
+            // 定位会偶发超时（页面被浏览器节流），但它通常是「慢」而不是「失败」，忽略即可。
+            await callTool("mochiani_canvas_locate_node", { pageId, origin, nodeId }).catch(() => null);
+        }
+        last = await callTool("mochiani_canvas_model_controls", { pageId, origin, nodeId }).catch((error) => ({
+            error: error?.message || String(error),
+        }));
+        if (last?.panelMounted && last?.configToken) return last;
+        await sleep(900);
+    }
+    throw new BridgeError(
+        "MochiAni 那个视频节点的生成面板没打开，读不到配置令牌。去 MochiAni 画布点一下该视频节点，再重试。",
+        "PANEL_NOT_MOUNTED",
+        last,
+    );
+}
+
+/**
+ * 按用户选的「模型 / 渠道 / 参数」改节点配置。
+ *
+ * 顺序不能乱：
+ *   1. 先换模型 —— 换模型会把渠道重置成该模型的默认渠道；
+ *   2. 再换渠道；
+ *   3. 最后逐个改参数（模型不同，参数键也不同）。
+ * 每步都会让 configToken 失效，所以每步之后都要重读 model_controls 拿新 token。
+ */
+async function applyModelConfig(job, pageId, origin, nodeId, controls) {
+    let current = controls;
+    let token = String(controls?.configToken || "");
+    if (!token) throw new BridgeError("没读到配置令牌，无法切换模型", "NO_CONFIG_TOKEN", controls);
+
+    const step = async (payload, label) => {
+        await callTool("mochiani_canvas_configure_model", {
+            pageId,
+            origin,
+            expectedRevision: String(current?.revision || controls?.revision || ""),
+            idempotencyKey: randomUUID(),
+            nodeId,
+            expectedConfig: token,
+            ...payload,
+        });
+        current = await waitPanelControls(pageId, origin, nodeId, 15000);
+        token = String(current.configToken || "");
+        pushLog(job, label);
+    };
+
+    if (job.modelKey && job.modelKey !== String(current.modelKey || "")) {
+        await step({ action: "model", value: job.modelKey }, `模型切到 ${job.modelKey}`);
+    }
+    if (job.channelId && job.channelId !== String(current.channelId || "")) {
+        await step({ action: "channel", value: job.channelId }, `渠道切到 ${job.channelId}`);
+    }
+    for (const [key, value] of Object.entries(job.params || {})) {
+        if (value == null || value === "") continue;
+        if (String(current.configParams?.[key] ?? "") === String(value)) continue;
+        await step({ action: "parameter", parameter: key, value: String(value) }, `参数 ${key}=${value}`);
+    }
+    return current;
+}
+
+const IMAGE_EXT = { "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp", "image/gif": ".gif" };
+
+/** 浏览器只能给到 base64，MochiAni 的导入工具只认本机绝对路径 —— 所以先落盘。 */
+function decodeDataUrl(dataUrl) {
+    const match = /^data:([^;,]+)?(;base64)?,([\s\S]*)$/.exec(String(dataUrl || ""));
+    if (!match) return null;
+    const mime = (match[1] || "image/png").toLowerCase();
+    const buffer = match[2] ? Buffer.from(match[3], "base64") : Buffer.from(decodeURIComponent(match[3]), "utf8");
+    if (!buffer.length) return null;
+    return { mime, buffer, ext: IMAGE_EXT[mime] || ".png" };
+}
+
+/** 等素材上传真的完成（节点建出来 ≠ 图已经在 MochiAni 侧可用）。 */
+async function waitNodeMedia(pageId, origin, nodeId, timeoutMs = 30000) {
+    const deadline = Date.now() + timeoutMs;
+    let last = null;
+    while (Date.now() < deadline) {
+        last = await callTool("mochiani_canvas_get_node", { pageId, origin, nodeId }).catch(() => null);
+        const media = last?.media || {};
+        if (media.uploadConfirmed === true || media.remoteUrlsPresent === true) return true;
+        if (media.uploadError) return false;
+        await sleep(1200);
+    }
+    return false;
+}
+
+/**
+ * 参考图：落盘 → upload_and_connect（导入 + 按原生端口规则连线一步到位）。
+ * 连完再核一次媒体上传状态，没传完的如实标出来，不假装成功。
+ */
+async function importReferenceImages(job, pageId, origin, nodeId, position) {
+    const images = Array.isArray(job.images) ? job.images : [];
+    const connected = [];
+    if (!images.length) return connected;
+
+    const dir = path.join(os.tmpdir(), "mochiani-bridge-refs");
+    fs.mkdirSync(dir, { recursive: true });
+
+    for (let index = 0; index < images.length; index += 1) {
+        const decoded = decodeDataUrl(images[index]?.dataUrl || images[index]);
+        if (!decoded) {
+            pushLog(job, `第 ${index + 1} 张参考图不是合法图片数据，跳过`);
+            continue;
+        }
+        const file = path.join(dir, `${job.id}-ref-${index + 1}${decoded.ext}`);
+        fs.writeFileSync(file, decoded.buffer);
+        const read = await canvasRead(pageId, origin);
+        const receipt = await callTool("mochiani_canvas_upload_and_connect", {
+            pageId,
+            origin,
+            expectedRevision: read.revision,
+            idempotencyKey: randomUUID(),
+            localPath: file,
+            mediaType: "image",
+            targetNodeId: nodeId,
+        });
+        const imageNodeId = pickNodeId(receipt);
+        if (!imageNodeId) {
+            pushLog(job, `第 ${index + 1} 张参考图没读到节点 ID，可能没导进去`);
+            job.warnings.push(`参考图 ${index + 1} 导入回执里没有节点 ID`);
+            continue;
+        }
+        if (receipt?.connectionVerified === false) {
+            pushLog(job, `参考图 ${index + 1} 已导入，但连线未确认（端口可能不兼容）`);
+            job.warnings.push(`参考图 ${index + 1} 连线未确认`);
+        } else {
+            pushLog(job, `参考图 ${index + 1} 已导入并连上视频节点`);
+        }
+        const uploaded = await waitNodeMedia(pageId, origin, imageNodeId);
+        if (!uploaded) {
+            pushLog(job, `参考图 ${index + 1} 上传还没确认，别急着下单`);
+            job.warnings.push(`参考图 ${index + 1} 上传未确认`);
+        }
+        connected.push(imageNodeId);
+    }
+    void position;
+    return connected;
+}
+
+/**
+ * 写提示词。
+ *
+ * ⚠️ 一旦节点连上参考图，提示词在 MochiAni 侧就变成「结构化文档」（有 documentToken + references），
+ * 这时 `set_prompt` 会被页面拒绝，而且它吐的错误是没填模板的 `画布操作未执行：{reason}`（页面侧 bug，
+ * 看不出真实原因）。所以这里先读 references，有引用就走 `edit_references`，没有才用 `set_prompt`。
+ */
+async function writeCanvasPrompt(job, pageId, origin, nodeId, fallbackRevision) {
+    const refs = await callTool("mochiani_canvas_references", { pageId, origin, nodeId }).catch(() => null);
+    const hasReferences = Boolean(refs?.documentToken) && Array.isArray(refs?.references) && refs.references.length > 0;
+
+    if (hasReferences) {
+        // 只保留文档里本来就有的引用片段，不新造 chip（连线本身已经让素材参与生成）
+        const kept = (Array.isArray(refs.segments) ? refs.segments : [])
+            .filter((segment) => segment && typeof segment.referenceId === "string" && segment.referenceId)
+            .map((segment) => ({ referenceId: segment.referenceId }));
+        await callTool("mochiani_canvas_edit_references", {
+            pageId,
+            origin,
+            expectedRevision: String(refs.revision || fallbackRevision || ""),
+            idempotencyKey: randomUUID(),
+            nodeId,
+            expectedDocument: refs.documentToken,
+            segments: [{ text: job.prompt }, ...kept],
+        });
+        pushLog(job, "提示词已写进节点（带参考图，走结构化引用）");
+        return;
+    }
+
+    const before = await callTool("mochiani_canvas_generation_context", { pageId, origin, nodeId });
+    await callTool("mochiani_canvas_set_prompt", {
+        pageId,
+        origin,
+        expectedRevision: before.revision || fallbackRevision,
+        idempotencyKey: randomUUID(),
+        nodeId,
+        prompt: job.prompt,
+        expectedPrompt: before.currentPrompt ?? "",
+    });
+    pushLog(job, "提示词已写进节点");
+}
+
 async function planCanvasJob(job, ctx) {
     const { pageId, origin } = ctx;
     const read = await canvasRead(pageId, origin);
@@ -290,27 +527,47 @@ async function planCanvasJob(job, ctx) {
         idempotencyKey: randomUUID(),
         nodes: [{ kind: "video", x: position.x, y: position.y }],
     });
-    const nodeId = String((created?.affectedIds || [])[0] || "");
+    const nodeId = pickNodeId(created);
     if (!nodeId) throw new BridgeError("节点已经提交，但没读到节点 ID", "NODE_ID_MISSING", created);
     job.nodeId = nodeId;
     pushLog(job, `已在 MochiAni 画布建好视频节点 ${nodeId}`);
 
-    const before = await callTool("mochiani_canvas_generation_context", { pageId, origin, nodeId });
-    await callTool("mochiani_canvas_set_prompt", {
-        pageId,
-        origin,
-        expectedRevision: before.revision || created.revision,
-        idempotencyKey: randomUUID(),
-        nodeId,
-        prompt: job.prompt,
-        expectedPrompt: before.currentPrompt ?? "",
-    });
-    pushLog(job, "提示词已写进节点");
+    // 1) 面板 + 模型/渠道/参数（必须在连参考图之前完成：带连线的节点不让切模型）
+    let controls = await waitPanelControls(pageId, origin, nodeId);
+    if (job.modelKey || job.channelId || Object.keys(job.params || {}).length) {
+        controls = await applyModelConfig(job, pageId, origin, nodeId, controls);
+    }
+    job.modelTarget = {
+        modelKey: String(controls?.modelKey || ""),
+        channelId: String(controls?.channelId || ""),
+        params: controls?.configParams || {},
+    };
 
+    // 2) 参考图
+    if (Array.isArray(job.images) && job.images.length) {
+        await importReferenceImages(job, pageId, origin, nodeId, position);
+    }
+
+    // 3) 提示词
+    await writeCanvasPrompt(job, pageId, origin, nodeId, created.revision);
+
+    // 4) 回读核验：提示词、模型、渠道三样都必须对上，否则宁可停在预检
     const after = await callTool("mochiani_canvas_generation_context", { pageId, origin, nodeId });
     if (String(after.currentPrompt || "").trim() !== job.prompt) {
         throw new BridgeError("提示词写入后回读不一致，先别下单，去 MochiAni 画布看一眼", "PROMPT_VERIFY_FAILED", after);
     }
+    if (job.modelKey && String(after.modelKey || "") !== job.modelKey) {
+        throw new BridgeError(
+            `模型没切成：要 ${job.modelKey}，节点上实际是 ${after.modelKey || "未知"}`,
+            "MODEL_VERIFY_FAILED",
+            after,
+        );
+    }
+    if (job.channelId && String(after.channelId || after.modelSupplierId || "") !== job.channelId) {
+        pushLog(job, `注意：渠道没切成功（要 ${job.channelId}，实际 ${after.channelId || after.modelSupplierId || "未知"}）`);
+        job.warnings.push(`渠道未生效，实际 ${after.channelId || after.modelSupplierId || "未知"}`);
+    }
+
     job.estimate = {
         points: after.estimatedPoints ?? null,
         isEstimate: after.pricingIsEstimate !== false,
@@ -349,7 +606,8 @@ async function confirmCanvasJob(job) {
         receipt = await callTool("mochiani_canvas_generate_node", {
             pageId,
             origin,
-            expectedRevision: read.revision,
+            // 版本用 generation_context 回读到的那个，比前面 canvas_read 的更新
+            expectedRevision: String(ctx.revision || read.revision || ""),
             idempotencyKey: randomUUID(),
             nodeId: job.nodeId,
             expectedContext: ctx.contextToken,
@@ -554,6 +812,9 @@ function publicJob(job) {
         preflight: job.preflight,
         estimate: job.estimate,
         model: job.model,
+        modelTarget: job.modelTarget || null,
+        imageCount: Array.isArray(job.images) ? job.images.length : 0,
+        warnings: job.warnings || [],
         error: job.error,
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,
@@ -561,7 +822,7 @@ function publicJob(job) {
     };
 }
 
-function createJob(kind, prompt, page) {
+function createJob(kind, prompt, page, extras = {}) {
     const id = `mj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
     const job = {
         id,
@@ -576,6 +837,13 @@ function createJob(kind, prompt, page) {
         preflight: null,
         estimate: null,
         model: null,
+        modelTarget: null,
+        // 用户在面板里选的「模型 / 渠道 / 参数 / 参考图」
+        modelKey: String(extras.modelKey || "").trim(),
+        channelId: String(extras.channelId || "").trim(),
+        params: extras.params && typeof extras.params === "object" ? { ...extras.params } : {},
+        images: Array.isArray(extras.images) ? extras.images : [],
+        warnings: [],
         receipt: null,
         error: "",
         createdAt: nowIso(),
@@ -600,10 +868,10 @@ function pruneJobs() {
     }
 }
 
-async function planJob(prompt, preferredPageId) {
+async function planJob(prompt, preferredPageId, extras = {}) {
     if (!String(prompt || "").trim()) throw new BridgeError("指令不能为空", "EMPTY_PROMPT");
     const ctx = await readTargetContext(preferredPageId);
-    const job = createJob(ctx.kind, String(prompt).trim(), ctx.page);
+    const job = createJob(ctx.kind, String(prompt).trim(), ctx.page, extras);
     pushLog(job, `目标：${ctx.page.siteName || ctx.page.siteKind}（${ctx.kind === "canvas" ? "无限画布" : "漫剧编辑器"}）`);
     try {
         if (ctx.kind === "canvas") await planCanvasJob(job, ctx);
@@ -670,7 +938,7 @@ function cors(res) {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Private-Network", "true");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Mochiani-Token");
     res.setHeader("Access-Control-Max-Age", "86400");
 }
 
@@ -715,6 +983,71 @@ async function handleAccount(query) {
     }
 }
 
+/**
+ * 真实模型目录 —— 面板要像「视频生成窗口」那样先选模型/渠道，就必须读 MochiAni 自己的
+ * model_options，不能凭模型名猜（46 个模型里有同名不同 id 的）。
+ *
+ * model_options 只认 nodeId：画布上没有视频节点时临时建一个当探针（不生成、不花钱），
+ * 面板后续把 nodeId 回传给 /api/plan 就能直接复用，不会留一堆空节点。
+ */
+async function handleModels(query) {
+    try {
+        const ctx = await readTargetContext(query.pageId || "");
+        if (ctx.kind !== "canvas") {
+            return { ok: false, error: "模型目录只支持无限画布页面（漫剧编辑器不提供选模型）" };
+        }
+        const { pageId, origin } = ctx;
+        const read = await canvasRead(pageId, origin);
+        const existing = pickVideoNode(read);
+        let nodeId = String(query.nodeId || "") || String(existing?.id || "");
+        let probeCreated = false;
+        if (!nodeId) {
+            const position = nextNodePosition(read);
+            const created = await callTool("mochiani_canvas_create_nodes", {
+                pageId,
+                origin,
+                expectedRevision: read.revision,
+                idempotencyKey: randomUUID(),
+                nodes: [{ kind: "video", x: position.x, y: position.y }],
+            });
+            nodeId = pickNodeId(created);
+            probeCreated = Boolean(nodeId);
+        }
+        if (!nodeId) return { ok: false, error: "画布上没有视频节点，临时建一个也没成功" };
+
+        const options = await callTool("mochiani_canvas_model_options", { pageId, origin, nodeId });
+        const controls = await callTool("mochiani_canvas_model_controls", { pageId, origin, nodeId }).catch(() => null);
+        return {
+            ok: true,
+            nodeId,
+            probeCreated,
+            revision: String(options?.revision || read.revision || ""),
+            models: Array.isArray(options?.options) ? options.options : [],
+            panel: controls?.panelMounted
+                ? {
+                      modelKey: controls.modelKey,
+                      channelId: String(controls.channelId || ""),
+                      configParams: controls.configParams || {},
+                      videoCategories: controls.videoCategories || [],
+                      activeVideoCategory: controls.activeVideoCategory ?? null,
+                      channelAvailability: controls.channelAvailability || [],
+                  }
+                : null,
+        };
+    } catch (error) {
+        return { ok: false, code: error.code || "MODELS_FAILED", error: error.message };
+    }
+}
+
+/** 令牌可以走 `x-mochiani-token` 头、`Authorization: Bearer`，或 `?token=`（方便直接贴 URL）。 */
+function readRequestToken(req, url) {
+    const header = String(req.headers["x-mochiani-token"] || "").trim();
+    if (header) return header;
+    const auth = String(req.headers["authorization"] || "").trim();
+    if (/^bearer\s+/i.test(auth)) return auth.replace(/^bearer\s+/i, "").trim();
+    return String(url.searchParams.get("token") || "").trim();
+}
+
 async function handle(req, res) {
     if (req.method === "OPTIONS") {
         cors(res);
@@ -724,17 +1057,30 @@ async function handle(req, res) {
     }
     const url = new URL(req.url || "/", `http://${HOST}:${PORT}`);
     const pathname = url.pathname.replace(/\/+$/, "") || "/";
+    const isHealth = req.method === "GET" && (pathname === "/" || pathname === "/health");
 
-    if (req.method === "GET" && (pathname === "/" || pathname === "/health")) {
+    // 设了令牌就除了 /health 全要验：健康检查留在外面，画布那边才能区分
+    // 「桥没开」和「桥开着但令牌不对」。
+    if (TOKEN && !isHealth && readRequestToken(req, url) !== TOKEN) {
+        send(res, 401, {
+            ok: false,
+            code: "UNAUTHORIZED",
+            error: "本机桥开启了访问令牌：地址里要带 ?token=…（或在节点里直接填 https://你的域名/?token=你的令牌）",
+        });
+        return;
+    }
+
+    if (isHealth) {
         pruneJobs();
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.1.0",
+            version: "1.3.0",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
-            hint: "画布侧默认连 http://127.0.0.1:17399",
+            authRequired: Boolean(TOKEN),
+            hint: TOKEN ? "远程模式：地址需带 ?token=…" : "画布侧默认连 http://127.0.0.1:17399",
         });
         return;
     }
@@ -773,10 +1119,24 @@ async function handle(req, res) {
         return;
     }
 
+    if (req.method === "GET" && pathname === "/api/models") {
+        const body = await handleModels({
+            pageId: url.searchParams.get("pageId") || "",
+            nodeId: url.searchParams.get("nodeId") || "",
+        });
+        send(res, body.ok ? 200 : 409, body);
+        return;
+    }
+
     if (req.method === "POST" && pathname === "/api/plan") {
         const body = await readBody(req);
         try {
-            const job = await planJob(body.prompt, body.pageId ? String(body.pageId) : "");
+            const job = await planJob(body.prompt, body.pageId ? String(body.pageId) : "", {
+                modelKey: body.modelKey,
+                channelId: body.channelId,
+                params: body.params,
+                images: body.images,
+            });
             send(res, 200, { ok: true, job: publicJob(job) });
         } catch (error) {
             send(res, 502, { ok: false, code: error.code || "PLAN_FAILED", error: error.message, detail: error.payload ?? null });
@@ -845,6 +1205,16 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, () => {
     console.log(`[mochiani-bridge] listening http://${HOST}:${PORT}`);
     console.log(`[mochiani-bridge] MCP root: ${MCP_ROOT}`);
+    console.log(
+        TOKEN
+            ? "[mochiani-bridge] 远程模式：已启用访问令牌（画布地址要带 ?token=…）"
+            : "[mochiani-bridge] 本机模式：无鉴权。若要暴露到公网，请设置 MOCHIANI_BRIDGE_TOKEN",
+    );
+    if (process.env.MOCHIANI_BRIDGE_LAZY === "1") {
+        // 部署形态（服务器上先起桥、MochiAni 后登录）用：不在启动时就抢 MCP 会话。
+        console.log("[mochiani-bridge] lazy 模式：等第一次调用接口时再连 MCP");
+        return;
+    }
     ensureClient()
         .then(() => console.log("[mochiani-bridge] MCP connected"))
         .catch((error) => console.warn("[mochiani-bridge] MCP connect failed:", error?.message || error));

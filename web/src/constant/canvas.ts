@@ -30,6 +30,7 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Script]: { width: 760, height: 520, get title() { return i18n.t("canvas.nodeTypes.script"); } },
     [CanvasNodeType.VideoMerge]: { width: 560, height: 600, get title() { return i18n.t("canvas.nodeTypes.videoMerge"); } },
     [CanvasNodeType.ReverseVideo]: { width: 460, height: 440, get title() { return i18n.t("canvas.nodeTypes.reverseVideo"); } },
+    [CanvasNodeType.Mochiani]: { width: 520, height: 700, get title() { return i18n.t("canvas.nodeTypes.mochiani"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
 
 export const NODE_SPECS = {
@@ -84,6 +85,11 @@ export const NODE_SPECS = {
     },
     [CanvasNodeType.ReverseVideo]: {
         width: 460, height: 440, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.ReverseVideo].title; },
+        metadata: { status: "idle" },
+    },
+    [CanvasNodeType.Mochiani]: {
+        width: 520, height: 700, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Mochiani].title; },
+        // 表单状态（模型/渠道/参数/任务快照）都写在 metadata 里，刷新或滚出视口不会丢。
         metadata: { status: "idle" },
     },
 } satisfies Record<CanvasNodeType, CanvasNodeSpec>;

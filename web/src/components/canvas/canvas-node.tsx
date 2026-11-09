@@ -640,6 +640,7 @@ function NodeContent(props: NodeContentRendererProps) {
     if (props.node.type === CanvasNodeType.VideoMerge && props.renderNodeContent) return props.renderNodeContent(props.node);
     if (props.node.type === CanvasNodeType.Script && props.renderNodeContent) return props.renderNodeContent(props.node);
     if (props.node.type === CanvasNodeType.ReverseVideo && props.renderNodeContent) return props.renderNodeContent(props.node);
+    if (props.node.type === CanvasNodeType.Mochiani && props.renderNodeContent) return props.renderNodeContent(props.node);
     if (props.node.type === CanvasNodeType.Chat) return <ChatNodeContent {...props} />;
     if (props.isBatchRoot || ((props.node.type === CanvasNodeType.Image || props.node.type === CanvasNodeType.Video) && (props.node.metadata?.images?.length || 0) > 0)) {
         return props.node.type === CanvasNodeType.Video ? <VideoBatchContent {...props} /> : <ImageNodeContent {...props} />;
@@ -676,7 +677,18 @@ const nodeContentRenderers = {
     [CanvasNodeType.VideoMerge]: EmptyVideoMergeContent,
     [CanvasNodeType.Script]: EmptyScriptContent,
     [CanvasNodeType.ReverseVideo]: EmptyReverseVideoContent,
+    [CanvasNodeType.Mochiani]: EmptyMochianiContent,
 } satisfies Record<CanvasNodeType, (props: NodeContentRendererProps) => ReactNode>;
+
+function EmptyMochianiContent({ theme }: NodeContentRendererProps) {
+    const { t } = useTranslation();
+    return (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-4 text-center" style={{ color: theme.node.placeholder }}>
+            <Clapperboard className="size-7 opacity-35" />
+            <span className="text-sm">{t("canvas.nodeTypes.mochiani")}</span>
+        </div>
+    );
+}
 
 function EmptyReverseVideoContent({ theme }: NodeContentRendererProps) {
     const { t } = useTranslation();

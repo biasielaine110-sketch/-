@@ -23,6 +23,7 @@ export enum CanvasNodeType {
     Script = "script",
     VideoMerge = "video-merge",
     ReverseVideo = "reverse-video",
+    Mochiani = "mochiani",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -153,6 +154,29 @@ export type CanvasReverseVideoRun = {
      * 每次阶段推进都刷新它，节点据此判断「running 却很久没动静 = 上次被刷新掐断了」。
      */
     at?: number;
+};
+
+/**
+ * MochiAni 生视频节点：上一次任务快照。
+ *
+ * 和反推视频同理 —— 节点滚出视口会被裁掉重挂，生成要跑几分钟，
+ * 进度只放组件 state 会在回来时凭空消失、用户以为任务丢了。
+ */
+export type CanvasMochianiRun = {
+    id: string;
+    stage: string;
+    nodeId?: string;
+    videoUrl?: string;
+    prompt?: string;
+    error?: string;
+    /** 预估灵点 */
+    points?: number | null;
+    modelKey?: string;
+    channelId?: string;
+    /** 最近一次状态更新时间（epoch ms） */
+    at?: number;
+    log?: Array<{ at: string; message: string }>;
+    warnings?: string[];
 };
 
 export type CanvasNodeMetadata = {
@@ -429,6 +453,12 @@ export type CanvasNodeMetadata = {
      * 节点滚出视口会被裁掉重挂，进度只放组件 state 会在回来时凭空消失，所以落到 metadata。
      */
     reverseVideoRun?: CanvasReverseVideoRun;
+    /** MochiAni 生视频节点：上一次任务快照（理由同 reverseVideoRun）。 */
+    mochianiRun?: CanvasMochianiRun;
+    /** MochiAni 生视频节点：窗口里填的提示词（滚出视口重挂后要还在）。 */
+    mochianiPrompt?: string;
+    /** MochiAni 生视频节点：选中的模型 / 渠道 / 参数。 */
+    mochianiConfig?: { modelKey?: string; channelId?: string; params?: Record<string, string> };
     /** Midjourney Imagine parent task id — enables manual Upscale (U1–U4). */
     midjourneyTaskId?: string;
     /** Midjourney tile index 1–4 when the primary image is a specific Imagine tile. */

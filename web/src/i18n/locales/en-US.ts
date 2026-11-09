@@ -416,6 +416,7 @@ export default {
         videoTaskTimedOut: "Video task timed out. Please try again later",
         videoGenerationFailed: "Video generation failed",
         videoTaskQueryFailed: "Failed to query video task",
+        videoResultMissing: "The video task completed but the response has no downloadable URL (the channel may use a metadata.url field)",
         videoPromptRequired: "Enter a video prompt or connect a reference image, video, or audio asset",
         referenceImageReadFailed: "Failed to read the reference image. Choose another image or upload it again.",
         referenceAudioReadFailed: "Failed to read the reference audio. Choose another audio file or upload it again.",
@@ -543,6 +544,7 @@ export default {
             script: "Story script",
             videoMerge: "Video merge",
             reverseVideo: "Video reverse",
+            mochiani: "MochiAni video",
         },
         videoMerge: {
             summary: "{{count}} clips · {{duration}}",

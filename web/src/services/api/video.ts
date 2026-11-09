@@ -37,7 +37,21 @@ import { runModelPlugin } from "./model-plugin";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
-type VideoResponse = { id: string; status?: string; error?: { message?: string }; url?: string; result_url?: string; video_url?: string; content?: { video_url?: string; url?: string } | null };
+type VideoResponse = {
+    id: string;
+    status?: string;
+    progress?: number;
+    error?: { message?: string; code?: string };
+    url?: string;
+    result_url?: string;
+    video_url?: string;
+    content?: { video_url?: string; url?: string } | null;
+    // work-fisher（api.work-fisher.com）与 OpenAI video 契约：完成态直链在 `metadata.url`，
+    // 是个带签名的临时地址（X-Tos-Signature 之类），取到就得立刻下载转存。
+    metadata?: { url?: string; video_url?: string } | null;
+    // MiniMax-H3 `/v2/query/video_generation/{id}`：直链在 `task.content.url`。
+    task?: { content?: { url?: string } | null } | null;
+};
 type ApiVideoResponse = VideoResponse | { code?: number | string; data?: VideoResponse | null; msg?: string; message?: string; error?: { message?: string } };
 type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
 type RequestOptions = { signal?: AbortSignal; referenceAudios?: ReferenceAudio[]; referenceVideos?: ReferenceVideo[] };
@@ -165,6 +179,12 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     // WorkBuddy local file-queue VideoGen — no API key; runs on this machine only.
     if (isMioraQueueBaseUrl(requestConfig.baseUrl)) {
         return createMioraVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
+    }
+    // work-fisher 必须在所有「按模型名猜形状」的启发式之前：它挂的 `rh-*-h3-*` 工作流模型
+    // 会被 `isRelayMiniMaxH3Video` 抢走，套上 CometAPI 形状后上游收不到 prompt。
+    if (isWorkFisherVideoHost(requestConfig.baseUrl)) {
+        assertVideoConfig(requestConfig, requestConfig.model);
+        return createWorkFisherVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
     }
     // Metaso MiniMax-H3 must use OpenAI /videos before any AutoDL ComfyUI heuristic.
     if (isMetasoH3Video(requestConfig, selectedModel)) {
@@ -1138,6 +1158,145 @@ async function pollApimartMuseVideoTask(config: AiConfig, task: VideoGenerationT
     return { status: "pending" };
 }
 
+/**
+ * work-fisher（https://api.work-fisher.com，文档 `#models-workfisher-ext`）—— 单独分流。
+ *
+ *   提交  POST /v1/videos        { model, prompt, seconds, metadata:{ resolution, ratio, generate_audio } }
+ *   查询  GET  /v1/videos/{id}   status: queued | in_progress | completed | failed
+ *   直链  completed 时在 **`metadata.url`**（带签名的临时地址，取到就得立刻下载转存）
+ *   参考图 `images: string[]`（1 张 = 首帧，2 张 = 首帧 + 尾帧）；超过 2 张走 `metadata.content`
+ *
+ * 🔴 为什么必须单独分流：模型名 `rh-ai-aifisher-h3-m10-s10` 里的 `-h3-` 会命中
+ *    `isRelayMiniMaxH3Video`，被当成 MiniMax-H3 中转 → 发 `size:1344x768` /
+ *    `resolution:768P` / `input_reference:{image_url}` 这一套 CometAPI 形状，而 work-fisher
+ *    只认 `metadata`。请求被降级解析后上游会按工作流自带的示例提示词出片 ——
+ *    表现就是「生成的画面跟我的提示词完全没关系」。
+ */
+async function createWorkFisherVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const modelName = modelOptionName(model).trim();
+    if (!modelName) throw new Error(apiText("videoModelRequired"));
+    const promptText = String(prompt || "").trim();
+    // 🔴 空提示词不要下发：RunningHub 系工作流（`rh-*`）在收不到提示词时会**用工作流自带的
+    //    示例提示词出片**，看着像「正常生成」，实际内容和用户写的毫无关系。宁可在这里拦下来。
+    //    （挂了参考图的图生视频允许不写提示词 —— 但那也要让人看得见「没发提示词」这件事。）
+    if (!promptText && !references.length) throw new Error(apiText("videoPromptRequired"));
+    if (!promptText) console.warn(`[work-fisher] ${modelName} 这次没有提示词，上游会用工作流自带的示例提示词出片`);
+
+    const ratio = normalizeVideoRatio(config.size);
+    const resolution = normalizeWorkFisherResolution(config.vquality);
+    const seconds = workFisherSeconds(config.videoSeconds);
+    const generateAudio = boolConfig(config.videoGenerateAudio, true);
+
+    // 参考图：文档只收公开 URL（不收 data URI），本地图先传到上游 /v1/files/upload 换成 URL。
+    // 单张失败不该毁掉整单 —— 能发几张发几张。
+    const imageUrls: string[] = [];
+    for (const image of references.slice(0, 9)) {
+        const existing = [image.url, image.dataUrl].map((value) => String(value || "").trim()).find((value) => isPublicHttpUrl(value) && !value.startsWith("data:"));
+        if (existing) {
+            imageUrls.push(existing);
+            continue;
+        }
+        try {
+            const dataUrl = await imageToDataUrl(image);
+            if (!dataUrl?.startsWith("data:image/")) continue;
+            const blob = await (await fetch(dataUrl)).blob();
+            const uploaded = await uploadProviderMediaFile(config, blob, publicImageFilename(blob), options);
+            if (isPublicHttpUrl(uploaded) && !uploaded.startsWith("data:")) imageUrls.push(uploaded);
+        } catch {
+            // 忽略单张失败
+        }
+    }
+
+    const metadata: Record<string, unknown> = { resolution, ratio, generate_audio: generateAudio };
+    // 文档：`images` 只用于图生视频，1 张首帧 / 2 张首尾帧；更多参考素材走 `metadata.content`
+    //（一旦给了 content，顶层 images 会被整体覆盖）。
+    if (imageUrls.length > 2) {
+        metadata.content = imageUrls.map((url) => ({ type: "image_url", image_url: { url } }));
+    }
+    const images = imageUrls.length <= 2 && imageUrls.length ? imageUrls : undefined;
+
+    const base: Record<string, unknown> = { model: modelName, prompt: promptText, ...(images ? { images } : {}) };
+    const attempts: Record<string, unknown>[] = [
+        // 文档形状：`seconds` 在顶层。
+        { ...base, seconds, metadata },
+        // 官方 curl 形状：`seconds` 塞进 metadata（老版 /v1/video/generations 的写法）。
+        // 只在第一发 400 时才会走到，避免个别适配器只读这一处。
+        { ...base, metadata: { ...metadata, seconds } },
+        // 最小合法体：某些严格适配器（不适合 ratio / generate_audio 的模型）会对多余键报 400，
+        // 退到只剩文档里最核心的三个字段。
+        { ...base, seconds, metadata: { resolution } },
+    ];
+
+    let lastError: unknown;
+    for (const payload of attempts) {
+        // 排查「出片内容跟提示词无关」时最需要的就是「我们到底发了什么」——payload 里没有密钥，
+        // 只有 model / prompt / metadata，所以线上也打（提示词截断到 300 字）。
+        console.info("[work-fisher] create video body", {
+            model: payload.model,
+            seconds: payload.seconds ?? (payload.metadata as Record<string, unknown> | undefined)?.seconds,
+            images: Array.isArray(payload.images) ? payload.images.length : 0,
+            promptPreview: String(payload.prompt || "").slice(0, 300),
+            promptLength: String(payload.prompt || "").length,
+            metadata: payload.metadata,
+        });
+        try {
+            const postUrl = aiApiUrl(config, "/videos");
+            const rawCreated = (await retryAlternateTransport(config, "/videos", postUrl, payload, (url) => axios.post<ApiVideoResponse>(url, payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal }))).data;
+            const created = unwrapVideoResponse(rawCreated);
+            if (!created.id) throw new Error(apiText("noVideoTaskId"));
+            // 上游若回显 prompt，就核对一下：不一致 = 网关把提示词改写了/丢了，
+            // 那就是「出片跟提示词无关」的直接证据（比事后猜字段快得多）。
+            const echoed = (rawCreated as unknown as { prompt?: unknown; input?: { prompt?: unknown } }) || {};
+            const upstreamPrompt = typeof echoed.prompt === "string" ? echoed.prompt : typeof echoed.input?.prompt === "string" ? echoed.input.prompt : "";
+            if (upstreamPrompt && promptText && !upstreamPrompt.includes(promptText.slice(0, 12))) {
+                console.warn("[work-fisher] 上游回显的提示词与我们提交的不一致（提示词可能在网关被改写）", {
+                    sent: promptText.slice(0, 300),
+                    got: upstreamPrompt.slice(0, 300),
+                });
+            }
+            return { id: created.id, provider: "openai", model };
+        } catch (error) {
+            lastError = error;
+            if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+            if (!axios.isAxiosError(error) || error.response?.status !== 400) break;
+        }
+    }
+    throw new Error(readAxiosError(lastError, apiText("videoTaskCreateFailed")));
+}
+
+/** work-fisher 清晰度档位：480p / 720p / 1080p / 2k / 4k（另有 native1080p / native4k）。 */
+export function normalizeWorkFisherResolution(value: string) {
+    const raw = (value || "").trim().toLowerCase().replace(/\s+/g, "");
+    if (!raw) return "720p";
+    if (raw === "native1080p" || raw === "native4k" || raw === "2k" || raw === "4k") return raw;
+    const aliases: Record<string, string> = {
+        low: "480p",
+        sd: "480p",
+        "480": "480p",
+        medium: "720p",
+        standard: "720p",
+        auto: "720p",
+        "720": "720p",
+        high: "1080p",
+        hd: "1080p",
+        "1080": "1080p",
+    };
+    if (aliases[raw]) return aliases[raw];
+    const numeric = Number(raw.replace(/p$/, ""));
+    if (!Number.isFinite(numeric)) return "720p";
+    if (numeric <= 480) return "480p";
+    if (numeric <= 720) return "720p";
+    if (numeric <= 1080) return "1080p";
+    if (numeric <= 1440) return "2k";
+    return "4k";
+}
+
+/** work-fisher 时长：整数秒，Seedance 2.0 收 4–15、2.5 收 4–30，这里给 [1,30] 让上游自己校验。 */
+function workFisherSeconds(value: string) {
+    const seconds = Math.floor(Number(value) || 5);
+    return String(Math.max(1, Math.min(30, seconds)));
+}
+
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     if (isMetasoH3Video(config, model)) {
         return createMetasoH3VideoTask(config, model, prompt, references, options);
@@ -1674,6 +1833,16 @@ export function isAicostJsonVideoHost(baseUrl: string) {
     return hostname === "aicost.me" || hostname.endsWith(".aicost.me");
 }
 
+/**
+ * work-fisher（api.work-fisher.com 及其子域）：视频走 `/v1/videos` + `metadata` 契约，
+ * 结果在 `metadata.url`。**必须在所有模型名启发式之前分流** —— 它挂的模型名里带 `h3`
+ * （`rh-ai-aifisher-h3-m10-s10`），否则会被 `isRelayMiniMaxH3Video` 抢走。导出给探针用。
+ */
+export function isWorkFisherVideoHost(baseUrl: string) {
+    const hostname = videoHostname(baseUrl);
+    return hostname === "work-fisher.com" || hostname.endsWith(".work-fisher.com");
+}
+
 function isMetasoH3Video(config: AiConfig, _model: string) {
     // Only Metaso's OpenAI root uses the sora-2 JSON shape. Other H3 relays differ.
     return /metaso\.cn/i.test(config.baseUrl.trim());
@@ -1685,6 +1854,9 @@ function isMetasoH3Video(config: AiConfig, _model: string) {
  */
 export function isRelayMiniMaxH3Video(config: AiConfig, model: string) {
     if (/autodl\.art|metaso\.cn/i.test(config.baseUrl.trim())) return false;
+    // work-fisher 挂了 RunningHub 系的 `rh-*-h3-*` 工作流模型，名字里带 `-h3-` 但不是
+    // MiniMax-H3 中转：它的契约是 `/v1/videos` + `metadata`（见 createWorkFisherVideoTask）。
+    if (isWorkFisherVideoHost(config.baseUrl)) return false;
     const name = modelOptionName(model).toLowerCase();
     return /minimax[-_]?h3|(?:^|[-_])h3(?:$|[-_])|1ren[-_]?minimax|miora[-_]?minimax/i.test(name);
 }
@@ -1774,13 +1946,26 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
-        const video = unwrapVideoResponse((await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data);
+        const rawResponse = (await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data;
+        const video = unwrapVideoResponse(rawResponse);
         const url = videoResultUrl(video);
         if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
         if (video.status === "completed") {
-            const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
-            await assertVideoBlob(content.data);
-            return { status: "completed", result: { blob: content.data } };
+            // `/videos/{id}/content` 是 **OpenAI 原生 video 契约**才有的一次性下载端点。
+            // work-fisher / New API 系中转没有它，直链只在响应体里（上面 `videoResultUrl` 深度扫描过）。
+            // 这里再失败就说明「任务完成但响应里没有可用直链」，必须给能定位的文案 ——
+            // 把顶层字段和截断的原始 JSON 一起带出去，用户截图/贴回来就能知道该认哪个字段。
+            try {
+                const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
+                await assertVideoBlob(content.data);
+                return { status: "completed", result: { blob: content.data } };
+            } catch (contentError) {
+                if (axios.isCancel(contentError) || options?.signal?.aborted) throw contentError;
+                const detail = describeVideoPayload(rawResponse);
+                // 也不只是「报错」：完整响应留在控制台，方便下次直接照着补字段。
+                console.warn("[video] 任务已完成但没有解析出视频直链，原始响应如下（把这行内容贴给开发者即可定位）", rawResponse);
+                throw new Error(`${apiText("videoResultMissing")}\n响应字段：${detail.keys.join(", ") || "（空）"}\n原始：${detail.raw}`);
+            }
         }
         if (video.status === "failed" || video.status === "cancelled") return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
         return { status: "pending" };
@@ -1919,8 +2104,112 @@ function unwrapEnvelope<T>(payload: ApiEnvelope<T>, emptyMessage: string): T {
     return payload as T;
 }
 
-function videoResultUrl(payload: VideoResponse) {
-    return [payload.video_url, payload.result_url, payload.url, payload.content?.video_url, payload.content?.url].find((url) => typeof url === "string" && (isPublicMediaUrl(url) || /\.mp4(\?|#|$)/i.test(url)));
+/**
+ * 从查询响应里挑出视频直链。**顺序有讲究**，也**不能只看顶层那几个字段**。
+ *
+ * 🔴 踩过两次：
+ *   1. work-fisher 完成后直链在 `metadata.url`，早期不认 → `pollOpenAIVideoTask` 以为
+ *      「completed 但没 URL」，转去 GET `/videos/{id}/content`（OpenAI 原生 video 才有的端点，
+ *      work-fisher 没有）→ 面板报 500，而**后台视频其实早就好了**。
+ *   2. 只补 `metadata.url` 仍然不够：`rh-ai-aifisher-*` 这类工作流模型回来的是
+ *      `output/outputs[0]/files[0].url`、甚至是字符串里套 JSON。逐字段猜永远猜不完。
+ *
+ * 所以：先走「已知字段」的快速路径（顺序固定、语义明确），再退到**深度扫描**——
+ * 把整个响应（含数组、含字符串里的 JSON）走一遍，按「像不像成片直链」打分取最高：
+ *   100 = 带 .mp4/.mov/.webm/.m3u8 后缀
+ *    70 = 路径里有 /video /output /result /download 这类段
+ *    60 = 已知媒体 CDN（腾讯 COS / 阿里 OSS / 火山 TOS / CloudFront / work-fisher 自己）
+ *    10 = 其它 http(s) 链接（最后兜底，宁可给个可疑链接也别报错）
+ * 缩略图/封面/参考图（jpg/png…、thumb/cover/image/input 这些键）一律不算。
+ */
+const MEDIA_KEY_SKIP = /(thumb|cover|poster|preview|placeholder|avatar|icon|logo|image|img|photo|frame|audio|music|voice|prompt|negative|input|source|ref)/i;
+/** 名字就像「成片地址」的键，同分时优先（`output` 压过 `trace` 这种审计字段）。 */
+const MEDIA_KEY_BONUS = /^(video|video_url|videourl|url|output|outputs|file|files|result|results|download|download_url|downloadurl|play_url|source_url)$/i;
+const MEDIA_INPUT_SUBTREE = /^(inputs?|images?|references?|reference_images?|input_reference|ref_images?|prompt|negative_prompt|audios?|audios?)$/i;
+const MEDIA_IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|avif|heic|svg)(\?|#|$)/i;
+
+type VideoUrlCandidate = { url: string; key: string; score: number };
+
+function scoreVideoUrl(raw: unknown, key: string): number {
+    if (typeof raw !== "string") return 0;
+    const url = raw.trim();
+    if (!/^https?:\/\//i.test(url)) return 0;
+    if (MEDIA_IMAGE_EXT.test(url)) return 0;
+    if (key && MEDIA_KEY_SKIP.test(key) && !/video/i.test(key)) return 0;
+    const bonus = key && MEDIA_KEY_BONUS.test(key) ? 5 : 0;
+    if (/\.(mp4|m4v|mov|webm|mkv|m3u8)(\?|#|$)/i.test(url)) return 100 + bonus;
+    let parsed: URL | null = null;
+    try {
+        parsed = new URL(url);
+    } catch {
+        parsed = null;
+    }
+    const path = parsed?.pathname || "";
+    if (/(^|\/)(video|videos|output|outputs|result|results|download|media|play)(\/|$)/i.test(path)) return 70 + bonus;
+    if (parsed && /(myqcloud\.com|aliyuncs\.com|\.tos-|tos-|volces\.com|cloudfront\.net|work-fisher\.com|runninghub\.)/i.test(parsed.hostname)) return 60 + bonus;
+    return 10 + bonus;
+}
+
+function collectVideoUrlCandidates(value: unknown, key: string, depth: number, out: VideoUrlCandidate[]) {
+    if (value == null || depth > 7 || out.length > 400) return;
+    if (typeof value === "string") {
+        const text = value.trim();
+        // 有些中转把结果再包一层 JSON 字符串。
+        if ((text.startsWith("{") || text.startsWith("[")) && text.length < 40000) {
+            try {
+                collectVideoUrlCandidates(JSON.parse(text), key, depth + 1, out);
+                return;
+            } catch {
+                // 不是 JSON，按普通字符串处理
+            }
+        }
+        const score = scoreVideoUrl(text, key);
+        if (score) out.push({ url: text, key, score });
+        return;
+    }
+    if (Array.isArray(value)) {
+        for (const item of value) collectVideoUrlCandidates(item, key, depth + 1, out);
+        return;
+    }
+    if (typeof value !== "object") return;
+    for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>)) {
+        // 参考素材（输入图/参考视频）不是成片，整棵子树跳过。
+        if (MEDIA_INPUT_SUBTREE.test(childKey) && typeof childValue !== "string") continue;
+        collectVideoUrlCandidates(childValue, childKey, depth + 1, out);
+    }
+}
+
+export function videoResultUrl(payload: VideoResponse) {
+    const candidates = [
+        payload.video_url,
+        payload.result_url,
+        payload.url,
+        payload.content?.video_url,
+        payload.content?.url,
+        payload.metadata?.url,
+        payload.metadata?.video_url,
+        payload.task?.content?.url,
+    ];
+    const direct = candidates.find((url) => typeof url === "string" && url.trim() && (isPublicMediaUrl(url) || /\.(mp4|mov|webm)(\?|#|$)/i.test(url)));
+    if (direct) return direct;
+    const deep: VideoUrlCandidate[] = [];
+    collectVideoUrlCandidates(payload, "", 0, deep);
+    if (!deep.length) return undefined;
+    deep.sort((a, b) => b.score - a.score);
+    return deep[0].url;
+}
+
+/** 「完成但没直链」时用来定位问题：顶层字段 + 截断的原始 JSON。 */
+function describeVideoPayload(payload: unknown) {
+    const source = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
+    const keys = source ? Object.keys(source).slice(0, 30) : [];
+    let raw = "";
+    try {
+        raw = JSON.stringify(payload) || "";
+    } catch {
+        raw = String(payload ?? "");
+    }
+    return { keys, raw: raw.length > 900 ? `${raw.slice(0, 900)}…` : raw };
 }
 
 function readApiErrorMessage(value: unknown): string {

@@ -416,6 +416,7 @@ export default {
         videoTaskTimedOut: "视频任务超时，请稍后重试",
         videoGenerationFailed: "视频生成失败",
         videoTaskQueryFailed: "视频任务查询失败",
+        videoResultMissing: "视频任务已完成，但响应里没有可下载的直链（渠道可能只给了临时地址字段，检查是否为 metadata.url）",
         videoPromptRequired: "请输入视频提示词，或连接参考图片/视频/音频",
         referenceImageReadFailed: "参考图读取失败，请换一张图片或重新上传",
         referenceAudioReadFailed: "参考音频读取失败，请换一个音频或重新上传",
@@ -543,6 +544,7 @@ export default {
             script: "脚本生成器",
             videoMerge: "视频合并",
             reverseVideo: "反推视频",
+            mochiani: "MochiAni 生视频",
         },
         videoMerge: {
             summary: "{{count}} 段 · {{duration}}",

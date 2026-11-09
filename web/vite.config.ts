@@ -1,5 +1,6 @@
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
+import { appendFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,44 @@ import { handleCanvasBridge } from "./api/canvas-bridge.js";
 import { handleMioraQueue } from "./api/miora-queue.js";
 
 const webDir = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * work-fisher（`rh-*` 工作流模型）的 `/v1/videos` 请求/响应落盘到 `video-diag.log`。
+ *
+ * 为什么只抓这一个站：它的完成态响应体不按 OpenAI 形状给直链（`metadata.url` 有时有、
+ * 有时在 `output/outputs` 里），而中转又不给文档 —— 每次都得靠「真实响应长什么样」才能修。
+ * 只抓创建与「已完成/失败」的轮询，正常 pending 轮询不写（每 3 秒一条会把盘写爆）。
+ * 请求体里没有密钥（Authorization 在 header，不落盘）。
+ */
+function isWorkFisherVideoUrl(url: URL) {
+    return /(^|\.)work-fisher\.com$/i.test(url.hostname) && /^\/v1\/videos(\/|$)/i.test(url.pathname);
+}
+
+async function captureVideoDiag(targetUrl: URL, method: string, body: Uint8Array | undefined, upstream: { status: number; clone(): { text(): Promise<string> } }) {
+    if (!isWorkFisherVideoUrl(targetUrl)) return;
+    try {
+        const isPoll = /^\/v1\/videos\/\d/.test(targetUrl.pathname);
+        const text = await upstream.clone().text();
+        if (isPoll) {
+            let status = "";
+            try {
+                const parsed = JSON.parse(text) as { status?: unknown; data?: { status?: unknown } };
+                status = String(parsed.status ?? parsed.data?.status ?? "");
+            } catch {
+                status = "";
+            }
+            const settled = /completed|succeed|success|failed|error|cancel/i.test(status) || upstream.status >= 400;
+            if (!settled) return;
+        }
+        const requestPreview = body ? Buffer.from(body).toString("utf8").slice(0, 1500) : "";
+        appendFileSync(
+            "video-diag.log",
+            `[${new Date().toISOString()}] ${method} ${upstream.status} ${targetUrl.href}\nrequest: ${requestPreview}\nresponse: ${text.slice(0, 4000)}\n\n`,
+        );
+    } catch {
+        // 抓日志失败绝不影响代理本身
+    }
+}
 
 /** undici/Node wrap the real failure (DNS, refused, reset, abort) in `cause` — surface it. */
 function describeError(error: unknown): string {
@@ -90,6 +129,7 @@ function apiProxyPlugin(): Plugin {
                                 `[api-proxy] ${upstream.status} ${targetUrl.href}\nrequest: ${bodyPreview}\nresponse: ${errorText.slice(0, 800)}`,
                             );
                         }
+                        await captureVideoDiag(targetUrl, req.method || "GET", body, upstream);
                         res.statusCode = upstream.status;
                         upstream.headers.forEach((value, key) => {
                             if (!["content-encoding", "content-length", "transfer-encoding", "connection"].includes(key)) res.setHeader(key, value);

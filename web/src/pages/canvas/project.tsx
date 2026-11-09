@@ -156,6 +156,7 @@ import { startCanvasWorkbuddyBridge } from "@/lib/canvas/canvas-workbuddy-bridge
 import { CanvasNodePromptPanel, type CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { CanvasToolbar } from "@/components/canvas/canvas-toolbar";
 import { CanvasMochianiPanel } from "@/components/canvas/canvas-mochiani-panel";
+import { CanvasMochianiNodeContent } from "@/components/canvas/canvas-mochiani-node-content";
 import { CanvasReverseVideoNodeContent } from "@/components/canvas/canvas-reverse-video-node-content";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
@@ -10389,6 +10390,15 @@ function AtelierCanvasPage() {
                     />
                 );
             }
+            if (contentNode.type === CanvasNodeType.Mochiani) {
+                return (
+                    <CanvasMochianiNodeContent
+                        node={contentNode}
+                        onCreateVideo={createBridgeVideoNode}
+                        onConfigChange={handleConfigNodeChange}
+                    />
+                );
+            }
             if (contentNode.type === CanvasNodeType.VideoMerge) {
                 return (
                     <CanvasVideoMergeNodeContent
@@ -10800,8 +10810,9 @@ function AtelierCanvasPage() {
                 {/* 后台队列的进度 / 停止入口：弹窗关掉以后仍然显示，不挡画布操作。 */}
                 <CanvasH3OptimizeProgress />
 
-                {/* MochiAni 生视频：本机桥（tools/mochiani-bridge）→ MochiAni MCP → 视频回画布。 */}
-                <CanvasMochianiPanel onCreateVideo={createBridgeVideoNode} />
+                {/* MochiAni 生视频：点右下角 = 在画布上新建一个「MochiAni 生视频」节点（不再是遮罩弹窗）。
+                    内容区在 renderNodeContentPanel 里渲染，走本机桥 tools/mochiani-bridge → MochiAni MCP → 视频回画布。 */}
+                <CanvasMochianiPanel onCreateNode={() => createNode(CanvasNodeType.Mochiani, getCanvasCenter())} />
 
                 {/* 反推视频不再是右下角浮层：它已经做成可右键创建的内置节点（CanvasNodeType.ReverseVideo），
                     内容区在 renderNodeContentPanel 里渲染。 */}

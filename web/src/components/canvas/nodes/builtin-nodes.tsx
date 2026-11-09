@@ -44,6 +44,9 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
     // 反推视频：只收视频（走左侧 target 连线），产物是它自己建的对话 / 文本 / 脚本节点，
     // 所以不需要 source 手柄 —— 从这里拖出一根线到别处什么也不会发生。
     { type: CanvasNodeType.ReverseVideo, title: i18n.t("canvas.nodeTypes.reverseVideo"), icon: <Wand2 className={iconClass} />, minimapColor: "#a78bfa", hasSourceHandle: false, hidePanel: true },
+    // MochiAni 生视频：整个「视频生成窗口」就是一个节点，不再用遮罩弹窗盖住画布。
+    // 它只跟本机桥对话（127.0.0.1:17399），产物是它自己建的视频节点，所以不需要 source 手柄。
+    { type: CanvasNodeType.Mochiani, title: i18n.t("canvas.nodeTypes.mochiani"), icon: <Clapperboard className={iconClass} />, minimapColor: "#f472b6", hasSourceHandle: false, hidePanel: true },
 ].map((def) => {
     const spec = NODE_SPECS[def.type];
     return { ...def, title: spec.title, defaultSize: { width: spec.width, height: spec.height }, defaultMetadata: spec.metadata };

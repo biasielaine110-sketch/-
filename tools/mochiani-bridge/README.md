@@ -17,8 +17,8 @@ MochiAni MCP 是 **stdio 进程**，只有本机 Node 能拉起来；画布是�
 1. 本机已 `npm i -g mochiani-mcp` 并跑过 `mochiani-mcp-setup`（配置在
    `%LOCALAPPDATA%\MochiAni\MCP\config.json`）。
 2. **浏览器里已登录 mochiani.com**，并且页面上的 MCP 处于「已连接」状态。
-3. **打开的是某个具体作品**（漫剧编辑器 / 画布），不是首页。
-   MochiAni 的生成能力绑在「作品 → 分镜」上；首页 `operations.canGenerate=false`，生成不了。
+3. **打开的是某个具体作品**（无限画布 / 漫剧编辑器），不是首页。
+   首页 `mochiani-client` 没有生成能力；无限画布走 `canvas_*`，漫剧编辑器走分镜。
    在首页点一下「刷新连接」之后进入作品页，让页面重新注册给 MCP。
 4. 画布本身在开着（`npm run dev` 或线上页面），并且项目页已经打开。
 
@@ -47,41 +47,137 @@ node tools/mochiani-bridge/server.mjs
 
 ## 一次生成发生了什么
 
-```
-画布面板「预检」  POST /api/plan
-  ├─ mochiani_list_open_pages            挑出 canGenerate 的页面
-  ├─ mochiani_get_work_summary           读 projectId / workId
-  ├─ mochiani_create_shot                把你的指令作为新分镜文案写进去
-  └─ mochiani_preflight_generation       只读预检：模型 / 渠道 / 参考 / 阻塞原因
+面板按「视频生成窗口」的样子做：**选模型 → 选渠道 → 调参数 → 写提示词 → 传参考图 → 预检 → 确认生成**。
+两条链路按浏览器里打开的是哪种页面自动分流。
 
-画布面板「确认生成」POST /api/jobs/:id/confirm     ← 从这一步开始扣余额
-  ├─ mochiani_generate_video             下发分镜视频生成
+### A. 无限画布（`mochiani-canvas`）—— 渠道模型模式走这条
+
+```
+GET /api/models                              ← 面板一打开就拉
+  ├─ mochiani_canvas_read                   找一个视频节点（没有就临时建一个当探针，不生成）
+  └─ mochiani_canvas_model_options          真实模型目录：46 个模型 + 各自渠道 + 参数档位 + 媒体上限
+
+POST /api/plan   {prompt, modelKey, channelId, params, images:[{dataUrl}]}
+  ├─ mochiani_canvas_create_nodes           建视频节点
+  ├─ mochiani_canvas_locate_node            把面板打开（这一步会偶发超时，忽略）
+  ├─ mochiani_canvas_model_controls         轮询到 panelMounted=true，拿 configToken
+  ├─ mochiani_canvas_configure_model        model → channel → 每个 parameter，**每步都要重读新 token**
+  ├─ mochiani_canvas_upload_and_connect     参考图（本机落盘后导入 + 连线一步到位）
+  ├─ mochiani_canvas_set_prompt             或 edit_references（有参考图时必须走这个，见下）
+  └─ mochiani_canvas_generation_context     contextToken + estimatedPoints
+
+POST /api/jobs/:id/confirm                   ← 从这一步开始扣灵点
+  ├─ mochiani_canvas_generate_node          expectedContext + confirmedByUser=true
   └─ 轮询（默认 15s）
+       ├─ mochiani_canvas_generation_operation   state / completionConfirmed
+       └─ mochiani_canvas_get_node               取 videoUrl
+```
+
+### B. 漫剧编辑器（`carton-editor`）
+
+```
+POST /api/plan
+  ├─ mochiani_get_work_summary          读 projectId / workId
+  ├─ mochiani_create_shot               把指令作为新分镜文案写进去
+  └─ mochiani_preflight_generation      只读预检：模型 / 渠道 / 参考 / 阻塞原因
+
+POST /api/jobs/:id/confirm               ← 从这一步开始扣余额
+  ├─ mochiani_generate_video
+  └─ 轮询
        ├─ mochiani_get_shot_media_versions   主视频出来就算完成（优先）
        └─ mochiani_get_generation_task_status 明确 failed 才判失败
-
-画布面板「放到画布」
-  └─ 复用画布桥的 createBridgeVideoNode，把 videoUrl 落成视频节点
 ```
+
+最后「放到画布」复用画布的 `createBridgeVideoNode`，把 videoUrl 落成视频节点。
+
+## 参考图怎么进 MochiAni
+
+画布页面只能给到**图片字节**（`<input type="file">` 拿到的是 File，不是路径），
+而 MochiAni 的导入工具只吃**本机绝对路径**。所以桥里做了两件事：
+
+1. 把 `dataUrl` 解成 Buffer，落到 `%TEMP%\mochiani-bridge-refs\`；
+2. 调 `mochiani_canvas_upload_and_connect(localPath, mediaType:"image", targetNodeId)`，
+   一步完成「导入素材节点 + 按原生端口规则连到视频节点」，再 `get_node` 等
+   `media.uploadConfirmed` 为真才放行。
+
+> ⚠️ 连完参考图后，该节点的提示词就变成**结构化文档**（带 `documentToken` + `references`），
+> 此时 `mochiani_canvas_set_prompt` 会被页面拒绝，而且报的是一个没填模板的
+> `画布操作未执行：{reason}`（看不出真实原因）。必须改走 `mochiani_canvas_edit_references`。
+> 桥里先读 `mochiani_canvas_references` 判断，有引用就自动切过去。
+
+> ⚠️ 模型/渠道切换必须在连参考图**之前**：MochiAni 不允许带上游连线的节点再切模型。
 
 ## 花钱的闸门
 
-- `预检` 不花钱，但它**会**在你的 MochiAni 作品里新增一个分镜（文案 = 指令）。这是后面生成的对象。
-- 只有点 `确认生成（扣 MochiAni 余额）` 才真的下单，用的是 MochiAni 账户余额，走 MochiAni 原生计费。
+- `预检` 不花钱，但它**会**在你的 MochiAni 画布/作品里新增一个空节点或分镜。这是后面生成的对象。
+- 只有点 `确认生成（扣 MochiAni 灵点）` 才真的下单，走 MochiAni 原生计费。
 - `停止轮询` 只是停本机查询，**不会取消 MochiAni 上的任务、也不会退钱**。
-- 超时（1 小时）/ 空结果都不会自动重发 —— 避免重复扣费。去 MochiAni 作品里确认后再决定。
+- 超时（1 小时）/ 空结果都不会自动重发 —— 避免重复扣费。去 MochiAni 里确认后再决定。
 
 ## HTTP 接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/health` | 桥 + MCP 连接状态 |
-| GET | `/api/context?pageId=` | 当前作品（`projectId/workId`）+ 已连接页面列表 |
-| POST | `/api/plan` | `{prompt, pageId?}` → 建分镜 + 预检，返回 job（`stage=ready`） |
+| GET | `/api/context?pageId=` | 当前作品 + 已连接页面列表 |
+| GET | `/api/account?pageId=` | MochiAni 账户灵点 |
+| GET | `/api/models?pageId=&nodeId=` | **真实模型目录**（模型 / 渠道 / 参数 / 媒体上限）+ 面板当前配置 |
+| POST | `/api/plan` | `{prompt, pageId?, modelKey?, channelId?, params?, images?}` → 建节点 + 切配置 + 导图 + 预检，返回 job（`stage=ready`） |
 | POST | `/api/jobs/:id/confirm` | 确认下单，开始轮询 |
 | POST | `/api/jobs/:id/cancel` | 停止本机轮询 |
 | GET | `/api/jobs` / `/api/jobs/:id` | 任务列表 / 单个任务 |
 | POST | `/api/tool` | `{name, args}` 直调任意 MochiAni 工具，排障用 |
+
+### 跨域 / 线上页面
+
+桥对所有来源放开（`Access-Control-Allow-Origin: *`），并且带
+`Access-Control-Allow-Private-Network: true`。所以**线上 HTTPS 页面（pages.dev）
+也能直接 fetch `http://127.0.0.1:17399`** —— 浏览器把 `127.0.0.1` 当作可信来源，不算混合内容。
+前提是桥跑在你自己这台机器上。
+
+### 别的电脑也想用（远程 / 当网站使）
+
+要并发，先认清一件事：**桥必须和「浏览器里登录着 MochiAni 的那个页面」在同一台机器上**
+（MCP 的 daemon 在 `127.0.0.1:17321`，页面只往本机注册）。所以有两种形态：
+
+**A. 每台电脑各自跑桥（最省事，推荐）**
+
+前端照旧用 pages.dev / 任意地址，每台电脑装一份：
+
+1. `npm i -g mochiani-mcp` + 跑一次它的 setup（登录 MochiAni，页面点「刷新连接」）
+2. 拷走 `tools/mochiani-bridge/`，双击 `start.bat`
+3. 节点里保持默认 `http://127.0.0.1:17399`
+
+**B. 一台常开的机器当「服务器」，其它电脑只开网页**
+
+机器 A 上跑桥 + 一个登录着 MochiAni 的浏览器窗口（别关），把桥暴露到公网：
+
+```bash
+# 1) 开令牌 + 允许外部访问（不给令牌 = 谁拿到地址都能花你的灵点）
+set MOCHIANI_BRIDGE_HOST=0.0.0.0
+set MOCHIANI_BRIDGE_TOKEN=自己编一个长串
+start.bat
+
+# 2) 用 Tailscale Funnel 给它一个固定 HTTPS 地址（见 skill permanent-public-url-tailscale-funnel）
+tailscale funnel --bg 17399
+# → https://<机器名>.<tailnet>.ts.net/
+```
+
+机器 B/C 上打开前端，节点里的「本机桥」填：
+
+```
+https://<机器名>.<tailnet>.ts.net/?token=自己编那个长串
+```
+
+`?token=` 会被前端剥出来改成 `x-mochiani-token` 请求头（不留在 URL 里）。
+桥这侧：`/health` 永远放行（画布要能区分「桥没开」和「令牌不对」），其它 `/api/*` 一律验令牌，
+401 时画布会直接提示「地址要带 ?token=」。
+
+注意：
+- A 机的浏览器窗口必须保持登录态 + 停在无限画布/作品页；机器休眠 = 全挂。
+- 灵点是**机器 A 那个账号**的余额，所有电脑共用。
+- 公网暴露时别用 `ry` 之类弱令牌；这个桥没有任何限流。
+
 
 ## 排障
 
@@ -92,4 +188,9 @@ node tools/mochiani-bridge/server.mjs
 | `NO_MOCHIANI_PAGE` | 浏览器页面没连上 MCP，去页面点「刷新连接」 |
 | `NO_ACTIVE_WORK` | 页面连上了但读不到作品 ID，确认在作品编辑页 |
 | 面板里 `MCP 已连接` 但预检按钮灰 | 还没读到作品，先点「刷新」 |
-| 生成一直「生成中」 | 去 MochiAni 作品里看分镜状态；别重复下单 |
+| `PANEL_NOT_MOUNTED` | 视频节点的生成面板没打开；去 MochiAni 画布点一下那个视频节点再重试 |
+| `画布操作未执行：{reason}` | MochiAni 侧没填模板的错误。**连了参考图还调 `set_prompt` 就会这样**，要走 `edit_references` |
+| `MODEL_VERIFY_FAILED` | 模型没切成，节点上的实际模型和选的不一致；去 MochiAni 看一眼再预检 |
+| 渠道没生效（warning） | 该渠道对这个模型不可用，换一个渠道 |
+| 生成一直「生成中」 | 去 MochiAni 里看节点状态；别重复下单 |
+| 余额不足 | 预检能过，`确认生成` 会被 MochiAni 拒；先充值 |
