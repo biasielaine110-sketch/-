@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App, Button, Input, Select, Tag, Upload } from "antd";
+import type { SelectProps } from "antd";
 import {
     CircleAlert,
     CircleCheck,
@@ -111,6 +112,73 @@ type ModelOption = {
 };
 
 type RefImage = { uid: string; name: string; dataUrl: string };
+
+/**
+ * 模型分类 —— MochiAni 的 `model_options` 把生图 / 生视频（还有音频）全摊在同一张表里，
+ * 几十个模型平铺在一个下拉里根本没法选。这里按「能拿到的线索」归组，优先级：
+ *
+ *  ① **显式字段**：`kind` / `type` / `mediaType` / `modelType` / `category` / `outputType` /
+ *     `nodeKind` / `taskType`，以及数组形态的 `capabilities` / `tags` / `outputTypes`；
+ *  ② 字段有值、但枚举没见过 → **原样拿它当分组名**（宁可多出一组「xxx」，也别把认不出来的
+ *     全塞进「其他」—— 那等于没分）；
+ *  ③ 一个线索都没有 → 按模型名 / key 关键词猜。
+ *
+ * ⚠️ 别写成「前 N 个是视频」这种位置假设：MochiAni 那边的目录顺序随时会变。
+ */
+const MODEL_KIND_LABEL = { video: "生视频", image: "生图", audio: "音频", text: "文本", other: "其他" } as const;
+type ModelKind = keyof typeof MODEL_KIND_LABEL;
+
+const MODEL_KIND_ORDER: Record<ModelKind, number> = { video: 0, image: 1, audio: 2, text: 3, other: 9 };
+
+const MODEL_KIND_FIELDS = ["kind", "type", "mediaType", "modelType", "category", "outputType", "nodeKind", "taskType", "subType", "mode", "typeName"];
+const MODEL_KIND_LIST_FIELDS = ["capabilities", "tags", "types", "outputTypes"];
+
+const VIDEO_NAME_HINTS = /(seedance|kling|veo|sora|hailuo|minimax|vidu|runway|pika|luma|wan2|wanx|hunyuan|cogvideo|ltx|skyreels|kandinsky|framepack|mochi|t2v|i2v|v2v|video|可灵|即梦|海螺|混元|万相|视频)/i;
+const IMAGE_NAME_HINTS = /(image|dall|flux|midjourney|^mj|sdxl|sd3|stable|diffusion|banana|seedream|imagen|recraft|ideogram|kolors|hidream|gpt-4o|生图|图像|图片)/i;
+
+/** 从模型条目里抠出「描述它是什么模态」的原始字符串（没有就空串）。 */
+function readModelKindToken(item: ModelOption): string {
+    const record = item as unknown as Record<string, unknown>;
+    for (const field of MODEL_KIND_FIELDS) {
+        const raw = record[field];
+        if (typeof raw === "string" && raw.trim()) return raw.trim();
+    }
+    for (const field of MODEL_KIND_LIST_FIELDS) {
+        const raw = record[field];
+        if (Array.isArray(raw)) {
+            const joined = raw.filter((value): value is string => typeof value === "string").join(" ");
+            if (joined.trim()) return joined.trim();
+        }
+    }
+    return "";
+}
+
+function normalizeModelKind(token: string): ModelKind {
+    const value = token.toLowerCase();
+    if (/(^|[^a-z])(video|t2v|i2v|v2v|movie)([^a-z]|$)/.test(value) || /视频/.test(value)) return "video";
+    if (/(^|[^a-z])(image|img|t2i|i2i|picture|photo)([^a-z]|$)/.test(value) || /图|绘画/.test(value)) return "image";
+    if (/(^|[^a-z])(audio|music|tts|voice|sound)([^a-z]|$)/.test(value) || /音频|音乐|语音/.test(value)) return "audio";
+    if (/(^|[^a-z])(text|llm|chat)([^a-z]|$)/.test(value) || /文本|对话/.test(value)) return "text";
+    return "other";
+}
+
+/** 分组信息：`key` 用来合并同组，`label` 是下拉里的分组标题，`order` 决定组之间的先后。 */
+function modelKindInfo(item: ModelOption): { key: string; label: string; order: number } {
+    const token = readModelKindToken(item);
+    if (token) {
+        const kind = normalizeModelKind(token);
+        // 认不出来的枚举：原样当分组名，别丢线索。
+        if (kind === "other") return { key: `raw:${token.toLowerCase()}`, label: token, order: 5 };
+        return { key: kind, label: MODEL_KIND_LABEL[kind], order: MODEL_KIND_ORDER[kind] };
+    }
+    const name = `${item.modelName || ""} ${item.modelKey || ""} ${item.modelId || ""}`;
+    // 名字里明写「视频 / video / i2v / t2v」的一定是视频模型（含「图生视频」「image-to-video」这类），
+    // 先判掉它，别让 `image` 这个关键词把图生视频误判成生图模型。
+    if (/(视频|video|i2v|t2v|v2v)/i.test(name)) return { key: "video", label: MODEL_KIND_LABEL.video, order: MODEL_KIND_ORDER.video };
+    if (IMAGE_NAME_HINTS.test(name)) return { key: "image", label: MODEL_KIND_LABEL.image, order: MODEL_KIND_ORDER.image };
+    if (VIDEO_NAME_HINTS.test(name)) return { key: "video", label: MODEL_KIND_LABEL.video, order: MODEL_KIND_ORDER.video };
+    return { key: "other", label: MODEL_KIND_LABEL.other, order: MODEL_KIND_ORDER.other };
+}
 
 type BridgeBody = Record<string, unknown> & {
     ok?: boolean;
@@ -423,7 +491,9 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 setModels(list);
                 setModelsError("");
                 const preferKey = preferred?.modelKey || data.panel?.modelKey || "";
-                const nextModel = list.find((item) => item.modelKey === preferKey) || list[0];
+                // 没偏好时别直接取第一个：目录里混着生图模型，默认落到生视频那一组更合理。
+                const nextModel =
+                    list.find((item) => item.modelKey === preferKey) || list.find((item) => modelKindInfo(item).key === "video") || list[0];
                 if (!nextModel) return;
                 const preferChannel = preferred?.channelId || data.panel?.channelId || "";
                 const nextChannel = nextModel.channels?.find((item) => item.id === preferChannel) || nextModel.channels?.[0];
@@ -564,13 +634,47 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         };
     }, [audioLimit, imageLimit, linkedByKind, refImages, videoLimit]);
 
-    const modelOptions = useMemo(() => {
+    /**
+     * 下拉选项：按模态分组（生视频 / 生图 / 音频 / 文本 / 其他）。
+     *
+     * - 只有一组时**不加组标题**（多一行灰字纯噪音）；
+     * - 组标题带数量，方便一眼看出「视频多少个、图多少个」；
+     * - 同名不同 id 的模型仍带 `#id` 后缀（MochiAni 确实有这种）。
+     */
+    const modelOptions = useMemo<NonNullable<SelectProps["options"]>>(() => {
         const counter = new Map<string, number>();
         for (const item of models) counter.set(item.modelName, (counter.get(item.modelName) || 0) + 1);
-        return models.map((item) => ({
-            value: item.modelKey,
-            label: (counter.get(item.modelName) || 0) > 1 ? `${item.modelName} · #${item.modelId}` : item.modelName,
-        }));
+
+        const groups = new Map<string, { order: number; label: string; items: { value: string; label: string }[] }>();
+        for (const item of models) {
+            const info = modelKindInfo(item);
+            const group = groups.get(info.key) || { order: info.order, label: info.label, items: [] };
+            group.items.push({
+                value: item.modelKey,
+                label: (counter.get(item.modelName) || 0) > 1 ? `${item.modelName} · #${item.modelId}` : item.modelName,
+            });
+            groups.set(info.key, group);
+        }
+
+        const ordered = Array.from(groups.values()).sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
+        if (ordered.length <= 1) return ordered[0]?.items || [];
+        return ordered.map((group) => ({ label: `${group.label}（${group.items.length}）`, options: group.items }));
+    }, [models]);
+
+    /** 选中模型的分组 —— 在「生视频」节点上选到生图模型基本是选错了，给一句轻提示。 */
+    const selectedModelGroup = selectedModel ? modelKindInfo(selectedModel).key : "";
+    const selectedModelIsImage = selectedModelGroup === "image";
+
+    /** 每组多少个（下拉里已有组标题，这里给一眼总量：共 46 个 · 生视频 30 · 生图 16）。 */
+    const modelKindSummary = useMemo(() => {
+        const counts = new Map<string, { label: string; order: number; count: number }>();
+        for (const item of models) {
+            const info = modelKindInfo(item);
+            const hit = counts.get(info.key) || { label: info.label, order: info.order, count: 0 };
+            hit.count += 1;
+            counts.set(info.key, hit);
+        }
+        return Array.from(counts.values()).sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
     }, [models]);
 
     const changeModel = (value: string) => {
@@ -886,6 +990,24 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                             onChange={changeModel}
                             disabled={locked || modelsLoading || !models.length}
                         />
+                        {models.length ? (
+                            <div className="flex flex-wrap items-center gap-x-1.5 text-[10px] opacity-45">
+                                <span>共 {models.length} 个</span>
+                                {modelKindSummary.map((group) => (
+                                    <span key={group.label}>
+                                        · {group.label} {group.count}
+                                    </span>
+                                ))}
+                            </div>
+                        ) : null}
+                        {models.length > 1 && modelKindSummary.length === 1 && modelKindSummary[0].label === MODEL_KIND_LABEL.other ? (
+                            <div className="text-[10px] opacity-45">模型目录没带模态字段，暂时分不出生图 / 生视频（仍可搜索选择）。</div>
+                        ) : null}
+                        {selectedModelIsImage ? (
+                            <div className="text-[10px]" style={{ color: "#fbbf24" }}>
+                                选中的是生图模型，这个节点是拿来生视频的 —— 可能出不来视频。
+                            </div>
+                        ) : null}
                         <Select
                             size="small"
                             placeholder="选择渠道"
