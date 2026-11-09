@@ -157,6 +157,25 @@ export type CanvasReverseVideoRun = {
 };
 
 /**
+ * 「反推视频」节点的目标视频参数：风格 / 模型 / 成片总时长 / 比例 / 分辨率。
+ *
+ * 全部可选：空 = 跟随全局配置（沿用以前的行为）。字段名刻意与视频节点保持一致
+ * （`model` / `size` = 比例 / `quality` = 分辨率 / `styleTemplateId`），铺链路时能**原样**搬过去。
+ */
+export type CanvasReverseVideoTarget = {
+    /** 风格模板 id（`constant/style-templates.ts`）；空 = 不加风格。 */
+    styleTemplateId?: string;
+    /** 视频模型（`channelId::model`，见 `encodeChannelModel`）；空 = 跟随全局视频模型。 */
+    model?: string;
+    /** 成片**总**时长（秒，字符串，默认 30）：文案 / 剧本按它来规划镜头与台词量。 */
+    seconds?: string;
+    /** 视频比例（`16:9` / `9:16` / `1:1` …）；空 = 跟随全局。 */
+    size?: string;
+    /** 视频分辨率档位（`480` / `720` / `1080` / `2k`）；空 = 跟随全局 / 模型默认。 */
+    quality?: string;
+};
+
+/**
  * MochiAni 生视频节点：上一次任务快照。
  *
  * 和反推视频同理 —— 节点滚出视口会被裁掉重挂，生成要跑几分钟，
@@ -294,6 +313,25 @@ export type CanvasNodeMetadata = {
      * 三处都读它：「添加资产」「镜头图」「按镜按资产」弹窗的默认值，以及一键铺链路建出来的图片节点。
      */
     scriptImageSize?: string;
+    /**
+     * 脚本生成器：**成片总时长（秒）**。来自反推节点的「秒数」（默认 30）。
+     * 只影响**写剧本**：任务书末尾追加一段「总时长 N 秒」硬要求（镜数按「每 15 秒 4 镜」的节律、
+     * 各镜 `duration` 之和落在 N 秒附近、台词量按能念完的字数）。不填 = 与以前完全一致。
+     */
+    scriptTotalSeconds?: number;
+    /**
+     * 脚本生成器：铺链路时给**视频节点**用的模型（`channelId::model`）。
+     * 不填 = 视频节点跟随全局（老行为）。来源：反推节点上选的「视频模型」。
+     */
+    scriptVideoModel?: string;
+    /**
+     * 脚本生成器：铺链路时给**视频节点**用的比例（`16:9` / `9:16` …）。
+     * 与 `scriptImageSize`（关键帧的比例）分开存：反推节点上选的比例要同时喂给两者，
+     * 但手工改关键帧比例时不该把视频比例一起改掉。
+     */
+    scriptVideoSize?: string;
+    /** 脚本生成器：铺链路时给**视频节点**用的分辨率档位（写进节点的 `vquality`）。 */
+    scriptVideoQuality?: string;
     /**
      * 脚本生成器：这张图片是**本节点「一键批量生成」出来的资产图**（值 = 脚本节点 id）。
      *
@@ -448,6 +486,18 @@ export type CanvasNodeMetadata = {
      * 连线和这里都有值时**连线优先**（连线是用户当下看得见的那个关系）。
      */
     reverseVideoSourceId?: string;
+    /**
+     * 反推视频节点：**目标视频参数**（用户 2026-11-09 口径：窗口里要先选好风格 / 模型 / 秒数 / 比例 / 分辨率）。
+     *
+     * 两处用：
+     *  ① `seconds` = **成片总时长**，02/03 写文案 / 03 生剧本时按它规划镜头数与台词量（默认 30 秒）；
+     *  ② 03 跑「一键视频」时，风格 / 模型 / 比例 / 分辨率会**落到它建出来的脚本节点上**，再被铺链路
+     *     写进每一个视频节点（见 `project.tsx: runVideoReverse` / `handleBuildScriptPipeline`）。
+     *
+     * ⚠️ 单独一个对象而不是散在 metadata 顶层：这些是「**目标值**」，语义与视频节点自己生成用的
+     * `model` / `size` / `vquality` 不同（本节点自己并不生成任何东西），混在一起迟早被别的逻辑读错。
+     */
+    reverseVideoTarget?: CanvasReverseVideoTarget;
     /**
      * 反推视频节点：上一次执行的结果快照。
      * 节点滚出视口会被裁掉重挂，进度只放组件 state 会在回来时凭空消失，所以落到 metadata。

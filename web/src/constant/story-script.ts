@@ -538,6 +538,35 @@ function buildDensityLine(segmentTarget: number, perSegment: number): string {
 }
 
 /**
+ * 「成片总时长」硬要求块（用户 2026-11-09：反推节点上选了 30 秒，整张分镜表就得是一条 30 秒的片子）。
+ *
+ * 为什么单独成块、追加在任务书**末尾**：预设 system prompt 里只有「总时长须与创意大纲一致」这类限定语，
+ * 而大纲（用户贴进来的文案）往往没写多少秒 —— 模型于是默认按「一条完整短片」铺 1~2 分钟。
+ * 末尾这一段给的是**确定性数字**，而且镜数直接复用「每 15 秒 4 镜」的节律算，
+ * 与 `buildSegmentDurationGuidance` 里的密度口径天然一致，不会出现「一处说 8 镜、一处说 16 镜」。
+ *
+ * 不传 / 非法值 → 返回空串（任务书与改造前逐字一致）。
+ */
+export function buildStoryScriptTotalSecondsBlock(totalSeconds?: unknown): string {
+    const raw = Number(totalSeconds);
+    if (!Number.isFinite(raw) || raw <= 0) return "";
+    const total = Math.round(raw);
+    const perShot = STORY_SCRIPT_SEGMENT_TARGET_SECONDS / STORY_SCRIPT_SHOTS_PER_15S;
+    const shots = Math.max(1, Math.round(total / perShot));
+    const low = Math.max(2, Math.round(total * 0.9));
+    const high = Math.round(total * 1.1);
+    // 中文口播约 4~5 字/秒；给区间而不是精确字数，模型才不会为了凑字数硬掰台词。
+    const wordsLow = Math.round(total * 3.5);
+    const wordsHigh = Math.round(total * 5);
+    return [
+        "## 成片总时长要求（硬要求）",
+        `- 本次成片总时长 **${total} 秒**：整张表所有 \`duration\` 加起来必须落在 ${low}~${high} 秒（目标 ${total} 秒），**不要**按 1 分钟以上的量去铺。`,
+        `- 镜头数量按「每 ${STORY_SCRIPT_SEGMENT_TARGET_SECONDS} 秒 ${STORY_SCRIPT_SHOTS_PER_15S} 个镜头」的节律 → ${total} 秒约 **${shots} 个镜头**（${Math.max(1, shots - 1)}~${shots + 1} 个都可以），不要拆成二三十个 1~2 秒的碎镜。`,
+        `- 台词总量按 ${total} 秒能念完算：大约 ${wordsLow}~${wordsHigh} 字，宁可少说也不要赶。`,
+    ].join("\n");
+}
+
+/**
  * 「每镜 / 每段时长」要求。三种口径，取决于「视频分段」怎么设：
  * - `shot`：**一镜就是一段成片** → 10/15 锁死 `duration` = N；5 秒是上限（≤N）；
  * - `duration` / `2` / `3` / `4` / `5`：若干镜合并成一段 → 连续几镜的秒数之和凑到 N；

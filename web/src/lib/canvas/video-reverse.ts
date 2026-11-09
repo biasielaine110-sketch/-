@@ -7,6 +7,7 @@
  *  ② 三个命令只有「要不要特殊要求 / 要不要接着跑一键视频」的差别，提示词口径写在一处才不会漂。
  */
 
+import type { CanvasReverseVideoTarget } from "@/types/canvas";
 /** 三条命令。数字即用户看到的 01 / 02 / 03。 */
 export type VideoReverseMode = 1 | 2 | 3;
 
@@ -44,6 +45,62 @@ export function buildDefaultVideoReverseRequirement(imageMentions: readonly stri
 /** 没有任何参考图时的默认文案（也用作输入框 placeholder）。 */
 export const DEFAULT_VIDEO_REVERSE_REQUIREMENT = buildDefaultVideoReverseRequirement();
 
+/**
+ * 「秒数」的默认值（用户 2026-11-09 口径：默认 30 秒、可手动改）。
+ * 这个秒数是**成片总时长**：02 写文案按它规划台词量，03 生剧本按它规划镜数。
+ */
+export const DEFAULT_REVERSE_VIDEO_SECONDS = 30;
+/** 秒数可调范围。上限放宽到 5 分钟：长视频脚本也有人用，但再长就不该用这套「分镜反推」了。 */
+export const REVERSE_VIDEO_SECONDS_MIN = 5;
+export const REVERSE_VIDEO_SECONDS_MAX = 300;
+
+/**
+ * 归一化「目标视频参数」——窗口里选的那一档，也是 03 往脚本节点搬的那一份。
+ *
+ * 为什么要有这一步：UI 控件给什么值的都有（`InputNumber` 给 number 或 null、`Select` 允许清空、
+ * 风格选择器回调 `undefined`），直接塞进 metadata 会出现 `"30"` / `30` / `null` 三种形态，
+ * 下游一处按字符串判、一处按数字判就会静默失效。
+ *
+ * 口径：
+ *  - 空串 / 空白 / null → 返回空对象里的对应键直接**丢掉**（= 跟随全局，语义上等价于没设）；
+ *  - `seconds` 夹到 [5, 300] 的整数，非法值 → 回落默认 30。
+ */
+export function normalizeReverseVideoTarget(raw: Partial<CanvasReverseVideoTarget> | null | undefined): CanvasReverseVideoTarget {
+    const source = raw || {};
+    const text = (value: unknown) => String(value ?? "").trim();
+    const target: CanvasReverseVideoTarget = {};
+    const styleTemplateId = text(source.styleTemplateId);
+    if (styleTemplateId) target.styleTemplateId = styleTemplateId;
+    const model = text(source.model);
+    if (model) target.model = model;
+    const size = text(source.size);
+    if (size) target.size = size;
+    const quality = text(source.quality);
+    if (quality) target.quality = quality;
+    const seconds = Number(source.seconds);
+    target.seconds = String(Number.isFinite(seconds) && seconds > 0 ? Math.min(REVERSE_VIDEO_SECONDS_MAX, Math.max(REVERSE_VIDEO_SECONDS_MIN, Math.round(seconds))) : DEFAULT_REVERSE_VIDEO_SECONDS);
+    return target;
+}
+
+/** 读 metadata 上的目标参数，永远给出一个「秒数有值、其它可能为空」的对象（UI 直接拿去渲染）。 */
+export function readReverseVideoTarget(metadata: { reverseVideoTarget?: Partial<CanvasReverseVideoTarget> | null } | null | undefined): CanvasReverseVideoTarget {
+    return normalizeReverseVideoTarget(metadata?.reverseVideoTarget);
+}
+
+/**
+ * 02 / 03 里那句「按 N 秒写」。
+ *
+ * 为什么必须进提示词而不是只给脚本生成器：02 只要文案（不建脚本节点），模型默认会按
+ * 「一条完整短片」写足一分钟；用户选 30 秒，产出的镜头数与台词量就必须是 30 秒的量。
+ * 文案与剧本两头都要压，所以这句话在对话提示词里也出现一次。
+ */
+export function buildReverseTargetSecondsHint(seconds: number | string | undefined): string {
+    const value = Number(seconds);
+    const total = Number.isFinite(value) && value > 0 ? Math.round(value) : DEFAULT_REVERSE_VIDEO_SECONDS;
+    const shots = Math.max(1, Math.round((total / 15) * 4));
+    return `成片时长：整条片子按 ${total} 秒写 —— 镜头数量与台词量都按 ${total} 秒规划（参考「每 15 秒 4 镜」的节律，${total} 秒约 ${shots} 个镜头），不要写成 1 分钟的长片，也不要拆成一堆 1~2 秒的碎镜。`;
+}
+
 export const VIDEO_REVERSE_MODES = [
     {
         mode: 1 as const,
@@ -61,7 +118,7 @@ export const VIDEO_REVERSE_MODES = [
         mode: 3 as const,
         no: "03",
         label: "反推视频生成同款文案及视频",
-        hint: "同 02，再把文本节点接到脚本生成器并执行「一键视频」",
+        hint: "同 02，再把文本节点接到脚本生成器并执行「一键视频」——剧本按上面选的秒数写，生视频用上面选的模型 / 比例 / 分辨率 / 风格",
     },
 ] as const;
 
@@ -115,6 +172,11 @@ export type VideoReversePromptInput = {
     mode: VideoReverseMode;
     /** 02 / 03 的特殊要求 */
     requirement?: string;
+    /**
+     * 02 / 03 的**成片总时长（秒）**：来自节点「生成设置」里的秒数（默认 30）。
+     * 01 忽略它 —— 01 是反推眼前这条视频，它的时长由视频本身决定，写个数字只会让模型改镜头数。
+     */
+    targetSeconds?: number | string;
 };
 
 const isRemoteUrl = (url: string) => /^https?:\/\//i.test(url);
@@ -178,12 +240,14 @@ export const VIDEO_REVERSE_REWRITE_PROMPT = "上一次的输出没有按要求�
  * ⚠️ 语言硬要求**首尾各钉一次**（开头先声明、结尾再收口）：模型对首尾指令最敏感，中段还夹着
  * 「特殊要求」「视频链接」这些容易被当成局部约束的内容，只放一处经常被技能正文的英文示例盖过去。
  */
-export function buildVideoReversePrompt({ videoUrl, mode, requirement }: VideoReversePromptInput): string {
+export function buildVideoReversePrompt({ videoUrl, mode, requirement, targetSeconds }: VideoReversePromptInput): string {
     const lines: string[] = [];
     lines.push(VIDEO_REVERSE_LANGUAGE_RULE);
     lines.push(mode === 1 ? "请用「视频反推-分镜提示词」技能反推我接入的这条视频，输出可以直接拿去用的分镜提示词。" : "请用「视频反推-分镜提示词」技能反推我接入的这条视频，并在反推结果的基础上，写一份同款风格的文案。");
     const extra = (requirement || "").trim();
     if (mode !== 1 && extra) lines.push(`特殊要求：${extra}`);
+    // 时长只对 02 / 03 有意义：01 是照原片反推，镜头数由视频本身决定。
+    if (mode !== 1) lines.push(buildReverseTargetSecondsHint(targetSeconds));
     const url = (videoUrl || "").trim();
     if (isRemoteUrl(url)) lines.push(`视频链接：${url}`);
     else lines.push("视频已通过画布连线接入（本地/临时地址，模型打不开链接），请按连线传入的视频内容反推。");

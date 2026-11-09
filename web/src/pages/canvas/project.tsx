@@ -57,6 +57,7 @@ import {
     buildStoryScriptRowTask,
     buildStoryScriptSchemeFormatHint,
     buildStoryScriptTask,
+    buildStoryScriptTotalSecondsBlock,
     buildVideoNodePrompt,
     collectStoryScriptAssetFillTargets,
     countStoryScriptTemplateShots,
@@ -168,7 +169,7 @@ import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasRe
 import { collectCanvasOccupied, findFreeColumnX, planRightwardChainSlots } from "@/lib/canvas/canvas-free-space";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
-import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, needsChineseRewrite, pickVideoReverseSkill, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoTarget, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -7565,7 +7566,13 @@ function AtelierCanvasPage() {
             /** 第八套（麻薯 · 分镜组）：视频列是 `### 【分镜组N】（0—15秒）` + 组级四块 + 组内逐镜块。 */
             const mashuScheme = wholeSchemeId === "mashu";
             const directorFormatHint = buildStoryScriptSchemeFormatHint(sourceNode.metadata?.scriptScheme);
-            const scriptTask = directorFormatHint ? `${task}\n\n${directorFormatHint}` : task;
+            /**
+             * 「成片总时长」（用户 2026-11-09）：反推节点上选的秒数（默认 30）会落到 `scriptTotalSeconds`，
+             * 这里把它压成任务书末尾的一段硬要求 —— 镜数与台词量都按这个数字来，不再按模型的「一条短片」惯性铺 1 分钟。
+             * 不填 = 空串，任务书与改造前逐字一致。
+             */
+            const totalSecondsBlock = buildStoryScriptTotalSecondsBlock(sourceNode.metadata?.scriptTotalSeconds);
+            const scriptTask = [directorFormatHint ? `${task}\n\n${directorFormatHint}` : task, totalSecondsBlock].filter(Boolean).join("\n\n");
             /**
              * 用户贴进来的「模版」有两种位置，两种都要「照抄结构」而不是拆成括号链：
              *  ① 源内容本身就是逐镜标签块（`- **首帧图片提示词**：…`）；
@@ -9236,6 +9243,24 @@ function AtelierCanvasPage() {
             // —— 只写比例的节点会回落到 1K（见 `resolveScriptImageQuality`）。
             const scriptImageQuality = resolveScriptImageQuality(effectiveConfig.quality);
             const scriptImageMeta = scriptImageQuality ? { quality: scriptImageQuality } : {};
+            /**
+             * **视频节点的模型 / 比例 / 分辨率**（用户 2026-11-09：反推节点窗口里选好，一键视频就按这套出片）。
+             *
+             * 三个值都从脚本节点上读（`scriptVideoModel` / `scriptVideoSize` / `scriptVideoQuality`），
+             * 由 `runVideoReverse` 在 03 建脚本节点时从反推节点的 `reverseVideoTarget` 搬过来。
+             * 空 = 与改造前完全一致（视频节点不写这三个键，取全局偏好）。
+             *
+             * ⚠️ 只写进节点的 metadata，**不在这里改节点窗口尺寸**：视频节点是 420×236，按 9:16 折算会变成
+             * 133 宽 —— 提示词面板直接没法用。窗口保持默认，画幅由 `metadata.size` 决定。
+             */
+            const scriptVideoModel = String(source.metadata?.scriptVideoModel || "").trim();
+            const scriptVideoSize = resolveStoryScriptImageSize(source.metadata?.scriptVideoSize);
+            const scriptVideoQuality = String(source.metadata?.scriptVideoQuality || "").trim();
+            const scriptVideoMeta = {
+                ...(scriptVideoModel ? { model: scriptVideoModel } : {}),
+                ...(scriptVideoSize ? { size: scriptVideoSize } : {}),
+                ...(scriptVideoQuality ? { vquality: scriptVideoQuality } : {}),
+            };
             const imageSpec = nodeSizeFromRatio(scriptImageSize, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height) || NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             const imageWidth = imageSpec.width;
             const imageHeight = imageSpec.height;
@@ -9473,7 +9498,9 @@ function AtelierCanvasPage() {
                 const videoNode: CanvasNodeData = {
                     // 视频节点同样继承脚本节点选的风格模板（用户 2026-11-08 第 05 条）：铺完点生成时
                     // `composeStyledPrompt` 会把它拼到提示词尾部；窗口里的风格按钮显示同一档，可随时改。
-                    ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { prompt: videoPrompt, status: NODE_STATUS_IDLE, ...(seconds ? { seconds: String(seconds) } : {}), ...scriptStyle }),
+                    // `scriptVideoMeta` = 反推节点上选的模型 / 比例 / 分辨率（用户 2026-11-09），
+                    // 三个键为空时对象为空 → 与改造前逐字节一致。
+                    ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { prompt: videoPrompt, status: NODE_STATUS_IDLE, ...(seconds ? { seconds: String(seconds) } : {}), ...scriptStyle, ...scriptVideoMeta }),
                     title: merged ? t("canvas.scriptNode.pipelineVideoRange", { from: shotNoFrom, to: shotNoTo, count: members.length }) : t("canvas.scriptNode.pipelineVideo", { no: shotNoFrom }),
                     width: videoWidth,
                     height: videoHeight,
@@ -10009,6 +10036,14 @@ function AtelierCanvasPage() {
             if (!skill) {
                 return { ok: false, error: "技能库里没找到「视频反推-分镜提示词」：先在 AI 对话节点的技能列表里确认它已经装好" };
             }
+            /**
+             * 节点窗口里选好的**目标视频参数**（风格 / 模型 / 总时长 / 比例 / 分辨率，用户 2026-11-09）。
+             *
+             * 读的是「反推节点自己」的 metadata（`input.reverseNodeId`）——它跟视频节点没关系，别拿错。
+             * 节点不在（老画布 / 探针直接调函数）就给一份归一化后的默认值（秒数 30、其余跟随全局）。
+             */
+            const reverseNode = input.reverseNodeId ? nodesRef.current.find((item) => item.id === input.reverseNodeId) : undefined;
+            const target = readReverseVideoTarget(reverseNode?.metadata);
 
             const videoUrl = videoNode.metadata.content;
             const gap = 120;
@@ -10086,7 +10121,7 @@ function AtelierCanvasPage() {
 
             // ② 把视频链接 + 要求发进对话，等它把反推结果说完
             report("把视频链接发进对话，反推中…");
-            let body = (await sendChatMessage(chatNode.id, buildVideoReversePrompt({ videoUrl, mode: input.mode, requirement: input.requirement }), { text: true, image: false })).trim();
+            let body = (await sendChatMessage(chatNode.id, buildVideoReversePrompt({ videoUrl, mode: input.mode, requirement: input.requirement, targetSeconds: target.seconds }), { text: true, image: false })).trim();
             /**
              * 语言兜底（用户 2026-11-09：「强化执行反推节点任务时，输出的文案文本内容必须为中文」）。
              *
@@ -10131,7 +10166,23 @@ function AtelierCanvasPage() {
 
             // ④ 03：文本节点 → 脚本生成器（新节点，右接），然后一键视频
             report("创建脚本生成器节点并接上文案…");
-            const scriptNode = createCanvasNode(CanvasNodeType.Script, scriptSlot, { status: NODE_STATUS_IDLE, scriptSource: "", scriptPrompt: "", scriptRows: [] });
+            /**
+             * 脚本节点**一建出来就带上目标参数**（用户 2026-11-09）：
+             *  - `scriptTotalSeconds`：写剧本时按这个秒数规划镜数与台词量；
+             *  - `scriptVideoModel` / `scriptVideoSize` / `scriptVideoQuality`：铺链路时写进每个视频节点；
+             *  - `styleTemplateId`：脚本节点本来就有的风格字段，铺链路时同时落到关键帧图片和视频节点上；
+             *  - `scriptImageSize` 也写同一个比例：关键帧必须和成片同画幅，否则视频模型要裁切。
+             *
+             * 全部是条件展开 —— 用户一个都没选时，与改造前逐字节一致。
+             */
+            const scriptTargetMeta: Partial<CanvasNodeData["metadata"]> = {
+                ...(target.styleTemplateId ? { styleTemplateId: target.styleTemplateId } : {}),
+                ...(target.seconds ? { scriptTotalSeconds: Number(target.seconds) || undefined } : {}),
+                ...(target.size ? { scriptImageSize: target.size, scriptVideoSize: target.size } : {}),
+                ...(target.quality ? { scriptVideoQuality: target.quality } : {}),
+                ...(target.model ? { scriptVideoModel: target.model } : {}),
+            };
+            const scriptNode = createCanvasNode(CanvasNodeType.Script, scriptSlot, { status: NODE_STATUS_IDLE, scriptSource: "", scriptPrompt: "", scriptRows: [], ...scriptTargetMeta });
             pushNodes([scriptNode], resolveConnectionPairs(textNode.id, scriptNode.id, [...nodesRef.current, scriptNode], "source"));
 
             report(referenceAssets.length ? `执行一键视频（参考图 ${referenceAssets.length} 张会先按名字挂到道具格，最长约 45 分钟）…` : "执行一键视频（进度见脚本节点，最长约 45 分钟）…");

@@ -29,7 +29,7 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Merge]: { width: 480, height: 420, get title() { return i18n.t("canvas.nodeTypes.merge"); } },
     [CanvasNodeType.Script]: { width: 760, height: 520, get title() { return i18n.t("canvas.nodeTypes.script"); } },
     [CanvasNodeType.VideoMerge]: { width: 560, height: 600, get title() { return i18n.t("canvas.nodeTypes.videoMerge"); } },
-    [CanvasNodeType.ReverseVideo]: { width: 460, height: 440, get title() { return i18n.t("canvas.nodeTypes.reverseVideo"); } },
+    [CanvasNodeType.ReverseVideo]: { width: 460, height: 560, get title() { return i18n.t("canvas.nodeTypes.reverseVideo"); } },
     [CanvasNodeType.Mochiani]: { width: 560, height: 820, get title() { return i18n.t("canvas.nodeTypes.mochiani"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
 
@@ -84,7 +84,7 @@ export const NODE_SPECS = {
         metadata: { status: "idle", videoMergeAspect: null },
     },
     [CanvasNodeType.ReverseVideo]: {
-        width: 460, height: 440, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.ReverseVideo].title; },
+        width: 460, height: 560, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.ReverseVideo].title; },
         metadata: { status: "idle" },
     },
     [CanvasNodeType.Mochiani]: {

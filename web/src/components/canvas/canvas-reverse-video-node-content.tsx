@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Input, Modal, Tag } from "antd";
-import { CircleAlert, Clapperboard, FileText, Images, Link2, Loader2, Sparkles, Video, Wand2 } from "lucide-react";
+import { App, Button, Input, InputNumber, Modal, Select, Tag } from "antd";
+import { CircleAlert, Clapperboard, FileText, Images, Link2, Loader2, SlidersHorizontal, Sparkles, Video, Wand2 } from "lucide-react";
 
+import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { DEFAULT_VIDEO_REVERSE_REQUIREMENT, VIDEO_REVERSE_MODES, buildDefaultVideoReverseRequirement, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoTarget, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { getStyleTemplate } from "@/constant/style-templates";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
+import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
+import type { CanvasNodeData, CanvasNodeMetadata, CanvasReverseVideoTarget } from "@/types/canvas";
+import { CanvasSizePicker } from "./canvas-size-picker";
+import { CanvasStylePicker } from "./canvas-style-picker";
 
 /**
  * 「反推视频」命令集合**节点**的内容区。
@@ -69,6 +74,20 @@ const INTERACTIVE_SELECTOR = "textarea,input,button,[contenteditable],[data-canv
  */
 const STALE_RUN_MS = 60 * 60_000;
 
+/**
+ * 分辨率档位。与视频节点参数面板同一套值（`video-settings-panel.tsx` 里的 `vquality`）：
+ * 空 = 跟随全局 / 模型默认（最稳，绝不因为选了不支持的档位换来一次 400）。
+ */
+const QUALITY_OPTIONS = [
+    { value: "", label: "跟随全局" },
+    { value: "480", label: "480p" },
+    { value: "720", label: "720p" },
+    { value: "1080", label: "1080p" },
+    { value: "2k", label: "2K" },
+];
+
+const qualityLabel = (value: string | undefined) => QUALITY_OPTIONS.find((item) => item.value === (value || ""))?.label || "跟随全局";
+
 export function CanvasReverseVideoNodeContent({
     node,
     videos,
@@ -83,6 +102,8 @@ export function CanvasReverseVideoNodeContent({
 }: CanvasReverseVideoNodeContentProps) {
     const { message } = App.useApp();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const globalConfig = useEffectiveConfig();
+    const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const [pickerOpen, setPickerOpen] = useState(false);
     const [urlDraft, setUrlDraft] = useState("");
     const [creating, setCreating] = useState(false);
@@ -91,6 +112,26 @@ export function CanvasReverseVideoNodeContent({
     const scrollRef = useRef<HTMLDivElement | null>(null);
 
     const run = node.metadata?.reverseVideoRun;
+    /**
+     * 目标视频参数（风格 / 模型 / 秒数 / 比例 / 分辨率，用户 2026-11-09）：
+     * 一律用 `readReverseVideoTarget` 归一化后再渲染 —— 老节点没有这个字段，秒数也要有默认 30。
+     */
+    const target = useMemo(() => readReverseVideoTarget(node.metadata), [node.metadata]);
+    /**
+     * 写回：**整体覆盖** `reverseVideoTarget`（`applyNodeConfigPatch` 是浅合并，只 patch 一个键会把其它几个抹掉）。
+     * `normalizeReverseVideoTarget` 顺手把空串键删掉 = 「跟随全局」，同时把秒数夹到合法区间。
+     */
+    const patchTarget = useCallback(
+        (patch: Partial<CanvasReverseVideoTarget>) => {
+            onConfigChange(node.id, { reverseVideoTarget: normalizeReverseVideoTarget({ ...target, ...patch }) });
+        },
+        [node.id, onConfigChange, target],
+    );
+    /** 设置摘要（弹窗里给用户确认「按什么出片」用）。 */
+    const targetSummary = useMemo(() => {
+        const style = target.styleTemplateId ? getStyleTemplate(target.styleTemplateId)?.label || target.styleTemplateId : "无风格";
+        return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${target.size || "跟随全局比例"} · ${qualityLabel(target.quality)} · 风格：${style}`;
+    }, [target]);
     /**
      * 02 / 03 要求框的**默认文案**（用户 2026-11-09 口径）：
      * 「根据我提供的视频反推该视频提示词及文案，同时使用 @图片1 作为文案中的道具，重新输出一份类似的剧本文案。」
@@ -303,7 +344,41 @@ export function CanvasReverseVideoNodeContent({
                     ) : null}
                 </div>
 
-                {/* ③ 三条命令 */}
+                {/* ③ 生成设置（用户 2026-11-09）：风格 / 模型 / 秒数 / 比例 / 分辨率 */}
+                <div className="rounded-md px-2.5 py-2" style={{ border: softBorder }}>
+                    <div className="flex items-center gap-1.5 text-[11px]">
+                        <SlidersHorizontal size={11} className="shrink-0 opacity-70" />
+                        <span className="min-w-0 flex-1 font-medium opacity-80">生成设置</span>
+                        <span className="shrink-0 text-[10px] opacity-45">02 / 03 按这套走</span>
+                    </div>
+                    {/* 第一行：风格 + 视频模型（控件与视频节点的提示词面板同一套） */}
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <CanvasStylePicker value={target.styleTemplateId} onChange={(styleTemplateId) => patchTarget({ styleTemplateId: styleTemplateId || "" })} buttonClassName="!h-7 !max-w-[132px] !shrink-0 !justify-start !rounded-full !px-2.5" placement="topLeft" />
+                        <ModelPicker config={globalConfig} value={target.model} onChange={(model) => patchTarget({ model })} capability="video" placeholder="视频模型（跟随全局）" onMissingConfig={() => openConfigDialog(true)} className="max-w-[168px]" />
+                    </div>
+                    {/* 第二行：秒数（成片总时长，默认 30）+ 比例 + 分辨率 */}
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <InputNumber
+                            size="small"
+                            className="!w-[104px]"
+                            min={REVERSE_VIDEO_SECONDS_MIN}
+                            max={REVERSE_VIDEO_SECONDS_MAX}
+                            step={5}
+                            precision={0}
+                            value={Number(target.seconds) || DEFAULT_REVERSE_VIDEO_SECONDS}
+                            addonAfter="秒"
+                            onChange={(value) => patchTarget({ seconds: String(value ?? DEFAULT_REVERSE_VIDEO_SECONDS) })}
+                            aria-label="成片总时长（秒）"
+                        />
+                        <CanvasSizePicker value={target.size || ""} onChange={(size) => patchTarget({ size })} className="h-6 w-[96px]" />
+                        <Select size="small" className="!w-[124px]" value={target.quality || ""} onChange={(quality) => patchTarget({ quality })} options={QUALITY_OPTIONS} popupMatchSelectWidth={false} aria-label="视频分辨率" />
+                    </div>
+                    <div className="mt-1 text-[10px] leading-relaxed opacity-45">
+                        秒数 = 成片总时长：02 写文案、03 生剧本都按它规划镜头数与台词量（默认 {DEFAULT_REVERSE_VIDEO_SECONDS} 秒）；生视频用这里的模型 / 比例 / 分辨率 / 风格。
+                    </div>
+                </div>
+
+                {/* ④ 三条命令 */}
                 <div className="flex flex-col gap-1.5">
                     {VIDEO_REVERSE_MODES.map((item) => {
                         const Icon = MODE_ICON[item.mode];
@@ -338,7 +413,7 @@ export function CanvasReverseVideoNodeContent({
                     })}
                 </div>
 
-                {/* ④ 进度 / 错误 / 产物 */}
+                {/* ⑤ 进度 / 错误 / 产物 */}
                 {run?.status === "running" && run.stage ? (
                     <div className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11px]" style={{ background: "rgba(99,102,241,0.14)", color: "#c7d2fe" }}>
                         <Loader2 size={12} className="animate-spin shrink-0" />
@@ -377,7 +452,7 @@ export function CanvasReverseVideoNodeContent({
                 ) : null}
             </div>
 
-            {/* ⑤ 脚注：用的技能 / 模型 */}
+            {/* ⑥ 脚注：用的技能 / 模型 */}
             <div className="flex flex-col gap-0.5 text-[11px] leading-relaxed opacity-45">
                 <span className="flex items-center gap-1.5">
                     <Sparkles size={11} className="shrink-0" />
@@ -403,7 +478,10 @@ export function CanvasReverseVideoNodeContent({
                         {referenceImages?.length ? `连进来的 ${referenceImages.length} 张参考图会一起带进对话，${imageReferenceLabel(0)} 就是第一张（连线顺序）。` : "（本节点还没连参考图，所以默认文案里没有 @图片N。）"}
                     </div>
                     <Input.TextArea value={requirementText} onChange={(event) => setRequirementText(event.target.value)} rows={4} placeholder={DEFAULT_VIDEO_REVERSE_REQUIREMENT} />
-                    {requirementMode === 3 ? <div className="text-[11px] opacity-50">确定后会接着把文本节点接到脚本生成器，并执行一键视频。</div> : null}
+                    <div className="text-[11px] opacity-60">
+                        本次成片：<span className="font-medium">{targetSummary}</span>
+                    </div>
+                    {requirementMode === 3 ? <div className="text-[11px] opacity-50">确定后会接着把文本节点接到脚本生成器，并执行一键视频 —— 剧本按 {target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒写，生视频用上面这套参数。</div> : null}
                 </div>
             </Modal>
         </div>
