@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Input, Select, Tag, Upload } from "antd";
+import { App, Button, Input, Select, Switch, Tag, Upload } from "antd";
 import type { SelectProps } from "antd";
 import {
     CircleAlert,
@@ -72,6 +72,11 @@ type MochianiJob = {
     imageCount: number;
     videoCount?: number;
     audioCount?: number;
+    /** 漫剧编辑器：关联上的素材（含新建的）、真正发出去的分镜文案、写进分镜的配音条数。 */
+    cast?: { characters?: string[]; scenes?: string[]; props?: string[]; created?: string[] } | null;
+    script?: string;
+    voiceCount?: number;
+    voiceItems?: Array<{ characterName?: string; text?: string }>;
     warnings: string[];
     error: string;
     createdAt: string;
@@ -99,7 +104,11 @@ type ModelChannel = {
     name: string;
     avgRatio?: number;
     avgTime?: number;
+    successRate?: number;
+    price?: number;
     configInfo?: Record<string, ParamOption[]>;
+    /** 漫剧编辑器给的 default_config（canvas 页面没有这项）。 */
+    defaultParams?: Record<string, string>;
 };
 
 type ModelOption = {
@@ -109,6 +118,7 @@ type ModelOption = {
     configInfo?: Record<string, ParamOption[]>;
     mediaLimits?: { image?: { required?: number; max?: number }; video?: { max?: number }; audio?: { max?: number } };
     channels?: ModelChannel[];
+    defaultParams?: Record<string, string>;
 };
 
 type RefImage = { uid: string; name: string; dataUrl: string };
@@ -190,6 +200,8 @@ type BridgeBody = Record<string, unknown> & {
     points?: PointSummary | null;
     user?: string;
     models?: ModelOption[];
+    /** 漫剧编辑器：桥回传的「编辑器当前用的模型 / 渠道 / 参数」。 */
+    current?: { modelKey?: string; channelId?: string; params?: Record<string, string> };
     panel?: { modelKey?: string; channelId?: string; configParams?: Record<string, string> } | null;
 };
 
@@ -307,6 +319,14 @@ function defaultParams(model: ModelOption, channel?: ModelChannel) {
         if (!Array.isArray(options) || !options.length) continue;
         out[key] = key === "duration" ? options[options.length - 1].value : options[0].value;
     }
+    // 漫剧编辑器的候选里带 MochiAni 自己的 default_config（15s / 2K / 16:9），
+    // 有就按它的来 —— 别拿「最短时长」当默认，那是给无限画布兜底的猜法。
+    const presets = channel?.defaultParams || model.defaultParams;
+    for (const [key, value] of Object.entries(presets || {})) {
+        if (value == null || value === "") continue;
+        if (Object.keys(source).length && !(key in source)) continue;
+        out[key] = String(value);
+    }
     return out;
 }
 
@@ -327,6 +347,21 @@ function toReferencePayload(reference: CanvasResourceReference) {
     // blob: / 空 —— 那是只在本页内存里的临时文件，桥（可能在另一台机器）够不着。
     return null;
 }
+
+/** 「每行一个名字」→ 名字数组（也容忍逗号 / 顿号 / 分号分隔）。 */
+function splitInputLines(text?: string) {
+    return String(text || "")
+        .split(/[\n,，、;；]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+/** 漫剧编辑器的三个素材输入区（顺序 = 分镜里关联的顺序）。 */
+const CARTON_CAST_FIELDS = [
+    { key: "characters", label: "出场人物", placeholder: "林晚\n陆沉" },
+    { key: "scenes", label: "场景", placeholder: "老宅客厅" },
+    { key: "props", label: "道具", placeholder: "铜钥匙" },
+] as const;
 
 const MEDIA_KIND_META = {
     image: { label: "图", icon: ImagePlus, color: "#60a5fa" },
@@ -413,6 +448,21 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         [node.id, onConfigChange],
     );
 
+    /**
+     * `mochianiConfig` 的写回。
+     *
+     * ⚠️ `applyNodeConfigPatch` 是**浅合并** metadata —— 直接 `patchMetadata({ mochianiConfig: {...} })`
+     * 会把漫剧编辑器的 cast / voiceover 一起抹掉（切个模型就把人物清空）。所以这里永远
+     * 用「旧值 + 补丁」拼完整的对象再写。
+     */
+    const saveConfig = useCallback(
+        (patch: Partial<NonNullable<CanvasNodeMetadata["mochianiConfig"]>>) => {
+            const current = node.metadata?.mochianiConfig || {};
+            patchMetadata({ mochianiConfig: { ...current, ...patch } });
+        },
+        [node.metadata?.mochianiConfig, patchMetadata],
+    );
+
     /** 提示词面板的写回：两处都写，面板靠 `prompt` 回填，预检靠 `mochianiPrompt`。 */
     const handlePromptChange = useCallback(
         (_nodeId: string, value: string) => {
@@ -490,23 +540,27 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 const list = Array.isArray(data.models) ? data.models : [];
                 setModels(list);
                 setModelsError("");
-                const preferKey = preferred?.modelKey || data.panel?.modelKey || "";
+                // 漫剧编辑器的目录是「模型 × 渠道」，桥会把它当前的配置一起给回来；
+                // 用户没存过偏好时优先落到「编辑里正在用的那套」，而不是列表第一个。
+                const preferKey = preferred?.modelKey || data.current?.modelKey || data.panel?.modelKey || "";
                 // 没偏好时别直接取第一个：目录里混着生图模型，默认落到生视频那一组更合理。
                 const nextModel =
                     list.find((item) => item.modelKey === preferKey) || list.find((item) => modelKindInfo(item).key === "video") || list[0];
                 if (!nextModel) return;
-                const preferChannel = preferred?.channelId || data.panel?.channelId || "";
+                const preferChannel = preferred?.channelId || data.current?.channelId || data.panel?.channelId || "";
                 const nextChannel = nextModel.channels?.find((item) => item.id === preferChannel) || nextModel.channels?.[0];
                 const nextParams =
                     preferred?.params && Object.keys(preferred.params).length
                         ? { ...preferred.params }
-                        : preferKey === nextModel.modelKey && data.panel?.configParams && Object.keys(data.panel.configParams).length
-                          ? { ...data.panel.configParams }
-                          : defaultParams(nextModel, nextChannel);
+                        : preferKey === nextModel.modelKey && data.current?.params && Object.keys(data.current.params).length
+                          ? { ...data.current.params }
+                          : preferKey === nextModel.modelKey && data.panel?.configParams && Object.keys(data.panel.configParams).length
+                            ? { ...data.panel.configParams }
+                            : defaultParams(nextModel, nextChannel);
                 setModelKey(nextModel.modelKey);
                 setChannelId(nextChannel?.id || "");
                 setParams(nextParams);
-                patchMetadata({ mochianiConfig: { modelKey: nextModel.modelKey, channelId: nextChannel?.id || "", params: nextParams } });
+                saveConfig({ modelKey: nextModel.modelKey, channelId: nextChannel?.id || "", params: nextParams });
             } catch (err) {
                 setModels([]);
                 setModelsError(err instanceof Error ? err.message : String(err));
@@ -514,7 +568,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 setModelsLoading(false);
             }
         },
-        [bridgeBase, patchMetadata],
+        [bridgeBase, saveConfig],
     );
 
     // 挂载：连桥 → 读页面 / 余额 / 模型目录 → 恢复上次任务
@@ -581,6 +635,17 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     /** 视频 / 音频上限：模型没声明（0）就不拦，交给 MochiAni 侧的原生端口去拒。 */
     const videoLimit = selectedModel?.mediaLimits?.video?.max ?? 0;
     const audioLimit = selectedModel?.mediaLimits?.audio?.max ?? 0;
+
+    /**
+     * 当前目标是漫剧编辑器吗？
+     *
+     * 两个页面的口径完全不同：画布是「节点 + 上传参考图」，漫剧编辑器是「分镜 + 素材库 ID + 配音」。
+     * 所以这里挂几个只在 carton 下出现的输入区，画布那边一个字都不改。
+     */
+    const isCarton = target?.kind === "carton";
+    const cast = node.metadata?.mochianiConfig?.cast;
+    const voiceoverText = node.metadata?.mochianiConfig?.voiceover || "";
+    const generateVoice = node.metadata?.mochianiConfig?.generateVoice !== false;
 
     /**
      * 连进本节点的素材（`X 拾取` 或直接拖线连进来）。
@@ -684,7 +749,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         setModelKey(value);
         setChannelId(nextChannel?.id || "");
         setParams(nextParams);
-        patchMetadata({ mochianiConfig: { modelKey: value, channelId: nextChannel?.id || "", params: nextParams } });
+        saveConfig({ modelKey: value, channelId: nextChannel?.id || "", params: nextParams });
         const nextMax = next?.mediaLimits?.image?.max ?? 9;
         setRefImages((prev) => prev.slice(0, nextMax));
     };
@@ -693,18 +758,24 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         const next = selectedModel?.channels?.find((item) => item.id === value);
         setChannelId(value);
         if (!next) {
-            patchMetadata({ mochianiConfig: { modelKey, channelId: value, params } });
+            saveConfig({ modelKey, channelId: value, params });
             return;
         }
         const nextParams = defaultParams(selectedModel as ModelOption, next);
         setParams(nextParams);
-        patchMetadata({ mochianiConfig: { modelKey, channelId: value, params: nextParams } });
+        saveConfig({ modelKey, channelId: value, params: nextParams });
     };
 
     const changeParam = (key: string, value: string) => {
         const nextParams = { ...params, [key]: value };
         setParams(nextParams);
-        patchMetadata({ mochianiConfig: { modelKey, channelId, params: nextParams } });
+        saveConfig({ modelKey, channelId, params: nextParams });
+    };
+
+    /** 漫剧编辑器的「出场素材 / 配音」—— 存进 metadata，节点滚出视口重挂也不丢。 */
+    const changeCast = (kind: "characters" | "scenes" | "props", value: string) => {
+        const current = node.metadata?.mochianiConfig?.cast || {};
+        saveConfig({ cast: { ...current, [kind]: value } });
     };
 
     const addImages = async (files: File[]) => {
@@ -748,7 +819,8 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         const styleTemplate = getStyleTemplate(node.metadata?.styleTemplateId);
         const text = composeStyledPrompt(base, styleTemplate ? buildStylePromptText(styleTemplate) : "", "");
         const media = collectMediaPayload();
-        if (imageRequired && media.images.length < imageRequired) {
+        // 漫剧编辑器的参考素材来自作品素材库（人物/场景/道具），不走上传，别拿 imageRequired 拦它。
+        if (!isCarton && imageRequired && media.images.length < imageRequired) {
             message.warning(`这个模型至少要 ${imageRequired} 张参考图（现在 ${media.images.length} 张）`);
             return;
         }
@@ -768,6 +840,19 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                     images: media.images,
                     videos: media.videos,
                     audios: media.audios,
+                    // 漫剧编辑器专有：出场素材按行拆成名字数组，配音把原文交给桥去逐行解析
+                    ...(isCarton
+                        ? {
+                              cast: {
+                                  characters: splitInputLines(cast?.characters),
+                                  scenes: splitInputLines(cast?.scenes),
+                                  props: splitInputLines(cast?.props),
+                                  autoCreate: true,
+                              },
+                              voiceover: voiceoverText || "",
+                              generateVoice,
+                          }
+                        : {}),
                 }),
             });
             if (data.job) {
@@ -1048,6 +1133,53 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                     </div>
                 </div>
 
+                {/* ③.5 漫剧编辑器专有：出场素材 / 配音
+                      两套口径别混：无限画布是「节点 + 上传参考图」，漫剧编辑器是「分镜 + 素材库 ID + 配音项」。
+                      这里只负责收**名字**，真实 ID 由桥按当前作品的素材库现解析（换个作品同一份节点还能用）。 */}
+                {isCarton ? (
+                    <div className="rounded-md px-2 py-1.5" style={{ border: softBorder }}>
+                        <div className="mb-1 flex items-center gap-1 text-[11px]">
+                            <Clapperboard size={11} className="opacity-60" />
+                            <span className="opacity-60">漫剧编辑器 · 出场素材 / 配音</span>
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                            {CARTON_CAST_FIELDS.map((field) => (
+                                <label key={field.key} className="flex flex-col gap-0.5">
+                                    <span className="text-[10px] opacity-45">{field.label}（每行一个正式名，库里没有会新建）</span>
+                                    <Input.TextArea
+                                        size="small"
+                                        autoSize={{ minRows: 1, maxRows: 4 }}
+                                        value={cast?.[field.key] || ""}
+                                        placeholder={field.placeholder}
+                                        onChange={(event) => changeCast(field.key, event.target.value)}
+                                        disabled={locked}
+                                    />
+                                </label>
+                            ))}
+                            <label className="flex flex-col gap-0.5">
+                                <span className="text-[10px] opacity-45">配音（角色名：台词，一行一条）</span>
+                                <Input.TextArea
+                                    size="small"
+                                    autoSize={{ minRows: 1, maxRows: 6 }}
+                                    value={voiceoverText}
+                                    placeholder={"林晚：这门我从来没开过。\n陆沉：那你现在开。"}
+                                    onChange={(event) => saveConfig({ voiceover: event.target.value })}
+                                    disabled={locked}
+                                />
+                            </label>
+                            <label className="flex items-center justify-between text-[11px]">
+                                <span className="opacity-55">确认时一起生成配音</span>
+                                <Switch
+                                    size="small"
+                                    checked={generateVoice}
+                                    onChange={(checked) => saveConfig({ generateVoice: checked })}
+                                    disabled={locked}
+                                />
+                            </label>
+                        </div>
+                    </div>
+                ) : null}
+
                 {/* ④ 提示词 —— 直接复用视频节点的提示词面板（内嵌形态）：
                        @ 引用 chip（图 / 视频 / 音频 / 文案）+ 风格模板 + 主按钮＝预检。
                        与视频窗口的唯一差别是这里没有模型/参数行（模型目录来自桥）和排期。 */}
@@ -1072,8 +1204,10 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                     />
                 </div>
 
-                {/* ⑤ 参考素材：连线接入的图 / 视频 / 音频 + 手动加的图 */}
-                <div>
+                {/* ⑤ 参考素材：连线接入的图 / 视频 / 音频 + 手动加的图
+                      漫剧编辑器的参考走「作品素材库」（上面那三个输入区），上传的图它不认，所以那边不显示这块。 */}
+                {isCarton ? null : (
+                    <div>
                     <div className="mb-1 flex items-center justify-between text-[11px]">
                         <span className="opacity-55">参考素材</span>
                         <span className="opacity-35">
@@ -1155,7 +1289,8 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                             选中本节点按 X，再点图片 / 视频 / 音频节点 —— 连进来的素材会出现在这里，预检时一起传进 MochiAni 当参考。
                         </div>
                     ) : null}
-                </div>
+                    </div>
+                )}
 
                 {/* ⑥ 任务状态 */}
                 {job ? (
@@ -1175,6 +1310,10 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                             {job.imageCount ? <span className="opacity-45">参考图 {job.imageCount} 张</span> : null}
                             {job.videoCount ? <span className="opacity-45">参考视频 {job.videoCount} 个</span> : null}
                             {job.audioCount ? <span className="opacity-45">参考音频 {job.audioCount} 个</span> : null}
+                            {job.cast?.characters?.length ? <span className="opacity-45">人物 {job.cast.characters.length}</span> : null}
+                            {job.cast?.scenes?.length ? <span className="opacity-45">场景 {job.cast.scenes.length}</span> : null}
+                            {job.cast?.props?.length ? <span className="opacity-45">道具 {job.cast.props.length}</span> : null}
+                            {job.voiceCount ? <span className="opacity-45">配音 {job.voiceCount} 条</span> : null}
                         </div>
                         {notEnoughPoints ? (
                             <div className="mt-1 text-[11px]" style={{ color: "#fbbf24" }}>

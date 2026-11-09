@@ -75,18 +75,39 @@ POST /api/jobs/:id/confirm                   ← 从这一步开始扣灵点
 
 ### B. 漫剧编辑器（`carton-editor`）
 
+漫剧编辑器跟无限画布是**两套口径**：那边靠「节点 + 上传参考图」，这边靠「分镜 + 素材库 ID + 配音项」，
+而且模型目录也不在 `canvas_model_options` 里、走 `get_generation_settings`。所以桥里单独一层适配。
+
 ```
-POST /api/plan
-  ├─ mochiani_get_work_summary          读 projectId / workId
-  ├─ mochiani_create_shot               把指令作为新分镜文案写进去
-  └─ mochiani_preflight_generation      只读预检：模型 / 渠道 / 参考 / 阻塞原因
+GET /api/models
+  └─ mochiani_get_generation_settings        video.available_options → 模型 × 渠道 × 参数
+                                             （实测 106 条 / 44 个 model_id，每条带灵点价、成功率、平均时长）
+
+POST /api/plan {prompt, modelKey:"carton:<modelId>", channelId:<supplierId>, params,
+                cast:{characters[], scenes[], props[], autoCreate}, voiceover, generateVoice}
+  ├─ mochiani_update_video_generation_config 只有跟编辑器当前配置不一样才切（切换本身不花钱）
+  ├─ mochiani_get_asset_matching_context     按名字匹配素材库真实 ID
+  ├─ mochiani_create_asset                   库里没有的名字 → 自动新建（角色 / 场景 / 道具）
+  ├─ mochiani_create_shot                    script + characterIds / sceneIds / propIds
+  ├─ mochiani_create_voiceover_item          「角色名：台词」逐条写成分镜配音项
+  └─ mochiani_preflight_generation           只读预检：模型 / 渠道 / 参考 / 阻塞原因
 
 POST /api/jobs/:id/confirm               ← 从这一步开始扣余额
-  ├─ mochiani_generate_video
+  ├─ mochiani_generate_voiceovers            勾了「一起生成配音」才走，先于视频
+  ├─ mochiani_generate_video                 modelId + supplierId + shotId
   └─ 轮询
        ├─ mochiani_get_shot_media_versions   主视频出来就算完成（优先）
        └─ mochiani_get_generation_task_status 明确 failed 才判失败
 ```
+
+**两条硬规矩**（都是 MochiAni 那边的，不是我们加的）：
+
+1. 关联了哪个素材，**分镜文案里就必须出现它的完整正式名**，否则页面直接拒写 ——
+   所以桥会检查，缺的名字补一行「出场人物：… / 场景：… / 道具：…」，并把补了什么写进 `warnings`。
+2. 配音项必须挂在**真实角色 ID** 上（先读 `voiceover.characters`），名字对不上就整条跳过并给出警告，
+   不会瞎猜一个 ID 塞进去。
+
+离线校验：`MOCHIANI_BRIDGE_NO_LISTEN=1 node probe-carton-plan.mjs`（不连 MCP、不花钱、不写作品）。
 
 最后「放到画布」复用画布的 `createBridgeVideoNode`，把 videoUrl 落成视频节点。
 

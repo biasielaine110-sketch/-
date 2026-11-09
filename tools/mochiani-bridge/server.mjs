@@ -713,6 +713,346 @@ async function pollCanvasJob(job) {
     return "stop";
 }
 
+// ------------------------------------------------------- carton 数据适配
+
+/**
+ * 漫剧编辑器（carton-editor）跟无限画布是**两套完全不同的口径**：
+ *
+ * | 想发的东西 | 无限画布 | 漫剧编辑器 |
+ * |---|---|---|
+ * | 提示词 | 节点 `currentPrompt` | 分镜 `script` |
+ * | 人物/场景/道具 | 参考图（上传） | 素材库真 ID（characterIds / sceneIds / propIds） |
+ * | 配音 | 音频参考 | 分镜级配音项（characterId + text） |
+ * | 模型 | `canvas_model_options` | `get_generation_settings.video.available_options` |
+ *
+ * 所以这里单独一层适配：模型目录从 generation_settings 拼，素材从素材库按**名字**匹配，
+ * 配音按「角色名：台词」解析。别跟 canvas 那套混用。
+ */
+
+const CARTON_MODEL_PREFIX = "carton:";
+
+const CARTON_ASSET_LABEL = { character: "出场人物", scene: "场景", prop: "道具", other: "其他素材" };
+
+function readGenerationSettings(pageId, origin) {
+    return callTool("mochiani_get_generation_settings", { pageId, origin });
+}
+
+function settingsSection(settings, key) {
+    const root = settings?.generationSettings || settings || {};
+    const section = root[key];
+    return section && typeof section === "object" ? section : null;
+}
+
+/** `config_options` 里的 value 可能是数字（duration=15）也可能是字符串，面板统一按字符串收。 */
+function normalizeConfigOptions(raw) {
+    const out = {};
+    if (!raw || typeof raw !== "object") return out;
+    for (const [key, list] of Object.entries(raw)) {
+        if (!Array.isArray(list)) continue;
+        out[key] = list
+            .map((item) => {
+                if (item == null) return null;
+                if (typeof item === "object") {
+                    const value = item.value ?? item.val ?? item.id;
+                    if (value == null) return null;
+                    return { label: String(item.label ?? item.name ?? value), value: String(value) };
+                }
+                return { label: String(item), value: String(item) };
+            })
+            .filter(Boolean);
+    }
+    return out;
+}
+
+function mergeConfigOptions(base, extra) {
+    const out = { ...base };
+    for (const [key, list] of Object.entries(extra || {})) if (!out[key]?.length) out[key] = list;
+    return out;
+}
+
+/**
+ * `video.available_options` → 面板的「模型 → 渠道 → 参数」。
+ *
+ * ⚠️ 一条 option = 一个 (model_id, supplier_id) 组合，实测 106 条 / 44 个 model_id。
+ * 同名不同 id（Minimax H3 = 185/189、Seedance 2.0 = 17/131/183）必须分成两条 ——
+ * 它们的渠道池不一样，合并会串号。面板那边会自动给重名的补 `· #id`。
+ */
+function buildCartonVideoModels(video) {
+    const options = Array.isArray(video?.available_options) ? video.available_options : [];
+    const models = new Map();
+    for (const item of options) {
+        const modelId = String(item?.model_id ?? "").trim();
+        if (!modelId) continue;
+        const modelKey = `${CARTON_MODEL_PREFIX}${modelId}`;
+        if (!models.has(modelKey)) {
+            models.set(modelKey, {
+                modelId,
+                modelKey,
+                modelName: String(item?.model_name || modelId).trim(),
+                kind: "video",
+                configInfo: {},
+                channels: [],
+                mediaLimits: null,
+            });
+        }
+        const entry = models.get(modelKey);
+        const configInfo = normalizeConfigOptions(item?.config_options);
+        entry.configInfo = mergeConfigOptions(entry.configInfo, configInfo);
+        if (item?.is_available === false) continue;
+        const supplierId = String(item?.supplier_id ?? "").trim();
+        if (!supplierId || entry.channels.some((channel) => channel.id === supplierId)) continue;
+        entry.channels.push({
+            id: supplierId,
+            name: String(item?.supplier_name || supplierId).trim(),
+            avgTime: Number(item?.average_time_seconds) || 0,
+            successRate: Number(item?.success_rate) || 0,
+            price: Number(item?.unit_price) || 0,
+            currency: String(item?.currency || ""),
+            configInfo,
+            defaultParams: normalizeDefaultParams(item?.default_config),
+        });
+    }
+
+    const limits = video?.limits || {};
+    const mediaLimits = {
+        image: { required: Number(limits.min_image_num) || 0, max: Number(limits.image_num) || 9 },
+        video: { max: Number(limits.video_num) || 0 },
+        audio: { max: Number(limits.audio_num) || 0 },
+    };
+    const list = [...models.values()].filter((item) => item.channels.length);
+    for (const item of list) {
+        item.mediaLimits = mediaLimits;
+        const first = item.channels[0];
+        if (first?.defaultParams && Object.keys(first.defaultParams).length) item.defaultParams = first.defaultParams;
+    }
+    return list;
+}
+
+function normalizeDefaultParams(raw) {
+    const out = {};
+    if (!raw || typeof raw !== "object") return out;
+    for (const [key, value] of Object.entries(raw)) {
+        if (value == null) continue;
+        if (typeof value === "object") continue;
+        out[key] = String(value);
+    }
+    return out;
+}
+
+/**
+ * 面板回传的参数是字符串，模型那边要的是原类型（duration=15 是数字）。
+ * 按候选值反查一次，把类型还原回去；查不到就原样给，让 MochiAni 自己报错。
+ */
+function coerceCartonParams(params, option) {
+    const out = {};
+    for (const [key, raw] of Object.entries(params || {})) {
+        if (raw == null || raw === "") continue;
+        const list = Array.isArray(option?.config_options?.[key]) ? option.config_options[key] : [];
+        const hit = list.find((item) => String(item?.value ?? item) === String(raw));
+        out[key] = hit ? (hit.value ?? hit) : raw;
+    }
+    return out;
+}
+
+function findCartonOption(video, modelId, supplierId) {
+    const options = Array.isArray(video?.available_options) ? video.available_options : [];
+    return (
+        options.find((item) => String(item?.model_id) === String(modelId) && String(item?.supplier_id) === String(supplierId)) ||
+        options.find((item) => String(item?.model_id) === String(modelId)) ||
+        null
+    );
+}
+
+/** 名字 → 素材类别。素材库里几个字段口径不一样，全拼起来一起判。 */
+function normalizeAssetKind(token) {
+    const text = String(token || "").toLowerCase();
+    if (/character|角色|人物|演员|cast/.test(text)) return "character";
+    if (/scene|场景|环境|location/.test(text)) return "scene";
+    if (/prop|道具|物品|object/.test(text)) return "prop";
+    if (/more|other|其他|额外/.test(text)) return "other";
+    return "";
+}
+
+/**
+ * 从 `get_asset_matching_context` 的返回里把素材捞出来。
+ *
+ * 那个工具的输出结构没写死（角色/场景/道具可能在不同层级、不同键名下），所以按
+ * 「有 id + 有 name」认对象，再靠字段名 / 所在键名 / 中文标签判类别。
+ */
+function collectCartonAssets(root) {
+    const out = [];
+    const seen = new Set();
+    const visit = (value, trail) => {
+        if (!value || typeof value !== "object") return;
+        if (Array.isArray(value)) {
+            for (const item of value) visit(item, trail);
+            return;
+        }
+        const id = String(value.id ?? value.assetId ?? value.asset_id ?? value.assetID ?? "").trim();
+        const name = String(value.name ?? value.assetName ?? value.asset_name ?? value.title ?? "").trim();
+        if (id && name && !seen.has(id)) {
+            seen.add(id);
+            const kind =
+                normalizeAssetKind([value.assetType, value.asset_type, value.type, value.kind, value.category, trail].filter(Boolean).join(" ")) ||
+                "";
+            out.push({ id, name, kind, raw: value });
+        }
+        for (const [key, child] of Object.entries(value)) visit(child, `${trail} ${key}`);
+    };
+    visit(root, "");
+    return out;
+}
+
+/** 精确 → 去空格 → 包含（取最长的那个），都命中不了返回 null。 */
+function matchCartonAsset(name, assets) {
+    const target = String(name || "").trim();
+    if (!target) return null;
+    const exact = assets.find((item) => item.name === target);
+    if (exact) return exact;
+    const loose = assets.find((item) => item.name.replace(/\s+/g, "") === target.replace(/\s+/g, ""));
+    if (loose) return loose;
+    const partial = assets
+        .filter((item) => item.name.length >= 2 && (item.name.includes(target) || target.includes(item.name)))
+        .sort((a, b) => b.name.length - a.name.length)[0];
+    return partial || null;
+}
+
+function splitNames(text) {    return String(text || "")
+        .split(/[\n,，、;；|]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+/**
+ * 配音只能挂到「读取配音设置返回的真实角色」上，所以先从 `voiceover` 段里捞角色。
+ * 返回 [{id, name}]；捞不到就退回素材库里的角色（resolveCartonAssets 的 voiceCandidates）。
+ */
+function collectVoiceCharacters(settings) {
+    const voiceover = settingsSection(settings, "voiceover");
+    const out = [];
+    const seen = new Set();
+    const visit = (value, trail) => {
+        if (!value || typeof value !== "object") return;
+        if (Array.isArray(value)) {
+            for (const item of value) visit(item, trail);
+            return;
+        }
+        const id = String(value.characterId ?? value.character_id ?? value.id ?? "").trim();
+        const name = String(value.characterName ?? value.character_name ?? value.name ?? "").trim();
+        if (id && name && /character|角色|voice/i.test(`${trail} ${Object.keys(value).join(" ")}`) && !seen.has(id)) {
+            seen.add(id);
+            out.push({ id, name });
+        }
+        for (const [key, child] of Object.entries(value)) visit(child, `${trail} ${key}`);
+    };
+    visit(voiceover, "voiceover");
+    return out;
+}
+
+/** 「角色名：台词」逐行解析；没有冒号的行算旁白（characterId 留空）。 */
+function parseVoiceLines(text) {
+    const out = [];
+    for (const line of String(text || "").split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const match = trimmed.match(/^([^：:]{1,20})[：:]\s*(.+)$/);
+        if (match) out.push({ characterName: match[1].trim(), text: match[2].trim() });
+        else out.push({ characterName: "", text: trimmed });
+    }
+    return out.filter((item) => item.text);
+}
+
+/**
+ * MochiAni 的硬规矩：**关联了哪个素材，分镜文案里就必须出现它的完整正式名**，
+ * 否则页面直接拒写。所以缺的名字要补进去，并且告诉用户补了什么。
+ */
+function composeCartonScript(prompt, groups) {
+    const missing = new Map();
+    for (const [kind, names] of Object.entries(groups)) {
+        for (const name of names) {
+            if (!name) continue;
+            if (String(prompt).includes(name)) continue;
+            if (!missing.has(kind)) missing.set(kind, []);
+            if (!missing.get(kind).includes(name)) missing.get(kind).push(name);
+        }
+    }
+    if (!missing.size) return { script: prompt, added: [] };
+    const lines = [...missing.entries()].map(([kind, names]) => `${CARTON_ASSET_LABEL[kind] || "素材"}：${names.join("、")}`);
+    return {
+        script: `${prompt}\n\n${lines.join("\n")}`,
+        added: [...missing.values()].flat(),
+    };
+}
+
+/**
+ * 素材名 → 真实 ID。库里没有的按用户选择自动新建（`mochiani_create_asset`）。
+ * 返回三类 ID 数组 + 新建/匹配的日志行。
+ */
+async function resolveCartonAssets({ pageId, origin, projectId, projectName, workId, workName }, groupNames, options = {}) {
+    const outcome = {
+        ids: { character: [], scene: [], prop: [], other: [] },
+        resolvedNames: { character: [], scene: [], prop: [], other: [] },
+        created: [],
+        missing: [],
+        notes: [],
+        // 配音兜底用：素材库里的角色也算候选（配音设置里没配角色时靠它）
+        voiceCandidates: [],
+    };
+    const wanted = Object.entries(groupNames).filter(([, names]) => names.length);
+    if (!wanted.length) return outcome;
+
+    let assets = [];
+    try {
+        const context = await callTool("mochiani_get_asset_matching_context", { pageId, origin });
+        assets = collectCartonAssets(context);
+    } catch (error) {
+        outcome.notes.push(`素材库没读到（${error.message}），先按新建处理`);
+    }
+    outcome.voiceCandidates = assets.filter((item) => item.kind === "character").map((item) => ({ id: item.id, name: item.name }));
+
+    for (const [kind, names] of wanted) {
+        for (const name of names) {
+            const hit = matchCartonAsset(name, assets);
+            if (hit) {
+                const bucket = hit.kind || kind;
+                if (!outcome.ids[bucket].includes(hit.id)) {
+                    outcome.ids[bucket].push(hit.id);
+                    outcome.resolvedNames[bucket].push(hit.name);
+                }
+                if (hit.name !== name) outcome.notes.push(`「${name}」匹配到素材「${hit.name}」`);
+                continue;
+            }
+            if (options.autoCreate === false) {
+                outcome.missing.push(name);
+                continue;
+            }
+            try {
+                const created = await callTool("mochiani_create_asset", {
+                    origin,
+                    pageId,
+                    projectId,
+                    projectName,
+                    workId,
+                    workName,
+                    assetType: kind === "other" ? "other" : kind,
+                    name,
+                    description: options.descriptions?.[name] || "",
+                    idempotencyKey: `atelier-asset-${workId}-${kind}-${name}`,
+                });
+                const newId = firstString(created, [/^asset_?id$/i, /^created_?asset_?id$/i, /^id$/i]);
+                if (!newId) throw new Error("新建成功但没读到素材 ID");
+                outcome.ids[kind].push(newId);
+                outcome.resolvedNames[kind].push(name);
+                outcome.created.push(`${CARTON_ASSET_LABEL[kind]}「${name}」`);
+                assets.push({ id: newId, name, kind });
+            } catch (error) {
+                outcome.missing.push(`${name}（${error.message}）`);
+            }
+        }
+    }
+    return outcome;
+}
+
 // ------------------------------------------------------------ carton session
 
 async function planCartonJob(job, ctx) {
@@ -731,14 +1071,83 @@ async function planCartonJob(job, ctx) {
     job.work.workName = workName;
     pushLog(job, `作品：${workName} / 项目：${projectName}`);
 
+    const workRef = { pageId, origin, projectId, projectName, workId, workName };
+
+    // 1) 视频模型 / 渠道 / 参数 —— 只有跟当前配置不一样才切（切换本身不下发任务）
+    const settings = await readGenerationSettings(pageId, origin);
+    const video = settingsSection(settings, "video");
+    const wantedModelId = job.modelKey.startsWith(CARTON_MODEL_PREFIX) ? job.modelKey.slice(CARTON_MODEL_PREFIX.length) : "";
+    const option = wantedModelId ? findCartonOption(video, wantedModelId, job.channelId) : null;
+    const modelId = String(option?.model_id || job.modelKey.replace(CARTON_MODEL_PREFIX, "") || video?.model_id || "");
+    const supplierId = String(option?.supplier_id || job.channelId || video?.supplier_id || "");
+    const selectedConfig = { ...(video?.selected_config || {}), ...coerceCartonParams(job.params, option) };
+    job.modelTarget = { modelKey: modelId ? `${CARTON_MODEL_PREFIX}${modelId}` : "", channelId: supplierId, params: selectedConfig };
+    job.model = { id: modelId, key: String(video?.model_name || option?.model_name || ""), supplierId };
+
+    const configChanged =
+        String(video?.model_id || "") !== modelId ||
+        String(video?.supplier_id || "") !== supplierId ||
+        Object.entries(coerceCartonParams(job.params, option)).some(([key, value]) => String(video?.selected_config?.[key]) !== String(value));
+    if (configChanged && modelId && supplierId) {
+        try {
+            await callTool("mochiani_update_video_generation_config", {
+                ...workRef,
+                modelId,
+                supplierId,
+                selectedConfig,
+                expectedConfig: video?.selected_config || {},
+                userExplicitlyRequestedModelOrChannelChange: true,
+                userRequest: `开源画布节点指定：${option?.model_name || modelId} / ${option?.supplier_name || supplierId}`,
+                idempotencyKey: `atelier-vcfg-${job.id}`,
+            });
+            pushLog(job, `视频配置已切到 ${option?.model_name || modelId} / ${option?.supplier_name || supplierId}`);
+        } catch (error) {
+            job.warnings.push(`切模型失败，仍按当前配置走：${error.message}`);
+            pushLog(job, `切模型失败（继续用当前配置）：${error.message}`);
+        }
+    }
+
+    // 2) 人物 / 场景 / 道具 —— 名字匹配真实 ID，缺的自动新建
+    const cast = job.cast || {};
+    const resolved = await resolveCartonAssets(workRef, {
+        character: cast.characters || [],
+        scene: cast.scenes || [],
+        prop: cast.props || [],
+    }, { autoCreate: cast.autoCreate !== false });
+    for (const line of resolved.notes) pushLog(job, line);
+    if (resolved.created.length) pushLog(job, `新建素材：${resolved.created.join("、")}`);
+    if (resolved.missing.length) job.warnings.push(`这些素材没关联上：${resolved.missing.join("、")}`);
+    job.cast = {
+        characters: resolved.resolvedNames.character,
+        scenes: resolved.resolvedNames.scene,
+        props: resolved.resolvedNames.prop,
+        created: resolved.created,
+    };
+    if (resolved.ids.character.length || resolved.ids.scene.length || resolved.ids.prop.length) {
+        pushLog(
+            job,
+            `关联素材：人物 ${resolved.ids.character.length} · 场景 ${resolved.ids.scene.length} · 道具 ${resolved.ids.prop.length}`,
+        );
+    }
+
+    // 3) 分镜文案：素材正式名必须出现在文案里，缺的补一行
+    const script = composeCartonScript(job.prompt, {
+        character: resolved.resolvedNames.character,
+        scene: resolved.resolvedNames.scene,
+        prop: resolved.resolvedNames.prop,
+    });
+    if (script.added.length) {
+        pushLog(job, `文案里补了素材名：${script.added.join("、")}`);
+        job.warnings.push(`自动补了素材名（MochiAni 要求）：${script.added.join("、")}`);
+    }
+    job.script = script.script;
+
     const created = await callTool("mochiani_create_shot", {
-        origin,
-        pageId,
-        projectId,
-        projectName,
-        workId,
-        workName,
-        script: job.prompt,
+        ...workRef,
+        script: script.script,
+        characterIds: resolved.ids.character.length ? resolved.ids.character : undefined,
+        sceneIds: resolved.ids.scene.length ? resolved.ids.scene : undefined,
+        propIds: resolved.ids.prop.length ? resolved.ids.prop : undefined,
         idempotencyKey: `atelier-plan-${job.id}`,
     });
     const shotId =
@@ -749,16 +1158,46 @@ async function planCartonJob(job, ctx) {
     job.nodeId = shotId;
     pushLog(job, `分镜已创建：${shotId}`);
 
+    // 4) 配音 —— 「角色名：台词」逐条写成分镜配音项（这里只写不进，生成放在确认之后）
+    const lines = parseVoiceLines(job.voiceoverText || "");
+    if (lines.length) {
+        const voiceCharacters = collectVoiceCharacters(settings);
+        const pool = voiceCharacters.length ? voiceCharacters : resolved.voiceCandidates || [];
+        const byName = new Map(pool.map((item) => [item.name, item.id]));
+        const items = [];
+        for (const line of lines) {
+            const characterId = line.characterName ? byName.get(line.characterName) || "" : "";
+            if (line.characterName && !characterId) {
+                job.warnings.push(`配音「${line.characterName}」没匹配到角色，这条跳过`);
+                continue;
+            }
+            if (!characterId) {
+                job.warnings.push(`配音「${line.text.slice(0, 12)}…」没写角色名，MochiAni 要求必须指定角色，跳过`);
+                continue;
+            }
+            try {
+                const saved = await callTool("mochiani_create_voiceover_item", {
+                    ...workRef,
+                    shotId,
+                    characterId,
+                    text: line.text,
+                    idempotencyKey: `atelier-vo-${job.id}-${items.length}`,
+                });
+                const itemId = firstString(saved, [/^item_?id$/i, /^voiceover_?item_?id$/i, /^id$/i]);
+                items.push({ itemId, characterId, characterName: line.characterName, text: line.text });
+            } catch (error) {
+                job.warnings.push(`配音写入失败（${line.characterName}）：${error.message}`);
+            }
+        }
+        job.voiceItems = items;
+        if (items.length) pushLog(job, `配音已写入 ${items.length} 条${job.generateVoice ? "，确认后一起生成" : "（不生成音频）"}`);
+    }
+
     let preflight = null;
     let blocked = "";
     try {
         preflight = await callTool("mochiani_preflight_generation", {
-            origin,
-            pageId,
-            projectId,
-            projectName,
-            workId,
-            workName,
+            ...workRef,
             taskType: "video",
             shotIds: [shotId],
         });
@@ -775,17 +1214,36 @@ async function planCartonJob(job, ctx) {
 
 async function confirmCartonJob(job) {
     const { origin, pageId, projectId, projectName, workId, workName } = job.work;
+    const workRef = { origin, pageId, projectId, projectName, workId, workName };
     job.stage = "submitting";
+
+    // 配音先走：视频生成时会按「分镜现有配音」决定要不要补样音，顺序反了就得再生成一次。
+    const voiceItems = Array.isArray(job.voiceItems) ? job.voiceItems : [];
+    if (job.generateVoice && voiceItems.length) {
+        pushLog(job, `先下发 ${voiceItems.length} 条配音`);
+        try {
+            const receipt = await callTool("mochiani_generate_voiceovers", {
+                ...workRef,
+                shotIds: [job.nodeId],
+                mode: "all",
+                items: voiceItems.map((item) => ({ itemId: item.itemId, characterId: item.characterId, text: item.text })),
+                idempotencyKey: `atelier-vo-gen-${job.id}`,
+            });
+            job.voiceReceipt = receipt;
+            pushLog(job, "配音已受理（音频在 MochiAni 里出）");
+        } catch (error) {
+            job.warnings.push(`配音生成失败（视频照常下发）：${error.message}`);
+            pushLog(job, `配音生成失败，继续视频：${error.message}`);
+        }
+    }
+
     pushLog(job, "已确认，下发视频生成");
     const receipt = await callTool("mochiani_generate_video", {
-        origin,
-        pageId,
-        projectId,
-        projectName,
-        workId,
-        workName,
+        ...workRef,
         shotId: job.nodeId,
         count: 1,
+        modelId: job.model?.id || undefined,
+        supplierId: job.model?.supplierId || undefined,
         idempotencyKey: `atelier-gen-${job.id}`,
     });
     job.receipt = receipt;
@@ -870,6 +1328,13 @@ function publicJob(job) {
         imageCount: Array.isArray(job.images) ? job.images.length : 0,
         videoCount: Array.isArray(job.videos) ? job.videos.length : 0,
         audioCount: Array.isArray(job.audios) ? job.audios.length : 0,
+        // carton 专有：关联上的素材、写进去的配音、以及补过名字之后真正发出去的分镜文案
+        cast: job.cast || null,
+        script: job.script || "",
+        voiceCount: Array.isArray(job.voiceItems) ? job.voiceItems.length : 0,
+        voiceItems: Array.isArray(job.voiceItems)
+            ? job.voiceItems.map((item) => ({ characterName: item.characterName, text: item.text }))
+            : [],
         warnings: job.warnings || [],
         error: job.error,
         createdAt: job.createdAt,
@@ -901,6 +1366,12 @@ function createJob(kind, prompt, page, extras = {}) {
         images: Array.isArray(extras.images) ? extras.images : [],
         videos: Array.isArray(extras.videos) ? extras.videos : [],
         audios: Array.isArray(extras.audios) ? extras.audios : [],
+        // carton（漫剧编辑器）专有：出场素材 / 配音 / 是否一起生成配音
+        cast: extras.cast && typeof extras.cast === "object" ? extras.cast : null,
+        voiceoverText: String(extras.voiceover || ""),
+        generateVoice: extras.generateVoice !== false,
+        script: "",
+        voiceItems: [],
         warnings: [],
         receipt: null,
         error: "",
@@ -1052,7 +1523,31 @@ async function handleModels(query) {
     try {
         const ctx = await readTargetContext(query.pageId || "");
         if (ctx.kind !== "canvas") {
-            return { ok: false, error: "模型目录只支持无限画布页面（漫剧编辑器不提供选模型）" };
+            // 漫剧编辑器没有 `model_options`，模型目录从 generation_settings 的
+            // `video.available_options` 拼（一条 = 模型 × 渠道，带 MochiAni 自己的参数与指标）。
+            const settings = await readGenerationSettings(ctx.pageId, ctx.origin);
+            const video = settingsSection(settings, "video");
+            const models = buildCartonVideoModels(video);
+            if (!models.length) {
+                return { ok: false, code: "NO_CARTON_MODELS", error: "读到了漫剧编辑器，但视频模型目录是空的（去编辑器里看一眼当前模型）" };
+            }
+            const currentModelKey = video?.model_id ? `${CARTON_MODEL_PREFIX}${video.model_id}` : "";
+            return {
+                ok: true,
+                kind: "carton",
+                models,
+                current: {
+                    modelKey: currentModelKey,
+                    channelId: String(video?.supplier_id || ""),
+                    params: normalizeDefaultParams(video?.selected_config),
+                },
+                work: {
+                    projectId: String(settings?.project?.id || ""),
+                    projectName: String(settings?.project?.title || ""),
+                    workId: String(settings?.work?.id || ""),
+                    workName: String(settings?.work?.title || ""),
+                },
+            };
         }
         const { pageId, origin } = ctx;
         const read = await canvasRead(pageId, origin);
@@ -1133,7 +1628,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.4.0",
+            version: "1.5.0",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
@@ -1196,6 +1691,10 @@ async function handle(req, res) {
                 images: body.images,
                 videos: body.videos,
                 audios: body.audios,
+                // 漫剧编辑器：出场素材（名字数组）+ 配音台词 + 是否一起生成配音
+                cast: body.cast,
+                voiceover: body.voiceover,
+                generateVoice: body.generateVoice,
             });
             send(res, 200, { ok: true, job: publicJob(job) });
         } catch (error) {
@@ -1262,20 +1761,39 @@ const server = http.createServer((req, res) => {
     handle(req, res).catch((error) => send(res, 500, { ok: false, error: error?.message || String(error) }));
 });
 
-server.listen(PORT, HOST, () => {
-    console.log(`[mochiani-bridge] listening http://${HOST}:${PORT}`);
-    console.log(`[mochiani-bridge] MCP root: ${MCP_ROOT}`);
-    console.log(
-        TOKEN
-            ? "[mochiani-bridge] 远程模式：已启用访问令牌（画布地址要带 ?token=…）"
-            : "[mochiani-bridge] 本机模式：无鉴权。若要暴露到公网，请设置 MOCHIANI_BRIDGE_TOKEN",
-    );
-    if (process.env.MOCHIANI_BRIDGE_LAZY === "1") {
-        // 部署形态（服务器上先起桥、MochiAni 后登录）用：不在启动时就抢 MCP 会话。
-        console.log("[mochiani-bridge] lazy 模式：等第一次调用接口时再连 MCP");
-        return;
-    }
-    ensureClient()
-        .then(() => console.log("[mochiani-bridge] MCP connected"))
-        .catch((error) => console.warn("[mochiani-bridge] MCP connect failed:", error?.message || error));
-});
+/**
+ * 探针模式：`MOCHIANI_BRIDGE_NO_LISTEN=1` 时只把函数加载进来、不起监听也不连 MCP，
+ * 供 `probe-*.mjs` 直接 import 纯函数做离线校验（例如 carton 的模型/素材解析）。
+ */
+if (process.env.MOCHIANI_BRIDGE_NO_LISTEN === "1") {
+    console.log("[mochiani-bridge] probe 模式：不监听端口");
+} else {
+    server.listen(PORT, HOST, () => {
+        console.log(`[mochiani-bridge] listening http://${HOST}:${PORT}`);
+        console.log(`[mochiani-bridge] MCP root: ${MCP_ROOT}`);
+        console.log(
+            TOKEN
+                ? "[mochiani-bridge] 远程模式：已启用访问令牌（画布地址要带 ?token=…）"
+                : "[mochiani-bridge] 本机模式：无鉴权。若要暴露到公网，请设置 MOCHIANI_BRIDGE_TOKEN",
+        );
+        if (process.env.MOCHIANI_BRIDGE_LAZY === "1") {
+            // 部署形态（服务器上先起桥、MochiAni 后登录）用：不在启动时就抢 MCP 会话。
+            console.log("[mochiani-bridge] lazy 模式：等第一次调用接口时再连 MCP");
+            return;
+        }
+        ensureClient()
+            .then(() => console.log("[mochiani-bridge] MCP connected"))
+            .catch((error) => console.warn("[mochiani-bridge] MCP connect failed:", error?.message || error));
+    });
+}
+
+export {
+    buildCartonVideoModels,
+    collectCartonAssets,
+    collectVoiceCharacters,
+    composeCartonScript,
+    coerceCartonParams,
+    matchCartonAsset,
+    parseVoiceLines,
+    normalizeConfigOptions,
+};

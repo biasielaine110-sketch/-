@@ -457,8 +457,20 @@ export type CanvasNodeMetadata = {
     mochianiRun?: CanvasMochianiRun;
     /** MochiAni 生视频节点：窗口里填的提示词（滚出视口重挂后要还在）。 */
     mochianiPrompt?: string;
-    /** MochiAni 生视频节点：选中的模型 / 渠道 / 参数。 */
-    mochianiConfig?: { modelKey?: string; channelId?: string; params?: Record<string, string> };
+    /**
+     * MochiAni 生视频节点：选中的模型 / 渠道 / 参数，以及漫剧编辑器的「出场素材 + 配音」。
+     *
+     * `cast` 存的是**名字**不是 ID —— 名字是用户写的，ID 只在桥那边按作品素材库现解析，
+     * 换个作品还能用同一份节点。`voiceover` 就是「角色名：台词」的原文。
+     */
+    mochianiConfig?: {
+        modelKey?: string;
+        channelId?: string;
+        params?: Record<string, string>;
+        cast?: { characters?: string; scenes?: string; props?: string };
+        voiceover?: string;
+        generateVoice?: boolean;
+    };
     /** Midjourney Imagine parent task id — enables manual Upscale (U1–U4). */
     midjourneyTaskId?: string;
     /** Midjourney tile index 1–4 when the primary image is a specific Imagine tile. */
