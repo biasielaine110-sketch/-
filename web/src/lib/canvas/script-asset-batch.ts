@@ -585,6 +585,13 @@ export type ScriptAssetReferenceMatch = {
     /** `分类:标题`，与 `buildScriptAssetBatchItems` / `buildScriptAssetBatchMounts` 同一个键。 */
     key: string;
     mounts: ScriptAssetBatchMount[];
+    /**
+     * 这条是怎么认上的：
+     *  - `name`：名字对上（`口红产品图` → `口红`）；
+     *  - `hero`：名字对不上，按「表里出现镜数最多」兜底认成主角道具（用户 2026-11-09 口径）。
+     * 调用方据此给用户一句不同的提示 —— 自动认的要让人看得见，别以为是名字对上了。
+     */
+    via?: "name" | "hero";
 };
 
 /**
@@ -612,20 +619,40 @@ function scriptAssetReferenceTexts(reference: ScriptAssetReference): string[] {
     return prompt && prompt.length <= 120 ? [title, prompt].filter(Boolean) : [title].filter(Boolean);
 }
 
+export type ScriptAssetReferenceMatchOptions = {
+    /**
+     * 名字对不上的参考图，是否兜底认成「主角道具」（用户 2026-11-09 口径：
+     * 「优先将我提供的这个道具图作为分镜表中**出现频率最高**的道具资产链接到道具资产表格中，
+     * 注意链接了之后生成资产图时就别生成这个道具资产了」）。默认 **开**。
+     *
+     * 关掉它 = 回到「名字对不上就什么都不做」的老行为（探针里用得到）。
+     */
+    heroPropFallback?: boolean;
+};
+
 /**
  * 把「反推节点上连进来的参考图」对齐到分镜表里的资产，并算出每张图要挂到哪些格。
  *
- * 判定：**参考图名字里包含资产名**（或反过来包含），取命中最长的那条 ——
- * `口红产品图` 同时含 `口红` 与 `口红膏` 时命中 `口红膏`（更具体的那件）。
- * 一张资产只认第一张参考图（先连的优先），剩下的留在 `unmatched` 里给调用方报出来。
+ * 两段判定：
+ *  ① **按名字**（主路）：参考图名字里包含资产名（或反过来包含），取命中最长的那条 ——
+ *     `口红产品图` 同时含 `口红` 与 `口红膏` 时命中 `口红膏`（更具体的那件）。
+ *     一张资产只认第一张参考图（先连的优先）。
+ *  ② **主角道具兜底**（`heroPropFallback`，默认开）：名字完全对不上的图，按「表里出现镜数」从多到少
+ *     挂到还没被占用的道具上。理由：用户既然在反推节点上连了这张图，它就是这条片子的主角道具，
+ *     剧本本来就是围着它写的 —— 名字对不上（`产品图.png` / `IMG_2031` / 表里叫 `复古怀表` 而图叫 `老怀表`）
+ *     是常态，静默不挂等于让用户白给一张图、还多花一次资产图的钱。
+ *     ⚠️ 明显是「已占用资产的第二张图」（名字里含那件资产名，如 `口红实物图` vs 已挂的 `口红`）**不参与兜底** ——
+ *     否则会挤掉另一件道具的资产图。挂上之后调用方把它塞进 `skipAssetKeys`，该道具就不再生成资产图。
  *
- * @returns `matches`：按参考图顺序，每条带好 `mounts`（`buildScriptAssetBatchMounts` 的同一份格位）；
- *          `unmatched`：没对上任何资产的参考图（**不阻塞**流程，只是不参与挂载）。
+ * @returns `matches`：按参考图顺序，每条带好 `mounts`（`buildScriptAssetBatchMounts` 的同一份格位）
+ *          与 `via`（`name` = 名字命中 / `hero` = 兜底认的主角道具）；
+ *          `unmatched`：没对上、也没兜底成的参考图（**不阻塞**流程，只是不参与挂载）。
  */
 export function matchScriptAssetReferences(
     rows: readonly StoryScriptRow[] | null | undefined,
     references: readonly ScriptAssetReference[] | null | undefined,
     roles: readonly ScriptAssetRole[] = SCRIPT_ASSET_REFERENCE_ROLE_IDS,
+    options: ScriptAssetReferenceMatchOptions = {},
 ): { matches: ScriptAssetReferenceMatch[]; unmatched: ScriptAssetReference[] } {
     const refs = (references || []).filter((item) => Boolean(item?.nodeId));
     if (!refs.length || !rows?.length) return { matches: [], unmatched: refs };
@@ -641,6 +668,8 @@ export function matchScriptAssetReferences(
     if (!candidates.length) return { matches: [], unmatched: refs };
     const mountsByKey = buildScriptAssetBatchMounts(rows);
     const claimed = new Set<string>();
+    /** 已被认领的资产名（归一化）—— 用来识别「同一件道具的第二张图」，别把它兜底到别的道具上。 */
+    const claimedNorms: string[] = [];
     const matches: ScriptAssetReferenceMatch[] = [];
     const unmatched: ScriptAssetReference[] = [];
     for (const reference of refs) {
@@ -674,7 +703,45 @@ export function matchScriptAssetReferences(
             continue;
         }
         claimed.add(best.key);
-        matches.push({ reference, role: best.role, title: best.title, key: best.key, mounts: mountsByKey[best.key] || [] });
+        claimedNorms.push(best.norm);
+        matches.push({ reference, role: best.role, title: best.title, key: best.key, mounts: mountsByKey[best.key] || [], via: "name" });
+    }
+
+    /**
+     * ② 主角道具兜底。排序口径必须与「道具资产表」看得到的频率一致：`mountsByKey[key].length`
+     * = 这件道具在表里占了几格（道具是一镜一格，所以就是**出现在几镜**）。
+     * 只在「道具」上兜底 —— 角色 / 场景有定妆版式与空景要求，拿一张随手拍的产品图去顶会歪。
+     */
+    const heroFallback = options.heroPropFallback !== false;
+    if (heroFallback && unmatched.length) {
+        const ranked = candidates
+            .filter((candidate) => candidate.role === "prop" && !claimed.has(candidate.key))
+            .map((candidate) => ({ ...candidate, shots: mountsByKey[candidate.key]?.length || 0 }))
+            .filter((candidate) => candidate.shots > 0)
+            // 出现镜数多的优先；同频次取名字更长的（更具体的那件），与名字命中的同档口径一致。
+            .sort((left, right) => right.shots - left.shots || right.norm.length - left.norm.length);
+        if (ranked.length) {
+            const leftovers = unmatched.slice();
+            unmatched.length = 0;
+            for (const reference of leftovers) {
+                const texts = scriptAssetReferenceTexts(reference);
+                // 已认领道具的第二张图（`口红实物图` vs 已挂的 `口红`）：退回去当 unmatched，
+                // 不能挤掉别的道具的资产图。
+                const duplicateOfClaimed = texts.some((text) => claimedNorms.some((norm) => text === norm || text.includes(norm) || norm.includes(text)));
+                if (duplicateOfClaimed) {
+                    unmatched.push(reference);
+                    continue;
+                }
+                const next = ranked.find((candidate) => !claimed.has(candidate.key));
+                if (!next) {
+                    unmatched.push(reference);
+                    continue;
+                }
+                claimed.add(next.key);
+                claimedNorms.push(next.norm);
+                matches.push({ reference, role: next.role, title: next.title, key: next.key, mounts: mountsByKey[next.key] || [], via: "hero" });
+            }
+        }
     }
     return { matches, unmatched };
 }

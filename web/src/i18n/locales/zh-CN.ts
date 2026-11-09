@@ -838,6 +838,7 @@ export default {
             oneClickScriptEmpty: "分镜表解析出来是空的，已暂停后续流程",
             oneClickImageSkipped: "分镜表里没有可生成的资产图，直接进入铺视频链路",
             oneClickReferenceMounted: "参考图已挂成道具素材：{{names}}（这些道具不再单独生成资产图）",
+            oneClickReferenceHeroMounted: "名字对不上，已按「出现镜数最多」把你的参考图认成主角道具：{{names}}（该道具不再单独生成资产图）",
             oneClickImageRetry: "{{count}} 张资产图生成失败，正在用偏好模型 {{model}} 重试…",
             oneClickImageFallback: "仍有 {{count}} 张失败，正在用 {{model}} 托底生成…",
             oneClickImageFallbackMissing: "仍有 {{count}} 张图失败，但渠道里没有 seedream-5.0-pro 可用，已暂停后续流程",

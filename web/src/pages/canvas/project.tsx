@@ -9710,33 +9710,35 @@ function AtelierCanvasPage() {
      * 为什么要有这一步：用户拍/画好的产品图已经在手上了，再让模型照着分镜表描述生一张「差不多的口红」
      * 既是白花钱，也会让真产品在视频里走形。所以：
      *  ① 按名字把参考图对齐到表里的道具（`matchScriptAssetReferences`，只认道具）；
-     *  ② 对齐上的 → 走 `mountScriptAssetToCells` 直接挂进那一格（`scriptCellAssets` 精准指定 +
+     *  ② 名字对不上时**兜底认成主角道具**：按「这件道具在表里出现几镜」从多到少挂上去 ——
+     *     用户连这张图的意思就是「片子围着它拍」（用户 2026-11-09 口径：「优先把这个道具图作为
+     *     分镜表中出现频率最高的道具资产」）。`via` 会标出是名字命中还是兜底认的；
+     *  ③ 对齐上的 → 走 `mountScriptAssetToCells` 直接挂进那一格（`scriptCellAssets` 精准指定 +
      *     `scriptNameLocks` 按名兜底 + `scriptAssetRoles` 标成道具），铺链路时这一镜的视频节点就直连这张图；
-     *  ③ 顺手把参考图连到脚本节点 —— 与「一键直接生图」出来的资产图同一个位置，用户看得出它是本表素材。
+     *  ④ 顺手把参考图连到脚本节点 —— 与「一键直接生图」出来的资产图同一个位置，用户看得出它是本表素材。
      * 返回命中资产的键（`分类:标题`），调用方把它交给 `handleDirectGenerateScriptAssets`
-     * 的 `skipAssetKeys`，于是**已经挂上的产品不再生图**。
+     * 的 `skipAssetKeys`，于是**已经挂上的产品不再生图**（这是「已经用了这个道具」的关键一步）。
      *
-     * ⚠️ 对齐不上（名字不一致 / 表里没这件道具）就**什么都不做**：不挂、也不跳过生成，
-     * 保持「一键视频」原来的行为 —— 静默吞掉一张产品图比多生一张更让用户困惑。
+     * ⚠️ 表里一件道具都没有（或全被占满）才**什么都不做**：不挂、也不跳过生成。
      */
     const mountReferenceAssetsToScript = useCallback((scriptNodeId: string, references: readonly ScriptAssetReference[]) => {
         const source = nodesRef.current.find((item) => item.id === scriptNodeId);
-        if (!source || !references.length) return { matched: [] as Array<{ nodeId: string; title: string }>, skipAssetKeys: [] as string[] };
+        if (!source || !references.length) return { matched: [] as Array<{ nodeId: string; title: string; via: "name" | "hero" }>, skipAssetKeys: [] as string[] };
         const rows = source.metadata?.scriptRows;
         const { matches } = matchScriptAssetReferences(rows, references);
-        if (!matches.length) return { matched: [] as Array<{ nodeId: string; title: string }>, skipAssetKeys: [] as string[] };
+        if (!matches.length) return { matched: [] as Array<{ nodeId: string; title: string; via: "name" | "hero" }>, skipAssetKeys: [] as string[] };
         const extras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
         let cells = source.metadata?.scriptCellAssets;
         let locks = source.metadata?.scriptNameLocks;
         const roles: Record<string, ScriptAssetRole> = {};
-        const mounted: Array<{ nodeId: string; title: string }> = [];
+        const mounted: Array<{ nodeId: string; title: string; via: "name" | "hero" }> = [];
         for (const match of matches) {
             // 表里查不到格位（名字被道具上限截掉之类）：跳过生成就够，不硬写一个空挂载。
             if (match.mounts.length) {
                 const next = mountScriptAssetToCells({ cells, locks, mounts: match.mounts, nodeId: match.reference.nodeId, extras });
                 cells = next.cells;
                 locks = next.locks;
-                mounted.push({ nodeId: match.reference.nodeId, title: match.title });
+                mounted.push({ nodeId: match.reference.nodeId, title: match.title, via: match.via || "name" });
             }
             // 角色标记必须写：铺链路拼「资产绑定」文案时靠它认分类，缺了会被 `resolveScriptAssetRole`
             // 兜成「角色」，提示词里就会写成「XX人物参考」。
@@ -9874,13 +9876,18 @@ function AtelierCanvasPage() {
 
                 // ---- ①.5 参考图（产品）直接挂成道具资产，并把这些道具剔出下一步的生图清单 ----
                 // 必须排在这里：分镜表刚出来（stage ①）才有「道具名」可对齐；而 stage ② 要读挂载结果 + 跳过表。
+                /**
+                 * 参考图挂载结果分两种说法：名字对上的照旧提示；**兜底认的主角道具**单独提示一句 ——
+                 * 自动认的东西必须让用户看得见，否则他只会疑惑「这张图凭什么挂到这件道具上」。
+                 */
                 let skipAssetKeys: string[] = [];
                 if (options?.referenceAssets?.length) {
                     const result = mountReferenceAssetsToScript(nodeId, options.referenceAssets);
                     skipAssetKeys = result.skipAssetKeys;
-                    if (result.matched.length) {
-                        message.success(t("canvas.scriptNode.oneClickReferenceMounted", { names: result.matched.map((item) => item.title).join("、") }));
-                    }
+                    const named = result.matched.filter((item) => item.via !== "hero").map((item) => item.title);
+                    const heroes = result.matched.filter((item) => item.via === "hero").map((item) => item.title);
+                    if (named.length) message.success(t("canvas.scriptNode.oneClickReferenceMounted", { names: named.join("、") }));
+                    if (heroes.length) message.info(t("canvas.scriptNode.oneClickReferenceHeroMounted", { names: heroes.join("、") }));
                 }
 
                 // ---- ② 一键直接生图（偏好模型重试一次 → seedream-5.0-pro 托底一次；15 分钟封顶）----

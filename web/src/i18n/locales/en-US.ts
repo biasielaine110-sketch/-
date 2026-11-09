@@ -838,6 +838,7 @@ export default {
             oneClickScriptEmpty: "The storyboard parsed to zero rows — the rest of the flow is paused",
             oneClickImageSkipped: "No asset image to generate in this storyboard — going straight to the video chain",
             oneClickReferenceMounted: "Reference image(s) mounted as props: {{names}} (their asset images are skipped)",
+            oneClickReferenceHeroMounted: "Names did not match, so your reference image was treated as the hero prop (most shots): {{names}} (its asset image is skipped)",
             oneClickImageRetry: "{{count}} asset image(s) failed — retrying with your preferred model {{model}}…",
             oneClickImageFallback: "{{count}} still failing — falling back to {{model}}…",
             oneClickImageFallbackMissing: "{{count}} image(s) still failing and no seedream-5.0-pro model is available — the rest of the flow is paused",
