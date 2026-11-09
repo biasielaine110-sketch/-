@@ -542,6 +542,7 @@ export default {
             merge: "Merge grid",
             script: "Story script",
             videoMerge: "Video merge",
+            reverseVideo: "Video reverse",
         },
         videoMerge: {
             summary: "{{count}} clips · {{duration}}",
@@ -816,6 +817,8 @@ export default {
             directAssetHint: "No dialog, no filtering: generate all {{count}} characters / scenes / props at once (characters locked to 9:16, scenes & props to 16:9, ignoring the size selector above; blocking diagrams excluded). Scene and prop prompts also get an empty-plate suffix (no people), and every prompt states its aspect ratio both at the start and on the last line; the default image model from your preferences is used",
             directAssetStarted: "Started generating {{count}} asset image(s)",
             directAssetEmpty: "No asset to generate yet — the character / scene / prop columns need content",
+            viewTemplateMissing:
+                "No library entry matched \"{{names}}\" — these images will not get the view layout. A character entry needs \"角色视图 / 角色三视图\" + \"无头\" in its title (scene: \"场景视图\" + \"宫格\") and must stay enabled; fix the title and run again",
             oneClickVideo: "One-click video",
             oneClickVideoHint:
                 "All in one: build the storyboard → generate every asset image → lay the video chain out and start generating. A failed storyboard retries once with deepseek-flash; failed images retry with your preferred model, then fall back to seedream-5.0-pro. Each stage waits at most 15 minutes and pauses the rest of the flow on timeout or a remaining failure (nodes already created are kept)",
@@ -832,6 +835,7 @@ export default {
             oneClickScriptFailed: "Storyboard failed (already retried with the fallback model): {{error}}",
             oneClickScriptEmpty: "The storyboard parsed to zero rows — the rest of the flow is paused",
             oneClickImageSkipped: "No asset image to generate in this storyboard — going straight to the video chain",
+            oneClickReferenceMounted: "Reference image(s) mounted as props: {{names}} (their asset images are skipped)",
             oneClickImageRetry: "{{count}} asset image(s) failed — retrying with your preferred model {{model}}…",
             oneClickImageFallback: "{{count}} still failing — falling back to {{model}}…",
             oneClickImageFallbackMissing: "{{count}} image(s) still failing and no seedream-5.0-pro model is available — the rest of the flow is paused",

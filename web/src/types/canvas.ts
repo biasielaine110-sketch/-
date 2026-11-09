@@ -22,6 +22,7 @@ export enum CanvasNodeType {
     Merge = "merge",
     Script = "script",
     VideoMerge = "video-merge",
+    ReverseVideo = "reverse-video",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -129,6 +130,29 @@ export type CanvasVideoMergeClip = {
     inSec: number;
     /** 取用区间终点（秒）；图片用它的时长。 */
     outSec: number;
+};
+
+/**
+ * 反推视频节点一次执行的快照（一条命令从点下到跑完）。
+ *
+ * 只有 `running` / `done` / `error` 三态：反推是**一次性任务**，没有「队列」也没有「取消后继续」，
+ * 所以不需要更细的状态机。`chatNodeId` / `textNodeId` / `scriptNodeId` 用来在窗口里回跳产物。
+ */
+export type CanvasReverseVideoRun = {
+    status: "running" | "done" | "error";
+    /** 当前阶段文案（「反推中…」「写进文本节点…」），给人看进度用。 */
+    stage?: string;
+    error?: string;
+    /** 01 / 02 / 03 */
+    mode?: number;
+    chatNodeId?: string;
+    textNodeId?: string;
+    scriptNodeId?: string;
+    /**
+     * 最近一次状态更新时间（epoch ms）—— **不是「开始时间」**。
+     * 每次阶段推进都刷新它，节点据此判断「running 却很久没动静 = 上次被刷新掐断了」。
+     */
+    at?: number;
 };
 
 export type CanvasNodeMetadata = {
@@ -394,6 +418,17 @@ export type CanvasNodeMetadata = {
     videoMergeAspect?: string | null;
     /** 视频合并：这条视频是哪个合并节点渲染出来的（溯源用，不影响播放）。 */
     videoMergeFrom?: string;
+    /**
+     * 反推视频节点：**手动接入**的视频节点 id。
+     * 正常接入走画布连线（视频节点 → 本节点），只有用户在窗口里从列表 / 粘贴链接挑的时候才写这里。
+     * 连线和这里都有值时**连线优先**（连线是用户当下看得见的那个关系）。
+     */
+    reverseVideoSourceId?: string;
+    /**
+     * 反推视频节点：上一次执行的结果快照。
+     * 节点滚出视口会被裁掉重挂，进度只放组件 state 会在回来时凭空消失，所以落到 metadata。
+     */
+    reverseVideoRun?: CanvasReverseVideoRun;
     /** Midjourney Imagine parent task id — enables manual Upscale (U1–U4). */
     midjourneyTaskId?: string;
     /** Midjourney tile index 1–4 when the primary image is a specific Imagine tile. */

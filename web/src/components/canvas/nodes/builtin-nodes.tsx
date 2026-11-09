@@ -1,4 +1,4 @@
-import { Clapperboard, Combine, FileText, Group, Grid2x2, Highlighter, Image as ImageIcon, MessageSquareText, Music2, ScrollText, Settings2, Video } from "lucide-react";
+import { Clapperboard, Combine, FileText, Group, Grid2x2, Highlighter, Image as ImageIcon, MessageSquareText, Music2, ScrollText, Settings2, Video, Wand2 } from "lucide-react";
 
 import i18n from "@/i18n";
 
@@ -41,6 +41,9 @@ const BUILTIN_DEFINITIONS: CanvasNodeDefinition[] = [
     { type: CanvasNodeType.Script, title: i18n.t("canvas.nodeTypes.script"), icon: <ScrollText className={iconClass} />, minimapColor: "#f59e0b", resource: builtinResource, hidePanel: true },
     { type: CanvasNodeType.VideoMerge, title: i18n.t("canvas.nodeTypes.videoMerge"), icon: <Combine className={iconClass} />, minimapColor: "#d946ef", hasSourceHandle: false, hidePanel: true },
     { type: CanvasNodeType.Chat, title: i18n.t("canvas.nodeTypes.chat"), icon: <MessageSquareText className={iconClass} />, minimapColor: "#38bdf8", resource: builtinResource, hidePanel: true },
+    // 反推视频：只收视频（走左侧 target 连线），产物是它自己建的对话 / 文本 / 脚本节点，
+    // 所以不需要 source 手柄 —— 从这里拖出一根线到别处什么也不会发生。
+    { type: CanvasNodeType.ReverseVideo, title: i18n.t("canvas.nodeTypes.reverseVideo"), icon: <Wand2 className={iconClass} />, minimapColor: "#a78bfa", hasSourceHandle: false, hidePanel: true },
 ].map((def) => {
     const spec = NODE_SPECS[def.type];
     return { ...def, title: spec.title, defaultSize: { width: spec.width, height: spec.height }, defaultMetadata: spec.metadata };

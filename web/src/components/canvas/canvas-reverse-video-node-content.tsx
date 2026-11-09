@@ -1,0 +1,395 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { App, Button, Input, Modal, Tag } from "antd";
+import { CircleAlert, Clapperboard, FileText, Images, Link2, Loader2, Sparkles, Video, Wand2 } from "lucide-react";
+
+import { canvasThemes } from "@/lib/canvas-theme";
+import { DEFAULT_VIDEO_REVERSE_REQUIREMENT, VIDEO_REVERSE_MODES, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { useThemeStore } from "@/stores/use-theme-store";
+import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
+
+/**
+ * 「反推视频」命令集合**节点**的内容区。
+ *
+ * 三条命令都建立在同一个前提上：**先接入一条视频**。接入有两条路，都认：
+ *  ① 画布连线：视频节点 → 本节点（最自然，`project.tsx` 解析后传 `attachedVideoId` + `attachSource="connection"`）；
+ *  ② 窗口里的「接入视频」：选中画布上的视频直接接，或从列表 / 粘贴链接建一个（落在 `metadata.reverseVideoSourceId`）。
+ *
+ * 没接入时按钮是「看起来禁用」的（`aria-disabled`）——刻意不用真 `disabled`：
+ * 真禁用时悬停不出 `title`、点了也没反应，用户只会觉得坏了。
+ *
+ * 真正的编排在 `project.tsx: runVideoReverse`：建对话节点 → 连视频 → 调技能反推 →
+ * 结果落文本节点 →（03）接脚本生成器并跑一键视频。这里只负责「选视频 + 按按钮 + 显示进度」。
+ * 进度 / 结果落在 `metadata.reverseVideoRun`：节点滚出视口会被卸载重挂，只放 state 会凭空消失。
+ */
+
+export type ReverseVideoOption = {
+    id: string;
+    title: string;
+    url: string;
+};
+
+type CanvasReverseVideoNodeContentProps = {
+    node: CanvasNodeData;
+    /** 画布上所有可用的视频节点 */
+    videos: ReverseVideoOption[];
+    /** 当前选中的视频节点（点「接入视频」时优先接它） */
+    selectedVideoId?: string | null;
+    /** 已解析出的接入视频（连线优先，其次手动接入） */
+    attachedVideoId?: string | null;
+    /** 接入来源，只影响文案：连线接入无法在这里「取消」，得去删那根线 */
+    attachSource?: "connection" | "manual" | null;
+    /**
+     * 除视频以外连进来的参考图（目前只认图片节点）。
+     * 02/03 跑一键视频时，**名字对上分镜表里道具**的那几张会被直接挂成道具资产、
+     * 并且不再单独生成该道具的资产图（见 `project.tsx: mountReferenceAssetsToScript`）。
+     */
+    referenceImages?: ReverseVideoOption[];
+    /** 反推固定使用的文本模型（展示用，真正生效在 project.tsx） */
+    reverseModelLabel?: string;
+    onConfigChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
+    /** 粘贴链接建一个视频节点，返回新节点 id */
+    onCreateVideoFromUrl?: (videoUrl: string) => Promise<string>;
+    /** 执行一条命令；report 用来把阶段文案打到窗口里 */
+    onRun: (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string }, report: (stage: string) => void) => Promise<VideoReverseResult>;
+};
+
+const MODE_ICON: Record<VideoReverseMode, typeof Video> = {
+    1: Video,
+    2: FileText,
+    3: Clapperboard,
+};
+
+/** 落在窗口里会挡住「拖整个节点」的控件：命中就让事件停在这层。 */
+const INTERACTIVE_SELECTOR = "textarea,input,button,[contenteditable],[data-canvas-selectable-text],.ant-select,.ant-btn,.ant-tag,.ant-modal";
+
+/**
+ * 「running」超过这个时长就判定为上次被打断（刷新页面会掐断请求，状态位来不及回写）。
+ * 必须**大于 03 一键视频的最长预算（45 分钟）**，否则长任务跑到一半按钮就被解锁，用户能连点两条命令。
+ */
+const STALE_RUN_MS = 60 * 60_000;
+
+export function CanvasReverseVideoNodeContent({
+    node,
+    videos,
+    selectedVideoId,
+    attachedVideoId,
+    attachSource,
+    referenceImages,
+    reverseModelLabel,
+    onConfigChange,
+    onCreateVideoFromUrl,
+    onRun,
+}: CanvasReverseVideoNodeContentProps) {
+    const { message } = App.useApp();
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const [pickerOpen, setPickerOpen] = useState(false);
+    const [urlDraft, setUrlDraft] = useState("");
+    const [creating, setCreating] = useState(false);
+    const [requirementMode, setRequirementMode] = useState<VideoReverseMode | null>(null);
+    const [requirementText, setRequirementText] = useState(DEFAULT_VIDEO_REVERSE_REQUIREMENT);
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+
+    const run = node.metadata?.reverseVideoRun;
+    const attached = useMemo(() => videos.find((item) => item.id === attachedVideoId) || null, [attachedVideoId, videos]);
+    const selectedVideo = useMemo(() => videos.find((item) => item.id === selectedVideoId) || null, [selectedVideoId, videos]);
+    /** 状态位是 running 但已经很久没更新 = 上次被刷新 / 关页面掐断了，别把按钮永久锁死。 */
+    const staleRun = run?.status === "running" && Date.now() - (run.at || 0) > STALE_RUN_MS;
+    const running = run?.status === "running" && !staleRun;
+
+    // 节点内滚动：画布的 wheel 会当缩放拦掉，必须自己在原生事件上停下（React onWheel 不够）。
+    useEffect(() => {
+        const element = scrollRef.current;
+        if (!element) return;
+        const stop = (event: WheelEvent) => event.stopPropagation();
+        element.addEventListener("wheel", stop, { passive: true });
+        return () => element.removeEventListener("wheel", stop);
+    }, []);
+
+    /** 只挡「真实控件」的按下：不挡的话点一下输入框就变成拖整个节点。 */
+    const stopDragOnInteractive = useCallback((event: React.SyntheticEvent) => {
+        const target = event.target as HTMLElement | null;
+        if (target?.closest?.(INTERACTIVE_SELECTOR)) event.stopPropagation();
+    }, []);
+
+    const patchRun = useCallback(
+        (next: NonNullable<CanvasNodeMetadata["reverseVideoRun"]>) => {
+            onConfigChange(node.id, { reverseVideoRun: next });
+        },
+        [node.id, onConfigChange],
+    );
+
+    const attach = useCallback(
+        (videoId: string) => {
+            setPickerOpen(false);
+            // 换了素材就把上一次的进度 / 产物记录清掉：那是上一条视频的结果，留着只会误导。
+            onConfigChange(node.id, { reverseVideoSourceId: videoId, reverseVideoRun: undefined });
+        },
+        [node.id, onConfigChange],
+    );
+
+    /** 「接入视频」：画布上选中了视频就直接接；没选中就打开选择框，别让用户多跳一步。 */
+    const handleAttachClick = useCallback(() => {
+        if (selectedVideo && selectedVideo.id !== attachedVideoId) {
+            attach(selectedVideo.id);
+            message.success(`已接入「${selectedVideo.title || "视频"}」`);
+            return;
+        }
+        setPickerOpen((prev) => !prev);
+    }, [attach, attachedVideoId, message, selectedVideo]);
+
+    const handleCreateFromUrl = useCallback(async () => {
+        const url = urlDraft.trim();
+        if (!url) return;
+        if (!onCreateVideoFromUrl) {
+            message.error("当前环境不支持按链接建视频节点，请先把视频上传到画布");
+            return;
+        }
+        setCreating(true);
+        try {
+            const nodeId = await onCreateVideoFromUrl(url);
+            attach(nodeId);
+            setUrlDraft("");
+            message.success("视频节点已建好并接入");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+        } finally {
+            setCreating(false);
+        }
+    }, [attach, message, onCreateVideoFromUrl, urlDraft]);
+
+    const runMode = useCallback(
+        async (mode: VideoReverseMode, requirement?: string) => {
+            if (!attached) {
+                message.warning("先接入视频：把视频节点连到本节点，或点「接入视频」挑一个");
+                return;
+            }
+            patchRun({ status: "running", mode, stage: "准备中…", at: Date.now() });
+            try {
+                const outcome = await onRun({ videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id }, (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }));
+                patchRun({
+                    status: outcome.ok ? "done" : "error",
+                    mode,
+                    stage: outcome.ok ? "已完成" : undefined,
+                    error: outcome.ok ? undefined : outcome.error || "执行失败",
+                    chatNodeId: outcome.chatNodeId,
+                    textNodeId: outcome.textNodeId,
+                    scriptNodeId: outcome.scriptNodeId,
+                    at: Date.now(),
+                });
+                if (outcome.ok) message.success(mode === 3 ? "反推 + 一键视频已启动/完成，进度见脚本节点" : "反推完成，结果已写进文本节点");
+                else message.error(outcome.error || "执行失败");
+            } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                patchRun({ status: "error", mode, error: detail, at: Date.now() });
+                message.error(detail);
+            }
+        },
+        [attached, message, node.id, onRun, patchRun],
+    );
+
+    const handleCommand = useCallback(
+        (mode: VideoReverseMode) => {
+            if (!attached) {
+                message.warning("先接入视频：把视频节点连到本节点，或点「接入视频」挑一个");
+                return;
+            }
+            if (running) return;
+            if (mode === 1) {
+                void runMode(1);
+                return;
+            }
+            // 02 / 03：先弹特殊要求，默认已经把「反推视频并生成同款风格文案」写好。
+            setRequirementText(DEFAULT_VIDEO_REVERSE_REQUIREMENT);
+            setRequirementMode(mode);
+        },
+        [attached, message, runMode, running],
+    );
+
+    const confirmRequirement = useCallback(() => {
+        const mode = requirementMode;
+        setRequirementMode(null);
+        if (!mode) return;
+        void runMode(mode, requirementText.trim());
+    }, [requirementMode, requirementText, runMode]);
+
+    const softBorder = `1px solid ${theme.node.stroke}`;
+
+    return (
+        <div className="flex h-full w-full flex-col gap-2 p-3 text-[13px]" style={{ color: theme.node.text, cursor: "default" }} onMouseDown={stopDragOnInteractive} onPointerDown={stopDragOnInteractive}>
+            {/* ① 表头 + 接入视频 */}
+            <div className="flex items-center gap-2">
+                <Wand2 size={14} style={{ color: "#a78bfa" }} className="shrink-0" />
+                <span className="min-w-0 flex-1 truncate text-xs font-semibold opacity-80">反推视频 · 命令集合</span>
+                <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: attached ? "#22c55e" : "#71717a" }} />
+                <Button size="small" icon={<Link2 size={12} />} onClick={handleAttachClick} loading={creating}>
+                    {attached ? "换一个" : "接入视频"}
+                </Button>
+            </div>
+
+            <div ref={scrollRef} className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-0.5" data-canvas-no-zoom>
+                {/* ② 接入状态 */}
+                <div className="rounded-md px-2.5 py-2" style={{ border: softBorder }}>
+                    {attached ? (
+                        <div className="flex items-center gap-2.5">
+                            <video src={attached.url} muted playsInline preload="metadata" className="h-14 w-24 shrink-0 rounded object-cover" style={{ background: "#000" }} />
+                            <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                    <span className="min-w-0 truncate text-xs font-medium">{attached.title || "视频"}</span>
+                                    <Tag style={{ marginInlineEnd: 0 }} color={attachSource === "connection" ? "blue" : "default"}>
+                                        {attachSource === "connection" ? "连线接入" : "手动接入"}
+                                    </Tag>
+                                </div>
+                                <div className="mt-0.5 truncate text-[11px] opacity-45">{attached.url}</div>
+                                {attachSource === "connection" ? <div className="mt-0.5 text-[11px] opacity-55">下面三条命令可用（断开那根线 = 取消接入）</div> : null}
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="text-[11px] leading-relaxed" style={{ color: "#f59e0b" }}>
+                            还没接入视频：把画布上的视频节点连到本节点左侧，或点右上角「接入视频」从列表里挑 / 粘贴链接。
+                            <div className="mt-1 opacity-60">{videos.length ? `画布上可选的视频：${videos.length} 个` : "画布上还没有视频节点"}</div>
+                        </div>
+                    )}
+
+                    {pickerOpen ? (
+                        <div className="mt-2 flex flex-col gap-2 rounded-md px-2 py-2" style={{ border: softBorder }}>
+                            <div className="max-h-40 overflow-auto">
+                                {videos.length ? (
+                                    videos.map((item) => (
+                                        <button key={item.id} type="button" onClick={() => attach(item.id)} className="flex w-full items-center gap-2 rounded px-1 py-1 text-left text-xs transition hover:bg-white/10">
+                                            <Video size={12} className="shrink-0 opacity-60" />
+                                            <span className="min-w-0 flex-1 truncate">{item.title || "视频"}</span>
+                                            <span className="shrink-0 opacity-40">{item.id.slice(0, 6)}</span>
+                                        </button>
+                                    ))
+                                ) : (
+                                    <div className="px-1 py-1 text-[11px] opacity-50">画布上没有视频节点，先拖一个视频进来，或在下面粘贴链接</div>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <Input size="small" value={urlDraft} onChange={(event) => setUrlDraft(event.target.value)} onPressEnter={() => void handleCreateFromUrl()} placeholder="粘贴视频链接（http/https），自动建一个视频节点" />
+                                <Button size="small" onClick={() => void handleCreateFromUrl()} loading={creating} disabled={!urlDraft.trim()}>
+                                    建节点并接入
+                                </Button>
+                            </div>
+                        </div>
+                    ) : null}
+
+                    {/* 参考图（连进来的图片节点）：02 / 03 会按名字把它们挂到分镜表的道具格 */}
+                    {referenceImages?.length ? (
+                        <div className="mt-2 rounded-md px-2 py-1.5" style={{ border: softBorder }}>
+                            <div className="flex items-start gap-1.5 text-[11px] leading-relaxed opacity-70">
+                                <Images size={11} className="mt-0.5 shrink-0" />
+                                <span className="min-w-0 flex-1">参考图 {referenceImages.length} 张：执行 02 / 03 时，名字对上分镜表「道具」的那几张会直接挂成道具素材，并且不再生成该道具的资产图。</span>
+                            </div>
+                            <div className="mt-1 flex flex-wrap gap-1">
+                                {referenceImages.map((item) => (
+                                    <img key={item.id} src={item.url} alt={item.title} title={item.title} className="h-10 w-10 rounded object-cover" style={{ background: "#000" }} />
+                                ))}
+                            </div>
+                        </div>
+                    ) : null}
+                </div>
+
+                {/* ③ 三条命令 */}
+                <div className="flex flex-col gap-1.5">
+                    {VIDEO_REVERSE_MODES.map((item) => {
+                        const Icon = MODE_ICON[item.mode];
+                        const usable = Boolean(attached) && !running;
+                        const isBusy = running && run?.mode === item.mode;
+                        return (
+                            <button
+                                key={item.mode}
+                                type="button"
+                                onClick={() => handleCommand(item.mode)}
+                                aria-disabled={!usable}
+                                title={usable ? item.hint : "先接入视频"}
+                                className="flex w-full items-start gap-2.5 rounded-md px-2.5 py-2 text-left transition"
+                                style={{
+                                    border: `1px solid ${usable ? theme.node.stroke : "transparent"}`,
+                                    background: usable ? theme.toolbar.activeBg : "transparent",
+                                    opacity: usable ? 1 : 0.45,
+                                    cursor: usable ? "pointer" : "not-allowed",
+                                }}
+                            >
+                                <span className="mt-0.5 shrink-0 text-[11px] font-semibold tracking-wider opacity-70">{item.no}</span>
+                                <Icon size={14} className="mt-0.5 shrink-0" style={{ color: usable ? "#a5b4fc" : "#71717a" }} />
+                                <span className="min-w-0 flex-1">
+                                    <span className="flex items-center gap-1.5">
+                                        <span className="text-xs font-medium">{item.label}</span>
+                                        {isBusy ? <Loader2 size={11} className="animate-spin" /> : null}
+                                    </span>
+                                    <span className="mt-0.5 block text-[11px] leading-relaxed opacity-55">{item.hint}</span>
+                                </span>
+                            </button>
+                        );
+                    })}
+                </div>
+
+                {/* ④ 进度 / 错误 / 产物 */}
+                {run?.status === "running" && run.stage ? (
+                    <div className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11px]" style={{ background: "rgba(99,102,241,0.14)", color: "#c7d2fe" }}>
+                        <Loader2 size={12} className="animate-spin shrink-0" />
+                        <span className="min-w-0 flex-1">{run.stage}</span>
+                    </div>
+                ) : null}
+
+                {staleRun ? <div className="rounded-md px-2 py-1.5 text-[11px]" style={{ background: "rgba(250,204,21,0.14)", color: "#fbbf24" }}>上一次运行已经超时（刷新页面会掐断请求），可以直接重跑。</div> : null}
+
+                {run?.status === "done" && !run.error ? (
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                        {run.chatNodeId ? (
+                            <Tag color="default" style={{ marginInlineEnd: 0 }}>
+                                对话节点
+                            </Tag>
+                        ) : null}
+                        {run.textNodeId ? (
+                            <Tag color="green" style={{ marginInlineEnd: 0 }}>
+                                文本节点
+                            </Tag>
+                        ) : null}
+                        {run.scriptNodeId ? (
+                            <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                                脚本节点 + 一键视频
+                            </Tag>
+                        ) : null}
+                        {run.stage && !run.chatNodeId ? <span className="opacity-50">{run.stage}</span> : null}
+                    </div>
+                ) : null}
+
+                {run?.status === "error" && run.error ? (
+                    <div className="flex items-start gap-1.5 rounded-md px-2 py-1.5 text-[11px] leading-relaxed" style={{ background: "rgba(248,113,113,0.14)", color: "#fca5a5" }}>
+                        <CircleAlert size={12} className="mt-0.5 shrink-0" />
+                        <span className="min-w-0 flex-1">{run.error}</span>
+                    </div>
+                ) : null}
+            </div>
+
+            {/* ⑤ 脚注：用的技能 / 模型 */}
+            <div className="flex flex-col gap-0.5 text-[11px] leading-relaxed opacity-45">
+                <span className="flex items-center gap-1.5">
+                    <Sparkles size={11} className="shrink-0" />
+                    技能「视频反推-分镜提示词」；没装会直接报错，不会静默换别的模型硬跑。三条命令的输出强制简体中文。
+                </span>
+                {reverseModelLabel ? <span className="truncate">反推模型：{reverseModelLabel}</span> : null}
+            </div>
+
+            {/* 特殊要求（02 / 03） */}
+            <Modal
+                open={requirementMode !== null}
+                onCancel={() => setRequirementMode(null)}
+                onOk={confirmRequirement}
+                okText="开始反推"
+                cancelText="取消"
+                width={520}
+                title={requirementMode === 3 ? "03 · 反推视频并生成同款风格文案及视频" : "02 · 反推视频并生成同款风格文案"}
+                destroyOnHidden={false}
+            >
+                <div className="flex flex-col gap-2 text-sm">
+                    <div className="text-xs opacity-60">这段会作为「特殊要求」跟着视频一起发进 AI 对话，可以直接改。</div>
+                    <Input.TextArea value={requirementText} onChange={(event) => setRequirementText(event.target.value)} rows={3} placeholder={DEFAULT_VIDEO_REVERSE_REQUIREMENT} />
+                    {requirementMode === 3 ? <div className="text-[11px] opacity-50">确定后会接着把文本节点接到脚本生成器，并执行一键视频。</div> : null}
+                </div>
+            </Modal>
+        </div>
+    );
+}

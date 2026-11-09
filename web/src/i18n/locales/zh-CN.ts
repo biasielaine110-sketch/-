@@ -542,6 +542,7 @@ export default {
             merge: "宫格合并",
             script: "脚本生成器",
             videoMerge: "视频合并",
+            reverseVideo: "反推视频",
         },
         videoMerge: {
             summary: "{{count}} 段 · {{duration}}",
@@ -817,6 +818,7 @@ export default {
             directAssetHint: "不弹窗、不筛选：把表里全部 {{count}} 个角色 / 场景 / 道具一次性全部生成（角色固定 9:16，场景 / 道具固定 16:9，不受上方「生图比例」影响；不含人物站位图），场景与道具额外追加「空景、不要出现人物」后缀，画幅还会同时写进提示词开头和最后一行；模型取配置偏好里的默认生图模型",
             directAssetStarted: "已开始直接生成 {{count}} 张资产图",
             directAssetEmpty: "分镜表里还没有可生成的资产（角色 / 场景 / 道具至少要有内容）",
+            viewTemplateMissing: "词库里没找到「{{names}}」——这批图不会套视图版式。判据是标题同时含「角色视图 / 角色三视图」+「无头」（场景是「场景视图」+「宫格」），且条目没被关掉；改好标题后再点一次即可",
             oneClickVideo: "一键视频",
             oneClickVideoHint:
                 "一条龙：生成分镜表 → 一键直接生图 → 一键铺视频链路并生成。分镜表报错会换 deepseek-flash 再生成一次，生图报错会先用偏好模型、再用 seedream-5.0-pro 托底；两个阶段各自最长等 15 分钟，超时或仍失败就暂停后续流程（已铺出来的节点都会保留）",
@@ -833,6 +835,7 @@ export default {
             oneClickScriptFailed: "分镜表生成失败（已用重试模型再试一次）：{{error}}",
             oneClickScriptEmpty: "分镜表解析出来是空的，已暂停后续流程",
             oneClickImageSkipped: "分镜表里没有可生成的资产图，直接进入铺视频链路",
+            oneClickReferenceMounted: "参考图已挂成道具素材：{{names}}（这些道具不再单独生成资产图）",
             oneClickImageRetry: "{{count}} 张资产图生成失败，正在用偏好模型 {{model}} 重试…",
             oneClickImageFallback: "仍有 {{count}} 张失败，正在用 {{model}} 托底生成…",
             oneClickImageFallbackMissing: "仍有 {{count}} 张图失败，但渠道里没有 seedream-5.0-pro 可用，已暂停后续流程",
