@@ -84,10 +84,14 @@ GET /api/models
                                              （实测 106 条 / 44 个 model_id，每条带灵点价、成功率、平均时长）
 
 POST /api/plan {prompt, modelKey:"carton:<modelId>", channelId:<supplierId>, params,
-                cast:{characters[], scenes[], props[], autoCreate}, voiceover, generateVoice}
+                cast:{characters[], scenes[], props[], autoCreate,
+                      images:[{kind:"characters"|"scenes"|"props", name, url|dataUrl}]},
+                voiceover, generateVoice}
   ├─ mochiani_update_video_generation_config 只有跟编辑器当前配置不一样才切（切换本身不花钱）
   ├─ mochiani_get_asset_matching_context     按名字匹配素材库真实 ID
   ├─ mochiani_create_asset                   库里没有的名字 → 自动新建（角色 / 场景 / 道具）
+  ├─ mochiani_upload_asset_images            素材图：按 byName 对齐 assetId 批量上传形象图
+  │                                          ⚠️ 只收本机绝对路径 → 桥先落 os.tmpdir()，用完删
   ├─ mochiani_create_shot                    script + characterIds / sceneIds / propIds
   ├─ mochiani_create_voiceover_item          「角色名：台词」逐条写成分镜配音项
   └─ mochiani_preflight_generation           只读预检：模型 / 渠道 / 参考 / 阻塞原因
@@ -108,6 +112,23 @@ POST /api/jobs/:id/confirm               ← 从这一步开始扣余额
    不会瞎猜一个 ID 塞进去。
 
 离线校验：`MOCHIANI_BRIDGE_NO_LISTEN=1 node probe-carton-plan.mjs`（不连 MCP、不花钱、不写作品）。
+
+**素材区是可选的，填了以「图块」形态出现**：
+
+- 名字怎么来：节点上每个素材一个图块，输入名字回车即加一条（`cast.characters/scenes/props` 存的还是换行文本）。
+- 图怎么来：只认**画布上连线进来的图片节点**，按节点标题跟名字对（「林晚定妆照」→ 林晚；精确 → 双向包含，标题至少 2 字）。
+  对不上就留空占位 —— **不按顺序自动分配**，把 A 的脸挂到 B 身上比没图更糟。
+- 不填会怎样：只发提示词，人物/场景/道具交给 MochiAni 按分镜自己解析。
+- 按用户要求**不**从提示词里抽「角色锁定描述」写进素材 `description`（`create_asset` 的 `description` 通道留着但默认不启用）。
+
+**读模型目录为空 ≠ 没模型**（`/api/models` 的自愈顺序）：
+
+1. `mochiani_canvas_model_options` 空 → `resetClient()` 掐掉 MCP 连接重读（桥跑久了会捏着旧的页面会话，实测重启桥立刻恢复 44 个模型）；
+2. 仍空 → `mochiani_canvas_locate_node` 把节点挪进视口、唤醒生成面板，再读；
+3. 仍空 → 报 `MODEL_OPTIONS_EMPTY`；locate 超时 → 报 `PAGE_SUSPENDED`（浏览器把 MochiAni 标签页挂起了，切过去点一下即可）。
+
+**渠道不是模型名的一部分**：同一个模型下挂的是线路池（实测 `Minimax H3` = Tencent / AD【优质】 / AutoDL托管，价格与成功率不同）。
+所以面板默认自动选一条、只显示一行灰字，`>1` 条时才给「换渠道」。
 
 最后「放到画布」复用画布的 `createBridgeVideoNode`，把 videoUrl 落成视频节点。
 
