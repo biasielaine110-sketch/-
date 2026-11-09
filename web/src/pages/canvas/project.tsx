@@ -1658,9 +1658,31 @@ function AtelierCanvasPage() {
     const createBridgeVideoNode = useCallback(
         async (videoUrl: string, prompt?: string, position?: Position) => {
             const nodeId = createNode(CanvasNodeType.Video, position);
+            /**
+             * MochiAni 回来的是它自己 CDN 上的临时地址（`tencentcloud.mochiani.com/temporary/…`），
+             * 过一阵就失效。先落到本机媒体库（objectURL + storageKey），画布上的节点才是
+             * 能导出、能被「视频合并」吃、重启后还在的；下载失败（跨域被拦）才退回远程地址。
+             */
+            let content = videoUrl;
+            let mediaFields: { storageKey?: string; bytes?: number; mimeType?: string; durationMs?: number } = {};
+            if (/^https?:\/\//i.test(videoUrl)) {
+                try {
+                    const media = await uploadMediaFile(videoUrl, "video");
+                    content = media.url;
+                    mediaFields = {
+                        storageKey: media.storageKey,
+                        bytes: media.bytes,
+                        mimeType: media.mimeType,
+                        durationMs: media.durationMs,
+                    };
+                } catch {
+                    // 拿不回来就先用远程地址播，至少能看、能手动另存。
+                }
+            }
             const patch = {
-                content: videoUrl,
+                content,
                 status: NODE_STATUS_SUCCESS,
+                ...mediaFields,
                 ...(prompt ? { prompt, composerContent: prompt, promptSyncAt: Date.now() } : {}),
             };
             setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node)));

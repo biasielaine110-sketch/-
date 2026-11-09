@@ -788,9 +788,14 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
 
     const imageLimit = selectedModel?.mediaLimits?.image?.max ?? 9;
     const imageRequired = selectedModel?.mediaLimits?.image?.required ?? 0;
-    /** 视频 / 音频上限：模型没声明（0）就不拦，交给 MochiAni 侧的原生端口去拒。 */
-    const videoLimit = selectedModel?.mediaLimits?.video?.max ?? 0;
-    const audioLimit = selectedModel?.mediaLimits?.audio?.max ?? 0;
+    /**
+     * 视频 / 音频上限。`null` = 模型压根没上报（未知，不拦）；`0` = 明确不支持（不发）。
+     *
+     * 🔴 以前 `?? 0` 把两者混成一个 0，而 `pick` 又把 0 当「不限」—— 结果不支持参考视频的模型
+     * 也会把视频硬塞进去，白传一遍再被 MochiAni 的端口拒掉。
+     */
+    const videoLimit = typeof selectedModel?.mediaLimits?.video?.max === "number" ? selectedModel.mediaLimits.video.max : null;
+    const audioLimit = typeof selectedModel?.mediaLimits?.audio?.max === "number" ? selectedModel.mediaLimits.audio.max : null;
 
     /**
      * 当前目标是漫剧编辑器吗？
@@ -823,10 +828,16 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     /** 组装给桥的参考素材：连线的优先（用户刚连的那根线更可信），手动上传的补在后面。 */
     const collectMediaPayload = useCallback(async () => {
         const unusable: string[] = [];
-        const pick = async (list: CanvasResourceReference[], limit: number, kind: "image" | "video" | "audio") => {
+        const kindLabel = { image: "参考图", video: "参考视频", audio: "参考音频" } as const;
+        const pick = async (list: CanvasResourceReference[], limit: number | null, kind: "image" | "video" | "audio") => {
             const out: Array<{ url?: string; dataUrl?: string }> = [];
+            // 明确 0 = 这个模型/渠道不吃这种素材；null = 没上报，当未知照发。
+            if (limit === 0) {
+                for (const reference of list) unusable.push(`${reference.title || reference.label}：当前模型不支持${kindLabel[kind]}，没发`);
+                return out;
+            }
             for (const reference of list) {
-                if (limit > 0 && out.length >= limit) {
+                if (limit != null && limit > 0 && out.length >= limit) {
                     unusable.push(`${reference.title || reference.label} 超过上限，没发`);
                     continue;
                 }
