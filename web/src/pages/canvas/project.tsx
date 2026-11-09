@@ -168,7 +168,7 @@ import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasRe
 import { collectCanvasOccupied, findFreeColumnX, planRightwardChainSlots } from "@/lib/canvas/canvas-free-space";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
-import { buildVideoReversePrompt, pickVideoReverseSkill, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, needsChineseRewrite, pickVideoReverseSkill, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -10086,8 +10086,20 @@ function AtelierCanvasPage() {
 
             // ② 把视频链接 + 要求发进对话，等它把反推结果说完
             report("把视频链接发进对话，反推中…");
-            const answer = await sendChatMessage(chatNode.id, buildVideoReversePrompt({ videoUrl, mode: input.mode, requirement: input.requirement }), { text: true, image: false });
-            const body = answer.trim();
+            let body = (await sendChatMessage(chatNode.id, buildVideoReversePrompt({ videoUrl, mode: input.mode, requirement: input.requirement }), { text: true, image: false })).trim();
+            /**
+             * 语言兜底（用户 2026-11-09：「强化执行反推节点任务时，输出的文案文本内容必须为中文」）。
+             *
+             * 提示词里那条硬要求已经首尾各钉了一次，但用户装的技能包正文若是整篇英文（模板 + 示例 + 字段名），
+             * 模型仍会照抄。所以这里做**确定性**收口：只有整篇明显不是中文时（`needsChineseRewrite`：
+             * 汉字数 < 英文词数的一半，且英文词 ≥ 20）才多打一轮「只换语言、不动内容」的重写。
+             * 重写失败 / 返回空就**沿用第一份** —— 绝不因为这一轮把已经跑通的任务判失败。
+             */
+            if (body && needsChineseRewrite(body)) {
+                report("输出不是中文，正在让模型原样改写成中文…");
+                const rewritten = (await sendChatMessage(chatNode.id, VIDEO_REVERSE_REWRITE_PROMPT, { text: true, image: false })).trim();
+                if (rewritten) body = rewritten;
+            }
             if (!body) {
                 return {
                     ok: false,

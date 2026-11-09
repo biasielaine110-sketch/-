@@ -381,7 +381,7 @@ export function CanvasReverseVideoNodeContent({
             <div className="flex flex-col gap-0.5 text-[11px] leading-relaxed opacity-45">
                 <span className="flex items-center gap-1.5">
                     <Sparkles size={11} className="shrink-0" />
-                    技能「视频反推-分镜提示词」；没装会直接报错，不会静默换别的模型硬跑。三条命令的输出强制简体中文。
+                    技能「视频反推-分镜提示词」；没装会直接报错，不会静默换别的模型硬跑。输出强制简体中文（提示词首尾各钉一次，偶尔跑偏会自动让它原样重写一遍）。
                 </span>
                 {reverseModelLabel ? <span className="truncate">反推模型：{reverseModelLabel}</span> : null}
             </div>
