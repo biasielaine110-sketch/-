@@ -287,6 +287,7 @@ You generate a structured story-script table from an uploaded script excerpt.
 - \`scene_description\` should describe the location concretely enough to be used directly as an image-generation prompt.
 - \`prop\` should name **only the key object(s) this shot really depends on**, at most **3 per shot**, joined by \`、\` when several; \`prop_description\` describes their look, material and state.
 - 🔴 Every prop you list becomes **its own generated asset image**. One-off tableware, ornaments, tissues, packaging and background clutter must **not** go into \`prop\` — describe them in one clause inside \`visual_description\` instead (that column feeds the shot prompt, so the frame still shows them); \`prop_description\` only adds their material / state detail. Write \`无\` when the shot has no key prop.
+- 🔴 Name **whole objects, not their parts**: one object together with its parts / accessories / contents counts as **one** prop (\`手机、手机壳、屏幕\` → just \`手机\`; \`自行车、车把、车座、车轮\` → just \`自行车\`). Never split one physical object into several prop entries.
 - \`blocking\` should read like a floor plan in words: left / right / centre, foreground / midground / background, facing direction, and how far apart the characters are.
 - \`style_prompt\` describes the image style for this shot — film stock / colour grade / texture / grain / reference genre or director. Keep it identical across shots in the same scene, and write \`无\` when no particular style is needed.
 
@@ -431,6 +432,7 @@ const STORY_SCRIPT_STYLE_HINT_ASSET = [
     "- 每一镜都要填「场景 / 场景描述 / 道具 / 道具描述 / 人物站位」，同一场景或同一道具在多镜里必须复用完全一致的名字",
     "- 🔴 道具列**只写这一镜真正依赖、且需要跨镜保持一致的关键道具**，**一镜最多 3 件**（多件用 `、` 分隔）；这一镜没有关键道具就写 `无`",
     "- 🔴 **道具列里每写一件，就会单独生成一张资产图**。餐具、摆件、纸巾、包装、背景小物这类用过就不再出现的次要道具**不要**写进道具列，改成在「画面描述」里一句话带过（这一列会进分镜提示词，画面才带得出来；道具描述只补材质与状态）—— 它们跟着画面一起生，不单独出图",
+    "- 🔴 道具要写**完整器物**：一个物体连同它的零件、配件、内部小件算**一件**（`手机、手机壳、屏幕` → 只写 `手机`；`自行车、车把、车座、车轮` → 只写 `自行车`；`剑、剑鞘、剑穗` → 只写 `剑`）。是同一个整体的零件就不要拆成多件，更不要给零件单独起名",
     "- 人物站位要写清谁在画面左侧 / 右侧 / 前景 / 后景、朝向、彼此的远近；除非这一镜人物确实移动，否则保持与上一镜一致",
     "- 人物移动时写清从上一位置到新位置的移动过程，不要让角色在两镜之间凭空换位",
 ];
@@ -458,6 +460,7 @@ export const STORY_SCRIPT_STORYBOARD_SYSTEM_PROMPT = `你是一名资深分镜�
 - 镜号用 1、2、3 这样的整数（不要写 S01）；时长用整数秒（不要写 3.5秒）
 - 同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位（blocking）写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）
 - 🔴 道具列**只写这一镜真正依赖、且需要跨镜保持一致的关键道具**，**一镜最多 3 件**（多件用 \`、\` 分隔），没有就写 \`无\`；**每写一件就会单独生成一张资产图** —— 餐具、摆件、纸巾、包装、背景小物这类次要道具不写进道具列，改用一句话写进「画面描述」（这一列会进分镜提示词，画面才带得出来），「道具描述」只补材质与状态
+- 🔴 道具写**完整器物**：一个物体连同它的零件、配件、内部小件算**一件**（\`手机、手机壳、屏幕\` → 只写 \`手机\`；\`自行车、车把、车座、车轮\` → 只写 \`自行车\`），不要把同一个整体的零件拆成多件、也不要给零件单独起名
 - 某一格没有内容时写 \`无\``;
 
 const STORY_SCRIPT_STORYBOARD_COMMON_RULES = [
@@ -468,6 +471,7 @@ const STORY_SCRIPT_STORYBOARD_COMMON_RULES = [
     "画面连贯衔接，无割裂感。",
     "画面描述必须精确具体，包含主体/背景/道具/光线方向/色调氛围，且要精确到可直接作为图片生成 prompt。",
     "同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位要写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）。",
+    "道具写完整器物：一个物体连同它的零件 / 配件算一件（`手机、手机壳、屏幕` 只写 `手机`），不要把同一个整体的零件拆成多件。",
     "风格提示词写这一镜的影像风格（影调、质感、颗粒、参考片种/导演），同一场戏保持一致；不需要时写 `无`。",
     "缺失内容写 `无`。",
 ];
@@ -1394,14 +1398,62 @@ export function isMultiNameAssetColumn(columnKey: unknown, extras?: readonly Sto
 export const SCRIPT_PROP_ASSET_LIMIT = 3;
 
 /**
+ * 「零件 / 配件」尾字表：`手机壳`、`剑鞘`、`车把`、`刀柄`…… 这类「主体 + 零件」式命名的尾巴。
+ *
+ * 只在**同一格已经写了主体**（`手机` / `剑` / `车`）时才拿它判定「后面这件是主体的零件」，
+ * 见 `mergeScriptPropPartNames`。刻意只收「明显是零件」的字，`帘` / `杯` / `钥匙` 这类
+ * 是独立器物的词不进表 —— 宁可少并，也不能把真道具吃掉。
+ */
+const SCRIPT_PROP_PART_TAILS = [
+    "壳", "套", "盖", "帽", "塞", "柄", "把手", "鞘", "穗", "刃", "锋", "刀身", "机身",
+    "底座", "座", "轮", "胎", "链条", "链", "扣", "拉链", "带", "绳", "线", "管", "嘴", "脚", "腿",
+    "支架", "屏", "屏幕", "膜", "贴膜", "内胆", "芯", "页", "框", "边", "角",
+];
+
+/**
+ * 把同一格里「某个物体 + 它的零件」并回那个物体（用户 2026-11-09 第 2 条报障：
+ * 「一个道具拆出来的还是太碎，明明是一个物体上的零件也拆出来了」）。
+ *
+ * 命中只有两条，都很保守：
+ *  1. **后缀包含**：`青花瓷面碗` 与 `面碗`、`苏晚的手机` 与 `手机` —— 短的只是长的简写，留长的；
+ *  2. **前缀 + 零件尾字**：`手机` 与 `手机壳` / `手机屏幕`、`剑` 与 `剑鞘` —— 后者是主体的零件。
+ *
+ * 只跟**同一格里的其它名字**比，不查全表：单独一格的 `门把手` 照旧是它自己，不会被谁的「门」吃掉。
+ * 顺序保持首次出现的位置（并掉的零件直接消失，整体留在原位）。
+ */
+export function mergeScriptPropPartNames(names: readonly string[]): string[] {
+    const list = names.filter(Boolean);
+    if (list.length < 2) return list;
+    /** 这个词是不是「另一个词的主体」或「更完整的写法」→ 是的话它就该被并掉。 */
+    const isPartOfAnother = (name: string): boolean => {
+        for (const other of list) {
+            if (other === name) continue;
+            // ① 后缀包含：`面碗` ⊂ `青花瓷面碗`（只认 ≥2 字的短名字，避免把单字并掉）
+            if (name.length >= 2 && other.length > name.length && other.endsWith(name)) return true;
+            // ② 前缀 + 零件尾字：`手机壳` = `手机` + `壳`
+            if (name.length > other.length && name.startsWith(other)) {
+                const tail = name.slice(other.length);
+                if (tail.length <= 4 && SCRIPT_PROP_PART_TAILS.includes(tail)) return true;
+            }
+        }
+        return false;
+    };
+    const kept = list.filter((name) => !isPartOfAnother(name));
+    return kept.length ? kept : list;
+}
+
+/**
  * 道具名按上限取前 N 件；**超限时**先按「全表出现镜数」降序排（同频次保持表里原顺序）。
  *
  * 为什么不是简单取前 N：用户要的是「**使用频率不高**、不重要的道具不单独生成」——
  * 一格里写了 6 件，其中两件在别的镜头也出现（需要跨镜一致），它们才是该留下出图的；
  * 按顿号顺序一刀切很可能把这两件切掉、留下三只一次性碗。未超限时原样返回（顺序不动）。
+ *
+ * ⚠️ 先 `mergeScriptPropPartNames` 再截断：`手机、手机壳、屏幕` 先并成 `手机`，
+ * 空出来的名额才能让位给真正不同的道具，而不是拿 3 张图去画同一部手机的三个零件。
  */
 export function pickScriptPropAssetNames(names: readonly string[], frequency?: ReadonlyMap<string, number> | null, limit = SCRIPT_PROP_ASSET_LIMIT): string[] {
-    const list = names.filter(Boolean);
+    const list = mergeScriptPropPartNames(names.filter(Boolean));
     if (list.length <= limit) return list;
     if (!frequency) return list.slice(0, limit);
     return list
@@ -3437,9 +3489,14 @@ export function backfillStoryScriptCastNames(
             }
         }
         // ③ 补道具（段头【道具】一栏往往就是这一组镜头要出的三张道具资产；空着等于丢了）
+        // 🔴 但**不能把段头整串灌进去**：段头常常写着一桌餐具（10 件），灌进空格 → 格子里一堆道具
+        // （用户 2026-11-09「道具还是太碎」报障）。这里跟生成侧同一套口径：先并零件、再收到 3 件。
         if (hasPropColumn && declared?.props.length && blankCell(row.prop)) {
-            ensure().prop = declared.props.join("、");
-            propFilled += 1;
+            const fillProps = pickScriptPropAssetNames(declared.props);
+            if (fillProps.length) {
+                ensure().prop = fillProps.join("、");
+                propFilled += 1;
+            }
         }
         return copy || row;
     });
@@ -3510,7 +3567,8 @@ export const STORY_SCRIPT_CAST_COMPLETENESS_HINT = [
     "- 每一镜都要先回答一句「**这个画面里到底有谁**」：只要人在画框里（哪怕一句台词都没有、只是站着、合影、从背景走过），就必须把名字写进角色列。只有明确不在这个画面里的人才能不写；不要因为「这一镜的台词是别人说的」就把其他人删掉。",
     "- 表里只有 `character_1` / `character_2` 两个角色格，但**一格可以写多个人**：多个名字用 `、` 分隔，例如 `苏晚、阿杰、小雨、老周、莉莉`。画面里出现的所有人必须分布在这两格之中，不许因为「只有两格」就丢人。",
     "- 一格写了多个名字时，`character_description_N` 必须**逐人分条**：`苏晚：28岁女性……｜阿杰：30岁男性……｜小雨：……`（用 `｜` 分隔），每个人都有自己的一条外观卡；只描述第一个人的写法视为不合格。",
-    "- 源内容里的段头 `【场景】` / `【人物】` / `【道具】` 是**作者写死的这一段资产清单**（例如 `【场景】外景·街角咖啡店门口 - 午后` / `【人物】女人、男人` / `【道具】外带咖啡杯、纸巾`）：这一段就算拆成 3 个镜头，**每一镜都要把这段的人物全写进角色列、场景列写同一个场景名、道具列写全这些道具**（多个用 `、`）。拆分镜只改变景别 / 机位 / 动作，**不许改出场名单**。",
+    "- 源内容里的段头 `【场景】` / `【人物】` / `【道具】` 是**作者写死的这一段资产清单**（例如 `【场景】外景·街角咖啡店门口 - 午后` / `【人物】女人、男人` / `【道具】外带咖啡杯、纸巾`）：这一段就算拆成 3 个镜头，**每一镜都要把这段的人物全写进角色列、场景列写同一个场景名**。拆分镜只改变景别 / 机位 / 动作，**不许改出场名单**。",
+    "- ⚠️ `【道具】` 是**例外，不要照抄**：段头那一串是「这一段可能出现的所有东西」（常含餐具、摆件、纸巾、包装、门帘这类次要物件），而**道具列只挑这一镜真正依赖、跨镜要保持同一个样子的关键道具，一镜最多 3 件**；次要道具改用一句话写进「画面描述」。道具列每多写一件就多一张资产图 —— 宁可少写，不要凑数。",
     "- 场景列每一镜都必须有名字：同一场次沿用同一个场景名，不要写 `无`、不要留空。",
 ].join("\n");
 
@@ -3539,7 +3597,7 @@ export function buildStoryScriptSegmentAssetSection(sourceText: unknown): string
         ...lines,
         "硬要求：",
         "1. 每一段拆成几镜都可以，但**这一段里的每一镜**都必须把该段【人物】全部写进角色列（一格可写多人，用 `、`）、场景列写同一个场景名。",
-        "2. 🔴 道具列**不要**照抄该段【道具】：只挑**这一镜真正依赖、且跨镜要保持同一个样子**的关键道具，**一镜最多 3 件**（多个用 `、`）；段头里剩下的餐具 / 摆件 / 纸巾 / 包装这类次要道具一律不写进道具列，改用一句话写进「画面描述」（这一列会进分镜提示词，画面才带得出来），「道具描述」只补材质与状态 —— 道具列里每写一件就会单独生成一张资产图。这一镜确实没有关键道具就写 `无`。",
+        "2. 🔴 道具列**不要**照抄该段【道具】：只挑**这一镜真正依赖、且跨镜要保持同一个样子**的关键道具，**一镜最多 3 件**（多个用 `、`）；段头里剩下的餐具 / 摆件 / 纸巾 / 包装这类次要道具一律不写进道具列，改用一句话写进「画面描述」（这一列会进分镜提示词，画面才带得出来），「道具描述」只补材质与状态 —— 道具列里每写一件就会单独生成一张资产图。**同一件器物的零件 / 配件算一件**（`手机、手机壳、屏幕` 只写 `手机`），不要把同一个整体拆成多件。这一镜确实没有关键道具就写 `无`。",
         "3. 拆镜只改变景别 / 机位 / 动作 / 台词分配，**不许改出场名单**；不要因为某个人这一镜不说话就把他从角色列删掉。",
         "4. 不同段落的人物不要互相串：第 2 段的人物不许出现在第 1 段的镜头里（除非源内容正文明确写了）。",
     ].join("\n");

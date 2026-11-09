@@ -195,38 +195,111 @@ export function buildScriptAssetDirectItems(rows?: readonly StoryScriptRow[] | n
  * 所以判据是「归一化标题里必须出现哪些词」：角色视图 + 无头 / 场景视图 + 2x2 或宫格。
  * 匹配不到就**不拼**（不报错、不阻塞）—— 用户删了这条词库条目，生图该照常跑。
  */
-export const SCRIPT_ASSET_VIEW_TEMPLATE_RULES: Array<{ role: ScriptAssetRole; label: string; groups: string[][] }> = [
-    { role: "character", label: "角色视图 · 无头 9:16 竖版排版", groups: [["角色视图"], ["无头"]] },
-    { role: "scene", label: "场景视图 · 2x2 场景宫格图", groups: [["场景视图"], ["2x2", "宫格"]] },
+export const SCRIPT_ASSET_VIEW_TEMPLATE_RULES: Array<{ role: ScriptAssetRole; label: string; canonical: string; groups: string[][] }> = [
+    // 第一组放宽到「角色视图 / 角色三视图 / 角色正面视图 / 人物视图」：用户改标题时最容易在这里走样
+    // （「角色三视图」不含「角色视图」三个连续字，只按原样匹配就会静默不套版式）。
+    // 第二组必须是「无头」——它是这条版式的判据，只写「角色视图不加无头」的条目不算。
+    // `canonical` = 用户原话的标题（横线数量随手打，比对前会归一化）：词库里同时留着好几版时，
+    // 标题**正好是这一条**的优先（见 `scoreScriptViewTemplateTitle`）。
+    {
+        role: "character",
+        label: "角色视图 · 无头 9:16 竖版排版",
+        canonical: "角色视图-------无头9x16竖版排版",
+        groups: [["角色视图", "角色三视图", "角色正面视图", "人物视图"], ["无头"]],
+    },
+    {
+        role: "scene",
+        label: "场景视图 · 2x2 场景宫格图",
+        canonical: "场景视图-----------2x2场景宫格图",
+        groups: [["场景视图", "场景三视图", "场景宫格"], ["2x2", "宫格"]],
+    },
 ];
 
-/** 标题归一化：去空格 / 各种横线 / 括号 / 标点，`×` 统一成 `x`，再转小写。 */
+/** 标题归一化：去空格 / 各种横线 / 括号 / 标点，`×` 统一成 `x`，全角数字与字母转半角，再转小写。 */
 export function normalizeScriptViewTemplateTitle(value: unknown): string {
     return String(value ?? "")
         .toLowerCase()
         .replace(/[×✕✖]/g, "x")
-        .replace(/[\s\-—–－_·•.。:：,，、;；/\\|()（）\[\]【】{}"'“”‘’]+/g, "");
+        // 全角 `９ｘ１６` / `２×２` 很常见（中文输入法下打出来的），不转半角就永远匹配不上。
+        .replace(/[０-９ａ-ｚ]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
+        .replace(/[～〜]/g, "~")
+        .replace(/[\s\-—–－_·•.。~:：,，、;；/\\|()（）\[\]【】{}"'“”‘’]+/g, "");
 }
 
 type ViewTemplatePromptEntry = { title?: string; content?: string; enabled?: boolean };
 
 /**
+ * 一个标题对某条规则的「像不像」打分：`-1` = 不命中，分越高越该被选中。
+ *
+ * 为什么不再「命中即返回第一条」（用户 2026-11-09 报障：「感觉现在是乱的」）：
+ * 这两条版式是用户自建的，词库里很容易同时留着好几版（草稿 / 正式 / 改过标题的旧版），
+ * 而它们的标题**全都**满足判据。老实现按词库顺序取第一条 —— 于是「用的是哪一条」取决于
+ * 列表排序（拖动一下顺序、复制一条再改，出图版式就换了），表现上就是「时好时坏、乱」。
+ *
+ * 打分口径（都可测、且单一命中时结果与老实现完全一致）：
+ *  ① 归一化标题**正好等于**规则里的 `canonical`（用户原话那条）→ +100，稳赢；
+ *  ② 每组取第一个命中的关键词，越靠前越具体（`角色视图` 比 `人物视图` 更贴），分越高；
+ *  ③ 仍并列 → 保持词库顺序（先来的赢），不引入随机性。
+ */
+export function scoreScriptViewTemplateTitle(rule: { canonical: string; groups: string[][] }, title: unknown): number {
+    const normalized = normalizeScriptViewTemplateTitle(title);
+    if (!normalized) return -1;
+    let score = 0;
+    for (const group of rule.groups) {
+        const index = group.findIndex((keyword) => {
+            const key = normalizeScriptViewTemplateTitle(keyword);
+            return Boolean(key) && normalized.includes(key);
+        });
+        if (index < 0) return -1;
+        score += group.length - index;
+    }
+    if (normalized === normalizeScriptViewTemplateTitle(rule.canonical)) score += 100;
+    return score;
+}
+
+/**
  * 从词库里捞出这一分类要追加的版式正文；没有 → 空串。
- * 同一个分类命中多条时取**词库顺序第一条**（用户的排序就是优先级），关掉的条目跳过。
+ * 命中的多条里取**分数最高**的那条（见 `scoreScriptViewTemplateTitle`），并列取词库顺序第一条。
+ * 关掉的条目直接跳过（不能让一条停用的好标题把后面的顶掉）。
  */
 export function resolveScriptAssetViewTemplate(role: ScriptAssetRole, textPrompts?: readonly ViewTemplatePromptEntry[] | null): string {
     const rule = SCRIPT_ASSET_VIEW_TEMPLATE_RULES.find((item) => item.role === role);
     if (!rule) return "";
+    let best = "";
+    let bestScore = 0;
     for (const entry of textPrompts || []) {
         if (entry?.enabled === false) continue;
         const content = String(entry?.content ?? "").trim();
         if (!content) continue;
-        const title = normalizeScriptViewTemplateTitle(entry?.title);
-        if (!title) continue;
-        const hit = rule.groups.every((group) => group.some((keyword) => title.includes(normalizeScriptViewTemplateTitle(keyword))));
-        if (hit) return content;
+        const score = scoreScriptViewTemplateTitle(rule, entry?.title);
+        // 严格大于：同分保留先出现的那条（词库顺序就是用户排序）。
+        if (score > bestScore) {
+            bestScore = score;
+            best = content;
+        }
     }
-    return "";
+    return best;
+}
+
+/**
+ * 这一批里**该套版式却没套上**的分类（返回规则标签，如「角色视图 · 无头 9:16 竖版排版」）。
+ *
+ * 为什么要有它：词库匹配不上时按设计是**静默不拼**（不阻塞生图），可用户看到的就是
+ * 「这张角色图怎么没按版式排」—— 而且没有任何线索。用户 2026-11-09 直接问
+ * 「一键生图到底有没有调用词库里那条角色视图」，所以把「没命中」变成一句能在界面上看到的提示：
+ * 调不调用、命中没命中，一眼就知道，不用再猜。
+ *
+ * 只在**这一批真有这个分类**时才算（表里没角色就不必提醒角色版式）。
+ */
+export function resolveMissingScriptAssetViewTemplates(items: readonly ScriptAssetBatchItem[], textPrompts?: readonly ViewTemplatePromptEntry[] | null): string[] {
+    const missing: string[] = [];
+    const roles = new Set(items.map((item) => item.role));
+    for (const rule of SCRIPT_ASSET_VIEW_TEMPLATE_RULES) {
+        if (!roles.has(rule.role)) continue;
+        if (resolveScriptAssetViewTemplate(rule.role, textPrompts)) continue;
+        missing.push(rule.label);
+    }
+    return missing;
 }
 
 /**
@@ -485,6 +558,125 @@ export function mountScriptAssetToCells(input: {
     let locks = normalizeStoryScriptNameLockMap(input.locks);
     for (const [name, ids] of lockAdds) locks = setStoryScriptNameLock(locks, name, [...scriptNameLockIds(locks, name), ...ids]);
     return { cells, locks };
+}
+
+// ── 参考图直接挂载：反推节点上连进来的「产品图」不用再生，直接挂成道具资产 ──────────────────
+
+/**
+ * 参与「参考图直接挂载」的分类 —— 目前**只认道具**（用户 2026-11-09 口径：
+ * 「若参考图是产品则需要将该产品道具在执行一键视频时直接挂载到具体的产品道具中」）。
+ *
+ * 为什么不连角色 / 场景一起认：反推节点上连的参考图，用户心里那张「产品图」是**替代资产图**用的；
+ * 角色 / 场景有自己的定妆版式与空景要求（见 `SCRIPT_ASSET_VIEW_TEMPLATE_RULES` /
+ * `SCRIPT_ASSET_EMPTY_PLATE_ROLES`），拿一张随手拍的产品图去顶，出图口径会歪。
+ * 要放开就在这一个数组里加，匹配 / 挂载 / 跳过生成三条路自动跟着变。
+ */
+export const SCRIPT_ASSET_REFERENCE_ROLE_IDS: ScriptAssetRole[] = ["prop"];
+
+/** 反推节点上连进来的参考图（`title` 是图片节点标题，用来和分镜表里的资产名对齐）。 */
+export type ScriptAssetReference = { nodeId: string; title: string; prompt?: string };
+
+/** 一条命中的参考图 → 分镜表里的具体资产。 */
+export type ScriptAssetReferenceMatch = {
+    reference: ScriptAssetReference;
+    role: ScriptAssetRole;
+    /** 命中的资产名（= 分镜表那一格的名字 / 标题，也就是 `item.title`）。 */
+    title: string;
+    /** `分类:标题`，与 `buildScriptAssetBatchItems` / `buildScriptAssetBatchMounts` 同一个键。 */
+    key: string;
+    mounts: ScriptAssetBatchMount[];
+};
+
+/**
+ * 名字归一化（**只用于匹配参考图**）：小写 → 去掉图片扩展名 → 去掉空白 / 标点 / 括号 / 连接符。
+ *
+ * 与 `normalizeScriptViewTemplateTitle` 分开写：那边要把 `×` 转成 `x`（为了认「无头9x16」这种标题），
+ * 这边不转，否则 `口红×2` 会变成 `口红x2` 反而更匹配不上 `口红`。
+ */
+export function normalizeScriptAssetReferenceName(value: unknown): string {
+    return String(value ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/\.(png|jpe?g|webp|gif|bmp|avif)$/i, "")
+        .replace(/[\s\-—–－_·•.。:：,，、;；/\\|()（）\[\]【】{}"'“”‘’]+/g, "");
+}
+
+/** 一个参考图能被拿去匹配的文本：标题优先，标题太泛（`图片` / 空）时再看提示词。 */
+function scriptAssetReferenceTexts(reference: ScriptAssetReference): string[] {
+    const title = normalizeScriptAssetReferenceName(reference.title);
+    // 标题就是资产名的情况（脚本资产生成出来的图 / 用户手动改名）—— 最可靠，只看标题。
+    if (title && title !== "图片" && title !== "image" && title.length >= 2) return [title];
+    const prompt = normalizeScriptAssetReferenceName(reference.prompt);
+    // 提示词只在「短」的时候才当名字用：资产描述是短句，场景 / 镜头提示词是长段落，
+    // 长文里顺带提到某个道具名不算「这就是那张产品图」。
+    return prompt && prompt.length <= 120 ? [title, prompt].filter(Boolean) : [title].filter(Boolean);
+}
+
+/**
+ * 把「反推节点上连进来的参考图」对齐到分镜表里的资产，并算出每张图要挂到哪些格。
+ *
+ * 判定：**参考图名字里包含资产名**（或反过来包含），取命中最长的那条 ——
+ * `口红产品图` 同时含 `口红` 与 `口红膏` 时命中 `口红膏`（更具体的那件）。
+ * 一张资产只认第一张参考图（先连的优先），剩下的留在 `unmatched` 里给调用方报出来。
+ *
+ * @returns `matches`：按参考图顺序，每条带好 `mounts`（`buildScriptAssetBatchMounts` 的同一份格位）；
+ *          `unmatched`：没对上任何资产的参考图（**不阻塞**流程，只是不参与挂载）。
+ */
+export function matchScriptAssetReferences(
+    rows: readonly StoryScriptRow[] | null | undefined,
+    references: readonly ScriptAssetReference[] | null | undefined,
+    roles: readonly ScriptAssetRole[] = SCRIPT_ASSET_REFERENCE_ROLE_IDS,
+): { matches: ScriptAssetReferenceMatch[]; unmatched: ScriptAssetReference[] } {
+    const refs = (references || []).filter((item) => Boolean(item?.nodeId));
+    if (!refs.length || !rows?.length) return { matches: [], unmatched: refs };
+    const candidates: Array<{ role: ScriptAssetRole; title: string; key: string; norm: string }> = [];
+    for (const role of roles) {
+        for (const item of collectScriptAssetPromptCandidates(role, rows)) {
+            const norm = normalizeScriptAssetReferenceName(item.title);
+            // 单字名字（「刀」「碗」）太容易误命中，直接不参与参考图匹配 —— 那种还是老实生图。
+            if (norm.length < 2) continue;
+            candidates.push({ role, title: item.title, key: scriptAssetBatchKey(role, item.title), norm });
+        }
+    }
+    if (!candidates.length) return { matches: [], unmatched: refs };
+    const mountsByKey = buildScriptAssetBatchMounts(rows);
+    const claimed = new Set<string>();
+    const matches: ScriptAssetReferenceMatch[] = [];
+    const unmatched: ScriptAssetReference[] = [];
+    for (const reference of refs) {
+        const texts = scriptAssetReferenceTexts(reference);
+        /**
+         * 三档命中，取最高档、同档取名字最长的：
+         *  3 = 完全相同（`口红` ↔ `口红`）；
+         *  2 = 参考图标题里含资产名（`口红产品图` → `口红`，最常见的一档）；
+         *  1 = 资产名里含参考图标题（表里写 `口红膏`、用户只写 `口红`）—— 兜底，档位最低。
+         * ⚠️ 档位必须分开：只按「双向包含 + 最长」选，表里同时有 `口红` / `口红膏` 时
+         * 一张叫 `口红` 的产品图会被判成 `口红膏`（探针 `reference-picks-longest` 那条的场景反过来）。
+         */
+        let best: (typeof candidates)[number] | null = null;
+        let bestTier = 0;
+        for (const candidate of candidates) {
+            if (claimed.has(candidate.key)) continue;
+            let tier = 0;
+            for (const text of texts) {
+                if (text === candidate.norm) tier = Math.max(tier, 3);
+                else if (text.includes(candidate.norm)) tier = Math.max(tier, 2);
+                else if (candidate.norm.includes(text)) tier = Math.max(tier, 1);
+            }
+            if (!tier) continue;
+            if (!best || tier > bestTier || (tier === bestTier && candidate.norm.length > best.norm.length)) {
+                best = candidate;
+                bestTier = tier;
+            }
+        }
+        if (!best) {
+            unmatched.push(reference);
+            continue;
+        }
+        claimed.add(best.key);
+        matches.push({ reference, role: best.role, title: best.title, key: best.key, mounts: mountsByKey[best.key] || [] });
+    }
+    return { matches, unmatched };
 }
 
 // ── 排布：脚本节点**左侧**的「资产图阵」─────────────────────────────────────────────
