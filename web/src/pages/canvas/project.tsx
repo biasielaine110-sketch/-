@@ -3718,6 +3718,14 @@ function AtelierCanvasPage() {
                 return;
             }
 
+            // V = 反推视频节点。Ctrl/Cmd+V 是粘贴，上面已提前 return，不会冲突。
+            // 注意：视频合并节点的「往时间线加素材」已让位给 B（见下方），V 不再兼职。
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "v") {
+                event.preventDefault();
+                createNode(CanvasNodeType.ReverseVideo);
+                return;
+            }
+
             if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "f") {
                 event.preventDefault();
                 if (selectedNodeIdsRef.current.size !== 1) {
@@ -3736,7 +3744,7 @@ function AtelierCanvasPage() {
 
             /**
              * 起一条 sticky 连线：选中的节点当锚点，之后连点其他节点即可逐个接上。
-             * X（通用连线）与 V（视频合并拾取）共用这一份，别各写一遍 —— 两处的锚点方向
+             * X（通用连线）与 B（视频合并拾取）共用这一份，别各写一遍 —— 两处的锚点方向
              * （分组按 source、其余按 target）必须完全一致，复制一份迟早走偏。
              */
             const beginPickConnect = () => {
@@ -3780,10 +3788,11 @@ function AtelierCanvasPage() {
                 return;
             }
 
-            // V = 「往时间线里加素材」的专属键：只对**选中的单个视频合并节点**生效，
-            // 其他情况一律让位（连 preventDefault 都不做），免得占掉别处的 V。
+            // B = 「往时间线里加素材」的专属键：只对**选中的单个视频合并节点**生效，
+            // 其他情况一律让位（连 preventDefault 都不做），免得占掉别处的 B。
             // 方向与 X 一致（合并节点是 target，点到的素材是 source），所以复用同一份起线动作。
-            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "v") {
+            // （V 已改为「新建反推视频节点」，所以这里迁到 B。）
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "b") {
                 if (connectingParamsRef.current) {
                     event.preventDefault();
                     setConnecting(null);
