@@ -218,6 +218,28 @@ const RE_PROJECT_NAME = [/^project_?name$/i, /^project_?title$/i];
 const RE_WORK_ID = [/^work_?id$/i, /^workid$/i];
 const RE_WORK_NAME = [/^work_?name$/i, /^work_?title$/i];
 
+/**
+ * 作品身份（carton 专用）。
+ *
+ * ⚠️ `mochiani_get_work_summary` 现在回的是**嵌套**结构：
+ * `{ product, pageId, project: { id, title }, work: { id, title, revision }, ... }`。
+ * 键名是光秃秃的 `id` / `title`，不带 `project` / `work` 前缀 —— 所以原来那套
+ * 「按键名正则全树找 projectId / workId」**永远命中不了**，于是 workId 空 →
+ * 前端报「页面连上了，但读不到作品 ID」→ `/api/params` 409、`/api/plan` 502 全军覆没。
+ * 这里先按嵌套结构直取，取不到再退回键名正则（兼容老的扁平返回）。
+ */
+function readWorkIdentity(summary) {
+    const pick = (value) => (typeof value === "string" || typeof value === "number" ? String(value).trim() : "");
+    const projectId = pick(summary?.project?.id) || firstString(summary, RE_PROJECT_ID);
+    const workId = pick(summary?.work?.id) || firstString(summary, RE_WORK_ID);
+    return {
+        projectId,
+        workId,
+        projectName: pick(summary?.project?.title) || firstString(summary, RE_PROJECT_NAME) || projectId,
+        workName: pick(summary?.work?.title) || firstString(summary, RE_WORK_NAME) || workId,
+    };
+}
+
 // ------------------------------------------------------------- page discovery
 
 /**
@@ -1443,13 +1465,10 @@ async function resolveCartonAssets({ pageId, origin, projectId, projectName, wor
 async function planCartonJob(job, ctx) {
     const { pageId, origin } = ctx;
     const summary = await callTool("mochiani_get_work_summary", { pageId, origin });
-    const projectId = firstString(summary, RE_PROJECT_ID);
-    const workId = firstString(summary, RE_WORK_ID);
+    const { projectId, workId, projectName, workName } = readWorkIdentity(summary);
     if (!projectId || !workId) {
         throw new BridgeError("页面连上了，但读不到作品 ID。请确认当前页是某个作品的编辑页。", "NO_ACTIVE_WORK", summary);
     }
-    const projectName = firstString(summary, RE_PROJECT_NAME) || projectId;
-    const workName = firstString(summary, RE_WORK_NAME) || workId;
     job.work.projectId = projectId;
     job.work.projectName = projectName;
     job.work.workId = workId;
@@ -2328,7 +2347,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.2",
+            version: "1.6.3",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
@@ -2347,11 +2366,12 @@ async function handle(req, res) {
                 body.work = { workId: read?.workId || "", nodeCount: read?.totalNodes ?? 0, revision: read?.revision || "" };
             } else {
                 const summary = await callTool("mochiani_get_work_summary", { pageId: ctx.pageId, origin: ctx.origin });
+                const identity = readWorkIdentity(summary);
                 body.work = {
-                    projectId: firstString(summary, RE_PROJECT_ID),
-                    projectName: firstString(summary, RE_PROJECT_NAME),
-                    workId: firstString(summary, RE_WORK_ID),
-                    workName: firstString(summary, RE_WORK_NAME),
+                    projectId: identity.projectId,
+                    projectName: identity.projectName,
+                    workId: identity.workId,
+                    workName: identity.workName,
                 };
             }
             send(res, 200, body);
@@ -2528,4 +2548,5 @@ export {
     parseVoiceLines,
     normalizeConfigOptions,
     readParamOptions,
+    readWorkIdentity,
 };

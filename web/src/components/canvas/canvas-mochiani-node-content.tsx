@@ -734,6 +734,12 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
      * 节点锁着 A 页却去 B 页拿模型目录，会拿到完全另一套模型。所以读上下文时记下它，之后处处带上。
      */
     const targetPageRef = useRef("");
+    /**
+     * 锁住的目标页类型。`carton`（漫剧编辑器）不吃「面板参数回读」也不吃画布排版 ——
+     * 参数在模型目录的 configInfo 里，节点排版没有画布节点这一说。用它挡掉那两类请求，
+     * 免得每切一次模型就往控制台糊一条 409。
+     */
+    const targetKindRef = useRef<"canvas" | "carton" | "">("");
     const restoredRef = useRef(false);
 
     const stopPolling = useCallback(() => {
@@ -836,6 +842,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             const data = await bridgeFetch(bridgeBase, "/api/context");
             if (data.ok && data.target) {
                 targetPageRef.current = String(data.target.pageId || "");
+                targetKindRef.current = data.target.kind === "carton" ? "carton" : "canvas";
                 setTarget(data.target);
                 setWork(data.work || null);
                 setContextError("");
@@ -844,6 +851,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 setAccountUser(acc?.ok ? acc.user || "" : "");
             } else {
                 targetPageRef.current = "";
+                targetKindRef.current = "";
                 setTarget(null);
                 setWork(null);
                 setPoints(null);
@@ -851,6 +859,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             }
         } catch (err) {
             targetPageRef.current = "";
+            targetKindRef.current = "";
             setTarget(null);
             setWork(null);
             setContextError(err instanceof Error ? err.message : String(err));
@@ -904,6 +913,12 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             const requestedChannel = String(next.channelId || "");
             // 什么都没指定就没得问（切生成模式时只给 videoCategory，那是合法的）
             if (!requestedModel && next.videoCategory == null) return;
+            /**
+             * 漫剧编辑器**没有**「视频节点面板」这东西：参数全在模型目录的 `configInfo` 里，
+             * 桥的 `/api/params` 对它一律回 409 `NOT_CANVAS`。原本这里照打不误，每切一次模型
+             * 就往控制台糊一条 409（一次发送能刷四五条）—— 这里直接不问了。
+             */
+            if (targetKindRef.current === "carton") return;
             /**
              * 命中缓存就直接本地对齐，不再打桥。
              *
@@ -1629,25 +1644,28 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                     style={{ background: healthError ? "#f87171" : healthOk ? "#22c55e" : "#71717a" }}
                     title={healthError || (healthOk ? "本机桥已连接" : "检查中")}
                 />
-                <button
-                    type="button"
-                    onClick={() => {
-                        if (!healthOk) {
-                            message.warning("本机桥还没连上，先点「刷新」确认桥在跑");
-                            return;
-                        }
-                        void runTidy();
-                    }}
-                    className="flex items-center gap-1 text-[11px] transition hover:opacity-100"
-                    style={{
-                        opacity: tidying || !healthOk ? 0.35 : 0.6,
-                        cursor: tidying || !healthOk ? "not-allowed" : "pointer",
-                    }}
-                    aria-disabled={tidying || !healthOk}
-                    title="把 MochiAni 画布上撞在一起的节点挪开（只动真叠压的）"
-                >
-                    {tidying ? <Loader2 size={11} className="animate-spin" /> : <LayoutGrid size={11} />} 整理
-                </button>
+                {/* 漫剧编辑器没有「画布节点」这回事，「整理」只在无限画布下出现 */}
+                {isCarton ? null : (
+                    <button
+                        type="button"
+                        onClick={() => {
+                            if (!healthOk) {
+                                message.warning("本机桥还没连上，先点「刷新」确认桥在跑");
+                                return;
+                            }
+                            void runTidy();
+                        }}
+                        className="flex items-center gap-1 text-[11px] transition hover:opacity-100"
+                        style={{
+                            opacity: tidying || !healthOk ? 0.35 : 0.6,
+                            cursor: tidying || !healthOk ? "not-allowed" : "pointer",
+                        }}
+                        aria-disabled={tidying || !healthOk}
+                        title="把 MochiAni 画布上撞在一起的节点挪开（只动真叠压的）"
+                    >
+                        {tidying ? <Loader2 size={11} className="animate-spin" /> : <LayoutGrid size={11} />} 整理
+                    </button>
+                )}
                 <button
                     type="button"
                     onClick={() => void (async () => {
