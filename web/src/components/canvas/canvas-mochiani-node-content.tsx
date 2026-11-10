@@ -6,19 +6,23 @@ import {
     CircleCheck,
     Clapperboard,
     Coins,
+    ExternalLink,
     Film,
     ImagePlus,
     LayoutGrid,
     Loader2,
     Music4,
+    Play,
     PlugZap,
     RefreshCw,
     Sparkles,
     Unlink,
+    Video,
     Wrench,
     X,
 } from "lucide-react";
 
+import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { canvasThemes } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { shrinkImageDataUrl, shrinkImageDataUrls } from "@/lib/canvas/mochiani-payload";
@@ -701,6 +705,25 @@ const MEDIA_KIND_META = {
 } as const;
 
 type MediaKind = keyof typeof MEDIA_KIND_META;
+
+/**
+ * 「一键生成」：预检通过后要**自动**接着点确认的那些任务 id。
+ *
+ * 为什么放模块级而不是 state：画布节点滚出视口就被裁掉重挂，而预检要跑十几秒到几分钟。
+ * 挂掉的这一段时间里预检照样在桥那边跑完，重挂时 `metadata.mochianiRun` 会把 job 捞回来 ——
+ * 如果「还没确认」这个意图只存在组件 state 里，那一下就没了，用户回来只看到一个停在
+ * 「待确认」的任务，还得自己再点一下。放模块级就能跨重挂活下来。
+ * （整页刷新会丢，这是可接受的：那种情况下用户看到的就是「待确认」，点一下就行。）
+ */
+const autoConfirmJobIds = new Set<string>();
+
+/** 等待时长 → `03:07`。 */
+function formatWaitTime(seconds: number) {
+    const total = Math.max(0, Math.floor(seconds));
+    const mm = String(Math.floor(total / 60)).padStart(2, "0");
+    const ss = String(total % 60).padStart(2, "0");
+    return `${mm}:${ss}`;
+}
 
 export function CanvasMochianiNodeContent({ node, references, onDetachReference, onReorderReferences, onPreviewReference, onCreateVideo, onConfigChange }: Props) {
     const { message } = App.useApp();
@@ -1534,25 +1557,28 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     };
 
     /**
-     * 预检。`promptOverride` 由提示词面板的主按钮（文案「预检」）传进来，避免 state 落后一帧。
+     * 预检。`promptOverride` 由提示词面板的主按钮（文案「生成」）传进来，避免 state 落后一帧。
      *
      * 风格模板与视频节点同一条路：`composeStyledPrompt` 只在**发出去的那一版**提示词尾部追加，
      * metadata 里存的仍是干净正文（幂等，重复预检不会叠第二遍）。
+     *
+     * `options.autoConfirm` = 一键生成：把这次任务的 id 挂进 `autoConfirmJobIds`，
+     * 等它走到 `ready` 时下面的 effect 会自动调确认生成。返回值 = 预检有没有真的发出去。
      */
-    const runPlan = async (promptOverride?: string) => {
+    const runPlan = async (promptOverride?: string, options?: { autoConfirm?: boolean }) => {
         const base = (promptOverride ?? prompt).trim();
         if (!base) {
             message.warning("先写提示词");
-            return;
+            return false;
         }
         if (!healthOk || !target) {
             message.warning("先连上本机桥并读到 MochiAni 页面（点右上角「刷新」）");
-            return;
+            return false;
         }
         // 桥 1.6.8 起预检是「先回任务、后台算」，期间再点会排第二个预检（白建一遍素材）。
         if (job?.stage === "planning") {
             message.warning("上一次预检还在跑，进度看下面的日志（每 3 秒刷一次）");
-            return;
+            return false;
         }
         const styleTemplate = getStyleTemplate(node.metadata?.styleTemplateId);
         const text = composeStyledPrompt(base, styleTemplate ? buildStylePromptText(styleTemplate) : "", "");
@@ -1560,7 +1586,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         // 漫剧编辑器的参考素材来自作品素材库（人物/场景/道具），不走上传，别拿 imageRequired 拦它。
         if (!isCarton && imageRequired && media.images.length < imageRequired) {
             message.warning(`这个模型至少要 ${imageRequired} 张参考图（现在 ${media.images.length} 张）`);
-            return;
+            return false;
         }
         if (media.unusable.length) message.warning(media.unusable.slice(0, 2).join("；"));
         /**
@@ -1623,15 +1649,19 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             });
             if (data.job) {
                 setJob(data.job);
+                if (options?.autoConfirm) autoConfirmJobIds.add(data.job.id);
                 // 后台预检：job.stage = "planning"，下面的轮询会把日志一点点补上。
                 if (data.pending) message.info("预检已开始，进度在下面日志里（建素材 / 传图比较慢）");
                 if (!data.ok) setError(data.error || "预检没有通过");
             } else {
                 setError(data.error || "预检失败");
+                return false;
             }
             void refreshContext();
+            return true;
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
+            return false;
         } finally {
             setBusy("");
         }
@@ -1650,6 +1680,29 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         } finally {
             setBusy("");
         }
+    };
+
+    /**
+     * 一键生成 = 预检 + 确认生成。
+     *
+     * 三个入口共用它：提示词面板的主按钮（文案「生成」）、底部操作行的「生成」、
+     * 以及「已预检过」时的二次点击。已经预检过（`ready`）就**不再重复预检**（预检会在
+     * MochiAni 里白建一遍素材、白传一遍图），直接确认；其余情况先预检，成功后交给
+     * `autoConfirmJobIds` 的半截 effect 自动确认。
+     *
+     * ⚠️ 不在这里判余额：确认那一步桥会拒，且 `notEnoughPoints` 的提示已经挂在确认前，
+     *    两处都判会变成「点了没反应」。
+     */
+    const handleGenerate = async (promptOverride?: string) => {
+        if (job && ["submitting", "generating"].includes(jobStage)) {
+            message.info("已经在生成了，别重复下单");
+            return;
+        }
+        if (job && job.stage === "ready") {
+            await runConfirm();
+            return;
+        }
+        await runPlan(promptOverride, { autoConfirm: true });
     };
 
     const runCancel = async () => {
@@ -1716,6 +1769,55 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     const estimatePoints = job?.estimate?.points ?? null;
     const notEnoughPoints = Number.isFinite(balance) && estimatePoints != null && balance < estimatePoints;
     const locked = Boolean(job) && ["planning", "submitting", "generating", "ready"].includes(jobStage);
+
+    /**
+     * 一键生成的第 2 段：预检一走到 `ready` 就自动确认。
+     *
+     * 只认 `autoConfirmJobIds` 里登记过的任务 —— 手动点「预检（不花钱）」的任何一步都不会
+     * 自动扣灵点。余额不够就把意图撤掉并提示，绝不让用户以为「点了就生成」结果静默失败。
+     */
+    useEffect(() => {
+        if (!job) return;
+        if (!autoConfirmJobIds.has(job.id)) return;
+        if (job.stage === "ready") {
+            autoConfirmJobIds.delete(job.id);
+            if (notEnoughPoints) {
+                message.warning(`余额 ${points?.total ?? "?"} 灵点，不够预估的 ${estimatePoints} 灵点 —— 先充值`);
+                return;
+            }
+            void runConfirm();
+            return;
+        }
+        if (["blocked", "error", "cancelled", "done"].includes(job.stage)) autoConfirmJobIds.delete(job.id);
+        // `runConfirm` 每次渲染都是新函数，塞进依赖等于每 3 秒轮询都重跑一次；靠 job 变化驱动就够了
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [job, notEnoughPoints]);
+
+    /** 预览区空态：没片子的时候显示「在跑什么 / 该点什么」。 */
+    const waitSeconds = useElapsedSeconds(["planning", "submitting", "generating"].includes(jobStage), node.id);
+    const previewHint = (() => {
+        if (jobStage === "planning") {
+            return { icon: <Loader2 size={18} className="animate-spin opacity-60" />, text: `预检中 · 已等 ${formatWaitTime(waitSeconds)}`, color: theme.node.placeholder };
+        }
+        if (jobStage === "submitting") {
+            return { icon: <Loader2 size={18} className="animate-spin opacity-60" />, text: `已下发，等 MochiAni 接单 · 已等 ${formatWaitTime(waitSeconds)}`, color: theme.node.placeholder };
+        }
+        if (jobStage === "generating") {
+            return { icon: <Loader2 size={18} className="animate-spin opacity-60" />, text: `生成中 · 已等 ${formatWaitTime(waitSeconds)}`, color: theme.node.placeholder };
+        }
+        if (jobStage === "ready") {
+            return {
+                icon: <Play size={18} style={{ color: "#4ade80" }} />,
+                text: `预检通过${estimatePoints != null ? ` · 预估 ${estimatePoints} 灵点` : ""}，点「生成」开始`,
+                color: theme.node.placeholder,
+            };
+        }
+        if (jobStage === "blocked") return { icon: <CircleAlert size={18} style={{ color: "#fbbf24" }} />, text: "预检没通过 —— 原因看下面的任务状态", color: "#fbbf24" };
+        if (jobStage === "error") return { icon: <CircleAlert size={18} style={{ color: "#f87171" }} />, text: "这次没成 —— 原因看下面的任务状态", color: "#f87171" };
+        if (jobStage === "cancelled") return { icon: <Video size={18} className="opacity-40" />, text: "已停止，可以重新生成一版", color: theme.node.placeholder };
+        return { icon: <Video size={18} className="opacity-40" />, text: "生成完成后在这里预览（也能「放到画布」变成视频节点）", color: theme.node.placeholder };
+    })();
+    const jobVideoUrl = job?.videoUrl || "";
     /** 提示词面板的「运行中」：预检请求在飞 / 任务在跑，主按钮变成「停止」。 */
     const panelRunning = busy === "plan" || ["planning", "submitting", "generating"].includes(jobStage);
     const stageColor = jobStage === "done" ? "success" : jobStage === "error" || jobStage === "blocked" ? "error" : jobStage ? "processing" : "default";
@@ -1778,6 +1880,43 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 >
                     {loadingContext ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} 刷新
                 </button>
+            </div>
+
+            {/* ①.5 视频预览：跟视频节点的内容区一个意思 —— 成片直接在这个窗口里看，
+                   不必先「放到画布」；没片子时留一块空态，顺手把「现在在跑什么」写清楚。 */}
+            <div className="relative shrink-0 overflow-hidden rounded-md" style={jobVideoUrl ? { border: softBorder, background: "#000" } : undefined}>
+                {jobVideoUrl ? (
+                    <>
+                        <video
+                            key={jobVideoUrl}
+                            src={jobVideoUrl}
+                            controls
+                            playsInline
+                            preload="metadata"
+                            className="block w-full"
+                            style={{ maxHeight: 300, background: "#000" }}
+                            data-canvas-no-zoom
+                        />
+                        <a
+                            href={jobVideoUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="absolute right-1.5 top-1.5 flex items-center gap-1 rounded bg-black/65 px-1.5 py-0.5 text-[10px] text-white/85 backdrop-blur transition hover:text-white"
+                            title="在新标签页打开原片（可另存 / 可拿到别的工具里用）"
+                            onClick={(event) => event.stopPropagation()}
+                        >
+                            <ExternalLink size={10} /> 原片
+                        </a>
+                    </>
+                ) : (
+                    <div
+                        className="flex flex-col items-center justify-center gap-1 rounded-md border border-dashed px-3 text-center"
+                        style={{ borderColor: theme.node.stroke, minHeight: 84, color: previewHint.color }}
+                    >
+                        {previewHint.icon}
+                        <span className="text-[11px] leading-snug opacity-80">{previewHint.text}</span>
+                    </div>
+                )}
             </div>
 
             <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-0.5" data-canvas-no-zoom>
@@ -2130,7 +2269,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 ) : null}
 
                 {/* ④ 提示词 —— 直接复用视频节点的提示词面板（内嵌形态）：
-                       @ 引用 chip（图 / 视频 / 音频 / 文案）+ 风格模板 + 主按钮＝预检。
+                       @ 引用 chip（图 / 视频 / 音频 / 文案）+ 风格模板 + 主按钮＝生成（预检 → 自动确认）。
                        与视频窗口的唯一差别是这里没有模型/参数行（模型目录来自桥）和排期。 */}
                 <div className="rounded-md px-1.5 py-1.5" style={{ border: softBorder }}>
                     <CanvasNodePromptPanel
@@ -2138,14 +2277,14 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                         hideModelRow
                         hideSchedule
                         allowSubmitWhileRunning={false}
-                        generateLabel="预检"
+                        generateLabel="生成"
                         modeOverride="video"
                         node={node}
                         isRunning={panelRunning}
                         mentionReferences={references || []}
                         onPromptChange={handlePromptChange}
                         onConfigChange={(nodeId, patch) => onConfigChange(nodeId, patch as Partial<CanvasNodeMetadata>)}
-                        onGenerate={(_nodeId, _mode, text) => void runPlan(text)}
+                        onGenerate={(_nodeId, _mode, text) => void handleGenerate(text)}
                         onStop={() => void runCancel()}
                         onReorderReferences={onReorderReferences}
                         onRemoveReference={onDetachReference}
@@ -2288,7 +2427,6 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                                 {job.error}
                             </div>
                         ) : null}
-                        {job.videoUrl ? <video src={job.videoUrl} controls className="mt-1.5 w-full rounded" style={{ maxHeight: 180, background: "#000" }} /> : null}
                     </div>
                 ) : null}
 
@@ -2308,20 +2446,48 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                         停止轮询
                     </Button>
                 ) : null}
-                {!job || ["error", "cancelled"].includes(jobStage) ? (
-                    <Button
-                        size="small"
-                        icon={<Sparkles size={13} />}
-                        loading={busy === "plan"}
-                        onClick={() => void runPlan()}
-                        disabled={!healthOk || !target}
-                    >
-                        预检（不花钱）
+                {jobStage === "planning" ? (
+                    <Button size="small" type="primary" loading disabled>
+                        预检中…
                     </Button>
                 ) : null}
+                {/* 「生成」= 预检 + 确认生成一键走完；已经预检过就直接确认，不再重跑预检。 */}
+                {!job || ["error", "cancelled", "blocked"].includes(jobStage) ? (
+                    <>
+                        <Button
+                            size="small"
+                            icon={<Sparkles size={13} />}
+                            loading={busy === "plan"}
+                            onClick={() => void runPlan()}
+                            disabled={!healthOk || !target}
+                            title="只做预检：连页面、建素材、算预估灵点，不花钱"
+                        >
+                            预检（不花钱）
+                        </Button>
+                        <Button
+                            size="small"
+                            type="primary"
+                            icon={<Play size={13} />}
+                            loading={busy === "plan" || busy === "confirm"}
+                            onClick={() => void handleGenerate()}
+                            disabled={!healthOk || !target}
+                            title="预检通过后自动确认生成（会扣灵点）"
+                        >
+                            生成
+                        </Button>
+                    </>
+                ) : null}
                 {job && jobStage === "ready" ? (
-                    <Button size="small" type="primary" danger loading={busy === "confirm"} onClick={() => void runConfirm()}>
-                        确认生成（扣灵点）
+                    <Button
+                        size="small"
+                        type="primary"
+                        danger
+                        icon={<Play size={13} />}
+                        loading={busy === "confirm"}
+                        onClick={() => void handleGenerate()}
+                        title="确认生成（扣灵点）"
+                    >
+                        生成（扣灵点）
                     </Button>
                 ) : null}
                 {jobStage === "done" && job?.videoUrl ? (
