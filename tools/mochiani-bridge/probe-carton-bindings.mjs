@@ -125,5 +125,30 @@ const flat = (list) => list.map((item) => `${item.marker}>${item.kind}:${item.na
     check("无标记时为空", readImageMarkerIndices("一只猫").length === 0);
 }
 
+// 10) 「资产锁定」写法：名字在前 + 冒号（脚本生成器的真实输出，连接词在后面）
+{
+    const { stripImageBindingMarkers, guessAssetKindByName } = bridge;
+    const prompt = [
+        "- **资产锁定：**",
+        "@图片1 女模：女模人物参考，锁定面容、发型、服装、体型。",
+        "@图片2 白色得皮包：白色金扣链条包参考。",
+        "",
+        "多镜头连续片段（共 4 镜）：",
+        "- **第5镜**",
+    ].join("\r\n");
+    const got = parseImageBindings(prompt, 2);
+    check("资产锁定写法解析出 2 条", got.length === 2, flat(got));
+    check("女模是角色", got[0]?.kind === "character" && got[0]?.name === "女模", flat(got));
+    check("皮包按词尾判成道具", got[1]?.kind === "prop" && got[1]?.name === "白色得皮包", flat(got));
+
+    const clean = stripImageBindingMarkers(prompt);
+    check("只摘 @图片N，名字留在文案里", clean.includes("女模：女模人物参考") && !/@图片/.test(clean), JSON.stringify(clean));
+    check("其它行不受影响", clean.includes("资产锁定") && clean.includes("第5镜"), "");
+
+    check("词尾猜类型：包→道具", guessAssetKindByName("白色得皮包") === "prop");
+    check("词尾猜类型：厅→场景", guessAssetKindByName("老宅客厅") === "scene");
+    check("词尾猜类型：默认角色", guessAssetKindByName("女模") === "character" && guessAssetKindByName("男主") === "character");
+}
+
 console.log(failed ? `\n${failed} 项失败` : "\n全部通过");
 process.exit(failed ? 1 : 0);

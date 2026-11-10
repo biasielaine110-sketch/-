@@ -1363,15 +1363,20 @@ function composeCartonScript(prompt, groups) {
 /**
  * 从分镜文案里读出「哪张图是谁」。
  *
- * 用户常只写文案、不填面板里的「出场素材」：`@图片1 为男主，图片2 为女主，图片3 为路人`。
- * 画布连进来的参考图顺序就是 `job.images` 的顺序（`图片1` = 第 1 张），所以这里解析成
- * `[{ marker:"图片1", index:0, kind:"character", name:"男主" }]`，由 planCartonJob
- * 建素材 + 传素材图，图就不会「文字过去了、图没过去」。
+ * 两种真实写法都要认：
  *
- * 只认**带连接词**的明确写法（`为 / 是 / = / : / →`）。不认连接词就认，
- * 会把「参考图片1 和图片2」这种正文误读成素材名，宁缺勿错。
+ * 1. 连接词在前：`@图片1 为男主，图片2 为女主` → 整段是给桥看的声明，进分镜前整条摘掉。
+ * 2. 名字在前 + 冒号：`@图片1 女模：女模人物参考，锁定面容…`（脚本生成器「资产锁定」那种）
+ *    → 只摘掉 `@图片1` 这个标记，`女模：女模人物参考…` 留在文案里
+ *    （名字留着正好满足 MochiAni「关联素材名必须出现在文案里」的硬规矩）。
+ *
+ * 画布连进来的参考图顺序就是 `job.images` 的顺序（`图片1` = 第 1 张），解析结果
+ * `[{ marker, index, kind, name }]` 由 planCartonJob 建素材 + 传素材图。
+ *
+ * **不写连接词、后面也不跟冒号的，一律不解析** —— 否则「参考图片1 和图片2」会被读成素材名。
  */
-const CARTON_IMAGE_MARKER = /@?图片\s*([0-9]{1,2})\s*(?:作为|当作|为|是|＝|=|→|->|:|：)\s*([^\s，,。；;、：:!！?？"'（）()\[\]【】]{1,20})/gu;
+const CARTON_IMAGE_MARKER =
+    /@?图片\s*([0-9]{1,2})\s*(?:(?:作为|当作|为|是|＝|=|→|->|:|：)\s*([^\s，,。；;、：:!！?？"'（）()\[\]【】]{1,20})|([^\s：:，,。；;、]{1,20})\s*(?=[：:]))/gu;
 /** 名字里带类别前缀时顺带定类型：`图片2 为场景咖啡馆`。 */
 const CARTON_NAME_KIND_HINT = [
     { prefix: "角色", kind: "character" },
@@ -1380,6 +1385,33 @@ const CARTON_NAME_KIND_HINT = [
     { prefix: "道具", kind: "prop" },
 ];
 
+/**
+ * 按**词尾**猜素材类型（只在用户没写类别前缀时兜底）。
+ *
+ * 为什么值得猜：`@图片2 白色得皮包：…` 默认当角色建，包里那张图就会挂成「角色」——
+ * 图是能挂上，但素材库分类就乱了、分镜里也会按角色绑。猜错的代价只是类型不同，图照样挂上，
+ * 所以这里用「宁窄勿宽」的词尾表，别拿它当语义理解。
+ */
+const CARTON_PROP_SUFFIX = [
+    "包", "袋", "鞋", "靴", "帽", "裙", "裤", "衣", "外套", "手套", "围巾",
+    "眼镜", "墨镜", "手机", "手表", "项链", "耳环", "手链", "戒指", "发夹",
+    "车", "桌", "椅", "床", "沙发", "灯", "杯", "瓶", "伞", "枪", "刀", "剑",
+    "盒", "箱", "扇", "钟", "镜", "书本", "画框", "花瓶",
+];
+const CARTON_SCENE_SUFFIX = [
+    "室", "厅", "房", "街", "楼", "店", "馆", "场", "园", "山", "海", "林",
+    "桥", "站", "廊", "阳台", "天台", "院", "巷", "教室", "办公室", "厨房",
+    "卧室", "走廊", "客厅", "洗手间",
+];
+
+function guessAssetKindByName(name) {
+    const key = String(name || "").trim();
+    if (!key) return "character";
+    if (CARTON_PROP_SUFFIX.some((suffix) => key.endsWith(suffix))) return "prop";
+    if (CARTON_SCENE_SUFFIX.some((suffix) => key.endsWith(suffix))) return "scene";
+    return "character";
+}
+
 function parseImageBindings(prompt, imageCount) {
     const out = [];
     const seen = new Set();
@@ -1387,9 +1419,10 @@ function parseImageBindings(prompt, imageCount) {
     for (const match of text.matchAll(CARTON_IMAGE_MARKER)) {
         const index = Number(match[1]) - 1;
         if (!Number.isInteger(index) || index < 0 || index >= imageCount) continue;
-        let name = String(match[2] || "").trim();
+        // 组 2 = 连接词在前的写法；组 3 = 「名字 + 冒号」的写法
+        let name = String(match[2] || match[3] || "").trim();
         if (!name) continue;
-        let kind = "character";
+        let kind = match[2] ? "character" : guessAssetKindByName(name);
         let typed = false;
         for (const hint of CARTON_NAME_KIND_HINT) {
             if (name.startsWith(hint.prefix) && name.length > hint.prefix.length) {
@@ -1440,7 +1473,8 @@ function readImageMarkerIndices(prompt) {
  */
 function stripImageBindingMarkers(prompt) {
     return String(prompt || "")
-        .replace(CARTON_IMAGE_MARKER, "")
+        // 连接词写法整条摘掉；「名字：描述」写法只摘 `@图片N` 标记，名字留在文案里
+        .replace(CARTON_IMAGE_MARKER, (_match, _num, _connected, colonName) => (colonName ? colonName : ""))
         .replace(/[，,、；;](?:[ \t]*[，,、；;])+/g, "，")
         .replace(/^[ \t]*[，,、；;。.][ \t]*/gm, "")
         .replace(/[ \t]{2,}/g, " ")
@@ -2544,7 +2578,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.5",
+            version: "1.6.6",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
@@ -2741,6 +2775,7 @@ export {
     collectVoiceCharacters,
     composeCartonScript,
     coerceCartonParams,
+    guessAssetKindByName,
     matchCartonAsset,
     parseImageBindings,
     parseVoiceLines,
