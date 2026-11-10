@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { App, Button, InputNumber, Modal, Segmented, Slider, Tabs } from "antd";
-import { Clapperboard, Film, ImagePlus, Scissors, Sparkles } from "lucide-react";
+import { Clapperboard, Film, ImagePlus, Scaling, Scissors, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -9,32 +9,39 @@ import {
     formatVideoClock,
     isVideoUpscalerModel,
     loadVideoBlob,
+    scaleVideoBlob,
     trimVideoBlob,
+    VIDEO_SCALE_PERCENTAGES,
     VIDEO_UPSCALE_RESOLUTIONS,
+    type VideoScalePercentage,
     type VideoUpscaleResolution,
 } from "@/lib/canvas/canvas-video-tools";
 import { proxyMediaUrl } from "@/lib/api-proxy";
 import { findPreferredModelOption, selectableModelsByCapability, type AiConfig } from "@/stores/use-config-store";
 
-export type VideoToolsTab = "trim" | "frame" | "upscale";
+export type VideoToolsTab = "trim" | "frame" | "upscale" | "scale";
 
 export type VideoToolsTrimResult = { blob: Blob; startSec: number; endSec: number };
 export type VideoToolsFrameResult = { dataUrl: string; timeSec: number };
 export type VideoToolsUpscaleResult = { model: string; resolution: VideoUpscaleResolution };
+export type VideoToolsScaleResult = { blob: Blob; width: number; height: number; percent: number };
 
 type CanvasNodeVideoToolsDialogProps = {
     open: boolean;
     videoUrl: string;
+    /** 节点在 IndexedDB / 本地媒体库里的 key：直链过期或没带 CORS 时靠它拿原片字节。 */
+    videoStorageKey?: string;
     config: AiConfig;
     initialTab?: VideoToolsTab;
     onClose: () => void;
     onTrim: (result: VideoToolsTrimResult) => Promise<void> | void;
     onFrame: (result: VideoToolsFrameResult) => Promise<void> | void;
     onUpscale: (result: VideoToolsUpscaleResult, signal?: AbortSignal) => Promise<void> | void;
+    onScale: (result: VideoToolsScaleResult) => Promise<void> | void;
     onMissingConfig?: () => void;
 };
 
-export function CanvasNodeVideoToolsDialog({ open, videoUrl, config, initialTab = "trim", onClose, onTrim, onFrame, onUpscale, onMissingConfig }: CanvasNodeVideoToolsDialogProps) {
+export function CanvasNodeVideoToolsDialog({ open, videoUrl, videoStorageKey, config, initialTab = "trim", onClose, onTrim, onFrame, onUpscale, onScale, onMissingConfig }: CanvasNodeVideoToolsDialogProps) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -46,6 +53,8 @@ export function CanvasNodeVideoToolsDialog({ open, videoUrl, config, initialTab 
     const [framePreview, setFramePreview] = useState<string | null>(null);
     const [upscaleModel, setUpscaleModel] = useState("");
     const [resolution, setResolution] = useState<VideoUpscaleResolution>("1080p");
+    const [scalePercent, setScalePercent] = useState<VideoScalePercentage>(50);
+    const [sourceSize, setSourceSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
     const [busy, setBusy] = useState(false);
     const [progress, setProgress] = useState(0);
     const abortRef = useRef<AbortController | null>(null);
@@ -71,6 +80,7 @@ export function CanvasNodeVideoToolsDialog({ open, videoUrl, config, initialTab 
         setFramePreview(null);
         setUpscaleModel(preferredUpscaler);
         setResolution("1080p");
+        setScalePercent(50);
         abortRef.current?.abort();
         abortRef.current = null;
     }, [open, initialTab, preferredUpscaler, videoUrl]);
@@ -120,7 +130,21 @@ export function CanvasNodeVideoToolsDialog({ open, videoUrl, config, initialTab 
         setRange([0, nextDuration || 1]);
         setFrameTime(Math.min(0.1, Math.max(0, nextDuration / 10)));
         setCurrentTime(video.currentTime || 0);
+        if (video.videoWidth && video.videoHeight) {
+            setSourceSize({ width: video.videoWidth, height: video.videoHeight });
+        }
     };
+
+    /** 「缩放」页签里显示的目标分辨率（按原尺寸百分比，偶数取整 —— h264 要求）。 */
+    const scaleTarget = useMemo(() => {
+        const even = (value: number) => {
+            const rounded = Math.max(2, Math.round(value));
+            return rounded % 2 === 0 ? rounded : rounded - 1;
+        };
+        if (!sourceSize.width || !sourceSize.height) return "";
+        const ratio = scalePercent / 100;
+        return `${even(sourceSize.width * ratio)} × ${even(sourceSize.height * ratio)}`;
+    }, [scalePercent, sourceSize]);
 
     const runTrim = async () => {
         if (busy) return;
@@ -132,11 +156,27 @@ export function CanvasNodeVideoToolsDialog({ open, videoUrl, config, initialTab 
         setBusy(true);
         setProgress(0);
         try {
-            const source = await loadVideoBlob(videoUrl);
+            const source = await loadVideoBlob(videoUrl, videoStorageKey);
             const blob = await trimVideoBlob(source, start, end, setProgress);
             await onTrim({ blob, startSec: start, endSec: end });
         } catch (error) {
             message.error(error instanceof Error ? error.message : t("canvas.videoTools.trimFailed"));
+        } finally {
+            setBusy(false);
+            setProgress(0);
+        }
+    };
+
+    const runScale = async () => {
+        if (busy) return;
+        setBusy(true);
+        setProgress(0);
+        try {
+            const source = await loadVideoBlob(videoUrl, videoStorageKey);
+            const result = await scaleVideoBlob(source, scalePercent, setProgress);
+            await onScale(result);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : t("canvas.videoTools.scaleFailed"));
         } finally {
             setBusy(false);
             setProgress(0);
@@ -387,6 +427,48 @@ export function CanvasNodeVideoToolsDialog({ open, videoUrl, config, initialTab 
                                                     {t("canvas.videoTools.upscaleAction")}
                                                 </Button>
                                             </div>
+                                        </div>
+                                    ),
+                                },
+                                {
+                                    key: "scale",
+                                    label: (
+                                        <span className="inline-flex items-center gap-1.5">
+                                            <Scaling className="size-3.5" />
+                                            {t("canvas.videoTools.tabs.scale")}
+                                        </span>
+                                    ),
+                                    children: (
+                                        <div className="space-y-4 pt-1">
+                                            <div className="space-y-2">
+                                                <div className="text-sm font-medium opacity-75">{t("canvas.videoTools.scalePercent")}</div>
+                                                <Segmented
+                                                    block
+                                                    value={scalePercent}
+                                                    options={VIDEO_SCALE_PERCENTAGES.map((item) => ({ label: `${item}%`, value: item }))}
+                                                    onChange={(value) => setScalePercent(value as VideoScalePercentage)}
+                                                    disabled={busy}
+                                                />
+                                                <div className="flex justify-between text-xs opacity-70">
+                                                    <span>{t("canvas.videoTools.scaleOutput")}</span>
+                                                    <span className="font-semibold">
+                                                        {scaleTarget || t("canvas.videoTools.scaleUnknownSize")}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <div className="rounded-xl border px-3 py-2 text-sm">
+                                                {busy && progress > 0 ? (
+                                                    <div className="flex justify-between">
+                                                        <span className="opacity-60">{t("canvas.videoTools.progress")}</span>
+                                                        <span className="font-semibold">{Math.round(progress * 100)}%</span>
+                                                    </div>
+                                                ) : (
+                                                    <span className="text-xs leading-5 opacity-70">{t("canvas.videoTools.scaleHint")}</span>
+                                                )}
+                                            </div>
+                                            <Button type="primary" size="large" block icon={<Scaling className="size-4" />} loading={busy} onClick={() => void runScale()}>
+                                                {t("canvas.videoTools.scaleAction")}
+                                            </Button>
                                         </div>
                                     ),
                                 },

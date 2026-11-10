@@ -128,7 +128,7 @@ import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/compon
 import { CanvasNodeMjUpscaleDialog } from "@/components/canvas/canvas-node-mj-upscale-dialog";
 import { CanvasNodeScaleDialog } from "@/components/canvas/canvas-node-scale-dialog";
 import { CanvasNodeAdjustDialog } from "@/components/canvas/canvas-node-adjust-dialog";
-import { CanvasNodeVideoToolsDialog, type VideoToolsFrameResult, type VideoToolsTrimResult, type VideoToolsUpscaleResult } from "@/components/canvas/canvas-node-video-tools-dialog";
+import { CanvasNodeVideoToolsDialog, type VideoToolsFrameResult, type VideoToolsScaleResult, type VideoToolsTrimResult, type VideoToolsUpscaleResult } from "@/components/canvas/canvas-node-video-tools-dialog";
 import { CanvasNodeAudioToolsDialog, type AudioToolsTrimResult } from "@/components/canvas/canvas-node-audio-tools-dialog";
 import { CanvasNodeAudioMergeDialog, type AudioMergeCandidate } from "@/components/canvas/canvas-node-audio-merge-dialog";
 import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
@@ -4689,15 +4689,46 @@ function AtelierCanvasPage() {
         }
     }, []);
 
+    /**
+     * 视频工具产物落盘。IndexedDB 配额满时**不能让整单失败**（本地文件夹还有副本时
+     * `persistMediaBlob` 自己会吞掉，但延迟镜像那条路会把配额错抛出来），所以这里兜一层：
+     * 退回内存 objectURL，节点照常出现，只是刷新后这一版会丢。
+     */
+    const storeVideoToolResult = useCallback(
+        async (blob: Blob) => {
+            try {
+                return await storeGeneratedVideo({ blob, mimeType: "video/mp4" });
+            } catch (error) {
+                const url = URL.createObjectURL(blob);
+                message.warning(`本地存储写入失败，这一版只在内存里（刷新会丢）：${error instanceof Error ? error.message : String(error)}`);
+                return { url, storageKey: "", bytes: blob.size, mimeType: "video/mp4" };
+            }
+        },
+        [message],
+    );
+
     const handleVideoTrim = useCallback(
         async (result: VideoToolsTrimResult) => {
             const source = videoToolsNode;
             if (!source) return;
-            const stored = await storeGeneratedVideo({ blob: result.blob, mimeType: "video/mp4" });
+            const stored = await storeVideoToolResult(result.blob);
             await createAdjacentVideoNode(source, stored, t("canvas.videoTools.trimSuccess"));
             message.success(t("canvas.videoTools.trimSuccess"));
         },
-        [createAdjacentVideoNode, message, t, videoToolsNode],
+        [createAdjacentVideoNode, message, storeVideoToolResult, t, videoToolsNode],
+    );
+
+    /** 按原尺寸百分比缩放：同样落一个相邻视频节点，标题带百分比，便于一眼看出是哪一版。 */
+    const handleVideoScale = useCallback(
+        async (result: VideoToolsScaleResult) => {
+            const source = videoToolsNode;
+            if (!source) return;
+            const stored = await storeVideoToolResult(result.blob);
+            const title = `${t("canvas.videoTools.tabs.scale")} ${result.percent}%`;
+            await createAdjacentVideoNode(source, stored, title);
+            message.success(t("canvas.videoTools.scaleSuccess"));
+        },
+        [createAdjacentVideoNode, message, storeVideoToolResult, t, videoToolsNode],
     );
 
     const handleAudioTrim = useCallback(
@@ -11262,11 +11293,13 @@ function AtelierCanvasPage() {
                     <CanvasNodeVideoToolsDialog
                         open={Boolean(videoToolsNode)}
                         videoUrl={videoToolsNode.metadata.content}
+                        videoStorageKey={videoToolsNode.metadata.storageKey}
                         config={effectiveConfig}
                         onClose={() => setVideoToolsNodeId(null)}
                         onTrim={handleVideoTrim}
                         onFrame={handleVideoFrame}
                         onUpscale={handleVideoUpscale}
+                        onScale={handleVideoScale}
                         onMissingConfig={() => openConfigDialog(true)}
                     />
                 ) : null}
