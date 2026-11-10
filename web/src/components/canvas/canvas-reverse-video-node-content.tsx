@@ -7,6 +7,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoTarget, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
+import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
 import { getStyleTemplate } from "@/constant/style-templates";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -133,7 +134,9 @@ export function CanvasReverseVideoNodeContent({
     /** 设置摘要（弹窗里给用户确认「按什么出片」用）。 */
     const targetSummary = useMemo(() => {
         const style = target.styleTemplateId ? getStyleTemplate(target.styleTemplateId)?.label || target.styleTemplateId : "无风格";
-        return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${target.size || "跟随全局比例"} · ${qualityLabel(target.quality)} · 风格：${style}`;
+        // 换了引擎要写在摘要里：03 的「按这套出片」是用户最后一眼确认，不能还写着普通视频模型。
+        const engine = isMochianiVideoEngine(target.videoEngine) ? "MochiAni 生视频" : "";
+        return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${target.size || "跟随全局比例"} · ${qualityLabel(target.quality)} · 风格：${style}${engine ? ` · ${engine}` : ""}`;
     }, [target]);
     /**
      * 03 弹窗里的「执行方案」选项（用户 2026-11-10）。
@@ -373,8 +376,22 @@ export function CanvasReverseVideoNodeContent({
                     {/* 第一行：风格 + 视频模型（控件与视频节点的提示词面板同一套） */}
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         <CanvasStylePicker value={target.styleTemplateId} onChange={(styleTemplateId) => patchTarget({ styleTemplateId: styleTemplateId || "" })} buttonClassName="!h-7 !max-w-[132px] !shrink-0 !justify-start !rounded-full !px-2.5" placement="topLeft" />
-                        <ModelPicker config={globalConfig} value={target.model} onChange={(model) => patchTarget({ model })} capability="video" placeholder="视频模型（跟随全局）" onMissingConfig={() => openConfigDialog(true)} className="max-w-[168px]" />
-                    </div>
+                        {/* 视频模型：最后一项「MochiAni 生视频节点」= 换引擎（用户 2026-11-10 第 02 条）。
+                            选它之后 03 的「一键视频」铺出来的是 MochiAni 窗口，而不是普通视频节点；
+                            两个选择分开存（`model` / `videoEngine`），来回切不互相冲掉。 */}
+                        <ModelPicker
+                            config={globalConfig}
+                            value={isMochianiVideoEngine(target.videoEngine) ? MOCHIANI_VIDEO_ENGINE : target.model}
+                            onChange={(model) => {
+                                if (isMochianiVideoEngine(model)) patchTarget({ videoEngine: MOCHIANI_VIDEO_ENGINE });
+                                else patchTarget({ videoEngine: undefined, model });
+                            }}
+                            capability="video"
+                            placeholder="视频模型（跟随全局）"
+                            onMissingConfig={() => openConfigDialog(true)}
+                            className="max-w-[168px]"
+                            extraOptions={[{ value: MOCHIANI_VIDEO_ENGINE, label: "MochiAni 生视频节点", title: "铺链路时改成 MochiAni 生视频窗口（模型/渠道取偏好里的 MochiAni 配置）" }]}
+                        />                    </div>
                     {/* 第二行：秒数（成片总时长，默认 30）+ 比例 + 分辨率 */}
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         <InputNumber

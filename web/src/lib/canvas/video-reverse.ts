@@ -9,6 +9,7 @@
 
 import type { CanvasReverseVideoTarget } from "@/types/canvas";
 import { SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
+import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
 /** 三条命令。数字即用户看到的 01 / 02 / 03。 */
 export type VideoReverseMode = 1 | 2 | 3;
 
@@ -89,6 +90,11 @@ export function normalizeReverseVideoTarget(raw: Partial<CanvasReverseVideoTarge
      */
     const scriptScheme = text(source.scriptScheme);
     if (scriptScheme && (SCRIPT_SCHEME_IDS as readonly string[]).includes(scriptScheme)) target.scriptScheme = scriptScheme as ScriptSchemeId;
+    /**
+     * 生视频引擎（用户 2026-11-10 第 02 条）：只认 `"mochiani"` 这一个哨兵，其它一律丢掉
+     * （= 普通视频节点）。和 `scriptScheme` 同理，脏值不能留在元数据里假装「用户选过」。
+     */
+    if (isMochianiVideoEngine(text(source.videoEngine))) target.videoEngine = MOCHIANI_VIDEO_ENGINE;
     return target;
 }
 

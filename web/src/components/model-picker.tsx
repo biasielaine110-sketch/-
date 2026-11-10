@@ -20,18 +20,38 @@ type ModelPickerProps = {
     fullWidth?: boolean;
     placeholder?: string;
     onMissingConfig?: () => void;
+    /**
+     * 额外的「不是普通模型」的选项（用户 2026-11-10 第 01 / 02 条）：值不走渠道模型表，
+     * 而是引擎哨兵（如 `mochiani` = 改用 MochiAni 生视频节点）。排在列表末尾，单独着色，
+     * 且不参与健康检查（它不是 API 模型，没有 baseUrl 可探测）。
+     */
+    extraOptions?: Array<{ value: string; label: ReactNode; title?: string }>;
 };
 
-export function ModelPicker({ config, value, onChange, capability, className, fullWidth = false, placeholder, onMissingConfig }: ModelPickerProps) {
+export function ModelPicker({ config, value, onChange, capability, className, fullWidth = false, placeholder, onMissingConfig, extraOptions }: ModelPickerProps) {
     const { t } = useTranslation();
     const pickerId = useId();
     const [open, setOpen] = useState(false);
     const [bulkChecking, setBulkChecking] = useState(false);
     const [, bump] = useState(0);
-    const models = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
+    const extraList = useMemo(() => extraOptions || [], [extraOptions]);
+    const extraValues = useMemo(() => new Set(extraList.map((item) => item.value)), [extraList]);
+    const models = useMemo(
+        () =>
+            Array.from(
+                new Set(
+                    [...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter(
+                        (model): model is string => typeof model === "string" && model.length > 0 && !extraValues.has(model),
+                    ),
+                ),
+            ),
+        [capability, config, extraValues, value],
+    );
     const healthCapability = capability || "text";
     const current = value || undefined;
-    const autoHealth = healthCapability === "image" || healthCapability === "video";
+    /** 当前值是不是那个「非模型」的额外选项（MochiAni 等）：是就不查健康、不显示健康点。 */
+    const currentExtra = useMemo(() => extraList.find((item) => item.value === current), [current, extraList]);
+    const autoHealth = (healthCapability === "image" || healthCapability === "video") && !currentExtra;
 
     useEffect(() => subscribeModelHealth(() => bump((value) => value + 1)), []);
 
@@ -43,27 +63,36 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
         return () => controller.abort();
     }, [autoHealth, config, current, healthCapability]);
 
-    const selectOptions = useMemo<DefaultOptionType[]>(
-        () =>
-            models.length
-                ? models.map((model) => ({
-                      value: model,
-                      label: <ModelLabel config={config} model={model} capability={healthCapability} />,
-                      title: modelOptionLabel(config, model),
-                  }))
-                : [
-                      {
-                          value: "__empty__",
-                          label: emptyModelLabel(config, capability),
-                          title: emptyModelLabel(config, capability),
-                          disabled: true,
-                      },
-                  ],
-        [bump, capability, config, healthCapability, models],
-    );
+    const selectOptions = useMemo<DefaultOptionType[]>(() => {
+        const modelOptions: DefaultOptionType[] = models.map((model) => ({
+            value: model,
+            label: <ModelLabel config={config} model={model} capability={healthCapability} />,
+            title: modelOptionLabel(config, model),
+        }));
+        // 额外选项排在最后：它们是「换引擎」这种结构性的选择，别和模型列表混在一起。
+        const extraEntries: DefaultOptionType[] = extraList.map((item) => ({
+            value: item.value,
+            label: (
+                <span className="flex w-full min-w-0 items-center gap-2">
+                    <span className="inline-block size-2 shrink-0 rounded-full bg-violet-500" />
+                    <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                </span>
+            ),
+            title: item.title || item.value,
+        }));
+        if (modelOptions.length || extraEntries.length) return [...modelOptions, ...extraEntries];
+        return [
+            {
+                value: "__empty__",
+                label: emptyModelLabel(config, capability),
+                title: emptyModelLabel(config, capability),
+                disabled: true,
+            },
+        ];
+    }, [bump, capability, config, extraList, healthCapability, models]);
     const pickerPlaceholder = placeholder || t("settingsPanels.model.select");
-    const currentHealth = current && current !== "__empty__" ? getModelHealth(modelHealthKey(config, current, healthCapability)) : { status: "idle" as const };
-    const canCheck = Boolean(current && current !== "__empty__");
+    const currentHealth = current && current !== "__empty__" && !currentExtra ? getModelHealth(modelHealthKey(config, current, healthCapability)) : { status: "idle" as const };
+    const canCheck = Boolean(current && current !== "__empty__" && !currentExtra);
     const checking = currentHealth.status === "checking";
     const anyChecking = bulkChecking || models.some((model) => getModelHealth(modelHealthKey(config, model, healthCapability)).status === "checking");
 
@@ -131,6 +160,16 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                     }}
                     labelRender={(props) => {
                         const model = String(props.value || current || "");
+                        const extra = extraList.find((item) => item.value === model);
+                        if (extra) {
+                            // 额外选项（换引擎）：没有健康点、没有模型图标 —— 它不是一条 API 线路。
+                            return (
+                                <span className="flex min-w-0 items-center gap-2">
+                                    <span className="inline-block size-2 shrink-0 rounded-full bg-violet-500" />
+                                    <span className="canvas-model-picker-text min-w-0 flex-1 truncate text-left">{extra.label}</span>
+                                </span>
+                            );
+                        }
                         const titleText = model && model !== "__empty__" ? modelOptionLabel(config, model) : "";
                         const fallback = typeof props.label === "string" || typeof props.label === "number" ? String(props.label) : pickerPlaceholder;
                         const text: ReactNode = titleText || fallback;

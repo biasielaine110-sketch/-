@@ -34,6 +34,7 @@ import { listChatSkills, orderChatSkillsById } from "@/lib/chat-skills";
 import { useOrderDrag } from "@/hooks/use-order-drag";
 import { CONFIG_GATE_ID, isGateUnlocked, markGateUnlocked } from "@/lib/gate-unlock";
 import { defaultTextPrompts, isTextPromptEnabled } from "@/constant/text-prompt-library";
+import { MOCHIANI_ASPECT_RATIO_OPTIONS, resolveMochianiPreference, type MochianiPreference } from "@/constant/mochiani-video";
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import {
@@ -361,6 +362,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 <Form.Item label={t("config.preferences.systemPrompt")} className="mb-6">
                                     <CanvasFindReplaceTextArea rows={4} value={config.systemPrompt} resetKey="system-prompt" placeholder={t("config.preferences.systemPromptPlaceholder")} onChange={(value) => updateConfig("systemPrompt", value)} />
                                 </Form.Item>
+                                <MochianiPreferenceForm value={config.mochiani} onChange={(mochiani) => updateConfig("mochiani", mochiani)} />
                                 <TextPromptLibraryPreferences prompts={config.textPrompts || []} onChange={(textPrompts) => updateConfig("textPrompts", textPrompts)} />
                             </Form>
                         ),
@@ -618,6 +620,96 @@ function channelProtocolLabel(channel: ModelChannel, t: (key: string) => string)
     const summary = channelProtocolSummary(channel);
     if (summary === "mixed") return t("config.channels.mixedProtocol");
     return apiFormatLabel(summary);
+}
+
+/**
+ * MochiAni 生视频偏好（用户 2026-11-10 第 03 条）。
+ *
+ * 存的是「铺链路建 MochiAni 节点时的预填值」：模型 / 线路 / 生成模式 / 画幅 / 自由参数。
+ * 为什么不做成下拉：MochiAni 的模型目录只在**本机桥**里（`/api/models`），配置面板拿不到，
+ * 硬去拉一次还得依赖用户当时开没开桥。所以这里让用户填**桥里看到的那个名字**（节点窗口的模型
+ * 下拉里就有），留空则节点自己读 —— 配置面板在桥没开时也永远可用。
+ *
+ * 参数用 JSON 文本框：MochiAni 的参数表是「模型 / 线路决定的可选集」，写死几个 input 一定会漏；
+ * 解析失败时**保留上一次可用的值**（不清空、不抛错），只是把边框标红 + 提示。
+ */
+function MochianiPreferenceForm({ value, onChange }: { value?: MochianiPreference; onChange: (next: MochianiPreference) => void }) {
+    const { t } = useTranslation();
+    const pref = resolveMochianiPreference({ mochiani: value });
+    const paramsText = JSON.stringify(pref.params || {}, null, 2);
+    const [paramsDraft, setParamsDraft] = useState(paramsText);
+    const [paramsError, setParamsError] = useState("");
+
+    // 外部改动（导入配置 / 恢复默认 / 另一个标签页写入）时把草稿同步过来；草稿自己还没提交时不打断。
+    useEffect(() => {
+        setParamsDraft((current) => (parseMochianiParams(current) ? paramsText : current));
+    }, [paramsText]);
+
+    const patch = (next: Partial<MochianiPreference>) => onChange({ ...pref, ...next });
+
+    return (
+        <div className="mb-6">
+            <div className="mb-1 text-sm font-semibold">{t("config.preferences.mochianiTitle")}</div>
+            <div className="mb-3 text-xs opacity-60">{t("config.preferences.mochianiDescription")}</div>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <Form.Item label={t("config.preferences.mochianiModel")} className="mb-0">
+                    <Input value={pref.modelKey} placeholder={t("config.preferences.mochianiModelPlaceholder")} onChange={(event) => patch({ modelKey: event.target.value })} />
+                </Form.Item>
+                <Form.Item label={t("config.preferences.mochianiChannel")} className="mb-0">
+                    <Input value={pref.channelId} placeholder={t("config.preferences.mochianiChannelPlaceholder")} onChange={(event) => patch({ channelId: event.target.value })} />
+                </Form.Item>
+                <Form.Item label={t("config.preferences.mochianiCategory")} className="mb-0">
+                    <Select
+                        value={pref.videoCategory}
+                        onChange={(videoCategory: string) => patch({ videoCategory })}
+                        options={[
+                            { value: "", label: t("config.preferences.mochianiCategoryAuto") },
+                            { value: "11", label: `${t("config.preferences.mochianiCategoryAll")} (11)` },
+                            { value: "3", label: `${t("config.preferences.mochianiCategoryMulti")} (3)` },
+                            { value: "1", label: `${t("config.preferences.mochianiCategoryFrames")} (1)` },
+                            { value: "9", label: `${t("config.preferences.mochianiCategoryText")} (9)` },
+                        ]}
+                    />
+                </Form.Item>
+                <Form.Item label={t("config.preferences.mochianiAspect")} extra={t("config.preferences.mochianiAspectHint")} className="mb-0">
+                    <Select value={pref.aspectRatio} onChange={(aspectRatio: string) => patch({ aspectRatio })} options={MOCHIANI_ASPECT_RATIO_OPTIONS.map((item) => ({ value: item, label: item }))} />
+                </Form.Item>
+            </div>
+            <Form.Item label={t("config.preferences.mochianiParams")} className="mt-4 mb-0" validateStatus={paramsError ? "error" : undefined} help={paramsError || undefined}>
+                <CanvasFindReplaceTextArea
+                    rows={3}
+                    value={paramsDraft}
+                    resetKey="mochiani-params"
+                    placeholder={t("config.preferences.mochianiParamsPlaceholder")}
+                    onChange={(next) => {
+                        setParamsDraft(next);
+                        const parsed = parseMochianiParams(next);
+                        if (!parsed) {
+                            setParamsError(t("config.preferences.mochianiParamsInvalid"));
+                            return;
+                        }
+                        setParamsError("");
+                        patch({ params: parsed });
+                    }}
+                />
+            </Form.Item>
+        </div>
+    );
+}
+
+/** JSON 文本 → 参数对象；不是对象 / 含非字符串值 / 语法错 → `null`（调用方保留旧值）。 */
+function parseMochianiParams(text: string): Record<string, string> | null {
+    const raw = text.trim();
+    if (!raw) return {};
+    try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+        const entries = Object.entries(parsed as Record<string, unknown>);
+        if (entries.some(([, value]) => typeof value !== "string")) return null;
+        return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
+    } catch {
+        return null;
+    }
 }
 
 function TextPromptLibraryPreferences({ prompts, onChange }: { prompts: TextPromptEntry[]; onChange: (prompts: TextPromptEntry[]) => void }) {

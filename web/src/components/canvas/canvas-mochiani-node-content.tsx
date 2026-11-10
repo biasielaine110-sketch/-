@@ -273,7 +273,13 @@ type Props = {
     onReorderReferences?: (orderedNodeIds: string[]) => void;
     /** 双击参考图 chip → 画布的全屏预览。 */
     onPreviewReference?: (referenceNodeId: string) => void;
-    onCreateVideo: (videoUrl: string, prompt?: string) => Promise<string>;
+    /**
+     * 产物落到画布：建一个视频节点并返回它的 id。
+     *
+     * 第三个参数是**宿主节点 id**（= 本 MochiAni 窗口）：画布会把媒体引用**也镜像到宿主节点**上，
+     * 于是「脚本链路里连到合并节点的那根线」能直接读到这段视频（用户 2026-11-10 第 01 条）。
+     */
+    onCreateVideo: (videoUrl: string, prompt?: string, options?: { hostNodeId?: string }) => Promise<string>;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
 };
 
@@ -1571,7 +1577,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         if (!job?.videoUrl) return;
         setBusy("place");
         try {
-            const nodeId = await onCreateVideo(job.videoUrl, job.prompt);
+            const nodeId = await onCreateVideo(job.videoUrl, job.prompt, { hostNodeId: node.id });
             setPlacedNodeId(nodeId);
             message.success("视频已经落到画布上了");
         } catch (err) {

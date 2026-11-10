@@ -13,6 +13,7 @@ import { CanvasScriptBatchAssetDialog } from "@/components/canvas/canvas-script-
 import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import { buildScriptGhostPrefill, buildScriptMashuPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, buildScriptSchemeSeed, resolveSchemeDefaultMergeMode, resolveScriptPromptValues, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, shouldPinScriptPrompt, type ScriptLibrarySchemeId, type ScriptPromptField, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
+import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import {
     buildStoryScriptAssetDescriptionHints,
@@ -432,6 +433,13 @@ export function CanvasScriptNodeContent({
     const extraPrompt = node.metadata?.scriptPrompt || "";
     const connectedTextValue = connectedText.trim();
     const textModel = resolveModelForCapability(globalConfig, node.metadata?.model, "text");
+    /**
+     * 标题栏「视频模型」选择器的当前值（用户 2026-11-10 第 01 条）。
+     *
+     * 两个字段合成一个值：走 MochiAni 节点时显示哨兵，否则显示 `scriptVideoModel`
+     * （空 = 跟随偏好里的默认视频模型，与改造前一致）。铺链路各读各的，这里只负责显示与回写。
+     */
+    const videoModelValue = isMochianiVideoEngine(node.metadata?.scriptVideoEngine) ? MOCHIANI_VIDEO_ENGINE : String(node.metadata?.scriptVideoModel || "");
 
     // 内容基准字号（px）。组件内所有字号都写成 em，所以只改这一个值就能整体缩放
     // （档位见 story-script.ts 的 STORY_SCRIPT_FONT_SIZES，避开 13.5px 这种糊字）。
@@ -1545,6 +1553,25 @@ export function CanvasScriptNodeContent({
                 onChange={(styleTemplateId) => patchMetadata({ styleTemplateId })}
                 buttonClassName="!h-8 !max-w-[128px] !shrink-0 !justify-start !rounded-full !px-2.5"
                 placement="bottomLeft"
+            />
+
+            {/* 生视频引擎（用户 2026-11-10 第 01 条）：「铺视频链路 / 一键视频」每一段要建哪种窗口。
+                默认 = 跟随偏好里的默认视频模型（空值 = 不写 model，视频节点自己跟随全局）；
+                也可以直接选「MochiAni 生视频节点」——之后每段建的都是 MochiAni 窗口，
+                提示词 / 参考图 / 风格 / 合并连线与普通视频节点完全一样，只是「生成」由 MochiAni 的「预检」驱动。
+                两个选择分开存（`scriptVideoModel` / `scriptVideoEngine`），来回切不会互相冲掉。 */}
+            <ModelPicker
+                config={{ ...globalConfig, model: videoModelValue }}
+                value={videoModelValue}
+                onChange={(model) => {
+                    if (isMochianiVideoEngine(model)) patchMetadata({ scriptVideoEngine: MOCHIANI_VIDEO_ENGINE });
+                    else patchMetadata({ scriptVideoEngine: undefined, scriptVideoModel: model });
+                }}
+                capability="video"
+                onMissingConfig={() => openConfigDialog(true)}
+                className="max-w-[158px]"
+                placeholder={t("canvas.scriptNode.videoModelFollow")}
+                extraOptions={[{ value: MOCHIANI_VIDEO_ENGINE, label: t("canvas.scriptNode.videoEngineMochiani"), title: t("canvas.scriptNode.videoEngineMochianiHint") }]}
             />
 
             {fontSizeStepper}

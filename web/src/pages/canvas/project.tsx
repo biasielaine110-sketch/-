@@ -103,6 +103,7 @@ import {
     type ScriptRefLinkKind,
 } from "@/constant/story-script";
 import { asScriptSchemeId, buildScriptSchemeSeed, resolveScriptPromptValues, resolveScriptSchemeId } from "@/constant/script-scheme";
+import { buildMochianiNodeConfig, isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE, resolveMochianiPreference } from "@/constant/mochiani-video";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -1656,7 +1657,7 @@ function AtelierCanvasPage() {
     );
 
     const createBridgeVideoNode = useCallback(
-        async (videoUrl: string, prompt?: string, position?: Position) => {
+        async (videoUrl: string, prompt?: string, position?: Position, hostNodeId?: string) => {
             const nodeId = createNode(CanvasNodeType.Video, position);
             /**
              * MochiAni 回来的是它自己 CDN 上的临时地址（`tencentcloud.mochiani.com/temporary/…`），
@@ -1685,8 +1686,26 @@ function AtelierCanvasPage() {
                 ...mediaFields,
                 ...(prompt ? { prompt, composerContent: prompt, promptSyncAt: Date.now() } : {}),
             };
-            setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node)));
-            nodesRef.current = nodesRef.current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...patch } } : node));
+            /**
+             * MochiAni 节点**自己也留一份媒体引用**（用户 2026-11-10 第 01 条：输出照旧接进视频合并节点）。
+             *
+             * 为什么不能只靠刚落画布的那个视频节点：脚本链路里的合并节点连的是 **MochiAni 窗口本身**
+             * （铺链路时建的），而 MochiAni 的产物以前只落成旁边一个新视频节点、跟那条连线无关 ——
+             * 于是合并节点永远「缺素材」。把 media 字段镜像到宿主节点上，时间线就能直接读到这段视频。
+             *
+             * ⚠️ 只写媒体字段，**不写 `status` / 提示词**：宿主节点的状态与提示词归它自己的面板管，
+             * 这两样一改，节点会显示成「成功」而丢掉运行快照。
+             */
+            const hostPatch = hostNodeId
+                ? { content, ...mediaFields }
+                : null;
+            const applyPatch = (node: CanvasNodeData): CanvasNodeData => {
+                if (node.id === nodeId) return { ...node, metadata: { ...node.metadata, ...patch } };
+                if (hostPatch && node.id === hostNodeId) return { ...node, metadata: { ...node.metadata, ...hostPatch } };
+                return node;
+            };
+            setNodes((prev) => prev.map(applyPatch));
+            nodesRef.current = nodesRef.current.map(applyPatch);
             return nodeId;
         },
         [createNode],
@@ -9300,16 +9319,27 @@ function AtelierCanvasPage() {
             const scriptVideoModel = String(source.metadata?.scriptVideoModel || "").trim();
             const scriptVideoSize = resolveStoryScriptImageSize(source.metadata?.scriptVideoSize);
             const scriptVideoQuality = String(source.metadata?.scriptVideoQuality || "").trim();
+            /**
+             * **生视频引擎**（用户 2026-11-10 第 01 条）：脚本节点上选了「MochiAni 生视频节点」时，
+             * 这一段铺出来的是 MochiAni 窗口（`CanvasNodeType.Mochiani`），而不是普通视频节点。
+             * 提示词 / 参考图 / 风格 / 音频 / 合并连线全部走同一套逻辑（下游只认「有内容的视频源」），
+             * 差别只有三点：① 节点类型；② 模型 / 渠道 / 参数从**偏好里的 MochiAni 配置**预填，
+             * 不再写 `scriptVideoModel`；③ 窗口尺寸换成 560×820（MochiAni 的面板一屏放得下）。
+             */
+            const useMochianiVideo = isMochianiVideoEngine(source.metadata?.scriptVideoEngine);
+            const mochianiPreference = useMochianiVideo ? resolveMochianiPreference(effectiveConfig) : null;
             const scriptVideoMeta = {
-                ...(scriptVideoModel ? { model: scriptVideoModel } : {}),
+                ...(scriptVideoModel && !useMochianiVideo ? { model: scriptVideoModel } : {}),
                 ...(scriptVideoSize ? { size: scriptVideoSize } : {}),
                 ...(scriptVideoQuality ? { vquality: scriptVideoQuality } : {}),
             };
             const imageSpec = nodeSizeFromRatio(scriptImageSize, NODE_DEFAULT_SIZE[CanvasNodeType.Image].width, NODE_DEFAULT_SIZE[CanvasNodeType.Image].height) || NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             const imageWidth = imageSpec.width;
             const imageHeight = imageSpec.height;
-            const videoWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Video].width;
-            const videoHeight = NODE_DEFAULT_SIZE[CanvasNodeType.Video].height;
+            const videoNodeType = useMochianiVideo ? CanvasNodeType.Mochiani : CanvasNodeType.Video;
+            const videoSpec = NODE_DEFAULT_SIZE[videoNodeType];
+            const videoWidth = videoSpec.width;
+            const videoHeight = videoSpec.height;
             const gapX = 48;
             const gapY = 72;
             const rowHeight = Math.max(textHeight, imageHeight, videoHeight);
@@ -9544,7 +9574,19 @@ function AtelierCanvasPage() {
                     // `composeStyledPrompt` 会把它拼到提示词尾部；窗口里的风格按钮显示同一档，可随时改。
                     // `scriptVideoMeta` = 反推节点上选的模型 / 比例 / 分辨率（用户 2026-11-09），
                     // 三个键为空时对象为空 → 与改造前逐字节一致。
-                    ...createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { prompt: videoPrompt, status: NODE_STATUS_IDLE, ...(seconds ? { seconds: String(seconds) } : {}), ...scriptStyle, ...scriptVideoMeta }),
+                    //
+                    // 选的是 MochiAni 引擎时改走下面那个分支：类型换成 `Mochiani`，提示词双写
+                    // （`prompt` + `mochianiPrompt`，与节点窗口的手写逻辑同口径），模型 / 渠道 / 参数
+                    // 从偏好预填 —— 用户在节点里改过一次就只影响那一个节点，不回写偏好。
+                    ...(useMochianiVideo && mochianiPreference
+                        ? createCanvasNode(CanvasNodeType.Mochiani, { x: 0, y: 0 }, {
+                              prompt: videoPrompt,
+                              mochianiPrompt: videoPrompt,
+                              status: NODE_STATUS_IDLE,
+                              ...scriptStyle,
+                              mochianiConfig: buildMochianiNodeConfig(mochianiPreference, { aspectRatio: scriptVideoSize }),
+                          })
+                        : createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, { prompt: videoPrompt, status: NODE_STATUS_IDLE, ...(seconds ? { seconds: String(seconds) } : {}), ...scriptStyle, ...scriptVideoMeta })),
                     title: merged ? t("canvas.scriptNode.pipelineVideoRange", { from: shotNoFrom, to: shotNoTo, count: members.length }) : t("canvas.scriptNode.pipelineVideo", { no: shotNoFrom }),
                     width: videoWidth,
                     height: videoHeight,
@@ -9711,79 +9753,91 @@ function AtelierCanvasPage() {
                  * ⚠️ 顺序按画布摆放（上→下），见 `planScriptPipelineGenerateOrder`。
                  */
                 if (autoGenerate) {
-                    const targets = planScriptPipelineGenerateOrder(createdVideoNodes);
-                    if (targets.length) {
-                        message.info(
-                            t("canvas.scriptNode.pipelineVideoGenerateStarted", {
-                                count: targets.length,
-                                seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000,
-                            }),
-                        );
-                        /**
-                         * **某段视频生成失败 → 换模型再生成一次；仍失败 → 暂停后续**（用户 2026-11-10 第 01 条）。
-                         *
-                         * 用户原话：「生成失败的视频再次使用偏好或者上一次设定选择的生视频模型生成一次，
-                         * 若还是失败即暂停。」→ 候选模型只有两个：偏好里的视频模型、上一次「生成设置」里
-                         * 选的（`scriptVideoModel`，铺链路时已写进每个视频节点的 `metadata.model`）。
-                         *
-                         * 🔴 两条老口径不能被「顺手改成串行」破坏：
-                         *  ① 2 秒间隔是**两次点生成之间**，不是「等上一段出完再点下一段」（见 `script-pipeline-run.ts`）；
-                         *  ② 视频分支自己吞掉异常（Promise 永远 resolve），成败只能读节点 `metadata.status`。
-                         * 所以「发射」与「监督」拆开：for 循环保持 2 秒节奏只负责点生成，
-                         * 每一发的等待 / 重试 / 暂停判定放在 `supervise()` 里并行跑。
-                         */
-                        const preferredVideoModel = resolveModelForCapability(effectiveConfig, undefined, "video");
-                        const settingsVideoModel = scriptVideoModel;
-                        // 一旦判定「暂停」，后面还没点的段就不再点了（已经在跑的等它自己落定）。
-                        let pipelinePaused = false;
-                        /** 换模型只能走 `metadata.model`（`buildGenerationConfig` 只认它），顺带把状态复位成 idle。 */
-                        const patchVideoNodeModel = (targetNodeId: string, model: string) => {
-                            const patch = (item: CanvasNodeData): CanvasNodeData =>
-                                item.id === targetNodeId
-                                    ? { ...item, metadata: { ...item.metadata, ...(model ? { model } : {}), status: NODE_STATUS_IDLE, errorDetails: undefined } }
-                                    : item;
-                            nodesRef.current = nodesRef.current.map(patch);
-                            setNodes((prev) => prev.map(patch));
-                        };
-                        const fireVideoGenerate = (target: { nodeId: string; prompt: string }) =>
-                            Promise.resolve(generateNodeRef.current?.(target.nodeId, "video", target.prompt)).catch(() => undefined);
-                        const videoNodeOf = (targetNodeId: string) => nodesRef.current.find((item) => item.id === targetNodeId);
-                        const pauseVideoPipeline = (target: { nodeId: string; index: number }, triedLabels: string) => {
-                            pipelinePaused = true;
-                            const detail = t("canvas.scriptNode.pipelineVideoPaused", {
-                                shot: target.index + 1,
-                                models: triedLabels,
-                                error: videoNodeOf(target.nodeId)?.metadata?.errorDetails || t("canvas.projectPage.generationFailed"),
-                            });
-                            message.error(detail);
-                            options?.onVideoPause?.(detail);
-                        };
-                        const superviseVideo = async (target: { nodeId: string; prompt: string; index: number }) => {
-                            await fireVideoGenerate(target);
-                            if (readScriptPipelineVideoOutcome(videoNodeOf(target.nodeId)) !== "error") return;
-                            const failedModel = String(videoNodeOf(target.nodeId)?.metadata?.model || "");
-                            const retryModel = resolveScriptPipelineRetryModel({ preferred: preferredVideoModel, settingsSelected: settingsVideoModel, failed: failedModel });
-                            const triedLabels = [failedModel, retryModel].filter(Boolean).map((model) => modelOptionLabel(effectiveConfig, model));
-                            message.warning(
-                                t("canvas.scriptNode.pipelineVideoRetry", {
-                                    shot: target.index + 1,
-                                    model: retryModel ? modelOptionLabel(effectiveConfig, retryModel) : t("canvas.scriptNode.oneClickScriptModelUnknown"),
+                    /**
+                     * MochiAni 引擎**不代跑生成**（用户 2026-11-10 第 01 条只说「铺出 MochiAni 窗口」）。
+                     *
+                     * 原因不是偷懒：MochiAni 的执行是「预检 → 确认 → 落画布」三步，中间要认页面上下文、
+                     * 账户余额与当前任务，一次只能驱动一个页面任务；而 `generateNodeRef` 是普通视频节点的
+                     * 直连生成器（`mode: "video"`），对它无能为力。硬串成自动点击只会得到一串报错。
+                     * 所以铺完只提示下一步在哪点，绝不假装已经跑起来了。
+                     */
+                    if (useMochianiVideo) {
+                        message.info(t("canvas.scriptNode.pipelineMochianiBuilt", { count: createdVideoNodes.length }));
+                    } else {
+                            const targets = planScriptPipelineGenerateOrder(createdVideoNodes);
+                            if (targets.length) {
+                            message.info(
+                                t("canvas.scriptNode.pipelineVideoGenerateStarted", {
+                                    count: targets.length,
+                                    seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000,
                                 }),
                             );
-                            patchVideoNodeModel(target.nodeId, retryModel || failedModel);
-                            await fireVideoGenerate(target);
-                            if (readScriptPipelineVideoOutcome(videoNodeOf(target.nodeId)) !== "error") return;
-                            pauseVideoPipeline(target, triedLabels.join(" → "));
-                        };
-                        void (async () => {
-                            const jobs: Promise<void>[] = [];
-                            for (const target of targets) {
-                                if (target.index > 0) await new Promise((resolve) => setTimeout(resolve, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS));
-                                if (pipelinePaused) break;
-                                jobs.push(superviseVideo(target));
-                            }
-                            await Promise.all(jobs);
-                        })();
+                            /**
+                             * **某段视频生成失败 → 换模型再生成一次；仍失败 → 暂停后续**（用户 2026-11-10 第 01 条）。
+                             *
+                             * 用户原话：「生成失败的视频再次使用偏好或者上一次设定选择的生视频模型生成一次，
+                             * 若还是失败即暂停。」→ 候选模型只有两个：偏好里的视频模型、上一次「生成设置」里
+                             * 选的（`scriptVideoModel`，铺链路时已写进每个视频节点的 `metadata.model`）。
+                             *
+                             * 🔴 两条老口径不能被「顺手改成串行」破坏：
+                             *  ① 2 秒间隔是**两次点生成之间**，不是「等上一段出完再点下一段」（见 `script-pipeline-run.ts`）；
+                             *  ② 视频分支自己吞掉异常（Promise 永远 resolve），成败只能读节点 `metadata.status`。
+                             * 所以「发射」与「监督」拆开：for 循环保持 2 秒节奏只负责点生成，
+                             * 每一发的等待 / 重试 / 暂停判定放在 `supervise()` 里并行跑。
+                             */
+                            const preferredVideoModel = resolveModelForCapability(effectiveConfig, undefined, "video");
+                            const settingsVideoModel = scriptVideoModel;
+                            // 一旦判定「暂停」，后面还没点的段就不再点了（已经在跑的等它自己落定）。
+                            let pipelinePaused = false;
+                            /** 换模型只能走 `metadata.model`（`buildGenerationConfig` 只认它），顺带把状态复位成 idle。 */
+                            const patchVideoNodeModel = (targetNodeId: string, model: string) => {
+                                const patch = (item: CanvasNodeData): CanvasNodeData =>
+                                    item.id === targetNodeId
+                                        ? { ...item, metadata: { ...item.metadata, ...(model ? { model } : {}), status: NODE_STATUS_IDLE, errorDetails: undefined } }
+                                        : item;
+                                nodesRef.current = nodesRef.current.map(patch);
+                                setNodes((prev) => prev.map(patch));
+                            };
+                            const fireVideoGenerate = (target: { nodeId: string; prompt: string }) =>
+                                Promise.resolve(generateNodeRef.current?.(target.nodeId, "video", target.prompt)).catch(() => undefined);
+                            const videoNodeOf = (targetNodeId: string) => nodesRef.current.find((item) => item.id === targetNodeId);
+                            const pauseVideoPipeline = (target: { nodeId: string; index: number }, triedLabels: string) => {
+                                pipelinePaused = true;
+                                const detail = t("canvas.scriptNode.pipelineVideoPaused", {
+                                    shot: target.index + 1,
+                                    models: triedLabels,
+                                    error: videoNodeOf(target.nodeId)?.metadata?.errorDetails || t("canvas.projectPage.generationFailed"),
+                                });
+                                message.error(detail);
+                                options?.onVideoPause?.(detail);
+                            };
+                            const superviseVideo = async (target: { nodeId: string; prompt: string; index: number }) => {
+                                await fireVideoGenerate(target);
+                                if (readScriptPipelineVideoOutcome(videoNodeOf(target.nodeId)) !== "error") return;
+                                const failedModel = String(videoNodeOf(target.nodeId)?.metadata?.model || "");
+                                const retryModel = resolveScriptPipelineRetryModel({ preferred: preferredVideoModel, settingsSelected: settingsVideoModel, failed: failedModel });
+                                const triedLabels = [failedModel, retryModel].filter(Boolean).map((model) => modelOptionLabel(effectiveConfig, model));
+                                message.warning(
+                                    t("canvas.scriptNode.pipelineVideoRetry", {
+                                        shot: target.index + 1,
+                                        model: retryModel ? modelOptionLabel(effectiveConfig, retryModel) : t("canvas.scriptNode.oneClickScriptModelUnknown"),
+                                    }),
+                                );
+                                patchVideoNodeModel(target.nodeId, retryModel || failedModel);
+                                await fireVideoGenerate(target);
+                                if (readScriptPipelineVideoOutcome(videoNodeOf(target.nodeId)) !== "error") return;
+                                pauseVideoPipeline(target, triedLabels.join(" → "));
+                            };
+                            void (async () => {
+                                const jobs: Promise<void>[] = [];
+                                for (const target of targets) {
+                                    if (target.index > 0) await new Promise((resolve) => setTimeout(resolve, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS));
+                                    if (pipelinePaused) break;
+                                    jobs.push(superviseVideo(target));
+                                }
+                                await Promise.all(jobs);
+                            })();
+                        }
                     }
                 }
             };
@@ -10355,6 +10409,9 @@ function AtelierCanvasPage() {
                 ...(target.size ? { scriptImageSize: target.size, scriptVideoSize: target.size } : {}),
                 ...(target.quality ? { scriptVideoQuality: target.quality } : {}),
                 ...(target.model ? { scriptVideoModel: target.model } : {}),
+                // 02 里选了「MochiAni 生视频节点」→ 03 建脚本节点时记住引擎，铺链路时才知道建哪种窗口
+                // （用户 2026-11-10 第 02 条：「同上，后续在脚本生成器执行生视频时，也铺的是该节点」）。
+                ...(isMochianiVideoEngine(target.videoEngine) ? { scriptVideoEngine: MOCHIANI_VIDEO_ENGINE } : {}),
             };
             /**
              * 🔴 执行方案必须**建节点时就写进去**（用户 2026-11-09 报障：「03 出来的视频运动提示词
@@ -10414,23 +10471,34 @@ function AtelierCanvasPage() {
             const shotNo = row.shot_no || rowIndex + 1;
             // 与「一键铺链」同口径：单镜时长档位（10/15 锁定、5 是上限、none 按表里）。
             const seconds = resolveStoryScriptShotSeconds(row.duration, source.metadata?.scriptSegmentSeconds);
-            const videoWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Video].width;
-            const videoHeight = NODE_DEFAULT_SIZE[CanvasNodeType.Video].height;
+            // 与「一键铺链路」同口径：脚本节点选了 MochiAni 引擎，逐镜建出来的也是 MochiAni 窗口
+            // （用户 2026-11-10 第 01 条 —— 「后续的铺视频链路」包含单镜 / 多选铺视频这两条入口）。
+            const shotUseMochiani = isMochianiVideoEngine(source.metadata?.scriptVideoEngine);
+            const shotMochianiPreference = shotUseMochiani ? resolveMochianiPreference(effectiveConfig) : null;
+            const shotVideoType = shotUseMochiani ? CanvasNodeType.Mochiani : CanvasNodeType.Video;
+            const videoWidth = NODE_DEFAULT_SIZE[shotVideoType].width;
+            const videoHeight = NODE_DEFAULT_SIZE[shotVideoType].height;
             // 与「一键铺链路」同口径：视频节点只放视频段，不再拼分镜提示词（用户 2026-10-19 要求）；
             // 也不再拿 imagePrompt 兜底 —— 那一兜就是把分镜提示词整段灌进视频节点。
+            const videoPrompt = buildVideoNodePrompt(prompts.videoPrompt);
             const videoNode: CanvasNodeData = {
-                ...createCanvasNode(
-                    CanvasNodeType.Video,
-                    { x: 0, y: 0 },
-                    {
-                        prompt: buildVideoNodePrompt(prompts.videoPrompt),
-                        status: NODE_STATUS_IDLE,
-                        ...(seconds ? { seconds: String(seconds) } : {}),
-                        // 与「一键铺链路」同口径：单行建出来的视频节点也默认继承脚本节点的风格模板
-                        // （2026-11-08 第 05 条：脚本里选了风格，生图与生视频窗口都默认跟着走）。
-                        ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
-                    },
-                ),
+                ...(shotUseMochiani && shotMochianiPreference
+                    ? createCanvasNode(CanvasNodeType.Mochiani, { x: 0, y: 0 }, {
+                          prompt: videoPrompt,
+                          mochianiPrompt: videoPrompt,
+                          status: NODE_STATUS_IDLE,
+                          // 与「一键铺链路」同口径：单行建出来的窗口也默认继承脚本节点的风格模板
+                          ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
+                          mochianiConfig: buildMochianiNodeConfig(shotMochianiPreference, { aspectRatio: resolveStoryScriptImageSize(source.metadata?.scriptVideoSize) }),
+                      })
+                    : createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, {
+                          prompt: videoPrompt,
+                          status: NODE_STATUS_IDLE,
+                          ...(seconds ? { seconds: String(seconds) } : {}),
+                          // 与「一键铺链路」同口径：单行建出来的视频节点也默认继承脚本节点的风格模板
+                          // （2026-11-08 第 05 条：脚本里选了风格，生图与生视频窗口都默认跟着走）。
+                          ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
+                      })),
                 title: t("canvas.scriptNode.pipelineVideo", { no: shotNo }),
                 width: videoWidth,
                 height: videoHeight,
@@ -10495,7 +10563,7 @@ function AtelierCanvasPage() {
             revealNodes([videoNode], "fit");
             if (!options?.silent) message.success(t("canvas.scriptNode.buildShotVideoDone", { no: shotNo }));
         },
-        [message, t, revealNodes],
+        [effectiveConfig, message, t, revealNodes],
     );
 
     /**
@@ -10694,7 +10762,7 @@ function AtelierCanvasPage() {
                             const reference = nodesRef.current.find((item) => item.id === referenceNodeId);
                             if (reference) handleNodeViewImage(reference);
                         }}
-                        onCreateVideo={createBridgeVideoNode}
+                        onCreateVideo={(videoUrl, prompt, options) => createBridgeVideoNode(videoUrl, prompt, undefined, options?.hostNodeId)}
                         onConfigChange={handleConfigNodeChange}
                     />
                 );

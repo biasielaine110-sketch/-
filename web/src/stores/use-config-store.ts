@@ -5,6 +5,7 @@ import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
 import { registerCustomStyleTemplates, type CanvasStyleTemplate } from "@/constant/style-templates";
+import { DEFAULT_MOCHIANI_PREFERENCE, type MochianiPreference } from "@/constant/mochiani-video";
 import { defaultTextPrompts, h3PromptOptimizerEntry, normalizeTextPrompts, type TextPromptEntry } from "@/constant/text-prompt-library";
 import { normalizeSunoVersionValue } from "@/lib/audio-generation";
 import { isNativeComfyUiBaseUrl, parseComfyApiWorkflow } from "@/lib/comfyui-native";
@@ -176,6 +177,15 @@ export type AiConfig = {
      * 内置模板**不可删改**，只能新增 / 编辑 / 删除这里的条目（判据 `isBuiltinStyleTemplate`）。
      */
     customStyleTemplates?: CanvasStyleTemplate[];
+    /**
+     * **MochiAni 生视频的偏好**（用户 2026-11-10 第 03 条）。
+     *
+     * 铺链路建 MochiAni 节点时，模型 / 渠道 / 生成模式 / 画幅 / 参数就取这里的值 ——
+     * 否则用户每铺一段都要在节点窗口里重挑一遍模型与线路。
+     * 结构见 `constant/mochiani-video.ts` 的 `MochianiPreference`；读的时候一律走
+     * `resolveMochianiPreference()`（持久化是浅合并，老配置可能没有这个键 / 只有半个对象）。
+     */
+    mochiani?: MochianiPreference;
 };
 
 export type ConfigTabKey = "channels" | "preferences" | "skills" | "agents" | "backup";
@@ -274,6 +284,8 @@ export const defaultConfig: AiConfig = {
     imageQuickTools: { ids: [], showLabels: false },
     nodeCreateMenuOrder: [],
     imageContextMenuOrder: [],
+    // MochiAni 偏好默认全空（= 节点窗口里让用户自己挑模型）；画幅按 MochiAni 面板的默认 9:16。
+    mochiani: { ...DEFAULT_MOCHIANI_PREFERENCE, params: {} },
 };
 
 type ConfigStore = {

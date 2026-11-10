@@ -37,21 +37,28 @@ export function mediaSeconds(durationMs?: number) {
 /**
  * 能不能被「X 拾取」收进视频合并节点。
  *
- * 只看视频 / 图片节点，而且必须已经有内容（storageKey 或 content 任一）；
+ * 只看视频 / 图片 / **MochiAni** 节点，而且必须已经有内容（storageKey 或 content 任一）；
  * 空壳节点拾取进去只会占一行却导不出文件。
+ *
+ * MochiAni 为什么要算进来（用户 2026-11-10 第 01 条）：脚本链路的「每段一个生视频窗口」可以整条换成
+ * MochiAni 节点，而这些节点的输出仍然要接进一个视频合并节点。MochiAni 生成完成后会把媒体引用
+ * **镜像到自己身上**（`createBridgeVideoNode` 的 `hostNodeId`），所以判据与视频节点完全一致 ——
+ * 没跑之前同样是空壳、同样只占位不导出。
  */
 export function isVideoMergeSourceNode(node: CanvasNodeData) {
-    if (node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Image) return false;
+    if (node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Mochiani) return false;
     return Boolean(node.metadata?.storageKey || node.metadata?.content);
 }
 
 /**
  * 由源节点生成一段默认的裁剪区间：视频取整段，图片按默认时长占位。
  * `durationSec` 允许外部（导出前探测到的真实时长）覆盖节点上记录的时长。
+ *
+ * MochiAni 与视频节点同一档（`kind: "video"`）：它产出的就是一段视频。
  */
 export function videoMergeClipFromNode(node: CanvasNodeData, durationSec?: number): CanvasVideoMergeClip | null {
     if (!isVideoMergeSourceNode(node)) return null;
-    const kind = node.type === CanvasNodeType.Video ? "video" : "image";
+    const kind = node.type === CanvasNodeType.Image ? "image" : "video";
     if (kind === "image") {
         return {
             nodeId: node.id,

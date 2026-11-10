@@ -174,6 +174,15 @@ export type CanvasReverseVideoTarget = {
     /** 视频分辨率档位（`480` / `720` / `1080` / `2k`）；空 = 跟随全局 / 模型默认。 */
     quality?: string;
     /**
+     * 生视频「引擎」（用户 2026-11-10 第 02 条）：空 / `"video"` = 普通视频节点；
+     * `"mochiani"` = 铺链路时改成 **MochiAni 生视频节点**（见 `constant/mochiani-video.ts`）。
+     *
+     * 与 `model` 并存是刻意的：`model` 只描述「普通视频节点用哪个模型」，MochiAni 的模型 / 渠道
+     * 走偏好里的 `AiConfig.mochiani`（第 03 条），两者互不覆盖 —— 用户在两个引擎之间来回切时，
+     * 各自的模型选择都还在。
+     */
+    videoEngine?: string;
+    /**
      * 03 里**分镜表按第几套执行方案**出（用户 2026-11-10）。
      *
      * 八套方案对 `视频运动提示词` 的格式约束各不相同（第四套 = 八段标签块、第五套 = 整段 10 秒视频脚本、
@@ -335,6 +344,14 @@ export type CanvasNodeMetadata = {
      * 不填 = 视频节点跟随全局（老行为）。来源：反推节点上选的「视频模型」。
      */
     scriptVideoModel?: string;
+    /**
+     * 脚本生成器：铺链路时**建哪种生视频窗口**（用户 2026-11-10 第 01 条）。
+     *
+     * 空 = 普通视频节点（老行为）；`"mochiani"` = 每段建一个 MochiAni 生视频节点（`CanvasNodeType.Mochiani`），
+     * 提示词 / 参考图 / 风格 / 合并连线都与普通视频节点一致，只是「生成」由 MochiAni 节点自己的
+     * 「预检」按钮驱动。哨兵与判定见 `constant/mochiani-video.ts`。
+     */
+    scriptVideoEngine?: string;
     /**
      * 脚本生成器：铺链路时给**视频节点**用的比例（`16:9` / `9:16` …）。
      * 与 `scriptImageSize`（关键帧的比例）分开存：反推节点上选的比例要同时喂给两者，
