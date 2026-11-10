@@ -285,13 +285,36 @@ async function canvasRead(pageId, origin) {
     return callTool("mochiani_canvas_read", { pageId, origin });
 }
 
+/**
+ * 画布节点的矩形。
+ *
+ * ⚠️ `x/y` 是**左上角**，不是中心 —— 用 `x + width / 2` 当右边界会算少半个宽度，
+ * 宽节点（>720px）直接叠到右边那个身上。实测 MochiAni 原生 grid 排出来是
+ * `-1723` 与 `-1295`（宽 380 / 542）：左边缘语义下正好留 48px 缝，中心语义会重叠 33px。
+ */
+const NODE_FALLBACK_W = 520;
+const NODE_FALLBACK_H = 300;
+
+function nodeRect(node) {
+    const x = Number(node?.x || 0);
+    const y = Number(node?.y || 0);
+    const w = Number(node?.width) || NODE_FALLBACK_W;
+    const h = Number(node?.height) || NODE_FALLBACK_H;
+    return { id: String(node?.id || ""), kind: String(node?.kind || ""), x, y, w, h, right: x + w, bottom: y + h };
+}
+
+/** 两个矩形是不是挨着了（gap 是要求的最小间距）。 */
+function rectsOverlap(a, b, gap = 24) {
+    return a.x < b.right + gap && b.x < a.right + gap && a.y < b.bottom + gap && b.y < a.bottom + gap;
+}
+
 /** 新节点的落点：放在现有节点右侧，避免叠在一起。 */
 function nextNodePosition(read) {
-    const nodes = Array.isArray(read?.nodes) ? read.nodes : [];
+    const nodes = (Array.isArray(read?.nodes) ? read.nodes : []).map(nodeRect);
     if (!nodes.length) return { x: 0, y: 0 };
-    const right = Math.max(...nodes.map((node) => Number(node.x || 0) + Number(node.width || 0) / 2));
-    const avgY = nodes.reduce((sum, node) => sum + Number(node.y || 0), 0) / nodes.length;
-    return { x: Math.round(right + 360), y: Math.round(avgY) };
+    const right = Math.max(...nodes.map((node) => node.right));
+    const avgY = Math.round(nodes.reduce((sum, node) => sum + node.y, 0) / nodes.length);
+    return { x: Math.round(right + 360), y: avgY };
 }
 
 function sleep(ms) {
@@ -646,9 +669,10 @@ async function importReferenceMedia(job, pageId, origin, nodeId, kind) {
  * 参考素材是 `upload_and_connect` 一张张塞进去的，MochiAni 会把新节点就近丢在视频节点旁边，
  * 一连 9 张就叠成一坨（用户反馈「全都叠在一起了」）。
  *
- * 参考节点走**原生** `canvas_layout`（grid）：画布的 x/y 到底是「左上角」还是「中心」，工具契约里
- * 没写，自己算网格就会算歪；原生那套自己知道自己的尺寸。只有「把视频节点挪到网格右侧」这一步
- * 自己算 —— 用 `x + width / 2` 当右边界，这个写法在两种语义下都只会偏右、不会压到参考图。
+ * 参考节点走**原生** `canvas_layout`（grid）：它自己知道自己的尺寸，比自己算网格稳。
+ * 但原生 grid **只认这一批节点**，完全不管画布上已有的东西 —— 多发送几次，新一批参考图
+ * 就会整整齐齐地叠在上一批身上（用户反馈「又形成了叠压」）。所以排完还要过一遍
+ * `resolveCanvasOverlaps()`：真叠了就整批挪开。
  *
  * 排布是顺手的事，**失败只记 warning**，绝不能把预检带崩。
  */
@@ -668,11 +692,11 @@ async function arrangeCanvasNodes(job, pageId, origin, videoNodeId, refIds) {
             pushLog(job, `${ids.length} 个参考节点已排成 ${columns} 列网格`);
         }
         const after = await canvasRead(pageId, origin);
-        const nodes = Array.isArray(after?.nodes) ? after.nodes : [];
+        const nodes = (Array.isArray(after?.nodes) ? after.nodes : []).map(nodeRect);
         const refs = nodes.filter((node) => ids.includes(node.id));
         if (!refs.length) return;
-        const right = Math.max(...refs.map((node) => Number(node.x || 0) + Number(node.width || 0) / 2));
-        const top = Math.min(...refs.map((node) => Number(node.y || 0)));
+        const right = Math.max(...refs.map((node) => node.right));
+        const top = Math.min(...refs.map((node) => node.y));
         await canvasWrite(
             pageId,
             origin,
@@ -684,6 +708,106 @@ async function arrangeCanvasNodes(job, pageId, origin, videoNodeId, refIds) {
     } catch (error) {
         job.warnings.push(`自动排布没成功（${error?.message || error}），不影响生成`);
     }
+}
+
+/**
+ * 这一批新节点（视频节点 + 参考图）跟画布上**已有**内容叠了没有？叠了就整批挪开。
+ *
+ * 为什么必须做：原生 `canvas_layout` 的 grid 只在这批节点内部排版，锚点不管别的节点，
+ * 所以每次发送都往同一个位置糊，几轮下来就叠成一坨。这里改成「先量后挪」：
+ *   1. 读全画布，按矩形算我们这批跟别人的交叠；
+ *   2. 有交叠 → 把这批**整体平移**到「所有别人的最右边界 + 200」，内部相对位置不动；
+ *   3. 再读一遍复核（最多 3 轮）。留复核是因为 x/y 语义万一不是左上角，
+ *      第一轮会算少一半宽度，第二轮按实测几何再补 —— 有反馈就不会一直错下去。
+ *
+ * 排布不参与成败：整段失败只记 warning。
+ */
+async function resolveCanvasOverlaps(job, pageId, origin, batchIds) {
+    const ids = new Set((Array.isArray(batchIds) ? batchIds : []).filter(Boolean));
+    if (!ids.size) return;
+    for (let round = 1; round <= 3; round += 1) {
+        let read = null;
+        try {
+            read = await canvasRead(pageId, origin);
+        } catch (error) {
+            job.warnings.push(`叠压检查没读成（${describeCanvasError(error)}），不影响生成`);
+            return;
+        }
+        const nodes = (Array.isArray(read?.nodes) ? read.nodes : []).map(nodeRect);
+        const mine = nodes.filter((node) => ids.has(node.id));
+        const others = nodes.filter((node) => node.id && !ids.has(node.id));
+        if (!mine.length || !others.length) return;
+
+        const crowded = mine.filter((item) => others.some((other) => rectsOverlap(item, other)));
+        if (!crowded.length) {
+            if (round > 1) pushLog(job, "画布已无叠压");
+            return;
+        }
+
+        // 整批挪到「别人的最右边界 + 200」，内部相对位置原样保留
+        const wall = Math.max(...others.map((node) => node.right));
+        const shift = Math.round(wall + 200 - Math.min(...mine.map((node) => node.x)));
+        if (!Number.isFinite(shift) || shift <= 0) return;
+        try {
+            await canvasWrite(
+                pageId,
+                origin,
+                "mochiani_canvas_move_nodes",
+                { moves: mine.map((node) => ({ nodeId: node.id, x: Math.round(node.x + shift), y: Math.round(node.y) })) },
+                { job, label: "挪开叠压的节点" },
+            );
+            pushLog(job, `${crowded.length} 个节点和画布上已有内容叠压，整批右移 ${shift}px`);
+        } catch (error) {
+            job.warnings.push(`叠压没挪开（${describeCanvasError(error)}），不影响生成`);
+            return;
+        }
+    }
+}
+
+/**
+ * 整张画布的「整理」：只动**真撞在一起**的节点，把它们挪到不撞的位置。
+ *
+ * 和 `resolveCanvasOverlaps` 的区别：那个只管我们刚发过去的那一批（发送时自动跑），
+ * 这个管全画布（用户手工点「整理」，收拾历史遗留的叠压）。
+ *
+ * 摆法对人有意义：先试「往撞到的那个节点下面放」（同类节点竖着排好看），
+ * 下面也被占了再往右推。只有真被挪过的节点才发 move，别的保持原位不动。
+ */
+async function tidyCanvasOverlaps(pageId, origin) {
+    let moved = 0;
+    for (let round = 1; round <= 6; round += 1) {
+        const read = await canvasRead(pageId, origin);
+        const nodes = (Array.isArray(read?.nodes) ? read.nodes : []).map(nodeRect).filter((node) => node.id);
+        // 从左到右、从上到下摆：先到位的先占坑，后来的让路
+        const ordered = nodes.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+        const placed = [];
+        const moves = [];
+        for (const node of ordered) {
+            let x = node.x;
+            let y = node.y;
+            let guard = 0;
+            while (guard < 60) {
+                const self = { ...node, x, y, right: x + node.w, bottom: y + node.h };
+                const hits = placed.filter((other) => rectsOverlap(self, other));
+                if (!hits.length) break;
+                // 先往「撞到的那些节点的最下面」放
+                y = Math.max(...hits.map((other) => other.bottom)) + 72;
+                const lowered = { ...node, x, y, right: x + node.w, bottom: y + node.h };
+                if (!placed.some((other) => rectsOverlap(lowered, other))) break;
+                // 还撞：往右推
+                x = Math.max(...hits.map((other) => other.right)) + 200;
+                guard += 1;
+            }
+            if (x !== node.x || y !== node.y) {
+                moves.push({ nodeId: node.id, x: Math.round(x), y: Math.round(y) });
+            }
+            placed.push({ ...node, x, y, right: x + node.w, bottom: y + node.h });
+        }
+        if (!moves.length) return { moved, rounds: round - 1 };
+        await canvasWrite(pageId, origin, "mochiani_canvas_move_nodes", { moves }, { label: "整理画布" });
+        moved += moves.length;
+    }
+    return { moved, rounds: 6 };
 }
 
 /**
@@ -781,6 +905,9 @@ async function planCanvasJob(job, ctx) {
 
     // 2.5) 排一下 MochiAni 画布：参考图网格，视频节点挪到右侧（失败只告警）
     await arrangeCanvasNodes(job, pageId, origin, nodeId, refNodeIds);
+
+    // 2.6) 多发送几次会跟上一批叠在一起：真叠了就把这一整批挪到空白处（失败只告警）
+    await resolveCanvasOverlaps(job, pageId, origin, [nodeId, ...refNodeIds]);
 
     // 3) 提示词
     await writeCanvasPrompt(job, pageId, origin, nodeId, created.revision);
@@ -2201,7 +2328,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.1",
+            version: "1.6.2",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
@@ -2263,6 +2390,23 @@ async function handle(req, res) {
             videoCategory: url.searchParams.get("videoCategory"),
         });
         send(res, body.ok ? 200 : 409, body);
+        return;
+    }
+
+    // 整理画布：把撞在一起的节点挪开（发送时只自动检查「刚发的这一批」，历史遗留靠这个收拾）
+    if (req.method === "POST" && pathname === "/api/tidy") {
+        const body = await readBody(req);
+        try {
+            const ctx = await readTargetContext(body.pageId ? String(body.pageId) : "");
+            if (ctx.kind !== "canvas") {
+                send(res, 409, { ok: false, error: "只有「无限画布」能整理节点排版，漫剧编辑器不走这套" });
+                return;
+            }
+            const result = await tidyCanvasOverlaps(ctx.pageId, ctx.origin);
+            send(res, 200, { ok: true, pageId: ctx.pageId, moved: result.moved, rounds: result.rounds });
+        } catch (error) {
+            send(res, 502, { ok: false, code: error.code || "TIDY_FAILED", error: describeCanvasError(error), detail: error.payload ?? null });
+        }
         return;
     }
 

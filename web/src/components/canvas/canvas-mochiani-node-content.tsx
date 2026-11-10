@@ -8,6 +8,7 @@ import {
     Coins,
     Film,
     ImagePlus,
+    LayoutGrid,
     Loader2,
     Music4,
     PlugZap,
@@ -651,6 +652,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     const [accountUser, setAccountUser] = useState("");
     const [contextError, setContextError] = useState("");
     const [loadingContext, setLoadingContext] = useState(false);
+    const [tidying, setTidying] = useState(false);
 
     const [models, setModels] = useState<ModelOption[]>([]);
     const [modelsLoading, setModelsLoading] = useState(false);
@@ -856,6 +858,33 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             setLoadingContext(false);
         }
     }, [bridgeBase]);
+
+    /**
+     * 整理画布：把 MochiAni 那边**撞在一起**的节点挪开。
+     *
+     * 发送时的自动摆布只管「刚发过去的这一批」，历史遗留的叠压得靠这个手动收。
+     * 只挪真撞上的节点，别的保持原位。
+     */
+    const runTidy = useCallback(async () => {
+        setTidying(true);
+        try {
+            const data = await bridgeFetch(bridgeBase, "/api/tidy", {
+                method: "POST",
+                body: JSON.stringify({ pageId: targetPageRef.current || undefined }),
+            });
+            if (!data.ok) {
+                message.warning(data.error || "整理没成功");
+                return;
+            }
+            const moved = Number(data.moved) || 0;
+            message.success(moved ? `整理好了：挪开 ${moved} 个叠压节点` : "画布没有叠压，不用整理");
+            void refreshContext();
+        } catch (err) {
+            message.warning(err instanceof Error ? err.message : String(err));
+        } finally {
+            setTidying(false);
+        }
+    }, [bridgeBase, refreshContext]);
 
     /** `params` / 参数缓存一变就同步镜像，供异步回读对齐时用。 */
     useEffect(() => {
@@ -1600,6 +1629,25 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                     style={{ background: healthError ? "#f87171" : healthOk ? "#22c55e" : "#71717a" }}
                     title={healthError || (healthOk ? "本机桥已连接" : "检查中")}
                 />
+                <button
+                    type="button"
+                    onClick={() => {
+                        if (!healthOk) {
+                            message.warning("本机桥还没连上，先点「刷新」确认桥在跑");
+                            return;
+                        }
+                        void runTidy();
+                    }}
+                    className="flex items-center gap-1 text-[11px] transition hover:opacity-100"
+                    style={{
+                        opacity: tidying || !healthOk ? 0.35 : 0.6,
+                        cursor: tidying || !healthOk ? "not-allowed" : "pointer",
+                    }}
+                    aria-disabled={tidying || !healthOk}
+                    title="把 MochiAni 画布上撞在一起的节点挪开（只动真叠压的）"
+                >
+                    {tidying ? <Loader2 size={11} className="animate-spin" /> : <LayoutGrid size={11} />} 整理
+                </button>
                 <button
                     type="button"
                     onClick={() => void (async () => {

@@ -192,7 +192,9 @@ chip 上的 × 断开的是那根连线（`handleRemoveLinkedMedia`，Config 汇
 | GET | `/api/context?pageId=` | 当前作品 + 已连接页面列表 |
 | GET | `/api/account?pageId=` | MochiAni 账户灵点 |
 | GET | `/api/models?pageId=&nodeId=` | **真实模型目录**（模型 / 渠道 / 参数 / 媒体上限）+ 面板当前配置 |
-| POST | `/api/plan` | `{prompt, pageId?, modelKey?, channelId?, params?, images?, videos?, audios?}` → 建节点 + 切配置 + 导素材 + 预检，返回 job（`stage=ready`）。三个素材数组的元素是 `{url}` 或 `{dataUrl}` |
+| GET | `/api/params?pageId=&nodeId=&modelKey=&channelId=&videoCategory=` | 回读某套「模型 + 渠道」的**真实参数表**（画幅只能从这里拿，见 skill §11） |
+| POST | `/api/tidy` | `{pageId?}` → 把画布上**撞在一起**的节点挪开（只动真叠压的），返回 `{moved, rounds}` |
+| POST | `/api/plan` | `{prompt, pageId?, modelKey?, channelId?, params?, images?, videos?, audios?}` → 建节点 + 切配置 + 导素材 + 预检，返回 job（`stage=ready`）。三个素材数组的元素是 `{url}` 或 `{dataUrl}`。**发完会自动检查这一批有没有和画布上已有节点叠压，叠了整批挪开** |
 | POST | `/api/jobs/:id/confirm` | 确认下单，开始轮询 |
 | POST | `/api/jobs/:id/cancel` | 停止本机轮询 |
 | GET | `/api/jobs` / `/api/jobs/:id` | 任务列表 / 单个任务 |
