@@ -298,6 +298,89 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ----------------------------------------------------- 画布写操作：等空闲 + 重试
+
+/**
+ * 等 MochiAni 页面「闲下来」再动手。
+ *
+ * 页面把每次画布改动都排进自己的队列：先本地生效、再异步落库，落库本身还会再抬一次
+ * revision。所以连着发第二个写操作时，页面经常还在处理前一个，这时它**直接拒绝**，
+ * 而且吐回来的是没填模板的 `画布操作未执行：{reason}`（页面侧 bug，看不出真实原因）。
+ *
+ * 实测（2026-11-10，Wan3.0 全能参考）：新建视频节点后连传 3 张参考图，
+ * 前两张必成、第三张必挂；每张之前先等 revision 稳定，三张全过。
+ *
+ * 判据用「连续两次读到同一个 revision」，比 sleep 固定时长可靠：一张 7MB 图和一张
+ * 50KB 图的落库耗时差一个数量级，写死等待要么白等要么还是抢跑。
+ */
+const CANVAS_IDLE_POLL_MS = 700;
+const CANVAS_IDLE_STABLE_HITS = 2;
+
+async function waitCanvasIdle(pageId, origin, { stableFor = CANVAS_IDLE_STABLE_HITS, timeoutMs = 20000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    let last = "";
+    let hits = 0;
+    while (Date.now() < deadline) {
+        let revision = "";
+        try {
+            revision = String((await canvasRead(pageId, origin))?.revision || "");
+        } catch {
+            revision = "";
+        }
+        if (revision && revision === last) {
+            hits += 1;
+            if (hits >= stableFor) return revision;
+        } else {
+            hits = 0;
+            last = revision;
+        }
+        await sleep(CANVAS_IDLE_POLL_MS);
+    }
+    return last;
+}
+
+/** 页面自己弹回来、等一会儿重发就能过的那些错误。 */
+function isCanvasBusyError(error) {
+    const text = String(error?.message || error || "");
+    if (String(error?.code || "") === "CANVAS_REVISION_CONFLICT") return true;
+    return /CANVAS_REVISION_CONFLICT|画布操作未执行/.test(text);
+}
+
+/** 把页面那种没填占位符的报错翻译成人话。 */
+function describeCanvasError(error) {
+    const text = String(error?.message || error || "").trim();
+    if (!text) return "未知错误";
+    if (/画布操作未执行/.test(text)) {
+        return "页面拒绝了这次操作（MochiAni 只回了「画布操作未执行」，没给原因，多半是它自己的队列还没处理完）";
+    }
+    return text;
+}
+
+/**
+ * 画布写操作的唯一入口：先等页面空闲 → 现读 revision → 发；被挡就退避重试。
+ *
+ * ⚠️ 重试沿用**同一个** idempotencyKey：万一上一次其实已经落地，MCP 会按 key 去重，
+ *    不会在画布上多出一份。所以这里的 key 在循环外生成一次。
+ * ⚠️ expectedRevision 一律用**现读的**，不信调用方传进来的旧值。
+ */
+async function canvasWrite(pageId, origin, toolName, args, { attempts = 3, job = null, label = "" } = {}) {
+    const idempotencyKey = args?.idempotencyKey || randomUUID();
+    const base = { ...args, idempotencyKey };
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        const revision = await waitCanvasIdle(pageId, origin);
+        try {
+            return await callTool(toolName, { pageId, origin, ...base, expectedRevision: revision });
+        } catch (error) {
+            lastError = error;
+            if (!isCanvasBusyError(error) || attempt >= attempts) break;
+            if (job) pushLog(job, `${label || toolName}：页面还在忙，第 ${attempt} 次被挡，等一会儿重发`);
+            await sleep(900 * attempt);
+        }
+    }
+    throw lastError;
+}
+
 /** 画布里第一个视频节点（模型目录要靠它读，model_options 必须给 nodeId）。 */
 function pickVideoNode(read) {
     const nodes = Array.isArray(read?.nodes) ? read.nodes : [];
@@ -367,15 +450,17 @@ async function applyModelConfig(job, pageId, origin, nodeId, controls) {
     // ⚠️ step 必须定义在「切模式」之前：v1 把它写在后面，切模式那句会踩 TDZ
     //    （Cannot access 'step' before initialization），只要用户选了生成模式就整单失败。
     const step = async (payload, label) => {
-        await callTool("mochiani_canvas_configure_model", {
+        await canvasWrite(
             pageId,
             origin,
-            expectedRevision: String(current?.revision || controls?.revision || ""),
-            idempotencyKey: randomUUID(),
-            nodeId,
-            expectedConfig: token,
-            ...payload,
-        });
+            "mochiani_canvas_configure_model",
+            {
+                nodeId,
+                expectedConfig: token,
+                ...payload,
+            },
+            { job, label },
+        );
         current = await waitPanelControls(pageId, origin, nodeId, 15000);
         token = String(current.configToken || "");
         pushLog(job, label);
@@ -517,16 +602,22 @@ async function importReferenceMedia(job, pageId, origin, nodeId, kind) {
         }
         const file = path.join(dir, `${job.id}-${kind}-${index + 1}${decoded.ext}`);
         fs.writeFileSync(file, decoded.buffer);
-        const read = await canvasRead(pageId, origin);
-        const receipt = await callTool("mochiani_canvas_upload_and_connect", {
-            pageId,
-            origin,
-            expectedRevision: read.revision,
-            idempotencyKey: randomUUID(),
-            localPath: file,
-            mediaType: kind,
-            targetNodeId: nodeId,
-        });
+        // 一张图挂不上不该把整单带崩：重试过还是不行就记 warning、继续下一张，
+        // 让预检能走完（用户看得到具体缺哪张，而不是一个没头的 502）。
+        let receipt = null;
+        try {
+            receipt = await canvasWrite(
+                pageId,
+                origin,
+                "mochiani_canvas_upload_and_connect",
+                { localPath: file, mediaType: kind, targetNodeId: nodeId },
+                { job, label: `${label} ${index + 1}` },
+            );
+        } catch (error) {
+            pushLog(job, `${label} ${index + 1} 没能连上：${describeCanvasError(error)}`);
+            job.warnings.push(`${label} ${index + 1} 没能连上`);
+            continue;
+        }
         const mediaNodeId = pickNodeId(receipt);
         if (!mediaNodeId) {
             pushLog(job, `${label} ${index + 1} 没读到节点 ID，可能没导进去`);
@@ -566,17 +657,14 @@ async function arrangeCanvasNodes(job, pageId, origin, videoNodeId, refIds) {
     if (!ids.length) return;
     try {
         if (ids.length > 1) {
-            const read = await canvasRead(pageId, origin);
             const columns = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(ids.length))));
-            await callTool("mochiani_canvas_layout", {
+            await canvasWrite(
                 pageId,
                 origin,
-                expectedRevision: read.revision,
-                idempotencyKey: randomUUID(),
-                nodeIds: ids,
-                mode: "grid",
-                columns,
-            });
+                "mochiani_canvas_layout",
+                { nodeIds: ids, mode: "grid", columns },
+                { job, label: "参考节点排版" },
+            );
             pushLog(job, `${ids.length} 个参考节点已排成 ${columns} 列网格`);
         }
         const after = await canvasRead(pageId, origin);
@@ -585,13 +673,13 @@ async function arrangeCanvasNodes(job, pageId, origin, videoNodeId, refIds) {
         if (!refs.length) return;
         const right = Math.max(...refs.map((node) => Number(node.x || 0) + Number(node.width || 0) / 2));
         const top = Math.min(...refs.map((node) => Number(node.y || 0)));
-        await callTool("mochiani_canvas_move_nodes", {
+        await canvasWrite(
             pageId,
             origin,
-            expectedRevision: after.revision,
-            idempotencyKey: randomUUID(),
-            moves: [{ nodeId: videoNodeId, x: Math.round(right + 360), y: Math.round(top) }],
-        });
+            "mochiani_canvas_move_nodes",
+            { moves: [{ nodeId: videoNodeId, x: Math.round(right + 360), y: Math.round(top) }] },
+            { job, label: "挪动视频节点" },
+        );
         pushLog(job, "视频节点已挪到参考图右侧");
     } catch (error) {
         job.warnings.push(`自动排布没成功（${error?.message || error}），不影响生成`);
@@ -614,29 +702,33 @@ async function writeCanvasPrompt(job, pageId, origin, nodeId, fallbackRevision) 
         const kept = (Array.isArray(refs.segments) ? refs.segments : [])
             .filter((segment) => segment && typeof segment.referenceId === "string" && segment.referenceId)
             .map((segment) => ({ referenceId: segment.referenceId }));
-        await callTool("mochiani_canvas_edit_references", {
+        await canvasWrite(
             pageId,
             origin,
-            expectedRevision: String(refs.revision || fallbackRevision || ""),
-            idempotencyKey: randomUUID(),
-            nodeId,
-            expectedDocument: refs.documentToken,
-            segments: [{ text: job.prompt }, ...kept],
-        });
+            "mochiani_canvas_edit_references",
+            {
+                nodeId,
+                expectedDocument: refs.documentToken,
+                segments: [{ text: job.prompt }, ...kept],
+            },
+            { job, label: "写提示词（结构化引用）" },
+        );
         pushLog(job, "提示词已写进节点（带参考图，走结构化引用）");
         return;
     }
 
     const before = await callTool("mochiani_canvas_generation_context", { pageId, origin, nodeId });
-    await callTool("mochiani_canvas_set_prompt", {
+    await canvasWrite(
         pageId,
         origin,
-        expectedRevision: before.revision || fallbackRevision,
-        idempotencyKey: randomUUID(),
-        nodeId,
-        prompt: job.prompt,
-        expectedPrompt: before.currentPrompt ?? "",
-    });
+        "mochiani_canvas_set_prompt",
+        {
+            nodeId,
+            prompt: job.prompt,
+            expectedPrompt: before.currentPrompt ?? "",
+        },
+        { job, label: "写提示词" },
+    );
     pushLog(job, "提示词已写进节点");
 }
 
@@ -646,13 +738,13 @@ async function planCanvasJob(job, ctx) {
     pushLog(job, `画布版本 ${read?.revision}，现有 ${read?.totalNodes ?? 0} 个节点`);
 
     const position = nextNodePosition(read);
-    const created = await callTool("mochiani_canvas_create_nodes", {
+    const created = await canvasWrite(
         pageId,
         origin,
-        expectedRevision: read.revision,
-        idempotencyKey: randomUUID(),
-        nodes: [{ kind: "video", x: position.x, y: position.y }],
-    });
+        "mochiani_canvas_create_nodes",
+        { nodes: [{ kind: "video", x: position.x, y: position.y }] },
+        { job, label: "新建视频节点" },
+    );
     const nodeId = pickNodeId(created);
     if (!nodeId) throw new BridgeError("节点已经提交，但没读到节点 ID", "NODE_ID_MISSING", created);
     job.nodeId = nodeId;
@@ -1652,7 +1744,7 @@ async function planJob(prompt, preferredPageId, extras = {}) {
         return job;
     } catch (error) {
         job.stage = "error";
-        job.error = error?.message || String(error);
+        job.error = describeCanvasError(error);
         pushLog(job, job.error);
         throw error;
     }
@@ -2109,7 +2201,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.0",
+            version: "1.6.1",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
@@ -2193,7 +2285,7 @@ async function handle(req, res) {
             });
             send(res, 200, { ok: true, job: publicJob(job) });
         } catch (error) {
-            send(res, 502, { ok: false, code: error.code || "PLAN_FAILED", error: error.message, detail: error.payload ?? null });
+            send(res, 502, { ok: false, code: error.code || "PLAN_FAILED", error: describeCanvasError(error), detail: error.payload ?? null });
         }
         return;
     }
