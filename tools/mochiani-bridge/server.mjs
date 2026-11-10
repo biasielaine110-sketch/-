@@ -468,6 +468,20 @@ function isCanvasBusyError(error) {
     return /CANVAS_REVISION_CONFLICT|画布操作未执行/.test(text);
 }
 
+/**
+ * 幂等冲突：**同一个 `idempotencyKey` 换了参数再发**，页面认定「这条记录和这次的不一致」直接拒。
+ *
+ * 🔴 这是重试逻辑自己挖的坑（2026-11-11 实测）：第一次被「画布操作未执行」挡掉后，重试会
+ * 重新读 revision（`expectedRevision` 必然变了），而 key 没变 —— 页面一比对参数不同，回
+ * `CANVAS_IDEMPOTENCY_CONFLICT`，于是这一次写**永远失败**。
+ * 现象就是「连了 2 张图只过去 1 张」，而且和图片是否相同无关（用户以为是图片重复导致的）。
+ * 处理：这份错误码本身说明上一次没落地，换一个新 key 重发是安全的。
+ */
+function isIdempotencyConflict(error) {
+    const text = `${error?.code || ""} ${error?.message || error || ""}`;
+    return /CANVAS_IDEMPOTENCY_CONFLICT|IDEMPOTENCY_CONFLICT/i.test(text);
+}
+
 /** 把页面那种没填占位符的报错翻译成人话。 */
 function describeCanvasError(error) {
     const text = String(error?.message || error || "").trim();
@@ -481,20 +495,29 @@ function describeCanvasError(error) {
 /**
  * 画布写操作的唯一入口：先等页面空闲 → 现读 revision → 发；被挡就退避重试。
  *
- * ⚠️ 重试沿用**同一个** idempotencyKey：万一上一次其实已经落地，MCP 会按 key 去重，
- *    不会在画布上多出一份。所以这里的 key 在循环外生成一次。
+ * ⚠️ 正常重试沿用**同一个** idempotencyKey：万一上一次其实已经落地，页面会按 key 去重，
+ *    不会在画布上多出一份。
+ * ⚠️ 但 key 不变 + `expectedRevision` 变了 = 页面判「参数不一致」→ `CANVAS_IDEMPOTENCY_CONFLICT`
+ *    （见 `isIdempotencyConflict()`）。所以一撞到这个码就换个新 key 重发；这个码本身已经说明
+ *    上一次没落地，换 key 不会重复建节点。
  * ⚠️ expectedRevision 一律用**现读的**，不信调用方传进来的旧值。
  */
-async function canvasWrite(pageId, origin, toolName, args, { attempts = 3, job = null, label = "" } = {}) {
-    const idempotencyKey = args?.idempotencyKey || randomUUID();
-    const base = { ...args, idempotencyKey };
+async function canvasWrite(pageId, origin, toolName, args, { attempts = 4, job = null, label = "" } = {}) {
+    let idempotencyKey = args?.idempotencyKey || randomUUID();
+    const { idempotencyKey: _ignored, ...base } = args || {};
     let lastError = null;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-        const revision = await waitCanvasIdle(pageId, origin);
+        // 重试时多要一个节拍的空闲：被挡多半是页面还在异步落库，抢同样的时机只会再被挡一次
+        const revision = await waitCanvasIdle(pageId, origin, attempt > 1 ? { stableFor: 2 } : {});
         try {
-            return await callTool(toolName, { pageId, origin, ...base, expectedRevision: revision });
+            return await callTool(toolName, { pageId, origin, ...base, idempotencyKey, expectedRevision: revision });
         } catch (error) {
             lastError = error;
+            if (isIdempotencyConflict(error) && attempt < attempts) {
+                if (job) pushLog(job, `${label || toolName}：幂等冲突（上一次没落地），换 key 重发`);
+                idempotencyKey = randomUUID();
+                continue;
+            }
             if (!isCanvasBusyError(error) || attempt >= attempts) break;
             if (job) pushLog(job, `${label || toolName}：页面还在忙，第 ${attempt} 次被挡，等一会儿重发`);
             await sleep(600 * attempt);
@@ -728,7 +751,7 @@ async function importReferenceMedia(job, pageId, origin, nodeId, kind, files) {
             );
         } catch (error) {
             pushLog(job, `${label} ${index + 1} 没能连上：${describeCanvasError(error)}`);
-            job.warnings.push(`${label} ${index + 1} 没能连上`);
+            job.warnings.push(`${label} ${index + 1} 没能连上（${error?.code || "未知错误"}）`);
             continue;
         }
         const mediaNodeId = pickNodeId(receipt);
@@ -2850,7 +2873,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.9",
+            version: "1.6.10",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
