@@ -32,6 +32,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { pathToFileURL } from "node:url";
 
 const PORT = Number(process.env.MOCHIANI_BRIDGE_PORT || 17399);
@@ -149,7 +150,15 @@ async function invoke(instance, name, args) {
     return parsed ?? { raw: text };
 }
 
-async function callTool(name, args, options = {}) {
+/**
+ * 一次 plan/confirm 的耗时统计作用域。
+ *
+ * 用 AsyncLocalStorage 而不是模块级变量：同一个桥经常被两个画布页面同时打，
+ * 全局计数器会把两次的耗时混在一起，看日志就分不清「谁慢」。
+ */
+const jobScope = new AsyncLocalStorage();
+
+async function callToolRaw(name, args, options = {}) {
     const instance = await ensureClient();
     try {
         return await invoke(instance, name, args);
@@ -161,6 +170,23 @@ async function callTool(name, args, options = {}) {
             return await invoke(retried, name, args);
         }
         throw error;
+    }
+}
+
+/** `callTool` 外面套一层计时：哪个工具吃掉了时间，日志里直接看得到。 */
+async function callTool(name, args, options = {}) {
+    const startedAt = Date.now();
+    try {
+        return await callToolRaw(name, args, options);
+    } finally {
+        const job = jobScope.getStore();
+        if (job) {
+            const timing = (job.timing ||= {});
+            const bucket = timing[name] || { ms: 0, n: 0 };
+            bucket.ms += Date.now() - startedAt;
+            bucket.n += 1;
+            timing[name] = bucket;
+        }
     }
 }
 
@@ -359,6 +385,35 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * 限并发地跑一批异步任务，**结果按原顺序返回**。
+ *
+ * 发送链里最贵的两块都是纯 IO 且彼此独立：把参考图/视频/音频从公网地址下载落盘、
+ * 逐条新建素材、逐条写配音。以前全是 `for + await` 串行，N 张图就是 N 份等待时间。
+ * 这里统一用 4~6 的并发（MochiAni 侧是浏览器页面，并发太高反而会被它排队挡回来）。
+ *
+ * `worker` 抛错不影响其它项：错误按位塞进结果数组，由调用方决定记 warning 还是放弃。
+ */
+async function mapLimit(items, limit, worker) {
+    const list = Array.isArray(items) ? items : [];
+    const out = new Array(list.length);
+    let cursor = 0;
+    const width = Math.max(1, Math.min(Number(limit) || 1, list.length || 1));
+    const runners = Array.from({ length: width }, async () => {
+        while (cursor < list.length) {
+            const index = cursor;
+            cursor += 1;
+            try {
+                out[index] = { ok: true, value: await worker(list[index], index) };
+            } catch (error) {
+                out[index] = { ok: false, error };
+            }
+        }
+    });
+    await Promise.all(runners);
+    return out;
+}
+
 // ----------------------------------------------------- 画布写操作：等空闲 + 重试
 
 /**
@@ -373,9 +428,15 @@ function sleep(ms) {
  *
  * 判据用「连续两次读到同一个 revision」，比 sleep 固定时长可靠：一张 7MB 图和一张
  * 50KB 图的落库耗时差一个数量级，写死等待要么白等要么还是抢跑。
+ *
+ * ⚠️ 间隔与命中数直接决定「发送到画布」的总耗时（一次发送有十几处写）：
+ *    原来是 700ms × 2 = 每次写至少白等 1.4s，十几处就是十几秒（用户反馈「有点慢」）。
+ *    现在 250ms × 1：仍然要读到**两次**相同的 revision（第一次只记 last，第二次才命中），
+ *    所以「写完之后页面异步落库再抬一次 revision」那段照样会被等到，只是不用多等 700ms。
+ *    别再调回 700 —— 那不是安全边际，是纯浪费。
  */
-const CANVAS_IDLE_POLL_MS = 700;
-const CANVAS_IDLE_STABLE_HITS = 2;
+const CANVAS_IDLE_POLL_MS = 250;
+const CANVAS_IDLE_STABLE_HITS = 1;
 
 async function waitCanvasIdle(pageId, origin, { stableFor = CANVAS_IDLE_STABLE_HITS, timeoutMs = 20000 } = {}) {
     const deadline = Date.now() + timeoutMs;
@@ -436,7 +497,7 @@ async function canvasWrite(pageId, origin, toolName, args, { attempts = 3, job =
             lastError = error;
             if (!isCanvasBusyError(error) || attempt >= attempts) break;
             if (job) pushLog(job, `${label || toolName}：页面还在忙，第 ${attempt} 次被挡，等一会儿重发`);
-            await sleep(900 * attempt);
+            await sleep(600 * attempt);
         }
     }
     throw lastError;
@@ -471,9 +532,9 @@ function pickNodeId(payload) {
  * locate_node 只是把视图挪过去；面板挂没挂上只能看 model_controls.panelMounted。
  * panelMounted=false 时 configure_model 无从下手（它要 expectedConfig），所以这里必须轮询。
  */
-async function waitPanelControls(pageId, origin, nodeId, timeoutMs = 25000) {
+async function waitPanelControls(pageId, origin, nodeId, timeoutMs = 25000, options = {}) {
     const deadline = Date.now() + timeoutMs;
-    let located = false;
+    let located = options.locate === false;
     let last = null;
     while (Date.now() < deadline) {
         if (!located) {
@@ -485,7 +546,8 @@ async function waitPanelControls(pageId, origin, nodeId, timeoutMs = 25000) {
             error: error?.message || String(error),
         }));
         if (last?.panelMounted && last?.configToken) return last;
-        await sleep(900);
+        // 轮询间隔别太大：面板通常 200~600ms 就挂好了，900ms 的间隔等于白等半秒多。
+        await sleep(350);
     }
     throw new BridgeError(
         "MochiAni 那个视频节点的生成面板没打开，读不到配置令牌。去 MochiAni 画布点一下该视频节点，再重试。",
@@ -522,7 +584,8 @@ async function applyModelConfig(job, pageId, origin, nodeId, controls) {
             },
             { job, label },
         );
-        current = await waitPanelControls(pageId, origin, nodeId, 15000);
+        // 改完一步只是让面板重算配置，不需要再 locate 一次（那是纯浪费的一次往返）
+        current = await waitPanelControls(pageId, origin, nodeId, 15000, { locate: false });
         token = String(current.configToken || "");
         pushLog(job, label);
     };
@@ -618,7 +681,7 @@ async function materializeReference(item, kind, timeoutMs = 180000) {
 }
 
 /** 等素材上传真的完成（节点建出来 ≠ 图已经在 MochiAni 侧可用）。 */
-async function waitNodeMedia(pageId, origin, nodeId, timeoutMs = 30000) {
+async function waitNodeMedia(pageId, origin, nodeId, timeoutMs = 20000) {
     const deadline = Date.now() + timeoutMs;
     let last = null;
     while (Date.now() < deadline) {
@@ -626,43 +689,32 @@ async function waitNodeMedia(pageId, origin, nodeId, timeoutMs = 30000) {
         const media = last?.media || {};
         if (media.uploadConfirmed === true || media.remoteUrlsPresent === true) return true;
         if (media.uploadError) return false;
-        await sleep(1200);
+        await sleep(450);
     }
     return false;
 }
 
 /**
  * 参考素材：落盘 → upload_and_connect（导入 + 按原生端口规则连线一步到位）。
- * 连完再核一次媒体上传状态，没传完的如实标出来，不假装成功。
  *
  * 图 / 视频 / 音频走同一条路，只有 `mediaType` 不同 —— MCP 那边
  * `mochiani_canvas_upload_and_connect` 支持三种，端口不兼容时它会拒。
+ *
+ * ⚠️ 只剩「必须串行」的那一段留在这里：写画布要吃 revision，并发会互相踩掉。
+ *    下载（纯网络）挪去 `prepareReferenceFiles()` 并发取；上传确认（只读）挪去
+ *    `confirmReferenceUploads()` 并发核 —— 以前这两件都在循环里 `await`，
+ *    9 张图 = 9 份下载 + 9 份 1.2s 轮询，光这两项就白等二十秒。
  */
-async function importReferenceMedia(job, pageId, origin, nodeId, kind) {
+async function importReferenceMedia(job, pageId, origin, nodeId, kind, files) {
     const list = Array.isArray(job[`${kind}s`]) ? job[`${kind}s`] : [];
     const connected = [];
     if (!list.length) return connected;
     const label = KIND_LABEL[kind] || "参考素材";
 
-    const dir = path.join(os.tmpdir(), "mochiani-bridge-refs");
-    fs.mkdirSync(dir, { recursive: true });
-
     for (let index = 0; index < list.length; index += 1) {
-        let decoded = null;
-        try {
-            decoded = await materializeReference(list[index], kind);
-        } catch (error) {
-            pushLog(job, `${label} ${index + 1} 取不回来：${error?.message || error}`);
-            job.warnings.push(`${label} ${index + 1} 下载失败`);
-            continue;
-        }
-        if (!decoded) {
-            pushLog(job, `${label} ${index + 1} 既不是可导入的文件、也不是能下载的地址，跳过`);
-            job.warnings.push(`${label} ${index + 1} 无法读取`);
-            continue;
-        }
-        const file = path.join(dir, `${job.id}-${kind}-${index + 1}${decoded.ext}`);
-        fs.writeFileSync(file, decoded.buffer);
+        const file = files?.[index];
+        // 取不回来的那些在 prepare 阶段已经记过日志和 warning，这里跳过就好
+        if (!file) continue;
         // 一张图挂不上不该把整单带崩：重试过还是不行就记 warning、继续下一张，
         // 让预检能走完（用户看得到具体缺哪张，而不是一个没头的 502）。
         let receipt = null;
@@ -691,14 +743,68 @@ async function importReferenceMedia(job, pageId, origin, nodeId, kind) {
         } else {
             pushLog(job, `${label} ${index + 1} 已导入并连上视频节点`);
         }
-        const uploaded = await waitNodeMedia(pageId, origin, mediaNodeId);
-        if (!uploaded) {
-            pushLog(job, `${label} ${index + 1} 上传还没确认，别急着下单`);
-            job.warnings.push(`${label} ${index + 1} 上传未确认`);
-        }
-        connected.push(mediaNodeId);
+        connected.push({ nodeId: mediaNodeId, label: `${label} ${index + 1}` });
     }
     return connected;
+}
+
+/** 参考素材的下载并发数：MochiAni 侧是浏览器页面，太高会被它排队挡回来，4 比较稳。 */
+const REFERENCE_FETCH_CONCURRENCY = 4;
+
+/**
+ * 把这一批参考素材**并发**取回本机临时文件，返回与 `job[`${kind}s`]` 等长的数组（取不到的是 null）。
+ *
+ * 下载占总耗时的比例很高（图床/R2 的公网地址，一张几 MB），而它们彼此完全独立。
+ * 串行 9 张 ≈ 9 × RTT；并发 4 ≈ 3 轮。
+ */
+async function prepareReferenceFiles(job, kinds) {
+    const dir = path.join(os.tmpdir(), "mochiani-bridge-refs");
+    fs.mkdirSync(dir, { recursive: true });
+    const prepared = {};
+    for (const kind of kinds) {
+        const list = Array.isArray(job[`${kind}s`]) ? job[`${kind}s`] : [];
+        if (!list.length) {
+            prepared[kind] = [];
+            continue;
+        }
+        const label = KIND_LABEL[kind] || "参考素材";
+        const results = await mapLimit(list, REFERENCE_FETCH_CONCURRENCY, async (item, index) => {
+            const decoded = await materializeReference(item, kind);
+            if (!decoded) {
+                pushLog(job, `${label} ${index + 1} 既不是可导入的文件、也不是能下载的地址，跳过`);
+                job.warnings.push(`${label} ${index + 1} 无法读取`);
+                return null;
+            }
+            const file = path.join(dir, `${job.id}-${kind}-${index + 1}${decoded.ext}`);
+            await fs.promises.writeFile(file, decoded.buffer);
+            return file;
+        });
+        results.forEach((result, index) => {
+            if (result.ok) return;
+            pushLog(job, `${label} ${index + 1} 取不回来：${result.error?.message || result.error}`);
+            job.warnings.push(`${label} ${index + 1} 下载失败`);
+        });
+        prepared[kind] = results.map((result) => (result.ok ? result.value : null));
+    }
+    return prepared;
+}
+
+/**
+ * 一次性并发核「参考素材上传完没有」。
+ *
+ * `canvas_get_node` 是纯读，互不影响；串行时每张至少 1.2s 轮询，并发后总耗时 ≈ 最慢那张。
+ */
+async function confirmReferenceUploads(job, pageId, origin, items) {
+    const list = (Array.isArray(items) ? items : []).filter((item) => item?.nodeId);
+    if (!list.length) return;
+    const results = await mapLimit(list, 6, (item) => waitNodeMedia(pageId, origin, item.nodeId));
+    results.forEach((result, index) => {
+        const ok = result.ok && result.value === true;
+        if (ok) return;
+        const label = list[index]?.label || "参考素材";
+        pushLog(job, `${label} 上传还没确认，别急着下单`);
+        job.warnings.push(`${label} 上传未确认`);
+    });
 }
 
 /**
@@ -932,14 +1038,20 @@ async function planCanvasJob(job, ctx) {
     };
 
     // 2) 参考素材：图 → 视频 → 音频（顺序固定，原生端口有容量上限，主素材先占位）
-    const refNodeIds = [];
+    //    ① 先把这批素材并发下载回本机（纯网络，串行 N 张 = N 份等待）
+    //    ② 再逐张 upload_and_connect（写画布吃 revision，必须串行）
+    //    ③ 上传确认只读，甩到最后和「排布 / 写提示词」并发，不占关键路径
+    const prepared = await prepareReferenceFiles(job, ["image", "video", "audio"]);
+    const connectedRefs = [];
     for (const kind of ["image", "video", "audio"]) {
         const list = job[`${kind}s`];
         if (Array.isArray(list) && list.length) {
-            const connected = await importReferenceMedia(job, pageId, origin, nodeId, kind);
-            refNodeIds.push(...connected);
+            const connected = await importReferenceMedia(job, pageId, origin, nodeId, kind, prepared[kind]);
+            connectedRefs.push(...connected);
         }
     }
+    const refNodeIds = connectedRefs.map((item) => item.nodeId);
+    const uploadCheck = confirmReferenceUploads(job, pageId, origin, connectedRefs).catch(() => null);
 
     // 2.5) 排一下 MochiAni 画布：参考图网格，视频节点挪到右侧（失败只告警）
     await arrangeCanvasNodes(job, pageId, origin, nodeId, refNodeIds);
@@ -949,6 +1061,9 @@ async function planCanvasJob(job, ctx) {
 
     // 3) 提示词
     await writeCanvasPrompt(job, pageId, origin, nodeId, created.revision);
+
+    // 3.5) 收一下前面甩出去的「上传确认」：这时它基本已经跑完了，等于零成本
+    await uploadCheck;
 
     // 4) 回读核验：提示词、模型、渠道三样都必须对上，否则宁可停在预检
     const after = await callTool("mochiani_canvas_generation_context", { pageId, origin, nodeId });
@@ -1600,48 +1715,92 @@ async function resolveCartonAssets({ pageId, origin, projectId, projectName, wor
     }
     outcome.voiceCandidates = assets.filter((item) => item.kind === "character").map((item) => ({ id: item.id, name: item.name }));
 
+    /**
+     * 三段式：① 纯内存匹配 → ② 没命中的**并发**新建 → ③ 按原顺序回填。
+     *
+     * 以前是 `for name { match ; await create }` 一条条串，10 个素材名就是 10 次往返。
+     * 新建素材彼此独立（幂等键按 `workId:kind:name` 算，重复重试不会建两份），所以可以并发；
+     * 但**结果必须按用户填写的顺序回填** —— `characterIds` 的顺序就是分镜里关联的顺序。
+     */
+    const entries = [];
     for (const [kind, names] of wanted) {
-        for (const name of names) {
-            const hit = matchCartonAsset(name, assets);
-            if (hit) {
-                const bucket = hit.kind || kind;
-                if (!outcome.ids[bucket].includes(hit.id)) {
-                    outcome.ids[bucket].push(hit.id);
-                    outcome.resolvedNames[bucket].push(hit.name);
-                }
-                // 原名和命中名都记一份：用户填「林晚」、库里叫「林晚_正式」，图也得挂得上。
-                outcome.byName[bucket][name] = hit.id;
-                outcome.byName[bucket][hit.name] = hit.id;
-                if (hit.name !== name) outcome.notes.push(`「${name}」匹配到素材「${hit.name}」`);
-                continue;
+        for (const name of names) entries.push({ kind, name, order: entries.length });
+    }
+
+    const hits = new Map(); // order -> { id, name, bucket }
+    const misses = [];
+    const missByName = new Map(); // 同名跨类别只建一次，避免「角色铜钥匙 / 道具铜钥匙」建出两份
+    for (const entry of entries) {
+        const hit = matchCartonAsset(entry.name, assets);
+        if (hit) {
+            hits.set(entry.order, { id: hit.id, name: hit.name, bucket: hit.kind || entry.kind });
+            continue;
+        }
+        if (options.autoCreate === false) {
+            outcome.missing.push(entry.name);
+            continue;
+        }
+        const existing = missByName.get(entry.name);
+        if (existing) {
+            existing.orders.push(entry.order);
+            continue;
+        }
+        const miss = { name: entry.name, kind: entry.kind, orders: [entry.order] };
+        missByName.set(entry.name, miss);
+        misses.push(miss);
+    }
+
+    if (misses.length) {
+        // 3 路并发：MochiAni 是浏览器页面，太高的并发会被它自己排队挡回来
+        const results = await mapLimit(misses, 3, (miss) =>
+            callTool("mochiani_create_asset", {
+                origin,
+                pageId,
+                projectId,
+                projectName,
+                workId,
+                workName,
+                assetType: miss.kind === "other" ? "other" : miss.kind,
+                name: miss.name,
+                description: options.descriptions?.[miss.name] || "",
+                idempotencyKey: stableUuid(`asset:${workId}:${miss.kind}:${miss.name}`),
+            }),
+        );
+        results.forEach((result, index) => {
+            const miss = misses[index];
+            if (!result.ok) {
+                const reason = `新建失败：${result.error?.message || result.error}`;
+                for (const order of miss.orders) outcome.missing.push(`${entries[order].name}（${reason}）`);
+                return;
             }
-            if (options.autoCreate === false) {
-                outcome.missing.push(name);
-                continue;
+            const newId = readAssetId(result.value);
+            if (!newId) {
+                for (const order of miss.orders) outcome.missing.push(`${miss.name}（新建成功但没读到素材 ID）`);
+                return;
             }
-            try {
-                const created = await callTool("mochiani_create_asset", {
-                    origin,
-                    pageId,
-                    projectId,
-                    projectName,
-                    workId,
-                    workName,
-                    assetType: kind === "other" ? "other" : kind,
-                    name,
-                    description: options.descriptions?.[name] || "",
-                    idempotencyKey: stableUuid(`asset:${workId}:${kind}:${name}`),
-                });
-                const newId = readAssetId(created);
-                if (!newId) throw new Error("新建成功但没读到素材 ID");
-                outcome.ids[kind].push(newId);
-                outcome.resolvedNames[kind].push(name);
-                outcome.byName[kind][name] = newId;
-                outcome.created.push(`${CARTON_ASSET_LABEL[kind]}「${name}」`);
-                assets.push({ id: newId, name, kind });
-            } catch (error) {
-                outcome.missing.push(`${name}（${error.message}）`);
+            for (const order of miss.orders) {
+                hits.set(order, { id: newId, name: miss.name, bucket: entries[order].kind, created: true });
             }
+            assets.push({ id: newId, name: miss.name, kind: miss.kind });
+        });
+    }
+
+    // 按填写顺序回填
+    for (const entry of entries) {
+        const hit = hits.get(entry.order);
+        if (!hit) continue;
+        const bucket = hit.bucket;
+        if (!outcome.ids[bucket].includes(hit.id)) {
+            outcome.ids[bucket].push(hit.id);
+            outcome.resolvedNames[bucket].push(hit.name);
+        }
+        // 原名和命中名都记一份：用户填「林晚」、库里叫「林晚_正式」，图也得挂得上。
+        outcome.byName[bucket][entry.name] = hit.id;
+        outcome.byName[bucket][hit.name] = hit.id;
+        if (hit.created) {
+            outcome.created.push(`${CARTON_ASSET_LABEL[bucket]}「${hit.name}」`);
+        } else if (hit.name !== entry.name) {
+            outcome.notes.push(`「${entry.name}」匹配到素材「${hit.name}」`);
         }
     }
     return outcome;
@@ -1828,7 +1987,7 @@ async function planCartonJob(job, ctx) {
     if (uploads.length) {
         // 同一个素材只传一张：显式挂的图排前面，文案指名的图不覆盖它
         const seenAssets = new Set();
-        const items = [];
+        const planned = [];
         let skipped = 0;
         for (const upload of uploads) {
             const key = `${upload.assetType}:${upload.assetId}`;
@@ -1836,14 +1995,20 @@ async function planCartonJob(job, ctx) {
                 skipped += 1;
                 continue;
             }
-            try {
-                const localPath = await materializeReferenceImage(upload.entry, tempFiles);
-                seenAssets.add(key);
-                items.push({ assetType: upload.assetType, assetId: upload.assetId, localPath });
-            } catch (error) {
-                job.warnings.push(`${upload.label}「${upload.name}」没传：${error.message}`);
-            }
+            seenAssets.add(key);
+            planned.push(upload);
         }
+        // 下载（图床/R2 公网地址）彼此独立，并发 4 取；以前串行，10 张图就是 10 份等待
+        const materialized = await mapLimit(planned, 4, (upload) => materializeReferenceImage(upload.entry, tempFiles));
+        const items = [];
+        materialized.forEach((result, index) => {
+            const upload = planned[index];
+            if (!result.ok) {
+                job.warnings.push(`${upload.label}「${upload.name}」没传：${result.error?.message || result.error}`);
+                return;
+            }
+            items.push({ assetType: upload.assetType, assetId: upload.assetId, localPath: result.value });
+        });
         if (skipped) pushLog(job, `${skipped} 张图对应同一素材，只传了第一张`);
         if (items.length) {
             try {
@@ -1909,34 +2074,43 @@ async function planCartonJob(job, ctx) {
         const voiceCharacters = collectVoiceCharacters(settings);
         const pool = voiceCharacters.length ? voiceCharacters : resolved.voiceCandidates || [];
         const byName = new Map(pool.map((item) => [item.name, item.id]));
-        const items = [];
-        for (const line of lines) {
+        // 先筛出「能写」的（纯内存），再并发写；幂等键按**行号**算 ——
+        // 以前用 `items.length`，并发/重试时会漂成别的行，等于换个 key 重复写一条。
+        const pending = [];
+        lines.forEach((line, index) => {
             const characterId = line.characterName ? byName.get(line.characterName) || "" : "";
             if (line.characterName && !characterId) {
                 job.warnings.push(`配音「${line.characterName}」没匹配到角色，这条跳过`);
-                continue;
+                return;
             }
             if (!characterId) {
                 job.warnings.push(`配音「${line.text.slice(0, 12)}…」没写角色名，MochiAni 要求必须指定角色，跳过`);
-                continue;
+                return;
             }
-            try {
-                // `text` 的 schema 上限是 200 字，超了会被 MCP 挡回来
-                const spoken = line.text.length > 200 ? line.text.slice(0, 200) : line.text;
-                if (spoken !== line.text) job.warnings.push(`配音「${line.characterName}」超过 200 字，已截断`);
-                const saved = await callTool("mochiani_create_voiceover_item", {
-                    ...workRef,
-                    shotId,
-                    characterId,
-                    text: spoken,
-                    idempotencyKey: stableUuid(`vo:${job.id}:${items.length}`),
-                });
-                const itemId = firstString(saved, [/^item_?id$/i, /^voiceover_?item_?id$/i, /^id$/i]);
-                items.push({ itemId, characterId, characterName: line.characterName, text: line.text });
-            } catch (error) {
-                job.warnings.push(`配音写入失败（${line.characterName}）：${error.message}`);
+            // `text` 的 schema 上限是 200 字，超了会被 MCP 挡回来
+            const spoken = line.text.length > 200 ? line.text.slice(0, 200) : line.text;
+            if (spoken !== line.text) job.warnings.push(`配音「${line.characterName}」超过 200 字，已截断`);
+            pending.push({ index, line, characterId, spoken });
+        });
+        const written = await mapLimit(pending, 3, (item) =>
+            callTool("mochiani_create_voiceover_item", {
+                ...workRef,
+                shotId,
+                characterId: item.characterId,
+                text: item.spoken,
+                idempotencyKey: stableUuid(`vo:${job.id}:${item.index}`),
+            }),
+        );
+        const items = [];
+        written.forEach((result, index) => {
+            const item = pending[index];
+            if (!result.ok) {
+                job.warnings.push(`配音写入失败（${item.line.characterName}）：${result.error?.message || result.error}`);
+                return;
             }
-        }
+            const itemId = firstString(result.value, [/^item_?id$/i, /^voiceover_?item_?id$/i, /^id$/i]);
+            items.push({ itemId, characterId: item.characterId, characterName: item.line.characterName, text: item.line.text });
+        });
         job.voiceItems = items;
         if (items.length) pushLog(job, `配音已写入 ${items.length} 条${job.generateVoice ? "，确认后一起生成" : "（不生成音频）"}`);
     }
@@ -2189,16 +2363,40 @@ async function planJob(prompt, preferredPageId, extras = {}, options = {}) {
 }
 
 async function runPlanWork(job, ctx) {
+    const startedAt = Date.now();
     try {
-        if (ctx.kind === "canvas") await planCanvasJob(job, ctx);
-        else await planCartonJob(job, ctx);
-        return job;
+        return await jobScope.run(job, async () => {
+            if (ctx.kind === "canvas") await planCanvasJob(job, ctx);
+            else await planCartonJob(job, ctx);
+            pushTimingSummary(job, startedAt);
+            return job;
+        });
     } catch (error) {
         job.stage = "error";
         job.error = describeCanvasError(error);
         pushLog(job, job.error);
         throw error;
     }
+}
+
+/**
+ * 收尾打一行「时间都花哪了」。
+ *
+ * 只统计 MCP 往返，不含我们自己的 sleep —— 所以两者差得多时，说明瓶颈在「等页面」
+ * （`waitCanvasIdle` / `waitNodeMedia`），而不是页面处理慢。排查提速时先看这一行。
+ */
+function pushTimingSummary(job, startedAt) {
+    const total = Date.now() - startedAt;
+    if (total < 1500) return;
+    const rows = Object.entries(job.timing || {})
+        .sort((a, b) => b[1].ms - a[1].ms)
+        .slice(0, 5)
+        .map(([name, stat]) => `${name.replace(/^mochiani_/, "")} ${(stat.ms / 1000).toFixed(1)}s×${stat.n}`);
+    const calls = Object.values(job.timing || {}).reduce((sum, stat) => sum + stat.ms, 0);
+    const waiting = Math.max(0, total - calls);
+    const text = `⏱ 总共 ${(total / 1000).toFixed(1)}s｜接口 ${(calls / 1000).toFixed(1)}s · 等页面 ${(waiting / 1000).toFixed(1)}s${rows.length ? `｜${rows.join(" · ")}` : ""}`;
+    pushLog(job, text);
+    job.timingSummary = text;
 }
 
 async function confirmJob(job) {
@@ -2652,7 +2850,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.8",
+            version: "1.6.9",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,

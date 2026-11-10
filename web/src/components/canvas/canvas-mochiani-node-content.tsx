@@ -21,6 +21,7 @@ import {
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { shrinkImageDataUrl, shrinkImageDataUrls } from "@/lib/canvas/mochiani-payload";
 import { buildStylePromptText, composeStyledPrompt, getStyleTemplate } from "@/constant/style-templates";
 import { imageToDataUrl } from "@/services/image-storage";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -353,9 +354,59 @@ function parseBridgeAddress(base: string) {
     return { origin: origin.replace(/\/+$/, ""), token: token.trim() };
 }
 
+const LOCAL_BRIDGE_ORIGIN = "http://127.0.0.1:17399";
+/** 本机桥探测结果缓存：60s 内不重复探（一次发送里有十几个请求，别每次都探）。 */
+const localBridgeProbe = new Map<string, { ok: boolean; at: number }>();
+
+function isLocalOrigin(origin: string) {
+    return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?\/?$/i.test(origin);
+}
+
+function pageServedLocally() {
+    try {
+        const host = window.location.hostname;
+        return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 页面自己就跑在本机时，直连本机桥，别绕公网域名。
+ *
+ * 为什么值得专门做一层：桥和网页在同一台机器上，但地址栏里填的是
+ * `https://xxx.ts.net:8443`（为了别的设备也能用）—— 于是每次请求都从本机出网、
+ * 走 Tailscale 中转再回到本机。实测上传 14.77MB 参考图用了 **240 秒**
+ * （≈60KB/s，正是中转速度），换成 loopback 是几十毫秒。
+ *
+ * 只在「页面在 127.0.0.1 上」且「配置的地址不是本机」时才探一次；探不通就老实走原地址，
+ * 所以对真正的远程用法零影响。
+ */
+async function resolveBridgeOrigin(origin: string, token: string) {
+    if (isLocalOrigin(origin) || !pageServedLocally()) return origin;
+    const cached = localBridgeProbe.get(origin);
+    if (cached && Date.now() - cached.at < 60_000) return cached.ok ? LOCAL_BRIDGE_ORIGIN : origin;
+    let ok = false;
+    try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 1500);
+        const response = await fetch(`${LOCAL_BRIDGE_ORIGIN}/health`, {
+            signal: controller.signal,
+            headers: token ? { "x-mochiani-token": token } : {},
+        });
+        clearTimeout(timer);
+        ok = response.ok;
+    } catch {
+        ok = false;
+    }
+    localBridgeProbe.set(origin, { ok, at: Date.now() });
+    return ok ? LOCAL_BRIDGE_ORIGIN : origin;
+}
+
 async function bridgeFetch(base: string, path: string, init?: RequestInit): Promise<BridgeBody> {
     const { origin, token } = parseBridgeAddress(base);
-    const response = await fetch(`${origin}${path}`, {
+    const target = await resolveBridgeOrigin(origin, token);
+    const response = await fetch(`${target}${path}`, {
         ...init,
         headers: {
             "Content-Type": "application/json",
@@ -601,13 +652,20 @@ function readBlobAsDataUrl(blob: Blob) {
 async function toReferencePayload(reference: CanvasResourceReference, kind: "image" | "video" | "audio") {
     const url = String(reference.previewUrl || "").trim();
     if (/^https?:\/\//i.test(url)) return { url };
-    if (url.startsWith("data:")) return { dataUrl: url };
+    // 已经是 dataUrl 的图也要减重（粘贴进来的图就是这个形态）
+    if (url.startsWith("data:")) return { dataUrl: kind === "image" ? await shrinkImageDataUrl(url) : url };
 
     try {
         if (kind === "image") {
             // 空 content（本地库迁移过）也交给它：会按 storageKey / 页面上的 <img> 找回原图。
             const dataUrl = await imageToDataUrl({ url, nodeId: reference.nodeId });
-            return dataUrl.startsWith("data:image/") ? { dataUrl } : null;
+            if (!dataUrl.startsWith("data:image/")) return null;
+            /**
+             * 本地图只能内联成 base64 发给桥：原图 3~5MB → base64 4.9MB → 三张 14.7MB，
+             * 实测一次「发送」光把请求体送进桥就要 240 秒。长边压到 1280、JPEG 0.86 后
+             * 单张落到 200KB 量级，体积小一个数量级，模型那边观感几乎无差。
+             */
+            return { dataUrl: await shrinkImageDataUrl(dataUrl) };
         }
         if (!/^blob:/i.test(url)) return null;
         const response = await fetch(url);
@@ -1202,14 +1260,23 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 for (const reference of list) unusable.push(`${reference.title || reference.label}：当前模型不支持${kindLabel[kind]}，没发`);
                 return out;
             }
-            for (const reference of list) {
-                if (limit != null && limit > 0 && out.length >= limit) {
-                    unusable.push(`${reference.title || reference.label} 超过上限，没发`);
-                    continue;
-                }
-                const entry = await toReferencePayload(reference, kind);
+            /**
+             * 本地图（`blob:`）发之前必须先读成 dataUrl，一张几 MB —— 以前 `for + await` 串行，
+             * 连 9 张就得排队读 9 遍。这里并发读，再**按原顺序**拼（顺序 = 文案里 `@图片N` 的下标）。
+             */
+            const resolved = await Promise.all(
+                list.map(async (reference) => ({
+                    reference,
+                    entry: await toReferencePayload(reference, kind).catch(() => null),
+                })),
+            );
+            for (const { reference, entry } of resolved) {
                 if (!entry) {
                     unusable.push(`${reference.title || reference.label} 读不出来（本地缓存已失效），重新上传一次`);
+                    continue;
+                }
+                if (limit != null && limit > 0 && out.length >= limit) {
+                    unusable.push(`${reference.title || reference.label} 超过上限，没发`);
                     continue;
                 }
                 out.push(entry);
@@ -1217,13 +1284,15 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             return out;
         };
         const images = await pick(linkedByKind.image, imageLimit, "image");
-        for (const item of refImages) {
+        // 面板里直接上传的参考图也是本地 dataUrl，跟连线图一样要先减重（并发压，顺序不变）
+        const shrunkRefs = await shrinkImageDataUrls(refImages.map((item) => item.dataUrl));
+        refImages.forEach((item, index) => {
             if (imageLimit > 0 && images.length >= imageLimit) {
                 unusable.push(`${item.name} 超过参考图上限，没发`);
-                continue;
+                return;
             }
-            images.push({ dataUrl: item.dataUrl });
-        }
+            images.push({ dataUrl: shrunkRefs[index] || item.dataUrl });
+        });
         return {
             images,
             videos: await pick(linkedByKind.video, videoLimit, "video"),
