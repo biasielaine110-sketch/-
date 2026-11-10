@@ -550,6 +550,55 @@ async function importReferenceMedia(job, pageId, origin, nodeId, kind) {
 }
 
 /**
+ * 发送完之后，把 MochiAni 自己那张画布排一下。
+ *
+ * 参考素材是 `upload_and_connect` 一张张塞进去的，MochiAni 会把新节点就近丢在视频节点旁边，
+ * 一连 9 张就叠成一坨（用户反馈「全都叠在一起了」）。
+ *
+ * 参考节点走**原生** `canvas_layout`（grid）：画布的 x/y 到底是「左上角」还是「中心」，工具契约里
+ * 没写，自己算网格就会算歪；原生那套自己知道自己的尺寸。只有「把视频节点挪到网格右侧」这一步
+ * 自己算 —— 用 `x + width / 2` 当右边界，这个写法在两种语义下都只会偏右、不会压到参考图。
+ *
+ * 排布是顺手的事，**失败只记 warning**，绝不能把预检带崩。
+ */
+async function arrangeCanvasNodes(job, pageId, origin, videoNodeId, refIds) {
+    const ids = (Array.isArray(refIds) ? refIds : []).filter((id) => typeof id === "string" && id && id !== videoNodeId);
+    if (!ids.length) return;
+    try {
+        if (ids.length > 1) {
+            const read = await canvasRead(pageId, origin);
+            const columns = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(ids.length))));
+            await callTool("mochiani_canvas_layout", {
+                pageId,
+                origin,
+                expectedRevision: read.revision,
+                idempotencyKey: randomUUID(),
+                nodeIds: ids,
+                mode: "grid",
+                columns,
+            });
+            pushLog(job, `${ids.length} 个参考节点已排成 ${columns} 列网格`);
+        }
+        const after = await canvasRead(pageId, origin);
+        const nodes = Array.isArray(after?.nodes) ? after.nodes : [];
+        const refs = nodes.filter((node) => ids.includes(node.id));
+        if (!refs.length) return;
+        const right = Math.max(...refs.map((node) => Number(node.x || 0) + Number(node.width || 0) / 2));
+        const top = Math.min(...refs.map((node) => Number(node.y || 0)));
+        await callTool("mochiani_canvas_move_nodes", {
+            pageId,
+            origin,
+            expectedRevision: after.revision,
+            idempotencyKey: randomUUID(),
+            moves: [{ nodeId: videoNodeId, x: Math.round(right + 360), y: Math.round(top) }],
+        });
+        pushLog(job, "视频节点已挪到参考图右侧");
+    } catch (error) {
+        job.warnings.push(`自动排布没成功（${error?.message || error}），不影响生成`);
+    }
+}
+
+/**
  * 写提示词。
  *
  * ⚠️ 一旦节点连上参考图，提示词在 MochiAni 侧就变成「结构化文档」（有 documentToken + references），
@@ -629,10 +678,17 @@ async function planCanvasJob(job, ctx) {
     };
 
     // 2) 参考素材：图 → 视频 → 音频（顺序固定，原生端口有容量上限，主素材先占位）
+    const refNodeIds = [];
     for (const kind of ["image", "video", "audio"]) {
         const list = job[`${kind}s`];
-        if (Array.isArray(list) && list.length) await importReferenceMedia(job, pageId, origin, nodeId, kind);
+        if (Array.isArray(list) && list.length) {
+            const connected = await importReferenceMedia(job, pageId, origin, nodeId, kind);
+            refNodeIds.push(...connected);
+        }
     }
+
+    // 2.5) 排一下 MochiAni 画布：参考图网格，视频节点挪到右侧（失败只告警）
+    await arrangeCanvasNodes(job, pageId, origin, nodeId, refNodeIds);
 
     // 3) 提示词
     await writeCanvasPrompt(job, pageId, origin, nodeId, created.revision);

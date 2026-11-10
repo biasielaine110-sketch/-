@@ -2,26 +2,37 @@ import { getNodeSpec } from "@/constant/canvas";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
 /**
- * In-place node type conversion (image node ↔ video node).
+ * In-place node type conversion.
  *
  * Image and video nodes are two flavours of the same "generation slot": same left/right handles, same
  * prompt, same incoming references. So the conversion rewrites the node instead of recreating it —
  * the id never changes, which is what keeps every connection, group membership, merge slot and
  * mention label pointing at the same node.
  *
+ * A video node can also become a **MochiAni** node: that node is a generation panel too (prompt +
+ * incoming references as material), it just delegates the work to MochiAni through the local bridge.
+ * The same in-place rule applies — the connections a video node has are exactly the references the
+ * MochiAni node needs, so recreating it would drop them.
+ *
  * The payload the node renders cannot cross the boundary (a `<video>` pointed at an image is a broken
  * node, and vice versa), so it is *parked* under `metadata.convertedMedia[<type it belonged to>]`
  * rather than dropped: converting back restores it, and because the parked `storageKey` is still
  * referenced by the project JSON, the asset cleanup keeps the file on disk.
  */
-const CONVERSION_COUNTERPARTS: Record<string, CanvasNodeType> = {
-    [CanvasNodeType.Image]: CanvasNodeType.Video,
-    [CanvasNodeType.Video]: CanvasNodeType.Image,
+const CONVERSION_TARGETS: Record<string, CanvasNodeType[]> = {
+    [CanvasNodeType.Image]: [CanvasNodeType.Video],
+    [CanvasNodeType.Video]: [CanvasNodeType.Image, CanvasNodeType.Mochiani],
+    [CanvasNodeType.Mochiani]: [CanvasNodeType.Video],
 };
 
-/** The type this node can be converted into, or null for node types without a counterpart. */
+/** The types this node can be converted into, in menu order. */
+export function nodeConversionTargets(type: string): CanvasNodeType[] {
+    return CONVERSION_TARGETS[type] || [];
+}
+
+/** Primary target (first of `nodeConversionTargets`) — kept for callers that only want one. */
 export function nodeConversionTarget(type: string): CanvasNodeType | null {
-    return CONVERSION_COUNTERPARTS[type] || null;
+    return nodeConversionTargets(type)[0] || null;
 }
 
 /** The media payload the node renders — parked wholesale on conversion. */
@@ -44,11 +55,14 @@ const MEDIA_FIELDS = [
 /** Generation knobs that only ever applied to one of the two types. */
 const IMAGE_ONLY_FIELDS = ["size", "quality", "count", "background", "mjVersion", "generationType", "freeResize"] as const;
 const VIDEO_ONLY_FIELDS = ["seconds", "videoResolution", "vquality", "generateAudio", "watermark", "steps", "refImageSize", "samplerName", "scheduler", "seedMode", "seed", "audioMode"] as const;
+/** MochiAni 节点自己的东西：模型/渠道/参数偏好、上一次任务快照、提示词镜像。 */
+const MOCHIANI_ONLY_FIELDS = ["mochianiConfig", "mochianiRun", "mochianiPrompt"] as const;
 
 /** Knobs are a real user choice even when falsy (`generateAudio: false`), so they always travel. */
 const SOURCE_TYPE_KNOBS: Record<string, readonly string[]> = {
     [CanvasNodeType.Image]: IMAGE_ONLY_FIELDS,
     [CanvasNodeType.Video]: VIDEO_ONLY_FIELDS,
+    [CanvasNodeType.Mochiani]: MOCHIANI_ONLY_FIELDS,
 };
 
 type MetadataBag = Record<string, unknown>;
@@ -107,8 +121,8 @@ function restoreMedia(target: MetadataBag, snapshot: MetadataBag) {
 
 export function convertNodeType(node: CanvasNodeData, targetType: CanvasNodeType): CanvasNodeData {
     const sourceType = node.type as CanvasNodeType;
-    // Only the image ↔ video pair converts, and only into its counterpart.
-    if (nodeConversionTarget(sourceType) !== targetType) return node;
+    // Only the declared pairs convert, and only into a real target of that pair.
+    if (!nodeConversionTargets(sourceType).includes(targetType)) return node;
 
     const metadata = { ...(node.metadata || {}) } as MetadataBag;
     const parkedByType = { ...((metadata.convertedMedia as Record<string, MetadataBag>) || {}) };
@@ -137,8 +151,12 @@ export function convertNodeType(node: CanvasNodeData, targetType: CanvasNodeType
     // Only a title the user never touched follows the node to its new type.
     const spec = getNodeSpec(targetType);
     const title = node.title === getNodeSpec(sourceType).title ? spec.title : node.title;
+    // MochiAni 节点是一整块生成面板：塞进视频节点那个框里什么都看不见。只放大、不缩小。
+    const grow = targetType === CanvasNodeType.Mochiani;
+    const width = grow ? Math.max(node.width, spec.width) : node.width;
+    const height = grow ? Math.max(node.height, spec.height) : node.height;
 
-    return { ...node, type: targetType, title, metadata: metadata as CanvasNodeData["metadata"] };
+    return { ...node, type: targetType, title, width, height, metadata: metadata as CanvasNodeData["metadata"] };
 }
 
 /** The parked payload this conversion left behind, so the caller can tell the user it was kept. */

@@ -1848,6 +1848,7 @@ export default {
             seek: "Drag to seek",
             convertToVideo: "Convert to video node",
             convertToImage: "Convert to image node",
+            convertToMochiani: "Convert to MochiAni node",
             convertBusy: "This node is still generating — stop it before switching the node type.",
             convertKeptMedia: "Node type switched. The previous media was kept — switch back to restore it.",
         },

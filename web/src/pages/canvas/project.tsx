@@ -255,7 +255,7 @@ import {
 import { buildDocxBlob, buildMarkdownBlob, isDocumentFile, readDocumentAsText, type TextExportFormat } from "@/lib/canvas/document-text";
 import { clipboardTextSnapshot, extractClipboardRemoteImage, isPasteableNodeFile, mediaFileFromClipboardText, resolveClipboardMediaKind } from "@/lib/canvas/clipboard-paste";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType } from "@/lib/canvas/node-registry";
-import { convertNodeType, convertedNodeKeptMedia, nodeConversionTarget } from "@/lib/canvas/node-type-conversion";
+import { convertNodeType, convertedNodeKeptMedia, nodeConversionTargets } from "@/lib/canvas/node-type-conversion";
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
 import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
 import { CanvasMediaLibraryNotice } from "@/components/canvas/canvas-media-library-notice";
@@ -1881,7 +1881,7 @@ function AtelierCanvasPage() {
     const convertNodeTypeById = useCallback(
         (nodeId: string, targetType: CanvasNodeType) => {
             const node = nodesRef.current.find((item) => item.id === nodeId);
-            if (!node || nodeConversionTarget(node.type) !== targetType) return;
+            if (!node || !nodeConversionTargets(node.type).includes(targetType)) return;
             // Generation writes its result back into the node by id; switching the type underneath it
             // would land image bytes on a video node (and vice versa).
             if (isNodeGenerating(nodeId)) {

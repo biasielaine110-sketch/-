@@ -533,6 +533,13 @@ export type CanvasNodeMetadata = {
          * 默认 11；漫剧编辑器里模式跟着模型走，画布那边桥会调原生 `video_category`。
          */
         videoCategory?: number | null;
+        /**
+         * 画幅偏好（默认 `9:16`）。
+         *
+         * 只有模型/渠道真的提供画幅参数（`model_size` / `lable1`）时才会写进 `params` 生效；
+         * 不提供时（如 `Seedance2.0 fast` 的 AL 线路）只作为偏好记着，换到带画幅的渠道会自动带上。
+         */
+        aspectRatio?: string;
         cast?: { characters?: string; scenes?: string; props?: string };
         voiceover?: string;
         generateVoice?: boolean;

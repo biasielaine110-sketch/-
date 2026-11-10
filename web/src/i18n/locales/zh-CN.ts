@@ -1847,6 +1847,7 @@ export default {
             seek: "拖动选择播放位置",
             convertToVideo: "转换为视频节点",
             convertToImage: "转换为图像节点",
+            convertToMochiani: "转换为 MochiAni 节点",
             convertBusy: "该节点正在生成，请先停止生成再转换节点类型。",
             convertKeptMedia: "节点类型已切换，原素材已保留；转换回原类型即可恢复。",
         },

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
+import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useOrderDrag } from "@/hooks/use-order-drag";
@@ -9,7 +9,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useConfigStore } from "@/stores/use-config-store";
 import { mergeOrderedIds, reorderIds, sortByOrder } from "@/lib/canvas/menu-order";
-import { nodeConversionTarget } from "@/lib/canvas/node-type-conversion";
+import { nodeConversionTargets } from "@/lib/canvas/node-type-conversion";
 import { CanvasNodeType, type CanvasNodeData, type ContextMenuState } from "@/types/canvas";
 import {
     buildImageToolbarTools,
@@ -26,6 +26,13 @@ type ContextMenuTool = {
     active?: boolean;
     danger?: boolean;
     onClick: () => void;
+};
+
+/** 「转换为 XX 节点」的文案键 —— 一个源类型可能有好几个目标。 */
+const CONVERT_LABEL_KEYS: Partial<Record<string, string>> = {
+    [CanvasNodeType.Image]: "canvas.controls.convertToImage",
+    [CanvasNodeType.Video]: "canvas.controls.convertToVideo",
+    [CanvasNodeType.Mochiani]: "canvas.controls.convertToMochiani",
 };
 
 export function CanvasNodeContextMenu({
@@ -94,9 +101,10 @@ export function CanvasNodeContextMenu({
     const hasVideo = Boolean(node && node.type === CanvasNodeType.Video && node.metadata?.content);
     const hasAudio = Boolean(node && node.type === CanvasNodeType.Audio && node.metadata?.content);
     const isAudio = Boolean(node && node.type === CanvasNodeType.Audio);
-    // Image and video nodes are the same generation slot in two flavours, so either can become the
-    // other. Other node types have no counterpart and simply never show the entry.
-    const convertTarget = node ? nodeConversionTarget(node.type) : null;
+    // Image and video nodes are the same generation slot in two flavours; a video node can also
+    // become a MochiAni node (same prompt + same incoming references, work goes to the bridge).
+    // Other node types have no target and simply never show the entry.
+    const convertTargets = node ? nodeConversionTargets(node.type) : [];
     const showBatchGenerate = menu.type === "node" && Boolean(node) && batchGenerateCount > 1 && Boolean(onBatchGenerate);
     const showGroup = menu.type === "node" && Boolean(node) && groupCount > 1 && Boolean(onGroupSelected);
     // h3 提示词优化作用在**选区**上（点一次逐个转格式），所以哪怕只选了 1 个也出现。
@@ -344,20 +352,32 @@ export function CanvasNodeContextMenu({
                 </div>
             ) : null}
             {/* Type conversion is a structural node operation, not a tool: it stays out of the
-                reorderable list (and its saved order) and sits above it. */}
-            {convertTarget && onConvertType && node ? (
+                reorderable list (and its saved order) and sits above it. A video node has two
+                targets (图像 / MochiAni), so this renders one item per target in declared order. */}
+            {convertTargets.length && onConvertType && node ? (
                 <div className="mb-1 border-b pb-1" style={{ borderColor: theme.toolbar.border }}>
-                    <MenuButton
-                        icon={convertTarget === CanvasNodeType.Video ? <Video className="size-4" /> : <ImageIcon className="size-4" />}
-                        label={t(convertTarget === CanvasNodeType.Video ? "canvas.controls.convertToVideo" : "canvas.controls.convertToImage")}
-                        onClick={() => {
-                            // Close an open fullscreen preview first: it is showing the payload of the
-                            // type we are about to leave.
-                            onBeforeAction?.();
-                            onConvertType(node, convertTarget);
-                            onClose();
-                        }}
-                    />
+                    {convertTargets.map((target) => (
+                        <MenuButton
+                            key={target}
+                            icon={
+                                target === CanvasNodeType.Video ? (
+                                    <Video className="size-4" />
+                                ) : target === CanvasNodeType.Mochiani ? (
+                                    <Clapperboard className="size-4" />
+                                ) : (
+                                    <ImageIcon className="size-4" />
+                                )
+                            }
+                            label={t(CONVERT_LABEL_KEYS[target] || "canvas.controls.convertToImage")}
+                            onClick={() => {
+                                // Close an open fullscreen preview first: it is showing the payload of the
+                                // type we are about to leave.
+                                onBeforeAction?.();
+                                onConvertType(node, target);
+                                onClose();
+                            }}
+                        />
+                    ))}
                 </div>
             ) : null}
             {canReorder ? (
