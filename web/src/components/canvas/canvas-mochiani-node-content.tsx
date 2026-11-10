@@ -242,8 +242,17 @@ type BridgeBody = Record<string, unknown> & {
     current?: { modelKey?: string; channelId?: string; params?: Record<string, string> };
     panel?: {
         modelKey?: string;
+        modelId?: string;
         channelId?: string;
         configParams?: Record<string, string>;
+        /**
+         * 节点当前模型/渠道的**完整**参数候选（`model_controls.editableParameters`）。
+         *
+         * 🔴 为什么 `configInfo` 不够：画幅（`model_size`）挂在**模型**的 `modelSize` 串上，
+         * 由 MochiAni 前端临时合进参数表，`configInfo` 里根本没有这一项 —— 只看 `configInfo`
+         * 时 `Seedance2.0 fast` / `Wan3.0` 阿里云线路的画幅选择器会整个消失。
+         */
+        editableParameters?: Record<string, ParamOption[]>;
         /** 画布节点生成面板的真实「生成模式」候选（11=全能参考）。 */
         videoCategories?: Array<{ key: number; label: string; compatible?: boolean; reason?: string; modelCount?: number }>;
         activeVideoCategory?: number | null;
@@ -384,11 +393,13 @@ function defaultParams(model: ModelOption, channel?: ModelChannel) {
  * 只在这个节点还没存过配置时生效 —— 用户一旦自己选过模型 / 渠道 / 参数，就以存的为准，
  * 否则每次节点滚出视口重挂都会把人的选择冲回默认值。
  *
- * 渠道「AL」是 `Seedance2.0 fast`（model-id:90）底下的第 7 条线路：它只开放 `duration` 和
- * `resolution`（大小写是 `480P` / `720P`），**没有画幅参数** —— 画幅那份偏好见 `aspectRatio`。
+ * 渠道默认按「原厂线路」挑：Seedance 系是 `AL`，Wan 系是 `阿里云`（见 `pickPreferredChannel`）。
+ * ⚠️ 这两条线路的 `configInfo` 里都**没有画幅参数**（画幅挂在模型的 `modelSize` 上），
+ * 所以画幅必须靠 `/api/params` 回读 `editableParameters`，不能只看 `configInfo`。
  */
 const PREFERRED_MODEL_NAME = "seedance2.0fast";
-const PREFERRED_CHANNEL_NAME = "al";
+/** 默认渠道名（按优先级）：Seedance 系 `AL`，Wan 系 `阿里云`。 */
+const PREFERRED_CHANNEL_NAMES = ["al", "阿里云"];
 const PREFERRED_PARAM_VALUES: Record<string, string> = { resolution: "480p", duration: "15" };
 /** 画幅默认 9:16（竖屏）。只有模型/渠道真的提供画幅参数时才写进去。 */
 const DEFAULT_ASPECT_RATIO = "9:16";
@@ -422,21 +433,62 @@ function aspectRatioKeyOf(source: Record<string, unknown>) {
 }
 
 /**
+ * 一组参数候选里的「用户偏好值」：分辨率 480p / 时长 15s / 画幅 9:16。
+ *
+ * 只在候选里真的有这一项时才写 —— 渠道不提供就不塞，免得给 MochiAni 发一个它不认的键。
+ */
+function preferredFromOptions(options: Record<string, ParamOption[]>, aspectRatio = DEFAULT_ASPECT_RATIO) {
+    const out: Record<string, string> = {};
+    for (const [key, wanted] of Object.entries(PREFERRED_PARAM_VALUES)) {
+        const hit = matchOptionValue(options[key], wanted);
+        if (hit) out[key] = hit;
+    }
+    const ratioKey = aspectRatioKeyOf(options);
+    const ratio = ratioKey ? matchOptionValue(options[ratioKey], aspectRatio) : "";
+    if (ratioKey && ratio) out[ratioKey] = ratio;
+    return out;
+}
+
+/**
  * 默认档位：先走 `defaultParams`，再把用户指定的分辨率 / 时长 / 画幅压上去。
  *
  * 为什么不能直接用 `defaultParams`：画布那边的兜底是「时长取最短」（15 个候选里取 4s），
  * 而这里要的是 15s；分辨率同理，默认要 480p 而不是列表第一个。
  */
 function preferredParams(model: ModelOption, channel?: ModelChannel, aspectRatio = DEFAULT_ASPECT_RATIO) {
-    const out = defaultParams(model, channel);
-    const source = paramSourceOf(model, channel);
-    for (const [key, wanted] of Object.entries(PREFERRED_PARAM_VALUES)) {
-        const hit = matchOptionValue(source[key], wanted);
-        if (hit) out[key] = hit;
+    return { ...defaultParams(model, channel), ...preferredFromOptions(paramSourceOf(model, channel), aspectRatio) };
+}
+
+/**
+ * 只挑出「画幅」那一项。
+ *
+ * 换模型 / 换渠道时用它把用户已经选过的画幅带过去 —— 否则每次切线路都被
+ * `preferredParams` 重置回默认 9:16，用户以为自己选丢了。
+ */
+function aspectOnly(source: Record<string, string>) {
+    const out: Record<string, string> = {};
+    for (const key of ASPECT_RATIO_KEYS) {
+        if (source[key]) out[key] = source[key];
     }
-    const ratioKey = aspectRatioKeyOf(source);
-    const ratio = ratioKey ? matchOptionValue(source[ratioKey], aspectRatio) : "";
-    if (ratioKey && ratio) out[ratioKey] = ratio;
+    return out;
+}
+
+/**
+ * 把一份参数值对齐到「权威参数候选」上。
+ *
+ * 用于 `/api/params` 回读之后：用户已经选过、且新候选里仍然合法的值原样保留；
+ * 不合法 / 缺失的按偏好补（480p / 15s / 9:16），再不行取第一个候选。
+ * 候选里没有的键直接丢掉 —— 留着会让 `configure_model` 发一个该模型不认的参数。
+ */
+function alignToOptions(current: Record<string, string>, options: Record<string, ParamOption[]>, aspectRatio = DEFAULT_ASPECT_RATIO) {
+    const preferred = preferredFromOptions(options, aspectRatio);
+    const out: Record<string, string> = {};
+    for (const [key, list] of Object.entries(options)) {
+        if (!list.length) continue;
+        const value = current[key];
+        const stillValid = value && list.some((item) => item.value === value);
+        out[key] = stillValid ? value : preferred[key] || list[0]?.value || "";
+    }
     return out;
 }
 
@@ -444,18 +496,28 @@ function preferredParams(model: ModelOption, channel?: ModelChannel, aspectRatio
 function pickPreferredModel(list: ModelOption[]) {
     const named = list.filter((item) => squash(item.modelName) === PREFERRED_MODEL_NAME);
     if (!named.length) return null;
-    return named.find((item) => (item.channels || []).some((channel) => squash(channel.name) === PREFERRED_CHANNEL_NAME)) || named[0];
+    return named.find((item) => (item.channels || []).some((channel) => squash(channel.name) === PREFERRED_CHANNEL_NAMES[0])) || named[0];
 }
 
-/** 默认渠道：名字是 `AL`（或 `xx-AL`）的那条，找不到就退回第一条。 */
+/**
+ * 默认渠道：优先原厂线路 —— `AL`（Seedance 系）→ `阿里云`（Wan 系）→ 名字最短的阿里云线路 → 第一条。
+ *
+ * ⚠️ 不能用 `/al$/` 这种后缀匹配去凑「阿里云」：中文线路名一个都命中不了，
+ * 结果 Wan3.0 会落到渠道列表第一条（可能是 `阿里云（2k定制版）` 这种加价线路）。
+ */
 function pickPreferredChannel(model?: ModelOption | null) {
     const channels = model?.channels || [];
     if (!channels.length) return null;
-    return (
-        channels.find((channel) => squash(channel.name) === PREFERRED_CHANNEL_NAME) ||
-        channels.find((channel) => /al$/.test(squash(channel.name))) ||
-        channels[0]
-    );
+    for (const wanted of PREFERRED_CHANNEL_NAMES) {
+        const exact = channels.find((channel) => squash(channel.name) === squash(wanted));
+        if (exact) return exact;
+    }
+    const seedanceStyle = channels.find((channel) => /(^|-)al$/.test(squash(channel.name)));
+    if (seedanceStyle) return seedanceStyle;
+    const aliCloud = channels
+        .filter((channel) => String(channel.name || "").includes("阿里云"))
+        .sort((a, b) => String(a.name).length - String(b.name).length);
+    return aliCloud[0] || channels[0];
 }
 
 function readFileAsDataUrl(file: File) {
@@ -561,6 +623,20 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     const [modelKey, setModelKey] = useState(node.metadata?.mochianiConfig?.modelKey || "");
     const [channelId, setChannelId] = useState(node.metadata?.mochianiConfig?.channelId || "");
     const [params, setParams] = useState<Record<string, string>>(node.metadata?.mochianiConfig?.params || {});
+    /**
+     * `/api/params` 回读回来的「权威参数候选」，按 `modelKey|channelId` 缓存。
+     *
+     * 🔴 为什么不能只用 `configInfo`：画幅（`model_size`）挂在**模型**的 `modelSize` 串上，
+     * MochiAni 前端在 `configInfo` 缺这一项时临时合进参数表 —— 桥只读 `configInfo`，
+     * 于是 `Seedance2.0 fast` 的 AL 线路、`Wan3.0` 的阿里云线路全都**没有画幅下拉**。
+     * 完整参数表只有 `model_controls.editableParameters` 有，由桥的 `/api/params` 回读。
+     */
+    const [paramOptions, setParamOptions] = useState<Record<string, Record<string, ParamOption[]>>>({});
+    const [paramsProbing, setParamsProbing] = useState(false);
+    /** `params` 的实时镜像 —— 异步回读回来时要拿最新的值去对齐（闭包里的 `params` 会过期）。 */
+    const paramsRef = useRef<Record<string, string>>(node.metadata?.mochianiConfig?.params || {});
+    /** `paramOptions` 的镜像：`loadModels` 里要读缓存对齐，又不能把缓存塞进依赖（会把回调整片重建）。 */
+    const paramOptionsRef = useRef<Record<string, Record<string, ParamOption[]>>>({});
     /**
      * 视频「生成模式」（MochiAni 的 `specific_type`）。
      *
@@ -746,6 +822,81 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         }
     }, [bridgeBase]);
 
+    /** `params` / 参数缓存一变就同步镜像，供异步回读对齐时用。 */
+    useEffect(() => {
+        paramsRef.current = params;
+        paramOptionsRef.current = paramOptions;
+    }, [params, paramOptions]);
+
+    /**
+     * 向桥要「这套模型 / 渠道」真实的可调参数（含 `configInfo` 里没有的画幅）。
+     *
+     * 只影响面板自己的下拉与默认值；失败（页面挂起 / 面板没挂上）就静默退回 `configInfo`，
+     * 不能因为读不到参数就把整个选择区变空。
+     */
+    const probeParams = useCallback(
+        async (next: { modelKey?: string; channelId?: string; videoCategory: number | null }) => {
+            const requestedModel = String(next.modelKey || "");
+            const requestedChannel = String(next.channelId || "");
+            // 什么都没指定就没得问（切生成模式时只给 videoCategory，那是合法的）
+            if (!requestedModel && next.videoCategory == null) return;
+            /**
+             * 命中缓存就直接本地对齐，不再打桥。
+             *
+             * 桥这一趟是**真去改 MochiAni 那个视频节点**的模型/渠道（画幅只能这么读），
+             * 画布上有好几个节点时每个都问一遍会把对面节点来回切 —— 能复用就复用。
+             */
+            const cacheKey = requestedModel ? `${requestedModel}|${requestedChannel}` : "";
+            const cachedOptions = cacheKey ? paramOptionsRef.current[cacheKey] : undefined;
+            if (cachedOptions && Object.keys(cachedOptions).length) {
+                const cachedAligned = alignToOptions(paramsRef.current, cachedOptions, aspectRatio);
+                if (JSON.stringify(cachedAligned) !== JSON.stringify(paramsRef.current)) {
+                    paramsRef.current = cachedAligned;
+                    setParams(cachedAligned);
+                    saveConfig({ modelKey: requestedModel, channelId: requestedChannel, params: cachedAligned });
+                }
+                return;
+            }
+            const query = new URLSearchParams();
+            const pinnedPage = targetPageRef.current;
+            if (pinnedPage) query.set("pageId", pinnedPage);
+            if (requestedModel) query.set("modelKey", requestedModel);
+            if (requestedChannel) query.set("channelId", requestedChannel);
+            if (next.videoCategory != null) query.set("videoCategory", String(next.videoCategory));
+            setParamsProbing(true);
+            try {
+                const data = await bridgeFetch(bridgeBase, `/api/params?${query.toString()}`);
+                if (!data?.ok || !data.options) return;
+                const options = data.options as Record<string, ParamOption[]>;
+                if (!Object.keys(options).length) return;
+                // 桥可能没切成功（仍停在原组合）—— 一律以它回传的「真实落点」为准。
+                const settledModel = String(data.modelKey || requestedModel);
+                const settledChannel = String(data.channelId ?? requestedChannel ?? "");
+                if (settledModel) {
+                    setParamOptions((prev) => ({ ...prev, [`${settledModel}|${settledChannel}`]: options }));
+                }
+                /*
+                 * 没强指定模型（就是「换生成模式」那条路）时，以页面真实切到的模型 / 渠道为准 ——
+                 * MochiAni 的模式和模型是绑定的，强行把旧模型按回去只会跟模式打架。
+                 */
+                if (!requestedModel && settledModel) setModelKey(settledModel);
+                if (!requestedChannel && settledChannel) setChannelId(settledChannel);
+                const aligned = alignToOptions(paramsRef.current, options, aspectRatio);
+                paramsRef.current = aligned;
+                setParams(aligned);
+                if (settledModel) saveConfig({ modelKey: settledModel, channelId: settledChannel, params: aligned });
+                if (data.activeVideoCategory != null && Number(data.activeVideoCategory) !== next.videoCategory) {
+                    setVideoCategory(Number(data.activeVideoCategory));
+                }
+            } catch {
+                // 读不到参数不算错：面板继续用 configInfo 那套（只是没有画幅）
+            } finally {
+                setParamsProbing(false);
+            }
+        },
+        [bridgeBase, aspectRatio, saveConfig],
+    );
+
     const loadModels = useCallback(
         async (preferred?: { modelKey?: string; channelId?: string; params?: Record<string, string>; videoCategory?: number | null }) => {
             setModelsLoading(true);
@@ -761,6 +912,15 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 const list = Array.isArray(data.models) ? data.models : [];
                 setModels(list);
                 setModelsError("");
+                /**
+                 * 顺手把「节点当前那套」的完整参数表存进缓存（`/api/models` 已经带回来了）。
+                 * 命中就不用再问一次 `/api/params` —— 而且这是**唯一**带画幅的免费来源。
+                 */
+                const panelOptions = data.panel?.editableParameters;
+                if (data.panel?.modelKey && panelOptions && Object.keys(panelOptions).length) {
+                    const panelKey = `${data.panel.modelKey}|${data.panel.channelId || ""}`;
+                    setParamOptions((prev) => ({ ...prev, [panelKey]: panelOptions }));
+                }
                 // 生成模式候选：画布来自生成面板，漫剧编辑器来自模型目录倒推。
                 const categories = data.videoCategories?.length ? data.videoCategories : data.panel?.videoCategories || [];
                 setCategoryOptions(categories);
@@ -796,7 +956,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 const preferChannel = preferred?.channelId || data.current?.channelId || (adoptPanel ? data.panel?.channelId || "" : "");
                 // 渠道没偏好时落到「AL」（用户指定的默认渠道），而不是死板的第一个。
                 const nextChannel = nextModel.channels?.find((item) => item.id === preferChannel) || pickPreferredChannel(nextModel) || nextModel.channels?.[0];
-                const nextParams =
+                const baseParams =
                     preferred?.params && Object.keys(preferred.params).length
                         ? { ...preferred.params }
                         : adoptPanel && preferKey === nextModel.modelKey && data.current?.params && Object.keys(data.current.params).length
@@ -804,14 +964,27 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                           : adoptPanel && preferKey === nextModel.modelKey && data.panel?.configParams && Object.keys(data.panel.configParams).length
                             ? { ...data.panel.configParams }
                             : preferredParams(nextModel, nextChannel || undefined, aspectRatio);
+                /** 有缓存就当场对齐（把 `configInfo` 缺的画幅补上）；没缓存先用 `configInfo` 那套顶着。 */
+                const cached = paramOptionsRef.current[`${nextModel.modelKey}|${nextChannel?.id || ""}`];
+                const nextParams = cached ? alignToOptions(baseParams, cached, aspectRatio) : baseParams;
                 setModelKey(nextModel.modelKey);
                 setChannelId(nextChannel?.id || "");
+                paramsRef.current = nextParams;
                 setParams(nextParams);
                 saveConfig({
                     modelKey: nextModel.modelKey,
                     channelId: nextChannel?.id || "",
                     params: nextParams,
                     ...(hasSpecificType && savedCategory != null && nextModel.specificType != null ? { videoCategory: nextModel.specificType } : {}),
+                });
+                /**
+                 * 参数表以桥回读的为准 —— `configInfo` 里没有画幅（`Seedance2.0 fast` 的 AL 线路、
+                 * `Wan3.0` 的阿里云线路都这样），不问一遍就永远少一个下拉。不阻塞首屏。
+                 */
+                void probeParams({
+                    modelKey: nextModel.modelKey,
+                    channelId: nextChannel?.id || "",
+                    videoCategory: typeof savedCategory === "number" ? savedCategory : null,
                 });
             } catch (err) {
                 setModels([]);
@@ -820,7 +993,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                 setModelsLoading(false);
             }
         },
-        [bridgeBase, saveConfig, videoCategory, aspectRatio],
+        [bridgeBase, saveConfig, videoCategory, aspectRatio, probeParams],
     );
 
     // 挂载：连桥 → 读页面 / 余额 / 模型目录 → 恢复上次任务
@@ -875,12 +1048,19 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         [selectedModel, channelId],
     );
 
-    /** 参数选项以渠道为准（不同渠道的可调项不一样），没有就退回模型自己的。 */
+    /**
+     * 参数选项：桥回读的**权威表**优先（只有它带画幅），其次渠道 `configInfo`，最后模型 `configInfo`。
+     *
+     * ⚠️ 别把顺序倒过来：`configInfo` 少了画幅这一类「挂在模型上」的参数，
+     * 让它优先就等于把画幅下拉永久藏掉（这正是 `2.0fast` 丢画幅的老 bug）。
+     */
     const paramSource = useMemo(() => {
+        const probed = paramOptions[`${modelKey}|${channelId}`];
+        if (probed && Object.keys(probed).length) return probed;
         const channelConfig = selectedChannel?.configInfo;
         if (channelConfig && Object.keys(channelConfig).length) return channelConfig;
         return selectedModel?.configInfo || {};
-    }, [selectedChannel, selectedModel]);
+    }, [paramOptions, modelKey, channelId, selectedChannel, selectedModel]);
 
     /** 这套参数里哪个键是画幅；空串 = 当前渠道不给画幅（比如 `Seedance2.0 fast` 的 AL 线路）。 */
     const aspectRatioKey = useMemo(() => aspectRatioKeyOf(paramSource), [paramSource]);
@@ -1052,15 +1232,19 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
 
     const changeModel = (value: string) => {
         const next = models.find((item) => item.modelKey === value) || null;
-        // 换模型也守「默认渠道 = AL」：模型底下有 AL 就走它，没有才落第一条。
+        // 换模型也守「默认渠道 = 原厂线路」：有 AL 走 AL，Wan 系走阿里云，都没有才落第一条。
         const nextChannel = pickPreferredChannel(next) || next?.channels?.[0];
-        const nextParams = next ? preferredParams(next, nextChannel || undefined, aspectRatio) : {};
+        const cached = paramOptions[`${value}|${nextChannel?.id || ""}`];
+        const baseParams = next ? { ...preferredParams(next, nextChannel || undefined, aspectRatio), ...aspectOnly(params) } : {};
+        const nextParams = cached ? alignToOptions(baseParams, cached, aspectRatio) : baseParams;
         setModelKey(value);
         setChannelId(nextChannel?.id || "");
+        paramsRef.current = nextParams;
         setParams(nextParams);
         saveConfig({ modelKey: value, channelId: nextChannel?.id || "", params: nextParams });
         const nextMax = next?.mediaLimits?.image?.max ?? 9;
         setRefImages((prev) => prev.slice(0, nextMax));
+        void probeParams({ modelKey: value, channelId: nextChannel?.id || "", videoCategory });
     };
 
     /**
@@ -1073,6 +1257,12 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         setVideoCategory(value);
         if (!hasModelCategory) {
             saveConfig({ videoCategory: value });
+            /*
+             * 画布模式下「生成模式」是独立开关，但它跟模型是绑定的：切模式会让页面自己换模型。
+             * 所以这里**不指定模型/渠道**，让桥切完模式后把真实落点回传，面板跟着走
+             * （强行把旧模型按回去只会跟模式打架）。
+             */
+            void probeParams({ videoCategory: value });
             return;
         }
         const hit = models.find((item) => item.specificType === value);
@@ -1081,11 +1271,15 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             return;
         }
         const nextChannel = pickPreferredChannel(hit) || hit.channels?.[0];
-        const nextParams = preferredParams(hit, nextChannel || undefined, aspectRatio);
+        const cached = paramOptions[`${hit.modelKey}|${nextChannel?.id || ""}`];
+        const baseParams = preferredParams(hit, nextChannel || undefined, aspectRatio);
+        const nextParams = cached ? alignToOptions(baseParams, cached, aspectRatio) : baseParams;
         setModelKey(hit.modelKey);
         setChannelId(nextChannel?.id || "");
+        paramsRef.current = nextParams;
         setParams(nextParams);
         saveConfig({ videoCategory: value, modelKey: hit.modelKey, channelId: nextChannel?.id || "", params: nextParams });
+        void probeParams({ modelKey: hit.modelKey, channelId: nextChannel?.id || "", videoCategory: value });
     };
 
     const changeChannel = (value: string) => {
@@ -1095,9 +1289,13 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             saveConfig({ modelKey, channelId: value, params });
             return;
         }
-        const nextParams = preferredParams(selectedModel, next, aspectRatio);
+        const cached = paramOptions[`${modelKey}|${value}`];
+        const baseParams = { ...preferredParams(selectedModel, next, aspectRatio), ...aspectOnly(params) };
+        const nextParams = cached ? alignToOptions(baseParams, cached, aspectRatio) : baseParams;
+        paramsRef.current = nextParams;
         setParams(nextParams);
         saveConfig({ modelKey, channelId: value, params: nextParams });
+        void probeParams({ modelKey, channelId: value, videoCategory });
     };
 
     const changeParam = (key: string, value: string) => {
@@ -1571,12 +1769,12 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                                 ))}
                             </div>
                         ) : null}
-                        {/* 画幅：渠道不给画幅参数时**不放假下拉**，只把当前偏好说清楚 —— 这种渠道
-                            （Seedance2.0 fast 的 AL 线路就是）比例跟首张参考图 / 模型默认走，
-                            摆个选择器出来改了也不生效，比不显示更糟。 */}
+                        {/* 画幅：渠道不给画幅参数时**不放假下拉**，只把当前偏好说清楚。
+                            注意「有没有画幅」以桥回读的权威参数表为准 —— `configInfo` 里没有不代表模型没有
+                            （`2.0fast` / `Wan3.0` 的画幅挂在模型的 `modelSize` 上），所以回读期间不下结论。 */}
                         {selectedModel && !aspectRatioKey && !isCarton ? (
                             <div className="text-[10px] opacity-45" title="这条渠道没有画幅参数，比例由首张参考图（或模型默认）决定">
-                                画幅 {aspectRatio} · 当前渠道没有画幅参数，比例跟首张参考图走
+                                {paramsProbing ? "正在读取这条线路的参数…" : `画幅 ${aspectRatio} · 当前渠道没有画幅参数，比例跟首张参考图走`}
                             </div>
                         ) : null}
                         {selectedModel ? (

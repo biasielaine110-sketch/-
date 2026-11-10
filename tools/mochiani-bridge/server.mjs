@@ -1765,6 +1765,33 @@ function readOptionList(payload) {
 }
 
 /**
+ * `model_controls.editableParameters` → `{ 参数键: [{label,value,priceRatio}] }`。
+ *
+ * 🔴 这是**唯一**能拿到完整参数表的地方。MochiAni 的画幅（`model_size`）挂在**模型**的
+ * `modelSize` 逗号串上，由它前端在 `configInfo` 缺这一项时临时合进去；而 `model_options`
+ * 和渠道 `configInfo` 里都没有这一项 —— 所以只看 `configInfo` 的画幅选择器会凭空消失
+ * （`Seedance2.0 fast` 的 AL 线路、`Wan3.0` 的阿里云线路全是这种情况）。
+ */
+function readParamOptions(controls) {
+    const out = {};
+    const list = Array.isArray(controls?.editableParameters) ? controls.editableParameters : [];
+    for (const item of list) {
+        const key = String(item?.key || "").trim();
+        const options = Array.isArray(item?.options) ? item.options : [];
+        if (!key || !options.length) continue;
+        const normalized = options
+            .map((option) => {
+                const value = String(option?.value ?? option?.label ?? "").trim();
+                const label = String(option?.label ?? option?.value ?? "").trim() || value;
+                return { label, value, priceRatio: Number(option?.priceRatio) || 1 };
+            })
+            .filter((option) => option.value);
+        if (normalized.length) out[key] = normalized;
+    }
+    return out;
+}
+
+/**
  * 真实模型目录 —— 面板要像「视频生成窗口」那样先选模型/渠道，就必须读 MochiAni 自己的
  * model_options，不能凭模型名猜（46 个模型里有同名不同 id 的）。
  *
@@ -1917,8 +1944,11 @@ async function handleModels(query) {
             panel: controls?.panelMounted
                 ? {
                       modelKey: controls.modelKey,
+                      modelId: String(controls.modelId || ""),
                       channelId: String(controls.channelId || ""),
                       configParams: controls.configParams || {},
+                      /** 节点当前模型/渠道的**完整**参数候选（含 `configInfo` 里没有的画幅）。 */
+                      editableParameters: readParamOptions(controls),
                       videoCategories: controls.videoCategories || [],
                       activeVideoCategory: controls.activeVideoCategory ?? null,
                       channelAvailability: controls.channelAvailability || [],
@@ -1927,6 +1957,119 @@ async function handleModels(query) {
         };
     } catch (error) {
         return { ok: false, code: error.code || "MODELS_FAILED", error: error.message };
+    }
+}
+
+/** 参数探测按节点排队：并发 `configure_model` 会互相踩 revision / configToken。 */
+const paramQueues = new Map();
+function serializeByNode(nodeId, task) {
+    const previous = paramQueues.get(nodeId) || Promise.resolve();
+    const next = previous.then(task, task);
+    paramQueues.set(
+        nodeId,
+        next.catch(() => null),
+    );
+    return next;
+}
+
+/**
+ * 按「用户选的模型 / 渠道 / 生成模式」回读节点上真实的参数表。
+ *
+ * 🔴 为什么非要多打这一趟：`configInfo` 只管渠道级参数，**画幅不在里面**（见 `readParamOptions`）。
+ * 完整参数表只存在于 `model_controls.editableParameters`，而它描述的是「节点当前那套模型/渠道」——
+ * 所以想查「用户选的这套」有什么参数，只能先把节点切过去再读回来。
+ *
+ * 顺序照 `applyModelConfig`：生成模式 → 模型 → 渠道（换模式会把模型整套重置）。
+ * 每一步都容错：切不动只记 warning，仍然把当前参数表返给面板，别让选择器整个空掉。
+ */
+async function handleParams(query) {
+    try {
+        const ctx = await readTargetContext(query.pageId || "");
+        if (ctx.kind !== "canvas") {
+            return {
+                ok: false,
+                code: "NOT_CANVAS",
+                error: "只有无限画布这条链路需要参数探测（漫剧编辑器的参数在模型目录的 configInfo 里）",
+            };
+        }
+        const { pageId, origin } = ctx;
+        const read = await canvasRead(pageId, origin);
+        const existing = pickVideoNode(read);
+        let nodeId = String(query.nodeId || "").trim() || String(existing?.id || "");
+        let probeCreated = false;
+        if (!nodeId) {
+            const position = nextNodePosition(read);
+            const created = await callTool("mochiani_canvas_create_nodes", {
+                pageId,
+                origin,
+                expectedRevision: read.revision,
+                idempotencyKey: randomUUID(),
+                nodes: [{ kind: "video", x: position.x, y: position.y }],
+            });
+            nodeId = pickNodeId(created);
+            probeCreated = Boolean(nodeId);
+        }
+        if (!nodeId) return { ok: false, code: "NO_VIDEO_NODE", error: "画布上没有视频节点，临时建一个也没成功" };
+
+        return await serializeByNode(nodeId, async () => {
+            let controls = await waitPanelControls(pageId, origin, nodeId, 20000);
+            const applied = [];
+            const warnings = [];
+            const step = async (payload, label) => {
+                try {
+                    await callTool("mochiani_canvas_configure_model", {
+                        pageId,
+                        origin,
+                        expectedRevision: String(controls?.revision || ""),
+                        idempotencyKey: randomUUID(),
+                        nodeId,
+                        expectedConfig: String(controls?.configToken || ""),
+                        ...payload,
+                    });
+                    controls = await waitPanelControls(pageId, origin, nodeId, 15000);
+                    applied.push(label);
+                } catch (error) {
+                    warnings.push(`${label}没成功（${error?.message || error}）`);
+                }
+            };
+
+            const wantedCategory = query.videoCategory == null || query.videoCategory === "" ? null : Number(query.videoCategory);
+            if (wantedCategory != null && String(controls.activeVideoCategory ?? "") !== String(wantedCategory)) {
+                const hit = (controls.videoCategories || []).find((item) => Number(item.key) === wantedCategory);
+                if (hit && hit.compatible === false) {
+                    warnings.push(`「${hit.label}」当前不可用（${hit.reason || "渠道不支持"}），沿用原模式`);
+                } else {
+                    await step({ action: "video_category", value: String(wantedCategory) }, `生成模式切到 ${hit?.label || wantedCategory}`);
+                }
+            }
+
+            const wantedModel = String(query.modelKey || "").trim();
+            if (wantedModel && wantedModel !== String(controls.modelKey || "")) {
+                await step({ action: "model", value: wantedModel }, `模型切到 ${wantedModel}`);
+            }
+
+            const wantedChannel = String(query.channelId || "").trim();
+            if (wantedChannel && wantedChannel !== String(controls.channelId || "")) {
+                await step({ action: "channel", value: wantedChannel }, `渠道切到 ${wantedChannel}`);
+            }
+
+            return {
+                ok: true,
+                nodeId,
+                probeCreated,
+                modelKey: String(controls.modelKey || ""),
+                modelId: String(controls.modelId || ""),
+                channelId: String(controls.channelId || ""),
+                activeVideoCategory: controls.activeVideoCategory ?? null,
+                params: controls.configParams || {},
+                options: readParamOptions(controls),
+                categories: controls.videoCategories || [],
+                applied,
+                warnings,
+            };
+        });
+    } catch (error) {
+        return { ok: false, code: error?.code || "PARAMS_FAILED", error: error?.message || String(error) };
     }
 }
 
@@ -1966,7 +2109,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.5.0",
+            version: "1.6.0",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
@@ -2014,6 +2157,18 @@ async function handle(req, res) {
         const body = await handleModels({
             pageId: url.searchParams.get("pageId") || "",
             nodeId: url.searchParams.get("nodeId") || "",
+        });
+        send(res, body.ok ? 200 : 409, body);
+        return;
+    }
+
+    if (req.method === "GET" && pathname === "/api/params") {
+        const body = await handleParams({
+            pageId: url.searchParams.get("pageId") || "",
+            nodeId: url.searchParams.get("nodeId") || "",
+            modelKey: url.searchParams.get("modelKey") || "",
+            channelId: url.searchParams.get("channelId") || "",
+            videoCategory: url.searchParams.get("videoCategory"),
         });
         send(res, body.ok ? 200 : 409, body);
         return;
@@ -2136,4 +2291,5 @@ export {
     matchCartonAsset,
     parseVoiceLines,
     normalizeConfigOptions,
+    readParamOptions,
 };
