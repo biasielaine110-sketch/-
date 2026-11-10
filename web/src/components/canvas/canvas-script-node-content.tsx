@@ -12,7 +12,7 @@ import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type S
 import { CanvasScriptBatchAssetDialog } from "@/components/canvas/canvas-script-batch-asset-dialog";
 import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
-import { buildScriptGhostPrefill, buildScriptMashuPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, resolveAutoApplyScriptScheme, resolveSchemeDefaultMergeMode, resolveScriptPromptValues, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, shouldPinScriptPrompt, type ScriptLibrarySchemeId, type ScriptPromptField, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
+import { buildScriptGhostPrefill, buildScriptMashuPrefill, buildScriptMomanPrefill, buildScriptSchemePrefill, buildScriptSchemeSeed, resolveSchemeDefaultMergeMode, resolveScriptPromptValues, resolveScriptSchemeId, SCRIPT_SCHEME_IDS, shouldPinScriptPrompt, type ScriptLibrarySchemeId, type ScriptPromptField, type ScriptSchemeId, type ScriptSchemePrefill } from "@/constant/script-scheme";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import {
     buildStoryScriptAssetDescriptionHints,
@@ -968,40 +968,36 @@ export function CanvasScriptNodeContent({
      * 内置提示词 —— 界面与行为对不上，比不默认更糟。唯一正确的落点是「挂载后真的把三段填进去」。
      *
      * 判断条件（已选方案 / 手填过 / 词库里取不到 / prefill 未就绪 → 不动）收在
-     * `resolveAutoApplyScriptScheme` 里，探针能钉住；这里只管落库。
+     * `buildScriptSchemeSeed`（内部走 `resolveAutoApplyScriptScheme`）里，探针能钉住；这里只管落库。
      * 老节点不再迁移：已写进 metadata 的方案（含 10-19 那版的 `library`）一律尊重。
      */
     const schemeAutoAppliedRef = useRef(false);
     useEffect(() => {
         if (schemeAutoAppliedRef.current) return;
-        const next = resolveAutoApplyScriptScheme({
-            scheme: node.metadata?.scriptScheme,
-            directorPrefill,
-            x20Prefill,
-            libraryPrefill,
-            customSystemPrompt: node.metadata?.scriptSystemPrompt,
-            customAssetPrompt: node.metadata?.scriptAssetPrompt,
-            customShotPrompt: node.metadata?.scriptShotPrompt,
-        });
-        if (!next) return;
-        schemeAutoAppliedRef.current = true;
-        const prefill = schemePrefills[next];
         /**
-         * 默认「视频分段」：新节点挂载后会自动套上第四套，所以这里也要落一次 `每 4 镜一段`
-         * （用户 2026-11-07：第 1~6 套都默认每 4 镜一分段）。
-         * ⚠️ 只在**用户没设过**时写 —— 老节点可能早就自己选过「单镜」，自动预填不该把它悄悄改掉。
+         * 与 `runVideoReverse`（03 反推视频建脚本节点）**调同一个纯函数**：算出「该用哪套方案 +
+         * 默认视频分段 + 三段预填」。03 必须在**建节点时**就把这份补丁写进 metadata —— 组件还没挂载，
+         * `runScriptGeneration` 就已经跑了，等这条 effect 补上时表已经按第一套内置格式生成完
+         * （用户 2026-11-09 报障的「视频运动提示词格式不对」）。两处各写一套必然漂，所以收进
+         * `buildScriptSchemeSeed`，这里只负责落库。
          */
-        const defaultMergeMode = resolveSchemeDefaultMergeMode(next);
-        patchMetadata({
-            scriptScheme: next,
-            ...(defaultMergeMode && !node.metadata?.scriptMergeMode ? { scriptMergeMode: defaultMergeMode } : {}),
-            ...(prefill.system ? { scriptSystemPrompt: prefill.system } : {}),
-            ...(prefill.asset ? { scriptAssetPrompt: prefill.asset } : {}),
-            ...(prefill.shot ? { scriptShotPrompt: prefill.shot } : {}),
+        const seed = buildScriptSchemeSeed({
+            scheme: node.metadata?.scriptScheme,
+            textPrompts: globalConfig?.textPrompts,
+            skills: skillPacks,
+            mergeMode: node.metadata?.scriptMergeMode,
+            stored: {
+                system: node.metadata?.scriptSystemPrompt,
+                asset: node.metadata?.scriptAssetPrompt,
+                shot: node.metadata?.scriptShotPrompt,
+            },
         });
-        // patchMetadata 每次渲染都是新函数；真正的闸门是 next 与 ref，重复执行最多「看一眼就退出」。
+        if (!seed) return;
+        schemeAutoAppliedRef.current = true;
+        patchMetadata(seed);
+        // patchMetadata 每次渲染都是新函数；真正的闸门是 seed 与 ref，重复执行最多「看一眼就退出」。
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [libraryPrefill, x20Prefill, directorPrefill, node.metadata?.scriptAssetPrompt, node.metadata?.scriptScheme, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt]);
+    }, [globalConfig?.textPrompts, node.metadata?.scriptAssetPrompt, node.metadata?.scriptMergeMode, node.metadata?.scriptScheme, node.metadata?.scriptShotPrompt, node.metadata?.scriptSystemPrompt, skillPacks]);
 
     /**
      * 老节点补默认档位：`scriptMergeMode` **没设过**（= 用户从没点过「视频分段」，一直是归一化出来的

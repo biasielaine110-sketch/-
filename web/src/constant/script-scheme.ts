@@ -563,3 +563,67 @@ export function resolveAutoApplyScriptScheme(options: {
     if (hasSchemePrompt(options.libraryPrefill)) return "library";
     return null;
 }
+
+/** 「自动套用默认方案」要落进节点 metadata 的那一份补丁（第一套 / 条件不满足 → `null`）。 */
+export type ScriptSchemeSeed = Partial<{
+    scriptScheme: ScriptLibrarySchemeId;
+    /**
+     * 只可能是 `SCRIPT_SCHEME_DEFAULT_MERGE_MODE`（`"4"`）—— 用 `typeof` 取而不是写 `string`：
+     * `metadata.scriptMergeMode` 的类型是 `StoryScriptMergeMode`（联合字面量），宽成 `string` 就赋不进去了。
+     */
+    scriptMergeMode: typeof SCRIPT_SCHEME_DEFAULT_MERGE_MODE;
+    scriptSystemPrompt: string;
+    scriptAssetPrompt: string;
+    scriptShotPrompt: string;
+}>;
+
+/**
+ * 默认方案要写的**整份 metadata 补丁**（方案 + 默认视频分段 + 三段预填）—— 建节点与挂载预填唯一口径。
+ *
+ * 为什么需要它（用户 2026-11-09 报障：「03 反推出来的分镜表，视频运动提示词不是第四套那套八段格式」）：
+ * 方案预填一直只发生在**脚本节点组件挂载之后**（`canvas-script-node-content.tsx` 的自动预填 effect）。
+ * 手点新建没问题 —— 用户填完内容再点生成，effect 早跑完了。但 03（反推视频 → 建脚本节点 → 立刻一键视频）
+ * 是**同一次点击里**先 `pushNodes` 再 `runScriptGeneration`：React 还没提交渲染、组件还没挂载，
+ * 生成就已经读到 `scriptScheme: undefined`（归一成第一套内置提示词），第四套那条
+ * 「`video_motion_prompt` 只能是八段标签块」的硬约束（`STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT` +
+ * `STORY_SCRIPT_DIRECTOR_VIDEO_SYSTEM_OVERRIDE`）根本没进 system / 任务书；
+ * 之后 effect 才把方案补上 —— 表已按内置的「6 段 / `[a] + [b]` 括号链」生成，铺链路却按第四套拼风格行，
+ * 两边对不上（用户看到的就是「视频运动提示词格式不太对」）。
+ *
+ * 所以把「该写什么」收成这一个纯函数：**建节点时**（`runVideoReverse` 的 03）与**挂载时**（组件 effect）
+ * 都调它，两处口径永远一致；词库 / 技能库里没有可用内容时返回 `null`，与「手点新建」的回落链完全一样。
+ *
+ * @param mergeMode 节点上**已经存过**的「视频分段」档位 —— 有值就一个字都不动（用户手点过「单镜」）。
+ * @param stored    节点上已有的三段 —— 填过任何一段就说明「手填优先」，自动套用要退让。
+ */
+export function buildScriptSchemeSeed(options: {
+    scheme?: unknown;
+    textPrompts?: readonly TextPromptEntry[] | null;
+    skills?: readonly ScriptSchemeSkillSource[] | null;
+    mergeMode?: unknown;
+    stored?: Partial<Record<ScriptPromptField, unknown>> | null;
+}): ScriptSchemeSeed | null {
+    const next = resolveAutoApplyScriptScheme({
+        scheme: options.scheme,
+        directorPrefill: buildScriptSchemePrefill(options.textPrompts, "director"),
+        x20Prefill: buildScriptSchemePrefill(options.textPrompts, "x20"),
+        libraryPrefill: buildScriptSchemePrefill(options.textPrompts, "library"),
+        customSystemPrompt: options.stored?.system,
+        customAssetPrompt: options.stored?.asset,
+        customShotPrompt: options.stored?.shot,
+    });
+    if (!next) return null;
+    const prefill = buildScriptSchemePrefillLive(next, options.textPrompts, options.skills);
+    // 理论到不了（`next` 只可能是 director / library，两者都有 system / shot 才能被选中），留个安全出口。
+    if (!prefill) return { scriptScheme: next };
+    const mergeMode = resolveSchemeDefaultMergeMode(next);
+    return {
+        scriptScheme: next,
+        // ⚠️ 只在**用户没设过**时写：老节点可能早就自己选过「单镜」，自动预填不该把它悄悄改掉。
+        ...(mergeMode && !hasText(options.mergeMode) ? { scriptMergeMode: mergeMode } : {}),
+        // 空串不写：让那一段保持原值（= 回落到内置提示词），绝不拿空串把用户已有正文清掉。
+        ...(prefill.system ? { scriptSystemPrompt: prefill.system } : {}),
+        ...(prefill.asset ? { scriptAssetPrompt: prefill.asset } : {}),
+        ...(prefill.shot ? { scriptShotPrompt: prefill.shot } : {}),
+    };
+}

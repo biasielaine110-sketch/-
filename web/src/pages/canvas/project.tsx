@@ -102,7 +102,7 @@ import {
     type ScriptAssetRole,
     type ScriptRefLinkKind,
 } from "@/constant/story-script";
-import { resolveScriptPromptValues, resolveScriptSchemeId } from "@/constant/script-scheme";
+import { buildScriptSchemeSeed, resolveScriptPromptValues, resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -10356,14 +10356,28 @@ function AtelierCanvasPage() {
                 ...(target.quality ? { scriptVideoQuality: target.quality } : {}),
                 ...(target.model ? { scriptVideoModel: target.model } : {}),
             };
-            const scriptNode = createCanvasNode(CanvasNodeType.Script, scriptSlot, { status: NODE_STATUS_IDLE, scriptSource: "", scriptPrompt: "", scriptRows: [], ...scriptTargetMeta });
+            /**
+             * 🔴 执行方案必须**建节点时就写进去**（用户 2026-11-09 报障：「03 出来的视频运动提示词
+             * 不是第四套那套八段格式」）。
+             *
+             * 手点新建的脚本节点靠组件挂载后的自动预填拿到方案；但 03 是**同一次点击里**先建节点、
+             * 紧接着 `handleOneClickVideo` → `runScriptGeneration` —— React 还没提交渲染，组件还没挂载，
+             * 生成就已经读到 `scriptScheme: undefined`（= 第一套内置提示词），第四套的
+             * `video_motion_prompt` 八段硬约束（`STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT`）压根没进 system / 任务书；
+             * 等 effect 把方案补上时表已经按内置的括号链格式生成完了，铺链路又按第四套拼风格行 —— 两头对不上。
+             *
+             * 这里用与组件**同一个纯函数**（`buildScriptSchemeSeed`）算好整份补丁，建节点时一次落库，
+             * 生成立刻就能读到。词库 / 技能库里取不到内容时它是 `null`，行为与改造前一致（停在第一套）。
+             */
+            const scriptSchemeSeed = buildScriptSchemeSeed({ textPrompts: effectiveConfig.textPrompts, skills: chatSkillPacks }) || {};
+            const scriptNode = createCanvasNode(CanvasNodeType.Script, scriptSlot, { status: NODE_STATUS_IDLE, scriptSource: "", scriptPrompt: "", scriptRows: [], ...scriptSchemeSeed, ...scriptTargetMeta });
             pushNodes([scriptNode], resolveConnectionPairs(textNode.id, scriptNode.id, [...nodesRef.current, scriptNode], "source"));
 
             report(referenceAssets.length ? `执行一键视频（参考图 ${referenceAssets.length} 张会先按名字挂到道具格，最长约 45 分钟）…` : "执行一键视频（进度见脚本节点，最长约 45 分钟）…");
             await handleOneClickVideo(scriptNode.id, { referenceAssets });
             return { ok: true, chatNodeId: chatNode.id, textNodeId: textNode.id, scriptNodeId: scriptNode.id };
         },
-        [effectiveConfig.imageModel, effectiveConfig.textModel, handleOneClickVideo, resolveModelForCapability, reverseVideoModel, sendChatMessage],
+        [chatSkillPacks, effectiveConfig.imageModel, effectiveConfig.textModel, effectiveConfig.textPrompts, handleOneClickVideo, resolveModelForCapability, reverseVideoModel, sendChatMessage],
     );
 
     /** 「反推视频」节点里可选的目标：画布上所有有内容的视频节点。 */
