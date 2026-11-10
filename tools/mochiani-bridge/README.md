@@ -249,7 +249,7 @@ chip 上的 × 断开的是那根连线（`handleRemoveLinkedMedia`，Config 汇
 | GET | `/api/models?pageId=&nodeId=` | **真实模型目录**（模型 / 渠道 / 参数 / 媒体上限）+ 面板当前配置 |
 | GET | `/api/params?pageId=&nodeId=&modelKey=&channelId=&videoCategory=` | 回读某套「模型 + 渠道」的**真实参数表**（画幅只能从这里拿，见 skill §11） |
 | POST | `/api/tidy` | `{pageId?}` → 把画布上**撞在一起**的节点挪开（只动真叠压的），返回 `{moved, rounds}` |
-| POST | `/api/plan` | `{prompt, pageId?, modelKey?, channelId?, params?, images?, videos?, audios?}` → 建节点 + 切配置 + 导素材 + 预检，返回 job（`stage=ready`）。三个素材数组的元素是 `{url}` 或 `{dataUrl}`。**发完会自动检查这一批有没有和画布上已有节点叠压，叠了整批挪开** |
+| POST | `/api/plan` | `{prompt, pageId?, modelKey?, channelId?, params?, images?, videos?, audios?, sync?}` → 建 job 并预检。**1.6.8 起默认异步**：立刻回 `{ok, pending:true, job.stage="planning"}`，重活（建素材 / 传图 / 建分镜 / 预检）在后台跑，前端每 3s 拉 `/api/jobs/:id` 看日志；加 `sync:true` 恢复老的一次性返回。三个素材数组的元素是 `{url}` 或 `{dataUrl}`。**发完会自动检查这一批有没有和画布上已有节点叠压，叠了整批挪开** |
 | POST | `/api/jobs/:id/confirm` | 确认下单，开始轮询 |
 | POST | `/api/jobs/:id/cancel` | 停止本机轮询 |
 | GET | `/api/jobs` / `/api/jobs/:id` | 任务列表 / 单个任务 |
@@ -324,3 +324,5 @@ https://wb2api.tailb5bc86.ts.net:8443/?token=mochia6262f1472a18dc7fe55c9c5
 | 渠道没生效（warning） | 该渠道对这个模型不可用，换一个渠道 |
 | 生成一直「生成中」 | 去 MochiAni 里看节点状态；别重复下单 |
 | 余额不足 | 预检能过，`确认生成` 会被 MochiAni 拒；先充值 |
+| 浏览器报 `blocked by CORS policy: No 'Access-Control-Allow-Origin'` + `408 Request Timeout`（远程地址才出现） | **不是 CORS 问题**：响应根本没回来，浏览器把网络层失败一律报成 CORS。1.6.8 已把 `/api/plan` 改成「先回 job 再后台算」，这个错不会再出现；同时桥会打一行访问日志 `[bridge] POST /api/plan -> 200 27ms 请求体179B`（>8s 会标 ⚠️慢），据此区分「请求没到桥」/「桥算太久」。**同一台机器上测就填 `http://127.0.0.1:17399`**，别走 Funnel（TLS 握手绕 DERP≈8s，纯属自找麻烦） |
+| 远程 `/api/plan` 一直没回、日志里也没有 `[bridge] POST /api/plan` | 请求没到桥：Funnel 没起（`tailscale funnel status`）、端口映射不对，或地址里的 `?token=` 没带上 |

@@ -232,6 +232,8 @@ function modelKindInfo(item: ModelOption): { key: string; label: string; order: 
 type BridgeBody = Record<string, unknown> & {
     ok?: boolean;
     error?: string;
+    /** 桥 1.6.8+：预检丢到后台跑了，`job.stage` 会停在 `planning`，靠轮询拿结果。 */
+    pending?: boolean;
     job?: MochianiJob;
     pages?: MochianiPage[];
     target?: MochianiPage;
@@ -1478,6 +1480,11 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             message.warning("先连上本机桥并读到 MochiAni 页面（点右上角「刷新」）");
             return;
         }
+        // 桥 1.6.8 起预检是「先回任务、后台算」，期间再点会排第二个预检（白建一遍素材）。
+        if (job?.stage === "planning") {
+            message.warning("上一次预检还在跑，进度看下面的日志（每 3 秒刷一次）");
+            return;
+        }
         const styleTemplate = getStyleTemplate(node.metadata?.styleTemplateId);
         const text = composeStyledPrompt(base, styleTemplate ? buildStylePromptText(styleTemplate) : "", "");
         const media = await collectMediaPayload();
@@ -1547,6 +1554,8 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             });
             if (data.job) {
                 setJob(data.job);
+                // 后台预检：job.stage = "planning"，下面的轮询会把日志一点点补上。
+                if (data.pending) message.info("预检已开始，进度在下面日志里（建素材 / 传图比较慢）");
                 if (!data.ok) setError(data.error || "预检没有通过");
             } else {
                 setError(data.error || "预检失败");

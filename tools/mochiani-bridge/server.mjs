@@ -2164,11 +2164,31 @@ function pruneJobs() {
     }
 }
 
-async function planJob(prompt, preferredPageId, extras = {}) {
+/**
+ * 预检分两步：`readTargetContext`（要读页面，几秒）必须同步等，之后的重活
+ * （建素材 / 传图 / 拉模型参数）可以放到后台跑。
+ *
+ * 为什么要拆：远程链路（Tailscale Funnel）上 `/api/plan` 经常被浏览器报成
+ * `CORS 缺 ACAO + 408` —— 那不是 CORS 问题，是**响应迟迟没回来**（服务端还在算），
+ * 反代/浏览器先放弃了。1.6.8 起默认「先回 job（stage=planning）再后台算」，
+ * 前端本来就有 3s 一次的 job 轮询，日志会一点点刷出来。
+ */
+async function planJob(prompt, preferredPageId, extras = {}, options = {}) {
     if (!String(prompt || "").trim()) throw new BridgeError("指令不能为空", "EMPTY_PROMPT");
     const ctx = await readTargetContext(preferredPageId);
     const job = createJob(ctx.kind, String(prompt).trim(), ctx.page, extras);
     pushLog(job, `目标：${ctx.page.siteName || ctx.page.siteKind}（${ctx.kind === "canvas" ? "无限画布" : "漫剧编辑器"}）`);
+    if (options.background) {
+        job.stage = "planning";
+        pushLog(job, "后台预检中…（每完成一步会在这里多一行）");
+        void runPlanWork(job, ctx).catch(() => {});
+        return job;
+    }
+    await runPlanWork(job, ctx);
+    return job;
+}
+
+async function runPlanWork(job, ctx) {
     try {
         if (ctx.kind === "canvas") await planCanvasJob(job, ctx);
         else await planCartonJob(job, ctx);
@@ -2632,13 +2652,23 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.7",
+            version: "1.6.8",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
             authRequired: Boolean(TOKEN),
             hint: TOKEN ? "远程模式：地址需带 ?token=…" : "画布侧默认连 http://127.0.0.1:17399",
         });
+        return;
+    }
+
+    // 诊断用：睡 N 毫秒再回。用来量「公网反代到底能等多久」（浏览器侧报的是 CORS/408，
+    // 实际是反代等不及）。例：/api/__sleep?ms=45000&token=…
+    if (req.method === "GET" && pathname === "/api/__sleep") {
+        const ms = Math.min(600000, Math.max(0, Number(url.searchParams.get("ms") || 1000) || 0));
+        const t0 = Date.now();
+        await new Promise((resolve) => setTimeout(resolve, ms));
+        send(res, 200, { ok: true, requestedMs: ms, sleptMs: Date.now() - t0 });
         return;
     }
 
@@ -2731,8 +2761,9 @@ async function handle(req, res) {
                 cast: body.cast,
                 voiceover: body.voiceover,
                 generateVoice: body.generateVoice,
-            });
-            send(res, 200, { ok: true, job: publicJob(job) });
+                // 同步模式（老行为）：`?sync=1`。默认后台跑，避免公网链路把长请求掐成 408。
+            }, { background: !body.sync });
+            send(res, 200, { ok: true, pending: job.stage === "planning", job: publicJob(job) });
         } catch (error) {
             send(res, 502, { ok: false, code: error.code || "PLAN_FAILED", error: describeCanvasError(error), detail: error.payload ?? null });
         }
@@ -2793,9 +2824,40 @@ async function handle(req, res) {
     send(res, 404, { ok: false, error: "not found" });
 }
 
+/**
+ * 请求访问日志：只记 `/api/*`，一行一条（状态 + 耗时 + 请求体大小）。
+ * 起因：远程（Tailscale Funnel）报 `CORS 缺 ACAO + 408`，但那是**响应根本没回来**
+ * —— 浏览器把网络层的失败一律报成 CORS。有了这行日志才能区分
+ * 「请求没到桥」/「到了桥、桥算太久」/「桥回了但反代等不及」。
+ */
+function formatBytes(size) {
+    const n = Number(size);
+    if (!Number.isFinite(n) || n <= 0) return "0B";
+    if (n < 1024) return `${n}B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+    return `${(n / 1024 / 1024).toFixed(2)}MB`;
+}
+
 const server = http.createServer((req, res) => {
+    const startedAt = Date.now();
+    const apiPath = String(req.url || "/").split("?")[0];
+    if (apiPath.startsWith("/api/")) {
+        res.on("finish", () => {
+            const ms = Date.now() - startedAt;
+            const slow = ms > 8000 ? " ⚠️慢（反代可能等不及）" : "";
+            console.log(
+                `[bridge] ${req.method} ${apiPath} -> ${res.statusCode} ${ms}ms 请求体${formatBytes(req.headers["content-length"])}${slow}`,
+            );
+        });
+    }
     handle(req, res).catch((error) => send(res, 500, { ok: false, error: error?.message || String(error) }));
 });
+
+// 公网反代链路慢的时候，node 自己的 300s 上限会先掐掉长请求并发 408（而且不带 CORS 头）。
+// 放宽到 15 分钟，真正「跑太久」交给前端自己的 busy 状态去提示。
+server.requestTimeout = 15 * 60 * 1000;
+server.headersTimeout = 120 * 1000;
+server.keepAliveTimeout = 65 * 1000;
 
 /**
  * 探针模式：`MOCHIANI_BRIDGE_NO_LISTEN=1` 时只把函数加载进来、不起监听也不连 MCP，
