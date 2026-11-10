@@ -2003,6 +2003,9 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                                         </div>
                                     );
                                 })}
+                                <div className="text-[10px] leading-snug opacity-40">
+                                    没图也能发：提示词里写「@图片1 为男主」，桥会按连线顺序把第 1 张图挂成「男主」素材。
+                                </div>
                                 <label className="flex flex-col gap-0.5">
                                     <span className="text-[10px] opacity-45">配音（角色名：台词，一行一条）</span>
                                     <Input.TextArea
@@ -2026,7 +2029,8 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                             </div>
                         ) : (
                             <div className="mt-1 text-[10px] leading-snug opacity-40">
-                                不填就只发提示词，出场人物 / 场景 / 道具交给 MochiAni 按分镜自己解析。
+                                不填就只发提示词，出场人物 / 场景 / 道具交给 MochiAni 按分镜自己解析；
+                                提示词里写「@图片1 为男主」时，桥按连线顺序把对应图挂成素材。
                             </div>
                         )}
                     </div>

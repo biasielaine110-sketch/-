@@ -1361,6 +1361,94 @@ function composeCartonScript(prompt, groups) {
 }
 
 /**
+ * 从分镜文案里读出「哪张图是谁」。
+ *
+ * 用户常只写文案、不填面板里的「出场素材」：`@图片1 为男主，图片2 为女主，图片3 为路人`。
+ * 画布连进来的参考图顺序就是 `job.images` 的顺序（`图片1` = 第 1 张），所以这里解析成
+ * `[{ marker:"图片1", index:0, kind:"character", name:"男主" }]`，由 planCartonJob
+ * 建素材 + 传素材图，图就不会「文字过去了、图没过去」。
+ *
+ * 只认**带连接词**的明确写法（`为 / 是 / = / : / →`）。不认连接词就认，
+ * 会把「参考图片1 和图片2」这种正文误读成素材名，宁缺勿错。
+ */
+const CARTON_IMAGE_MARKER = /@?图片\s*([0-9]{1,2})\s*(?:作为|当作|为|是|＝|=|→|->|:|：)\s*([^\s，,。；;、：:!！?？"'（）()\[\]【】]{1,20})/gu;
+/** 名字里带类别前缀时顺带定类型：`图片2 为场景咖啡馆`。 */
+const CARTON_NAME_KIND_HINT = [
+    { prefix: "角色", kind: "character" },
+    { prefix: "人物", kind: "character" },
+    { prefix: "场景", kind: "scene" },
+    { prefix: "道具", kind: "prop" },
+];
+
+function parseImageBindings(prompt, imageCount) {
+    const out = [];
+    const seen = new Set();
+    const text = String(prompt || "");
+    for (const match of text.matchAll(CARTON_IMAGE_MARKER)) {
+        const index = Number(match[1]) - 1;
+        if (!Number.isInteger(index) || index < 0 || index >= imageCount) continue;
+        let name = String(match[2] || "").trim();
+        if (!name) continue;
+        let kind = "character";
+        let typed = false;
+        for (const hint of CARTON_NAME_KIND_HINT) {
+            if (name.startsWith(hint.prefix) && name.length > hint.prefix.length) {
+                kind = hint.kind;
+                name = name.slice(hint.prefix.length).trim();
+                typed = true;
+                break;
+            }
+        }
+        if (!typed) {
+            // `图片2 为场景 咖啡馆`：类别词被空格隔开单独成词时，名字在它后面
+            const hint = CARTON_NAME_KIND_HINT.find((item) => item.prefix === name);
+            if (hint) {
+                const rest = text.slice(match.index + match[0].length);
+                const next = /^\s*[:：]?\s*([^\s，,。；;、：:!！?？"'（）()\[\]【】]{1,20})/.exec(rest);
+                if (next) {
+                    kind = hint.kind;
+                    name = next[1].trim();
+                }
+            }
+        }
+        // `图片1 为男主（林晚）`：括号里是备注，素材名只用前面的「男主」
+        name = name.replace(/[（(][^（）()]*[）)]$/, "").trim();
+        if (!name) continue;
+        const key = `${kind}:${name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ marker: `图片${match[1]}`, index, kind, name });
+    }
+    return out;
+}
+
+/**
+ * 只数「文案点了哪几张图」（1 起），用来发现「写了 @图片3 但只连了 1 张图」这种静默丢失。
+ */
+function readImageMarkerIndices(prompt) {
+    const out = [];
+    for (const match of String(prompt || "").matchAll(CARTON_IMAGE_MARKER)) out.push(Number(match[1]));
+    return out;
+}
+
+/**
+ * 把「`@图片1 为男主`」这类**只给桥看**的指图声明从分镜文案里摘掉。
+ *
+ * 不摘的话这行会原样进 MochiAni 的分镜文案，被视频模型当成画面内容（"图片1"、"为"）。
+ * 摘掉之后素材正式名可能就不在文案里了 —— 这没关系，`composeCartonScript()`
+ * 会按 MochiAni 的硬要求补一行「出场人物：男主、女主」。
+ */
+function stripImageBindingMarkers(prompt) {
+    return String(prompt || "")
+        .replace(CARTON_IMAGE_MARKER, "")
+        .replace(/[，,、；;](?:[ \t]*[，,、；;])+/g, "，")
+        .replace(/^[ \t]*[，,、；;。.][ \t]*/gm, "")
+        .replace(/[ \t]{2,}/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}
+
+/**
  * 把前端给的图（`dataUrl` 或 `http(s)` 地址）落成本机临时文件。
  *
  * 为什么必须落盘：MochiAni 的 `mochiani_upload_asset_images` 只收**本机绝对路径**，
@@ -1399,6 +1487,24 @@ async function materializeReferenceImage(entry, sink) {
         return write(buffer, response.headers.get("content-type") || "image/png");
     }
     throw new Error("既没有 dataUrl 也没有 http 地址");
+}
+
+/**
+ * 从 `mochiani_create_asset` 的回执里读素材 ID。
+ *
+ * 回执形状没在文档里写死，直接字段之外再探一层嵌套（`{asset:{id}}` / `{data:{assetId}}`），
+ * 否则「素材建出来了、图没挂上」会变成最难查的一类静默失败。
+ */
+function readAssetId(payload) {
+    const direct = firstString(payload, [/^asset_?id$/i, /^created_?asset_?id$/i, /^id$/i]);
+    if (direct) return direct;
+    for (const key of ["asset", "created", "data", "result"]) {
+        const nested = payload?.[key];
+        if (!nested || typeof nested !== "object") continue;
+        const id = firstString(nested, [/^asset_?id$/i, /^id$/i]);
+        if (id) return id;
+    }
+    return "";
 }
 
 /**
@@ -1461,7 +1567,7 @@ async function resolveCartonAssets({ pageId, origin, projectId, projectName, wor
                     description: options.descriptions?.[name] || "",
                     idempotencyKey: stableUuid(`asset:${workId}:${kind}:${name}`),
                 });
-                const newId = firstString(created, [/^asset_?id$/i, /^created_?asset_?id$/i, /^id$/i]);
+                const newId = readAssetId(created);
                 if (!newId) throw new Error("新建成功但没读到素材 ID");
                 outcome.ids[kind].push(newId);
                 outcome.resolvedNames[kind].push(name);
@@ -1557,11 +1663,31 @@ async function planCartonJob(job, ctx) {
 
     // 2) 人物 / 场景 / 道具 —— 名字匹配真实 ID，缺的自动新建
     const cast = job.cast || {};
-    const resolved = await resolveCartonAssets(workRef, {
-        character: cast.characters || [],
-        scene: cast.scenes || [],
-        prop: cast.props || [],
-    }, { autoCreate: cast.autoCreate !== false });
+    /**
+     * 文案里指名的图（`@图片1 为男主`）并进素材清单一起解析 ——
+     * 用户只写文案、不填「出场素材」是最常见的情况，不并进来的话图就落不到任何素材上。
+     */
+    const bindings = parseImageBindings(job.prompt, Array.isArray(job.images) ? job.images.length : 0);
+    /**
+     * 静默丢失是本功能最容易踩的坑：写 `@图片3 为路人` 但只连了 2 张图时，
+     * 图根本不会上传，用户却只看到「文字过去了、图没过去」。这里主动告警。
+     */
+    const imageTotal = Array.isArray(job.images) ? job.images.length : 0;
+    const outOfRange = [...new Set(readImageMarkerIndices(job.prompt))].filter((n) => n > imageTotal);
+    if (outOfRange.length) {
+        const list = outOfRange.map((n) => `图片${n}`).join("、");
+        job.warnings.push(`文案里的 ${list} 没有对应参考图（只连了 ${imageTotal} 张），这几张图不会上传`);
+    }
+    const groups = {
+        character: [...(cast.characters || [])],
+        scene: [...(cast.scenes || [])],
+        prop: [...(cast.props || [])],
+    };
+    for (const binding of bindings) {
+        if (!groups[binding.kind].includes(binding.name)) groups[binding.kind].push(binding.name);
+        pushLog(job, `文案指定：${binding.marker} → ${CARTON_ASSET_LABEL[binding.kind]}「${binding.name}」`);
+    }
+    const resolved = await resolveCartonAssets(workRef, groups, { autoCreate: cast.autoCreate !== false });
     for (const line of resolved.notes) pushLog(job, line);
     if (resolved.created.length) pushLog(job, `新建素材：${resolved.created.join("、")}`);
     if (resolved.missing.length) job.warnings.push(`这些素材没关联上：${resolved.missing.join("、")}`);
@@ -1579,44 +1705,90 @@ async function planCartonJob(job, ctx) {
     }
 
     /**
-     * 2.5) 素材图 —— 节点上「图块」挂到的图，按名字对齐刚解析出的 assetId 传进去。
+     * 2.5) 素材图 —— 两个来源，上传前合并去重：
+     *  a) 节点「图块」里按名字对上的（`cast.images`，kind + name）；
+     *  b) 文案里点名的图（`@图片1 为男主` → `job.images[0]`，1.6.5 起）。
      *
      * 图只补形象，不参与分镜文案；一张传失败不影响出片，只记 warning。
      * 顺序必须在素材解析之后（要真 ID）、上传完再建分镜（MochiAni 建分镜时就要用到素材现图）。
      */
     const castImages = Array.isArray(cast.images) ? cast.images : [];
+    const uploads = [];
+    const tempFiles = [];
+    const queueUpload = (assetType, name, entry, label) => {
+        const assetId = String(resolved.byName?.[assetType]?.[name] || "");
+        if (!assetId) {
+            job.warnings.push(`${label}「${name}」没对上素材 ID，跳过`);
+            return;
+        }
+        uploads.push({ assetType, assetId, name, entry, label });
+    };
     if (castImages.length) {
         const typeOfKind = { characters: "character", scenes: "scene", props: "prop" };
-        const items = [];
-        const tempFiles = [];
         for (const entry of castImages) {
             const assetType = typeOfKind[String(entry?.kind || "")];
             const name = String(entry?.name || "").trim();
             if (!assetType || !name) continue;
-            const assetId = String(resolved.byName?.[assetType]?.[name] || "");
-            if (!assetId) {
-                job.warnings.push(`素材图「${name}」没对上素材 ID，跳过`);
+            queueUpload(assetType, name, entry, "素材图");
+        }
+    }
+    for (const binding of bindings) {
+        const entry = job.images[binding.index];
+        if (!entry) continue;
+        queueUpload(binding.kind, binding.name, entry, `${binding.marker} 素材图`);
+    }
+    if (uploads.length) {
+        // 同一个素材只传一张：显式挂的图排前面，文案指名的图不覆盖它
+        const seenAssets = new Set();
+        const items = [];
+        let skipped = 0;
+        for (const upload of uploads) {
+            const key = `${upload.assetType}:${upload.assetId}`;
+            if (seenAssets.has(key)) {
+                skipped += 1;
                 continue;
             }
             try {
-                items.push({ assetType, assetId, localPath: await materializeReferenceImage(entry, tempFiles) });
+                const localPath = await materializeReferenceImage(upload.entry, tempFiles);
+                seenAssets.add(key);
+                items.push({ assetType: upload.assetType, assetId: upload.assetId, localPath });
             } catch (error) {
-                job.warnings.push(`素材图「${name}」没传：${error.message}`);
+                job.warnings.push(`${upload.label}「${upload.name}」没传：${error.message}`);
             }
         }
+        if (skipped) pushLog(job, `${skipped} 张图对应同一素材，只传了第一张`);
         if (items.length) {
             try {
                 await callTool("mochiani_upload_asset_images", { ...workRef, items });
                 pushLog(job, `素材图已上传 ${items.length} 张（人物/场景/道具的形象图）`);
             } catch (error) {
-                job.warnings.push(`素材图上传失败，仍按文字素材继续：${error.message}`);
+                /**
+                 * 整批失败时逐张重试：一批里有一张坏图（素材被删、图超大）会连坐整批，
+                 * 而用户要的是「尽量多挂上」，所以降级成单张重试，只把真失败的那张记 warning。
+                 */
+                let okCount = 0;
+                const failures = [];
+                for (const item of items) {
+                    try {
+                        await callTool("mochiani_upload_asset_images", { ...workRef, items: [item] });
+                        okCount += 1;
+                    } catch (itemError) {
+                        failures.push(itemError.message);
+                    }
+                }
+                if (okCount) pushLog(job, `素材图逐张重试后成功 ${okCount}/${items.length} 张`);
+                if (failures.length) {
+                    job.warnings.push(`素材图上传失败 ${failures.length} 张（仍按文字素材继续）：${failures[0]}`);
+                }
+                if (!okCount && !failures.length) job.warnings.push(`素材图上传失败：${error.message}`);
             }
         }
         for (const file of tempFiles) fs.promises.rm(file, { force: true }).catch(() => {});
     }
 
     // 3) 分镜文案：素材正式名必须出现在文案里，缺的补一行
-    const script = composeCartonScript(job.prompt, {
+    //    指图声明（`@图片1 为男主`）是给桥看的，不能原样进分镜文案
+    const script = composeCartonScript(bindings.length ? stripImageBindingMarkers(job.prompt) : job.prompt, {
         character: resolved.resolvedNames.character,
         scene: resolved.resolvedNames.scene,
         prop: resolved.resolvedNames.prop,
@@ -2372,7 +2544,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.4",
+            version: "1.6.5",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
@@ -2570,9 +2742,12 @@ export {
     composeCartonScript,
     coerceCartonParams,
     matchCartonAsset,
+    parseImageBindings,
     parseVoiceLines,
+    readImageMarkerIndices,
     normalizeConfigOptions,
     readParamOptions,
     readWorkIdentity,
     stableUuid,
+    stripImageBindingMarkers,
 };

@@ -89,8 +89,10 @@ POST /api/plan {prompt, modelKey:"carton:<modelId>", channelId:<supplierId>, par
                 voiceover, generateVoice}
   ├─ mochiani_update_video_generation_config 只有跟编辑器当前配置不一样才切（切换本身不花钱）
   ├─ mochiani_get_asset_matching_context     按名字匹配素材库真实 ID
+  │                                          （名字来源：面板「出场素材」+ 文案里「@图片1 为男主」）
   ├─ mochiani_create_asset                   库里没有的名字 → 自动新建（角色 / 场景 / 道具）
   ├─ mochiani_upload_asset_images            素材图：按 byName 对齐 assetId 批量上传形象图
+  │                                          （节点图块对上的 + 文案点名的 图片N，同素材只传一张）
   │                                          ⚠️ 只收本机绝对路径 → 桥先落 os.tmpdir()，用完删
   ├─ mochiani_create_shot                    script + characterIds / sceneIds / propIds
   ├─ mochiani_create_voiceover_item          「角色名：台词」逐条写成分镜配音项
@@ -131,6 +133,24 @@ MCP 直接挡成 `-32602 Invalid uuid at idempotencyKey`。桥里一律用 `stab
 - 图怎么来：只认**画布上连线进来的图片节点**，按节点标题跟名字对（「林晚定妆照」→ 林晚；精确 → 双向包含，标题至少 2 字）。
   对不上就留空占位 —— **不按顺序自动分配**，把 A 的脸挂到 B 身上比没图更糟。
 - 不填会怎样：只发提示词，人物/场景/道具交给 MochiAni 按分镜自己解析。
+
+**1.6.5 起：不填素材也能把图带上 —— 在提示词里点名**：
+
+```
+@图片1 为男主，图片2 为女主，图片3 为路人
+一只橘猫在窗台睡觉，打呼噜
+```
+
+- `图片N` = 画布上**连线进来的参考图顺序**（`job.images` 顺序），连接词认 `为 / 是 / = / : / → / 作为`。
+- 桥按名字自动建素材（角色；`为场景 咖啡馆` / `为道具 台灯` 会建对应类型）并上传对应那张图，
+  日志里会出现「文案指定：图片1 → 出场人物「男主」」「新建素材：……」「素材图已上传 3 张」。
+- 这行声明**只给桥看**：写进分镜文案前会被摘掉（否则视频模型会把「图片1」「为」当画面内容），
+  摘掉后素材名若不在正文里，`composeCartonScript()` 会按 MochiAni 的硬规矩补一行「出场人物：男主、女主、路人」。
+- 写了 `图片3` 但只连了 2 张图 → 直接进 `warnings`（`图片3 没有对应参考图（只连了 2 张）`），不再静默丢图。
+- 一个素材只挂一张图：节点图块里显式对上的图优先，文案点名的图只补空。
+- 解析实现：`parseImageBindings()` / `stripImageBindingMarkers()` / `readImageMarkerIndices()`，
+  离线校验 `MOCHIANI_BRIDGE_NO_LISTEN=1 node probe-carton-bindings.mjs`。
+
 - 按用户要求**不**从提示词里抽「角色锁定描述」写进素材 `description`（`create_asset` 的 `description` 通道留着但默认不启用）。
 
 **读模型目录为空 ≠ 没模型**（`/api/models` 的自愈顺序）：
