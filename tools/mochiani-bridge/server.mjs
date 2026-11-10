@@ -1456,6 +1456,37 @@ function parseImageBindings(prompt, imageCount) {
 }
 
 /**
+ * 「图片节点标题 = 素材名」这条**零填写**路径。
+ *
+ * 前端把连线进来的每张图连同**节点标题**和它在 `job.images` 里的下标一起塞进 `cast.images`，
+ * `kind` 标成 `"auto"`。这里翻成素材绑定（类型按名字词尾猜）。
+ *
+ * 标题是「图片1 / 屏幕截图 / image_2」这种没语义的**直接跳过** ——
+ * 凭空建一堆叫「图片1」的素材，比不挂图更糟。
+ */
+const CARTON_PLACEHOLDER_TITLE =
+    /^(?:图片|图像|参考图|截图|屏幕截图|未命名|image|img|photo|screenshot|untitled|ref)[\s_#.-]*\d*$/i;
+
+function collectAutoImageBindings(castImages) {
+    const out = [];
+    const seen = new Set();
+    for (const entry of Array.isArray(castImages) ? castImages : []) {
+        if (String(entry?.kind || "") !== "auto") continue;
+        const name = String(entry?.name || "").trim();
+        if (!name || CARTON_PLACEHOLDER_TITLE.test(name)) continue;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        out.push({
+            name,
+            kind: guessAssetKindByName(name),
+            index: Number.isInteger(entry?.index) ? entry.index : -1,
+            entry,
+        });
+    }
+    return out;
+}
+
+/**
  * 只数「文案点了哪几张图」（1 起），用来发现「写了 @图片3 但只连了 1 张图」这种静默丢失。
  */
 function readImageMarkerIndices(prompt) {
@@ -1697,6 +1728,7 @@ async function planCartonJob(job, ctx) {
 
     // 2) 人物 / 场景 / 道具 —— 名字匹配真实 ID，缺的自动新建
     const cast = job.cast || {};
+    const castImages = Array.isArray(cast.images) ? cast.images : [];
     /**
      * 文案里指名的图（`@图片1 为男主`）并进素材清单一起解析 ——
      * 用户只写文案、不填「出场素材」是最常见的情况，不并进来的话图就落不到任何素材上。
@@ -1712,6 +1744,8 @@ async function planCartonJob(job, ctx) {
         const list = outOfRange.map((n) => `图片${n}`).join("、");
         job.warnings.push(`文案里的 ${list} 没有对应参考图（只连了 ${imageTotal} 张），这几张图不会上传`);
     }
+    /** 零填写路径：连线图片的**节点标题就是素材名**（`kind:"auto"`，见 collectAutoImageBindings）。 */
+    const autoBindings = collectAutoImageBindings(castImages);
     const groups = {
         character: [...(cast.characters || [])],
         scene: [...(cast.scenes || [])],
@@ -1720,6 +1754,22 @@ async function planCartonJob(job, ctx) {
     for (const binding of bindings) {
         if (!groups[binding.kind].includes(binding.name)) groups[binding.kind].push(binding.name);
         pushLog(job, `文案指定：${binding.marker} → ${CARTON_ASSET_LABEL[binding.kind]}「${binding.name}」`);
+    }
+    for (const binding of autoBindings) {
+        if (groups[binding.kind].includes(binding.name)) continue;
+        groups[binding.kind].push(binding.name);
+        pushLog(job, `图片标题：${binding.name} → ${CARTON_ASSET_LABEL[binding.kind]}`);
+    }
+    /**
+     * 连了图却一个素材名都拿不到 —— 这是「图静默丢失」最常见的形态，必须说出来。
+     * 两种情况：图片节点标题是「图片1」这种没语义的；文案里也没写「@图片1 为名字」。
+     */
+    const namedAny = bindings.length + autoBindings.length > 0;
+    const castFilled = groups.character.length + groups.scene.length + groups.prop.length > 0;
+    if (imageTotal > 0 && !namedAny && !castFilled) {
+        job.warnings.push(
+            `连了 ${imageTotal} 张图，但没有任何素材名：把图片节点标题改成角色/场景/道具名，或在文案里写「@图片1 为名字」`,
+        );
     }
     const resolved = await resolveCartonAssets(workRef, groups, { autoCreate: cast.autoCreate !== false });
     for (const line of resolved.notes) pushLog(job, line);
@@ -1739,14 +1789,14 @@ async function planCartonJob(job, ctx) {
     }
 
     /**
-     * 2.5) 素材图 —— 两个来源，上传前合并去重：
-     *  a) 节点「图块」里按名字对上的（`cast.images`，kind + name）；
-     *  b) 文案里点名的图（`@图片1 为男主` → `job.images[0]`，1.6.5 起）。
+     * 2.5) 素材图 —— 三个来源，上传前合并去重（优先级从高到低）：
+     *  a) 节点「图块」里按名字对上的（`cast.images`，kind = characters/scenes/props）；
+     *  b) 文案里点名的图（`@图片1 为男主` → `job.images[0]`，1.6.5 起）；
+     *  c) 连线图片的**节点标题就是素材名**（`kind:"auto"`，1.6.7 起，零填写）。
      *
      * 图只补形象，不参与分镜文案；一张传失败不影响出片，只记 warning。
      * 顺序必须在素材解析之后（要真 ID）、上传完再建分镜（MochiAni 建分镜时就要用到素材现图）。
      */
-    const castImages = Array.isArray(cast.images) ? cast.images : [];
     const uploads = [];
     const tempFiles = [];
     const queueUpload = (assetType, name, entry, label) => {
@@ -1757,19 +1807,23 @@ async function planCartonJob(job, ctx) {
         }
         uploads.push({ assetType, assetId, name, entry, label });
     };
-    if (castImages.length) {
-        const typeOfKind = { characters: "character", scenes: "scene", props: "prop" };
-        for (const entry of castImages) {
-            const assetType = typeOfKind[String(entry?.kind || "")];
-            const name = String(entry?.name || "").trim();
-            if (!assetType || !name) continue;
-            queueUpload(assetType, name, entry, "素材图");
-        }
+    const typeOfKind = { characters: "character", scenes: "scene", props: "prop" };
+    for (const entry of castImages) {
+        const assetType = typeOfKind[String(entry?.kind || "")];
+        const name = String(entry?.name || "").trim();
+        if (!assetType || !name) continue;
+        queueUpload(assetType, name, entry, "素材图");
     }
     for (const binding of bindings) {
         const entry = job.images[binding.index];
         if (!entry) continue;
         queueUpload(binding.kind, binding.name, entry, `${binding.marker} 素材图`);
+    }
+    // 文案点名过的下标不再走标题路径（同一张图不挂两个素材）
+    const claimedIndices = new Set(bindings.map((binding) => binding.index));
+    for (const binding of autoBindings) {
+        if (claimedIndices.has(binding.index)) continue;
+        queueUpload(binding.kind, binding.name, binding.entry, `图片「${binding.name}」`);
     }
     if (uploads.length) {
         // 同一个素材只传一张：显式挂的图排前面，文案指名的图不覆盖它
@@ -2578,7 +2632,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.6",
+            version: "1.6.7",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
@@ -2772,6 +2826,7 @@ if (process.env.MOCHIANI_BRIDGE_NO_LISTEN === "1") {
 export {
     buildCartonVideoModels,
     collectCartonAssets,
+    collectAutoImageBindings,
     collectVoiceCharacters,
     composeCartonScript,
     coerceCartonParams,

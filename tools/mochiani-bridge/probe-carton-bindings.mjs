@@ -150,5 +150,26 @@ const flat = (list) => list.map((item) => `${item.marker}>${item.kind}:${item.na
     check("词尾猜类型：默认角色", guessAssetKindByName("女模") === "character" && guessAssetKindByName("男主") === "character");
 }
 
+// 11) 零填写路径：连线图片的节点标题就是素材名
+{
+    const { collectAutoImageBindings } = bridge;
+    const items = [
+        { kind: "auto", name: "女模", index: 0, url: "https://x/a.png" },
+        { kind: "auto", name: "白色得皮包", index: 1, url: "https://x/b.png" },
+        { kind: "auto", name: "老宅客厅", index: 2, url: "https://x/c.png" },
+        { kind: "auto", name: "图片1", index: 3, url: "https://x/d.png" },
+        { kind: "auto", name: "image_2", index: 4, url: "https://x/e.png" },
+        { kind: "auto", name: "女模", index: 5, url: "https://x/f.png" },
+        { kind: "characters", name: "林晚", url: "https://x/g.png" },
+    ];
+    const got = collectAutoImageBindings(items);
+    check("只取 kind=auto 的三条有效标题", got.length === 3, got.map((i) => `${i.kind}:${i.name}@${i.index}`).join(" | "));
+    check("类型按词尾补齐", got.map((i) => i.kind).join(",") === "character,prop,scene", got.map((i) => i.kind).join(","));
+    check("无意义标题（图片1 / image_2）被丢掉", !got.some((i) => /图片1|image_2/.test(i.name)));
+    check("同名只留第一条", got.filter((i) => i.name === "女模").length === 1);
+    check("非 auto 的（面板素材图）不重复产出", !got.some((i) => i.name === "林晚"));
+    check("空输入不炸", collectAutoImageBindings(null).length === 0);
+}
+
 console.log(failed ? `\n${failed} 项失败` : "\n全部通过");
 process.exit(failed ? 1 : 0);

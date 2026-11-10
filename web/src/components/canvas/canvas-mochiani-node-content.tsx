@@ -1487,8 +1487,13 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             return;
         }
         if (media.unusable.length) message.warning(media.unusable.slice(0, 2).join("；"));
-        /** 图块上挂到的图一起发：桥在素材建好 / 匹配到真 ID 之后按 assetId 上传。没图的素材只发名字。 */
-        const castImages: Array<{ kind: string; name: string; url?: string; dataUrl?: string }> = [];
+        /**
+         * 一起发给桥的图，两种来源：
+         *  a) 面板「出场素材」里填了名字 + 画布上有同名图片（`kind` = characters/scenes/props）；
+         *  b) 连线进来的图片**节点标题就是素材名**（`kind: "auto"`，零填写 —— 标题是「图片1」这种没语义的会被桥丢掉）。
+         * 桥在素材建好 / 匹配到真 ID 之后按 assetId 上传。
+         */
+        const castImages: Array<{ kind: string; name: string; index?: number; url?: string; dataUrl?: string }> = [];
         if (isCarton) {
             for (const field of CARTON_CAST_FIELDS) {
                 for (const name of castNames(field.key)) {
@@ -1496,6 +1501,15 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                     const payload = reference ? await toReferencePayload(reference, "image") : null;
                     if (payload) castImages.push({ kind: field.key, name, ...payload });
                 }
+            }
+            // `media.images` 的前 N 个就是连线图片（顺序与 linkedByKind.image 一致），后面才是手动上传的图
+            for (let index = 0; index < media.images.length; index += 1) {
+                const reference = linkedByKind.image[index];
+                if (!reference) break;
+                const title = String(reference.title || reference.label || "").trim();
+                if (!title) continue;
+                if (castImages.some((item) => item.name === title)) continue;
+                castImages.push({ kind: "auto", name: title, index, ...media.images[index] });
             }
         }
         setBusy("plan");
@@ -2004,7 +2018,8 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                                     );
                                 })}
                                 <div className="text-[10px] leading-snug opacity-40">
-                                    没图也能发：提示词里写「@图片1 为男主」，桥会按连线顺序把第 1 张图挂成「男主」素材。
+                                    这里不用填也行：把连进来的图片节点标题改成角色/场景/道具名，桥会按标题自动建素材并挂图；
+                                    或在提示词里写「@图片1 为男主」。
                                 </div>
                                 <label className="flex flex-col gap-0.5">
                                     <span className="text-[10px] opacity-45">配音（角色名：台词，一行一条）</span>
@@ -2030,7 +2045,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                         ) : (
                             <div className="mt-1 text-[10px] leading-snug opacity-40">
                                 不填就只发提示词，出场人物 / 场景 / 道具交给 MochiAni 按分镜自己解析；
-                                提示词里写「@图片1 为男主」时，桥按连线顺序把对应图挂成素材。
+                                连线图片的节点标题是角色/场景/道具名时，桥按标题自动建素材并挂图。
                             </div>
                         )}
                     </div>

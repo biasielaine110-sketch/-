@@ -162,6 +162,18 @@ MCP 直接挡成 `-32602 Invalid uuid at idempotencyKey`。桥里一律用 `stab
 - 解析实现：`parseImageBindings()` / `stripImageBindingMarkers()` / `readImageMarkerIndices()` / `guessAssetKindByName()`，
   离线校验 `MOCHIANI_BRIDGE_NO_LISTEN=1 node probe-carton-bindings.mjs`。
 
+**1.6.7 起：连图就行 —— 图片节点标题就是素材名**（连面板都不用填）：
+
+- 图片节点叫「女模」「白色得皮包」「老宅客厅」，连线进来即可。桥按标题建素材
+  （类型按词尾猜：包/鞋/帽/车/桌/灯… → 道具，室/厅/街/楼/店… → 场景，其余 → 角色），把那张图传成素材图。
+- 前端把每个连线图片的**标题 + 在 `job.images` 里的下标**塞进 `cast.images`（`kind: "auto"`），
+  桥用 `collectAutoImageBindings()` 收口。
+- 标题是「图片1 / 图像 / 截图 / image_2 / screenshot」这种**没语义的直接跳过** —— 凭空建一堆「图片1」素材比不挂图更糟。
+- **优先级**：面板素材名（图块对上的）> 文案点名（`@图片1 为男主`）> 图片标题。同一张图被文案点名后不再走标题路径。
+- 一张都认不出来时**会告警**：`连了 N 张图，但没有任何素材名：把图片节点标题改成角色/场景/道具名，或在文案里写「@图片1 为名字」`。
+- 局限（MochiAni 侧的能力边界）：MCP **没有**「看画面认人」的工具，所以纯连线 + 标题是「图片1」时，
+  桥拿不到任何信息，只能靠名字或文案点名。
+
 - 按用户要求**不**从提示词里抽「角色锁定描述」写进素材 `description`（`create_asset` 的 `description` 通道留着但默认不启用）。
 
 **读模型目录为空 ≠ 没模型**（`/api/models` 的自愈顺序）：
