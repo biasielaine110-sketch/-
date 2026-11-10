@@ -67,6 +67,18 @@ export function resolveScriptSchemeId(value: unknown): ScriptSchemeId {
 }
 
 /**
+ * **严格**读方案 id：不在 `SCRIPT_SCHEME_IDS` 里就是 `null`（= 没选），**不**回落 `builtin`。
+ *
+ * 和 `resolveScriptSchemeId` 的分工：那个是「渲染用」，认不出就当第一套（界面总得亮一个）；
+ * 这个是「用户到底点没点过」的判断，必须能区分「空」与「明确选了第一套」——
+ * 否则 03 弹窗里没选方案会被当成「用户要内置提示词」，第四套默认就失效了。
+ */
+export function asScriptSchemeId(value: unknown): ScriptSchemeId | null {
+    const id = typeof value === "string" ? value.trim() : "";
+    return (SCRIPT_SCHEME_IDS as readonly string[]).includes(id) ? (id as ScriptSchemeId) : null;
+}
+
+/**
  * 第 1~6 套方案执行时**默认的「视频分段」= 每 4 镜一段**（用户 2026-11-07 明确要求）。
  *
  * 为什么是「切方案时顺手写一次 metadata」而不是改「视频分段」的默认渲染值：
@@ -564,14 +576,23 @@ export function resolveAutoApplyScriptScheme(options: {
     return null;
 }
 
-/** 「自动套用默认方案」要落进节点 metadata 的那一份补丁（第一套 / 条件不满足 → `null`）。 */
+/** 「自动套用默认方案 / 用户点名的方案」要落进节点 metadata 的那一份补丁（无可用内容 → `null`）。 */
 export type ScriptSchemeSeed = Partial<{
-    scriptScheme: ScriptLibrarySchemeId;
+    /**
+     * 方案 id。**包含 `builtin`**：03 弹窗里用户可以明确选「第一套 · 内置」，
+     * 那也是一次真实选择（写进去之后自动预填就该退让，不许再偷偷换成第四套）。
+     */
+    scriptScheme: ScriptSchemeId;
     /**
      * 只可能是 `SCRIPT_SCHEME_DEFAULT_MERGE_MODE`（`"4"`）—— 用 `typeof` 取而不是写 `string`：
      * `metadata.scriptMergeMode` 的类型是 `StoryScriptMergeMode`（联合字面量），宽成 `string` 就赋不进去了。
      */
     scriptMergeMode: typeof SCRIPT_SCHEME_DEFAULT_MERGE_MODE;
+    /**
+     * 第八套（麻薯 · 分镜组）切过去就默认「每镜 15 秒」（与 `applyScheme` 同一口径）：
+     * 一行 = 一个 15 秒分镜组，停在默认 5 秒会把整组表演砍掉三分之二。
+     */
+    scriptSegmentSeconds: "15";
     scriptSystemPrompt: string;
     scriptAssetPrompt: string;
     scriptShotPrompt: string;
@@ -595,35 +616,51 @@ export type ScriptSchemeSeed = Partial<{
  *
  * @param mergeMode 节点上**已经存过**的「视频分段」档位 —— 有值就一个字都不动（用户手点过「单镜」）。
  * @param stored    节点上已有的三段 —— 填过任何一段就说明「手填优先」，自动套用要退让。
+ * @param explicit  用户在 03 弹窗里**点了第几套**（2026-11-10）：为真时不再跑默认判定，
+ *                  直接照这一套落库（含第一套 —— 明确选内置也是选择）。词库里取不到的那段留空，
+ *                  生成时按该预设内置提示词补，与在脚本节点里手点方案完全同一口径。
  */
 export function buildScriptSchemeSeed(options: {
     scheme?: unknown;
+    explicit?: boolean;
     textPrompts?: readonly TextPromptEntry[] | null;
     skills?: readonly ScriptSchemeSkillSource[] | null;
     mergeMode?: unknown;
     stored?: Partial<Record<ScriptPromptField, unknown>> | null;
 }): ScriptSchemeSeed | null {
-    const next = resolveAutoApplyScriptScheme({
-        scheme: options.scheme,
-        directorPrefill: buildScriptSchemePrefill(options.textPrompts, "director"),
-        x20Prefill: buildScriptSchemePrefill(options.textPrompts, "x20"),
-        libraryPrefill: buildScriptSchemePrefill(options.textPrompts, "library"),
-        customSystemPrompt: options.stored?.system,
-        customAssetPrompt: options.stored?.asset,
-        customShotPrompt: options.stored?.shot,
-    });
+    // 明确点名的那一套优先；认不出的值（空串 / 脏值）当作「没点名」，继续走默认判定。
+    const explicitScheme = options.explicit ? asScriptSchemeId(options.scheme) : null;
+    const next: ScriptSchemeId | null =
+        explicitScheme ??
+        resolveAutoApplyScriptScheme({
+            // 脏值（`"whatever"` / 空串）**不能**当「用户选过了」交给默认判定 —— 那会让自动预填永远退让，
+            // 界面亮着第一套、词库明明有第四套也不用。归一成「没选」再判。
+            scheme: asScriptSchemeId(options.scheme) ?? undefined,
+            directorPrefill: buildScriptSchemePrefill(options.textPrompts, "director"),
+            x20Prefill: buildScriptSchemePrefill(options.textPrompts, "x20"),
+            libraryPrefill: buildScriptSchemePrefill(options.textPrompts, "library"),
+            customSystemPrompt: options.stored?.system,
+            customAssetPrompt: options.stored?.asset,
+            customShotPrompt: options.stored?.shot,
+        });
     if (!next) return null;
-    const prefill = buildScriptSchemePrefillLive(next, options.textPrompts, options.skills);
-    // 理论到不了（`next` 只可能是 director / library，两者都有 system / shot 才能被选中），留个安全出口。
-    if (!prefill) return { scriptScheme: next };
     const mergeMode = resolveSchemeDefaultMergeMode(next);
+    /**
+     * 第一套 = 预设自带的内置提示词：**只写方案，三段一个字都不写**。
+     * 往里写任何正文都会把内置提示词顶掉（那正好是「点了内置却仍按别套跑」的来源）。
+     */
+    if (next === "builtin") {
+        return { scriptScheme: "builtin", ...(mergeMode && !hasText(options.mergeMode) ? { scriptMergeMode: mergeMode } : {}) };
+    }
+    const prefill = buildScriptSchemePrefillLive(next, options.textPrompts, options.skills);
     return {
         scriptScheme: next,
         // ⚠️ 只在**用户没设过**时写：老节点可能早就自己选过「单镜」，自动预填不该把它悄悄改掉。
         ...(mergeMode && !hasText(options.mergeMode) ? { scriptMergeMode: mergeMode } : {}),
+        ...(next === "mashu" ? { scriptSegmentSeconds: "15" as const } : {}),
         // 空串不写：让那一段保持原值（= 回落到内置提示词），绝不拿空串把用户已有正文清掉。
-        ...(prefill.system ? { scriptSystemPrompt: prefill.system } : {}),
-        ...(prefill.asset ? { scriptAssetPrompt: prefill.asset } : {}),
-        ...(prefill.shot ? { scriptShotPrompt: prefill.shot } : {}),
+        ...(prefill?.system ? { scriptSystemPrompt: prefill.system } : {}),
+        ...(prefill?.asset ? { scriptAssetPrompt: prefill.asset } : {}),
+        ...(prefill?.shot ? { scriptShotPrompt: prefill.shot } : {}),
     };
 }

@@ -102,7 +102,7 @@ import {
     type ScriptAssetRole,
     type ScriptRefLinkKind,
 } from "@/constant/story-script";
-import { buildScriptSchemeSeed, resolveScriptPromptValues, resolveScriptSchemeId } from "@/constant/script-scheme";
+import { asScriptSchemeId, buildScriptSchemeSeed, resolveScriptPromptValues, resolveScriptSchemeId } from "@/constant/script-scheme";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -10185,7 +10185,7 @@ function AtelierCanvasPage() {
      *  ⑤ 只有 03 才继续：文本节点 → 脚本生成器 → `handleOneClickVideo`（一键视频）。
      */
     const runVideoReverse = useCallback(
-        async (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string }, report: (stage: string) => void = () => undefined): Promise<VideoReverseResult> => {
+        async (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: string }, report: (stage: string) => void = () => undefined): Promise<VideoReverseResult> => {
             const videoNode = nodesRef.current.find((item) => item.id === input.videoNodeId);
             if (!videoNode || videoNode.type !== CanvasNodeType.Video || !videoNode.metadata?.content) {
                 return { ok: false, error: "接入的视频节点已经不在了，请重新接入一次" };
@@ -10368,8 +10368,13 @@ function AtelierCanvasPage() {
              *
              * 这里用与组件**同一个纯函数**（`buildScriptSchemeSeed`）算好整份补丁，建节点时一次落库，
              * 生成立刻就能读到。词库 / 技能库里取不到内容时它是 `null`，行为与改造前一致（停在第一套）。
+             *
+             * 用户在 03 弹窗里**点了第几套**（2026-11-10）时走 `explicit` 分支：不再跑默认判定，
+             * 直接照那一套写方案 + 预填三段（第一套 = 只写方案、三段留空 = 内置提示词）。
+             * 取值优先用本次调用的入参（弹窗刚改、metadata 还没提交时也生效），其次用节点上存的选择。
              */
-            const scriptSchemeSeed = buildScriptSchemeSeed({ textPrompts: effectiveConfig.textPrompts, skills: chatSkillPacks }) || {};
+            const chosenScheme = asScriptSchemeId(input.scriptScheme) ?? asScriptSchemeId(target.scriptScheme);
+            const scriptSchemeSeed = buildScriptSchemeSeed({ scheme: chosenScheme || undefined, explicit: Boolean(chosenScheme), textPrompts: effectiveConfig.textPrompts, skills: chatSkillPacks }) || {};
             const scriptNode = createCanvasNode(CanvasNodeType.Script, scriptSlot, { status: NODE_STATUS_IDLE, scriptSource: "", scriptPrompt: "", scriptRows: [], ...scriptSchemeSeed, ...scriptTargetMeta });
             pushNodes([scriptNode], resolveConnectionPairs(textNode.id, scriptNode.id, [...nodesRef.current, scriptNode], "source"));
 

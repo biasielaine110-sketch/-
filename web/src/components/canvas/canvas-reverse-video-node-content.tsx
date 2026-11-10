@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App, Button, Input, InputNumber, Modal, Select, Tag } from "antd";
 import { CircleAlert, Clapperboard, FileText, Images, Link2, Loader2, SlidersHorizontal, Sparkles, Video, Wand2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoTarget, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { getStyleTemplate } from "@/constant/style-templates";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -56,7 +58,7 @@ type CanvasReverseVideoNodeContentProps = {
     /** 粘贴链接建一个视频节点，返回新节点 id */
     onCreateVideoFromUrl?: (videoUrl: string) => Promise<string>;
     /** 执行一条命令；report 用来把阶段文案打到窗口里 */
-    onRun: (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string }, report: (stage: string) => void) => Promise<VideoReverseResult>;
+    onRun: (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: ScriptSchemeId }, report: (stage: string) => void) => Promise<VideoReverseResult>;
 };
 
 const MODE_ICON: Record<VideoReverseMode, typeof Video> = {
@@ -101,6 +103,7 @@ export function CanvasReverseVideoNodeContent({
     onRun,
 }: CanvasReverseVideoNodeContentProps) {
     const { message } = App.useApp();
+    const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
@@ -132,6 +135,17 @@ export function CanvasReverseVideoNodeContent({
         const style = target.styleTemplateId ? getStyleTemplate(target.styleTemplateId)?.label || target.styleTemplateId : "无风格";
         return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${target.size || "跟随全局比例"} · ${qualityLabel(target.quality)} · 风格：${style}`;
     }, [target]);
+    /**
+     * 03 弹窗里的「执行方案」选项（用户 2026-11-10）。
+     *
+     * 为什么必须在**选中之前**就定下来：八套方案对 `视频运动提示词` 的格式约束各不相同
+     * （第四套 = 八段标签块、第五套 = 整段 10 秒视频脚本、第六套 = 光影全流程、第七 / 第八套 = 时间码 / 分镜组），
+     * 而 03 是「建脚本节点 → 立刻一键视频」一气呵成，中间没有地方让用户点方案。
+     * 空值 = 不表态，仍按默认判定（第四套 · 影视分镜导演优先），与「手点新建脚本节点」完全一致。
+     */
+    const schemeOptions = useMemo(() => [{ value: "", label: t("canvas.scriptNode.reverseSchemeFollow") }, ...SCRIPT_SCHEME_IDS.map((id) => ({ value: id, label: t(`canvas.scriptNode.scheme_${id}`) }))], [t]);
+    /** 当前选中的方案（空 = 默认），只用于文案。 */
+    const chosenSchemeLabel = target.scriptScheme ? t(`canvas.scriptNode.scheme_${target.scriptScheme}`) : t("canvas.scriptNode.reverseSchemeFollow");
     /**
      * 02 / 03 要求框的**默认文案**（用户 2026-11-09 口径）：
      * 「根据我提供的视频反推该视频提示词及文案，同时使用 @图片1 作为文案中的道具，重新输出一份类似的剧本文案。」
@@ -216,7 +230,12 @@ export function CanvasReverseVideoNodeContent({
             }
             patchRun({ status: "running", mode, stage: "准备中…", at: Date.now() });
             try {
-                const outcome = await onRun({ videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id }, (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }));
+                /**
+                 * `scriptScheme` 显式带过去（而不是只靠 `patchTarget` 落库）：
+                 * 节点 metadata 的写入要等一次 React 提交，而 03 在**同一次点击里**就要建脚本节点、
+                 * 立刻生成 —— 读 `nodesRef` 可能拿到还没刷新的旧值（这个坑 2026-11-09 已经踩过一次）。
+                 */
+                const outcome = await onRun({ videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id, scriptScheme: target.scriptScheme }, (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }));
                 patchRun({
                     status: outcome.ok ? "done" : "error",
                     mode,
@@ -235,7 +254,7 @@ export function CanvasReverseVideoNodeContent({
                 message.error(detail);
             }
         },
-        [attached, message, node.id, onRun, patchRun],
+        [attached, message, node.id, onRun, patchRun, target.scriptScheme],
     );
 
     const handleCommand = useCallback(
@@ -481,7 +500,25 @@ export function CanvasReverseVideoNodeContent({
                     <div className="text-[11px] opacity-60">
                         本次成片：<span className="font-medium">{targetSummary}</span>
                     </div>
-                    {requirementMode === 3 ? <div className="text-[11px] opacity-50">确定后会接着把文本节点接到脚本生成器，并执行一键视频 —— 剧本按 {target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒写，生视频用上面这套参数。</div> : null}
+                    {/* 03 的执行方案（用户 2026-11-10）：分镜表里「视频运动提示词」按哪一套格式出。 */}
+                    {requirementMode === 3 ? (
+                        <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2">
+                                <span className="text-xs opacity-70">{t("canvas.scriptNode.reverseSchemeLabel")}</span>
+                                <Select
+                                    size="small"
+                                    className="!w-[236px]"
+                                    value={target.scriptScheme || ""}
+                                    onChange={(value) => patchTarget({ scriptScheme: asScriptSchemeId(value) ?? undefined })}
+                                    options={schemeOptions}
+                                    popupMatchSelectWidth={false}
+                                    aria-label={t("canvas.scriptNode.reverseSchemeLabel")}
+                                />
+                            </div>
+                            <div className="text-[11px] leading-relaxed opacity-50">{t("canvas.scriptNode.reverseSchemeHint")}</div>
+                        </div>
+                    ) : null}
+                    {requirementMode === 3 ? <div className="text-[11px] opacity-50">确定后会接着把文本节点接到脚本生成器，并执行一键视频 —— 剧本按 {target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒写、分镜表按「{chosenSchemeLabel}」的格式出，生视频用上面这套参数。</div> : null}
                 </div>
             </Modal>
         </div>

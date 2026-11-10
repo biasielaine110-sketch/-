@@ -8,6 +8,7 @@
  */
 
 import type { CanvasReverseVideoTarget } from "@/types/canvas";
+import { SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 /** 三条命令。数字即用户看到的 01 / 02 / 03。 */
 export type VideoReverseMode = 1 | 2 | 3;
 
@@ -79,6 +80,15 @@ export function normalizeReverseVideoTarget(raw: Partial<CanvasReverseVideoTarge
     if (quality) target.quality = quality;
     const seconds = Number(source.seconds);
     target.seconds = String(Number.isFinite(seconds) && seconds > 0 ? Math.min(REVERSE_VIDEO_SECONDS_MAX, Math.max(REVERSE_VIDEO_SECONDS_MIN, Math.round(seconds))) : DEFAULT_REVERSE_VIDEO_SECONDS);
+    /**
+     * 03 的执行方案：**只认白名单里的 id**，认不出就整个丢掉（=「没选」，走默认判定）。
+     *
+     * 🔴 这里绝不能像 `resolveScriptSchemeId` 那样把空串 / 脏值归一成 `builtin`：
+     * `buildScriptSchemeSeed` 的退让条件是「元数据里已经有方案」，一旦写进 `"builtin"`，
+     * 默认的第四套（影视分镜导演）就再也不会自动套用了 —— 等于把默认行为悄悄改回内置。
+     */
+    const scriptScheme = text(source.scriptScheme);
+    if (scriptScheme && (SCRIPT_SCHEME_IDS as readonly string[]).includes(scriptScheme)) target.scriptScheme = scriptScheme as ScriptSchemeId;
     return target;
 }
 
