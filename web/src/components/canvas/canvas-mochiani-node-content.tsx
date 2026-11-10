@@ -500,6 +500,40 @@ function pickPreferredModel(list: ModelOption[]) {
 }
 
 /**
+ * 模型下拉里要**标绿**的「常用模型」。
+ *
+ * ⚠️ 按名字归一化后**精确**匹配，不用 `includes` —— 否则 `Seedance2.0 fast vip` 会跟着绿。
+ */
+const RECOMMENDED_MODEL_NAMES = ["seedance2.0fast", "wan3.0"] as const;
+
+/** 标绿用的颜色：深色底提亮绿，浅色底压深绿，两边都得读得清。 */
+const RECOMMENDED_MODEL_COLOR = { dark: "#4ade80", light: "#15803d" } as const;
+
+/**
+ * 算出该标绿的 `modelKey` 集合。
+ *
+ * 🔴 同名不同 id 在 MochiAni 里是常态（`Seedance2.0 fast` = 90/130，`wan3.0` = 187/191），
+ * 而且**渠道池不一样**：90 才有 AL，130 只有火山引擎；187/191 都有阿里云（187 线路更多）。
+ * 全标绿等于让用户随便挑一个，挑到 #130 就没有画幅了 —— 所以每个名字只标**该选的那一个**：
+ * 先按「有没有原厂线路（AL / 阿里云）」筛，再取渠道最多的，最后按 id 小的。
+ */
+function recommendedModelKeys(list: ModelOption[]) {
+    const keys = new Set<string>();
+    for (const name of RECOMMENDED_MODEL_NAMES) {
+        const sameName = list.filter((item) => squash(item.modelName) === name);
+        if (!sameName.length) continue;
+        const wantedChannel = name === "seedance2.0fast" ? PREFERRED_CHANNEL_NAMES[0] : "阿里云";
+        const withChannel = sameName.filter((item) => (item.channels || []).some((channel) => squash(channel.name) === squash(wantedChannel)));
+        const pool = withChannel.length ? withChannel : sameName;
+        const best = [...pool].sort(
+            (a, b) => (b.channels?.length || 0) - (a.channels?.length || 0) || Number(a.modelId) - Number(b.modelId),
+        )[0];
+        if (best) keys.add(best.modelKey);
+    }
+    return keys;
+}
+
+/**
  * 默认渠道：优先原厂线路 —— `AL`（Seedance 系）→ `阿里云`（Wan 系）→ 名字最短的阿里云线路 → 第一条。
  *
  * ⚠️ 不能用 `/al$/` 这种后缀匹配去凑「阿里云」：中文线路名一个都命中不了，
@@ -603,7 +637,8 @@ type MediaKind = keyof typeof MEDIA_KIND_META;
 
 export function CanvasMochianiNodeContent({ node, references, onDetachReference, onReorderReferences, onPreviewReference, onCreateVideo, onConfigChange }: Props) {
     const { message } = App.useApp();
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const themeMode = useThemeStore((state) => state.theme);
+    const theme = canvasThemes[themeMode];
 
     const [bridgeBase, setBridgeBase] = useState(readBridgeBase);
     const [bridgeEditing, setBridgeEditing] = useState(false);
@@ -1163,8 +1198,12 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
      *
      * - 只有一组时**不加组标题**（多一行灰字纯噪音）；
      * - 组标题带数量，方便一眼看出「视频多少个、图多少个」；
-     * - 同名不同 id 的模型仍带 `#id` 后缀（MochiAni 确实有这种）。
+     * - 同名不同 id 的模型仍带 `#id` 后缀（MochiAni 确实有这种）；
+     * - 常用的那两个（Seedance2.0 fast / wan3.0）标绿，几十个模型里一眼能挑到。
      */
+    const recommendedKeys = useMemo(() => recommendedModelKeys(models), [models]);
+    const recommendedColor = RECOMMENDED_MODEL_COLOR[themeMode] || RECOMMENDED_MODEL_COLOR.dark;
+
     const modelOptions = useMemo<NonNullable<SelectProps["options"]>>(() => {
         const counter = new Map<string, number>();
         for (const item of visibleModels) counter.set(item.modelName, (counter.get(item.modelName) || 0) + 1);
@@ -1679,6 +1718,18 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                             options={modelOptions}
                             onChange={changeModel}
                             disabled={locked || modelsLoading || !models.length}
+                            /* 常用模型标绿：`label` 保持纯字符串（搜索靠它），只在渲染那层套颜色。 */
+                            optionRender={(option) => {
+                                const text = String(option.label ?? "");
+                                return recommendedKeys.has(String(option.value)) ? (
+                                    <span style={{ color: recommendedColor }}>{text}</span>
+                                ) : (
+                                    <>{text}</>
+                                );
+                            }}
+                            labelRender={({ label, value }) =>
+                                recommendedKeys.has(String(value)) ? <span style={{ color: recommendedColor }}>{label}</span> : <>{label}</>
+                            }
                         />
                         {models.length ? (
                             <div className="flex flex-wrap items-center gap-x-1.5 text-[10px] opacity-45">
