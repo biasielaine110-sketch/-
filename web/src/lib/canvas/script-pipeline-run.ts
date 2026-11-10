@@ -34,3 +34,44 @@ export function planScriptPipelineGenerateOrder(videoNodes: readonly CanvasNodeD
         .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
         .map((node, index) => ({ nodeId: node.id, prompt: (node.metadata?.prompt || "").trim(), index }));
 }
+
+/**
+ * 一段视频「点完生成」之后到底成没成（2026-11-10 用户第 01 条要求重试，就必须能判结果）。
+ *
+ * ⚠️ 只能读节点状态：`generateNode()` 的视频分支**自己吞掉了错误**（catch 里只把节点标成
+ * error + toast），Promise 永远 resolve。所以「await 完再抛异常」这条路不存在，
+ * 判断一律看 `metadata.status`。
+ *
+ * 返回 `pending` 的情形（既不是成功也不是报错）**不算失败**，绝不能拿去重试：
+ *  - 用户中途点了停止 → 状态停在 loading；
+ *  - 模型没配好 → `handleGenerateNode` 直接 return，状态还是 idle。
+ * 这两种重试一次都是白花钱 / 白弹配置窗。
+ */
+export type ScriptPipelineVideoOutcome = "ok" | "error" | "pending";
+
+export function readScriptPipelineVideoOutcome(node: Pick<CanvasNodeData, "metadata"> | null | undefined): ScriptPipelineVideoOutcome {
+    // 与 `NODE_STATUS_SUCCESS` / `NODE_STATUS_ERROR`（project.tsx）同一套字面量，这里不 import
+    // 组件文件，保持 lib 纯净。
+    const status = node?.metadata?.status;
+    if (status === "error") return "error";
+    if (status === "success") return "ok";
+    return "pending";
+}
+
+/**
+ * 某段视频生成失败后，**再生成一次**要用哪个模型（用户 2026-11-10 第 01 条）。
+ *
+ * 用户原话：「再次使用偏好或者上一次设定选择的生视频模型生成一次，若还是失败即暂停。」
+ * 所以候选只有两个来源：
+ *  ① `preferred` —— 偏好里配的生视频模型（`resolveModelForCapability(config, undefined, "video")`）；
+ *  ② `settingsSelected` —— 上一次设定里选的（反推节点的「生成设置」→ 脚本节点 `scriptVideoModel`
+ *     → 铺链路时已写进视频节点 `metadata.model`）。
+ *
+ * 取第一个**和刚失败那个不同**的（换一条线路才有意义）；两个都等于失败模型时仍返回它 ——
+ * 用户要的是「再试一次」，瞬时故障重试同一条也可能过。
+ */
+export function resolveScriptPipelineRetryModel(input: { preferred?: string; settingsSelected?: string; failed?: string }): string {
+    const failed = (input.failed || "").trim();
+    const candidates = [input.preferred, input.settingsSelected].map((value) => (value || "").trim()).filter(Boolean);
+    return candidates.find((model) => model !== failed) || candidates[0] || "";
+}

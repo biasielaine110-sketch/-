@@ -192,7 +192,7 @@ import {
     type ScriptAssetBatchItem,
     type ScriptAssetReference,
 } from "@/lib/canvas/script-asset-batch";
-import { planScriptPipelineGenerateOrder, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
+import { planScriptPipelineGenerateOrder, readScriptPipelineVideoOutcome, resolveScriptPipelineRetryModel, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
     ONE_CLICK_IMAGE_FALLBACK_MODEL_NAMES,
@@ -9219,8 +9219,10 @@ function AtelierCanvasPage() {
          * @param options.skipConfirm 不弹确认窗、直接铺（只给「一键视频」用：那条流程已经有总确认）。
          * @param options.mergeEvery 强制「每 N 镜合并成 1 段」，**无视**「视频分段」档位与手动合并组。
          *                   只给「一键铺视频链路」用（用户 2026-11-09 第 02 条：固定每 4 镜合并为 1 镜）。
+         * @param options.onVideoPause 某段视频「换模型再生成一次」仍失败 → 判定暂停时回调（带原因文案）。
+         *                   只给「一键视频」用：那条流程要把暂停原因写到脚本节点的运行态上。
          */
-        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean; skipConfirm?: boolean; mergeEvery?: number }) => {
+        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean; skipConfirm?: boolean; mergeEvery?: number; onVideoPause?: (message: string) => void }) => {
             const videoOnly = Boolean(options?.videoOnly);
             const groupVideos = Boolean(options?.group);
             const autoGenerate = Boolean(options?.autoGenerate);
@@ -9717,11 +9719,70 @@ function AtelierCanvasPage() {
                                 seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000,
                             }),
                         );
+                        /**
+                         * **某段视频生成失败 → 换模型再生成一次；仍失败 → 暂停后续**（用户 2026-11-10 第 01 条）。
+                         *
+                         * 用户原话：「生成失败的视频再次使用偏好或者上一次设定选择的生视频模型生成一次，
+                         * 若还是失败即暂停。」→ 候选模型只有两个：偏好里的视频模型、上一次「生成设置」里
+                         * 选的（`scriptVideoModel`，铺链路时已写进每个视频节点的 `metadata.model`）。
+                         *
+                         * 🔴 两条老口径不能被「顺手改成串行」破坏：
+                         *  ① 2 秒间隔是**两次点生成之间**，不是「等上一段出完再点下一段」（见 `script-pipeline-run.ts`）；
+                         *  ② 视频分支自己吞掉异常（Promise 永远 resolve），成败只能读节点 `metadata.status`。
+                         * 所以「发射」与「监督」拆开：for 循环保持 2 秒节奏只负责点生成，
+                         * 每一发的等待 / 重试 / 暂停判定放在 `supervise()` 里并行跑。
+                         */
+                        const preferredVideoModel = resolveModelForCapability(effectiveConfig, undefined, "video");
+                        const settingsVideoModel = scriptVideoModel;
+                        // 一旦判定「暂停」，后面还没点的段就不再点了（已经在跑的等它自己落定）。
+                        let pipelinePaused = false;
+                        /** 换模型只能走 `metadata.model`（`buildGenerationConfig` 只认它），顺带把状态复位成 idle。 */
+                        const patchVideoNodeModel = (targetNodeId: string, model: string) => {
+                            const patch = (item: CanvasNodeData): CanvasNodeData =>
+                                item.id === targetNodeId
+                                    ? { ...item, metadata: { ...item.metadata, ...(model ? { model } : {}), status: NODE_STATUS_IDLE, errorDetails: undefined } }
+                                    : item;
+                            nodesRef.current = nodesRef.current.map(patch);
+                            setNodes((prev) => prev.map(patch));
+                        };
+                        const fireVideoGenerate = (target: { nodeId: string; prompt: string }) =>
+                            Promise.resolve(generateNodeRef.current?.(target.nodeId, "video", target.prompt)).catch(() => undefined);
+                        const videoNodeOf = (targetNodeId: string) => nodesRef.current.find((item) => item.id === targetNodeId);
+                        const pauseVideoPipeline = (target: { nodeId: string; index: number }, triedLabels: string) => {
+                            pipelinePaused = true;
+                            const detail = t("canvas.scriptNode.pipelineVideoPaused", {
+                                shot: target.index + 1,
+                                models: triedLabels,
+                                error: videoNodeOf(target.nodeId)?.metadata?.errorDetails || t("canvas.projectPage.generationFailed"),
+                            });
+                            message.error(detail);
+                            options?.onVideoPause?.(detail);
+                        };
+                        const superviseVideo = async (target: { nodeId: string; prompt: string; index: number }) => {
+                            await fireVideoGenerate(target);
+                            if (readScriptPipelineVideoOutcome(videoNodeOf(target.nodeId)) !== "error") return;
+                            const failedModel = String(videoNodeOf(target.nodeId)?.metadata?.model || "");
+                            const retryModel = resolveScriptPipelineRetryModel({ preferred: preferredVideoModel, settingsSelected: settingsVideoModel, failed: failedModel });
+                            const triedLabels = [failedModel, retryModel].filter(Boolean).map((model) => modelOptionLabel(effectiveConfig, model));
+                            message.warning(
+                                t("canvas.scriptNode.pipelineVideoRetry", {
+                                    shot: target.index + 1,
+                                    model: retryModel ? modelOptionLabel(effectiveConfig, retryModel) : t("canvas.scriptNode.oneClickScriptModelUnknown"),
+                                }),
+                            );
+                            patchVideoNodeModel(target.nodeId, retryModel || failedModel);
+                            await fireVideoGenerate(target);
+                            if (readScriptPipelineVideoOutcome(videoNodeOf(target.nodeId)) !== "error") return;
+                            pauseVideoPipeline(target, triedLabels.join(" → "));
+                        };
                         void (async () => {
+                            const jobs: Promise<void>[] = [];
                             for (const target of targets) {
                                 if (target.index > 0) await new Promise((resolve) => setTimeout(resolve, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS));
-                                void Promise.resolve(generateNodeRef.current?.(target.nodeId, "video", target.prompt)).catch(() => undefined);
+                                if (pipelinePaused) break;
+                                jobs.push(superviseVideo(target));
                             }
+                            await Promise.all(jobs);
                         })();
                     }
                 }
@@ -9747,7 +9808,7 @@ function AtelierCanvasPage() {
                 onOk: runPipeline,
             });
         },
-        [effectiveConfig.quality, message, modal, t, revealNodes],
+        [effectiveConfig, message, modal, t, revealNodes],
     );
 
     /**
@@ -10074,7 +10135,18 @@ function AtelierCanvasPage() {
 
                 // ---- ③ 一键铺视频链路并生成（不再弹确认：本条流程前面已经确认过）----
                 notify("pipeline", "canvas.scriptNode.oneClickStagePipeline");
-                handleBuildScriptPipeline(nodeId, undefined, { videoOnly: true, group: true, autoGenerate: true, skipConfirm: true });
+                /**
+                 * 铺链路是 fire-and-forget（2 秒一段点下去就返回），所以这里不能 await；
+                 * 「某段换模型重试仍失败 → 暂停」的消息由 `onVideoPause` 回到这条运行态上
+                 * （晚于下面的 done 覆盖，于是按钮最后显示的是红色暂停原因，而不是「已完成」）。
+                 */
+                handleBuildScriptPipeline(nodeId, undefined, {
+                    videoOnly: true,
+                    group: true,
+                    autoGenerate: true,
+                    skipConfirm: true,
+                    onVideoPause: (detail) => patchOneClickVideoRun(nodeId, { status: "paused", stage: "pipeline", message: detail }),
+                });
                 patchOneClickVideoRun(nodeId, { status: "done", stage: "pipeline", message: t("canvas.scriptNode.oneClickDone") });
                 message.success(t("canvas.scriptNode.oneClickDone"));
             } catch (error) {
