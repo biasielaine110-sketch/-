@@ -170,8 +170,9 @@ export async function scaleVideoBlob(blob: Blob, percent: number, onProgress?: (
     const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
     const track = await input.getPrimaryVideoTrack();
     if (!track) throw new Error("这个文件里没有视频轨道");
-    const sourceWidth = Math.max(2, Number(track.displayWidth) || 0);
-    const sourceHeight = Math.max(2, Number(track.displayHeight) || 0);
+    // 用异步版 `getDisplayWidth()`：同步 getter 已废弃，且在 metadata 未落地时会直接抛。
+    const sourceWidth = Math.max(2, Number(await track.getDisplayWidth()) || 0);
+    const sourceHeight = Math.max(2, Number(await track.getDisplayHeight()) || 0);
     const width = toEven(sourceWidth * ratio);
     const height = toEven(sourceHeight * ratio);
     const output = mp4Output();
