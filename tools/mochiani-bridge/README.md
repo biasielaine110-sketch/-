@@ -113,6 +113,18 @@ POST /api/jobs/:id/confirm               ← 从这一步开始扣余额
 
 离线校验：`MOCHIANI_BRIDGE_NO_LISTEN=1 node probe-carton-plan.mjs`（不连 MCP、不花钱、不写作品）。
 
+**参数对不上时查 schema**（MochiAni 的 386 个工具没有外部文档，`listTools()` 就是唯一权威）：
+
+```bash
+node probe-carton-schemas.mjs --required                     # 各工具必填字段速查表
+node probe-carton-schemas.mjs mochiani_create_shot           # 打印某个工具的完整 inputSchema
+node probe-carton-schemas.mjs --names | grep voiceover       # 只按名字找
+```
+
+⚠️ 所有写工具的 `idempotencyKey` 都是 `"format": "uuid"` —— 传 `atelier-plan-xxx` 这种业务串会被
+MCP 直接挡成 `-32602 Invalid uuid at idempotencyKey`。桥里一律用 `stableUuid(seed)` 从种子算出
+**确定性 UUID**（同一件事重试仍是同一个 key，幂等语义不丢）。
+
 **素材区是可选的，填了以「图块」形态出现**：
 
 - 名字怎么来：节点上每个素材一个图块，输入名字回车即加一条（`cast.characters/scenes/props` 存的还是换行文本）。

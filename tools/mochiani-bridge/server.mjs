@@ -31,7 +31,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 const PORT = Number(process.env.MOCHIANI_BRIDGE_PORT || 17399);
@@ -316,6 +316,22 @@ async function canvasRead(pageId, origin) {
  */
 const NODE_FALLBACK_W = 520;
 const NODE_FALLBACK_H = 300;
+
+/**
+ * 把任意种子串算成**确定性 UUID**（v5 形状）。
+ *
+ * ⚠️ MochiAni 所有写工具的 `idempotencyKey` schema 都是 `"format": "uuid"`，
+ * 传业务串（`atelier-plan-xxx`）会被 MCP 直接挡掉：
+ * `MCP error -32602: Input validation error: Invalid arguments for tool …: Invalid uuid at idempotencyKey`。
+ * 但我们又需要「同一件事重试/重算都落到同一个 key」—— 所以不能直接 `randomUUID()`，
+ * 得从 `jobId + 用途` 这种种子**算**出来。用 sha256 取 32 个十六进制，再按 RFC 4122 摆成
+ * `8-4-4-4-12`，第 13 位写版本号 5、第 17 位写 variant 位。
+ */
+function stableUuid(seed) {
+    const hex = createHash("sha256").update(String(seed)).digest("hex");
+    const variant = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 
 function nodeRect(node) {
     const x = Number(node?.x || 0);
@@ -1443,7 +1459,7 @@ async function resolveCartonAssets({ pageId, origin, projectId, projectName, wor
                     assetType: kind === "other" ? "other" : kind,
                     name,
                     description: options.descriptions?.[name] || "",
-                    idempotencyKey: `atelier-asset-${workId}-${kind}-${name}`,
+                    idempotencyKey: stableUuid(`asset:${workId}:${kind}:${name}`),
                 });
                 const newId = firstString(created, [/^asset_?id$/i, /^created_?asset_?id$/i, /^id$/i]);
                 if (!newId) throw new Error("新建成功但没读到素材 ID");
@@ -1530,7 +1546,7 @@ async function planCartonJob(job, ctx) {
                 expectedConfig: video?.selected_config || {},
                 userExplicitlyRequestedModelOrChannelChange: true,
                 userRequest: `开源画布节点指定：${option?.model_name || modelId} / ${option?.supplier_name || supplierId}`,
-                idempotencyKey: `atelier-vcfg-${job.id}`,
+                idempotencyKey: stableUuid(`vcfg:${job.id}`),
             });
             pushLog(job, `视频配置已切到 ${option?.model_name || modelId} / ${option?.supplier_name || supplierId}`);
         } catch (error) {
@@ -1617,7 +1633,7 @@ async function planCartonJob(job, ctx) {
         characterIds: resolved.ids.character.length ? resolved.ids.character : undefined,
         sceneIds: resolved.ids.scene.length ? resolved.ids.scene : undefined,
         propIds: resolved.ids.prop.length ? resolved.ids.prop : undefined,
-        idempotencyKey: `atelier-plan-${job.id}`,
+        idempotencyKey: stableUuid(`plan:${job.id}`),
     });
     const shotId =
         firstString(created, [/^shot_?id$/i, /^created_?shot_?id$/i]) ||
@@ -1645,12 +1661,15 @@ async function planCartonJob(job, ctx) {
                 continue;
             }
             try {
+                // `text` 的 schema 上限是 200 字，超了会被 MCP 挡回来
+                const spoken = line.text.length > 200 ? line.text.slice(0, 200) : line.text;
+                if (spoken !== line.text) job.warnings.push(`配音「${line.characterName}」超过 200 字，已截断`);
                 const saved = await callTool("mochiani_create_voiceover_item", {
                     ...workRef,
                     shotId,
                     characterId,
-                    text: line.text,
-                    idempotencyKey: `atelier-vo-${job.id}-${items.length}`,
+                    text: spoken,
+                    idempotencyKey: stableUuid(`vo:${job.id}:${items.length}`),
                 });
                 const itemId = firstString(saved, [/^item_?id$/i, /^voiceover_?item_?id$/i, /^id$/i]);
                 items.push({ itemId, characterId, characterName: line.characterName, text: line.text });
@@ -1691,12 +1710,18 @@ async function confirmCartonJob(job) {
     if (job.generateVoice && voiceItems.length) {
         pushLog(job, `先下发 ${voiceItems.length} 条配音`);
         try {
+            /**
+             * ⚠️ `items` 的每一项是 `{ shotId, itemIds }`（`itemIds` 是**数组**），
+             * 不是 `{ itemId, characterId, text }` —— 后者会被 schema 的
+             * `additionalProperties: false` 直接挡回来（报 Invalid arguments）。
+             */
+            const itemIds = voiceItems.map((item) => item.itemId).filter(Boolean);
             const receipt = await callTool("mochiani_generate_voiceovers", {
                 ...workRef,
                 shotIds: [job.nodeId],
                 mode: "all",
-                items: voiceItems.map((item) => ({ itemId: item.itemId, characterId: item.characterId, text: item.text })),
-                idempotencyKey: `atelier-vo-gen-${job.id}`,
+                ...(itemIds.length ? { items: [{ shotId: job.nodeId, itemIds }] } : {}),
+                idempotencyKey: stableUuid(`vogen:${job.id}`),
             });
             job.voiceReceipt = receipt;
             pushLog(job, "配音已受理（音频在 MochiAni 里出）");
@@ -1719,7 +1744,7 @@ async function confirmCartonJob(job) {
                   userRequest: `开源画布节点指定：${job.model?.key || job.model?.id || ""}`,
               }
             : {}),
-        idempotencyKey: `atelier-gen-${job.id}`,
+        idempotencyKey: stableUuid(`gen:${job.id}`),
     });
     job.receipt = receipt;
     job.taskId = firstString(receipt, [/^task_?uuid$/i, /^task_?id$/i]) || "";
@@ -2347,7 +2372,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.3",
+            version: "1.6.4",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
@@ -2549,4 +2574,5 @@ export {
     normalizeConfigOptions,
     readParamOptions,
     readWorkIdentity,
+    stableUuid,
 };
