@@ -572,6 +572,15 @@ export type CanvasNodeMetadata = {
      */
     reverseVideoTarget?: CanvasReverseVideoTarget;
     /**
+     * 反推视频节点：**用哪个技能反推**（用户 2026-11-12 第 02 条「需要能够切换技能」）。
+     *
+     * 取值是 `VIDEO_REVERSE_SKILL_OPTIONS` 里的 id：`"storyboard"`（视频反推-分镜提示词）/ `"ss"`（SS视频反推）。
+     * 空 / 缺省 / 脏值 → **默认 `storyboard`**（升级前的口径），所以老节点行为不变。
+     *
+     * ⚠️ 只存 id，不存中文技能名：名字会改、用户还可能起备注名，存名字等于把展示文案冻进数据里。
+     */
+    reverseVideoSkill?: string;
+    /**
      * 反推视频节点：上一次执行的结果快照。
      * 节点滚出视口会被裁掉重挂，进度只放组件 state 会在回来时凭空消失，所以落到 metadata。
      */

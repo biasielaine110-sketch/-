@@ -175,7 +175,7 @@ import { widenLegacyScriptNodes } from "@/lib/canvas/script-node-width";
 import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
-import { VIDEO_REVERSE_REWRITE_PROMPT, VIDEO_REVERSE_SKILL_LABEL, buildVideoReversePrompt, cleanVideoReverseScriptOutput, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cleanVideoReverseScriptOutput, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -10395,13 +10395,14 @@ function AtelierCanvasPage() {
      * 统一骨架：
      *  ① 建一个 AI 对话节点，把**接入的视频从左侧连进去** —— 模型能看到的视频输入只认连线，
      *     光在提示词里写一句链接对本地视频毫无意义（`sendChatMessage` 会把连线视频转成 video_url 或抽帧）。
-     *  ② 这个对话节点上只勾「SS视频反推SS」一个技能：反推是一次性任务，多勾会把输出带偏。
+     *  ② 这个对话节点上只勾**一个**技能（节点上切换的「视频反推-分镜提示词」或「SS视频反推」）：
+     *     反推是一次性任务，多勾会把输出带偏。
      *  ③ 技能挑不到就**直接报错返回**，绝不静默换成「不带技能硬跑」——那样模型自由发挥，用户还以为反推过了。
      *  ④ 回复正文落成文本节点（内容三件套一起写：`content` / `prompt` / `composerContent`）。
      *  ⑤ 只有 03 才继续：文本节点 → 脚本生成器 → `handleOneClickVideo`（一键视频）。
      */
     const runVideoReverse = useCallback(
-        async (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: string; shotsPerClip?: number }, report: (stage: string) => void = () => undefined): Promise<VideoReverseResult> => {
+        async (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: string; shotsPerClip?: number; skillId?: string }, report: (stage: string) => void = () => undefined): Promise<VideoReverseResult> => {
             const videoNode = nodesRef.current.find((item) => item.id === input.videoNodeId);
             if (!videoNode || videoNode.type !== CanvasNodeType.Video || !videoNode.metadata?.content) {
                 return { ok: false, error: "接入的视频节点已经不在了，请重新接入一次" };
@@ -10422,10 +10423,6 @@ function AtelierCanvasPage() {
                     referenceAssets.push({ nodeId: node.id, title: node.title || "", prompt: node.metadata?.prompt || "" });
                 }
             }
-            const skill = pickVideoReverseSkill(listChatSkills());
-            if (!skill) {
-                return { ok: false, error: `技能库里没找到「${VIDEO_REVERSE_SKILL_LABEL}」：先在 AI 对话节点的技能列表里确认它已经装好` };
-            }
             /**
              * 节点窗口里选好的**目标视频参数**（风格 / 模型 / 总时长 / 比例 / 分辨率，用户 2026-11-09）。
              *
@@ -10434,6 +10431,17 @@ function AtelierCanvasPage() {
              */
             const reverseNode = input.reverseNodeId ? nodesRef.current.find((item) => item.id === input.reverseNodeId) : undefined;
             const target = readReverseVideoTarget(reverseNode?.metadata);
+            /**
+             * 反推技能（用户 2026-11-12 第 02 条：节点可切换「视频反推-分镜提示词」/「SS视频反推」）。
+             *
+             * 取值优先 `input.skillId`（UI 点按钮时显式带过来，避免 patch 还没落库就执行），
+             * 否则读节点 metadata；两处都没有 → 默认「视频反推-分镜提示词」（= 升级前行为）。
+             */
+            const skillChoice = readReverseVideoSkill(input.skillId ? { reverseVideoSkill: input.skillId } : reverseNode?.metadata);
+            const skill = pickVideoReverseSkill(listChatSkills(), skillChoice.hints);
+            if (!skill) {
+                return { ok: false, error: `技能库里没找到「${skillChoice.label}」：先在 AI 对话节点的技能列表里确认它已经装好（反推技能可在节点上切换）` };
+            }
 
             const videoUrl = videoNode.metadata.content;
             const gap = 120;
@@ -10511,7 +10519,7 @@ function AtelierCanvasPage() {
 
             // ② 把视频链接 + 要求发进对话，等它把反推结果说完
             report("把视频链接发进对话，反推中…");
-            let body = (await sendChatMessage(chatNode.id, buildVideoReversePrompt({ videoUrl, mode: input.mode, requirement: input.requirement, targetSeconds: target.seconds }), { text: true, image: false })).trim();
+            let body = (await sendChatMessage(chatNode.id, buildVideoReversePrompt({ videoUrl, mode: input.mode, requirement: input.requirement, targetSeconds: target.seconds, skillLabel: skill.name || skillChoice.label }), { text: true, image: false })).trim();
             /**
              * 语言兜底（用户 2026-11-09：「强化执行反推节点任务时，输出的文案文本内容必须为中文」）。
              *
@@ -10539,7 +10547,7 @@ function AtelierCanvasPage() {
             if (!body) {
                 return {
                     ok: false,
-                    error: `对话没有返回文本：检查文本模型是否已配置、技能「${VIDEO_REVERSE_SKILL_LABEL}」是否可用（也可能被手动停止了）`,
+                    error: `对话没有返回文本：检查文本模型是否已配置、技能「${skill.name || skillChoice.label}」是否可用（也可能被手动停止了）`,
                     chatNodeId: chatNode.id,
                 };
             }

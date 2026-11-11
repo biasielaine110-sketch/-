@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_LABEL, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
@@ -60,7 +60,7 @@ type CanvasReverseVideoNodeContentProps = {
     /** 粘贴链接建一个视频节点，返回新节点 id */
     onCreateVideoFromUrl?: (videoUrl: string) => Promise<string>;
     /** 执行一条命令；report 用来把阶段文案打到窗口里 */
-    onRun: (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: ScriptSchemeId; shotsPerClip?: number }, report: (stage: string) => void) => Promise<VideoReverseResult>;
+    onRun: (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: ScriptSchemeId; shotsPerClip?: number; skillId?: string }, report: (stage: string) => void) => Promise<VideoReverseResult>;
 };
 
 const MODE_ICON: Record<VideoReverseMode, typeof Video> = {
@@ -124,6 +124,13 @@ export function CanvasReverseVideoNodeContent({
      * 一律用 `readReverseVideoTarget` 归一化后再渲染 —— 老节点没有这个字段，秒数也要有默认 30。
      */
     const target = useMemo(() => readReverseVideoTarget(node.metadata), [node.metadata]);
+    /**
+     * 反推技能（用户 2026-11-12 第 02 条）：默认「视频反推-分镜提示词」，可在节点上切到「SS视频反推」。
+     *
+     * 读的时候一律走 `readReverseVideoSkill`：老节点 / 脏值 → 默认那条，所以升级前后**行为不变**。
+     * 写的时候只写 id（`reverseVideoSkill`），文案随选项表走，别把中文名存进 metadata。
+     */
+    const skillOption = useMemo(() => readReverseVideoSkill(node.metadata), [node.metadata]);
     /**
      * 写回：**整体覆盖** `reverseVideoTarget`（`applyNodeConfigPatch` 是浅合并，只 patch 一个键会把其它几个抹掉）。
      * `normalizeReverseVideoTarget` 顺手把空串键删掉 = 「跟随全局」，同时把秒数夹到合法区间。
@@ -268,7 +275,7 @@ export function CanvasReverseVideoNodeContent({
                  * 节点 metadata 的写入要等一次 React 提交，而 03 在**同一次点击里**就要建脚本节点、
                  * 立刻生成 —— 读 `nodesRef` 可能拿到还没刷新的旧值（这个坑 2026-11-09 已经踩过一次）。
                  */
-                const outcome = await onRun({ videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id, scriptScheme: target.scriptScheme, shotsPerClip: target.shotsPerClip }, (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }));
+                const outcome = await onRun({ videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id, scriptScheme: target.scriptScheme, shotsPerClip: target.shotsPerClip, skillId: skillOption.id }, (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }));
                 patchRun({
                     status: outcome.ok ? "done" : "error",
                     mode,
@@ -287,7 +294,7 @@ export function CanvasReverseVideoNodeContent({
                 message.error(detail);
             }
         },
-        [attached, message, node.id, onRun, patchRun, target.scriptScheme, target.shotsPerClip],
+        [attached, message, node.id, onRun, patchRun, skillOption.id, target.scriptScheme, target.shotsPerClip],
     );
 
     const handleCommand = useCallback(
@@ -396,7 +403,50 @@ export function CanvasReverseVideoNodeContent({
                     ) : null}
                 </div>
 
-                {/* ③ 生成设置（用户 2026-11-09）：风格 / 模型 / 秒数 / 比例 / 分辨率 */}
+                {/* ③ 反推技能（用户 2026-11-12 第 02 条）：默认「视频反推-分镜提示词」，可手动切到「SS视频反推」。
+                    01 / 02 / 03 三条命令都用这里选的技能；除技能本身，三条的规则与约束完全不动。
+                    ⚠️ 存 id 不存中文名：名字会改，id 是稳定的；旧节点没有这个字段 → 读的时候回落默认那条。 */}
+                <div className="rounded-md px-2.5 py-2" style={{ border: softBorder }}>
+                    <div className="flex items-center gap-1.5 text-[11px]">
+                        <Sparkles size={11} className="shrink-0 opacity-70" />
+                        <span className="min-w-0 flex-1 font-medium opacity-80">反推技能</span>
+                        <span className="shrink-0 text-[10px] opacity-45">01 / 02 / 03 都用它</span>
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        {VIDEO_REVERSE_SKILL_OPTIONS.map((item) => {
+                            const active = item.id === skillOption.id;
+                            return (
+                                <button
+                                    key={item.id}
+                                    type="button"
+                                    className="inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11px] transition"
+                                    style={{
+                                        borderColor: active ? theme.toolbar.activeText : theme.node.stroke,
+                                        color: active ? theme.toolbar.activeText : theme.node.text,
+                                        background: active ? `${theme.toolbar.activeText}14` : "transparent",
+                                        opacity: active ? 1 : 0.7,
+                                    }}
+                                    aria-pressed={active}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                        event.stopPropagation();
+                                        if (active) return;
+                                        onConfigChange(node.id, { reverseVideoSkill: item.id });
+                                    }}
+                                    title={`${item.label}：${item.hint}${active ? "（当前使用）" : "，点一下切换"}`}
+                                >
+                                    {item.label}
+                                </button>
+                            );
+                        })}
+                    </div>
+                    <div className="mt-1 text-[10px] leading-relaxed opacity-45">
+                        只换「用哪个技能反推」——只输出正文、样本而非复刻、中文、时长与出片参数这些约束一条不变。切换前请确认技能库里装着它，没装会直接报错，不会悄悄换另一个技能跑。
+                    </div>
+                </div>
+
+                {/* ④ 生成设置（用户 2026-11-09）：风格 / 模型 / 秒数 / 比例 / 分辨率 */}
                 <div className="rounded-md px-2.5 py-2" style={{ border: softBorder }}>
                     <div className="flex items-center gap-1.5 text-[11px]">
                         <SlidersHorizontal size={11} className="shrink-0 opacity-70" />
@@ -470,7 +520,7 @@ export function CanvasReverseVideoNodeContent({
                     </div>
                 </div>
 
-                {/* ④ 三条命令 */}
+                {/* ⑤ 三条命令 */}
                 <div className="flex flex-col gap-1.5">
                     {VIDEO_REVERSE_MODES.map((item) => {
                         const Icon = MODE_ICON[item.mode];
@@ -505,7 +555,7 @@ export function CanvasReverseVideoNodeContent({
                     })}
                 </div>
 
-                {/* ⑤ 进度 / 错误 / 产物 */}
+                {/* ⑥ 进度 / 错误 / 产物 */}
                 {run?.status === "running" && run.stage ? (
                     <div className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11px]" style={{ background: "rgba(99,102,241,0.14)", color: "#c7d2fe" }}>
                         <Loader2 size={12} className="animate-spin shrink-0" />
@@ -544,11 +594,11 @@ export function CanvasReverseVideoNodeContent({
                 ) : null}
             </div>
 
-            {/* ⑥ 脚注：用的技能 / 模型 */}
+            {/* ⑦ 脚注：用的技能 / 模型 */}
             <div className="flex flex-col gap-0.5 text-[11px] leading-relaxed opacity-45">
                 <span className="flex items-center gap-1.5">
                     <Sparkles size={11} className="shrink-0" />
-                    技能「{VIDEO_REVERSE_SKILL_LABEL}」；没装会直接报错，不会静默换别的模型硬跑。输出强制简体中文（提示词首尾各钉一次，偶尔跑偏会自动让它原样重写一遍）。
+                    技能「{skillOption.label}」（可在上方切换）；没装会直接报错，不会静默换别的技能硬跑。输出强制简体中文（提示词首尾各钉一次，偶尔跑偏会自动让它原样重写一遍）。
                 </span>
                 {reverseModelLabel ? <span className="truncate">反推模型：{reverseModelLabel}</span> : null}
             </div>
