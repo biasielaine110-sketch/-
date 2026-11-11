@@ -3527,6 +3527,19 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
 }
 
+/**
+ * 这一轮是不是**正文为空**（上游 200 但 `content` 一个字符都没有）。
+ *
+ * `requestImageQuestion` 会把空正文兜成 `apiErrors.noContent`（「没有返回内容」）再返回，
+ * 调用方拿到的是**一句正常的提示文案**而不是异常 —— 于是分镜表解析器会把它当成模型原文，
+ * 报成「无法解析为分镜表结构」。用它把「模型没说话」和「模型说了但格式不对」分开：
+ * 前者该重试 / 换模型，后者才该看格式（2026-11-12 第七套报障就是这个混淆）。
+ */
+export function isEmptyChatAnswer(text: string) {
+    const value = String(text ?? "").trim();
+    return !value || value === apiText("noContent");
+}
+
 export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: ChatRequestOptions) {
     if (options?.tools?.length && options.executeTool) {
         return requestChatWithTools(config, messages, onDelta, options);

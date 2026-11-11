@@ -6,6 +6,7 @@ import { Group, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
+    isEmptyChatAnswer,
     isMidjourneyModel,
     modelSupportsNativeChatVideo,
     requestEdit,
@@ -7821,6 +7822,30 @@ function AtelierCanvasPage() {
                 let parsed = parseStoryScriptOutput(answer, presetId);
                 let lastAnswer = answer;
                 /**
+                 * 上游 200 但**正文为空**时先重发一次（同一份提示词，什么都不改）。
+                 *
+                 * 2026-11-12 报障：第七套一点就弹「无法解析为分镜表结构…模型返回开头：没有返回内容」。
+                 * 那句「没有返回内容」其实是 `requestImageQuestion` 给空正文的兜底文案，被解析器当成模型
+                 * 原文去解析了，所以看起来像「格式不对」，实际是「模型一个字都没回」。空正文多半是上游
+                 * 瞬时抖动（中转把请求吞了 / 思考预算吃光），原样重发的命中率不低；两遍都空才按空返回报错。
+                 */
+                let emptyRetried = false;
+                if (!parsed.ok && isEmptyChatAnswer(answer)) {
+                    emptyRetried = true;
+                    const retried = await requestImageQuestion(
+                        textConfig,
+                        [
+                            { role: "system", content: scriptSystemPrompt },
+                            { role: "user", content: userContent },
+                        ],
+                        (streamed) => setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptRaw: streamed } } : node))),
+                        { signal: controller.signal },
+                    );
+                    if (controller.signal.aborted) return { ok: false, cancelled: true };
+                    lastAnswer = retried;
+                    parsed = parseStoryScriptOutput(retried, presetId);
+                }
+                /**
                  * 模型反问而不是出表（`{ rows: [], clarification: "…" }`）时**自动重试一次**。
                  * 2026-11-05 实样：源稿 31 镜、任务书却硬写「必须 19 行」，模型判定冲突 →
                  * 每点一次都弹同一句「生成失败」。根因（模版误判 / 镜号重复）已在任务书侧修掉，
@@ -7845,9 +7870,20 @@ function AtelierCanvasPage() {
                     parsed = parseStoryScriptOutput(retried, presetId);
                 }
                 if (!parsed.ok) {
-                    setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: parsed.error, scriptRaw: lastAnswer } } : node)));
+                    /**
+                     * 空正文单独报一句：`parsed.error` 的写法（「无法解析为分镜表结构…模型返回开头：没有返回内容」）
+                     * 会让人以为又是格式问题，去改方案 / 改提示词，白折腾。空返回要的是「换模型 / 精简提示词」。
+                     */
+                    const errorText = isEmptyChatAnswer(lastAnswer)
+                        ? [
+                              `模型这轮没有返回任何正文（上游 200 但 content 为空${emptyRetried ? "，已自动重发 1 次仍为空" : ""}）—— 不是 JSON / 表格解析的问题，改输出格式没用。`,
+                              `诊断：模型 ${textConfig.model}｜方案 ${wholeSchemeId}｜system ${scriptSystemPrompt.length} 字｜任务书 ${scriptTask.length} 字｜参考图 ${hydrated.referenceImages.length} 张`,
+                              `建议：① 换一个通用文本模型重试（deepseek / gemini-2.5-pro 这类）；② 上面 system 字数明显偏大（>2 万字）时，精简「自定义系统提示词」或「分镜提示词」再试；③ 带了多张参考图时先删到 1~2 张。`,
+                          ].join("\n")
+                        : parsed.error;
+                    setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, scriptStatus: "error", errorDetails: errorText, scriptRaw: lastAnswer } } : node)));
                     message.error(t("canvas.scriptNode.parseFailed"));
-                    return { ok: false, error: parsed.error || t("canvas.scriptNode.parseFailed") };
+                    return { ok: false, error: errorText };
                 }
                 /**
                  * 源内容是「逐镜标签模版」时，三列提示词以**模版原文**为准（模型照搬的执行率不是 100%，
