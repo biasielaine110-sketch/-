@@ -175,7 +175,7 @@ import { widenLegacyScriptNodes } from "@/lib/canvas/script-node-width";
 import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
-import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cleanVideoReverseScriptOutput, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -10516,6 +10516,17 @@ function AtelierCanvasPage() {
                 const rewritten = (await sendChatMessage(chatNode.id, VIDEO_REVERSE_REWRITE_PROMPT, { text: true, image: false })).trim();
                 if (rewritten) body = rewritten;
             }
+            /**
+             * 02 / 03 的**确定性清洗**（用户 2026-11-11 第 02 条：「总给我出一堆没用的注释内容，
+             * 导致我想要的同类型剧本都生成不完」）。
+             *
+             * 提示词里已经把「只输出剧本正文」写了两遍，但模型仍会在开头寒暄、结尾加「注：…」，
+             * 甚至把整段包进 ``` 代码块 —— 文本节点会原样显示，03 还要拿它喂脚本生成器。这里统一收口：
+             * 只剥「整体代码块包裹 / 开头客套 / 结尾后记」三类，**绝不删正文**（判据见
+             * `cleanVideoReverseScriptOutput`）。
+             * ⚠️ **01 不清洗**：01 的输出就是分镜提示词表，「说明 / 注意」是它的正常内容。
+             */
+            if (body && input.mode !== 1) body = cleanVideoReverseScriptOutput(body);
             if (!body) {
                 return {
                     ok: false,

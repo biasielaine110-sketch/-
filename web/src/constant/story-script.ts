@@ -1430,45 +1430,133 @@ export const SCRIPT_PROP_ASSET_LIMIT = 3;
 /**
  * 「零件 / 配件」尾字表：`手机壳`、`剑鞘`、`车把`、`刀柄`…… 这类「主体 + 零件」式命名的尾巴。
  *
- * 只在**同一格已经写了主体**（`手机` / `剑` / `车`）时才拿它判定「后面这件是主体的零件」，
- * 见 `mergeScriptPropPartNames`。刻意只收「明显是零件」的字，`帘` / `杯` / `钥匙` 这类
- * 是独立器物的词不进表 —— 宁可少并，也不能把真道具吃掉。
+ * 用在 `scriptPropPartTail`：只有「剩下的那截**正好是这个表里的词**」才算零件，
+ * 见 `mergeScriptPropPartNames` / `planScriptPropAssets`。刻意只收「明显是零件」的字，
+ * `帘` / `杯` / `钥匙` / `包` 这类是独立器物的词不进表 —— 宁可少并，也不能把真道具吃掉。
+ *
+ * 2026-11-11 扩表（用户第 01 条：「同一个道具的组件分别生出来」）：补 `托` / `垫` / `沿` / `口` /
+ * `身` / `底` / `足` / `环` / `钩` / `夹` / `片` / `条` / `层` / `面` / `罩` ——
+ * `碗托`、`杯垫`、`碗沿`、`瓶口`、`机身`、`鞋底`、`桌脚`、`耳环`、`挂钩`、`发夹`、`刀片`、`书页条`、
+ * `涂层`、`桌面`、`灯罩` 全是「某件东西的一部分」，以前一个都不认。
  */
 const SCRIPT_PROP_PART_TAILS = [
     "壳", "套", "盖", "帽", "塞", "柄", "把手", "鞘", "穗", "刃", "锋", "刀身", "机身",
     "底座", "座", "轮", "胎", "链条", "链", "扣", "拉链", "带", "绳", "线", "管", "嘴", "脚", "腿",
     "支架", "屏", "屏幕", "膜", "贴膜", "内胆", "芯", "页", "框", "边", "角",
+    "托", "垫", "沿", "口", "身", "底", "足", "环", "钩", "夹", "片", "条", "层", "面", "罩",
 ];
 
 /**
- * 把同一格里「某个物体 + 它的零件」并回那个物体（用户 2026-11-09 第 2 条报障：
- * 「一个道具拆出来的还是太碎，明明是一个物体上的零件也拆出来了」）。
+ * `name` 是不是 `body` 的一件零件 —— 是就返回那截「零件尾巴」，否则 `null`。
  *
- * 命中只有两条，都很保守：
+ * 两种写法都认（用户 2026-11-11 第 01 条的两种现场形态）：
+ *  ① **主体在前**：`手机` + `手机壳` → `壳`；`剑` + `剑鞘` → `鞘`；
+ *  ② **主体带修饰**：`青花瓷碗` + `碗盖` → `盖`（`碗盖` 以 `青花瓷碗` 的**尾巴 `碗`** 开头）。
+ *     以前只认 ①，所以 `碗盖` / `碗托` 永远并不到 `青花瓷碗` 上，各生一张图。
+ *
+ * ⚠️ 只在「剩下那截 ≤4 字且正好是 `SCRIPT_PROP_PART_TAILS` 里的词」时才认：
+ * `门帘` + `门把手` 不算（`帘` 不在表里）——`门帘` 是独立道具，不能被 `门` 吃掉。
+ */
+export function scriptPropPartTail(name: string, body: string): string | null {
+    if (!name || !body || name === body) return null;
+    const accept = (tail: string) => Boolean(tail) && tail.length <= 4 && SCRIPT_PROP_PART_TAILS.includes(tail);
+    // ① 主体在前：`手机壳` = `手机` + `壳`
+    if (name.startsWith(body) && accept(name.slice(body.length).trim())) return name.slice(body.length).trim();
+    // ② 主体带修饰：拿 `body` 的**结尾**（最多 4 字）去比 `name` 的开头，`青花瓷碗` 的 `碗` → `碗盖` 的 `盖`
+    for (let len = Math.min(body.length, 4); len >= 1; len -= 1) {
+        const head = body.slice(body.length - len);
+        if (!head || !name.startsWith(head)) continue;
+        const tail = name.slice(head.length).trim();
+        if (accept(tail)) return tail;
+    }
+    return null;
+}
+
+/**
+ * 两个名字是不是「同一件东西的两件零件」（`碗盖` / `碗托`、`手机壳` / `手机屏幕`）。
+ * 判据：共同前缀 + 各自的尾巴**都在**零件尾字表里。命中返回那个共同前缀（供并簇时做展示名）。
+ *
+ * 为什么需要它：主体名字没被写进表里时（只写了 `碗盖、碗托`），上面那条「相对主体」的规则
+ * 一条都命中不了 → 两件零件各生一张图。有共同前缀就说明它们是同一件东西的两块。
+ */
+export function scriptPropSiblingHead(a: string, b: string): string | null {
+    if (!a || !b || a === b) return null;
+    let index = 0;
+    while (index < a.length && index < b.length && a[index] === b[index]) index += 1;
+    if (!index) return null;
+    const head = a.slice(0, index);
+    const tailA = a.slice(index).trim();
+    const tailB = b.slice(index).trim();
+    if (!tailA || !tailB || tailA.length > 4 || tailB.length > 4) return null;
+    return SCRIPT_PROP_PART_TAILS.includes(tailA) && SCRIPT_PROP_PART_TAILS.includes(tailB) ? head : null;
+}
+
+/** 两个道具名之间的关系（**相对第一个参数**看的）：`body` = 前者是本体、后者是它的零件 / 简写。 */
+export type ScriptPropRelation = "same" | "body" | "part" | "sibling" | "none";
+
+/**
+ * 判两个道具名是不是「同一件东西」，并说明**谁是谁的本体**。
+ *
+ * 五种关系（顺序即判定优先级，越靠前越可信）：
+ *  - `same`：归一化后完全一样（`两杯蜜桃乌龙茶` ↔ `蜜桃乌龙茶（两杯）`）；
+ *  - `body`：**前者是本体**，后者只是它的零件（`青花瓷碗` ← `碗盖`）或简写（`青花瓷面碗` ← `面碗`）；
+ *  - `part`：反过来了，前者是零件；
+ *  - `sibling`：同一件东西的两块零件（`碗盖` / `碗托`），谁是本体说不清，并簇时按出现先后挑一个；
+ *  - `none`：两件不同的东西（`口红` / `口红膏`、`门帘` / `酒杯`）。
+ *
+ * 🔴 方向必须分清楚：以前「并进哪一簇」只看「谁更长就当代表名」，于是 `手机` + `手机壳` 并完之后
+ * 代表名变成了 `手机壳`，后面的 `手机屏幕` / `手机支架` 再也匹配不上（`手机壳` 既不是它们的前缀
+ * 也不是后缀）→ **同一部手机被拆成 3 张图**。这就是用户 2026-11-11 第 01 条的根因。
+ */
+export function scriptPropRelation(left: string, right: string): ScriptPropRelation {
+    const a = String(left ?? "").trim();
+    const b = String(right ?? "").trim();
+    if (!a || !b) return "none";
+    if (a === b) return "same";
+    if (normalizeScriptPropAssetKey(a) === normalizeScriptPropAssetKey(b)) return "same";
+    if (scriptPropPartTail(b, a)) return "body";
+    if (b.length >= 2 && a.length > b.length && a.endsWith(b)) return "body";
+    if (scriptPropPartTail(a, b)) return "part";
+    if (a.length >= 2 && b.length > a.length && b.endsWith(a)) return "part";
+    if (scriptPropSiblingHead(a, b)) return "sibling";
+    return "none";
+}
+
+/**
+ * 把同一格里「某个物体 + 它的零件」并回那个物体（用户 2026-11-09 第 2 条 / 2026-11-11 第 01 条：
+ * 「一个物体上的零件也拆出来了」「同一个道具的组件分别生出来」）。
+ *
+ * 命中三条，都很保守（判据见 `scriptPropRelation`）：
  *  1. **后缀包含**：`青花瓷面碗` 与 `面碗`、`苏晚的手机` 与 `手机` —— 短的只是长的简写，留长的；
- *  2. **前缀 + 零件尾字**：`手机` 与 `手机壳` / `手机屏幕`、`剑` 与 `剑鞘` —— 后者是主体的零件。
+ *  2. **零件**：`手机` 与 `手机壳` / `手机屏幕`、`剑` 与 `剑鞘`、`青花瓷碗` 与 `碗盖`；
+ *  3. **兄弟零件**：`碗盖` 与 `碗托`（表里没写主体）—— 留先出现的那件，别一块一块出图。
  *
- * 只跟**同一格里的其它名字**比，不查全表：单独一格的 `门把手` 照旧是它自己，不会被谁的「门」吃掉。
+ * 只跟**同一格里的其它名字**比，不查全表：单独一格的 `门把手` 照旧是它自己。
  * 顺序保持首次出现的位置（并掉的零件直接消失，整体留在原位）。
  */
 export function mergeScriptPropPartNames(names: readonly string[]): string[] {
     const list = names.filter(Boolean);
     if (list.length < 2) return list;
-    /** 这个词是不是「另一个词的主体」或「更完整的写法」→ 是的话它就该被并掉。 */
-    const isPartOfAnother = (name: string): boolean => {
-        for (const other of list) {
-            if (other === name) continue;
-            // ① 后缀包含：`面碗` ⊂ `青花瓷面碗`（只认 ≥2 字的短名字，避免把单字并掉）
-            if (name.length >= 2 && other.length > name.length && other.endsWith(name)) return true;
-            // ② 前缀 + 零件尾字：`手机壳` = `手机` + `壳`
-            if (name.length > other.length && name.startsWith(other)) {
-                const tail = name.slice(other.length);
-                if (tail.length <= 4 && SCRIPT_PROP_PART_TAILS.includes(tail)) return true;
+    const kept: string[] = [];
+    for (let index = 0; index < list.length; index += 1) {
+        const name = list[index];
+        let drop = false;
+        for (let other = 0; other < list.length; other += 1) {
+            if (other === index) continue;
+            const relation = scriptPropRelation(name, list[other]);
+            // 它是别人的零件 / 简写 → 并掉（本体自己会留下）
+            if (relation === "part") {
+                drop = true;
+                break;
+            }
+            // 兄弟零件：只留先出现的那件
+            if (relation === "sibling" && other < index) {
+                drop = true;
+                break;
             }
         }
-        return false;
-    };
-    const kept = list.filter((name) => !isPartOfAnother(name));
+        if (!drop) kept.push(name);
+    }
     return kept.length ? kept : list;
 }
 
@@ -1511,8 +1599,11 @@ export const SCRIPT_PROP_ASSET_MIN_SHOTS = 2;
 /**
  * 全表道具资产图**总数上限**（不管表多长）。防的是「每条都出现在 2 镜、于是 20 件都出图」。
  * 排序口径 = 出现镜数降序，同频次按表里首次出现顺序。
+ *
+ * 2026-11-11 从 6 收到 **4**（用户第 01 条：「一次十来个道具，用得上嘛？」）：
+ * 一条 30 秒片子真正要「跨镜长得一模一样」的道具就 2~4 件，再多的都是浪费钱。
  */
-export const SCRIPT_PROP_ASSET_TOTAL_LIMIT = 6;
+export const SCRIPT_PROP_ASSET_TOTAL_LIMIT = 4;
 /**
  * 保底件数：**只有「一件都不满足」时**才兜底（整张表没有一件道具跨 2 镜 → 按频次留这么几件出图）。
  * 不写成「不足 N 件就补齐」：那会让「只有 1 件跨镜道具」的表又冒出 1 件一次性道具的图。
@@ -1557,25 +1648,12 @@ export function normalizeScriptPropAssetKey(value: unknown): string {
 }
 
 /**
- * 两处写法是不是同一件道具。三条判据都很保守（宁可漏并，不可错并）：
- *  1. 归一化后完全相同（`两杯蜜桃乌龙茶` ↔ `蜜桃乌龙茶（两杯）`）；
- *  2. **后缀包含**（`面碗` ⊂ `青花瓷面碗`，只认 ≥2 字的短名字，避免把单字并掉）；
- *  3. **前缀 + 零件尾字**（`手机壳` = `手机` + `壳`，尾字表见 `SCRIPT_PROP_PART_TAILS`）。
+ * 两处写法是不是同一件道具 —— `scriptPropRelation` 的无方向版（判据全在那边，这里只做收口，
+ * 免得两处各写一套必然漂）。真正「谁是谁的本体」用 `scriptPropRelation`。
  */
 export function isSameScriptPropName(left: unknown, right: unknown): boolean {
-    const a = normalizeScriptPropAssetKey(left);
-    const b = normalizeScriptPropAssetKey(right);
-    if (!a || !b) return false;
-    if (a === b) return true;
-    if (a.length >= 2 && b.endsWith(a)) return true;
-    if (b.length >= 2 && a.endsWith(b)) return true;
-    const shorter = a.length <= b.length ? a : b;
-    const longer = a.length <= b.length ? b : a;
-    if (shorter.length >= 2 && longer.startsWith(shorter)) {
-        const tail = longer.slice(shorter.length);
-        if (tail.length <= 4 && SCRIPT_PROP_PART_TAILS.includes(tail)) return true;
-    }
-    return false;
+    const relation = scriptPropRelation(String(left ?? ""), String(right ?? ""));
+    return relation === "same" || relation === "body" || relation === "part";
 }
 
 export type ScriptPropAssetPlan = {
@@ -1611,69 +1689,115 @@ export function planScriptPropAssets(rows: readonly StoryScriptRow[] | null | un
     const empty: ScriptPropAssetPlan = { titleByRaw, shotsByRaw, keep: new Set(), ranked: [] };
     if (!rows?.length || !specs.length) return empty;
 
-    /** 每个代表名 → 它出现过的镜数（用镜号 + 行下标去重，同镜写两次只算一次）。 */
-    type Cluster = { rep: string; shots: Set<number>; order: number };
-    const clusters: Cluster[] = [];
-    /** 原始名 → cluster 下标（名字可能在后续镜头里被并到更具体的代表名上，所以存下标而不是名字）。 */
-    const clusterOfRaw = new Map<string, number>();
-
+    // ① 先按表里顺序收集**所有写法** + 每种写法出现在哪几镜
+    const rawOrder: string[] = [];
+    const rawShots = new Map<string, Set<number>>();
     rows.forEach((row, index) => {
         const shotNo = Math.round(Number(row.shot_no)) || index + 1;
-        const seenThisShot = new Set<number>();
         for (const spec of specs) {
             if (!spec.nameKey) continue;
             for (const raw of splitScriptAssetNames(row[spec.nameKey])) {
                 const name = raw.trim();
                 if (!name) continue;
-                let indexOfCluster = clusterOfRaw.get(name);
-                if (indexOfCluster === undefined) {
-                    // 找一个「已经有代表名、且与它判定相同」的簇（**表里先出现的赢**，保证顺序稳定）
-                    const found = clusters.findIndex((cluster) => isSameScriptPropName(cluster.rep, name));
-                    if (found >= 0) {
-                        indexOfCluster = found;
-                        /**
-                         * 并进去之后代表名要不要换：命中「后缀包含」时取**更具体**的那个
-                         * （`面碗` → `青花瓷面碗`）；归一化后完全相同则取**更短**的那个
-                         * （`两杯蜜桃乌龙茶` → `蜜桃乌龙茶`，少一层噪声）。
-                         */
-                        const cluster = clusters[found];
-                        const sameNormalized = normalizeScriptPropAssetKey(cluster.rep) === normalizeScriptPropAssetKey(name);
-                        const shouldReplace = sameNormalized ? name.length < cluster.rep.length : name.length > cluster.rep.length;
-                        if (shouldReplace) {
-                            // 代表名换了，之前映射到旧代表名的写法一起改指过来
-                            for (const [key, value] of titleByRaw) if (value === cluster.rep) titleByRaw.set(key, name);
-                            cluster.rep = name;
-                        }
-                    } else {
-                        indexOfCluster = clusters.length;
-                        clusters.push({ rep: name, shots: new Set(), order: clusters.length });
-                    }
-                    clusterOfRaw.set(name, indexOfCluster);
+                let shots = rawShots.get(name);
+                if (!shots) {
+                    shots = new Set<number>();
+                    rawShots.set(name, shots);
+                    rawOrder.push(name);
                 }
-                const cluster = clusters[indexOfCluster];
-                titleByRaw.set(name, cluster.rep);
-                if (!seenThisShot.has(indexOfCluster)) {
-                    seenThisShot.add(indexOfCluster);
-                    cluster.shots.add(shotNo);
-                }
+                shots.add(shotNo);
             }
         }
     });
+    if (!rawOrder.length) return empty;
 
-    // 代表名可能在合并过程中变过 → 统一回填一遍（`titleByRaw` 的 value 永远是最终代表名）
-    for (const [raw, rep] of titleByRaw) {
-        const indexOfCluster = clusterOfRaw.get(raw);
-        if (indexOfCluster !== undefined) titleByRaw.set(raw, clusters[indexOfCluster].rep);
-        else titleByRaw.set(raw, rep);
+    /**
+     * ② 并查集：把「同一件东西」的所有写法并成一簇。
+     *
+     * 以前是「按顺序找第一个代表名相同的簇」—— 代表名还会随着合并被换成更长的名字，
+     * 于是 `手机` 被 `手机壳` 顶掉之后，`手机屏幕` / `手机支架` 就再也匹配不上（各成一簇 = 各生一张图）。
+     * 现在**先把所有写法一次性两两判定、并成簇，再在簇内挑代表名**，与顺序无关。
+     *
+     * 复杂度 O(n²)：道具名在几十件量级（1225 次字符串比较），一次生成只算一遍，可以接受。
+     */
+    const parent = rawOrder.map((_, index) => index);
+    const find = (index: number): number => {
+        let root = index;
+        while (parent[root] !== root) root = parent[root];
+        while (parent[index] !== root) {
+            const next = parent[index];
+            parent[index] = root;
+            index = next;
+        }
+        return root;
+    };
+    const union = (left: number, right: number) => {
+        const a = find(left);
+        const b = find(right);
+        if (a !== b) parent[b] = a;
+    };
+    for (let i = 0; i < rawOrder.length; i += 1) {
+        for (let j = i + 1; j < rawOrder.length; j += 1) {
+            if (scriptPropRelation(rawOrder[i], rawOrder[j]) !== "none") union(i, j);
+        }
     }
-    for (const [raw, indexOfCluster] of clusterOfRaw) shotsByRaw.set(raw, clusters[indexOfCluster].shots.size);
+
+    /** 簇根 → 成员下标（保持表里首次出现顺序）。 */
+    const groups = new Map<number, number[]>();
+    rawOrder.forEach((_, index) => {
+        const root = find(index);
+        const members = groups.get(root);
+        if (members) members.push(index);
+        else groups.set(root, [index]);
+    });
+
+    type Cluster = { rep: string; shots: Set<number>; order: number; members: number[] };
+    const clusters: Cluster[] = [];
+    for (const members of groups.values()) {
+        /**
+         * ③ 簇内挑代表名 —— 三档打分，**分高者当代表名**（这才是「本体」该赢的地方）：
+         *  - `body`（+2）：对方是它的零件 / 简写 → 它更像「整件东西」（`青花瓷碗` 赢 `碗盖`、`青花瓷面碗` 赢 `面碗`）；
+         *  - `same`（+1）：只是写法噪声不同 → 打平后按**字数少的**赢（`蜜桃乌龙茶` 赢 `两杯蜜桃乌龙茶`）；
+         *  - `part`（0）：它是别人的零件 → 基本不可能赢。
+         * 最后打平按表里出现先后。**绝不按「谁更长」**——那正是 `手机壳` 顶掉 `手机` 的元凶。
+         */
+        let rep = rawOrder[members[0]];
+        let bestScore = -1;
+        for (const index of members) {
+            const name = rawOrder[index];
+            let score = 0;
+            for (const other of members) {
+                if (other === index) continue;
+                const relation = scriptPropRelation(name, rawOrder[other]);
+                if (relation === "body") score += 2;
+                else if (relation === "same") score += 1;
+            }
+            const better = score > bestScore || (score === bestScore && name.length < rep.length);
+            if (better) {
+                bestScore = score;
+                rep = name;
+            }
+        }
+        const shots = new Set<number>();
+        for (const index of members) for (const shotNo of rawShots.get(rawOrder[index]) || []) shots.add(shotNo);
+        clusters.push({ rep, shots, order: members[0], members });
+    }
+
+    for (const cluster of clusters) {
+        for (const index of cluster.members) {
+            const raw = rawOrder[index];
+            titleByRaw.set(raw, cluster.rep);
+            shotsByRaw.set(raw, cluster.shots.size);
+        }
+    }
 
     const ranked = clusters
-        .map((cluster) => ({ title: cluster.rep, shots: cluster.shots.size, order: cluster.order }))
-        .sort((left, right) => right.shots - left.shots || left.order - right.order)
-        .map((entry) => entry.title);
+        .slice()
+        .sort((left, right) => right.shots.size - left.shots.size || left.order - right.order)
+        .map((cluster) => cluster.rep);
 
-    const keep = new Set(ranked.filter((title) => (clusters.find((cluster) => cluster.rep === title)?.shots.size || 0) >= SCRIPT_PROP_ASSET_MIN_SHOTS).slice(0, SCRIPT_PROP_ASSET_TOTAL_LIMIT));
+    const shotsOf = new Map(clusters.map((cluster) => [cluster.rep, cluster.shots.size]));
+    const keep = new Set(ranked.filter((title) => (shotsOf.get(title) || 0) >= SCRIPT_PROP_ASSET_MIN_SHOTS).slice(0, SCRIPT_PROP_ASSET_TOTAL_LIMIT));
     /**
      * 保底**只在「一件都不满足」时**生效：整张表没有一件道具跨 2 镜（典型的短剧：每镜一件不同小物），
      * 就按频次取前几件出图，否则会出现「一件道具资产都没有」—— 铺链路时主角道具连图都没得连。

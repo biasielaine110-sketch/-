@@ -26,8 +26,13 @@ export type VideoReverseResult = {
 export const VIDEO_REVERSE_SKILL_HINTS = ["视频反推-分镜提示词", "视频反推分镜提示词", "视频反推", "分镜提示词"] as const;
 
 /**
- * 02 / 03 要求框的默认文案骨架（用户 2026-11-09 口径）：
- * 「根据我提供的视频反推该视频提示词及文案，同时使用 @图片1 作为文案中的道具，重新输出一份类似的剧本文案。」
+ * 02 / 03 要求框的默认文案骨架。
+ *
+ * 2026-11-11 第 02 条改口径（用户）：「执行 02、03 的时候，直接给我输出反推出来的同类型的剧本内容，
+ * 别生成乱七八糟的注释和解释。」
+ * 旧骨架是「反推该视频**提示词**及文案」 —— 要求框里点名要提示词，模型当然会把整张分镜提示词表吐出来，
+ * 把输出预算吃掉、剧本被截断。现在默认只要剧本正文，与 `VIDEO_REVERSE_SCRIPT_ONLY_RULE` 同口径
+ * （两处口径打架 = 模型二选一，常常选错那一头）。
  *
  * 为什么拆成「前半句 + 参考图子句 + 后半句」三段：**参考图数量是变量**。
  *  - 一张参考图都没连：不许出现 `@图片1` —— 模型找不到对应图片，只会瞎猜一件道具；
@@ -38,8 +43,8 @@ export const VIDEO_REVERSE_SKILL_HINTS = ["视频反推-分镜提示词", "视�
  * 而 `@/i18n` 的模块顶层会读 `localStorage`，在 Node 里会直接崩。
  */
 export function buildDefaultVideoReverseRequirement(imageMentions: readonly string[] = []): string {
-    const head = "根据我提供的视频反推该视频提示词及文案";
-    const tail = "重新输出一份类似的剧本文案";
+    const head = "根据我提供的视频，写一份同款风格的剧本文案";
+    const tail = "只要剧本正文，不要提示词、分析和任何注释";
     const mentions = Array.from(new Set((imageMentions || []).map((item) => String(item || "").trim()).filter(Boolean))).map((item) => (item.startsWith("@") ? item : `@${item}`));
     if (!mentions.length) return `${head}，${tail}`;
     return `${head}，同时使用${mentions.join("、")}作为文案中的道具，${tail}`;
@@ -285,6 +290,76 @@ export const VIDEO_REVERSE_REWRITE_PROMPT = "上一次的输出没有按要求�
 
 
 /**
+ * 02 / 03 的**唯一输出物**：同款剧本正文（用户 2026-11-11 第 02 条）。
+ *
+ * 报障原话：「执行 92、03 的时候，输出的反推出来的同类型剧本，输出文本的时候总给我出一堆没用的
+ * 注释内容，导致我想要的同类型剧本都生成不完，请直接给我输出反推出来的同类型的剧本内容，
+ * 别生成乱七八糟的注释和解释。」
+ *
+ * 为什么会「生成不完」：模型把「反推过程 + 分镜提示词表 + 参数说明 + 剧本」全写一遍，
+ * 输出被前面的分析吃掉，剧本写到一半就到上限了。所以这一条不只是「少写废话」，
+ * 而是**把输出预算全部让给剧本**：分析在模型心里做，不许写出来。
+ *
+ * ⚠️ 与 `VIDEO_REVERSE_LANGUAGE_RULE` 一样，这段在 `buildVideoReversePrompt` 里首尾各钉一次、只写一份。
+ */
+export const VIDEO_REVERSE_SCRIPT_ONLY_RULE =
+    "输出内容（最高优先级硬要求）：**只输出可以直接拿去用的同款剧本正文**——分镜/场景标题、镜头、画面、台词、音效、时长这些正文行，第一行就是正文本身。\n" +
+    "以下内容一律不许出现在输出里（哪怕只有一句）：① 反推过程、看片分析、风格总结、分镜思路；② 分镜提示词表、参数说明、制作建议、运镜/景别术语解释；③ 任何前言（「好的」「以下是」「根据您提供的视频」）、后记（「希望对你有帮助」「如需调整请告诉我」）、注释 / 备注 / 括号补充 / 免责声明 / 本章说明；④ 用 `---` 或空行隔开的「分析与正文」两段式结构。\n" +
+    "内容较长时**优先保证剧本正文完整**：先删掉一切非正文内容再输出，不要为了写分析而把剧本截断。";
+
+/**
+ * 02 / 03 拿到回复后的**确定性清洗**（提示词是「请求」，这一步是「保证」）。
+ *
+ * 只做三件极其保守的事，绝不删正文：
+ *  1. 整个回复被 ```…``` 包起来 → 去掉包裹（否则文本节点 / 脚本解析器会当成代码块）；
+ *  2. 开头的寒暄 / 说明（「好的」「以下是」「根据您提供的视频…」）—— 只在**还没出现正文**时删，
+ *     且只删单行 ≤50 字、明显是客套的行；
+ *  3. 结尾的「注：…」「希望对你有帮助」「如需调整…」这类纯后记行。
+ *
+ * 🔴 只用于 02 / 03（输出物=剧本）。01 是纯反推结果，不能被清洗 —— 那张分镜提示词表里
+ * 本来就会有「说明」「注意」这类正常内容。
+ */
+export function cleanVideoReverseScriptOutput(text: string | undefined | null): string {
+    let body = String(text || "").replace(/\r\n/g, "\n").trim();
+    if (!body) return "";
+    // ① 整体代码块包裹
+    const fenced = body.match(/^```[a-zA-Z]*\n([\s\S]*?)\n```$/);
+    if (fenced) body = fenced[1].trim();
+    const lines = body.split("\n");
+    /** 开头客套 / 说明：只在正文出现之前删，且只认单行短句，避免吃掉真的剧本行。 */
+    const isPreamble = (line: string) => {
+        const value = line.trim();
+        if (!value || value.length > 50) return false;
+        return (
+            /^(好的|收到|明白|了解|没问题)[，,。！!：:\s]/.test(value) ||
+            /^以下(是|为)/.test(value) ||
+            /^(下面|接下来)(是|给|我)/.test(value) ||
+            /^我(将|会|先|来)/.test(value) ||
+            /^(根据|按照)(你|您)?(提供|的|要求)/.test(value) ||
+            /^(说明|注释|备注|提示|注意)[：:]/.test(value) ||
+            /^[-—=*]{3,}$/.test(value)
+        );
+    };
+    /** 结尾后记：从后往前删连续命中行。 */
+    const isFarewell = (line: string) => {
+        const value = line.trim();
+        if (!value) return true;
+        return (
+            /^(注|备注|说明|提示|注意)[：:]/.test(value) ||
+            /^[（(]\s*(注|说明|备注)/.test(value) ||
+            /^(以上|综上|总结)/.test(value) ||
+            /^希望(这|本|以上|对你)/.test(value) ||
+            /^如需|^如果(你|您)(还)?需要|^需要我/.test(value)
+        );
+    };
+    let start = 0;
+    while (start < lines.length && isPreamble(lines[start])) start += 1;
+    let end = lines.length - 1;
+    while (end > start && isFarewell(lines[end])) end -= 1;
+    return lines.slice(start, end + 1).join("\n").trim();
+}
+
+/**
  * 发给 AI 对话窗口的那句话。
  *
  * ⚠️ 视频本身是**通过连线**进对话的（`sendChatMessage` 会把它当视频输入：原生 video_url，或抽帧成图片），
@@ -297,7 +372,16 @@ export const VIDEO_REVERSE_REWRITE_PROMPT = "上一次的输出没有按要求�
 export function buildVideoReversePrompt({ videoUrl, mode, requirement, targetSeconds }: VideoReversePromptInput): string {
     const lines: string[] = [];
     lines.push(VIDEO_REVERSE_LANGUAGE_RULE);
-    lines.push(mode === 1 ? "请用「视频反推-分镜提示词」技能反推我接入的这条视频，输出可以直接拿去用的分镜提示词。" : "请用「视频反推-分镜提示词」技能反推我接入的这条视频，并在反推结果的基础上，写一份同款风格的文案。");
+    if (mode === 1) {
+        lines.push("请用「视频反推-分镜提示词」技能反推我接入的这条视频，输出可以直接拿去用的分镜提示词。");
+    } else {
+        /**
+         * 02 / 03 的核心口径（用户 2026-11-11 第 02 条）：**看片只在模型心里做，输出只要剧本**。
+         * 以前写的是「在反推结果的基础上写一份同款文案」→ 模型先把反推结果整篇写出来，剧本被挤到后面截断。
+         */
+        lines.push("请先用「视频反推-分镜提示词」技能把这条视频看明白（这一步**只在你自己心里做，不要输出任何过程**），然后直接写一份同款风格的剧本文案。");
+        lines.push(VIDEO_REVERSE_SCRIPT_ONLY_RULE);
+    }
     const extra = (requirement || "").trim();
     if (mode !== 1 && extra) lines.push(`特殊要求：${extra}`);
     // 时长只对 02 / 03 有意义：01 是照原片反推，镜头数由视频本身决定。
@@ -306,6 +390,11 @@ export function buildVideoReversePrompt({ videoUrl, mode, requirement, targetSec
     if (isRemoteUrl(url)) lines.push(`视频链接：${url}`);
     else lines.push("视频已通过画布连线接入（本地/临时地址，模型打不开链接），请按连线传入的视频内容反推。");
     lines.push(VIDEO_REVERSE_LANGUAGE_RULE);
-    lines.push("只输出结果正文，不要解释你的分析过程，也不要写与结果无关的寒暄。");
+    if (mode === 1) {
+        lines.push("只输出结果正文，不要解释你的分析过程，也不要写与结果无关的寒暄。");
+    } else {
+        // 尾钉一次：模型对结尾指令最敏感，而上面还夹着「特殊要求」「时长」「视频链接」三段易被当局部约束的内容。
+        lines.push(VIDEO_REVERSE_SCRIPT_ONLY_RULE);
+    }
     return lines.join("\n");
 }
