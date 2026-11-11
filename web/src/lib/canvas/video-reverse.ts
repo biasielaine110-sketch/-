@@ -58,6 +58,38 @@ export const REVERSE_VIDEO_SECONDS_MIN = 5;
 export const REVERSE_VIDEO_SECONDS_MAX = 300;
 
 /**
+ * 反推视频窗口的**默认出片参数**（用户 2026-11-11 第 02 条）：
+ * 「比例默认选 16x9，视频模型跟随偏好的视频模型，分辨率也优先 720p。」
+ *
+ * 为什么是「默认值」而不是「归一化时写死」：写进 metadata 就变成「用户已经选过」，
+ * 比例 / 分辨率就再也没法表达「我不改、按默认走」，老节点也会被无端改写。
+ * 所以 metadata 里空着，**读取时**由 `resolveReverseVideoSize / resolveReverseVideoQuality`
+ * 给出有效值 —— UI 显示的和 03 搬给脚本节点的是同一份。
+ */
+export const DEFAULT_REVERSE_VIDEO_SIZE = "16:9";
+export const DEFAULT_REVERSE_VIDEO_QUALITY = "720";
+
+/** 分辨率档位白名单（与 `QUALITY_OPTIONS` / 视频节点的 `vquality` 同一套）。 */
+export const REVERSE_VIDEO_QUALITIES = ["480", "720", "1080", "2k"] as const;
+
+/**
+ * 有效比例：窗口里选过就用它（含 `auto` 与用户手输的 `21:9` 这类自定义值），
+ * 没选过 → `16:9`。
+ */
+export function resolveReverseVideoSize(target: Partial<CanvasReverseVideoTarget> | null | undefined): string {
+    return String(target?.size ?? "").trim() || DEFAULT_REVERSE_VIDEO_SIZE;
+}
+
+/**
+ * 有效分辨率：只认白名单档位（`Select` 只有这几项，脏值不能送去生成），
+ * 没选过 / 脏值 → `720`（用户口径：「分辨率也是优先 720p」）。
+ */
+export function resolveReverseVideoQuality(target: Partial<CanvasReverseVideoTarget> | null | undefined): string {
+    const quality = String(target?.quality ?? "").trim();
+    return (REVERSE_VIDEO_QUALITIES as readonly string[]).includes(quality) ? quality : DEFAULT_REVERSE_VIDEO_QUALITY;
+}
+
+/**
  * 归一化「目标视频参数」——窗口里选的那一档，也是 03 往脚本节点搬的那一份。
  *
  * 为什么要有这一步：UI 控件给什么值的都有（`InputNumber` 给 number 或 null、`Select` 允许清空、

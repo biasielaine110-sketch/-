@@ -174,7 +174,7 @@ import { widenLegacyScriptNodes } from "@/lib/canvas/script-node-width";
 import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
-import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoTarget, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -10549,13 +10549,18 @@ function AtelierCanvasPage() {
              *  - `styleTemplateId`：脚本节点本来就有的风格字段，铺链路时同时落到关键帧图片和视频节点上；
              *  - `scriptImageSize` 也写同一个比例：关键帧必须和成片同画幅，否则视频模型要裁切。
              *
-             * 全部是条件展开 —— 用户一个都没选时，与改造前逐字节一致。
+             * 比例 / 分辨率**恒写**（用户 2026-11-11 第 02 条：「比例默认 16:9，分辨率优先 720p」）：
+             * 窗口里没选过时 `resolveReverseVideoSize / resolveReverseVideoQuality` 给的就是默认值，
+             * 与窗口里显示的、设置摘要里写的是同一份 —— 三处不同步的话用户会以为改成默认没生效。
+             * 模型仍只在用户**明确选过**时才写（`target.model` 空 = 动态跟随偏好里的视频模型，
+             * 写死反而会让之后改偏好不再生效）。
              */
             const scriptTargetMeta: Partial<CanvasNodeData["metadata"]> = {
                 ...(target.styleTemplateId ? { styleTemplateId: target.styleTemplateId } : {}),
                 ...(target.seconds ? { scriptTotalSeconds: Number(target.seconds) || undefined } : {}),
-                ...(target.size ? { scriptImageSize: target.size, scriptVideoSize: target.size } : {}),
-                ...(target.quality ? { scriptVideoQuality: target.quality } : {}),
+                scriptImageSize: resolveReverseVideoSize(target),
+                scriptVideoSize: resolveReverseVideoSize(target),
+                scriptVideoQuality: resolveReverseVideoQuality(target),
                 ...(target.model ? { scriptVideoModel: target.model } : {}),
                 // 02 里选了「MochiAni 生视频节点」→ 03 建脚本节点时记住引擎，铺链路时才知道建哪种窗口
                 // （用户 2026-11-10 第 02 条：「同上，后续在脚本生成器执行生视频时，也铺的是该节点」）。

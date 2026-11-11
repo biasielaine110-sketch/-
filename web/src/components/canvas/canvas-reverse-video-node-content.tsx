@@ -5,13 +5,13 @@ import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoTarget, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
 import { getStyleTemplate } from "@/constant/style-templates";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
-import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { useConfigStore, useEffectiveConfig, resolveModelForCapability } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasNodeData, CanvasNodeMetadata, CanvasReverseVideoTarget } from "@/types/canvas";
 import { CanvasSizePicker } from "./canvas-size-picker";
@@ -79,18 +79,20 @@ const INTERACTIVE_SELECTOR = "textarea,input,button,[contenteditable],[data-canv
 const STALE_RUN_MS = 60 * 60_000;
 
 /**
- * 分辨率档位。与视频节点参数面板同一套值（`video-settings-panel.tsx` 里的 `vquality`）：
- * 空 = 跟随全局 / 模型默认（最稳，绝不因为选了不支持的档位换来一次 400）。
+ * 分辨率档位。与视频节点参数面板同一套值（`video-settings-panel.tsx` 里的 `vquality`）。
+ *
+ * 用户 2026-11-11 第 02 条：「分辨率也是优先 720p」——所以控件上就显示 720p（不是空着写
+ * 「跟随全局」），`metadata.quality` 仍然是空的，等于「按默认 720p 走」。去掉空档是因为
+ * 一旦控件 value 恒为有效档位，留一个永远选不中的「跟随全局」只会让人以为坏了。
  */
 const QUALITY_OPTIONS = [
-    { value: "", label: "跟随全局" },
     { value: "480", label: "480p" },
     { value: "720", label: "720p" },
     { value: "1080", label: "1080p" },
     { value: "2k", label: "2K" },
 ];
 
-const qualityLabel = (value: string | undefined) => QUALITY_OPTIONS.find((item) => item.value === (value || ""))?.label || "跟随全局";
+const qualityLabel = (value: string | undefined) => QUALITY_OPTIONS.find((item) => item.value === (value || ""))?.label || "720p";
 
 export function CanvasReverseVideoNodeContent({
     node,
@@ -137,6 +139,19 @@ export function CanvasReverseVideoNodeContent({
      * 03 建脚本节点时搬进 `scriptShotsPerClip`，之后铺链路按 3 镜切片。
      */
     const compactShots = target.shotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT;
+    /**
+     * 有效出片参数（用户 2026-11-11 第 02 条）：窗口里没选过时给 16:9 / 720p。
+     * 03 搬给脚本节点的是**同一份**（`project.tsx` 里也调这两个函数），所以摘要写的就是实际会用的。
+     */
+    const effectiveSize = resolveReverseVideoSize(target);
+    const effectiveQuality = resolveReverseVideoQuality(target);
+    /**
+     * 视频模型：没选过 = 跟随偏好里的视频模型 —— 这里把它解析出来**显示**出来（而不是留一行
+     * 「跟随全局」），用户一眼能看到这次会用哪个模型；只要不手动改，metadata 里仍然是空的，
+     * 偏好改了它也跟着改。
+     */
+    const preferredVideoModel = useMemo(() => resolveModelForCapability(globalConfig, globalConfig.videoModel, "video"), [globalConfig]);
+    const effectiveVideoModel = target.model || preferredVideoModel;
     /** 设置摘要（弹窗里给用户确认「按什么出片」用）。 */
     const targetSummary = useMemo(() => {
         const style = target.styleTemplateId ? getStyleTemplate(target.styleTemplateId)?.label || target.styleTemplateId : "无风格";
@@ -144,7 +159,7 @@ export function CanvasReverseVideoNodeContent({
         const engine = isMochianiVideoEngine(target.videoEngine) ? "MochiAni 生视频" : "";
         // 分段口径也要写：03 是「建脚本节点 → 立刻一键视频」，铺出来几个视频窗口取决于这一档。
         const clip = target.shotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT ? `每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT} 镜一个视频` : `每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜一个视频`;
-        return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${target.size || "跟随全局比例"} · ${qualityLabel(target.quality)} · 风格：${style} · ${clip}${engine ? ` · ${engine}` : ""}`;
+        return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${effectiveSize} · ${qualityLabel(effectiveQuality)} · 风格：${style} · ${clip}${engine ? ` · ${engine}` : ""}`;
     }, [target]);
     /**
      * 03 弹窗里的「执行方案」选项（用户 2026-11-10）。
@@ -389,13 +404,13 @@ export function CanvasReverseVideoNodeContent({
                             两个选择分开存（`model` / `videoEngine`），来回切不互相冲掉。 */}
                         <ModelPicker
                             config={globalConfig}
-                            value={isMochianiVideoEngine(target.videoEngine) ? MOCHIANI_VIDEO_ENGINE : target.model}
+                            value={isMochianiVideoEngine(target.videoEngine) ? MOCHIANI_VIDEO_ENGINE : effectiveVideoModel}
                             onChange={(model) => {
                                 if (isMochianiVideoEngine(model)) patchTarget({ videoEngine: MOCHIANI_VIDEO_ENGINE });
                                 else patchTarget({ videoEngine: undefined, model });
                             }}
                             capability="video"
-                            placeholder="视频模型（跟随全局）"
+                            placeholder="视频模型（跟随偏好）"
                             onMissingConfig={() => openConfigDialog(true)}
                             className="max-w-[168px]"
                             extraOptions={[{ value: MOCHIANI_VIDEO_ENGINE, label: "MochiAni 生视频节点", title: "铺链路时改成 MochiAni 生视频窗口（模型/渠道取偏好里的 MochiAni 配置）" }]}
@@ -414,11 +429,11 @@ export function CanvasReverseVideoNodeContent({
                             onChange={(value) => patchTarget({ seconds: String(value ?? DEFAULT_REVERSE_VIDEO_SECONDS) })}
                             aria-label="成片总时长（秒）"
                         />
-                        <CanvasSizePicker value={target.size || ""} onChange={(size) => patchTarget({ size })} className="h-6 w-[96px]" />
-                        <Select size="small" className="!w-[124px]" value={target.quality || ""} onChange={(quality) => patchTarget({ quality })} options={QUALITY_OPTIONS} popupMatchSelectWidth={false} aria-label="视频分辨率" />
+                        <CanvasSizePicker value={effectiveSize} onChange={(size) => patchTarget({ size })} className="h-6 w-[96px]" />
+                        <Select size="small" className="!w-[124px]" value={effectiveQuality} onChange={(quality) => patchTarget({ quality })} options={QUALITY_OPTIONS} popupMatchSelectWidth={false} aria-label="视频分辨率" />
                     </div>
                     <div className="mt-1 text-[10px] leading-relaxed opacity-45">
-                        秒数 = 成片总时长：02 写文案、03 生剧本都按它规划镜头数与台词量（默认 {DEFAULT_REVERSE_VIDEO_SECONDS} 秒）；生视频用这里的模型 / 比例 / 分辨率 / 风格。
+                        秒数 = 成片总时长：02 写文案、03 生剧本都按它规划镜头数与台词量（默认 {DEFAULT_REVERSE_VIDEO_SECONDS} 秒）；生视频用这里的模型 / 比例 / 分辨率 / 风格（默认 16:9 · 720p，模型跟偏好里的视频模型）。
                     </div>
                     {/* 第三行：「每 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条）。
                         打开后 03 建脚本节点时带过去，铺链路（含一键视频）每 3 镜一个视频节点；关掉回到默认 4 镜。 */}
