@@ -8221,7 +8221,15 @@ function AtelierCanvasPage() {
                      * 组内逐镜块。压成一行 / 塞了整格 JSON / 写错到分镜列都在这里收敛。
                      */
                     if (mashuScheme) {
-                        const normalizedRows = normalizeStoryScriptMashuRows(workingRows, presetId);
+                        /**
+                         * 与整表路径**同一个组合**（`applyMashuVideoScriptOverlay` → `normalizeStoryScriptMashuRows`）：
+                         * 源内容里贴了整套分镜组时，按镜号整段回填这一行 —— 单镜重写时模型最容易只写一句概括
+                         * （用户 2026-11-11 第 02 条：「有几个镜头的视频运动提示词是空的，或者内容很少」），
+                         * 而源稿里明明有现成的完整分镜组。以前这里只跑 normalize（没有 overlay），
+                         * 于是整表重生成能补上、单镜重生成补不上。
+                         */
+                        const overlaid = applyMashuVideoScriptOverlay(workingRows, sourceText, presetId);
+                        const normalizedRows = normalizeStoryScriptMashuRows(overlaid, presetId);
                         workingRows = workingRows.map((item, index) => (index === rowIndex ? normalizedRows[index] : item));
                     }
                     // 单镜重写常把「后面几镜」的描述又写全了（模型看不到整表已经去重过）——

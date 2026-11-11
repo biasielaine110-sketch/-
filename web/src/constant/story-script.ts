@@ -549,21 +549,47 @@ function buildDensityLine(segmentTarget: number, perSegment: number): string {
  *
  * 不传 / 非法值 → 返回空串（任务书与改造前逐字一致）。
  */
-export function buildStoryScriptTotalSecondsBlock(totalSeconds?: unknown): string {
+export function buildStoryScriptTotalSecondsBlock(totalSeconds?: unknown, options?: { scheme?: unknown }): string {
     const raw = Number(totalSeconds);
     if (!Number.isFinite(raw) || raw <= 0) return "";
     const total = Math.round(raw);
-    const shots = resolveStoryScriptShotCount(total);
+    const scheme = resolveScriptSchemeId(options?.scheme);
     const low = Math.max(2, Math.round(total * 0.9));
     const high = Math.round(total * 1.1);
     // 中文口播约 4~5 字/秒；给区间而不是精确字数，模型才不会为了凑字数硬掰台词。
     const wordsLow = Math.round(total * 3.5);
     const wordsHigh = Math.round(total * 5);
+    const wordsLine = `- 台词总量按 ${total} 秒能念完算：大约 ${wordsLow}~${wordsHigh} 字，宁可少说也不要赶。`;
+    /**
+     * 🔴 第八套（麻薯）的「行」不等于「镜头」：**一行 = 一个 15 秒分镜组**，组内再分 2~5 个镜头。
+     *
+     * 2026-11-11 第 02 条报障：「执行第八套方案的时候，有几个镜头的视频运动提示词是空的，或者内容很少。」
+     * 真因是两段任务书**算的不是同一个单位**：
+     *   ①「每镜时长要求」写着「每一镜 duration 必须填 15」→ 8 行 = 120 秒；
+     *   ②这一块按「每 15 秒 4 镜」算镜数 → 30 秒要 8 行。
+     * 两条同时成立只有一种解：120 秒的片子塞进 30 秒预算。模型只能牺牲一头 —— 它选的是
+     * 「凑够 8 行、每行随便写点」，于是后几行的分镜组只写了个开头，甚至干脆空着。
+     * 所以这一套必须按「组」算：行数 = total ÷ 15，镜头数只落在**组内**。
+     */
+    if (scheme === "mashu") {
+        const groups = Math.max(1, Math.round(total / STORY_SCRIPT_SEGMENT_TARGET_SECONDS));
+        const shots = resolveStoryScriptShotCount(total);
+        return [
+            "## 成片总时长要求（硬要求）",
+            `- 本次成片总时长 **${total} 秒**：整张表所有 \`duration\` 加起来必须落在 ${low}~${high} 秒（目标 ${total} 秒），**不要**按 1 分钟以上的量去铺。`,
+            `- 🔴 第八套的一「行」= 一个 ${STORY_SCRIPT_SEGMENT_TARGET_SECONDS} 秒分镜组（\`### 【分镜组N】（起—止秒）\`），所以 ${total} 秒 = **${groups} 行**，每行 \`duration\` 都填 ${STORY_SCRIPT_SEGMENT_TARGET_SECONDS}。**不要**把镜头数当成行数去铺（那就变成 ${shots} 行 × 15 秒 = ${shots * STORY_SCRIPT_SEGMENT_TARGET_SECONDS} 秒了）。`,
+            `- 镜头数落在**组内**：每个分镜组里用 \`镜头 1:\` / \`镜头 2:\` … 切成 2~5 个镜头，组内各镜「持续时间」相加必须正好等于 ${STORY_SCRIPT_SEGMENT_TARGET_SECONDS} 秒；${total} 秒全片组内合计约 ${shots} 个镜头（每组约 ${STORY_SCRIPT_SHOTS_PER_15S} 个）。`,
+            `- 每一行都必须写**完整**的分镜组（组级四块 + 组内每镜四行标题 + 十个【】块 + SFX）—— 行数少不等于内容可以省，缺块会被判成没写完。`,
+            `- 这一列**不写** \`[时长：Xs]\`：时长由组标题的（起—止秒）与组内各镜「持续时间」表达。`,
+            wordsLine,
+        ].join("\n");
+    }
+    const shots = resolveStoryScriptShotCount(total);
     return [
         "## 成片总时长要求（硬要求）",
         `- 本次成片总时长 **${total} 秒**：整张表所有 \`duration\` 加起来必须落在 ${low}~${high} 秒（目标 ${total} 秒），**不要**按 1 分钟以上的量去铺。`,
         `- 镜头数量按「每 ${STORY_SCRIPT_SEGMENT_TARGET_SECONDS} 秒 ${STORY_SCRIPT_SHOTS_PER_15S} 个镜头」的节律 → ${total} 秒约 **${shots} 个镜头**（${Math.max(1, shots - 1)}~${shots + 1} 个都可以），不要拆成二三十个 1~2 秒的碎镜。`,
-        `- 台词总量按 ${total} 秒能念完算：大约 ${wordsLow}~${wordsHigh} 字，宁可少说也不要赶。`,
+        wordsLine,
     ].join("\n");
 }
 
@@ -1938,10 +1964,12 @@ export function isScriptTotalSecondsUnlimited(metadata?: { scriptTotalSecondsUnl
  * 不用自己判 `undefined`（以前写着「不填 = 与改造前一致」，现在「不填 = 30 秒」，判空的位置一多必然漂移）。
  */
 export function buildScriptTotalSecondsBlockFromMetadata(
-    metadata?: { scriptTotalSeconds?: unknown; scriptTotalSecondsUnlimited?: unknown } | null,
+    metadata?: { scriptTotalSeconds?: unknown; scriptTotalSecondsUnlimited?: unknown; scriptScheme?: unknown } | null,
 ): string {
     if (isScriptTotalSecondsUnlimited(metadata)) return "";
-    return buildStoryScriptTotalSecondsBlock(resolveScriptTotalSeconds(metadata));
+    // 方案要一起传：第八套一「行」是 15 秒分镜组，镜数按「每 15 秒 4 镜」算会与「每镜 15 秒」直接打架
+    // （见 `buildStoryScriptTotalSecondsBlock` 里 mashu 分支的注释）。
+    return buildStoryScriptTotalSecondsBlock(resolveScriptTotalSeconds(metadata), { scheme: metadata?.scriptScheme });
 }
 
 /** 单镜可取区间的文本，例如 `3~5`。 */
@@ -5502,27 +5530,112 @@ function parseMashuStoryboardRows(raw: string, columns: StoryScriptColumn[]): St
 }
 
 /**
+ * 第八套「视频列没写够」的**确定性重建**：拿这一行已有的列，拼一份合规的分镜组。
+ *
+ * 为什么需要（用户 2026-11-11 第 02 条）：「执行第八套方案的时候，有几个镜头的视频运动提示词是空的，
+ * 或者内容很少。」提示词侧已经三处钉了格式（system 末尾 / 任务书末尾 / 时长块），但**模型服从度不是 100%**：
+ * 一行 15 秒的分镜组动辄四五百字，模型写到后半张表就偷懒 —— 只写个 `### 【分镜组7】（0—15秒）` 加一句，
+ * 或者干脆留空。第四套遇到同样情况有一个「按行内各列重新组装八段块」的规范化函数（`normalizeStoryScriptDirectorRows`），
+ * 第八套此前只有「压平 / 错列 / 整格 JSON」三种收敛，**没有从行数据重建**的那一条 —— 于是空的就是空的。
+ *
+ * 原则与第四套一致：只用**这一行真实存在的值**，不编剧情；缺的块写「无。」/「沿用本组…」这类中性占位，
+ * 保证块结构完整（视频模型能读懂结构，比读一个 7 个字的短句强）。
+ *
+ * ⚠️ 幂等：拼出来的结果本身就是合规分镜组，下一次 normalize 不会再动它。
+ */
+export function buildMashuGroupScriptFromRow(row: StoryScriptRow, groupNo = 1): string {
+    const cell = (key: string) => museOneLine(row?.[key]);
+    const seconds = Math.max(1, Math.round(Number(row?.duration) || STORY_SCRIPT_SEGMENT_TARGET_SECONDS));
+    const visual = cell("visual_description") || cell("key_visual");
+    const action = cell("character_action");
+    const sceneText = cell("scene");
+    const sceneDesc = cell("scene_description");
+    const propText = [cell("prop"), cell("prop_description")].filter(Boolean).join("；");
+    const lighting = cell("lighting_mood");
+    const blocking = cell("blocking");
+    const dialogue = cell("dialogue");
+    const sound = cell("sound");
+    const emotion = cell("emotion");
+    const shot = cell("shot");
+    const style = cell("style_prompt");
+    const cast = [cell("character_1"), cell("character_2")].filter(Boolean);
+    const castDesc = [cell("character_description_1"), cell("character_description_2")].filter(Boolean).join("；");
+    const castLine = cast.length ? cast.join("、") : "本镜未标注出场人物";
+    const core = visual || action || sceneDesc || sceneText || "按本镜画面描述";
+    return [
+        `### 【分镜组${groupNo}】（0—${seconds}秒）`,
+        "【人物年龄与真人声音锚定】",
+        `${castLine}｜人物年龄：按角色描述｜声音年龄感：与角色年龄一致｜VoiceID：沿用本表设定｜基础音色：${castDesc || "按角色描述"}｜连续性约束：本组各镜声音一致`,
+        "【核心静态画面】",
+        core,
+        "【全局光影与空气】",
+        `空间与光源：${sceneDesc || sceneText || "沿用本镜场景"}`,
+        `整体受光：${lighting || "按场景自然光"}`,
+        "跨镜连续：沿用本组光位、轴线与人物左右关系",
+        "【导演与场次参考】",
+        style || "沿用本表风格提示词与服务对象的影像基调",
+        "镜头 1:",
+        `持续时间: ${seconds}秒（本组第0—${seconds}秒）`,
+        `景别与运镜: ${shot || "中景；机位保持稳定，跟随主体动作"}`,
+        "场景与配音:",
+        `【场景名称】${sceneText || "沿用本镜场景"}`,
+        `【光影设定】${lighting || "无。"}`,
+        `【场景状态】${blocking || "无。"}`,
+        `【画面动作】${action || visual || "无。"}`,
+        `【光影与空气】${lighting || "无。"}`,
+        `【说话状态】${dialogue ? emotion || "有对白，按台词自然开口" : "无对白，不做说话口型"}`,
+        `【原文台词】${dialogue || "无。"}`,
+        `【配音执行稿】${dialogue || "无。"}`,
+        `【发声节拍】${dialogue ? "按句读停连，重音落在情绪转折处" : "无。"}`,
+        `【配音指令】${cast.length ? `${castLine}｜沿用本表 VoiceID 与音色` : "无。"}`,
+        `[环境音效(SFX)：${sound || "无。"}${propText ? `（道具：${propText}）` : ""}]`,
+    ].join("\n");
+}
+
+/** 这一行有没有「能拿来重建」的素材（全是空行就别硬编一份假的分镜组）。 */
+function hasMashuRowMaterial(row: StoryScriptRow): boolean {
+    return ["visual_description", "key_visual", "character_action", "scene", "blocking", "dialogue", "sound", "shot"].some((key) => museOneLine(row?.[key]));
+}
+
+/** 视频列「写了但没写够」的下限：合格的分镜组一定比这长（块名 + 十块 + SFX）。 */
+const MASHU_MIN_SCRIPT_LENGTH = 120;
+
+/**
  * 第八套整表后处理（幂等）：
  *  ① 字面量 `\\n` / 被压成一行的分镜组 → `reflowLongVideoScript(text, "mashu")` 还原换行；
  *  ② 视频列空着、但 `shot_prompt` 里塞的是这份分镜组脚本（模型写错列）→ 挪到视频列并清空分镜列；
- *  ③ 视频列整格是 JSON（`{"prompt": …}` / 整个对象）→ 取出里面的分镜组正文。
+ *  ③ 视频列整格是 JSON（`{"prompt": …}` / 整个对象）→ 取出里面的分镜组正文；
+ *  ④ **空着 / 短得不像分镜组 / 根本不是分镜组** → 按这一行自己的列重建一份（见 `buildMashuGroupScriptFromRow`）。
+ *     没有 ④ 的话「模型偷懒少写几行」会原样留在表里，用户看到的就是「有几镜的视频运动提示词是空的」。
  */
 export function normalizeStoryScriptMashuRows(rows: readonly StoryScriptRow[], preset?: StoryScriptPresetId | string | null): StoryScriptRow[] {
     if (!rows?.length) return rows as StoryScriptRow[];
     const columns = getStoryScriptColumns(preset);
     if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
-    return rows.map((row) => {
+    return rows.map((row, index) => {
+        const shotNo = Number(row.shot_no) || index + 1;
         const rawText = String(row.video_motion_prompt ?? "");
         if (!rawText.trim()) {
             const shotText = String(row.shot_prompt ?? "");
-            if (!shotText.trim()) return row;
-            const text = unwrapMomanJsonPrompt(shotText);
-            const reflowed = reflowLongVideoScript(text, "mashu");
-            if (!isMashuVideoScript(reflowed)) return row;
-            // 分镜组脚本整段落到视频列；「分镜提示词」列保持空白（它是图像段，不该重复整段脚本）。
-            return { ...row, video_motion_prompt: reflowed, shot_prompt: "" };
+            if (shotText.trim()) {
+                const text = reflowLongVideoScript(unwrapMomanJsonPrompt(shotText), "mashu");
+                if (isMashuVideoScript(text)) {
+                    // 分镜组脚本整段落到视频列；「分镜提示词」列保持空白（它是图像段，不该重复整段脚本）。
+                    return { ...row, video_motion_prompt: text, shot_prompt: "" };
+                }
+            }
+            // ④ 空着且分镜列也不是分镜组 → 用这一行的列重建。
+            return hasMashuRowMaterial(row) ? { ...row, video_motion_prompt: buildMashuGroupScriptFromRow(row, shotNo) } : row;
         }
         const text = reflowLongVideoScript(unwrapMomanJsonPrompt(rawText), "mashu");
+        /**
+         * ④ 的另一个入口：**写了但没写够**。「内容很少」有两种形态 —— 完全不是分镜组（模型写成一句概括 /
+         * 八段标签块），以及有个组标题却没有块（`### 【分镜组3】（0—15秒）` 后面就一行）。
+         * 判据用「合规 + 长度」两条，都在 `MASHU_MIN_SCRIPT_LENGTH` 之上才放过，避免把合格但精简的分镜组改掉。
+         */
+        if ((!isMashuVideoScript(text) || text.length < MASHU_MIN_SCRIPT_LENGTH) && hasMashuRowMaterial(row)) {
+            return { ...row, video_motion_prompt: buildMashuGroupScriptFromRow(row, shotNo) };
+        }
         return text === rawText ? row : { ...row, video_motion_prompt: text };
     });
 }
