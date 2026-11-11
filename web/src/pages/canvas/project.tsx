@@ -10559,7 +10559,8 @@ function AtelierCanvasPage() {
                         fontSize: DEFAULT_CANVAS_FONT_SIZE,
                     },
                 ),
-                title: input.mode === 1 ? "反推分镜提示词" : "同款文案",
+                // 01 = 反推出来的分镜提示词表；02/03 = 由反推结果**另写**的同类型新剧本（不是原片的转写）。
+                title: input.mode === 1 ? "反推分镜提示词" : "同类型新剧本",
             };
             pushNodes([textNode]);
 

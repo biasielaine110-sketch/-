@@ -173,12 +173,15 @@ export function CanvasReverseVideoNodeContent({
     /** 当前选中的方案（空 = 默认），只用于文案。 */
     const chosenSchemeLabel = target.scriptScheme ? t(`canvas.scriptNode.scheme_${target.scriptScheme}`) : t("canvas.scriptNode.reverseSchemeFollow");
     /**
-     * 02 / 03 要求框的**默认文案**（2026-11-11 第 02 条新口径）：
-     * 「根据我提供的视频，写一份同款风格的剧本文案，同时使用 @图片1 作为文案中的道具，
-     *   只要剧本正文，不要提示词、分析和任何注释。」
+     * 02 / 03 要求框的**默认文案**（2026-11-12 口径）：
+     * 「根据我提供的视频，反推出它的类型与写法，另外写一份同类型的全新剧本文案，同时使用 @图片1
+     *   作为文案中的道具，只要剧本正文，不要提示词、分析和任何注释。」
      *
-     * ⚠️ 旧默认是「反推该视频**提示词**及文案」—— 要求框里点名要提示词，模型就把整张分镜提示词表
-     * 全吐出来，剧本被挤到后面截断（用户：「总给我出一堆没用的注释内容，导致剧本都生成不完」）。
+     * 两次改口径沿革：
+     *  ① 2026-11-11 第 02 条：旧默认是「反推该视频**提示词**及文案」→ 要求框里点名要提示词，
+     *     模型就把整张分镜提示词表全吐出来，剧本被挤到后面截断（「总给我出一堆没用的注释，剧本生成不完」）。
+     *  ② 2026-11-12：只留「同款风格的剧本文案」还不够 —— 模型会把「同款」读成「同一条」，
+     *     直接拿原片内容转写成剧本（「感觉像是直接反推了一份给我」）。现在把「反推类型 → 另写新剧本」写进默认文案。
      *
      * `@图片N` 必须按「连进本节点的参考图」逐张点名：没有参考图时不提（提了模型只会瞎猜一件道具），
      * 有 N 张就写 `@图片1、@图片2…` —— 编号与 `project.tsx: runVideoReverse` 把这批图连进对话节点后
@@ -558,13 +561,14 @@ export function CanvasReverseVideoNodeContent({
                 okText="开始反推"
                 cancelText="取消"
                 width={520}
-                title={requirementMode === 3 ? "03 · 反推视频并生成同款风格文案及视频" : "02 · 反推视频并生成同款风格文案"}
+                title={requirementMode === 3 ? "03 · 反推视频并生成同类型新剧本及视频" : "02 · 反推视频并生成同类型新剧本"}
                 destroyOnHidden={false}
             >
                 <div className="flex flex-col gap-2 text-sm">
                     <div className="text-xs opacity-60">
                         这段会作为「特殊要求」跟着视频一起发进 AI 对话，可以直接改。
                         {referenceImages?.length ? `连进来的 ${referenceImages.length} 张参考图会一起带进对话，${imageReferenceLabel(0)} 就是第一张（连线顺序）。` : "（本节点还没连参考图，所以默认文案里没有 @图片N。）"}
+                        <span className="mt-1 block opacity-80">视频只当「同类型的样本」用：要的是另写的一个故事（人物 / 场景 / 情节 / 台词全新），不是把这条片转写成剧本。</span>
                     </div>
                     <Input.TextArea value={requirementText} onChange={(event) => setRequirementText(event.target.value)} rows={4} placeholder={DEFAULT_VIDEO_REVERSE_REQUIREMENT} />
                     <div className="text-[11px] opacity-60">
