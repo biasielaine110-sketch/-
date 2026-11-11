@@ -549,7 +549,10 @@ function buildDensityLine(segmentTarget: number, perSegment: number): string {
  *
  * 不传 / 非法值 → 返回空串（任务书与改造前逐字一致）。
  */
-export function buildStoryScriptTotalSecondsBlock(totalSeconds?: unknown, options?: { scheme?: unknown }): string {
+export function buildStoryScriptTotalSecondsBlock(
+    totalSeconds?: unknown,
+    options?: { scheme?: unknown; segmentSeconds?: unknown; mergeMode?: unknown },
+): string {
     const raw = Number(totalSeconds);
     if (!Number.isFinite(raw) || raw <= 0) return "";
     const total = Math.round(raw);
@@ -581,6 +584,38 @@ export function buildStoryScriptTotalSecondsBlock(totalSeconds?: unknown, option
             `- 镜头数落在**组内**：每个分镜组里用 \`镜头 1:\` / \`镜头 2:\` … 切成 2~5 个镜头，组内各镜「持续时间」相加必须正好等于 ${STORY_SCRIPT_SEGMENT_TARGET_SECONDS} 秒；${total} 秒全片组内合计约 ${shots} 个镜头（每组约 ${STORY_SCRIPT_SHOTS_PER_15S} 个）。`,
             `- 每一行都必须写**完整**的分镜组（组级四块 + 组内每镜四行标题 + 十个【】块 + SFX）—— 行数少不等于内容可以省，缺块会被判成没写完。`,
             `- 这一列**不写** \`[时长：Xs]\`：时长由组标题的（起—止秒）与组内各镜「持续时间」表达。`,
+            wordsLine,
+        ].join("\n");
+    }
+    /**
+     * 🔴 第五 / 第七套同一个病，只是单位换成「条视频」：
+     * 这两套一「行」= **一份完整的长视频脚本**，而「每镜时长要求」在单镜 10/15 秒档写的是
+     * 「每一镜就是一整段成片，`duration` 必须填 15」——一镜一视频时 30 秒只有 2 行，
+     * 但这一块按「每 15 秒 4 镜」算成 8 镜，两处口径差 4 倍。模型只能二选一：
+     *   - 凑够 8 行 → 每行 4 秒，时间码只写得出一两段（用户看到的「内容很少」）；
+     *   - 老老实实写 15 秒 → 行数不够，被自己的「约 8 个镜头」判成没铺满。
+     * 2026-11-11 报障「第五套和第七套有几个镜头的视频运动提示词是空的，或者内容很少」就是这里。
+     * 所以「一行即一条视频」（不合并）时按**行**算；合并档（每 2/3/4/5 镜一段）一行仍是一镜，照旧按镜头数。
+     */
+    if ((scheme === "muse" || scheme === "moman") && storyScriptMergeGroupSize(resolveStoryScriptMergeMode(options?.mergeMode)) <= 1) {
+        const segment = Math.max(
+            1,
+            Math.round(
+                resolveStoryScriptSegmentTargetSeconds(options?.segmentSeconds, options?.mergeMode as StoryScriptMergeMode | string | null | undefined) ||
+                    STORY_SCRIPT_SEGMENT_TARGET_SECONDS,
+            ),
+        );
+        const rowsCount = Math.max(1, Math.round(total / segment));
+        const shotRows = resolveStoryScriptShotCount(total);
+        const completeHint =
+            scheme === "muse"
+                ? "`### 视频N（X秒）` + 参考生视频 / 共享环境与光线 / 时间轴 / Negative prompt 四段齐全"
+                : "时间码从 `0.00` 起、首尾相接连续覆盖到最后一秒，至少两段，每段都带【景别，运镜】";
+        return [
+            "## 成片总时长要求（硬要求）",
+            `- 本次成片总时长 **${total} 秒**：整张表所有 \`duration\` 加起来必须落在 ${low}~${high} 秒（目标 ${total} 秒），**不要**按 1 分钟以上的量去铺。`,
+            `- 🔴 ${scheme === "muse" ? "第五套" : "第七套"}一「行」= **一条独立视频**（一行一份完整脚本），所以 ${total} 秒 = **${rowsCount} 行**，每行 \`duration\` 都填 ${segment}。**不要**把镜头数当成行数去铺（那就变成 ${shotRows} 行 × ${segment} 秒 = ${shotRows * segment} 秒了）。`,
+            `- 每一行都必须写**完整**的脚本：${completeHint} —— 行数少不等于内容可以省，只写个标题加一句话会被判成没写完。`,
             wordsLine,
         ].join("\n");
     }
@@ -1964,12 +1999,22 @@ export function isScriptTotalSecondsUnlimited(metadata?: { scriptTotalSecondsUnl
  * 不用自己判 `undefined`（以前写着「不填 = 与改造前一致」，现在「不填 = 30 秒」，判空的位置一多必然漂移）。
  */
 export function buildScriptTotalSecondsBlockFromMetadata(
-    metadata?: { scriptTotalSeconds?: unknown; scriptTotalSecondsUnlimited?: unknown; scriptScheme?: unknown } | null,
+    metadata?: {
+        scriptTotalSeconds?: unknown;
+        scriptTotalSecondsUnlimited?: unknown;
+        scriptScheme?: unknown;
+        scriptSegmentSeconds?: unknown;
+        scriptMergeMode?: unknown;
+    } | null,
 ): string {
     if (isScriptTotalSecondsUnlimited(metadata)) return "";
-    // 方案要一起传：第八套一「行」是 15 秒分镜组，镜数按「每 15 秒 4 镜」算会与「每镜 15 秒」直接打架
-    // （见 `buildStoryScriptTotalSecondsBlock` 里 mashu 分支的注释）。
-    return buildStoryScriptTotalSecondsBlock(resolveScriptTotalSeconds(metadata), { scheme: metadata?.scriptScheme });
+    // 方案 + 分段要一起传：第八套一「行」是 15 秒分镜组、第五 / 七套一「行」是一条独立视频，
+    // 镜数按「每 15 秒 4 镜」算会与「每镜 15 秒」直接打架（见 `buildStoryScriptTotalSecondsBlock` 里的分支注释）。
+    return buildStoryScriptTotalSecondsBlock(resolveScriptTotalSeconds(metadata), {
+        scheme: metadata?.scriptScheme,
+        segmentSeconds: metadata?.scriptSegmentSeconds,
+        mergeMode: metadata?.scriptMergeMode,
+    });
 }
 
 /** 单镜可取区间的文本，例如 `3~5`。 */
@@ -5208,13 +5253,154 @@ function unwrapMomanJsonPrompt(value: string): string {
     return value;
 }
 
+/** 第七套时间码写法：`0.00` / `1.50`（两位小数，与用户实样一致）。 */
+function momanSeconds(value: number): string {
+    return Math.max(0, Number(value) || 0).toFixed(2);
+}
+
+/** 模型写的那半句话（去掉时间码前缀与【景别，运镜】括注）→ 能当素材的正文。 */
+function momanSalvageBody(text: unknown): string {
+    const raw = String(text ?? "");
+    if (!raw.trim()) return "";
+    return museOneLine(
+        raw
+            .replace(/\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*(?:秒|s)?\s*[：:]/gi, " ")
+            .replace(/[【\[][^】\]]{1,60}[】\]]/g, " "),
+    );
+}
+
+/**
+ * 把这一行的动作摊成「起.止—终.止」条目（至少两段，末段落在 `duration`）。
+ *
+ * 两种来源，优先用模型自己写的时间码：
+ *  ① 动作列里已有 `0—5秒 A；5—10秒 B` 这种节拍 → 直接沿用（只在全部落在本镜时长内时才用，
+ *     否则说明这份动作是按别的时长写的，交给 ② 重排）；
+ *  ② 没有可用时间码 → 按 `duration` 均分 2~3 段，用句读把动作摊上去，缺的段写中性占位（不编剧情）。
+ */
+function momanBeatsOf(action: string, content: string, duration: number): Array<{ from: number; to: number; text: string }> {
+    const explicit = Array.from(action.matchAll(/(\d+(?:\.\d+)?)\s*[—–\-~～至]\s*(\d+(?:\.\d+)?)\s*秒?\s*[：:]?\s*/g));
+    if (explicit.length >= 2) {
+        const beats = explicit
+            .map((match, index) => {
+                const start = (match.index ?? 0) + match[0].length;
+                const end = index + 1 < explicit.length ? explicit[index + 1].index ?? action.length : action.length;
+                return { from: Number(match[1]), to: Number(match[2]), text: museOneLine(action.slice(start, end)) };
+            })
+            .filter((beat) => beat.text && beat.to > beat.from);
+        const inRange = beats.every((beat) => beat.from >= 0 && beat.to <= duration + 0.5);
+        if (beats.length >= 2 && inRange) return beats;
+    }
+    const count = duration >= 12 ? 3 : 2;
+    // 落到这里说明动作里的时间码不可用（超出本镜时长）→ 先把时间码抹掉再按句读摊，
+    // 否则条目正文里会带着「0—5 秒」这种已经不属于这一镜的旧秒数。
+    const clauses = `${museActionWithinShot(action, duration) || content}`
+        .replace(/\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*秒?\s*[：:]?\s*/g, " ")
+        .split(/[；;。]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    const beats: Array<{ from: number; to: number; text: string }> = [];
+    let cursor = 0;
+    for (let index = 0; index < count; index += 1) {
+        const to = index === count - 1 ? duration : Math.round(((duration * (index + 1)) / count) * 100) / 100;
+        const fallback =
+            index === 0
+                ? content || "按本镜画面描述展开，机位与光位保持稳定"
+                : index === count - 1
+                  ? "落幅：动作收住，人物停在最后一个状态，环境动态持续"
+                  : "过程：动作延续，机位与光位不变";
+        beats.push({ from: cursor, to, text: clauses[index] || fallback });
+        cursor = to;
+    }
+    return beats;
+}
+
+/**
+ * 第七套「视频列没写够」的**确定性重建**：拿这一行已有的列，拼一份按时间码分段的一镜脚本。
+ *
+ * 为什么必须补（用户 2026-11-11 报障）：「执行第五套和第七套方案时，有几个镜头的视频运动提示词
+ * 是空的，或者内容很少。」第五套至少还有 `composeMuseScriptFromRow`，第七套此前**一条兜底都没有**：
+ * `normalizeStoryScriptMomanRows` 只在「空着 + 错列」时动手，空着且分镜列也不是时间码脚本
+ * 就直接 return row —— 于是空的就是空的；写了但只有一段概括（`0.00—15.00：【中景，固定机位】…`）
+ * 也照样原样留着（`isMomanVideoScript` 要求 ≥2 段，达不到时以前没有任何动作）。
+ *
+ * 原则与第四 / 八套一致：只用**这一行真实存在的值**，不编剧情；缺的段写中性占位，
+ * 保证「时间码从 0.00 起、首尾相接、覆盖到最后一秒、每段带【景别，运镜】」这个结构一定成立。
+ *
+ * ⚠️ 幂等：拼出来的结果本身就满足 `isMomanVideoScript` + 长度下限，下一次 normalize 不会再动它。
+ */
+export function buildMomanScriptFromRow(row: StoryScriptRow, sourceText?: unknown): string | null {
+    const duration = Math.max(1, Math.round(Number(row?.duration) || 0) || STORY_SCRIPT_SEGMENT_TARGET_SECONDS);
+    const salvage = momanSalvageBody(sourceText);
+    const content = museOneLine(row?.visual_description) || museOneLine(row?.key_visual) || salvage;
+    const action = museOneLine(row?.character_action) || museOneLine(row?.blocking) || salvage;
+    if (!content && !action) return null;
+    const sceneName = museOneLine(row?.scene);
+    /**
+     * 光线只取**一两句**：`lighting_mood` / `scene_description` / `visual_description` 三列经常都在讲同一束光，
+     * 全拼上去会得到「东侧晨光斜射；逆光勾边；院内偏暗；东侧有晨光盘进来」这种同义堆叠。
+     */
+    const light = (museLightSentences(row?.lighting_mood, row?.scene_description) || museLightSentences(row?.visual_description))
+        .split("；")
+        .slice(0, 2)
+        .join("；");
+    const dialogue = museOneLine(row?.dialogue);
+    const sound = museOneLine(row?.sound);
+    /** `shot` 列常写成「中景，固定机位」：第一段是景别，其余当运镜；没有就用镜头运动列 / 默认固定机位。 */
+    const shotParts = museOneLine(row?.shot)
+        .split(/[，,、；;/]/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+    const shotSize = shotParts[0] || "中景";
+    const movement = museOneLine(row?.camera_movement) || shotParts.slice(1).join("，") || "固定机位";
+    const beats = momanBeatsOf(action, content, duration);
+    return beats
+        .map((beat, index) => {
+            const isFirst = index === 0;
+            const isLast = index === beats.length - 1;
+            /**
+             * 一段只有四五个字（`0—5 秒：奶奶抬头`）等于没写：补上这一镜的画面内容 / 中性延续句，
+             * 让每段都够独立指导生成（格式段要求「每一段都要能独立指导生成」）。
+             */
+            const body =
+                beat.text.length >= 12
+                    ? beat.text
+                    : [beat.text, isFirst ? content : isLast ? "动作收住，画面停在最后一个状态" : "动作延续，机位与光位不变"]
+                          .filter(Boolean)
+                          .join("，");
+            const parts = [body];
+            if (isFirst) {
+                if (sceneName) parts.push(`场景：${sceneName}`);
+                if (light) parts.push(`光线：${light}`);
+            }
+            if (isLast) {
+                if (dialogue) parts.push(`台词：${dialogue}`);
+                if (sound) parts.push(`环境音：${sound}`);
+                else if (!dialogue) parts.push("环境音延续，不新增音乐");
+            }
+            return `${momanSeconds(beat.from)}—${momanSeconds(beat.to)}：【${shotSize}，${movement}】${parts.filter(Boolean).join("；")}。`;
+        })
+        .join("\n");
+}
+
+/** 这一行有没有「能拿来重建」的素材（全是空行就别硬编一份假的时间码脚本）。 */
+function hasMomanRowMaterial(row: StoryScriptRow): boolean {
+    return ["visual_description", "key_visual", "character_action", "blocking", "scene", "scene_description", "dialogue", "sound", "shot"].some((key) =>
+        museOneLine(row?.[key]),
+    );
+}
+
+/** 第七套视频列「写了但没写够」的下限：两段时间码 + 每段景别运镜与动作，不会短于这个长度。 */
+const MOMAN_MIN_SCRIPT_LENGTH = 90;
+
 /**
  * 第七套整表后处理（幂等）：保证 `video_motion_prompt` 是**按时间码分段**的形态。
  *
- * 处理三件事（都只在确实需要时动手）：
+ * 处理四件事（都只在确实需要时动手）：
  *  ① 字面量 `\\n` / 被压成一行的段落在 → `reflowLongVideoScript(text, "moman")` 还原换行；
  *  ② 视频列空着、但 `shot_prompt` 里塞的是这份时间码脚本（模型写错列）→ 挪到视频列并清空分镜列；
- *  ③ 视频列整格是 JSON（`{"prompt": "…"}` / 整个 storyboard 对象）→ 取 `prompt` 字段。
+ *  ③ 视频列整格是 JSON（`{"prompt": "…"}` / 整个 storyboard 对象）→ 取 `prompt` 字段；
+ *  ④ **空着 / 只有一段概括 / 压根不是时间码形态** → 按这一行自己的列重建一份（见 `buildMomanScriptFromRow`）。
+ *     没有 ④ 的话「模型偷懒少写」会原样留在表里，用户看到的就是「有几镜是空的或只有一句」。
  */
 export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], preset?: StoryScriptPresetId | string | null): StoryScriptRow[] {
     if (!rows?.length) return rows as StoryScriptRow[];
@@ -5228,9 +5414,20 @@ export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], p
                 const text = unwrapMomanJsonPrompt(shotText);
                 if (text && isMomanVideoScript(text)) return { ...row, video_motion_prompt: reflowLongVideoScript(text, "moman"), shot_prompt: "" };
             }
-            return row;
+            // ④ 空着且分镜列也不是时间码脚本 → 用这一行的列重建。
+            const rebuilt = buildMomanScriptFromRow(row);
+            return rebuilt ? { ...row, video_motion_prompt: rebuilt } : row;
         }
         const text = reflowLongVideoScript(unwrapMomanJsonPrompt(rawText), "moman");
+        /**
+         * ④ 另一个入口：**写了但没写够**。只有一段 `0.00—15.00：…` 的概括、
+         * 或者写了一整段散文（压根没有时间码）都算没写完。重建用行内素材 + 模型这句半成品，
+         * 重建不出来（行内也空）才保留原文，绝不把原有内容丢掉。
+         */
+        if ((!isMomanVideoScript(text) || text.length < MOMAN_MIN_SCRIPT_LENGTH) && hasMomanRowMaterial(row)) {
+            const rebuilt = buildMomanScriptFromRow(row, text);
+            if (rebuilt) return { ...row, video_motion_prompt: rebuilt };
+        }
         return text === rawText ? row : { ...row, video_motion_prompt: text };
     });
 }
@@ -8097,7 +8294,7 @@ function buildMuseScriptFromSlots(
 }
 
 /**
- * 第五套（muse）整表后处理：`video_motion_prompt` 是八行标签块时，改写成整段长视频脚本。
+ * 第五套（muse）整表后处理：`video_motion_prompt` 必须是**一整段合规的长视频脚本**。
  *
  * 幂等（合规就原样返回）、只在该预设真有这一列时生效；其它方案完全不受影响。
  *
@@ -8106,6 +8303,13 @@ function buildMuseScriptFromSlots(
  *  ② 整段 muse 脚本被写进了 **`shot_prompt` 列**、视频列空着 → 以前直接 return row，视频列一直空；
  *  ③ 视频列空着、但本镜的行内语义素材齐全 → 以前留着空列，视频节点只能拼一句上下文。
  * 三种都在这里收敛，模型照不照格式都不影响表格里看到的形态。
+ *
+ * 2026-11-11 第三轮报障补的 ④（用户原话：「有几个镜头的视频运动提示词是空的，或者内容很少」）：
+ * 以前判「合规」用的是 `looksLikeMuseScript`——**只要出现 `### 视频` 就放过**。模型偷懒写
+ * `### 视频三（15秒）` 加一句话（没有 `共享环境与光线` / `时间轴` / `Negative prompt`）时，
+ * 它照样判合规，于是那段 30 字原样留在表里；写成语义无关的散文时更救不回来（`parseMuseTagSlots`
+ * 认不出标签就 return）。现在改成「**五段齐 + 长度过线**」才算写完，不达标就走确定性重建
+ * （与第八套 ④ 同一口径，见 `buildMashuGroupScriptFromRow`）。
  */
 export function normalizeStoryScriptMuseRows(rows: readonly StoryScriptRow[], preset?: StoryScriptPresetId | string | null): StoryScriptRow[] {
     if (!rows?.length) return rows as StoryScriptRow[];
@@ -8113,6 +8317,7 @@ export function normalizeStoryScriptMuseRows(rows: readonly StoryScriptRow[], pr
     if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
     return rows.map((row, index) => {
         const shotNo = Number(row.shot_no) || index + 1;
+        const seconds = Math.max(1, Math.round(Number(row.duration) || 0) || STORY_SCRIPT_SEGMENT_TARGET_SECONDS);
         const rawText = String(row.video_motion_prompt ?? "");
         if (!rawText.trim()) {
             /**
@@ -8121,21 +8326,112 @@ export function normalizeStoryScriptMuseRows(rows: readonly StoryScriptRow[], pr
              */
             const relocated = relocateMuseScriptFromRow(row);
             if (relocated) return relocated;
-            const composed = composeMuseScriptFromRow(row, shotNo);
+            const composed = composeMuseScriptFromRow(row, shotNo, seconds);
             return composed ? { ...row, video_motion_prompt: composed } : row;
         }
         /**
          * 先还原「被压成一行」的脚本：模型把多行塞进 Markdown 表格单元格 / JSON 单行字符串时，
-         * `### 视频一（10秒）` 还在，`looksLikeMuseScript` 就会判「已经合规」直接放过 ——
+         * `### 视频一（10秒）` 还在，只要判据松就会「已经合规」直接放过 ——
          * 用户看到的却是一行流水句，等于专属格式没生效。reflow 幂等，已分行的原样返回。
          * 再统一成**参考生视频**口径：`文生视频` → `参考生视频`、整段删掉 `角色设定：`（幂等）。
          */
         const text = normalizeMuseReferenceScript(reflowLongVideoScript(rawText, "muse"));
-        if (looksLikeMuseScript(text)) return text === rawText ? row : { ...row, video_motion_prompt: text };
+        if (isCompleteMuseScript(text)) return text === rawText ? row : { ...row, video_motion_prompt: text };
+        /**
+         * ④ 写了但没写够：先看是不是八段标签块（模型退回旧写法），能拆出语义槽就按槽重组成完整脚本；
+         * 拆不出来（只有标题 + 一句散文 / 只剩时间轴）就把这句散文当素材，连同这一行其它列重建。
+         */
         const slots = parseMuseTagSlots(text);
-        if (!slots) return text === rawText ? row : { ...row, video_motion_prompt: text };
-        return { ...row, video_motion_prompt: buildMuseScriptFromSlots(slots, Number(row.duration) || 0, shotNo) };
+        /**
+         * 八段块里常有一两格写得极短（`人物动作：抬头`）：时间轴靠它切就会只有一条四个字的条目。
+         * 所以槽值太短时用这一行同类列补，补完再交给 `buildMuseScriptFromSlots` 组装。
+         */
+        const mergedSlots = slots
+            ? {
+                  ...slots,
+                  content: mergeMuseSlotText(slots.content, 8, [row.visual_description, row.key_visual]),
+                  action: museActionWithinShot(mergeMuseSlotText(slots.action, 12, [row.character_action, row.blocking]), seconds),
+                  sound: mergeMuseSlotText(slots.sound, 4, [row.sound, row.dialogue]),
+              }
+            : null;
+        const rebuilt = mergedSlots
+            ? buildMuseScriptFromSlots(mergedSlots, seconds, shotNo)
+            : composeMuseScriptFromRow(row, shotNo, seconds, text);
+        if (rebuilt) return { ...row, video_motion_prompt: rebuilt };
+        return text === rawText ? row : { ...row, video_motion_prompt: text };
     });
+}
+
+/** 视频列「写了但没写够」的下限：一份四段齐的脚本不可能短于这个长度（重建结果约 300~400 字）。 */
+const MUSE_MIN_SCRIPT_LENGTH = 150;
+
+/**
+ * 是不是一份**写完的**第五套脚本：四段齐（`### 视频N（X秒）` / `参考生视频，…` / `共享环境与光线：` /
+ * `时间轴：` + 条目 / `Negative prompt：`）且长度过线。
+ *
+ * ⚠️ 别退回 `looksLikeMuseScript`（只要 `### 视频` 就真）——那条判据的用途是「这是不是长视频脚本形态」，
+ * 用来判「写没写完」会把模型的半成品全部放过（2026-11-11 报障的真因）。
+ */
+function isCompleteMuseScript(text: unknown): boolean {
+    const value = String(text ?? "");
+    if (value.trim().length < MUSE_MIN_SCRIPT_LENGTH) return false;
+    if (!/###\s*视频/.test(value)) return false;
+    if (!/(?:参考生视频|文生视频)\s*[，,]/.test(value)) return false;
+    if (!/共享环境与光线\s*[：:]/.test(value)) return false;
+    if (!/Negative\s*prompt\s*[：:]/i.test(value)) return false;
+    const timeline = value.split(/时间轴\s*[：:]/)[1] || "";
+    if (!timeline.trim()) return false;
+    return /\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?/.test(timeline) || timeline.trim().length >= 12;
+}
+
+/**
+ * 行内动作的时间码如果**超出本镜时长**（改分段 / 合并后最常见：15 秒的动作用在 4 秒的镜上），
+ * 重建时把时间码抹掉，交给 `buildMuseScriptFromSlots` 用「0—时长」整段兜住 ——
+ * 否则会写出 `10—15 秒` 这种根本不在这一镜里的条目。
+ */
+function museActionWithinShot(action: string, duration: number): string {
+    const value = museOneLine(action);
+    if (!value) return "";
+    const ends = Array.from(value.matchAll(/\d+(?:\.\d+)?\s*[—–\-~～至]\s*(\d+(?:\.\d+)?)\s*秒?/g)).map((match) => Number(match[1]));
+    if (!ends.length || Math.max(...ends) <= duration + 0.5) return value;
+    return value
+        .replace(/\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*秒\s*[：:]?\s*/g, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+}
+
+/**
+ * 八段块的某一格太短（`人物动作：抬头`）时，用这一行同类列补上 —— 否则按槽组装出来的
+ * 时间轴只有一条四个字的条目，用户看到的仍是「内容很少」。
+ * 判据是**长度**而不是空/非空：模型经常填了但只填两三个字。
+ */
+function mergeMuseSlotText(slotValue: unknown, minLength: number, rowValues: readonly unknown[]): string {
+    const own = museOneLine(slotValue);
+    if (own.length >= minLength) return own;
+    return museOneLine([own, ...rowValues.map((value) => museOneLine(value))].filter(Boolean).join("；"));
+}
+
+/**
+ * 模型写的那半句话 → 能当「画面内容」的素材。
+ *
+ * ⚠️ 只取 `时间轴：` **之前**、`Negative prompt` 之前的部分：`时间轴` 的条目要靠行内的动作列重排，
+ * 结尾那句固定话术与负面段也不是画面内容。把它们一起塞进 content 会得到一行又长又乱的第二段
+ * （而且那行里同时出现两个段名，`reflowLongVideoScript` 会再分一次行 —— 归一就不幂等了）。
+ */
+function museSalvageBody(text: unknown): string {
+    const raw = String(text ?? "");
+    if (!raw.trim()) return "";
+    const head = raw.split(/时间轴\s*[：:]/)[0].replace(/Negative\s*prompt\s*[：:][\s\S]*$/i, " ");
+    return museOneLine(
+        head
+            .replace(/^#{1,6}\s*视频[^\n]*/gm, " ")
+            .replace(/共享环境与光线\s*[：:]/gi, " ")
+            .replace(/^\s*(?:参考生视频|文生视频)\s*[，,]\s*/i, " ")
+            .replace(/\b\d{1,2}:\d{1,2}\b\s*(?:竖屏|横屏)?\s*[，,]?/g, " ")
+            .replace(/时长\s*\d+(?:\.\d+)?\s*秒\s*[，,]?/g, " ")
+            .replace(/人物与场景以已给的设定图\s*\/\s*首帧参考图为准\s*[，,。]?/g, " ")
+            .replace(/镜头以固定机位为主[^。]*。/g, " "),
+    );
 }
 
 /** `shot_prompt` 里整段都是长视频脚本（模型写错列）→ 挪到视频列，并把分镜列清空。 */
@@ -8148,17 +8444,21 @@ function relocateMuseScriptFromRow(row: StoryScriptRow): StoryScriptRow | null {
 }
 
 /**
- * 视频列空、模型也没把脚本写错列时，用本镜已有的语义列拼一段长视频脚本。
- * 判据很紧：至少要有画面描述或角色动作，否则返回 null（不拿空行造垃圾）。
+ * 视频列空 / 没写够时，用本镜已有的语义列拼一段长视频脚本。
+ * 判据很紧：至少要有画面描述或角色动作（含模型自己那句半成品），否则返回 null（不拿空行造垃圾）。
  */
-function composeMuseScriptFromRow(row: StoryScriptRow, shotNo: number): string | null {
-    const content = museOneLine([row.visual_description, row.lighting_mood].filter(Boolean).join("；"));
-    const action = museOneLine([row.character_action, row.blocking].filter(Boolean).join("；"));
+function composeMuseScriptFromRow(row: StoryScriptRow, shotNo: number, seconds?: number, extra?: unknown): string | null {
+    const duration = Math.max(1, Math.round(Number(seconds) || Number(row?.duration) || 0) || STORY_SCRIPT_SEGMENT_TARGET_SECONDS);
+    const salvage = museSalvageBody(extra);
+    const rowContent = museOneLine([row.visual_description, row.key_visual, row.lighting_mood].filter(Boolean).join("；"));
+    const rowAction = museOneLine([row.character_action, row.blocking].filter(Boolean).join("；"));
+    const content = rowContent || salvage;
+    const action = rowAction || salvage;
     if (!content && !action) return null;
     const sound = museOneLine([row.sound, row.dialogue].filter(Boolean).join("；"));
     return buildMuseScriptFromSlots(
-        { shot: museOneLine(row.shot), content, action, sound },
-        Number(row.duration) || 0,
+        { shot: museOneLine(row.shot), content, action: museActionWithinShot(action, duration), sound },
+        duration,
         shotNo,
     );
 }
