@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Button, Input } from "antd";
-import { Check, Paintbrush, PencilLine, Plus, Trash2 } from "lucide-react";
+import { Check, Paintbrush, PencilLine, Pin, PinOff, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
     DEFAULT_CUSTOM_STYLE_CATEGORY,
     getAllStyleTemplates,
+    getCustomStyleTemplates,
     getStyleTemplate,
     getStyleTemplateCategories,
     isBuiltinStyleTemplate,
     normalizeCustomStyleTemplates,
+    normalizePinnedStyleTemplateIds,
     type CanvasStyleTemplate,
 } from "@/constant/style-templates";
+import { buildStylePickerSections } from "@/lib/canvas/style-picker-sections";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useConfigStore } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -149,6 +152,7 @@ function StylePickerPortal({
     } as const;
 
     const customTemplates = useConfigStore((state) => state.config.customStyleTemplates);
+    const pinnedIds = useConfigStore((state) => state.config.pinnedStyleTemplateIds);
     const updateConfig = useConfigStore((state) => state.updateConfig);
     /**
      * 编辑态：`null` = 看列表；有值 = 就地切成表单（不弹第二个浮层）。
@@ -165,21 +169,34 @@ function StylePickerPortal({
      */
     const [pendingRemove, setPendingRemove] = useState("");
 
-    const grouped = useMemo(() => {
-        const keyword = query.trim().toLowerCase();
-        const match = (item: CanvasStyleTemplate) =>
-            !keyword || item.label.toLowerCase().includes(keyword) || item.stylePrompt.toLowerCase().includes(keyword) || item.category.toLowerCase().includes(keyword);
-        // 内置 + 自定义一起列（自定义模板由 `registerCustomStyleTemplates` 同步进来）。
-        const source = getAllStyleTemplates().filter(match);
-        const buckets = new Map<string, CanvasStyleTemplate[]>();
-        for (const item of source) {
-            const list = buckets.get(item.category) || [];
-            list.push(item);
-            buckets.set(item.category, list);
-        }
-        const ordered = [...getStyleTemplateCategories(), ...buckets.keys()].filter((category, index, all) => all.indexOf(category) === index);
-        return ordered.map((category) => ({ category, items: buckets.get(category) || [] })).filter((group) => group.items.length > 0);
-    }, [query, customTemplates]);
+    /**
+     * 分组 + 置顶（用户 2026-11-11 第 03 条）：
+     * **置顶组**在最顶 → **自定义分类**（默认「我的风格」）其次 → 内置分类。
+     * 顺序规则全在纯函数 `buildStylePickerSections` 里（可被探针钉住），这里只喂数据。
+     * 注意 `customTemplates` 也要进依赖：自定义模板改名 / 改分类后注册表变了，分组得重算。
+     */
+    const sections = useMemo(
+        () =>
+            buildStylePickerSections({
+                templates: getAllStyleTemplates(),
+                categories: getStyleTemplateCategories(),
+                customIds: new Set(getCustomStyleTemplates().map((item) => item.id)),
+                pinnedIds: normalizePinnedStyleTemplateIds(pinnedIds),
+                pinnedTitle: t("canvas.stylePicker.pinnedGroup"),
+                keyword: query,
+            }),
+        [customTemplates, pinnedIds, query, t],
+    );
+
+    /**
+     * 置顶 / 取消置顶。新置顶的排在最前面（用户点完立刻能在最上面看到它），
+     * 取消就从列表里摘掉 —— 摘完它会回到自己的分类里。
+     */
+    const togglePin = (id: string) => {
+        const list = normalizePinnedStyleTemplateIds(pinnedIds);
+        const next = list.includes(id) ? list.filter((item) => item !== id) : [id, ...list];
+        updateConfig("pinnedStyleTemplateIds", next);
+    };
 
     /** 打开表单：不传 = 新增空表单；传 item = 编辑该条自定义模板。 */
     const openDraft = (item?: CanvasStyleTemplate) => {
@@ -216,6 +233,9 @@ function StylePickerPortal({
     /** 删一条自定义模板；正选中它的话顺手清空节点的选择（不留悬空 id）。 */
     const removeTemplate = (id: string) => {
         updateConfig("customStyleTemplates", normalizeCustomStyleTemplates(customTemplates).filter((item) => item.id !== id));
+        // 顺手摘掉置顶：留着就是一个永远查不到的 id，导出配置里也会很脏。
+        const pinned = normalizePinnedStyleTemplateIds(pinnedIds);
+        if (pinned.includes(id)) updateConfig("pinnedStyleTemplateIds", pinned.filter((item) => item !== id));
         if (selectedId === id) onSelect(undefined);
         setPendingRemove("");
     };
@@ -327,12 +347,16 @@ function StylePickerPortal({
                             <span className="truncate font-medium">{t("canvas.stylePicker.none")}</span>
                             <span className="ml-auto shrink-0 text-[11px] opacity-50">{t("canvas.stylePicker.noneHint")}</span>
                         </button>
-                        {grouped.map((group) => (
-                            <div key={group.category} className="mb-1.5">
-                                <div className="px-2 py-1 text-[11px] font-medium opacity-50">{group.category}</div>
-                                {group.items.map((item) => {
+                        {sections.map((section) => (
+                            <div key={section.key} className="mb-1.5">
+                                <div className={`flex items-center gap-1 px-2 py-1 text-[11px] font-medium ${section.pinned ? "opacity-80" : "opacity-50"}`}>
+                                    {section.pinned ? <Pin className="size-2.5" /> : null}
+                                    <span>{section.title}</span>
+                                </div>
+                                {section.items.map((item) => {
                                     const active = item.id === selectedId;
                                     const builtin = isBuiltinStyleTemplate(item.id);
+                                    const pinned = section.pinned;
                                     return (
                                         <div
                                             key={item.id}
@@ -346,34 +370,46 @@ function StylePickerPortal({
                                                     <span className="mt-0.5 line-clamp-2 block text-[11px] leading-4 opacity-55">{item.stylePrompt}</span>
                                                 </span>
                                             </button>
-                                            {builtin ? null : (
-                                                <span className="mt-1.5 flex shrink-0 items-center gap-0.5 opacity-60">
-                                                    <Button
-                                                        size="small"
-                                                        type="text"
-                                                        className="!h-6 !w-6 !min-w-6 !rounded-full !p-0"
-                                                        style={{ color: muted }}
-                                                        title={t("canvas.stylePicker.edit")}
-                                                        icon={<PencilLine className="size-3" />}
-                                                        onClick={() => openDraft(item)}
-                                                    />
-                                                    <Button
-                                                        size="small"
-                                                        type="text"
-                                                        className="!h-6 !w-6 !min-w-6 !rounded-full !p-0"
-                                                        style={pendingRemove === item.id ? { color: "#e5484d", opacity: 1 } : { color: muted }}
-                                                        title={pendingRemove === item.id ? t("canvas.stylePicker.deleteConfirm") : t("canvas.stylePicker.remove")}
-                                                        icon={<Trash2 className="size-3" />}
-                                                        onClick={() => handleRemoveClick(item.id)}
-                                                    />
-                                                </span>
-                                            )}
+                                            <span className="mt-1.5 flex shrink-0 items-center gap-0.5 opacity-60">
+                                                {/* 置顶：内置 / 自定义都有（用户 2026-11-11 第 03 条）。 */}
+                                                <Button
+                                                    size="small"
+                                                    type="text"
+                                                    className="!h-6 !w-6 !min-w-6 !rounded-full !p-0"
+                                                    style={pinned ? { color: "#7f77dd", opacity: 1 } : { color: muted }}
+                                                    title={pinned ? t("canvas.stylePicker.unpin") : t("canvas.stylePicker.pin")}
+                                                    icon={pinned ? <PinOff className="size-3" /> : <Pin className="size-3" />}
+                                                    onClick={() => togglePin(item.id)}
+                                                />
+                                                {builtin ? null : (
+                                                    <>
+                                                        <Button
+                                                            size="small"
+                                                            type="text"
+                                                            className="!h-6 !w-6 !min-w-6 !rounded-full !p-0"
+                                                            style={{ color: muted }}
+                                                            title={t("canvas.stylePicker.edit")}
+                                                            icon={<PencilLine className="size-3" />}
+                                                            onClick={() => openDraft(item)}
+                                                        />
+                                                        <Button
+                                                            size="small"
+                                                            type="text"
+                                                            className="!h-6 !w-6 !min-w-6 !rounded-full !p-0"
+                                                            style={pendingRemove === item.id ? { color: "#e5484d", opacity: 1 } : { color: muted }}
+                                                            title={pendingRemove === item.id ? t("canvas.stylePicker.deleteConfirm") : t("canvas.stylePicker.remove")}
+                                                            icon={<Trash2 className="size-3" />}
+                                                            onClick={() => handleRemoveClick(item.id)}
+                                                        />
+                                                    </>
+                                                )}
+                                            </span>
                                         </div>
                                     );
                                 })}
                             </div>
                         ))}
-                        {grouped.length === 0 ? <div className="px-2 py-6 text-center text-xs opacity-50">{t("canvas.stylePicker.empty")}</div> : null}
+                        {sections.length === 0 ? <div className="px-2 py-6 text-center text-xs opacity-50">{t("canvas.stylePicker.empty")}</div> : null}
                         <div className="px-2 pb-1 pt-1.5 text-[10px] leading-3 opacity-40">{t("canvas.stylePicker.builtinLocked")}</div>
                     </div>
                 </>

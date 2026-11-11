@@ -1827,7 +1827,10 @@ export default {
             remove: "Delete",
             deleteConfirm: "Click again to delete (cannot be undone)",
             formRequired: "Style name and style prompt are both required",
-            builtinLocked: "Built-in styles cannot be edited or deleted. Custom styles are included in the exported config.",
+            pinnedGroup: "Pinned",
+            pin: "Pin to top",
+            unpin: "Unpin",
+            builtinLocked: "Built-in styles cannot be edited or deleted (pinning is fine). Custom styles are included in the exported config.",
         },
         cameraPicker: {
             title: "Camera",

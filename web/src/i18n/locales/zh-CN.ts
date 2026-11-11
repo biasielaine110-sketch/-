@@ -1826,7 +1826,10 @@ export default {
             remove: "删除",
             deleteConfirm: "再点一次删除（不可恢复）",
             formRequired: "风格名称和风格提示词都不能为空",
-            builtinLocked: "内置风格模板不可编辑或删除，自定义模板随导出配置一起备份。",
+            pinnedGroup: "置顶",
+            pin: "置顶",
+            unpin: "取消置顶",
+            builtinLocked: "内置风格模板不可编辑或删除（可以置顶），自定义模板随导出配置一起备份。",
         },
         cameraPicker: {
             title: "摄像机",

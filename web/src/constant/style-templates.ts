@@ -110,6 +110,26 @@ export function registerCustomStyleTemplates(list: unknown): void {
     for (const item of CUSTOM_STYLE_TEMPLATES) CUSTOM_STYLE_TEMPLATE_MAP.set(item.id, item);
 }
 
+/**
+ * 置顶列表归一化（用户 2026-11-11 第 03 条）：只留非空字符串、去重、保持顺序。
+ *
+ * 这里**不**过滤「已不存在」的 id：内置 id 是常量表、自定义 id 在模板被删时由删除逻辑
+ * 顺手摘掉；万一漏了，多一个查不到的 id 只是不显示，不影响任何别的东西。
+ */
+export function normalizePinnedStyleTemplateIds(list: unknown): string[] {
+    if (!Array.isArray(list)) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const raw of list) {
+        if (typeof raw !== "string") continue;
+        const id = raw.trim();
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        out.push(id);
+    }
+    return out;
+}
+
 export function getCustomStyleTemplates(): CanvasStyleTemplate[] {
     return CUSTOM_STYLE_TEMPLATES;
 }

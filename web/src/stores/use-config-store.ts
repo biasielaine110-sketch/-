@@ -4,7 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
-import { registerCustomStyleTemplates, type CanvasStyleTemplate } from "@/constant/style-templates";
+import { normalizePinnedStyleTemplateIds, registerCustomStyleTemplates, type CanvasStyleTemplate } from "@/constant/style-templates";
 import { DEFAULT_MOCHIANI_PREFERENCE, type MochianiPreference } from "@/constant/mochiani-video";
 import { defaultTextPrompts, h3PromptOptimizerEntry, normalizeTextPrompts, type TextPromptEntry } from "@/constant/text-prompt-library";
 import { normalizeSunoVersionValue } from "@/lib/audio-generation";
@@ -178,6 +178,13 @@ export type AiConfig = {
      */
     customStyleTemplates?: CanvasStyleTemplate[];
     /**
+     * 风格模板的**置顶列表**（用户 2026-11-11 第 03 条：「同时也添加置顶功能，这样我可以把
+     * 常用的风格模板置顶」）。存 id、按下标即展示顺序；内置与自定义都能置顶。
+     *
+     * 与 `customStyleTemplates` 一样放在 `AiConfig` 里 → 跟着导出配置一起走。
+     */
+    pinnedStyleTemplateIds?: string[];
+    /**
      * **MochiAni 生视频的偏好**（用户 2026-11-10 第 03 条）。
      *
      * 铺链路建 MochiAni 节点时，模型 / 渠道 / 生成模式 / 画幅 / 参数就取这里的值 ——
@@ -284,6 +291,8 @@ export const defaultConfig: AiConfig = {
     imageQuickTools: { ids: [], showLabels: false },
     nodeCreateMenuOrder: [],
     imageContextMenuOrder: [],
+    // 默认没有置顶项（用户自己置顶后才写入）。
+    pinnedStyleTemplateIds: [],
     // MochiAni 偏好默认全空（= 节点窗口里让用户自己挑模型）；画幅按 MochiAni 面板的默认 9:16。
     mochiani: { ...DEFAULT_MOCHIANI_PREFERENCE, params: {} },
 };
@@ -623,6 +632,9 @@ export const useConfigStore = create<ConfigStore>()(
                             const normalized = normalizeStringIdList(config.imageContextMenuOrder);
                             return normalized.length ? normalized : readLegacyStringArray("canvas-image-context-menu-order-v1");
                         })(),
+                        // 置顶列表：脏数据（非字符串 / 空串 / 重复）一律清掉，否则选择器里会出现
+                        // 一个永远不显示的「幽灵置顶位」。
+                        pinnedStyleTemplateIds: normalizePinnedStyleTemplateIds(config.pinnedStyleTemplateIds),
                     },
                 };
             },
