@@ -186,6 +186,26 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
               }
             : null;
 
+    /**
+     * 放大编辑弹窗里的「编辑提示词」配置（用户 2026-11-11 第 01 条）。
+     *
+     * 模型**恒跟偏好里的文本模型**：`h3TextConfig.model` 是按 capability=text 解析的，
+     * 但节点自己存过 `metadata.model`（生图 / 生视频模型）时可能把它顶掉，所以这里
+     * 显式把 `model` 覆回 `textModel` —— 用户点名的就是「跟着偏好里的模型」。
+     *
+     * 指令不在这里：内置在 `lib/canvas/edit-prompt.ts`（弹窗里直接用）。
+     */
+    const promptEditModel = String(h3TextConfig.textModel || h3TextConfig.model || "").trim();
+    const promptEditOption =
+        mode === "image" || mode === "video"
+            ? {
+                  config: { ...h3TextConfig, model: promptEditModel || h3TextConfig.model },
+                  modelName: promptEditModel,
+                  job: { id: node.id, title: String(node.title || node.id), field: resolveNodePromptField(node) },
+                  applyOptimized: updatePrompt,
+              }
+            : null;
+
     const textEdit = useCanvasTextEditDialog({
         value: prompt,
         onChange: updatePrompt,
@@ -193,6 +213,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         placeholder: promptPlaceholder,
         h3Optimize: h3OptimizeOption,
         violationOptimize: violationOptimizeOption,
+        promptEdit: promptEditOption,
     });
 
     const activeReferences = mentionReferences.filter((reference) => reference.active && reference.nodeId !== node.id);

@@ -23,12 +23,12 @@ import type { AiConfig } from "@/stores/use-config-store";
 /**
  * 这一次跑的是哪条优化。
  *
- * 两条优化（`h3` = 转 h3 提示词、`violation` = 违规优化）**共用这一个队列**：
- * 同一时间只跑一批，天然互斥，不会两条流水同时写同一个节点。
- * 但编辑器里的按钮要能分辨「在跑的是我这条还是隔壁那条」（同一个节点两种按钮，
- * 只看 `currentId` 会两边一起显示「停止」），所以连同 kind 一起广播出去。
+ * 三条优化（`h3` = 转 h3 提示词、`violation` = 违规优化、`edit` = 按反馈编辑提示词）
+ * **共用这一个队列**：同一时间只跑一批，天然互斥，不会两条流水同时写同一个节点。
+ * 但编辑器里的按钮要能分辨「在跑的是我这条还是隔壁那条」（同一个节点三种按钮，
+ * 只看 `currentId` 会几边一起显示「停止」），所以连同 kind 一起广播出去。
  */
-export type H3OptimizeKind = "h3" | "violation";
+export type H3OptimizeKind = "h3" | "violation" | "edit";
 
 export type H3OptimizeQueueState = {
     running: boolean;
@@ -55,8 +55,16 @@ export type H3OptimizeQueueOptions = {
     /** 已带好 `model` 的文本配置 */
     config: AiConfig;
     systemPrompt: string;
-    /** 这一批是谁发起的（默认 h3）；只影响 UI 分辨，不影响执行 */
+    /** 这一批是谁发起的（默认 h3）；只影响 UI 分辨与流式口径，不影响队列 */
     kind?: H3OptimizeKind;
+    /**
+     * 覆盖发给模型的 user 正文（默认 = `job.text`）。
+     *
+     * 只有「编辑提示词」会传：它要把「原提示词 + 修改意见」一起发过去。
+     */
+    buildUserMessage?: (job: H3OptimizeTarget) => string;
+    /** 覆盖返回值清洗（默认只取「优化后完整提示词」那一节）；编辑提示词传 `finalizeEditedPrompt`。 */
+    transform?: (raw: string, original: string) => string;
     /** 每转出一点（含流式中间态）就回写一次；由上层决定写节点哪个字段 */
     onApply: (target: H3OptimizeTarget, text: string) => void;
 };
@@ -125,9 +133,22 @@ export async function startH3OptimizeQueue(options: H3OptimizeQueueOptions): Pro
         try {
             const answer = await requestH3PromptOptimize(options.config, job.text, {
                 systemPrompt: options.systemPrompt,
+                userText: options.buildUserMessage ? options.buildUserMessage(job) : undefined,
+                transform: options.transform,
                 signal: jobController.signal,
                 onStream: (text) => {
                     if (jobController.signal.aborted) return;
+                    /**
+                     * 编辑提示词：流式阶段**只进预览、不写节点**。
+                     *
+                     * 它要求「保持原架构、不要多余注解」，而模型在流式过程中往往先吐一句
+                     * 「好的，以下是修改后的提示词：」——边流边写会把这类文字留在输入框里，
+                     * 中途点停止更是直接留下半截。所以跟违规优化同口径：等最终结果（已清洗）再落盘。
+                     */
+                    if (kind === "edit") {
+                        patch({ currentText: text });
+                        return;
+                    }
                     // 流式阶段只有「已经出现『优化后完整提示词』那一节」才回写节点：
                     // 模型先输出风险分析、后给提示词时，中途停止不会把分析文字留在输入框里。
                     const picked = extractOptimizedPromptSection(text);

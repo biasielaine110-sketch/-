@@ -2,10 +2,11 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ClipboardEvent 
 import { createPortal } from "react-dom";
 import { Button, Input, Modal } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
-import { LoaderCircle, Minus, Plus, ShieldCheck, WandSparkles } from "lucide-react";
+import { LoaderCircle, Minus, Plus, ShieldCheck, SquarePen, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { insertTextIntoInputElement, readClipboardEventText } from "@/lib/canvas/clipboard-paste";
+import { EDIT_PROMPT_SYSTEM, buildEditPromptUserMessage, finalizeEditedPrompt } from "@/lib/canvas/edit-prompt";
 import { getH3OptimizeQueueState, startH3OptimizeQueue, stopH3OptimizeQueue, subscribeH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import type { AiConfig } from "@/stores/use-config-store";
 import { ModelPicker } from "@/components/model-picker";
@@ -60,6 +61,26 @@ export type CanvasTextEditDialogViolationOptimize = {
     applyOptimized: (text: string) => void;
 };
 
+/**
+ * 「编辑提示词」入口配置 —— 只在生图 / 生视频的提示词弹窗里出现（用户 2026-11-11 第 01 条）。
+ *
+ * 与前两条的区别：
+ *  - 指令是**内置**的（`EDIT_PROMPT_SYSTEM`），不走技能库也不走词库 —— 用户要的是「照我说的改」；
+ *  - 用户先填一段**反馈**（修改意见），点「执行」才发请求；
+ *  - 模型不给选，**恒跟随偏好里的文本模型**（`config.textModel`）；
+ *  - 要求「保持原文本架构、不加注解备注」，输出的清洗走 `finalizeEditedPrompt`。
+ *
+ * 同样跑后台队列（`kind: "edit"`），关掉弹窗也会把结果写回节点。
+ */
+export type CanvasTextEditDialogPromptEdit = {
+    /** capability=text 的配置（模型已经带好 = 偏好里的文本模型） */
+    config: AiConfig;
+    /** 只读展示用：偏好里的文本模型名 */
+    modelName: string;
+    job: { id: string; title: string; field: "prompt" | "composerContent" };
+    applyOptimized: (text: string) => void;
+};
+
 type CanvasTextEditDialogProps = {
     open: boolean;
     value: string;
@@ -72,11 +93,13 @@ type CanvasTextEditDialogProps = {
     h3Optimize?: CanvasTextEditDialogH3Optimize | null;
     /** 传了才显示「违规优化」那一行（模型固定跟随偏好里的文本模型）。 */
     violationOptimize?: CanvasTextEditDialogViolationOptimize | null;
+    /** 传了才显示「编辑提示词」那一行（按用户反馈增量改，模型固定跟随偏好里的文本模型）。 */
+    promptEdit?: CanvasTextEditDialogPromptEdit | null;
     onClose: () => void;
     onSave?: (content: string) => void;
 };
 
-export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize, readOnly = false, onFontSizeChange, h3Optimize = null, violationOptimize = null, onClose, onSave }: CanvasTextEditDialogProps) {
+export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize, readOnly = false, onFontSizeChange, h3Optimize = null, violationOptimize = null, promptEdit = null, onClose, onSave }: CanvasTextEditDialogProps) {
     const { t } = useTranslation();
     const textAreaRef = useRef<TextAreaRef>(null);
     const draftRef = useRef(value);
@@ -107,8 +130,17 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
     const violationBusyElsewhere = queue.running && !violationRunning;
     const violationError = violationRunning ? queue.currentError : "";
     const violationModel = String(violationOptimize?.config.textModel || violationOptimize?.config.model || "").trim();
+
+    // 「编辑提示词」：用户填反馈 → 点执行。模型不给选（恒跟偏好里的文本模型）。
+    const canPromptEdit = Boolean(promptEdit && !readOnly);
+    const promptEditJobId = promptEdit?.job.id || "";
+    const promptEditRunning = queue.running && queue.currentKind === "edit" && queue.currentId === promptEditJobId;
+    const promptEditBusyElsewhere = queue.running && !promptEditRunning;
+    const promptEditError = promptEditRunning ? queue.currentError : "";
+    const [promptEditOpen, setPromptEditOpen] = useState(false);
+    const [promptEditFeedback, setPromptEditFeedback] = useState("");
     /** 任意一条优化正在转**这个**节点 —— 流式正文都要同步进编辑区。 */
-    const anyRunningHere = h3Running || violationRunning;
+    const anyRunningHere = h3Running || violationRunning || promptEditRunning;
 
     draftRef.current = draft;
 
@@ -130,6 +162,9 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
         setDraft(value);
         draftRef.current = value;
         setLocalFontSize(Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, fontSize || DEFAULT_CANVAS_FONT_SIZE)));
+        // 每次打开都收起「编辑提示词」的反馈框、清掉上一次的意见（换节点时别带着别人的意见发出去）。
+        setPromptEditOpen(false);
+        setPromptEditFeedback("");
         // eslint-disable-next-line react-hooks/exhaustive-deps -- sync once per open
     }, [open]);
 
@@ -170,6 +205,34 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
             systemPrompt: violationOptimize.systemPrompt,
             kind: "violation",
             onApply: (_target, text) => violationOptimize.applyOptimized(text),
+        });
+    };
+
+    /**
+     * 「编辑提示词」：把「原提示词 + 用户填的修改意见」发给模型，做**增量**改写。
+     *
+     * 三条约束（用户 2026-11-11 第 01 条原话）：
+     *  - 模型恒跟偏好里的文本模型 → 不给 `ModelPicker`，`config.model` 已经在面板侧换成 `textModel`；
+     *  - 保持原文本架构 → 指令是内置的 `EDIT_PROMPT_SYSTEM`（结构锁定 + 只改点名处）；
+     *  - 不要多余注解备注 → 输出再走 `finalizeEditedPrompt`（剥首部客套 / 尾部注释 / 代码围栏）。
+     */
+    const runPromptEdit = () => {
+        if (!promptEdit || !canPromptEdit) return;
+        if (promptEditRunning) {
+            stopH3OptimizeQueue();
+            return;
+        }
+        const original = draftRef.current;
+        const feedback = promptEditFeedback.trim();
+        if (!original.trim() || !feedback) return;
+        void startH3OptimizeQueue({
+            jobs: [{ ...promptEdit.job, text: original, feedback }],
+            config: promptEdit.config,
+            systemPrompt: EDIT_PROMPT_SYSTEM,
+            kind: "edit",
+            buildUserMessage: (job) => buildEditPromptUserMessage(job.text, String(job.feedback || "")),
+            transform: finalizeEditedPrompt,
+            onApply: (_target, text) => promptEdit.applyOptimized(text),
         });
     };
 
@@ -394,6 +457,67 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                         </span>
                         {violationRunning ? <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400">{t("canvas.textEditDialog.violationOptimizeBackground")}</span> : null}
                         {violationError ? <span className="max-w-full truncate text-[11px] text-red-500">{violationError}</span> : null}
+                    </div>
+                ) : null}
+
+                {/* 编辑提示词（用户 2026-11-11 第 01 条）：点「编辑提示词」展开反馈框 → 填意见 → 点「执行」。
+                    指令内置、模型恒跟偏好里的文本模型；要求保持原架构、不加注解备注。
+                    同 h3 / 违规优化一样跑后台队列，关掉弹窗也会把结果写回节点。 */}
+                {canPromptEdit && promptEdit ? (
+                    <div className="mb-2 rounded-xl border border-stone-200 px-2 py-1.5 dark:border-stone-700" data-canvas-prompt-edit>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <Button
+                                size="small"
+                                type="primary"
+                                ghost
+                                className="!h-7 !shrink-0 !rounded-full !px-2.5"
+                                icon={<SquarePen className="size-3.5" />}
+                                onClick={() => setPromptEditOpen((current) => !current)}
+                                title={t("canvas.textEditDialog.promptEditTitle")}
+                                aria-expanded={promptEditOpen}
+                            >
+                                <span className="text-xs">{t("canvas.textEditDialog.promptEdit")}</span>
+                            </Button>
+                            <span className="shrink-0 text-[11px] text-stone-500">{t("canvas.textEditDialog.promptEditModel")}</span>
+                            <span className="shrink-0 text-[11px] tabular-nums text-stone-600 dark:text-stone-300">
+                                {promptEdit.modelName || t("canvas.textEditDialog.promptEditModelEmpty")}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate text-[11px] text-stone-400">
+                                {promptEditOpen ? t("canvas.textEditDialog.promptEditHint") : t("canvas.textEditDialog.promptEditCollapsedHint")}
+                            </span>
+                            {promptEditRunning ? <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400">{t("canvas.textEditDialog.h3OptimizeBackground")}</span> : null}
+                            {promptEditError ? <span className="max-w-full truncate text-[11px] text-red-500">{promptEditError}</span> : null}
+                        </div>
+                        {promptEditOpen ? (
+                            <div className="mt-1.5">
+                                <Input.TextArea
+                                    value={promptEditFeedback}
+                                    rows={2}
+                                    autoFocus
+                                    className="font-mono"
+                                    placeholder={t("canvas.textEditDialog.promptEditPlaceholder")}
+                                    onChange={(event) => setPromptEditFeedback(event.target.value)}
+                                    data-canvas-shortcuts-ignore
+                                    data-canvas-text-input
+                                />
+                                <div className="mt-1.5 flex items-center justify-end gap-2">
+                                    <Button size="small" className="!h-7 !shrink-0 !rounded-full !px-2.5" onClick={() => setPromptEditOpen(false)}>
+                                        <span className="text-xs">{t("common.cancel")}</span>
+                                    </Button>
+                                    <Button
+                                        size="small"
+                                        type="primary"
+                                        className="!h-7 !shrink-0 !rounded-full !px-2.5"
+                                        icon={promptEditRunning ? <LoaderCircle className="size-3.5 animate-spin" /> : <SquarePen className="size-3.5" />}
+                                        disabled={promptEditBusyElsewhere || (!promptEditRunning && (!promptEditFeedback.trim() || !draft.trim()))}
+                                        onClick={runPromptEdit}
+                                        title={t("canvas.textEditDialog.promptEditRunTitle")}
+                                    >
+                                        <span className="text-xs">{promptEditRunning ? t("canvas.textEditDialog.promptEditStop") : t("canvas.textEditDialog.promptEditRun")}</span>
+                                    </Button>
+                                </div>
+                            </div>
+                        ) : null}
                     </div>
                 ) : null}
 

@@ -67,8 +67,21 @@ export function buildH3OptimizeMessages(systemPrompt: string, prompt: string): A
 }
 
 export type H3OptimizeRequestOptions = {
-    /** 技能 / 词条正文 */
+    /** 技能 / 词条 / 内置指令正文 */
     systemPrompt: string;
+    /**
+     * 覆盖发给模型的 user 正文（默认 = 原文）。
+     *
+     * 「编辑提示词」那条要把「原提示词 + 修改意见」一起发过去，所以留了这个口子；
+     * h3 / 违规优化两条不传，行为一字不变。
+     */
+    userText?: string;
+    /**
+     * 覆盖返回值清洗（默认 = `extractOptimizedPromptSection`，只留「优化后完整提示词」那一节）。
+     *
+     * 编辑提示词要做的是「按意见改、别加注释」，所以换成 `finalizeEditedPrompt(raw, original)`。
+     */
+    transform?: (raw: string, original: string) => string;
     signal?: AbortSignal;
     /** 流式增量（已经是累计文本），宿主拿它实时写进输入框 */
     onStream?: (text: string) => void;
@@ -89,9 +102,10 @@ export async function requestH3PromptOptimize(config: AiConfig, prompt: string, 
     const trimmed = original.trim();
     if (!trimmed) return "";
     let streamed = "";
+    const userText = String(options.userText ?? "").trim() || trimmed;
     const answer = await requestImageQuestion(
         config,
-        buildH3OptimizeMessages(options.systemPrompt, trimmed),
+        buildH3OptimizeMessages(options.systemPrompt, userText),
         (text) => {
             if (options.signal?.aborted) return;
             streamed = text;
@@ -100,7 +114,7 @@ export async function requestH3PromptOptimize(config: AiConfig, prompt: string, 
         { signal: options.signal },
     );
     const raw = String(answer || streamed || "").trim() || trimmed;
-    return extractOptimizedPromptSection(raw).text;
+    return options.transform ? options.transform(raw, trimmed) : extractOptimizedPromptSection(raw).text;
 }
 
 /** 能优化的节点类型：图片 / 视频（同一个生成槽位的两种形态）。 */
@@ -132,6 +146,12 @@ export type H3OptimizeTarget = {
     field: "prompt" | "composerContent";
     /** 当前提示词正文（优化前） */
     text: string;
+    /**
+     * 「编辑提示词」用的修改意见（用户填的反馈）。
+     *
+     * 只有 `kind: "edit"` 会带；另外两条不传，`buildUserMessage` 也就不会碰它。
+     */
+    feedback?: string;
 };
 
 /**
