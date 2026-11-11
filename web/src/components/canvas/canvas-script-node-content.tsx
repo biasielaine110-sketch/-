@@ -1259,32 +1259,15 @@ export function CanvasScriptNodeContent({
         );
     };
 
-    /**
-     * 把勾选的行登记成一个「手动合并组」：一键铺链路时组内这几镜合成**一个**视频节点。
+    /*
+     * 2026-11-11 用户要求删掉「合并为一镜」按钮 —— 手动建组这条路不再从界面提供，
+     * `mergeSelectedRows` / `unmergeSelectedRows` / `selectedAllMerged` 一并移除（留着就是死代码）。
      *
-     * 用户原话：「需要能够选择几个镜头铺链路，即将这几个镜头合并成一个镜头」。
-     * 与上面的「视频分段」档位是**两套并存**的关系（手动优先）：
-     * 档位管「剩下的行怎么切」，手动组管「我点名的这几镜一定要在一起」。
-     *
-     * 勾的行不连续时按「首行—末行」补齐（`normalizeStoryScriptMergeGroups` 的口径），
-     * 因为「合并成一个镜头」本身要求连续；中间留一镜在外面会切成两条互不相连的视频。
+     * ⚠️ 能力本身**没有废掉**：`metadata.scriptMergeGroups` 照旧被铺链路读（见 `manualMergeGroups`），
+     * 历史合并组仍然生效、表里的「合并」徽标也照常显示；只是用户不能再新建或局部取消，
+     * 只能整表「解除合并组」清空（见下面的 `mergeManualActions`）。
+     * 要恢复入口：把被删的那颗按钮加回 `mergeManualActions`，`patchMetadata({ scriptMergeGroups })` 这条路是通的。
      */
-    const mergeSelectedRows = () => {
-        if (selectedRows.size < 2) return;
-        const picked = normalizeStoryScriptMergeGroups([Array.from(selectedRows)], rows.length);
-        if (!picked.length) return;
-        // 与已有手动组重叠的整组丢掉（后来的覆盖前面的），避免一个行同时属于两队。
-        const kept = manualMergeGroups.filter((span) => !span.some((index) => selectedRows.has(index)));
-        patchMetadata({ scriptMergeGroups: [...kept, ...picked] });
-        setSelectedRows(new Set());
-    };
-
-    /** 「取消合并」：把勾中的行从手动组里摘掉（整组摘，不做半组拆解 —— 半组没有意义）。 */
-    const unmergeSelectedRows = () => {
-        if (!selectedRows.size) return;
-        patchMetadata({ scriptMergeGroups: manualMergeGroups.filter((span) => !span.some((index) => selectedRows.has(index))) });
-        setSelectedRows(new Set());
-    };
 
     /** 打开「加剧情 / 重生成」弹窗：单镜（行按钮）或整批（勾选后底部按钮）都走这里。 */
     const openRowEdit = (indexes: number[]) => {
@@ -1904,24 +1887,12 @@ export function CanvasScriptNodeContent({
                 <Plus className="size-3.5" />
                 {t("canvas.scriptNode.addAsset")}
             </button>
-            {/* 一键批量生成：把表里的角色 / 场景 / 道具一次铺成右侧整齐的图片网格（可勾选跳过 / 只生一类）。 */}
-            {onBatchGenerateAssets && batchAssetItems.length ? (
-                <button
-                    type="button"
-                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] font-medium transition"
-                    style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14` }}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                        event.stopPropagation();
-                        setBatchAssetOpen(true);
-                    }}
-                    title={t("canvas.scriptNode.batchAssetHint")}
-                >
-                    <Sparkles className="size-3.5" />
-                    {t("canvas.scriptNode.batchAssetOpen", { count: batchAssetItems.length })}
-                </button>
-            ) : null}
+            {/*
+             * 「一键批量生成」2026-11-11 已搬到**右下角「一键直接生图」的左边**
+             * （用户要求：「把一键批量生成放在一键直接生图的左侧」）。
+             * 两颗都是「表里的资产一次出图」，只差筛选与弹窗，摆在一起才好对比；
+             * 留在顶部这一行反而离「直接生图」隔了整整一个表格。见右下角那一列。
+             */}
             {assetCandidates?.length ? (
                 <span className="text-[0.846em] opacity-55" style={{ color: theme.node.text }}>
                     {t("canvas.scriptNode.assetCandidateHint", { count: assetCandidates.length })}
@@ -2185,8 +2156,6 @@ export function CanvasScriptNodeContent({
         manualMergeGroups.forEach((span) => span.forEach((index) => map.set(index, span)));
         return map;
     }, [manualMergeGroups]);
-    /** 勾中的行是否**全部**已在手动合并组里：是的话批量条显示「取消合并」而不是「合并为一镜」。 */
-    const selectedAllMerged = selectedRows.size > 0 && Array.from(selectedRows).every((rowIndex) => mergeGroupOfRow.has(rowIndex));
     /**
      * 「成片总时长」（用户 2026-11-11 第 01 条）：「需要设定时长的输入区域，默认 30 秒，
      * 根据输入的时长，拆成对应的总时长镜头内容」。
@@ -2555,59 +2524,34 @@ export function CanvasScriptNodeContent({
     );
 
     /**
-     * 「合并为一镜 / 取消合并」+「解除合并组」—— 用户 2026-11-09 第 03 条：
-     * **移到「生图比例」的左侧**（同一行、紧挨着），不再单独占右下角一行。
-     * 勾几行立刻就能点，与「生图比例」这个「这次怎么铺」的设定挨在一起也更顺。
+     * 「解除合并组」—— 2026-11-11 用户要求**删掉「合并为一镜」按钮**（连带「取消合并」态），
+     * 这里就只剩清理入口。
+     *
+     * 为什么清理入口不能一起删：`metadata.scriptMergeGroups` 仍然被铺链路读取（手动组优先于
+     * 「视频分段」档位），表里的「合并」徽标也照旧显示。入口一删，用户看到几行被合并了却
+     * **没有任何办法退回按档位切**，只能去改配置 —— 所以整表清空这颗必须留着。
+     *
+     * 没有合并组时返回 `null`：右下角那一行只剩「生图比例」，不留一颗永远灰的按钮。
      */
-    const mergeManualActions = (
+    const mergeManualActions = manualMergeGroups.length ? (
         <div className="flex items-center gap-1.5">
             <button
                 type="button"
-                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition disabled:cursor-not-allowed"
-                style={{
-                    borderColor: selectedAllMerged ? theme.toolbar.activeText : theme.node.stroke,
-                    background: selectedAllMerged ? theme.toolbar.activeText : "transparent",
-                    color: selectedAllMerged ? theme.node.panel : theme.node.text,
-                    opacity: selectedAllMerged ? 1 : selectedRows.size < 2 ? 0.55 : 1,
-                }}
-                disabled={selectedRows.size < 2 && !selectedAllMerged}
+                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
                     event.stopPropagation();
-                    if (selectedAllMerged) unmergeSelectedRows();
-                    else mergeSelectedRows();
+                    patchMetadata({ scriptMergeGroups: [] });
                 }}
-                title={
-                    selectedAllMerged
-                        ? t("canvas.scriptNode.mergeManualOffHint")
-                        : selectedRows.size >= 2
-                          ? t("canvas.scriptNode.mergeManualHint")
-                          : t("canvas.scriptNode.mergeManualNeedSelect")
-                }
+                title={t("canvas.scriptNode.mergeManualClearHint")}
             >
-                <Combine className="size-3.5" />
-                {selectedAllMerged ? t("canvas.scriptNode.mergeManualOff") : t("canvas.scriptNode.mergeManual")}
+                <X className="size-3.5" />
+                {t("canvas.scriptNode.mergeManualClear", { count: manualMergeGroups.length })}
             </button>
-            {manualMergeGroups.length ? (
-                <button
-                    type="button"
-                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-                    style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                        event.stopPropagation();
-                        patchMetadata({ scriptMergeGroups: [] });
-                    }}
-                    title={t("canvas.scriptNode.mergeManualClearHint")}
-                >
-                    <X className="size-3.5" />
-                    {t("canvas.scriptNode.mergeManualClear", { count: manualMergeGroups.length })}
-                </button>
-            ) : null}
         </div>
-    );
+    ) : null;
 
     /**
      * 「声音」列的一格：这一镜已链接的音频（文件名 + 试听 + 解绑）+ 「+」。
@@ -3529,31 +3473,18 @@ export function CanvasScriptNodeContent({
                                 <Wand2 className="size-3.5" />
                                 {t("canvas.scriptNode.pipelineBuild")}
                             </button>
-                            {/* 「只铺视频」：一键铺链路的**简洁版**（用户原话：「需要有一个简洁版的按钮，即只铺视频节点窗口」）。
-                                只按分段把视频节点窗口铺出来 —— 提示词 / 时长 / 资产图 / 音频全都连好，但没有文本与图片节点，
-                                节点数量按分段数算（N 镜一段 = 1 个窗口）；勾了行就只铺勾的那几镜（合成一段）。
-                                ⚠️ 刻意**不用真 `disabled`**：disabled 元素悬停不弹 title，用户就看不到功能说明。 */}
-                            <button
-                                type="button"
-                                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-                                style={{ borderColor: theme.node.stroke, opacity: 0.85 }}
-                                onMouseDown={(event) => event.stopPropagation()}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                onClick={(event) => {
-                                    event.stopPropagation();
-                                    onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, { videoOnly: true });
-                                }}
-                                title={t("canvas.scriptNode.pipelineVideoOnlyHint")}
-                            >
-                                <Video className="size-3.5" />
-                                {t("canvas.scriptNode.pipelineVideoOnly")}
-                            </button>
-                            {/* 「一键铺视频链路」（用户 2026-11-09 第 02 条）：放在「一键铺链路」右边、
-                                「只铺视频窗口」再往右。与左边那颗的区别只有一个 —— **固定每 4 镜合并成 1 段**
+                            {/*
+                             * 2026-11-11 用户要求删除「只铺视频窗口」这颗按钮（原简洁版入口）。
+                             * 能力**没有进垃圾堆**：`onBuildPipeline(..., { videoOnly: true })` 这条路仍在，
+                             * 由下面两颗接管 —— 「一键铺视频链路」（videoOnly + 固定 mergeEvery）与
+                             * 最下面的「一键铺视频链路并生成」（videoOnly + group + autoGenerate）。
+                             * 也就是说「只铺视频节点窗口」的效果全部保留，只是不再单独摆一颗按钮。
+                             */}
+                            {/* 「一键铺视频链路」（用户 2026-11-09 第 02 条）：紧跟在「一键铺链路」右边。
+                                与左边那颗的区别只有一个 —— **固定每 N 镜合并成 1 段**
                                 （不看「视频分段」档位、也不看手动合并组），铺出来的视频节点自动接进一个
                                 「视频合并」节点；不建文本 / 图片节点、不自动触发生成。
-                                所以它＝「只铺视频窗口」+「每 4 镜一段」的确定版，用户点一次就得到一条
-                                能直接往下游合并 / 导出的视频链。 */}
+                                用户点一次就得到一条能直接往下游合并 / 导出的视频链。 */}
                             <button
                                 type="button"
                                 className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
@@ -3573,7 +3504,7 @@ export function CanvasScriptNodeContent({
                                 {t("canvas.scriptNode.pipelineVideoChain")}
                             </button>
                             {/* 「每 3 镜合一个视频」开关（用户 2026-11-11 第 01 条）：
-                                打开后**所有**铺链路入口（一键铺链路 / 只铺视频 / 一键铺视频链路 / 一键视频）
+                                打开后**所有**铺链路入口（一键铺链路 / 一键铺视频链路 / 一键视频）
                                 都按 3 镜切片；关掉回到原行为（按「视频分段」档位，默认 4 镜）。
                                 ⚠️ 与上面几颗一样不用真 `disabled`：开关态靠颜色 + 描边表达。 */}
                             <button
@@ -3650,12 +3581,37 @@ export function CanvasScriptNodeContent({
                                 : t("canvas.scriptNode.pipelineBuildSelected")}
                         </button>
                     ) : null}
-                    {/* 「一键直接生图」+「一键铺视频链路并生成」同一行，**直接生图在左**（用户 2026-11-07 点名）：
-                        左边这颗只管图 —— 不弹窗、不筛选，表里全部角色 / 场景 / 道具一次全生（角色 9:16、场景 / 道具 16:9），
-                        模型走「配置偏好 → 默认生图模型」；右边那颗才是「只铺视频窗口 + 打组 + 逐段生成」。
-                        两颗一起出现时才包这层 div，避免多出一条空行。 */}
-                    {onBuildPipeline || onDirectGenerateAssets ? (
-                        <div className="flex items-center gap-1.5">
+                    {/* 右下角末行：**批量生成 → 直接生图 → 铺视频链路并生成**，从左到右由「图」到「视频」。
+                        ①「一键批量生成」2026-11-11 从顶部资产入口行搬到这里，紧贴「一键直接生图」**左侧**
+                          （用户要求）。两颗都是「表里资产一次出图」，区别只有一处：批量生成**弹窗让用户勾选**
+                          跳过哪些 / 只生哪一类（站位图也在内），直接生图**不弹窗、不筛选**、全量出图
+                          （角色 9:16，场景 / 道具 16:9，剔掉站位图）。摆在一起用户一眼分得清「我要挑」还是「我全要」；
+                          留在顶部那一行则隔着整整一个表格，看不出它俩是一对。
+                        ②「一键直接生图」在中间（用户 2026-11-07 点名「直接生图在左」—— 相对当时更靠右的
+                          「铺视频链路并生成」而言，这个相对关系不变）。
+                        ③「一键铺视频链路并生成」在最右：只铺视频窗口 + 打组 + 接进视频合并节点 + 逐段生成。
+                        三者任一存在才包这层 div，避免多出一条空行。 */}
+                    {onBuildPipeline || onDirectGenerateAssets || (onBatchGenerateAssets && batchAssetItems.length) ? (
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                            {/* 「一键批量生成」：把表里的角色 / 场景 / 道具一次铺成右侧整齐的图片网格
+                                （可勾选跳过 / 只生一类）。位置在「一键直接生图」左边。 */}
+                            {onBatchGenerateAssets && batchAssetItems.length ? (
+                                <button
+                                    type="button"
+                                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                                    style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14` }}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={(event) => {
+                                        event.stopPropagation();
+                                        setBatchAssetOpen(true);
+                                    }}
+                                    title={t("canvas.scriptNode.batchAssetHint")}
+                                >
+                                    <Sparkles className="size-3.5" />
+                                    {t("canvas.scriptNode.batchAssetOpen", { count: batchAssetItems.length })}
+                                </button>
+                            ) : null}
                             {onDirectGenerateAssets && directAssetItems.length ? (
                                 <button
                                     type="button"
