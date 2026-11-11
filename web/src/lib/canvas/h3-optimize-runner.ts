@@ -1,4 +1,5 @@
 import { requestH3PromptOptimize, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
+import { extractOptimizedPromptSection } from "@/lib/canvas/optimize-prompt-output";
 import type { AiConfig } from "@/stores/use-config-store";
 
 /**
@@ -128,7 +129,10 @@ export async function startH3OptimizeQueue(options: H3OptimizeQueueOptions): Pro
                 onStream: (text) => {
                     if (jobController.signal.aborted) return;
                     patch({ currentText: text });
-                    options.onApply(job, text);
+                    // 流式阶段只有「已经出现『优化后完整提示词』那一节」才回写节点：
+                    // 模型先输出风险分析、后给提示词时，中途停止不会把分析文字留在输入框里。
+                    const picked = extractOptimizedPromptSection(text);
+                    if (picked.found) options.onApply(job, picked.text);
                 },
             });
             if (jobController.signal.aborted) break;

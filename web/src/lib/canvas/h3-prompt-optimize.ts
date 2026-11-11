@@ -1,5 +1,6 @@
 import { resolveSchemeSkillPrompt, type ScriptSchemeSkillSource } from "@/constant/script-scheme";
 import { resolveH3PromptOptimizerEntry, type TextPromptEntry } from "@/constant/text-prompt-library";
+import { extractOptimizedPromptSection } from "@/lib/canvas/optimize-prompt-output";
 import { requestImageQuestion, type AiTextMessage } from "@/services/api/image";
 import type { AiConfig } from "@/stores/use-config-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
@@ -78,6 +79,10 @@ export type H3OptimizeRequestOptions = {
  *
  * 空输入直接返回空串（调用方自己决定要不要提示）；模型没吐内容时退回原文，
  * 避免「点了优化，内容反而被清空」。
+ *
+ * 有些词条（如「违规优化」）会让模型输出**一整份报告**，只有其中一节是可用的提示词，
+ * 所以返回前统一过一遍 `extractOptimizedPromptSection`：有「优化后完整提示词」这一节就只要那一节，
+ * 没有就原样返回（h3 那条技能本来只出提示词，不受影响）。
  */
 export async function requestH3PromptOptimize(config: AiConfig, prompt: string, options: H3OptimizeRequestOptions): Promise<string> {
     const original = String(prompt ?? "");
@@ -94,7 +99,8 @@ export async function requestH3PromptOptimize(config: AiConfig, prompt: string, 
         },
         { signal: options.signal },
     );
-    return String(answer || streamed || "").trim() || trimmed;
+    const raw = String(answer || streamed || "").trim() || trimmed;
+    return extractOptimizedPromptSection(raw).text;
 }
 
 /** 能优化的节点类型：图片 / 视频（同一个生成槽位的两种形态）。 */
