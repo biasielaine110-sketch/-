@@ -168,6 +168,7 @@ import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores/canvas/use-generation-history-store";
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { collectCanvasOccupied, findFreeColumnX, planRightwardChainSlots } from "@/lib/canvas/canvas-free-space";
+import { widenLegacyScriptNodes } from "@/lib/canvas/script-node-width";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoTarget, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
@@ -909,8 +910,12 @@ function AtelierCanvasPage() {
         const thumbAbort = new AbortController();
         const restore = async () => {
             // Fast hydrate: primary media only âdo not block first paint on every history blob.
-            const restoredNodes = (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes), { mode: "fast" })).map((node) =>
-                node.type === CanvasNodeType.Chat && (node.height === 520 || node.height === 1040 || node.width === 420) ? { ...node, width: 840, height: 1387 } : node.type === CanvasNodeType.Text && node.height === 240 ? { ...node, height: 480 } : node,
+            // `widenLegacyScriptNodes`：老画布里的脚本节点还停在旧默认宽 760（配置态挤成三行），
+            // 一次性加宽到 1520；有下游紧贴右侧时不动，避免盖住铺链路出来的视频节点。
+            const restoredNodes = widenLegacyScriptNodes(
+                (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes), { mode: "fast" })).map((node) =>
+                    node.type === CanvasNodeType.Chat && (node.height === 520 || node.height === 1040 || node.width === 420) ? { ...node, width: 840, height: 1387 } : node.type === CanvasNodeType.Text && node.height === 240 ? { ...node, height: 480 } : node,
+                ),
             );
             setNodes(restoredNodes);
             setConnections(project.connections);

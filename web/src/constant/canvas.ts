@@ -27,7 +27,10 @@ export const NODE_DEFAULT_SIZE = {
     [CanvasNodeType.Chat]: { width: 840, height: 1387, get title() { return i18n.t("canvas.nodeTypes.chat"); } },
     [CanvasNodeType.Annotate]: { width: 420, height: 320, get title() { return i18n.t("canvas.nodeTypes.annotate"); } },
     [CanvasNodeType.Merge]: { width: 480, height: 420, get title() { return i18n.t("canvas.nodeTypes.merge"); } },
-    [CanvasNodeType.Script]: { width: 760, height: 520, get title() { return i18n.t("canvas.nodeTypes.script"); } },
+    // 宽度 1520（原 760 的一倍）：配置态那一屏有「方案 / 输出格式 / 每镜时长 / 生图比例」
+    // 四排胶囊按钮，760 会被挤成两三行；生成后自动适配的宽度本来就贴着表格（上限 2200），
+    // 加宽后两者连续，不会出现「生成完突然变宽一倍」的跳变。
+    [CanvasNodeType.Script]: { width: 1520, height: 520, get title() { return i18n.t("canvas.nodeTypes.script"); } },
     [CanvasNodeType.VideoMerge]: { width: 560, height: 600, get title() { return i18n.t("canvas.nodeTypes.videoMerge"); } },
     [CanvasNodeType.ReverseVideo]: { width: 460, height: 560, get title() { return i18n.t("canvas.nodeTypes.reverseVideo"); } },
     [CanvasNodeType.Mochiani]: { width: 560, height: 820, get title() { return i18n.t("canvas.nodeTypes.mochiani"); } },
@@ -75,7 +78,7 @@ export const NODE_SPECS = {
         metadata: { status: "idle", mergeOrientation: "grid", mergeRows: 2, mergeColumns: 2, mergeAspectRatio: null, mergeSlotIds: [null, null, null, null], mergeOffsets: {} },
     },
     [CanvasNodeType.Script]: {
-        width: 760, height: 520, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Script].title; },
+        width: 1520, height: 520, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Script].title; },
         metadata: { status: "idle", scriptSource: "", scriptPrompt: "", scriptRows: [] },
     },
     [CanvasNodeType.VideoMerge]: {

@@ -149,7 +149,11 @@ const TABLE_AUDIO_WIDTH = 210;
  * 配合同轮的行高收紧（格内长文最多 6 行、超出格内滚动），同一窗口能看到的镜头数约翻倍，
  * 二十镜以上的长表也能一次铺开。
  */
-const AUTO_SIZE_MIN_WIDTH = 760;
+/**
+ * 宽度下限与节点默认宽对齐（`NODE_DEFAULT_SIZE.Script` = 1520，即原 760 的一倍）。
+ * 生成后表格再窄也不缩回 760 —— 否则「点完生成窗口突然对折」，配置态刚看清的按钮位置全要重找。
+ */
+const AUTO_SIZE_MIN_WIDTH = 1520;
 const AUTO_SIZE_MAX_WIDTH = 2200;
 const AUTO_SIZE_MIN_HEIGHT = 460;
 const AUTO_SIZE_MAX_HEIGHT = 3200;
