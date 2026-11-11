@@ -981,6 +981,17 @@ export function CanvasScriptNodeContent({
      */
     const compactShotsPerClip = readScriptShotsPerClip(node.metadata);
     const shotsPerClipForPipeline = compactShotsPerClip || SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP;
+    /**
+     * 开关的**唯一写入口**。
+     *
+     * 用户 2026-11-11 第 04 条：截图里「输入视图」只有 生成脚本 / 一键视频 两颗按钮，
+     * 开关却只在**表体视图**的铺链路按钮列里 —— 想「直接一键视频」的人根本看不到它。
+     * 所以输入视图也挂一个，两处都调这个函数（别再各写一份 `patchMetadata`，否则一边改成 3
+     * 另一边忘了，用户点了没反应还以为坏了）。
+     */
+    const toggleShotsPerClip = () => {
+        patchMetadata({ scriptShotsPerClip: compactShotsPerClip ? undefined : SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT });
+    };
 
     /**
      * 「第四套（影视分镜导演）是默认方案」——用户 2026-10-23 的要求
@@ -2188,12 +2199,49 @@ export function CanvasScriptNodeContent({
         </div>
     );
 
+    /**
+     * 「每 3 镜合一个视频」开关 —— **输入视图版**（用户 2026-11-11 第 04 条）。
+     *
+     * 截图里输入视图只有「生成脚本 / 一键视频」两颗按钮，而开关原来只长在表体视图的铺链路
+     * 按钮列里：想「打开 3 镜 → 直接一键视频」的人根本找不到它。
+     * 文案 / 提示复用表体那颗的 i18n（`shotsPerClipToggle` / `OnHint` / `OffHint`），
+     * 两处说法必须一致，否则用户会以为是两个不同的开关。
+     */
+    const shotsPerClipSelector = (
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
+            <span className="opacity-60">{t("canvas.scriptNode.shotsPerClipLabel")}</span>
+            <button
+                type="button"
+                className="inline-flex h-6 items-center gap-1 rounded-full border px-2.5 transition"
+                style={{
+                    borderColor: compactShotsPerClip ? theme.toolbar.activeText : theme.node.stroke,
+                    // 与「每镜时长」「生图比例」同口径：选中必须实心，浅色描边会被看成「没点上」。
+                    background: compactShotsPerClip ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                    color: compactShotsPerClip ? theme.node.panel : theme.node.text,
+                    opacity: compactShotsPerClip ? 1 : 0.7,
+                }}
+                aria-pressed={Boolean(compactShotsPerClip)}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    toggleShotsPerClip();
+                }}
+                title={compactShotsPerClip ? t("canvas.scriptNode.shotsPerClipOnHint") : t("canvas.scriptNode.shotsPerClipOffHint")}
+            >
+                <Layers className="size-3" />
+                {t("canvas.scriptNode.shotsPerClipToggle", { count: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT })}
+            </button>
+        </div>
+    );
+
     const sourcePanel = (
         <div className="flex min-h-0 flex-1 flex-col gap-1.5 px-2 pb-2">
             {schemeSelector}
             {presetSwitcher}
             {segmentSelector}
             {imageSizeSelector}
+            {shotsPerClipSelector}
             <div className="flex shrink-0 items-center gap-2 text-[0.923em] opacity-60" style={{ color: theme.node.text }}>
                 <span>{t("canvas.scriptNode.sourceLabel")}</span>
                 {connectedTextCount ? <span>· {t("canvas.scriptNode.connectedHint", { count: connectedTextCount })}</span> : null}
@@ -3347,9 +3395,7 @@ export function CanvasScriptNodeContent({
                                 onPointerDown={(event) => event.stopPropagation()}
                                 onClick={(event) => {
                                     event.stopPropagation();
-                                    patchMetadata({
-                                        scriptShotsPerClip: compactShotsPerClip ? undefined : SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
-                                    });
+                                    toggleShotsPerClip();
                                 }}
                                 title={compactShotsPerClip ? t("canvas.scriptNode.shotsPerClipOnHint") : t("canvas.scriptNode.shotsPerClipOffHint")}
                             >

@@ -925,6 +925,7 @@ export default {
             pipelineVideoOnlyBuilt: "已铺出 {{videos}} 个视频节点（{{shots}} 镜）",
             pipelineVideoChain: "一键铺视频链路",
             pipelineVideoChainHint: "只铺视频节点，并按「每 {{count}} 镜合并成 1 段」切分（不看上面的视频分段档位），铺出来的视频节点自动接进一个视频合并节点；不建文本 / 图片节点、不自动生成。",
+            shotsPerClipLabel: "视频合并",
             shotsPerClipToggle: "每 {{count}} 镜合一个视频",
             shotsPerClipOnHint: "已开启：所有铺链路（含一键视频）都按每 3 个镜头合一个视频节点。再点一次关闭，回到原来的分段档位（默认每 4 镜一个）。",
             shotsPerClipOffHint: "打开后，所有铺链路（含一键视频）都按每 3 个镜头合一个视频节点；关闭 = 原行为（按视频分段档位，默认每 4 镜一个）。",
