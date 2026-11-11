@@ -128,11 +128,16 @@ export async function startH3OptimizeQueue(options: H3OptimizeQueueOptions): Pro
                 signal: jobController.signal,
                 onStream: (text) => {
                     if (jobController.signal.aborted) return;
-                    patch({ currentText: text });
                     // 流式阶段只有「已经出现『优化后完整提示词』那一节」才回写节点：
                     // 模型先输出风险分析、后给提示词时，中途停止不会把分析文字留在输入框里。
                     const picked = extractOptimizedPromptSection(text);
-                    if (picked.found) options.onApply(job, picked.text);
+                    if (!picked.found) {
+                        // 还没到那一节：预览里照旧显示模型在写什么（进度感），节点不动
+                        patch({ currentText: text });
+                        return;
+                    }
+                    patch({ currentText: picked.text });
+                    options.onApply(job, picked.text);
                 },
             });
             if (jobController.signal.aborted) break;
