@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { App, InputNumber, Modal } from "antd";
 import copy from "copy-to-clipboard";
@@ -165,6 +165,13 @@ const AUTO_SIZE_MAX_WIDTH = 2200;
 const AUTO_SIZE_MIN_HEIGHT = 460;
 const AUTO_SIZE_MAX_HEIGHT = 3200;
 const AUTO_SIZE_PADDING_X = 24;
+/**
+ * 「缩放」态（分镜表收起）的高度下限。
+ *
+ * 收起后节点只剩「表头 + 一行动作条 + 一条提示」，所以高度由实际测量决定
+ * （`shell` 里标题栏 + 提示条的高度），这里只是兜住「量出来是 0」的极端情况，别写死一个好看的数。
+ */
+const COLLAPSED_MIN_HEIGHT = 96;
 /**
  * 单元格正文最多显示几行。行高由「这一行最高的那一格」决定：经典预设的「分镜提示词 /
  * 视频运动提示词」有 440px 宽、动辄三四百字，完整显示会把整行撑到 300px 起 —— 旁边短内容的
@@ -554,6 +561,21 @@ export function CanvasScriptNodeContent({
      * ⚠️ 只有**渲染 / 表宽 / 自动适配签名**走它；行编辑、导出、铺链、任务书仍用完整的 `columns`。
      */
     const displayColumns = useMemo(() => resolveStoryScriptDisplayColumns(columns, compactColumns), [columns, compactColumns]);
+    /**
+     * 「缩放」态 = 整张分镜表**收起不显示**（用户 2026-11-11 第 03 条）。
+     *
+     * 用户原话：「点一次会简化版，再点是完整版，再点即缩放，缩放后表格中内容全部收起不显示，
+     * 注意只是不显示，不影响其正常功能的推进和链接图。默认可为缩放版，需要显示出来，用户自己去点即可。」
+     *
+     * 两个硬约束：
+     *  ① **只是不渲染**：`rows` / `metadata.scriptCellAssets` / 连线一个字节都不动，铺链路、一键视频、
+     *     批量重生成读的都是 metadata，所以收起态下照常能跑（这也是为什么不能「收起就清空行」）；
+     *  ② 默认收起（`undefined` 按收起算），所以必须给一条**看得懂的提示条**，否则用户会以为表丢了。
+     *
+     * 三态语义：`collapsed` → `compact` → `full` → 回到 `collapsed`（见 `tableDisplayMode`）。
+     */
+    const tableCollapsed = node.metadata?.scriptTableCollapsed !== false;
+    const collapsedStripRef = useRef<HTMLDivElement | null>(null);
     // 勾选列只在「支持批量操作」时出现（没接线就完全不占宽度）。
     const showRowSelect = Boolean(onRegenerateRows || onBuildShotVideos);
     // 「声音」列：逐镜挂台词配音 / 音效。接线了才出现（旧调用点不受影响）。
@@ -865,10 +887,27 @@ export function CanvasScriptNodeContent({
     // 否则每次 setNodes 都会重跑，用户手动拉伸的宽度会被不停拽回去。
     useEffect(() => {
         if (!onNodeSizeChange || fullscreen || view !== "table" || !rows.length) return;
+        const shell = shellRef.current;
+        if (!shell) return;
+        /**
+         * 「缩放」态：表体不渲染，所以量不到表高 —— 直接把节点收成「标题栏 + 提示条」那么高。
+         *
+         * 高度不用固定值：`提示条.offsetTop` 就是标题栏（+ 错误条）的高度（`shell` 是 relative，
+         * 它就是 offsetParent），加自身高度即得目标值，所以字号档位不同也不会裁掉半行字。
+         * 🔴 收完必须把签名清空：展开时若签名与上次相同，下面会直接 return，节点就永远停在 96px。
+         */
+        if (tableCollapsed) {
+            const strip = collapsedStripRef.current;
+            if (!strip) return;
+            lastAutoSizeKeyRef.current = "";
+            const height = Math.round(Math.max(COLLAPSED_MIN_HEIGHT, strip.offsetTop + strip.offsetHeight + 4));
+            if (Math.abs(height - node.height) < 8) return;
+            onNodeSizeChange(node.id, node.width, height);
+            return;
+        }
         const table = tableRef.current;
         const body = bodyRef.current;
-        const shell = shellRef.current;
-        if (!table || !body || !shell) return;
+        if (!table || !body) return;
         const contentHeight = table.offsetHeight;
         if (!contentHeight) return;
         // 签名带行数、单元格总字数、基准字号与「完整/精简」：增删行、改字、调字号、切显示都会变，纯切换视图不会。
@@ -885,7 +924,7 @@ export function CanvasScriptNodeContent({
         onConfigChange(node.id, { scriptAutoSizeKey: signature });
         if (Math.abs(width - node.width) < 8 && Math.abs(height - node.height) < 8) return;
         onNodeSizeChange(node.id, width, height);
-    }, [baseFontSize, columns, compactColumns, displayColumns, fullscreen, isRunning, node.height, node.id, node.width, onConfigChange, onNodeSizeChange, presetId, rows, showFullText, tableWidth, view]);
+    }, [baseFontSize, columns, compactColumns, displayColumns, fullscreen, isRunning, node.height, node.id, node.width, onConfigChange, onNodeSizeChange, presetId, rows, showFullText, tableCollapsed, tableWidth, view]);
 
     /**
      * 表体的滚动位置：卸载 / 重挂之后不许归位。
@@ -977,6 +1016,30 @@ export function CanvasScriptNodeContent({
     const totalDuration = rows.reduce((sum, row) => sum + (Number(row.duration) || 0), 0);
 
     const patchMetadata = (patch: Partial<CanvasNodeData["metadata"]>) => onConfigChange(node.id, patch);
+
+    /**
+     * 分镜表的三种显示档（同一个按钮循环，顺序就是用户口述的
+     * 「点一次简化版 → 再点完整版 → 再点缩放」）：
+     *
+     *  `collapsed`（收起，默认）→ `compact`（简洁版，藏六列）→ `full`（完整版）→ 回到 `collapsed`
+     *
+     * 为什么合成一个按钮：用户原话「可与简化版按钮重叠」—— 表体操作条已经是一长排胶囊，
+     * 再加一颗「缩放」会让「显示」这一组变成三颗，反而更难找。
+     * ⚠️ 必须定义在 `patchMetadata` **之后**（依赖数组里直接引用它，前置会 TDZ 崩）。
+     */
+    const tableDisplayMode: "collapsed" | "compact" | "full" = tableCollapsed ? "collapsed" : compactColumns ? "compact" : "full";
+    const cycleTableDisplay = useCallback(() => {
+        if (tableDisplayMode === "collapsed") {
+            // 展开到简洁版：两个键一起写，避免中间态（收起已关、列还是旧值）闪一下完整表。
+            patchMetadata({ scriptTableCollapsed: false, scriptCompactColumns: true });
+            return;
+        }
+        if (tableDisplayMode === "compact") {
+            patchMetadata({ scriptCompactColumns: false });
+            return;
+        }
+        patchMetadata({ scriptTableCollapsed: true });
+    }, [patchMetadata, tableDisplayMode]);
 
     /**
      * 铺链路「每几镜合一个视频节点」（用户 2026-11-11 第 01 条）。
@@ -2628,6 +2691,68 @@ export function CanvasScriptNodeContent({
         );
     };
 
+    /**
+     * 显示档按钮（收起 → 简洁版 → 完整版 → 收起）。标签写的是**下一个状态**，
+     * 与老「简洁版 / 完整版」按钮的写法一致（当前是简洁版时显示「完整版」）。
+     *
+     * ⚠️ 只定义一次、两处复用：表体操作条里一份，收起提示条里再一份。
+     * 收起时表体整块不渲染，如果按钮只长在表体里，用户就再也点不回来了（死锁）。
+     */
+    const tableDisplayControl = (
+        <button
+            type="button"
+            className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition"
+            style={{
+                borderColor: tableDisplayMode === "full" ? theme.node.stroke : theme.toolbar.activeText,
+                // 选中态实心：`activeBg` 是浅米色，一排描边胶囊里会被读成「禁用」。
+                background: tableDisplayMode === "full" ? "transparent" : theme.toolbar.activeText,
+                color: tableDisplayMode === "full" ? theme.node.text : theme.node.panel,
+                opacity: tableDisplayMode === "full" ? 0.75 : 1,
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+                event.stopPropagation();
+                cycleTableDisplay();
+            }}
+            title={
+                tableDisplayMode === "collapsed"
+                    ? t("canvas.scriptNode.zoomExpandHint")
+                    : tableDisplayMode === "compact"
+                      ? t("canvas.scriptNode.compactColumnsRestoreHint")
+                      : t("canvas.scriptNode.zoomCollapseHint")
+            }
+        >
+            {tableDisplayMode === "full" ? <Minimize2 className="size-3" /> : tableDisplayMode === "compact" ? <Maximize2 className="size-3" /> : <AlignJustify className="size-3" />}
+            {tableDisplayMode === "collapsed"
+                ? t("canvas.scriptNode.compactColumns")
+                : tableDisplayMode === "compact"
+                  ? t("canvas.scriptNode.compactColumnsRestore")
+                  : t("canvas.scriptNode.zoomCollapse")}
+        </button>
+    );
+
+    /**
+     * 「缩放」态：表体整块不渲染，只留一条提示 + 同一个显示档按钮。
+     *
+     * 用户要求「表格中内容全部收起不显示，但只是不显示，不影响其正常功能的推进和链接图」，
+     * 所以这里**绝不能**顺手把 `rows` 清掉或断连线 —— 铺链路 / 一键视频 / 批量重生成读的都是
+     * `metadata`，收起态下照常能跑。
+     */
+    const collapsedPanel = (
+        <div
+            ref={collapsedStripRef}
+            className="mx-2 mb-2 flex shrink-0 items-center gap-2 rounded-xl border px-2.5 py-1.5 text-[0.923em]"
+            style={{ borderColor: theme.node.stroke, background: theme.node.panel, color: theme.node.text }}
+        >
+            <AlignJustify className="size-3.5 shrink-0 opacity-60" />
+            <span className="min-w-0 flex-1 truncate opacity-70">
+                {t("canvas.scriptNode.tableCollapsedNotice", { count: rows.length })}
+            </span>
+            {tableDisplayControl}
+        </div>
+    );
+
     const tablePanel = (
         <div className="flex min-h-0 flex-1 flex-col px-2 pb-2">
             {assetToolbar}
@@ -3256,32 +3381,11 @@ export function CanvasScriptNodeContent({
                         {t("canvas.scriptNode.assetFillAll", { count: missingAssetRowCount })}
                     </button>
                 ) : null}
-                {/* 简洁版 / 完整版：一键隐藏「画面描述 / 角色动作 / 人物站位 / 情绪 / 场景标签 / 光影氛围」六列。
-                    与右边「完整显示 / 精简」不是一回事：那个是压单格行数，这个是直接少几列。
-                    只影响显示（行数据一个字不删），且状态写进 metadata —— 节点被卸载回来仍是用户选的那一档。 */}
-                <button
-                    type="button"
-                    className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition"
-                    style={{
-                        borderColor: compactColumns ? theme.toolbar.activeText : theme.node.stroke,
-                        // 选中态实心：`activeBg` 是浅米色，一排描边胶囊里会被读成「禁用」。
-                        background: compactColumns ? theme.toolbar.activeText : "transparent",
-                        color: compactColumns ? theme.node.panel : theme.node.text,
-                        opacity: compactColumns ? 1 : 0.75,
-                    }}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                        event.stopPropagation();
-                        // 默认是简洁版（`undefined` 也按开算），所以这里必须写**显式 false** 才能真正关掉；
-                        // 三态语义：undefined = 默认（简洁）、true = 简洁、false = 完整版。
-                        patchMetadata({ scriptCompactColumns: compactColumns ? false : true });
-                    }}
-                    title={compactColumns ? t("canvas.scriptNode.compactColumnsRestoreHint") : t("canvas.scriptNode.compactColumnsHint")}
-                >
-                    <AlignJustify className="size-3" />
-                    {compactColumns ? t("canvas.scriptNode.compactColumnsRestore") : t("canvas.scriptNode.compactColumns")}
-                </button>
+                {/* 显示档（收起 / 简洁版 / 完整版，同一个按钮循环）：
+                    收起 = 整张表不渲染；简洁版 = 隐藏「画面描述 / 角色动作 / 人物站位 / 情绪 / 场景标签 / 光影氛围」六列；
+                    完整版 = 全列铺开。与旁边「完整显示 / 精简」不是一回事：那个是压单格行数。
+                    三档都只影响显示（行数据一个字不删），状态写进 metadata —— 节点被卸载回来仍是用户选的那一档。 */}
+                {tableDisplayControl}
                 {/* 完整显示 / 精简：默认完整（不用拖滑条就能看全每格内容），太长时再切精简。 */}
                 <button
                     type="button"
@@ -3641,7 +3745,9 @@ export function CanvasScriptNodeContent({
         >
             {header}
             {errorBanner}
-            {isRunning ? runningPanel : view === "table" && rows.length ? tablePanel : sourcePanel}
+            {/* 收起态（`tableCollapsed`）只换「表体」这一块：表头、错误条、视图切换全都还在，
+                所以节点在收起时依然能「生成 / 一键视频 / 切回剧本原文」。 */}
+            {isRunning ? runningPanel : view === "table" && rows.length ? (tableCollapsed ? collapsedPanel : tablePanel) : sourcePanel}
             {fileDragging ? (
                 <div
                     className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-xl border-2 border-dashed px-3 text-center text-[0.923em]"

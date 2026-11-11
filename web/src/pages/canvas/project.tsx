@@ -202,6 +202,7 @@ import { planScriptPipelineGenerateOrder, readScriptPipelineVideoOutcome, resolv
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
     ONE_CLICK_IMAGE_FALLBACK_MODEL_NAMES,
+    ONE_CLICK_IMAGE_STAGE_TIMEOUT_MS,
     ONE_CLICK_POLL_INTERVAL_MS,
     ONE_CLICK_SCRIPT_RETRY_CHANNEL_HINTS,
     ONE_CLICK_SCRIPT_RETRY_MODEL_NAMES,
@@ -10036,7 +10037,7 @@ function AtelierCanvasPage() {
      *  - 分镜表最长等 **15 分钟**；到点既没报错也没成功 → **暂停**（并 abort 在跑的那一条）。
      *  - 生图里**角色 / 场景**报错 → 先用「配置偏好生图模型」重跑一次 → 仍报错 → 换
      *    `seedream-5.0-pro（猛蹬）` 对**报错的那几张**托底一次 → 仍失败 → **暂停**。
-     *  - 生图最长等 **15 分钟**；超时 → **暂停**。
+     *  - 生图最长等 **35 分钟**（用户 2026-11-11 第 01 条：一批图并发 + 两轮重试，15 分钟不够）；超时 → **暂停**。
      *
      * 「暂停」= 不再往下走 + 在节点按钮上标出暂停原因（`oneClickVideoRuns`，内存态）。
      * 已经铺出来的图片 / 视频节点一律**保留**：用户看得到失败在哪几张，手动补比清空更有用。
@@ -10295,8 +10296,8 @@ function AtelierCanvasPage() {
                     if (missed.length) message.warning(t("canvas.scriptNode.oneClickReferenceUnmounted", { names: missed.join("、") }));
                 }
 
-                // ---- ② 一键直接生图（偏好模型重试一次 → seedream-5.0-pro 托底一次；15 分钟封顶）----
-                const imageDeadline = Date.now() + ONE_CLICK_STAGE_TIMEOUT_MS;
+                // ---- ② 一键直接生图（偏好模型重试一次 → seedream-5.0-pro 托底一次；**35 分钟**封顶）----
+                const imageDeadline = Date.now() + ONE_CLICK_IMAGE_STAGE_TIMEOUT_MS;
                 notify("image", "canvas.scriptNode.oneClickStageImage");
                 const launched = handleDirectGenerateScriptAssets(nodeId, { skipAssetKeys });
                 const imageIds = launched.created.map((node) => node.id);

@@ -432,6 +432,14 @@ export type CanvasNodeMetadata = {
      * 只有显式切到完整版时才存 `false`。只影响显示，行数据不删。
      */
     scriptCompactColumns?: boolean;
+    /**
+     * 脚本生成器：分镜表「缩放」态 —— 整张表**收起不渲染**（用户 2026-11-11 第 03 条）。
+     *
+     * **默认收起**，所以 `undefined` 也按收起算，只有展开时才存 `false`（与 `scriptCompactColumns` 同款三态）。
+     * 🔴 只是不显示：`scriptRows` / `scriptCellAssets` / 连线 / 铺链路 / 一键视频全都不受影响，
+     * 任何「收起就清空行」的写法都是错的。
+     */
+    scriptTableCollapsed?: boolean;
     /** 脚本生成器：生成的脚本标题。 */
     scriptTitle?: string;
     /** 脚本生成器：解析失败时保留的原始返回，供用户查看/复制。 */

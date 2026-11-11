@@ -2084,10 +2084,20 @@ export function readScriptShotsPerClip(metadata: { scriptShotsPerClip?: unknown 
 /**
  * 铺链路时真正用的 `mergeEvery`（0 = 交给「视频分段」档位）。
  *
- * 优先级：开关的 3 > 调用方写死的 N（「一键铺视频链路」传 4）> 0。
+ * 优先级：**第八套 `mashu` 的 1** > 开关的 3 > 调用方写死的 N（「一键铺视频链路」传 4）> 0。
+ *
+ * 🔴 第八套必须单独先判（用户 2026-11-11 第 02 条：「第八套因为是每个镜头直出的 15 秒，
+ * 铺链路的时候直接一镜一视频，只针对第八套，其他方案仍按 3 镜合 / 4 镜合」）：
+ * 它一「行」就是一个 15 秒分镜组、本来就是按镜头直出的，再两张并进一个视频节点会让
+ * 15 秒 × 2 的脚本塞进一个节点里，时长和提示词两头对不上。所以这里直接返回 1，
+ * **优先级高于用户的「每 3 镜合」开关**（那个开关是给别的方案用的）。
  * 单独抽成纯函数是为了让探针能直接钉住这条优先级 —— 铺链路那条函数太大、跑不起来。
  */
-export function resolveScriptPipelineMergeEvery(metadata: { scriptShotsPerClip?: unknown } | null | undefined, requested?: unknown): number {
+export function resolveScriptPipelineMergeEvery(
+    metadata: { scriptShotsPerClip?: unknown; scriptScheme?: unknown } | null | undefined,
+    requested?: unknown,
+): number {
+    if (metadata?.scriptScheme === "mashu") return 1;
     return readScriptShotsPerClip(metadata) || Math.max(0, Math.round(Number(requested) || 0));
 }
 
