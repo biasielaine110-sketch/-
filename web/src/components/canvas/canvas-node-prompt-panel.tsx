@@ -9,6 +9,7 @@ import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { defaultConfig, resolveModelForCapability, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { resolveH3OptimizeSystemPrompt, resolveNodePromptField } from "@/lib/canvas/h3-prompt-optimize";
+import { resolveViolationOptimizeSystemPrompt } from "@/lib/canvas/violation-prompt-optimize";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { resolveNativeH3VideoSettingDefaults } from "@/lib/comfyui-native";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -98,6 +99,9 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     // 「h3 提示词优化」的 instruction：技能库「转Minih3-视频提示词」优先，没装才回落词库。
     // 图片 / 视频节点的**放大编辑弹窗**里也要有这颗按钮，所以两条入口共用这一份解析结果。
     const h3PromptSource = useMemo(() => resolveH3OptimizeSystemPrompt(skillPacks, textPrompts), [skillPacks, textPrompts]);
+    // 「违规优化」的 instruction：只认词库那条「--------------提示词---违规优化-------------」，
+    // 用户没建时用内置兜底（用户 2026-11-11 第 01 条）。
+    const violationPromptSource = useMemo(() => resolveViolationOptimizeSystemPrompt(textPrompts), [textPrompts]);
     const h3TextConfig = useMemo(() => buildGenerationConfig(globalConfig, node, "text"), [globalConfig, node]);
     const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
     const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
@@ -164,12 +168,31 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
               }
             : null;
 
+    /**
+     * 放大编辑弹窗里的「违规优化」配置。
+     *
+     * 与 h3 那条同构（同样靠 `job` + `applyOptimized` 在关窗后写回），差别只有两个：
+     * instruction 来自**词库**而不是技能，模型**不给选**（恒跟偏好里的文本模型）。
+     */
+    const violationOptimizeOption =
+        mode === "image" || mode === "video"
+            ? {
+                  config: h3TextConfig,
+                  systemPrompt: violationPromptSource.text,
+                  sourceTitle: violationPromptSource.title,
+                  fromLibrary: violationPromptSource.fromLibrary,
+                  job: { id: node.id, title: String(node.title || node.id), field: resolveNodePromptField(node) },
+                  applyOptimized: updatePrompt,
+              }
+            : null;
+
     const textEdit = useCanvasTextEditDialog({
         value: prompt,
         onChange: updatePrompt,
         title: t("canvas.promptPanel.editorTitle"),
         placeholder: promptPlaceholder,
         h3Optimize: h3OptimizeOption,
+        violationOptimize: violationOptimizeOption,
     });
 
     const activeReferences = mentionReferences.filter((reference) => reference.active && reference.nodeId !== node.id);

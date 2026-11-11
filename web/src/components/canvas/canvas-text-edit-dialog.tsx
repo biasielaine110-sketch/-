@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ClipboardEvent 
 import { createPortal } from "react-dom";
 import { Button, Input, Modal } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
-import { LoaderCircle, Minus, Plus, WandSparkles } from "lucide-react";
+import { LoaderCircle, Minus, Plus, ShieldCheck, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { insertTextIntoInputElement, readClipboardEventText } from "@/lib/canvas/clipboard-paste";
@@ -39,6 +39,27 @@ export type CanvasTextEditDialogH3Optimize = {
     applyOptimized: (text: string) => void;
 };
 
+/**
+ * 「违规优化」入口配置 —— 同样只在生图 / 生视频的提示词弹窗里出现。
+ *
+ * 与 h3 的区别（用户 2026-11-11 第 01 条）：
+ *  - instruction 只来自**词库**那条「--------------提示词---违规优化-------------」；
+ *  - 模型不给选，**恒跟随偏好里的文本模型**（`config.textModel`）。
+ *
+ * 请求走同一个后台队列（`kind: "violation"`），所以两条优化天然互斥。
+ */
+export type CanvasTextEditDialogViolationOptimize = {
+    /** capability=text 的配置（模型已经带好 = 偏好里的文本模型） */
+    config: AiConfig;
+    systemPrompt: string;
+    /** 词条标题，显示「词库「…」」 */
+    sourceTitle: string;
+    /** true = 命中用户词库；false = 用了内置兜底文案 */
+    fromLibrary: boolean;
+    job: { id: string; title: string; field: "prompt" | "composerContent" };
+    applyOptimized: (text: string) => void;
+};
+
 type CanvasTextEditDialogProps = {
     open: boolean;
     value: string;
@@ -49,11 +70,13 @@ type CanvasTextEditDialogProps = {
     onFontSizeChange?: (fontSize: number) => void;
     /** 传了才显示「h3 提示词优化」那一行。 */
     h3Optimize?: CanvasTextEditDialogH3Optimize | null;
+    /** 传了才显示「违规优化」那一行（模型固定跟随偏好里的文本模型）。 */
+    violationOptimize?: CanvasTextEditDialogViolationOptimize | null;
     onClose: () => void;
     onSave?: (content: string) => void;
 };
 
-export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize, readOnly = false, onFontSizeChange, h3Optimize = null, onClose, onSave }: CanvasTextEditDialogProps) {
+export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize, readOnly = false, onFontSizeChange, h3Optimize = null, violationOptimize = null, onClose, onSave }: CanvasTextEditDialogProps) {
     const { t } = useTranslation();
     const textAreaRef = useRef<TextAreaRef>(null);
     const draftRef = useRef(value);
@@ -68,13 +91,24 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
     // 弹窗随手关掉（或去点别的节点）也不中断，结果按 `h3Optimize.job.field` 写回节点。
     // 这里只是订阅流式正文，让「弹窗还开着」的那段时间能看到文字在长。
     const [optimizeModel, setOptimizeModel] = useState("");
-    const h3Queue = useSyncExternalStore(subscribeH3OptimizeQueue, getH3OptimizeQueueState);
+    const queue = useSyncExternalStore(subscribeH3OptimizeQueue, getH3OptimizeQueueState);
     const canH3Optimize = Boolean(h3Optimize && h3Optimize.systemPrompt.trim() && !readOnly);
     const h3JobId = h3Optimize?.job.id || "";
-    const h3Running = h3Queue.running && h3Queue.currentId === h3JobId;
+    /** kind 一起判：h3 与违规优化共用队列，只看 currentId 会让两个按钮同时变成「停止」。 */
+    const h3Running = queue.running && queue.currentKind !== "violation" && queue.currentId === h3JobId;
     /** 队列正忙着转**别的**节点：同一时间只允许一个队列，这里先别让点（避免两批互相覆盖）。 */
-    const h3BusyElsewhere = h3Queue.running && !h3Running;
-    const h3Error = h3Running ? h3Queue.currentError : "";
+    const h3BusyElsewhere = queue.running && !h3Running;
+    const h3Error = h3Running ? queue.currentError : "";
+
+    // 「违规优化」：指令来自词库，模型不给选（恒跟 config.textModel）。
+    const canViolationOptimize = Boolean(violationOptimize && violationOptimize.systemPrompt.trim() && !readOnly);
+    const violationJobId = violationOptimize?.job.id || "";
+    const violationRunning = queue.running && queue.currentKind === "violation" && queue.currentId === violationJobId;
+    const violationBusyElsewhere = queue.running && !violationRunning;
+    const violationError = violationRunning ? queue.currentError : "";
+    const violationModel = String(violationOptimize?.config.textModel || violationOptimize?.config.model || "").trim();
+    /** 任意一条优化正在转**这个**节点 —— 流式正文都要同步进编辑区。 */
+    const anyRunningHere = h3Running || violationRunning;
 
     draftRef.current = draft;
 
@@ -85,10 +119,10 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
 
     // 队列正在转这一条 → 流式正文同步进编辑区（关掉弹窗后改由 `applyOptimized` 写节点）。
     useEffect(() => {
-        if (!h3Running || !h3Queue.currentText) return;
-        draftRef.current = h3Queue.currentText;
-        setDraft(h3Queue.currentText);
-    }, [h3Running, h3Queue.currentText]);
+        if (!anyRunningHere || !queue.currentText) return;
+        draftRef.current = queue.currentText;
+        setDraft(queue.currentText);
+    }, [anyRunningHere, queue.currentText]);
 
     // 只在「打开瞬间」同步外部 value，避免打开后父级回写冲掉弹窗内粘贴内容。
     useEffect(() => {
@@ -113,7 +147,29 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
             jobs: [{ ...h3Optimize.job, text: original }],
             config: { ...h3Optimize.config, model },
             systemPrompt: h3Optimize.systemPrompt,
+            kind: "h3",
             onApply: (_target, text) => h3Optimize.applyOptimized(text),
+        });
+    };
+
+    /**
+     * 违规优化：用词库那条 instruction 把当前内容改写成能过审的版本。
+     * 模型不选、恒跟偏好里的文本模型；同样跑后台队列，关窗也会写完。
+     */
+    const runViolationOptimize = () => {
+        if (!violationOptimize || !canViolationOptimize) return;
+        if (violationRunning) {
+            stopH3OptimizeQueue();
+            return;
+        }
+        const original = draftRef.current;
+        if (!original.trim()) return;
+        void startH3OptimizeQueue({
+            jobs: [{ ...violationOptimize.job, text: original }],
+            config: { ...violationOptimize.config, model: violationModel || violationOptimize.config.model },
+            systemPrompt: violationOptimize.systemPrompt,
+            kind: "violation",
+            onApply: (_target, text) => violationOptimize.applyOptimized(text),
         });
     };
 
@@ -309,6 +365,35 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                         </span>
                         {h3Running ? <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400">{t("canvas.textEditDialog.h3OptimizeBackground")}</span> : null}
                         {h3Error ? <span className="max-w-full truncate text-[11px] text-red-500">{h3Error}</span> : null}
+                    </div>
+                ) : null}
+
+                {/* 违规优化：instruction 来自词库「--------------提示词---违规优化-------------」，
+                    模型固定跟随偏好里的文本模型（所以这里只有一个只读的模型名，不给选择器）。
+                    同 h3 一样跑后台队列，关掉弹窗也会把结果写回节点。 */}
+                {canViolationOptimize && violationOptimize ? (
+                    <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-stone-200 px-2 py-1.5 dark:border-stone-700" data-canvas-violation-optimize>
+                        <Button
+                            size="small"
+                            type="primary"
+                            ghost
+                            className="!h-7 !shrink-0 !rounded-full !px-2.5"
+                            icon={violationRunning ? <LoaderCircle className="size-3.5 animate-spin" /> : <ShieldCheck className="size-3.5" />}
+                            disabled={violationBusyElsewhere || (!violationRunning && !draft.trim())}
+                            onClick={runViolationOptimize}
+                            title={t("canvas.textEditDialog.violationOptimizeTitle", { title: violationOptimize.sourceTitle })}
+                        >
+                            <span className="text-xs">{violationRunning ? t("canvas.textEditDialog.violationOptimizeStop") : t("canvas.textEditDialog.violationOptimize")}</span>
+                        </Button>
+                        <span className="shrink-0 text-[11px] text-stone-500">{t("canvas.textEditDialog.violationOptimizeModel")}</span>
+                        <span className="shrink-0 text-[11px] tabular-nums text-stone-600 dark:text-stone-300">{violationModel || t("canvas.textEditDialog.violationOptimizeModelEmpty")}</span>
+                        <span className="min-w-0 flex-1 truncate text-[11px] text-stone-400">
+                            {violationOptimize.fromLibrary
+                                ? t("canvas.textEditDialog.violationOptimizeSourceLibrary", { title: violationOptimize.sourceTitle })
+                                : t("canvas.textEditDialog.violationOptimizeSourceBuiltin")}
+                        </span>
+                        {violationRunning ? <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400">{t("canvas.textEditDialog.violationOptimizeBackground")}</span> : null}
+                        {violationError ? <span className="max-w-full truncate text-[11px] text-red-500">{violationError}</span> : null}
                     </div>
                 ) : null}
 

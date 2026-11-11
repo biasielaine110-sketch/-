@@ -169,6 +169,7 @@ import { useGenerationHistoryStore, type GenerationHistoryImage } from "@/stores
 import { buildNodeMentionReferences, resolveCanvasReferenceImages, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { collectCanvasOccupied, findFreeColumnX, planRightwardChainSlots } from "@/lib/canvas/canvas-free-space";
 import { widenLegacyScriptNodes } from "@/lib/canvas/script-node-width";
+import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoTarget, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
@@ -9599,7 +9600,8 @@ function AtelierCanvasPage() {
                 // 顺序与写连线时一致 —— orderedGroupAssetIds → 音频（音频只连视频、但不进「图片资产」文案，拼装时按 kind 过滤掉）。
                 const videoBinding = assetBindingOf([...orderedGroupAssetIds, ...audioRefs.map((asset) => asset.id)], nodesRef.current, assetNameOf, assetRoleOf);
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
-                const videoPrompt = withScriptAssetBinding(baseVideoPrompt, videoBinding);
+                // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产绑定块在前、禁止项 / 强制声明收尾。
+                const videoPrompt = withVideoComplianceSuffix(withScriptAssetBinding(baseVideoPrompt, videoBinding));
                 // 单镜模式：10/15 秒 = 锁定成片秒数（不抄表里旧值，否则「选了 10 秒铺出来还是 3 秒」）；
                 // 5 秒 = 上限（表里更短就按表里）。合并模式仍按本段各镜 duration 累加。
                 // ⚠️ 判据是 `merged`（本段真的有多镜）而**不是**档位：手动合并组在「单镜」档位下也是多镜，
@@ -10590,7 +10592,14 @@ function AtelierCanvasPage() {
             // 资产文案：本镜连进视频节点的图片资产 → 第四套写多行「资产锁定」块、其余三套写「资产名@图片N」
             //（编号顺序 = orderedLinkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
             const videoBinding = assetBindingOf(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
-            videoNode.metadata = { ...videoNode.metadata, prompt: withScriptAssetBinding(videoNode.metadata?.prompt, videoBinding) };
+            // 合规后缀（用户 2026-11-11 第 02 条）：与一键铺链路同口径，拼在资产绑定之后（= 最后）。
+            // MochiAni 节点的 `mochianiPrompt` 是双写过来的初值，这里一起换掉，否则窗口里显示的还是旧版。
+            const boundShotPrompt = withVideoComplianceSuffix(withScriptAssetBinding(videoNode.metadata?.prompt, videoBinding));
+            videoNode.metadata = {
+                ...videoNode.metadata,
+                prompt: boundShotPrompt,
+                ...(videoNode.metadata?.mochianiPrompt ? { mochianiPrompt: boundShotPrompt } : {}),
+            };
             nodesRef.current = [...nodesRef.current, videoNode];
             setNodes((prev) => [...prev, videoNode]);
             if (links.length) setConnections((prev) => [...prev, ...links]);

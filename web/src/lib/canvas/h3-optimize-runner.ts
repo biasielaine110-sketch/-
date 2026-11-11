@@ -19,11 +19,23 @@ import type { AiConfig } from "@/stores/use-config-store";
  *  - 同一时间只允许一个队列（`running` 时再启动返回 `busy`），否则两批会互相覆盖同一批节点。
  */
 
+/**
+ * 这一次跑的是哪条优化。
+ *
+ * 两条优化（`h3` = 转 h3 提示词、`violation` = 违规优化）**共用这一个队列**：
+ * 同一时间只跑一批，天然互斥，不会两条流水同时写同一个节点。
+ * 但编辑器里的按钮要能分辨「在跑的是我这条还是隔壁那条」（同一个节点两种按钮，
+ * 只看 `currentId` 会两边一起显示「停止」），所以连同 kind 一起广播出去。
+ */
+export type H3OptimizeKind = "h3" | "violation";
+
 export type H3OptimizeQueueState = {
     running: boolean;
     total: number;
     done: number;
     failed: number;
+    /** 正在跑的是哪条优化（idle 时为空串） */
+    currentKind: H3OptimizeKind | "";
     /** 正在跑的节点 id / 标题（进度卡显示） */
     currentId: string;
     currentTitle: string;
@@ -42,6 +54,8 @@ export type H3OptimizeQueueOptions = {
     /** 已带好 `model` 的文本配置 */
     config: AiConfig;
     systemPrompt: string;
+    /** 这一批是谁发起的（默认 h3）；只影响 UI 分辨，不影响执行 */
+    kind?: H3OptimizeKind;
     /** 每转出一点（含流式中间态）就回写一次；由上层决定写节点哪个字段 */
     onApply: (target: H3OptimizeTarget, text: string) => void;
 };
@@ -51,6 +65,7 @@ const IDLE_STATE: H3OptimizeQueueState = {
     total: 0,
     done: 0,
     failed: 0,
+    currentKind: "",
     currentId: "",
     currentTitle: "",
     currentText: "",
@@ -98,13 +113,14 @@ export async function startH3OptimizeQueue(options: H3OptimizeQueueOptions): Pro
 
     const jobController = new AbortController();
     controller = jobController;
-    patch({ running: true, total: jobs.length, done: 0, failed: 0, currentId: "", currentTitle: "", currentText: "", currentError: "" });
+    const kind: H3OptimizeKind = options.kind || "h3";
+    patch({ running: true, total: jobs.length, done: 0, failed: 0, currentKind: kind, currentId: "", currentTitle: "", currentText: "", currentError: "" });
 
     let done = 0;
     let failed = 0;
     for (const job of jobs) {
         if (jobController.signal.aborted) break;
-        patch({ currentId: job.id, currentTitle: job.title, currentText: "", currentError: "" });
+        patch({ currentKind: kind, currentId: job.id, currentTitle: job.title, currentText: "", currentError: "" });
         try {
             const answer = await requestH3PromptOptimize(options.config, job.text, {
                 systemPrompt: options.systemPrompt,
