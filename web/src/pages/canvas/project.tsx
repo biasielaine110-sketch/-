@@ -57,7 +57,7 @@ import {
     buildStoryScriptRowTask,
     buildStoryScriptSchemeFormatHint,
     buildStoryScriptTask,
-    buildStoryScriptTotalSecondsBlock,
+    buildScriptTotalSecondsBlockFromMetadata,
     buildVideoNodePrompt,
     collectStoryScriptAssetFillTargets,
     countStoryScriptTemplateShots,
@@ -81,6 +81,7 @@ import {
     parseStoryScriptOutput,
     resolveScriptAssetRole,
     resolveScriptSystemPrompt,
+    resolveScriptTotalSeconds,
     resolveStoryScriptMergeMode,
     resolveScriptPipelineMergeEvery,
     SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
@@ -7752,11 +7753,15 @@ function AtelierCanvasPage() {
             const mashuScheme = wholeSchemeId === "mashu";
             const directorFormatHint = buildStoryScriptSchemeFormatHint(sourceNode.metadata?.scriptScheme);
             /**
-             * 「成片总时长」（用户 2026-11-09）：反推节点上选的秒数（默认 30）会落到 `scriptTotalSeconds`，
-             * 这里把它压成任务书末尾的一段硬要求 —— 镜数与台词量都按这个数字来，不再按模型的「一条短片」惯性铺 1 分钟。
-             * 不填 = 空串，任务书与改造前逐字一致。
+             * 「成片总时长」（用户 2026-11-09 / 2026-11-11 第 01 条）：反推节点上选的秒数会落到
+             * `scriptTotalSeconds`；脚本节点「输入」视图也能直接改同一个键。这里把它压成任务书末尾的
+             * 一段硬要求 —— 镜数与台词量都按这个数字来，不再按模型的「一条短片」惯性铺 1 分钟。
+             *
+             * **没设也照样有默认 30 秒**（`buildScriptTotalSecondsBlockFromMetadata` 内部走
+             * `resolveScriptTotalSeconds`）：界面上明明写着 30 秒，就不能让后端当「没限制」处理，
+             * 否则又是「设置没生效」。只有用户显式点了「不限制」才返回空串。
              */
-            const totalSecondsBlock = buildStoryScriptTotalSecondsBlock(sourceNode.metadata?.scriptTotalSeconds);
+            const totalSecondsBlock = buildScriptTotalSecondsBlockFromMetadata(sourceNode.metadata);
             const scriptTask = [directorFormatHint ? `${task}\n\n${directorFormatHint}` : task, totalSecondsBlock].filter(Boolean).join("\n\n");
             /**
              * 用户贴进来的「模版」有两种位置，两种都要「照抄结构」而不是拆成括号链：
@@ -10557,7 +10562,13 @@ function AtelierCanvasPage() {
              */
             const scriptTargetMeta: Partial<CanvasNodeData["metadata"]> = {
                 ...(target.styleTemplateId ? { styleTemplateId: target.styleTemplateId } : {}),
-                ...(target.seconds ? { scriptTotalSeconds: Number(target.seconds) || undefined } : {}),
+                /**
+                 * **恒写**（用户 2026-11-11 第 02 条：「反推窗口设了时长，执行 03 要能同步到脚本生成器的分镜时长」）：
+                 * 窗口里没改过 → 按默认 30 秒写进去。以前是「target.seconds 有值才写」，于是同一次
+                 * 「设了 30 秒 → 03」在脚本节点上看到的是**空**（界面靠 resolve 补成 30），
+                 * 一旦以后默认值改动，两边就会分叉。写死成解析后的有效值，脚本节点打开就看得见。
+                 */
+                scriptTotalSeconds: resolveScriptTotalSeconds({ scriptTotalSeconds: target.seconds }),
                 scriptImageSize: resolveReverseVideoSize(target),
                 scriptVideoSize: resolveReverseVideoSize(target),
                 scriptVideoQuality: resolveReverseVideoQuality(target),

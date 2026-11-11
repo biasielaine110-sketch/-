@@ -551,8 +551,7 @@ export function buildStoryScriptTotalSecondsBlock(totalSeconds?: unknown): strin
     const raw = Number(totalSeconds);
     if (!Number.isFinite(raw) || raw <= 0) return "";
     const total = Math.round(raw);
-    const perShot = STORY_SCRIPT_SEGMENT_TARGET_SECONDS / STORY_SCRIPT_SHOTS_PER_15S;
-    const shots = Math.max(1, Math.round(total / perShot));
+    const shots = resolveStoryScriptShotCount(total);
     const low = Math.max(2, Math.round(total * 0.9));
     const high = Math.round(total * 1.1);
     // 中文口播约 4~5 字/秒；给区间而不是精确字数，模型才不会为了凑字数硬掰台词。
@@ -1568,6 +1567,63 @@ export const STORY_SCRIPT_SHOT_TARGET_SECONDS = STORY_SCRIPT_SEGMENT_TARGET_SECO
 export const STORY_SCRIPT_MIN_SHOT_SECONDS = 3;
 /** 单镜秒数上限（写进表格时的上界；超过就是「一个镜头干完了四镜的事」）。 */
 export const STORY_SCRIPT_MAX_SHOT_SECONDS = 5;
+
+/**
+ * 脚本节点的「成片总时长」（用户 2026-11-11 第 01 条）：
+ * 「脚本生成器需要设定时长的输入区域，默认 30 秒，根据输入的时长，拆成对应的总时长镜头内容」。
+ *
+ * 与反推节点的 `DEFAULT_REVERSE_VIDEO_SECONDS`（也是 30）取同一个默认值 —— 03 把反推窗口上的秒数
+ * 搬进 `scriptTotalSeconds`，两条路进来看到的初始值必须一致，否则用户会以为同步没生效。
+ */
+export const DEFAULT_SCRIPT_TOTAL_SECONDS = 30;
+export const SCRIPT_TOTAL_SECONDS_MIN = 5;
+export const SCRIPT_TOTAL_SECONDS_MAX = 300;
+
+/**
+ * 读「成片总时长」：**没设 / 脏值一律当 30 秒**。
+ *
+ * 为什么不是「没设就不限制」：用户要的是「默认 30 秒，按这个时长拆镜」。留一个「空 = 想写多长写多长」
+ * 的隐性状态，模型就会按自己的「一条短片」惯性铺 1~2 分钟，而界面上明明写着 30 秒 —— 又是一次
+ * 「设置没生效」的报障。范围卡在 5~300 秒，与反推窗口的输入框一致。
+ */
+export function resolveScriptTotalSeconds(metadata?: { scriptTotalSeconds?: unknown } | null): number {
+    const raw = Number(metadata?.scriptTotalSeconds);
+    if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_SCRIPT_TOTAL_SECONDS;
+    return Math.min(SCRIPT_TOTAL_SECONDS_MAX, Math.max(SCRIPT_TOTAL_SECONDS_MIN, Math.round(raw)));
+}
+
+/**
+ * 按「每 15 秒 4 镜」节律算「这个总时长大约几个镜头」。
+ * UI 提示与任务书（`buildStoryScriptTotalSecondsBlock`）共用这一份，避免两处数字对不上。
+ */
+export function resolveStoryScriptShotCount(totalSeconds?: unknown): number {
+    const raw = Number(totalSeconds);
+    const total = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_SCRIPT_TOTAL_SECONDS;
+    return Math.max(1, Math.round(total / STORY_SCRIPT_SHOT_TARGET_SECONDS));
+}
+
+/**
+ * 是否显式「不限制成片总时长」（用户 2026-11-11 第 01 条的逃生阀）。
+ *
+ * 默认 30 秒是**硬要求**，但「贴一整篇小说 / 长剧本照抄」这类素材按长度走才对，不能被 30 秒掐掉。
+ * 所以只有用户主动点「不限制」时才不追加时长块；没点过 = 走默认 30 秒（见 `resolveScriptTotalSeconds`）。
+ */
+export function isScriptTotalSecondsUnlimited(metadata?: { scriptTotalSecondsUnlimited?: unknown } | null): boolean {
+    return Boolean(metadata?.scriptTotalSecondsUnlimited);
+}
+
+/**
+ * 任务书末尾那段「成片总时长」块的**唯一入口**（脚本节点 + 反推链路都走这里）。
+ *
+ * 把「读值 → 默认 30 → 不限制 → 拼块」四步收在一处：`project.tsx` 那边只传 `sourceNode.metadata`，
+ * 不用自己判 `undefined`（以前写着「不填 = 与改造前一致」，现在「不填 = 30 秒」，判空的位置一多必然漂移）。
+ */
+export function buildScriptTotalSecondsBlockFromMetadata(
+    metadata?: { scriptTotalSeconds?: unknown; scriptTotalSecondsUnlimited?: unknown } | null,
+): string {
+    if (isScriptTotalSecondsUnlimited(metadata)) return "";
+    return buildStoryScriptTotalSecondsBlock(resolveScriptTotalSeconds(metadata));
+}
 
 /** 单镜可取区间的文本，例如 `3~5`。 */
 export function storyScriptShotSecondsRange(max: number): string {

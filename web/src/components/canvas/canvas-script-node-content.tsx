@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { App, Modal } from "antd";
+import { App, InputNumber, Modal } from "antd";
 import copy from "copy-to-clipboard";
 import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Layers, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -43,6 +43,9 @@ import {
     resolveStoryScriptDisplayColumns,
     resolveStoryScriptFontSize,
     isMultiNameAssetColumn,
+    isScriptTotalSecondsUnlimited,
+    resolveScriptTotalSeconds,
+    resolveStoryScriptShotCount,
     resolveStoryScriptImageSize,
     resolveStoryScriptMergeMode,
     resolveStoryScriptPresetId,
@@ -75,6 +78,8 @@ import {
     STORY_SCRIPT_MERGE_MODES,
     SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP,
     SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
+    SCRIPT_TOTAL_SECONDS_MAX,
+    SCRIPT_TOTAL_SECONDS_MIN,
     readScriptShotsPerClip,
     STORY_SCRIPT_PRESET_IDS,
     STORY_SCRIPT_SEGMENT_SECONDS,
@@ -2119,6 +2124,87 @@ export function CanvasScriptNodeContent({
     }, [manualMergeGroups]);
     /** 勾中的行是否**全部**已在手动合并组里：是的话批量条显示「取消合并」而不是「合并为一镜」。 */
     const selectedAllMerged = selectedRows.size > 0 && Array.from(selectedRows).every((rowIndex) => mergeGroupOfRow.has(rowIndex));
+    /**
+     * 「成片总时长」（用户 2026-11-11 第 01 条）：「需要设定时长的输入区域，默认 30 秒，
+     * 根据输入的时长，拆成对应的总时长镜头内容」。
+     *
+     * 存 `metadata.scriptTotalSeconds` —— **和反推节点 03 写进来的是同一个键**，两条路进来看到的
+     * 数字必须一致，否则用户会以为「反推设了 30，脚本这边还是别的」。
+     * 读值一律走 `resolveScriptTotalSeconds`（没设 / 脏值 = 30），所以框里永远有值：
+     * 留一个「空 = 想写多长写多长」的隐性状态，模型就会按「一条短片」的惯性铺 1~2 分钟，
+     * 而界面上明明写着 30 秒 —— 又是一次「设置没生效」。
+     *
+     * ⚠️ 输入过程用本地草稿 `totalSecondsDraft`：直接把受控值 clamp 到 5 秒，用户敲「3」「0」
+     * 会变成「5」「50」（第一个键就被抬到下限）。所以草稿期间照原样显示，只有落进 5~300 才回写，
+     * 失焦 / 回车后清草稿 → 显示真实生效值。
+     */
+    const totalSeconds = resolveScriptTotalSeconds(node.metadata);
+    const [totalSecondsDraft, setTotalSecondsDraft] = useState<number | null>(null);
+    // 外部改了这个值（03 反推同步 / 撤销）→ 丢掉草稿，否则框里会一直停在旧数字。
+    useEffect(() => {
+        setTotalSecondsDraft(null);
+    }, [node.id, node.metadata?.scriptTotalSeconds]);
+    /** 就地「不限制」：贴长篇小说 / 长剧本照抄时用，打开后任务书不再追加时长硬要求块。 */
+    const totalSecondsUnlimited = isScriptTotalSecondsUnlimited(node.metadata);
+    const totalSecondsSelector = (
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
+            <span className="opacity-60">{t("canvas.scriptNode.totalSecondsLabel")}</span>
+            {/* 包一层：`data-canvas-text-input` 让画布快捷键让路，`stopPropagation` 防止拖节点。 */}
+            <span className="inline-flex" data-canvas-text-input data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+                <InputNumber
+                    size="small"
+                    className="!w-[104px]"
+                    min={SCRIPT_TOTAL_SECONDS_MIN}
+                    max={SCRIPT_TOTAL_SECONDS_MAX}
+                    step={5}
+                    precision={0}
+                    disabled={totalSecondsUnlimited}
+                    value={totalSecondsDraft ?? totalSeconds}
+                    addonAfter={t("canvas.scriptNode.totalSecondsUnit")}
+                    onChange={(value) => {
+                        if (value === null || value === undefined) {
+                            // 清空途中：只丢草稿，不回写（回写会立刻被 30 秒覆盖，框里跳一下）。
+                            setTotalSecondsDraft(null);
+                            return;
+                        }
+                        const next = Math.round(Number(value));
+                        if (!Number.isFinite(next)) return;
+                        setTotalSecondsDraft(next);
+                        // 只有落进合法区间才回写；「3」「0」这种打一半的状态不写，避免被下限 5 掐住。
+                        if (next >= SCRIPT_TOTAL_SECONDS_MIN && next <= SCRIPT_TOTAL_SECONDS_MAX) patchMetadata({ scriptTotalSeconds: next });
+                    }}
+                    onBlur={() => setTotalSecondsDraft(null)}
+                    aria-label={t("canvas.scriptNode.totalSecondsLabel")}
+                    title={t("canvas.scriptNode.totalSecondsHint")}
+                />
+            </span>
+            <button
+                type="button"
+                className="inline-flex h-6 items-center rounded-full border px-2.5 transition"
+                style={{
+                    borderColor: totalSecondsUnlimited ? theme.toolbar.activeText : theme.node.stroke,
+                    // 与其它 pill 同口径：选中实心。
+                    background: totalSecondsUnlimited ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                    color: totalSecondsUnlimited ? theme.node.panel : theme.node.text,
+                    opacity: totalSecondsUnlimited ? 1 : 0.7,
+                }}
+                aria-pressed={totalSecondsUnlimited}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    patchMetadata({ scriptTotalSecondsUnlimited: totalSecondsUnlimited ? undefined : true });
+                }}
+                title={t("canvas.scriptNode.totalSecondsUnlimitedHint")}
+            >
+                {t("canvas.scriptNode.totalSecondsUnlimited")}
+            </button>
+            {totalSecondsUnlimited ? null : (
+                <span className="opacity-45">{t("canvas.scriptNode.totalSecondsShotHint", { count: resolveStoryScriptShotCount(totalSeconds) })}</span>
+            )}
+        </div>
+    );
+
     const segmentSelector = (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
             <span className="opacity-60">{t("canvas.scriptNode.segmentLabel")}</span>
@@ -2239,6 +2325,8 @@ export function CanvasScriptNodeContent({
         <div className="flex min-h-0 flex-1 flex-col gap-1.5 px-2 pb-2">
             {schemeSelector}
             {presetSwitcher}
+            {/* 成片总时长排最前：它决定「拆多少镜」，比「每镜多长」更上位。 */}
+            {totalSecondsSelector}
             {segmentSelector}
             {imageSizeSelector}
             {shotsPerClipSelector}
@@ -3118,6 +3206,9 @@ export function CanvasScriptNodeContent({
                     与「每镜时长」并排，都属于「怎么生成」的那一组。
                     ⚠️「视频分段」「生图比例」已搬到右下角「一键铺链路」下面（见下面的按钮列）：
                     那两个决定的是「铺链路怎么铺」，混在这一长排里用户找不到。 */}
+                {/* 成片总时长也常驻表体操作条：翻表时想「改个时长再重生成」不用切回输入视图
+                    （与「每镜时长」同理，用户 2026-11-11 第 01 条）。 */}
+                {totalSecondsSelector}
                 {schemeSelector}
                 {/* 每镜时长也放到表体操作条：用户看分镜表时就能直接改，不用切回「输入」视图再找。
                     选单镜 → 每镜一段（10/15 锁定成片秒数、5 秒是上限）；选「按每段时长」→ 连续几镜凑够 N 秒。 */}
