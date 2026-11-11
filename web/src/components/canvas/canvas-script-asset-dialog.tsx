@@ -7,7 +7,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
 import { CanvasSizePicker } from "@/components/canvas/canvas-size-picker";
-import { collectScriptAssetPromptCandidates, resolveStoryScriptImageSize, scriptAssetColumnRole, SCRIPT_ASSET_GENERATABLE_ROLE_IDS, SCRIPT_ASSET_ROLE_IDS, SCRIPT_PROP_ASSET_LIMIT, type ScriptAssetPromptCandidate, type ScriptAssetRole, type StoryScriptRow } from "@/constant/story-script";
+import { collectScriptAssetPromptCandidates, resolveStoryScriptImageSize, scriptAssetColumnRole, SCRIPT_ASSET_GENERATABLE_ROLE_IDS, SCRIPT_ASSET_ROLE_IDS, SCRIPT_PROP_ASSET_LIMIT, SCRIPT_PROP_ASSET_TOTAL_LIMIT, type ScriptAssetPromptCandidate, type ScriptAssetRole, type StoryScriptRow } from "@/constant/story-script";
 import { resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import { isAudioFile } from "@/lib/canvas/canvas-generation-helpers";
@@ -496,9 +496,10 @@ export function CanvasScriptAssetDialog({ open, theme, candidates, rows, onClose
                     ) : (
                         <div className="text-[11px] opacity-50">{t("canvas.scriptNode.assetGenNoCandidate")}</div>
                     )}
-                    {/* 道具为什么只有几条：一格道具列可能写了十几件，但只有关键道具单独出图（用户 2026-11-09 报障）。 */}
+                    {/* 道具为什么只有几条：一格道具列可能写了十几件，但只有**跨镜出现的关键道具**单独出图
+                        （用户 2026-11-09 / 2026-11-11 报障：重复道具、一次性道具不该各出一张）。 */}
                     {genRole === "prop" ? (
-                        <div className="text-[11px] opacity-50">{t("canvas.scriptNode.assetPropLimitHint", { n: SCRIPT_PROP_ASSET_LIMIT })}</div>
+                        <div className="text-[11px] opacity-50">{t("canvas.scriptNode.assetPropLimitHint", { n: SCRIPT_PROP_ASSET_LIMIT, total: SCRIPT_PROP_ASSET_TOTAL_LIMIT })}</div>
                     ) : null}
                 </>
             )}

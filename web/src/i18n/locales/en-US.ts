@@ -895,7 +895,7 @@ export default {
             assetTabGenerate: "AI generate",
             assetGenHint: "No image on hand? Use an asset description from the storyboard table as the prompt and let AI generate the asset image; the node is created and wired as upstream material automatically",
             assetGenFromTable: "Use a description from the table (click to fill)",
-            assetPropLimitHint: "Only the key props get their own generated image (at most {{n}} per shot); minor tableware, ornaments, tissues and packaging do not need a separate asset — describe them in the shot/description field and they come along with the frame",
+            assetPropLimitHint: "Only the key props get their own generated image (at most {{n}} per shot, {{total}} per table); different spellings of the same prop (`面碗` / `青花瓷面碗`, `两杯茶` / `茶`) are merged into one; a one-off prop that appears in a single shot is not generated — describe it in the shot/description field and it comes along with the frame",
             assetGenNoCandidate: "This asset type has no description column in the table — type the prompt manually",
             assetGenPromptLabel: "Generation prompt",
             assetGenPromptPlaceholder: "Describe the look, style and shot of this character / scene / prop",

@@ -288,6 +288,8 @@ You generate a structured story-script table from an uploaded script excerpt.
 - \`prop\` should name **only the key object(s) this shot really depends on**, at most **3 per shot**, joined by \`、\` when several; \`prop_description\` describes their look, material and state.
 - 🔴 Every prop you list becomes **its own generated asset image**. One-off tableware, ornaments, tissues, packaging and background clutter must **not** go into \`prop\` — describe them in one clause inside \`visual_description\` instead (that column feeds the shot prompt, so the frame still shows them); \`prop_description\` only adds their material / state detail. Write \`无\` when the shot has no key prop.
 - 🔴 Name **whole objects, not their parts**: one object together with its parts / accessories / contents counts as **one** prop (\`手机、手机壳、屏幕\` → just \`手机\`; \`自行车、车把、车座、车轮\` → just \`自行车\`). Never split one physical object into several prop entries.
+- 🔴 **One prop = one identical name across the whole table.** If the same bowl appears in shot 2 and shot 7, write the exact same string in both — never \`面碗\` in one row and \`青花瓷面碗\` in another, and never put quantities in the name (\`两杯茶\` → \`茶\`). Each distinct spelling becomes a **separate generated image**.
+- 🔴 **Only props that recur across shots are worth generating**: a prop that appears in a single shot and carries no story weight belongs in \`visual_description\`, not \`prop\`.
 - \`blocking\` should read like a floor plan in words: left / right / centre, foreground / midground / background, facing direction, and how far apart the characters are.
 - \`style_prompt\` describes the image style for this shot — film stock / colour grade / texture / grain / reference genre or director. Keep it identical across shots in the same scene, and write \`无\` when no particular style is needed.
 
@@ -1491,21 +1493,214 @@ export function pickScriptPropAssetNames(names: readonly string[], frequency?: R
         .map((entry) => entry.name);
 }
 
-/** 全表每个道具名出现在几镜（`使用频率不高` 的量化口径；只在需要截断时参与排序）。 */
-function scriptPropShotFrequency(rows: readonly StoryScriptRow[], specs: ReadonlyArray<{ nameKey?: string; textKeys: string[] }>): Map<string, number> {
-    const freq = new Map<string, number>();
-    for (const row of rows) {
-        const seen = new Set<string>();
+/**
+ * 全表每个道具名出现在几镜 —— 已并入 `planScriptPropAssets(...).shotsByRaw`
+ * （那份计划同时做「跨镜写法收敛」，单看原始写法的频次会低估同一件道具的出现次数）。
+ */
+
+
+/**
+ * 「这件道具**跨镜出现几镜**才值得单独出一张资产图」（用户 2026-11-11 报障：
+ * 「一键生成的时候，减少道具的生成，现在道具还是生出了一堆重复的道具…同样的道具生成了 2 次、3 次」）。
+ *
+ * 一镜里写到的次要道具（餐具 / 摆件 / 纸巾 / 包装）本来就不该单独出图 —— 它们留在格子里当文字，
+ * 画面照样生得出来。真正需要单独出图的只有「跨镜要长得一模一样」的那几件。
+ * 2 = 至少在两个镜头里出现。想更严格就改成 3；想恢复「每件都出图」就改成 1。
+ */
+export const SCRIPT_PROP_ASSET_MIN_SHOTS = 2;
+/**
+ * 全表道具资产图**总数上限**（不管表多长）。防的是「每条都出现在 2 镜、于是 20 件都出图」。
+ * 排序口径 = 出现镜数降序，同频次按表里首次出现顺序。
+ */
+export const SCRIPT_PROP_ASSET_TOTAL_LIMIT = 6;
+/**
+ * 保底件数：**只有「一件都不满足」时**才兜底（整张表没有一件道具跨 2 镜 → 按频次留这么几件出图）。
+ * 不写成「不足 N 件就补齐」：那会让「只有 1 件跨镜道具」的表又冒出 1 件一次性道具的图。
+ */
+export const SCRIPT_PROP_ASSET_MIN_KEEP = 2;
+
+/** 量词表 —— 只用于剥掉「两杯 / 3 个 / 半颗」这类**数量前缀**（见 `normalizeScriptPropAssetKey`）。 */
+const SCRIPT_PROP_MEASURE_WORDS = "个只双对份杯碗碟盘瓶罐盒包袋桶壶支根条块片串把张件台部架辆艘扇门束朵颗粒枚摞沓组套堆口";
+
+/**
+ * 道具名归一化键（**只用于判断「两处写的是不是同一件」**，绝不写回表格、也不改用户能看到的名字）。
+ *
+ * 同一件道具在分镜表里被写成好几种样子是常态，而**每一种写法都会各生一张资产图**（真金白银）：
+ *  - 数量前缀：`两杯蜜桃乌龙茶` / `3 个鸡蛋` / `半颗卤蛋`；
+ *  - 括号注释：`口红（正装）` / `酒杯（左）`；
+ *  - 数量后缀：`筷子 ×2` / `椅子x4`。
+ * 以上三种剥掉之后再只去标点空白，得到「同一件」的判定键。
+ *
+ * ⚠️ **不做同义词替换**（`面碗` ≠ `瓷碗`、`手机` ≠ `电话`）：猜错会把两件不同的道具并成一张图，
+ * 比漏并更糟。跨镜的「简写 vs 全称」（`面碗` ⊂ `青花瓷面碗`）由 `isSameScriptPropName` 的后缀包含兜住。
+ */
+export function normalizeScriptPropAssetKey(value: unknown): string {
+    let text = String(value ?? "").trim();
+    if (!text) return "";
+    // ① 末尾括号注释 / 数量后缀（最多剥三层，`口红（正装）（左）` 这种也能清干净）
+    for (let guard = 0; guard < 3; guard += 1) {
+        const next = text
+            .replace(/[（(][^（()）]*[）)]\s*$/u, "")
+            .replace(/[×xX*]\s*\d+\s*$/u, "")
+            .trim();
+        if (next === text || !next) break;
+        text = next;
+    }
+    // ② 数量前缀：**必须带量词**才剥（否则「三体」「一个都不能少」这种名字会被吃头）
+    const quantity = new RegExp(`^(?:[0-9]+|[一二两三四五六七八九十几半整满]{1,2})\\s*[${SCRIPT_PROP_MEASURE_WORDS}]\\s*`, "u");
+    const stripped = text.replace(quantity, "").trim();
+    if (stripped.length >= 2) text = stripped;
+    // ③ 只去标点 / 空白，汉字原样保留
+    return text
+        .toLowerCase()
+        .replace(/[\s\-—–－_·•.。:：,，、;；/\\|()（）\[\]【】{}"'“”‘’]+/gu, "");
+}
+
+/**
+ * 两处写法是不是同一件道具。三条判据都很保守（宁可漏并，不可错并）：
+ *  1. 归一化后完全相同（`两杯蜜桃乌龙茶` ↔ `蜜桃乌龙茶（两杯）`）；
+ *  2. **后缀包含**（`面碗` ⊂ `青花瓷面碗`，只认 ≥2 字的短名字，避免把单字并掉）；
+ *  3. **前缀 + 零件尾字**（`手机壳` = `手机` + `壳`，尾字表见 `SCRIPT_PROP_PART_TAILS`）。
+ */
+export function isSameScriptPropName(left: unknown, right: unknown): boolean {
+    const a = normalizeScriptPropAssetKey(left);
+    const b = normalizeScriptPropAssetKey(right);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    if (a.length >= 2 && b.endsWith(a)) return true;
+    if (b.length >= 2 && a.endsWith(b)) return true;
+    const shorter = a.length <= b.length ? a : b;
+    const longer = a.length <= b.length ? b : a;
+    if (shorter.length >= 2 && longer.startsWith(shorter)) {
+        const tail = longer.slice(shorter.length);
+        if (tail.length <= 4 && SCRIPT_PROP_PART_TAILS.includes(tail)) return true;
+    }
+    return false;
+}
+
+export type ScriptPropAssetPlan = {
+    /** 表里写的那串名字 → **代表名**（同一件道具的多写法收敛成一个，建节点 / 上锁都用它） */
+    titleByRaw: Map<string, string>;
+    /** 表里写的那串名字 → 这件道具**跨镜出现几镜**（同镜写两次只算一镜） */
+    shotsByRaw: Map<string, number>;
+    /** 需要单独出图的**代表名**集合 */
+    keep: Set<string>;
+    /** 按「出现镜数降序、首次出现顺序」排好的代表名（提示 / 调试用） */
+    ranked: string[];
+};
+
+/**
+ * 道具资产的**跨镜整合 + 重要性收口**（用户 2026-11-11 第 03 条）：
+ * 「同样的道具生成了 2 次、3 次…另外不重要的道具就别生了，该整合整合」。
+ *
+ * 三件事，都在这一处算，两条生成入口（`collectScriptAssetCellTargets` /
+ * `collectScriptAssetPromptCandidates`）必须共用同一份计划（各算一份必然漂移）：
+ *  ① **同一件只留一个代表名**：`蜜桃乌龙茶` / `两杯蜜桃乌龙茶` / `蜜桃乌龙茶（两杯）` → `蜜桃乌龙茶`；
+ *     `面碗` / `青花瓷面碗` → `青花瓷面碗`（取更具体的那个当代表名，图才画得准）；
+ *  ② **跨镜频次**：同一件道具出现在几镜（`shotsByRaw`），一格内限件时按它排序；
+ *  ③ **只留值得出图的**：出现 ≥ `SCRIPT_PROP_ASSET_MIN_SHOTS` 镜的才出图，
+ *     总数不超过 `SCRIPT_PROP_ASSET_TOTAL_LIMIT`，一件都不满足时按频次保底留
+ *     `SCRIPT_PROP_ASSET_MIN_KEEP` 件。
+ *
+ * ⚠️ 只压「出图清单」，**绝不改格子文字**：被砍掉的道具仍写在道具列 / 道具描述 / 画面描述里，
+ * 画面照生（与 `pickScriptPropAssetNames` 的口径一致）。
+ */
+export function planScriptPropAssets(rows: readonly StoryScriptRow[] | null | undefined, specs: ReadonlyArray<{ nameKey?: string }>): ScriptPropAssetPlan {
+    const titleByRaw = new Map<string, string>();
+    const shotsByRaw = new Map<string, number>();
+    const empty: ScriptPropAssetPlan = { titleByRaw, shotsByRaw, keep: new Set(), ranked: [] };
+    if (!rows?.length || !specs.length) return empty;
+
+    /** 每个代表名 → 它出现过的镜数（用镜号 + 行下标去重，同镜写两次只算一次）。 */
+    type Cluster = { rep: string; shots: Set<number>; order: number };
+    const clusters: Cluster[] = [];
+    /** 原始名 → cluster 下标（名字可能在后续镜头里被并到更具体的代表名上，所以存下标而不是名字）。 */
+    const clusterOfRaw = new Map<string, number>();
+
+    rows.forEach((row, index) => {
+        const shotNo = Math.round(Number(row.shot_no)) || index + 1;
+        const seenThisShot = new Set<number>();
         for (const spec of specs) {
             if (!spec.nameKey) continue;
-            for (const one of splitScriptAssetNames(row[spec.nameKey])) {
-                if (seen.has(one)) continue;
-                seen.add(one);
-                freq.set(one, (freq.get(one) || 0) + 1);
+            for (const raw of splitScriptAssetNames(row[spec.nameKey])) {
+                const name = raw.trim();
+                if (!name) continue;
+                let indexOfCluster = clusterOfRaw.get(name);
+                if (indexOfCluster === undefined) {
+                    // 找一个「已经有代表名、且与它判定相同」的簇（**表里先出现的赢**，保证顺序稳定）
+                    const found = clusters.findIndex((cluster) => isSameScriptPropName(cluster.rep, name));
+                    if (found >= 0) {
+                        indexOfCluster = found;
+                        /**
+                         * 并进去之后代表名要不要换：命中「后缀包含」时取**更具体**的那个
+                         * （`面碗` → `青花瓷面碗`）；归一化后完全相同则取**更短**的那个
+                         * （`两杯蜜桃乌龙茶` → `蜜桃乌龙茶`，少一层噪声）。
+                         */
+                        const cluster = clusters[found];
+                        const sameNormalized = normalizeScriptPropAssetKey(cluster.rep) === normalizeScriptPropAssetKey(name);
+                        const shouldReplace = sameNormalized ? name.length < cluster.rep.length : name.length > cluster.rep.length;
+                        if (shouldReplace) {
+                            // 代表名换了，之前映射到旧代表名的写法一起改指过来
+                            for (const [key, value] of titleByRaw) if (value === cluster.rep) titleByRaw.set(key, name);
+                            cluster.rep = name;
+                        }
+                    } else {
+                        indexOfCluster = clusters.length;
+                        clusters.push({ rep: name, shots: new Set(), order: clusters.length });
+                    }
+                    clusterOfRaw.set(name, indexOfCluster);
+                }
+                const cluster = clusters[indexOfCluster];
+                titleByRaw.set(name, cluster.rep);
+                if (!seenThisShot.has(indexOfCluster)) {
+                    seenThisShot.add(indexOfCluster);
+                    cluster.shots.add(shotNo);
+                }
             }
         }
+    });
+
+    // 代表名可能在合并过程中变过 → 统一回填一遍（`titleByRaw` 的 value 永远是最终代表名）
+    for (const [raw, rep] of titleByRaw) {
+        const indexOfCluster = clusterOfRaw.get(raw);
+        if (indexOfCluster !== undefined) titleByRaw.set(raw, clusters[indexOfCluster].rep);
+        else titleByRaw.set(raw, rep);
     }
-    return freq;
+    for (const [raw, indexOfCluster] of clusterOfRaw) shotsByRaw.set(raw, clusters[indexOfCluster].shots.size);
+
+    const ranked = clusters
+        .map((cluster) => ({ title: cluster.rep, shots: cluster.shots.size, order: cluster.order }))
+        .sort((left, right) => right.shots - left.shots || left.order - right.order)
+        .map((entry) => entry.title);
+
+    const keep = new Set(ranked.filter((title) => (clusters.find((cluster) => cluster.rep === title)?.shots.size || 0) >= SCRIPT_PROP_ASSET_MIN_SHOTS).slice(0, SCRIPT_PROP_ASSET_TOTAL_LIMIT));
+    /**
+     * 保底**只在「一件都不满足」时**生效：整张表没有一件道具跨 2 镜（典型的短剧：每镜一件不同小物），
+     * 就按频次取前几件出图，否则会出现「一件道具资产都没有」—— 铺链路时主角道具连图都没得连。
+     * ⚠️ 不要写成「不足 N 件就补齐」：那会让「只有 1 件跨镜道具」的表又冒出 1 件一次性道具的图，
+     * 正好把这次收口白做（用户要的就是「不重要的别生」）。
+     */
+    if (!keep.size && ranked.length) {
+        for (const title of ranked) {
+            if (keep.size >= Math.min(SCRIPT_PROP_ASSET_MIN_KEEP, SCRIPT_PROP_ASSET_TOTAL_LIMIT)) break;
+            keep.add(title);
+        }
+    }
+    return { titleByRaw, shotsByRaw, keep, ranked };
+}
+
+/**
+ * 把一个格子里的道具名收敛成**代表名**，并丢掉不重要的那几件。
+ * 返回顺序 = 入参顺序（格子里作者写的先后），只去重、不重排。
+ */
+export function resolveScriptPropAssetTitles(plan: ScriptPropAssetPlan, names: readonly string[]): string[] {
+    const out: string[] = [];
+    for (const name of names) {
+        const title = plan.titleByRaw.get(name) || name;
+        if (!plan.keep.has(title)) continue;
+        if (!out.includes(title)) out.push(title);
+    }
+    return out;
 }
 
 
@@ -3010,12 +3205,24 @@ const SCRIPT_ASSET_DESCRIPTION_COLUMNS: Record<ScriptAssetRole, Array<{ columnKe
  */
 export type ScriptAssetCellTarget = { shotNo: number; columnKey: string; title: string; name: string };
 
-export function collectScriptAssetCellTargets(role: unknown, rows?: readonly StoryScriptRow[] | null): ScriptAssetCellTarget[] {
+/** `collectScriptAssetCellTargets` 的选项（口径同 `ScriptAssetPromptCandidateOptions`）。 */
+export type ScriptAssetCellTargetOptions = {
+    /**
+     * 道具**不做重要性收口**：只出现 1 镜的道具也照样给出格位。
+     * 只给参考图挂载（`matchScriptAssetReferences` / `buildScriptAssetBatchMounts`）用 ——
+     * 用户连进来的产品图命中一件单镜道具时，图必须挂得上去，否则那张图等于白给。
+     */
+    allProps?: boolean;
+};
+
+export function collectScriptAssetCellTargets(role: unknown, rows?: readonly StoryScriptRow[] | null, options: ScriptAssetCellTargetOptions = {}): ScriptAssetCellTarget[] {
     const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
     if (!specs.length || !rows?.length) return [];
     const multiNameRole = isMultiNameAssetRole(role);
     const propRole = resolveScriptAssetRole(role) === "prop";
-    const propFrequency = propRole ? scriptPropShotFrequency(rows, specs) : null;
+    /** 道具：跨镜整合 + 重要性收口都看这一份计划（两条入口共用一个函数，别各算一份）。 */
+    const propPlan = propRole ? planScriptPropAssets(rows, specs) : null;
+    const propFrequency = propPlan ? propPlan.shotsByRaw : null;
     const out: ScriptAssetCellTarget[] = [];
     rows.forEach((row, index) => {
         const shotNo = Math.round(Number(row.shot_no)) || index + 1;
@@ -3032,9 +3239,23 @@ export function collectScriptAssetCellTargets(role: unknown, rows?: readonly Sto
              * 后面铺链路也认不出谁是谁（用户 2026-11-08 第 19 条报障）。
              */
             const splitNames = multiNameRole && name ? splitScriptAssetNames(name) : [];
-            // 道具一格列 10 件（餐具 / 摆件全单列）→ 一次生成 10 张图（用户 2026-11-09 报障）：
-            // 生成侧按 `SCRIPT_PROP_ASSET_LIMIT` 收口，超出的只当文字，不再占格位。
-            const names = propRole ? pickScriptPropAssetNames(splitNames, propFrequency) : splitNames;
+            /**
+             * 道具走**独立分支**，两条收口叠在一起（用户 2026-11-11 第 03 条）：
+             *  ① 一格之内：`pickScriptPropAssetNames` 把零件并回主体 + 最多 `SCRIPT_PROP_ASSET_LIMIT` 件；
+             *  ② 跨镜之间：`planScriptPropAssets` 把同一件道具的多种写法收敛成一个代表名、
+             *     再把「只出现 1 镜的一次性道具」整件剔掉（不单独出图）。
+             * `title` 用代表名（建节点 / 去重 / 挂格都用它），`name` 仍是格子里那种写法 ——
+             * 资产锁（`scriptNameLocks`）是按**格子原文**查的，写代表名会让 `面碗` 那一格查不到锁。
+             */
+            if (propRole && propPlan && name) {
+                const picked = options.allProps ? mergeScriptPropPartNames(splitNames) : pickScriptPropAssetNames(splitNames, propFrequency);
+                for (const one of picked) {
+                    const titles = options.allProps ? [propPlan.titleByRaw.get(one) || one] : resolveScriptPropAssetTitles(propPlan, [one]);
+                    for (const title of titles) out.push({ shotNo, columnKey: spec.columnKey, title, name: one });
+                }
+                continue;
+            }
+            const names = splitNames;
             if (names.length > 1) {
                 for (const one of names) out.push({ shotNo, columnKey: spec.columnKey, title: one, name: one });
                 continue;
@@ -3056,13 +3277,40 @@ export function collectScriptAssetCellTargets(role: unknown, rows?: readonly Sto
  * 「名字 + 描述」**，否则同一个角色会冒出「名字 / 完整描述」和「名字 / 只有名字」两条候选，
  * 而且顺序靠后的那条描述还是残缺的。万一先出现的是空描述（手改过的表），后来补上的描述会覆盖回去。
  */
-export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonly StoryScriptRow[] | null): ScriptAssetPromptCandidate[] {
+/**
+ * `collectScriptAssetPromptCandidates` 的选项。
+ */
+export type ScriptAssetPromptCandidateOptions = {
+    /**
+     * 道具**不做重要性收口**：表里写过的每一件道具都返回（只做跨镜/同格写法归并），
+     * 不再按「出现 ≥2 镜」过滤。
+     *
+     * 只给**参考图挂载**用（`matchScriptAssetReferences`）：它要认的是「分镜表里写过的所有道具名」，
+     * 与「这件道具值不值得单独出一张资产图」完全无关 —— 用收口后的清单会让只在 1 镜出现的道具
+     * 认不到用户连进来的产品图（图白给，那件道具还会照旧被生图）。
+     */
+    allProps?: boolean;
+};
+
+export function collectScriptAssetPromptCandidates(
+    role: unknown,
+    rows?: readonly StoryScriptRow[] | null,
+    options: ScriptAssetPromptCandidateOptions = {},
+): ScriptAssetPromptCandidate[] {
     const specs = SCRIPT_ASSET_DESCRIPTION_COLUMNS[resolveScriptAssetRole(role)];
     if (!specs.length || !rows?.length) return [];
     const multiNameRole = isMultiNameAssetRole(role);
     const propRole = resolveScriptAssetRole(role) === "prop";
-    const propFrequency = propRole ? scriptPropShotFrequency(rows, specs) : null;
+    /** 道具：跨镜整合 + 重要性收口（与 `collectScriptAssetCellTargets` 同一份计划）。 */
+    const propPlan = propRole ? planScriptPropAssets(rows, specs) : null;
+    const propFrequency = propPlan ? propPlan.shotsByRaw : null;
     const out: ScriptAssetPromptCandidate[] = [];
+    /**
+     * 道具的提示词按**代表名**归并：同一件道具在 A 镜写全了描述、B 镜只写了名字，
+     * 候选里只能有一条、而且必须是描述最全的那条（以前按写法各出一条 → 同一件道具出 2~3 张图）。
+     * Map 的插入顺序 = 表里首次出现顺序，所以最后按它 push 就保住了「与表一致的顺序」。
+     */
+    const propPromptByTitle = new Map<string, { prompt: string; detailed: boolean }>();
     const seen = new Map<string, number>();
     /** 按标题去重 + 「只剩名字 → 有真描述就升级」的唯一入口（单名字 / 多名字两条路共用）。 */
     const upsert = (title: string, prompt: string, meaningful: boolean) => {
@@ -3086,12 +3334,32 @@ export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonl
              * → 名字本身。绝不把「一群人的描述」整段塞给某一个人（那样五张角色卡会长一样），
              * 也绝不把「四件道具」当成一条去生一张「道具全家福」（用户 2026-11-08 第 19 条报障）。
              */
+            if (propRole && propPlan && name) {
+                /**
+                 * ① 一格之内：零件并回主体 + 最多 `SCRIPT_PROP_ASSET_LIMIT` 件（按跨镜频次排序）。
+                 * ⚠️ `options.allProps`（只给参考图挂载用）时**连一格 3 件的上限也不收**：
+                 * 一格写了 10 件、用户连进来的图正好是第 8 件，照样要认得出。
+                 */
+                const picked = options.allProps ? mergeScriptPropPartNames(splitScriptAssetNames(name)) : pickScriptPropAssetNames(splitScriptAssetNames(name), propFrequency);
+                for (const one of picked) {
+                    // ② 跨镜之间：收敛到代表名；不在 keep 里（只出现 1 镜的一次性道具）直接不生成
+                    const titles = options.allProps ? [propPlan.titleByRaw.get(one) || one] : resolveScriptPropAssetTitles(propPlan, [one]);
+                    if (!titles.length) continue;
+                    const title = titles[0];
+                    const own = findStoryScriptAssetDescription(rows, spec, one, row) || pickScriptNamedDescription(text, one);
+                    const prompt = own || one;
+                    const detailed = Boolean(own);
+                    const prev = propPromptByTitle.get(title);
+                    // 都有真描述时取更长的那条（更具体的材质 / 状态能画出更准的图）；只剩名字的一条随时让位。
+                    if (!prev) propPromptByTitle.set(title, { prompt, detailed });
+                    else if (detailed && (!prev.detailed || prompt.length > prev.prompt.length)) propPromptByTitle.set(title, { prompt, detailed });
+                }
+                continue;
+            }
             if (multiNameRole && name) {
                 const splitNames = splitScriptAssetNames(name);
-                // 道具：只保留 `SCRIPT_PROP_ASSET_LIMIT` 件（出现镜数多的优先），其余留在文字里、不单独出图。
-                const names = propRole ? pickScriptPropAssetNames(splitNames, propFrequency) : splitNames;
-                if (names.length > 1) {
-                    for (const one of names) {
+                if (splitNames.length > 1) {
+                    for (const one of splitNames) {
                         const own = findStoryScriptAssetDescription(rows, spec, one, row) || pickScriptNamedDescription(text, one);
                         upsert(one, own || one, Boolean(own));
                     }
@@ -3104,6 +3372,7 @@ export function collectScriptAssetPromptCandidates(role: unknown, rows?: readonl
             upsert(title, prompt, hasMeaningfulAssetDescription(text));
         }
     }
+    for (const [title, entry] of propPromptByTitle) out.push({ title, prompt: entry.prompt });
     return out;
 }
 
@@ -3686,6 +3955,7 @@ export const STORY_SCRIPT_CAST_COMPLETENESS_HINT = [
     "- 一格写了多个名字时，`character_description_N` 必须**逐人分条**：`苏晚：28岁女性……｜阿杰：30岁男性……｜小雨：……`（用 `｜` 分隔），每个人都有自己的一条外观卡；只描述第一个人的写法视为不合格。",
     "- 源内容里的段头 `【场景】` / `【人物】` / `【道具】` 是**作者写死的这一段资产清单**（例如 `【场景】外景·街角咖啡店门口 - 午后` / `【人物】女人、男人` / `【道具】外带咖啡杯、纸巾`）：这一段就算拆成 3 个镜头，**每一镜都要把这段的人物全写进角色列、场景列写同一个场景名**。拆分镜只改变景别 / 机位 / 动作，**不许改出场名单**。",
     "- ⚠️ `【道具】` 是**例外，不要照抄**：段头那一串是「这一段可能出现的所有东西」（常含餐具、摆件、纸巾、包装、门帘这类次要物件），而**道具列只挑这一镜真正依赖、跨镜要保持同一个样子的关键道具，一镜最多 3 件**；次要道具改用一句话写进「画面描述」。道具列每多写一件就多一张资产图 —— 宁可少写，不要凑数。",
+    "- 🔴 **同一件道具在全表必须用完全相同的名字**：这一镜写 `面碗`、那一镜写 `青花瓷面碗`，或写成 `两杯茶`，都会被当成**不同的道具各生一张图**；名字里不要带数量。只在一镜出现、后面不再用的道具**不要**写进道具列，写进「画面描述」即可（画面照样带得出来）。",
     "- 场景列每一镜都必须有名字：同一场次沿用同一个场景名，不要写 `无`、不要留空。",
 ].join("\n");
 

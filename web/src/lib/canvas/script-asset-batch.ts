@@ -515,10 +515,13 @@ export type ScriptAssetBatchMount = { shotNo: number; columnKey: string; name: s
  * 标题口径也一致（`collectScriptAssetCellTargets` 与 `collectScriptAssetPromptCandidates` 同源），
  * 所以「弹窗里勾了哪一条」就能精确映射到「这张图要挂哪几格」。
  */
-export function buildScriptAssetBatchMounts(rows?: readonly StoryScriptRow[] | null): Record<string, ScriptAssetBatchMount[]> {
+export function buildScriptAssetBatchMounts(
+    rows?: readonly StoryScriptRow[] | null,
+    options: { allProps?: boolean } = {},
+): Record<string, ScriptAssetBatchMount[]> {
     const out: Record<string, ScriptAssetBatchMount[]> = {};
     for (const role of SCRIPT_ASSET_GENERATABLE_ROLE_IDS) {
-        for (const target of collectScriptAssetCellTargets(role, rows)) {
+        for (const target of collectScriptAssetCellTargets(role, rows, options)) {
             const key = scriptAssetBatchKey(role, target.title);
             const list = out[key] || (out[key] = []);
             // 同一镜同一列只挂一次（同名列在 extras 里重复声明之类的脏数据）。
@@ -658,7 +661,13 @@ export function matchScriptAssetReferences(
     if (!refs.length || !rows?.length) return { matches: [], unmatched: refs };
     const candidates: Array<{ role: ScriptAssetRole; title: string; key: string; norm: string; matchable: boolean }> = [];
     for (const role of roles) {
-        for (const item of collectScriptAssetPromptCandidates(role, rows)) {
+        /**
+         * 🔴 `allProps: true` —— **参考图挂载必须看到表里写过的每一件道具**。
+         * 道具资产「只给跨 2 镜的单独出图」的收口（`planScriptPropAssets`）是**生成侧**口径；
+         * 这里要的是「用户连进来的这张图对应表里哪件道具」，与是否值得生成无关。
+         * 用收口后的清单 → 只在 1 镜出现的道具认不到图（图白给，那件道具还会被照旧生图）。
+         */
+        for (const item of collectScriptAssetPromptCandidates(role, rows, { allProps: true })) {
             const norm = normalizeScriptAssetReferenceName(item.title);
             if (!norm) continue;
             /**
@@ -673,7 +682,7 @@ export function matchScriptAssetReferences(
         }
     }
     if (!candidates.length) return { matches: [], unmatched: refs };
-    const mountsByKey = buildScriptAssetBatchMounts(rows);
+    const mountsByKey = buildScriptAssetBatchMounts(rows, { allProps: true });
     const claimed = new Set<string>();
     /** 已被认领的资产名（归一化）—— 用来识别「同一件道具的第二张图」，别把它兜底到别的道具上。 */
     const claimedNorms: string[] = [];

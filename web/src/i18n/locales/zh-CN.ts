@@ -895,7 +895,7 @@ export default {
             assetTabGenerate: "AI 生成",
             assetGenHint: "手上没有图时，用分镜表里的资产描述当提示词，直接让 AI 生成这张资产图；生成后会自动建好节点并连成脚本节点的上游素材",
             assetGenFromTable: "用分镜表里的描述（点击填入）",
-            assetPropLimitHint: "道具只给关键的那几件单独出图（一镜最多 {{n}} 件）；餐具、摆件、纸巾、包装这类次要道具不用单独生成，写进「画面描述 / 道具描述」就会跟着画面一起生出来",
+            assetPropLimitHint: "道具只给关键的那几件单独出图（一镜最多 {{n}} 件、全表最多 {{total}} 件）；同一件道具的不同写法（`面碗` / `青花瓷面碗`、`两杯茶` / `茶`）已经合并成一件；只在某一镜出现、后面不再用的一次性道具不单独生成 —— 写进「画面描述 / 道具描述」就会跟着画面一起生出来",
             assetGenNoCandidate: "分镜表里没有这一类资产的描述列，请直接手写提示词",
             assetGenPromptLabel: "生成提示词",
             assetGenPromptPlaceholder: "描述这个角色 / 场景 / 道具的外形、风格与镜头",
