@@ -574,6 +574,15 @@ const RECOMMENDED_MODEL_NAMES = ["seedance2.0fast", "wan3.0"] as const;
 const RECOMMENDED_MODEL_COLOR = { dark: "#4ade80", light: "#15803d" } as const;
 
 /**
+ * 置顶组的标题。
+ *
+ * 两个标绿的常用模型不只染色，还要**排到最前面**（`Seedance2.0 fast` 第一、`wan3.0` 第二）：
+ * 生视频类目下几十个模型，光靠颜色还是得往下翻。置顶做成单独一组、并从原分组里剔掉，
+ * 避免同一个 `modelKey` 在选项表里出现两次（antd 会出现两项同时高亮、搜索出重复项）。
+ */
+const RECOMMENDED_GROUP_LABEL = "常用";
+
+/**
  * 算出该标绿的 `modelKey` 集合。
  *
  * 🔴 同名不同 id 在 MochiAni 里是常态（`Seedance2.0 fast` = 90/130，`wan3.0` = 187/191），
@@ -1338,12 +1347,14 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     }, [hasModelCategory, models, videoCategory]);
 
     /**
-     * 下拉选项：按模态分组（生视频 / 生图 / 音频 / 文本 / 其他）。
+     * 下拉选项：**常用置顶**，其余按模态分组（生视频 / 生图 / 音频 / 文本 / 其他）。
      *
-     * - 只有一组时**不加组标题**（多一行灰字纯噪音）；
+     * - 标绿的两个（Seedance2.0 fast / wan3.0）先固定成「常用」组排最前：`RECOMMENDED_MODEL_NAMES`
+     *   的顺序就是它们的位次（fast 第一、wan3.0 第二）；目录里没有的那个自动跳过，不占位；
+     * - 置顶项从原分组里剔除 —— 同一个 `modelKey` 出现两次会让 antd 两项同时高亮、搜索出重复；
+     * - 只有一组时**不加组标题**（多一行灰字纯噪音）—— 但一旦有「常用」置顶，下面的分组要留标题；
      * - 组标题带数量，方便一眼看出「视频多少个、图多少个」；
-     * - 同名不同 id 的模型仍带 `#id` 后缀（MochiAni 确实有这种）；
-     * - 常用的那两个（Seedance2.0 fast / wan3.0）标绿，几十个模型里一眼能挑到。
+     * - 同名不同 id 的模型仍带 `#id` 后缀（MochiAni 确实有这种）。
      */
     const recommendedKeys = useMemo(() => recommendedModelKeys(models), [models]);
     const recommendedColor = RECOMMENDED_MODEL_COLOR[themeMode] || RECOMMENDED_MODEL_COLOR.dark;
@@ -1351,22 +1362,40 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
     const modelOptions = useMemo<NonNullable<SelectProps["options"]>>(() => {
         const counter = new Map<string, number>();
         for (const item of visibleModels) counter.set(item.modelName, (counter.get(item.modelName) || 0) + 1);
+        const toOption = (item: ModelOption) => ({
+            value: item.modelKey,
+            label: (counter.get(item.modelName) || 0) > 1 ? `${item.modelName} · #${item.modelId}` : item.modelName,
+        });
 
         const groups = new Map<string, { order: number; label: string; items: { value: string; label: string }[] }>();
         for (const item of visibleModels) {
             const info = modelKindInfo(item);
             const group = groups.get(info.key) || { order: info.order, label: info.label, items: [] };
-            group.items.push({
-                value: item.modelKey,
-                label: (counter.get(item.modelName) || 0) > 1 ? `${item.modelName} · #${item.modelId}` : item.modelName,
-            });
+            group.items.push(toOption(item));
             groups.set(info.key, group);
         }
 
         const ordered = Array.from(groups.values()).sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
-        if (ordered.length <= 1) return ordered[0]?.items || [];
-        return ordered.map((group) => ({ label: `${group.label}（${group.items.length}）`, options: group.items }));
-    }, [visibleModels]);
+
+        // 常用置顶：按 RECOMMENDED_MODEL_NAMES 的顺序取（= 第一位 fast、第二位 wan3.0）。
+        const pinned = RECOMMENDED_MODEL_NAMES.map((name) =>
+            visibleModels.find((item) => recommendedKeys.has(item.modelKey) && squash(item.modelName) === name),
+        )
+            .filter((item): item is ModelOption => Boolean(item))
+            .map(toOption);
+
+        if (!pinned.length) {
+            if (ordered.length <= 1) return ordered[0]?.items || [];
+            return ordered.map((group) => ({ label: `${group.label}（${group.items.length}）`, options: group.items }));
+        }
+
+        const pinnedValues = new Set(pinned.map((item) => item.value));
+        const rest = ordered
+            .map((group) => ({ ...group, items: group.items.filter((item) => !pinnedValues.has(item.value)) }))
+            .filter((group) => group.items.length);
+        const head = { label: `${RECOMMENDED_GROUP_LABEL}（${pinned.length}）`, options: pinned };
+        return [head, ...rest.map((group) => ({ label: `${group.label}（${group.items.length}）`, options: group.items }))];
+    }, [visibleModels, recommendedKeys]);
 
     /**
      * 「生成模式」下拉候选。
