@@ -22,8 +22,23 @@ export type VideoReverseResult = {
     scriptNodeId?: string;
 };
 
-/** 反推用的技能名（按优先级）。用户口径是「视频反推-分镜提示词」。 */
-export const VIDEO_REVERSE_SKILL_HINTS = ["视频反推-分镜提示词", "视频反推分镜提示词", "视频反推", "分镜提示词"] as const;
+/**
+ * 反推用的技能名。用户 2026-11-12 口径：「**调用 SS视频反推SS 技能**，原来 01/02/03 附带的
+ * 约束和规则逻辑完全不变，只是修改调用的技能模型。」
+ *
+ * 为什么只留这一条、不加「SS视频反推」「视频反推SS」这类宽松变体：
+ * `pickVideoReverseSkill` 的匹配是**双向包含**，而这两个短名都包含「视频反推」——
+ * 旧技能（「视频反推-分镜提示词」，或用户起的别名「视频反推」）会反过来把它们包含住、拿到 1 分。
+ * 结果就是「新技能没装也能跑，只是悄悄用回了旧技能」，用户根本看不出装漏了。
+ *
+ * 只留精确名不会丢掉容错：`normalizeSkillLabel` 已经吃掉空格 / 大小写 / 括号 / 连字符，
+ * 所以「SS 视频反推 SS」「ss视频反推ss（优化版）」都能命中。挑不到就报错返回
+ * （`pickVideoReverseSkill` → null），绝不静默换技能硬跑。
+ */
+export const VIDEO_REVERSE_SKILL_HINTS = ["SS视频反推SS"] as const;
+
+/** 给用户看的技能名（报错 / 提示文案统一用这个，别各处手抄）。 */
+export const VIDEO_REVERSE_SKILL_LABEL = VIDEO_REVERSE_SKILL_HINTS[0];
 
 /**
  * 02 / 03 要求框的默认文案骨架。
@@ -173,7 +188,7 @@ export const VIDEO_REVERSE_MODES = [
         mode: 1 as const,
         no: "01",
         label: "反推视频",
-        hint: "视频链接发进 AI 对话 → 用「视频反推-分镜提示词」反推 → 结果写进文本节点",
+        hint: "视频链接发进 AI 对话 → 用「SS视频反推SS」反推 → 结果写进文本节点",
     },
     {
         mode: 2 as const,
@@ -205,10 +220,13 @@ export function normalizeSkillLabel(raw: string | undefined | null) {
 }
 
 /**
- * 在技能库里挑「视频反推-分镜提示词」。
+ * 在技能库里挑「SS视频反推SS」。
  *
- * 排序：完全同名（2 分）> 名字互相包含（1 分）；同分时按 `hints` 里的先后。
+ * 排序：完全同名（2 分）> 名字互相包含且长度够（1 分）；同分时按 `hints` 里的先后。
  * 一个都命中不了就返回 `null`——调用方据此告诉用户「技能没装」，绝不静默跑。
+ *
+ * ⚠️ `hints` 已不含旧的「视频反推-分镜提示词」：用户要的是**换技能**，不是「新技能优先、旧的兜底」。
+ * 若哪天要回退，改 `VIDEO_REVERSE_SKILL_HINTS` 即可，本函数不用动。
  */
 export function pickVideoReverseSkill(skills: readonly VideoReverseSkillLike[], hints: readonly string[] = VIDEO_REVERSE_SKILL_HINTS): { id: string; name: string } | null {
     const wanted = hints.map((hint) => normalizeSkillLabel(hint)).filter(Boolean);
@@ -221,7 +239,12 @@ export function pickVideoReverseSkill(skills: readonly VideoReverseSkillLike[], 
         for (let rank = 0; rank < wanted.length; rank++) {
             const target = wanted[rank];
             for (const label of labels) {
-                const score = label === target ? 2 : label.includes(target) || target.includes(label) ? 1 : 0;
+                // 「方向不对称」：技能名比目标长（`SS视频反推SS（优化版）`）→ 认；
+                // 技能名比目标短一半以上（`视频反推` 这种泛名）→ **不认**。
+                // 否则「SS视频反推SS」这种目标会被旧技能的别名「视频反推」反向包含住，
+                // 新技能没装也照样跑（悄悄换回旧技能），用户看不出装漏了。
+                const contains = label.includes(target) || (target.includes(label) && label.length * 2 > target.length);
+                const score = label === target ? 2 : contains ? 1 : 0;
                 if (!score) continue;
                 const better = !best || score > best.score || (score === best.score && rank < best.rank);
                 if (better) {
@@ -411,7 +434,7 @@ export function buildVideoReversePrompt({ videoUrl, mode, requirement, targetSec
     const lines: string[] = [];
     lines.push(VIDEO_REVERSE_LANGUAGE_RULE);
     if (mode === 1) {
-        lines.push("请用「视频反推-分镜提示词」技能反推我接入的这条视频，输出可以直接拿去用的分镜提示词。");
+        lines.push(`请用「${VIDEO_REVERSE_SKILL_LABEL}」技能反推我接入的这条视频，输出可以直接拿去用的分镜提示词。`);
     } else {
         /**
          * 02 / 03 的核心口径（用户 2026-11-11 第 02 条）：**看片只在模型心里做，输出只要剧本**。
@@ -423,7 +446,7 @@ export function buildVideoReversePrompt({ videoUrl, mode, requirement, targetSec
          * ① 看片 = 提炼**类型要素**（只在心里）；② 写 = **另一个故事**（见 `VIDEO_REVERSE_NEW_STORY_RULE`）。
          * 顺序不能反：先立「样本」口径，再立「只输出正文」口径 —— 后者只约束形式，管不住「写的是不是同一个故事」。
          */
-        lines.push("请先用「视频反推-分镜提示词」技能把这条视频看明白（这一步**只在你自己心里做，不要输出任何过程**），然后**另外写一个同类型的新剧本**——不是把这条视频的剧情转写成剧本。");
+        lines.push(`请先用「${VIDEO_REVERSE_SKILL_LABEL}」技能把这条视频看明白（这一步**只在你自己心里做，不要输出任何过程**），然后**另外写一个同类型的新剧本**——不是把这条视频的剧情转写成剧本。`);
         lines.push(VIDEO_REVERSE_NEW_STORY_RULE);
         lines.push(VIDEO_REVERSE_SCRIPT_ONLY_RULE);
     }

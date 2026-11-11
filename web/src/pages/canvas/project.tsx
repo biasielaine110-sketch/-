@@ -175,7 +175,7 @@ import { widenLegacyScriptNodes } from "@/lib/canvas/script-node-width";
 import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
-import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cleanVideoReverseScriptOutput, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { VIDEO_REVERSE_REWRITE_PROMPT, VIDEO_REVERSE_SKILL_LABEL, buildVideoReversePrompt, cleanVideoReverseScriptOutput, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -10395,7 +10395,7 @@ function AtelierCanvasPage() {
      * 统一骨架：
      *  ① 建一个 AI 对话节点，把**接入的视频从左侧连进去** —— 模型能看到的视频输入只认连线，
      *     光在提示词里写一句链接对本地视频毫无意义（`sendChatMessage` 会把连线视频转成 video_url 或抽帧）。
-     *  ② 这个对话节点上只勾「视频反推-分镜提示词」一个技能：反推是一次性任务，多勾会把输出带偏。
+     *  ② 这个对话节点上只勾「SS视频反推SS」一个技能：反推是一次性任务，多勾会把输出带偏。
      *  ③ 技能挑不到就**直接报错返回**，绝不静默换成「不带技能硬跑」——那样模型自由发挥，用户还以为反推过了。
      *  ④ 回复正文落成文本节点（内容三件套一起写：`content` / `prompt` / `composerContent`）。
      *  ⑤ 只有 03 才继续：文本节点 → 脚本生成器 → `handleOneClickVideo`（一键视频）。
@@ -10424,7 +10424,7 @@ function AtelierCanvasPage() {
             }
             const skill = pickVideoReverseSkill(listChatSkills());
             if (!skill) {
-                return { ok: false, error: "技能库里没找到「视频反推-分镜提示词」：先在 AI 对话节点的技能列表里确认它已经装好" };
+                return { ok: false, error: `技能库里没找到「${VIDEO_REVERSE_SKILL_LABEL}」：先在 AI 对话节点的技能列表里确认它已经装好` };
             }
             /**
              * 节点窗口里选好的**目标视频参数**（风格 / 模型 / 总时长 / 比例 / 分辨率，用户 2026-11-09）。
@@ -10539,7 +10539,7 @@ function AtelierCanvasPage() {
             if (!body) {
                 return {
                     ok: false,
-                    error: "对话没有返回文本：检查文本模型是否已配置、技能「视频反推-分镜提示词」是否可用（也可能被手动停止了）",
+                    error: `对话没有返回文本：检查文本模型是否已配置、技能「${VIDEO_REVERSE_SKILL_LABEL}」是否可用（也可能被手动停止了）`,
                     chatNodeId: chatNode.id,
                 };
             }

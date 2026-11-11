@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_LABEL, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
@@ -548,7 +548,7 @@ export function CanvasReverseVideoNodeContent({
             <div className="flex flex-col gap-0.5 text-[11px] leading-relaxed opacity-45">
                 <span className="flex items-center gap-1.5">
                     <Sparkles size={11} className="shrink-0" />
-                    技能「视频反推-分镜提示词」；没装会直接报错，不会静默换别的模型硬跑。输出强制简体中文（提示词首尾各钉一次，偶尔跑偏会自动让它原样重写一遍）。
+                    技能「{VIDEO_REVERSE_SKILL_LABEL}」；没装会直接报错，不会静默换别的模型硬跑。输出强制简体中文（提示词首尾各钉一次，偶尔跑偏会自动让它原样重写一遍）。
                 </span>
                 {reverseModelLabel ? <span className="truncate">反推模型：{reverseModelLabel}</span> : null}
             </div>
