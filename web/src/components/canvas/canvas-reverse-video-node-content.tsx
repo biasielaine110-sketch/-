@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App, Button, Input, InputNumber, Modal, Select, Tag } from "antd";
-import { CircleAlert, Clapperboard, FileText, Images, Link2, Loader2, SlidersHorizontal, Sparkles, Video, Wand2 } from "lucide-react";
+import { CircleAlert, Clapperboard, FileText, Images, Layers, Link2, Loader2, SlidersHorizontal, Sparkles, Video, Wand2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoTarget, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
+import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
 import { getStyleTemplate } from "@/constant/style-templates";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
@@ -59,7 +60,7 @@ type CanvasReverseVideoNodeContentProps = {
     /** 粘贴链接建一个视频节点，返回新节点 id */
     onCreateVideoFromUrl?: (videoUrl: string) => Promise<string>;
     /** 执行一条命令；report 用来把阶段文案打到窗口里 */
-    onRun: (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: ScriptSchemeId }, report: (stage: string) => void) => Promise<VideoReverseResult>;
+    onRun: (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: ScriptSchemeId; shotsPerClip?: number }, report: (stage: string) => void) => Promise<VideoReverseResult>;
 };
 
 const MODE_ICON: Record<VideoReverseMode, typeof Video> = {
@@ -131,12 +132,19 @@ export function CanvasReverseVideoNodeContent({
         },
         [node.id, onConfigChange, target],
     );
+    /**
+     * 「每 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条）：存在 `reverseVideoTarget.shotsPerClip`，
+     * 03 建脚本节点时搬进 `scriptShotsPerClip`，之后铺链路按 3 镜切片。
+     */
+    const compactShots = target.shotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT;
     /** 设置摘要（弹窗里给用户确认「按什么出片」用）。 */
     const targetSummary = useMemo(() => {
         const style = target.styleTemplateId ? getStyleTemplate(target.styleTemplateId)?.label || target.styleTemplateId : "无风格";
         // 换了引擎要写在摘要里：03 的「按这套出片」是用户最后一眼确认，不能还写着普通视频模型。
         const engine = isMochianiVideoEngine(target.videoEngine) ? "MochiAni 生视频" : "";
-        return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${target.size || "跟随全局比例"} · ${qualityLabel(target.quality)} · 风格：${style}${engine ? ` · ${engine}` : ""}`;
+        // 分段口径也要写：03 是「建脚本节点 → 立刻一键视频」，铺出来几个视频窗口取决于这一档。
+        const clip = target.shotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT ? `每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT} 镜一个视频` : `每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜一个视频`;
+        return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${target.size || "跟随全局比例"} · ${qualityLabel(target.quality)} · 风格：${style} · ${clip}${engine ? ` · ${engine}` : ""}`;
     }, [target]);
     /**
      * 03 弹窗里的「执行方案」选项（用户 2026-11-10）。
@@ -238,7 +246,7 @@ export function CanvasReverseVideoNodeContent({
                  * 节点 metadata 的写入要等一次 React 提交，而 03 在**同一次点击里**就要建脚本节点、
                  * 立刻生成 —— 读 `nodesRef` 可能拿到还没刷新的旧值（这个坑 2026-11-09 已经踩过一次）。
                  */
-                const outcome = await onRun({ videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id, scriptScheme: target.scriptScheme }, (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }));
+                const outcome = await onRun({ videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id, scriptScheme: target.scriptScheme, shotsPerClip: target.shotsPerClip }, (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }));
                 patchRun({
                     status: outcome.ok ? "done" : "error",
                     mode,
@@ -257,7 +265,7 @@ export function CanvasReverseVideoNodeContent({
                 message.error(detail);
             }
         },
-        [attached, message, node.id, onRun, patchRun, target.scriptScheme],
+        [attached, message, node.id, onRun, patchRun, target.scriptScheme, target.shotsPerClip],
     );
 
     const handleCommand = useCallback(
@@ -411,6 +419,32 @@ export function CanvasReverseVideoNodeContent({
                     </div>
                     <div className="mt-1 text-[10px] leading-relaxed opacity-45">
                         秒数 = 成片总时长：02 写文案、03 生剧本都按它规划镜头数与台词量（默认 {DEFAULT_REVERSE_VIDEO_SECONDS} 秒）；生视频用这里的模型 / 比例 / 分辨率 / 风格。
+                    </div>
+                    {/* 第三行：「每 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条）。
+                        打开后 03 建脚本节点时带过去，铺链路（含一键视频）每 3 镜一个视频节点；关掉回到默认 4 镜。 */}
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <button
+                            type="button"
+                            className="inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[11px] transition"
+                            style={{
+                                borderColor: compactShots ? theme.toolbar.activeText : theme.node.stroke,
+                                color: compactShots ? theme.toolbar.activeText : theme.node.text,
+                                background: compactShots ? `${theme.toolbar.activeText}14` : "transparent",
+                                opacity: compactShots ? 1 : 0.7,
+                            }}
+                            aria-pressed={compactShots}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={() => patchTarget({ shotsPerClip: compactShots ? undefined : SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT })}
+                            title={
+                                compactShots
+                                    ? `已开启：铺链路每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT} 个镜头合一个视频节点（再点一次关闭）`
+                                    : `打开后铺链路每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT} 个镜头合一个视频节点（默认每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜一个）`
+                            }
+                        >
+                            <Layers size={11} className="shrink-0" />
+                            每 {SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT} 镜合一个视频{compactShots ? " · 已开" : ""}
+                        </button>
                     </div>
                 </div>
 

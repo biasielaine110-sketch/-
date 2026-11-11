@@ -1656,6 +1656,38 @@ export const STORY_SCRIPT_MERGE_MODES: StoryScriptMergeMode[] = ["shot", "2", "3
  */
 export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP = 4;
 
+/**
+ * 「每 3 镜合一个视频」开关打开时的镜数（用户 2026-11-11 第 01 条）。
+ *
+ * 开关落在**脚本节点自己**的 `metadata.scriptShotsPerClip`（`3` = 打开，没有这个键 = 原行为 4 镜）；
+ * 反推视频节点的同一个开关存在 `reverseVideoTarget.shotsPerClip`，03 建脚本节点时搬过来。
+ */
+export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT = 3;
+
+/**
+ * 读「这次铺链路每几镜合一个视频节点」。
+ *
+ * 返回 `0` = **不强制**（照「视频分段」档位 / 手动合并组走，也就等价于原行为）；
+ * 返回 `3` = 用户打开了「每 3 镜合一个视频」，铺链路一律按 3 镜切片 —— 这是显式选择，
+ * 所以优先于分段档位、也优先于「一键铺视频链路」写死的 4。
+ *
+ * 🔴 只认 `3` 这一个值：老节点 / 手改的脏值一律当成「没开」，绝不悄悄改变原有铺法。
+ */
+export function readScriptShotsPerClip(metadata: { scriptShotsPerClip?: unknown } | null | undefined): number {
+    const value = Number(metadata?.scriptShotsPerClip);
+    return value === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT ? SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT : 0;
+}
+
+/**
+ * 铺链路时真正用的 `mergeEvery`（0 = 交给「视频分段」档位）。
+ *
+ * 优先级：开关的 3 > 调用方写死的 N（「一键铺视频链路」传 4）> 0。
+ * 单独抽成纯函数是为了让探针能直接钉住这条优先级 —— 铺链路那条函数太大、跑不起来。
+ */
+export function resolveScriptPipelineMergeEvery(metadata: { scriptShotsPerClip?: unknown } | null | undefined, requested?: unknown): number {
+    return readScriptShotsPerClip(metadata) || Math.max(0, Math.round(Number(requested) || 0));
+}
+
 export function resolveStoryScriptMergeMode(value: unknown): StoryScriptMergeMode {
     return STORY_SCRIPT_MERGE_MODES.includes(value as StoryScriptMergeMode) ? (value as StoryScriptMergeMode) : "shot";
 }

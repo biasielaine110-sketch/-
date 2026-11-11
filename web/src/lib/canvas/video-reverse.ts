@@ -9,6 +9,7 @@
 
 import type { CanvasReverseVideoTarget } from "@/types/canvas";
 import { SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
+import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
 /** 三条命令。数字即用户看到的 01 / 02 / 03。 */
 export type VideoReverseMode = 1 | 2 | 3;
@@ -95,6 +96,11 @@ export function normalizeReverseVideoTarget(raw: Partial<CanvasReverseVideoTarge
      * （= 普通视频节点）。和 `scriptScheme` 同理，脏值不能留在元数据里假装「用户选过」。
      */
     if (isMochianiVideoEngine(text(source.videoEngine))) target.videoEngine = MOCHIANI_VIDEO_ENGINE;
+    /**
+     * 「每 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条）：只认 `3`，其它一律丢掉
+     *（= 原行为 4 镜）。和 `scriptScheme` / `videoEngine` 同理 —— 脏值不能留在元数据里冒充「用户开过」。
+     */
+    if (Number(source.shotsPerClip) === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT) target.shotsPerClip = SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT;
     return target;
 }
 

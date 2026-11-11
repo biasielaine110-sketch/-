@@ -193,6 +193,13 @@ export type CanvasReverseVideoTarget = {
      * ⚠️ 空**不能**归一成 `builtin`：一旦元数据里有值，自动套用就会认为「用户已经选过」而彻底退让。
      */
     scriptScheme?: import("@/constant/script-scheme").ScriptSchemeId;
+    /**
+     * 「每 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条）：`3` = 打开，不填 = 原行为（4 镜）。
+     *
+     * 只在这个节点上表达「我选了 3 镜」；03 建脚本节点时原样搬进 `scriptShotsPerClip`，
+     * 之后铺链路读的是脚本节点自己的那个键（反推节点删了也不影响已建好的脚本节点）。
+     */
+    shotsPerClip?: number;
 };
 
 /**
@@ -360,6 +367,16 @@ export type CanvasNodeMetadata = {
     scriptVideoSize?: string;
     /** 脚本生成器：铺链路时给**视频节点**用的分辨率档位（写进节点的 `vquality`）。 */
     scriptVideoQuality?: string;
+    /**
+     * 脚本生成器：**每几镜合一个视频节点**（用户 2026-11-11 第 01 条）。
+     *
+     * `3` = 打开「每 3 个镜头合一个视频」，铺链路时一律按 3 镜切片（含「一键铺链路」/
+     * 「只铺视频窗口」/「一键铺视频链路」/「一键视频」）；**没有这个键 = 原行为**
+     * （照「视频分段」档位走，默认 4 镜一段）。
+     *
+     * 🔴 只存 `3`：读的时候走 `readScriptShotsPerClip`，其它值一律当「没开」，绝不让脏值改铺法。
+     */
+    scriptShotsPerClip?: number;
     /**
      * 脚本生成器：这张图片是**本节点「一键批量生成」出来的资产图**（值 = 脚本节点 id）。
      *

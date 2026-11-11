@@ -35,7 +35,7 @@ import { useAssetStore } from "@/stores/use-asset-store";
 import { useChatSkillPacksStore } from "@/stores/use-chat-skill-packs-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, mergeDataUrls, resizeDataUrlByPercent, splitDataUrl, upscaleDataUrl, adjustDataUrl, type ImageAdjustParams } from "@/lib/canvas/canvas-image-data";
-import { loadVideoBlob } from "@/lib/canvas/canvas-video-tools";
+import { loadVideoBlob, scaleVideoBlob, VIDEO_SCALE_SHORTCUT_PERCENT } from "@/lib/canvas/canvas-video-tools";
 import { fitNodeSize, nodeSizeFromRatio, sizeFromDisplayScalePercent } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
@@ -82,6 +82,8 @@ import {
     resolveScriptAssetRole,
     resolveScriptSystemPrompt,
     resolveStoryScriptMergeMode,
+    resolveScriptPipelineMergeEvery,
+    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
     resolveStoryScriptPresetId,
     resolveStoryScriptImageSize,
     resolveStoryScriptShotSeconds,
@@ -4186,22 +4188,29 @@ function AtelierCanvasPage() {
         [message, t],
     );
 
-    /** G: one-shot 99% pixel downscale and overwrite selected image/annotate nodes. */
-    const downscaleSelectedImagesTo99 = useCallback(async () => {
+    /**
+     * G（图片分支）：一次性把选中的图片 / 标注节点降到 99% 并覆盖。
+     *
+     * `options.silentIfEmpty`：G 现在还要顺带处理视频 —— 只选了视频时不该再弹
+     * 「选中的节点没有可缩放的图片」，所以「选空 / 没图片」这两种情况静默返回 0；
+     * 真的动了图（成功 / 已是原尺寸 / 出错）照旧给提示。
+     * 返回成功张数（外层要合并两条分支的结果）。
+     */
+    const downscaleSelectedImagesTo99 = useCallback(async (options?: { silentIfEmpty?: boolean }) => {
         const selectedIds = new Set(selectedNodeIdsRef.current);
         if (!selectedIds.size) {
             const fallbackId = toolbarNodeIdRef.current || hoveredNodeIdRef.current;
             if (fallbackId) selectedIds.add(fallbackId);
         }
         if (!selectedIds.size) {
-            message.warning(t("canvas.shortcut.selectNodeToResetSize"));
-            return;
+            if (!options?.silentIfEmpty) message.warning(t("canvas.shortcut.selectNodeToResetSize"));
+            return 0;
         }
 
         const eligible = nodesRef.current.filter((node) => selectedIds.has(node.id) && (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Annotate) && Boolean(node.metadata?.content));
         if (!eligible.length) {
-            message.warning(t("canvas.shortcut.scaleNeedMedia"));
-            return;
+            if (!options?.silentIfEmpty) message.warning(t("canvas.shortcut.scaleNeedMedia"));
+            return 0;
         }
 
         let successCount = 0;
@@ -4218,36 +4227,19 @@ function AtelierCanvasPage() {
 
         if (successCount) {
             message.success(t("canvas.shortcut.resetSizeDone", { count: successCount }));
-            return;
+            return successCount;
         }
         if (lastError) {
             message.error(lastError instanceof Error ? lastError.message : t("canvas.editors.scaleFailed"));
-            return;
+            return 0;
         }
         message.info(t("canvas.editors.scaleAlreadyFull"));
+        return 0;
     }, [message, scaleImageNodeDisplay, t]);
 
-    // Capture-phase G: 99% pixel downscale overwrite (IME-safe KeyG).
-    useEffect(() => {
-        const handleDownscaleShortcut = (event: KeyboardEvent) => {
-            if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-            if (event.code !== "KeyG" && keyLower(event) !== "g") return;
-            if (isImeComposing(event)) return;
-
-            const target = event.target;
-            if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
-            if (target instanceof HTMLElement && target.isContentEditable) return;
-            if (target instanceof Element && target.closest(".ant-modal")) return;
-
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            blurActiveCanvasTextInput();
-            void downscaleSelectedImagesTo99();
-        };
-
-        window.addEventListener("keydown", handleDownscaleShortcut, true);
-        return () => window.removeEventListener("keydown", handleDownscaleShortcut, true);
-    }, [downscaleSelectedImagesTo99]);
+    // Capture-phase G 的键盘监听放在下面（`scaleSelectedVideosTo60` 之后）：视频分支要用的
+    // `storeVideoToolResult` / `createAdjacentVideoNode` 在本文件更靠后的位置定义，
+    // 提前挂依赖会踩 TDZ（渲染期就报 ReferenceError）。
 
     const handleNodeContentChange = useCallback((nodeId: string, content: string) => {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, content } } : node)));
@@ -4736,6 +4728,112 @@ function AtelierCanvasPage() {
         },
         [createAdjacentVideoNode, message, storeVideoToolResult, t, videoToolsNode],
     );
+
+    /** G 快捷键防重入：视频缩放要重编码、几秒钟跑不完，连按不该叠出两批产物。 */
+    const scaleShortcutRunningRef = useRef(false);
+
+    /**
+     * G（视频分支）：把选中的视频直接缩放到 **60%**（用户 2026-11-11 第 02 条：
+     * 「对画布中的视频按 g，可直接执行将其视频大小缩放之百分之 60 的命令」）。
+     *
+     * 走的是「视频工具 → 缩放」那条同一条链路（`loadVideoBlob` → `scaleVideoBlob` → 存盘 →
+     * 落一个相邻视频节点），只是**跳过弹窗**直接按 60% 跑；产物是**新节点**，原视频不动。
+     * 🔴 读字节只能走 `loadVideoBlob(url, storageKey)`：远程直链多半没有 CORS，`fetch` 拿不到。
+     *
+     * 没选中视频时静默返回 0（外层已经判过一次「有没有素材」）；一旦真的动手就自己汇报
+     * 进度 / 成功 / 失败 —— 重编码要几秒，不给反馈会让人以为按坏了。
+     */
+    const scaleSelectedVideosTo60 = useCallback(async () => {
+        const selectedIds = new Set(selectedNodeIdsRef.current);
+        if (!selectedIds.size) {
+            const fallbackId = toolbarNodeIdRef.current || hoveredNodeIdRef.current;
+            if (fallbackId) selectedIds.add(fallbackId);
+        }
+        if (!selectedIds.size) return 0;
+
+        const eligible = nodesRef.current.filter((node) => selectedIds.has(node.id) && node.type === CanvasNodeType.Video && Boolean(node.metadata?.content));
+        if (!eligible.length) return 0;
+
+        let successCount = 0;
+        let lastError: unknown;
+        const notice = message.loading({ content: t("canvas.shortcut.scaleVideoRunning"), duration: 0 });
+        try {
+            for (const node of eligible) {
+                const latest = nodesRef.current.find((item) => item.id === node.id) || node;
+                try {
+                    const blob = await loadVideoBlob(latest.metadata?.content || "", latest.metadata?.storageKey);
+                    const scaled = await scaleVideoBlob(blob, VIDEO_SCALE_SHORTCUT_PERCENT);
+                    const stored = await storeVideoToolResult(scaled.blob);
+                    await createAdjacentVideoNode(latest, stored, `${t("canvas.videoTools.tabs.scale")} ${scaled.percent}%`);
+                    successCount += 1;
+                } catch (error) {
+                    lastError = error;
+                }
+            }
+        } finally {
+            notice();
+        }
+
+        if (successCount) message.success(t("canvas.shortcut.scaleVideosDone", { count: successCount }));
+        else message.error(lastError instanceof Error ? lastError.message : t("canvas.editors.scaleFailed"));
+        return successCount;
+    }, [createAdjacentVideoNode, message, storeVideoToolResult, t]);
+
+    /**
+     * G 的**总入口**：图片 → 99% 覆盖（原方案，一个字没改）；视频 → 60%（新节点）。
+     *
+     * 两条分支各自汇报：同时选中图片和视频时两条都跑（各弹一句）；只选了视频时
+     * 图片分支用 `silentIfEmpty` 闭嘴，不会冒出「没有可缩放的图片」的误报。
+     */
+    const handleScaleShortcut = useCallback(async () => {
+        const selectedIds = new Set(selectedNodeIdsRef.current);
+        if (!selectedIds.size) {
+            const fallbackId = toolbarNodeIdRef.current || hoveredNodeIdRef.current;
+            if (fallbackId) selectedIds.add(fallbackId);
+        }
+        if (!selectedIds.size) {
+            message.warning(t("canvas.shortcut.selectNodeToResetSize"));
+            return;
+        }
+        const selected = nodesRef.current.filter((node) => selectedIds.has(node.id));
+        const hasVideo = selected.some((node) => node.type === CanvasNodeType.Video && Boolean(node.metadata?.content));
+        const hasImage = selected.some((node) => (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Annotate) && Boolean(node.metadata?.content));
+        if (!hasVideo && !hasImage) {
+            message.warning(t("canvas.shortcut.scaleNeedMedia"));
+            return;
+        }
+        scaleShortcutRunningRef.current = true;
+        try {
+            await downscaleSelectedImagesTo99({ silentIfEmpty: hasVideo });
+            if (hasVideo) await scaleSelectedVideosTo60();
+        } finally {
+            scaleShortcutRunningRef.current = false;
+        }
+    }, [downscaleSelectedImagesTo99, message, scaleSelectedVideosTo60, t]);
+
+    // Capture-phase G（IME-safe KeyG）：图片 99% 覆盖 / 视频 60% 缩放。
+    useEffect(() => {
+        const handleScaleShortcutKeyDown = (event: KeyboardEvent) => {
+            if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+            if (event.code !== "KeyG" && keyLower(event) !== "g") return;
+            if (isImeComposing(event)) return;
+
+            const target = event.target;
+            if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return;
+            if (target instanceof HTMLElement && target.isContentEditable) return;
+            if (target instanceof Element && target.closest(".ant-modal")) return;
+
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            // 视频缩放要重编码，可能跑几秒：连按不该叠出两批任务。
+            if (scaleShortcutRunningRef.current) return;
+            blurActiveCanvasTextInput();
+            void handleScaleShortcut();
+        };
+
+        window.addEventListener("keydown", handleScaleShortcutKeyDown, true);
+        return () => window.removeEventListener("keydown", handleScaleShortcutKeyDown, true);
+    }, [handleScaleShortcut]);
 
     const handleAudioTrim = useCallback(
         async (result: AudioToolsTrimResult) => {
@@ -9282,10 +9380,22 @@ function AtelierCanvasPage() {
             const videoOnly = Boolean(options?.videoOnly);
             const groupVideos = Boolean(options?.group);
             const autoGenerate = Boolean(options?.autoGenerate);
-            // 「一键铺视频链路」：固定每 N 镜一段（N=4），不受分段档位 / 手动合并影响。
-            const mergeEvery = Math.max(0, Math.round(Number(options?.mergeEvery) || 0));
+            /**
+             * 「每几镜合一个视频节点」：
+             *  - 脚本节点打开了「每 3 镜合一个视频」（`scriptShotsPerClip === 3`，用户 2026-11-11 第 01 条）
+             *    → 一律 3 镜切片，**优先于**分段档位、手动合并组，以及「一键铺视频链路」写死的 4；
+             *  - 没开 → 原行为：`options.mergeEvery`（= 视频链那 4）优先，其次走「视频分段」档位。
+             * （读的是下面那个 `source`，所以这段必须放在它之后。）
+             */
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
+            const mergeEvery = resolveScriptPipelineMergeEvery(source.metadata, options?.mergeEvery);
+            /**
+             * 调用方**显式**要求「每 N 镜一段」= 点的是「一键铺视频链路」那颗按钮。
+             * 与上面的 `mergeEvery` 分开：3 镜开关虽然是同一种固定切片，但它只改**怎么切**，
+             * 不该把「一键铺链路 / 只铺视频」的确认窗标题和按钮文案也改成「一键铺视频链路」。
+             */
+            const chainMergeEvery = Math.max(0, Math.round(Number(options?.mergeEvery) || 0));
             const rows = source.metadata?.scriptRows || [];
             if (!rows.length) return;
             const presetId = resolveStoryScriptPresetId(source.metadata?.scriptPreset);
@@ -9732,7 +9842,7 @@ function AtelierCanvasPage() {
             const videoCount = groups.length;
             // 确认文案四档：整表 / 选择 / 简洁版（含选择）/ 一键视频链路（固定每 N 镜一段）。
             const confirmTitleKey =
-                mergeEvery > 0
+                chainMergeEvery > 0
                     ? "canvas.scriptNode.pipelineVideoChainConfirmTitle"
                     : videoOnly
                       ? selection
@@ -9742,7 +9852,7 @@ function AtelierCanvasPage() {
                         ? "canvas.scriptNode.pipelineSelectedConfirmTitle"
                         : "canvas.scriptNode.pipelineConfirmTitle";
             const confirmBodyKey =
-                mergeEvery > 0
+                chainMergeEvery > 0
                     ? "canvas.scriptNode.pipelineVideoChainConfirmBody"
                     : videoOnly
                       ? selection
@@ -9776,7 +9886,7 @@ function AtelierCanvasPage() {
                 setSelectedConnectionId(null);
                 revealNodes(created, "center");
                 message.success(
-                    t(mergeEvery > 0 ? "canvas.scriptNode.pipelineVideoChainBuilt" : videoOnly ? "canvas.scriptNode.pipelineVideoOnlyBuilt" : "canvas.scriptNode.pipelineBuilt", {
+                    t(chainMergeEvery > 0 ? "canvas.scriptNode.pipelineVideoChainBuilt" : videoOnly ? "canvas.scriptNode.pipelineVideoOnlyBuilt" : "canvas.scriptNode.pipelineBuilt", {
                         shots: shotCount,
                         videos: videoCount,
                         count: mergeEvery,
@@ -10277,7 +10387,7 @@ function AtelierCanvasPage() {
      *  ⑤ 只有 03 才继续：文本节点 → 脚本生成器 → `handleOneClickVideo`（一键视频）。
      */
     const runVideoReverse = useCallback(
-        async (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: string }, report: (stage: string) => void = () => undefined): Promise<VideoReverseResult> => {
+        async (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: string; shotsPerClip?: number }, report: (stage: string) => void = () => undefined): Promise<VideoReverseResult> => {
             const videoNode = nodesRef.current.find((item) => item.id === input.videoNodeId);
             if (!videoNode || videoNode.type !== CanvasNodeType.Video || !videoNode.metadata?.content) {
                 return { ok: false, error: "接入的视频节点已经不在了，请重新接入一次" };
@@ -10450,6 +10560,10 @@ function AtelierCanvasPage() {
                 // 02 里选了「MochiAni 生视频节点」→ 03 建脚本节点时记住引擎，铺链路时才知道建哪种窗口
                 // （用户 2026-11-10 第 02 条：「同上，后续在脚本生成器执行生视频时，也铺的是该节点」）。
                 ...(isMochianiVideoEngine(target.videoEngine) ? { scriptVideoEngine: MOCHIANI_VIDEO_ENGINE } : {}),
+                // 「每 3 个镜头合一个视频」（用户 2026-11-11 第 01 条）：反推节点上开了就带过来，
+                // 于是 03 紧接着跑的一键视频 / 之后手点铺链路都是 3 镜一个视频节点。
+                // 取 `input.shotsPerClip` 优先：开关刚点完 metadata 还没提交时也能生效（同 scriptScheme 那个坑）。
+                ...(Number(input.shotsPerClip ?? target.shotsPerClip) === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT ? { scriptShotsPerClip: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT } : {}),
             };
             /**
              * 🔴 执行方案必须**建节点时就写进去**（用户 2026-11-09 报障：「03 出来的视频运动提示词

@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent as React
 import { createPortal } from "react-dom";
 import { App, Modal } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Layers, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -74,6 +74,8 @@ import {
     storyScriptToTsv,
     STORY_SCRIPT_MERGE_MODES,
     SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP,
+    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
+    readScriptShotsPerClip,
     STORY_SCRIPT_PRESET_IDS,
     STORY_SCRIPT_SEGMENT_SECONDS,
     STORY_SCRIPT_IMAGE_SIZES,
@@ -970,6 +972,15 @@ export function CanvasScriptNodeContent({
     const totalDuration = rows.reduce((sum, row) => sum + (Number(row.duration) || 0), 0);
 
     const patchMetadata = (patch: Partial<CanvasNodeData["metadata"]>) => onConfigChange(node.id, patch);
+
+    /**
+     * 铺链路「每几镜合一个视频节点」（用户 2026-11-11 第 01 条）。
+     *
+     * 开关打开 = 3 镜一个视频节点；关掉 = 原行为（4 镜）。`shotsPerClipForPipeline`
+     * 同时喂「一键铺视频链路」按钮的 `mergeEvery` 与提示文案，保证按钮上写的数 = 实际铺法。
+     */
+    const compactShotsPerClip = readScriptShotsPerClip(node.metadata);
+    const shotsPerClipForPipeline = compactShotsPerClip || SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP;
 
     /**
      * 「第四套（影视分镜导演）是默认方案」——用户 2026-10-23 的要求
@@ -3310,13 +3321,40 @@ export function CanvasScriptNodeContent({
                                     event.stopPropagation();
                                     onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, {
                                         videoOnly: true,
-                                        mergeEvery: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP,
+                                        mergeEvery: shotsPerClipForPipeline,
                                     });
                                 }}
-                                title={t("canvas.scriptNode.pipelineVideoChainHint", { count: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP })}
+                                title={t("canvas.scriptNode.pipelineVideoChainHint", { count: shotsPerClipForPipeline })}
                             >
                                 <Video className="size-3.5" />
                                 {t("canvas.scriptNode.pipelineVideoChain")}
+                            </button>
+                            {/* 「每 3 镜合一个视频」开关（用户 2026-11-11 第 01 条）：
+                                打开后**所有**铺链路入口（一键铺链路 / 只铺视频 / 一键铺视频链路 / 一键视频）
+                                都按 3 镜切片；关掉回到原行为（按「视频分段」档位，默认 4 镜）。
+                                ⚠️ 与上面几颗一样不用真 `disabled`：开关态靠颜色 + 描边表达。 */}
+                            <button
+                                type="button"
+                                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition"
+                                style={{
+                                    borderColor: compactShotsPerClip ? theme.toolbar.activeText : theme.node.stroke,
+                                    color: compactShotsPerClip ? theme.toolbar.activeText : theme.node.text,
+                                    background: compactShotsPerClip ? `${theme.toolbar.activeText}14` : "transparent",
+                                    opacity: compactShotsPerClip ? 1 : 0.7,
+                                }}
+                                aria-pressed={Boolean(compactShotsPerClip)}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    patchMetadata({
+                                        scriptShotsPerClip: compactShotsPerClip ? undefined : SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
+                                    });
+                                }}
+                                title={compactShotsPerClip ? t("canvas.scriptNode.shotsPerClipOnHint") : t("canvas.scriptNode.shotsPerClipOffHint")}
+                            >
+                                <Layers className="size-3.5" />
+                                {t("canvas.scriptNode.shotsPerClipToggle", { count: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT })}
                             </button>
                         </div>
                     ) : null}

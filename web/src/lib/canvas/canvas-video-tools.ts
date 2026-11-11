@@ -24,10 +24,19 @@ export type VideoUpscaleResolution = (typeof VIDEO_UPSCALE_RESOLUTIONS)[number][
 /**
  * 缩放档位：**按原尺寸的百分比**降（不提供放大，放大走「超分」页签）。
  * 20% 是最小档 —— 720P 缩到 20% 就是 256×144，再小就没法看了。
+ * 60% 是 G 快捷键用的那一档（用户 2026-11-11 第 02 条），顺手也放进面板可选。
  */
-export const VIDEO_SCALE_PERCENTAGES = [80, 70, 50, 30, 20] as const;
+export const VIDEO_SCALE_PERCENTAGES = [80, 70, 60, 50, 30, 20] as const;
 
 export type VideoScalePercentage = (typeof VIDEO_SCALE_PERCENTAGES)[number];
+
+/**
+ * 画布里按 **G** 直接对视频执行的缩放比例（用户 2026-11-11 第 02 条：
+ * 「对画布中的视频按 g，可直接执行将其视频大小缩放之百分之 60 的命令」）。
+ *
+ * 图片按 G 仍是原来的「99% 像素降采样覆盖」，两条路互不影响。
+ */
+export const VIDEO_SCALE_SHORTCUT_PERCENT = 60;
 
 export function isVideoUpscalerModel(model: string) {
     return /upscaler|zhenzhen-upscaler/i.test(model.trim());
