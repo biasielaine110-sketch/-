@@ -1030,6 +1030,9 @@ export default {
             poolAssetRemove: "解除链接（断开这条上游连线，并清掉表里对它的引用）",
             poolAssetReorderHint: "拖动可调整顺序 · 点一下切换分类 · 右上角 × 解除链接",
             assetRolePickHint: "勾选后可以为它选分类（默认「角色」）",
+            // ⚠️ segmentLabel / imageSizeLabel / imageSizeAuto / imageSizeHint / segment_none·5·10·15 / segmentHint
+            // 这 9 个键曾专供节点上的「每镜时长」「生图比例」胶囊组；2026-11-12 用户说「这两个去掉，我基本都已经约束了」
+            // → 控件删了，键先留着（恢复控件时直接复用，别当垃圾清掉）。底层语义仍按默认档走（5 秒上限 / 跟随全局）。
             segmentLabel: "每镜时长",
             imageSizeLabel: "生图比例",
             imageSizeAuto: "跟随全局",
@@ -1042,13 +1045,13 @@ export default {
             segmentPreview: "{{seconds}} 秒/段 · 共 {{count}} 段（{{lengths}} 秒）",
             segmentPreviewHint: "按当前每镜时长累加切段，一段 = 铺链路时的一个视频节点；每段实际秒数由各镜时长决定，通常会略多于目标值。想让每段正好等于目标值，改完点「整表重生成」让模型重排镜头。",
             segmentPreviewShot: "每镜 {{seconds}} 秒 · 共 {{count}} 段",
-            segmentPreviewShotHint: "铺链时每一镜出一个 {{seconds}} 秒的视频节点——成片长度直接用这里选的档位，不受表格里旧的时长列影响。想让生成的镜头本身也按 {{seconds}} 秒写，点「整表重生成」。",
+            segmentPreviewShotHint: "铺链时每一镜出一个 {{seconds}} 秒的视频节点——成片长度直接用当前档位，不受表格里旧的时长列影响。想让生成的镜头本身也按 {{seconds}} 秒写，点「整表重生成」。",
             segmentPreviewShotCap: "每镜 {{seconds}} 秒以内 · 共 {{count}} 段",
             segmentPreviewShotCapHint: "铺链时每一镜出一个视频节点，秒数取表格里这一镜的时长，最长 {{seconds}} 秒（超出的会被压到 {{seconds}} 秒）。",
             segmentPreviewMerge: "每 {{shots}} 镜一段 · 共 {{count}} 段 · 每段 {{seconds}} 秒",
             segmentPreviewMergeAdjusted: "每 {{shots}} 镜一段 · 共 {{count}} 段 · 实际每段 {{seconds}} 秒",
             segmentPreviewMergeHint: "铺链时 {{shots}} 镜合成一个视频节点，一段的成片长度 = 这几镜时长之和。按「每 {{density}} 秒 {{perDensity}} 个镜头」的拆镜节律，一段约 {{seconds}} 秒、单镜 {{perShot}} 秒。想让表格里的镜头本身也按这个长度写，点「整表重生成」。",
-            segmentPreviewMergeAdjustedHint: "铺链时 {{shots}} 镜合成一个视频节点。按「每 {{density}} 秒 {{perDensity}} 个镜头」的拆镜节律，一段应约 {{seconds}} 秒（单镜 {{perShot}} 秒）——「每镜时长」停在 5 秒（单镜上限）会被这条节律抬上来，否则镜头会被拆成一秒一个的碎片。想让表格里的镜头本身也按这个长度写，点「整表重生成」。",
+            segmentPreviewMergeAdjustedHint: "铺链时 {{shots}} 镜合成一个视频节点。按「每 {{density}} 秒 {{perDensity}} 个镜头」的拆镜节律，一段应约 {{seconds}} 秒（单镜 {{perShot}} 秒）——单镜默认按 5 秒上限来写时，会被这条节律抬上来，否则镜头会被拆成一秒一个的碎片。想让表格里的镜头本身也按这个长度写，点「整表重生成」。",
             mergeLabel: "视频分段",
             merge_shot: "单镜",
             merge_2: "每 2 镜",

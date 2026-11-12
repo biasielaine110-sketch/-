@@ -1030,6 +1030,9 @@ export default {
             poolAssetRemove: "Unlink (drops the upstream connection and clears table references to it)",
             poolAssetReorderHint: "Drag to reorder · click to cycle type · × in the corner unlinks",
             assetRolePickHint: "Tick it, then pick a type (default: character)",
+            // ⚠️ Kept on purpose: these keys only fed the "Shot length" / "Image ratio" pill groups that were
+            // removed from the script node on 2026-11-12 (the user constrains both upstream now). Restoring
+            // the controls should reuse them; the defaults (5s cap / follow global) still drive the pipeline.
             segmentLabel: "Shot length",
             imageSizeLabel: "Image ratio",
             imageSizeAuto: "Global",
@@ -1061,13 +1064,13 @@ export default {
             segmentPreview: "{{seconds}}s/seg · {{count}} segments ({{lengths}}s)",
             segmentPreviewHint: "Segments are cut by accumulating shot durations; one segment becomes one video node. The actual length depends on the shots and usually runs slightly over the target. To get exact lengths, hit \"Regenerate table\" so the model re-plans the shots.",
             segmentPreviewShot: "{{seconds}}s per shot · {{count}} clips",
-            segmentPreviewShotHint: "Linking builds one {{seconds}}s video node per shot — the clip length comes straight from this setting, not from the old duration column. To make the generated shots themselves be {{seconds}}s, hit \"Regenerate table\".",
+            segmentPreviewShotHint: "Linking builds one {{seconds}}s video node per shot — the clip length comes straight from the current setting, not from the old duration column. To make the generated shots themselves be {{seconds}}s, hit \"Regenerate table\".",
             segmentPreviewShotCap: "{{seconds}}s max per shot · {{count}} clips",
             segmentPreviewShotCapHint: "Linking builds one video node per shot using that shot's own duration, capped at {{seconds}}s (anything longer is clamped).",
             segmentPreviewMerge: "{{shots}} shots per clip · {{count}} clips · {{seconds}}s each",
             segmentPreviewMergeAdjusted: "{{shots}} shots per clip · {{count}} clips · {{seconds}}s each (auto-adjusted)",
             segmentPreviewMergeHint: "When linking, {{shots}} shots become one video node, so a clip is as long as those shots add up to. The shot-splitting rhythm is {{perDensity}} shots per {{density}} seconds, so a clip should be about {{seconds}}s ({{perShot}}s per shot). A full regenerate re-plans the shots in the table at this length.",
-            segmentPreviewMergeAdjustedHint: "When linking, {{shots}} shots become one video node. The shot-splitting rhythm is {{perDensity}} shots per {{density}} seconds, so a clip should be about {{seconds}}s ({{perShot}}s per shot) — leaving Per-shot length at the 5s single-shot cap gets raised by that rhythm, otherwise shots get chopped into 1-second fragments. A full regenerate re-plans the shots in the table at this length.",
+            segmentPreviewMergeAdjustedHint: "When linking, {{shots}} shots become one video node. The shot-splitting rhythm is {{perDensity}} shots per {{density}} seconds, so a clip should be about {{seconds}}s ({{perShot}}s per shot) — the default 5s single-shot cap gets raised by that rhythm, otherwise shots get chopped into 1-second fragments. A full regenerate re-plans the shots in the table at this length.",
         },
         toolbar: {
             select: "Select",

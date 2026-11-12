@@ -82,8 +82,6 @@ import {
     SCRIPT_TOTAL_SECONDS_MIN,
     readScriptShotsPerClip,
     STORY_SCRIPT_PRESET_IDS,
-    STORY_SCRIPT_SEGMENT_SECONDS,
-    STORY_SCRIPT_IMAGE_SIZES,
     type ScriptAssetRole,
     type StoryScriptExtraColumn,
     type StoryScriptPresetId,
@@ -2257,85 +2255,26 @@ export function CanvasScriptNodeContent({
         </div>
     );
 
-    const segmentSelector = (
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
-            <span className="opacity-60">{t("canvas.scriptNode.segmentLabel")}</span>
-            {STORY_SCRIPT_SEGMENT_SECONDS.map((id) => {
-                const active = id === segmentSeconds;
-                return (
-                    <button
-                        key={id}
-                        type="button"
-                        className="inline-flex h-6 items-center rounded-full border px-2.5 transition"
-                        style={{
-                            borderColor: active ? theme.toolbar.activeText : theme.node.stroke,
-                            // 选中态必须实心：activeBg 是浅米色，和未选中的半透明底几乎没差别，
-                            // 用户会以为「没点上 / 点了没反应」（这坑在其它 pill 上踩过好几次）。
-                            background: active ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
-                            color: active ? theme.node.panel : theme.node.text,
-                            opacity: active ? 1 : 0.7,
-                        }}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            if (id === "none") {
-                                // 取消分段时，分段方式若停在「按每段时长」会变成「选中但不可用」，一起退回单镜。
-                                patchMetadata({ scriptSegmentSeconds: id, ...(mergeMode === "duration" ? { scriptMergeMode: "shot" } : {}) });
-                                return;
-                            }
-                            // 只改时长，分段方式留给用户自己选（单镜 = 每镜 N 秒，按每段时长 = 合并凑 N 秒）。
-                            patchMetadata({ scriptSegmentSeconds: id });
-                        }}
-                        title={t("canvas.scriptNode.segmentHint")}
-                    >
-                        {t(`canvas.scriptNode.segment_${id}`)}
-                    </button>
-                );
-            })}
-        </div>
-    );
+    /**
+     * 「每镜时长」选择器已**移除**（用户 2026-11-12：「生图比例和每镜时长去掉，因为我基本都已经约束了」）。
+     *
+     * 只删控件、不删语义：`resolveStoryScriptSegmentSeconds(undefined)` 仍有默认档（5 秒上限），
+     * 任务书里的「每镜时长要求」、铺链路的单镜秒数、以及「视频分段 → 按每段时长」的目标秒数
+     * 都还读它 —— 用户以前在节点上选过的值（metadata 里存着）继续生效。
+     * 口径改动集中在 `segmentSeconds` / `mergeMode` 这两个解析值上，与控件是否存在无关。
+     */
 
     /**
-     * 「AI 生图比例」：`9:16` 竖屏 / `16:9` 横屏 / `1:1` …，空 = 跟随全局配置。
+     * 「AI 生图比例」已从节点上**移除**（用户 2026-11-12：「生图比例和每镜时长去掉，因为我基本都已经约束了」）。
      *
-     * 这一档不是「只给弹窗用的默认值」—— 它是这个脚本节点**出图的画幅口径**：
-     * ① 三个「AI 生成」弹窗（添加资产 / 镜头图 / 按镜按资产）打开时都带着它；
-     * ② 一键铺链路建出来的图片节点直接写上 `metadata.size`，于是逐节点点生成也是这个画幅。
-     * 存在 `metadata.scriptImageSize`（不是全局偏好）：同一张画布上竖屏短剧与横屏素材能各用各的。
+     * 保留 `imageSize` 只为了给四个「AI 生成」弹窗当**初始值**：用户以前在这个节点存过画幅的，
+     * 打开弹窗时仍然带着它；弹窗里选完仍会回写 `metadata.scriptImageSize`，一键铺链路继续用它。
+     * 节点上不再有任何地方能改这个值（也不再显示），要改就在弹窗里改。
+     *
+     * 为什么不一并删掉这个键：铺链路建出来的图片节点要写 `metadata.size`，删键等于把
+     * 「同一张画布上竖屏短剧 / 横屏素材各用各的」这条能力一起砍掉，而用户只要求去掉控件。
      */
     const imageSize = resolveStoryScriptImageSize(node.metadata?.scriptImageSize);
-    const imageSizeSelector = (
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
-            <span className="opacity-60">{t("canvas.scriptNode.imageSizeLabel")}</span>
-            {STORY_SCRIPT_IMAGE_SIZES.map((id) => {
-                const active = id === imageSize;
-                return (
-                    <button
-                        key={id || "auto"}
-                        type="button"
-                        className="inline-flex h-6 items-center rounded-full border px-2.5 transition"
-                        style={{
-                            borderColor: active ? theme.toolbar.activeText : theme.node.stroke,
-                            // 与「每镜时长」同口径：选中必须实心，浅色描边会被看成「没点上」。
-                            background: active ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
-                            color: active ? theme.node.panel : theme.node.text,
-                            opacity: active ? 1 : 0.7,
-                        }}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            patchMetadata({ scriptImageSize: id || undefined });
-                        }}
-                        title={t("canvas.scriptNode.imageSizeHint")}
-                    >
-                        {id || t("canvas.scriptNode.imageSizeAuto")}
-                    </button>
-                );
-            })}
-        </div>
-    );
 
     /**
      * 「每 3 镜合一个视频」开关 —— **输入视图版**（用户 2026-11-11 第 04 条）。
@@ -2377,10 +2316,9 @@ export function CanvasScriptNodeContent({
         <div className="flex min-h-0 flex-1 flex-col gap-1.5 px-2 pb-2">
             {schemeSelector}
             {presetSwitcher}
-            {/* 成片总时长排最前：它决定「拆多少镜」，比「每镜多长」更上位。 */}
+            {/* 成片总时长排最前：它决定「拆多少镜」。
+                「每镜时长」「生图比例」两个选择器已按用户要求移除（2026-11-12）。 */}
             {totalSecondsSelector}
-            {segmentSelector}
-            {imageSizeSelector}
             {shotsPerClipSelector}
             <div className="flex shrink-0 items-center gap-2 text-[0.923em] opacity-60" style={{ color: theme.node.text }}>
                 <span>{t("canvas.scriptNode.sourceLabel")}</span>
@@ -2776,10 +2714,13 @@ export function CanvasScriptNodeContent({
      * 用户 2026-11-12：「在缩小后的界面需要能够展示这些按钮 —— 展示使用的第几套执行方案、
      * 风格模板、对话和生视频模型选择、一键直接生图、一键铺视频链路、一键铺视频链路并生成、
      * 生图比例、每 3 镜合一个视频开关、简洁缩小开关」。原来这里只剩一句提示，改任何一项都得先
-     * 把表展开；现在把这些控件按「设置 → 画幅 → 动作」三行排进去，三行都是**引用同一份 JSX 变量**
+     * 把表展开；现在把这些控件按「设置 → 铺链路口径 → 动作」三行排进去，都是**引用同一份 JSX 变量**
      * （`schemeSelector` / `styleTemplatePicker` / `textModelPicker` / `videoModelPicker` /
-     * `imageSizeSelector` / `shotsPerClipSelector` / 三个动作按钮 / `tableDisplayControl`），
+     * `shotsPerClipSelector` / 三个动作按钮 / `tableDisplayControl`），
      * 所以口径与表体、输入视图完全一致，不会出现「两边选项不同 / 缩放态还显示旧值」。
+     *
+     * ⚠️ 同一天稍后又按要求**移除了「生图比例」「每镜时长」**（「这两个去掉，因为我基本都已经约束了」），
+     * 所以这里只剩「每 3 镜合一个视频」一个口径开关；上面那句是当天的原始需求，留作沿革。
      *
      * 高度不写死：自动适配那段按 `提示条.offsetTop + offsetHeight` 算，控件多了节点自己会长高。
      */
@@ -2807,12 +2748,9 @@ export function CanvasScriptNodeContent({
                 {videoModelPicker}
             </div>
 
-            {/* 出图口径：画幅 + 每 3 镜合一视频（决定铺链路时一段拼几镜）。两行合一排，
-                宽度不够时各自内部还会 wrap —— 缩放态要尽量矮。 */}
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
-                {imageSizeSelector}
-                {shotsPerClipSelector}
-            </div>
+            {/* 铺链路口径：每 3 镜合一视频（决定铺链路时一段拼几镜）。
+                「生图比例」已按用户要求从节点上移除（2026-11-12），改比例去「AI 生成」弹窗里选。 */}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">{shotsPerClipSelector}</div>
 
             {/* 三个批量动作 —— 与表体右下角完全同一份实现。全都没有（没接回调）时整行不占位。 */}
             {directAssetButton || buildVideoChainButton || pipelineVideoGenerateButton ? (
@@ -3400,16 +3338,12 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.shotCount", { count: rows.length })} · {t("canvas.scriptNode.totalDuration", { seconds: totalDuration })}
                 </span>
                 {/* 执行方案也放到表体操作条：看表时想「换套提示词再重生成」不用切回输入视图。
-                    与「每镜时长」并排，都属于「怎么生成」的那一组。
-                    ⚠️「视频分段」「生图比例」已搬到右下角「一键铺链路」下面（见下面的按钮列）：
-                    那两个决定的是「铺链路怎么铺」，混在这一长排里用户找不到。 */}
+                    ⚠️「视频分段」在右下角「一键铺链路」下面；「每镜时长」「生图比例」两个选择器
+                    已按用户要求移除（2026-11-12）—— 时长按表格里的 `duration` 走，比例在生成弹窗里选。 */}
                 {/* 成片总时长也常驻表体操作条：翻表时想「改个时长再重生成」不用切回输入视图
-                    （与「每镜时长」同理，用户 2026-11-11 第 01 条）。 */}
+                    （用户 2026-11-11 第 01 条）。 */}
                 {totalSecondsSelector}
                 {schemeSelector}
-                {/* 每镜时长也放到表体操作条：用户看分镜表时就能直接改，不用切回「输入」视图再找。
-                    选单镜 → 每镜一段（10/15 锁定成片秒数、5 秒是上限）；选「按每段时长」→ 连续几镜凑够 N 秒。 */}
-                {segmentSelector}
                 {/* 手动添加资产列（「宠物」「车辆」…）：自建列的行为与内置资产列一致，铺链路会按分类把图连进图片节点。
                     常驻显示、到上限才禁用 —— 之前到 8 列直接消失，看起来像「这个功能没了 / 加不上」。 */}
                 <button
@@ -3641,19 +3575,13 @@ export function CanvasScriptNodeContent({
                             </button>
                         </div>
                     ) : null}
-                    {/* 「视频分段」+「生图比例」：紧贴在「一键铺链路」下面（用户 2026-11-07 点名）。
-                        它们不改节点内容、改的是**这次怎么铺**（几镜合成一段 / 建出来的图什么画幅），
-                        所以和铺链路按钮放在一起，比混在左侧「方案 / 每镜时长」那一长排里更好找。
-                        两个都自带 flex-wrap：节点被拉窄时各自换行，不会横向溢出。
-                        ⚠️ 这里是**表体视图**的落点；「输入」视图（sourcePanel）里没有铺链路按钮，
-                        那两处保留不动（读写同一个 metadata，改哪边都一样）。 */}
+                    {/* 「视频分段」：紧贴在「一键铺链路」下面（用户 2026-11-07 点名）。
+                        它不改节点内容、改的是**这次怎么铺**（几镜合成一段），所以和铺链路按钮放在一起。
+                        ⚠️「生图比例」已按用户要求从节点上移除（2026-11-12）：比例在「AI 生成」弹窗里选，
+                        铺链路建图片节点时沿用节点上存的那一档（没有就跟随全局）。 */}
                     <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">{mergeSelector}</div>
-                    {/* 「合并为一镜 / 取消合并 + 解除合并组」跟「生图比例」同一行，**在它左边**
-                        （用户 2026-11-09 第 03 条）。两者都是「这次怎么铺」的设定，挨着更好找。 */}
-                    <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">
-                        {mergeManualActions}
-                        {imageSizeSelector}
-                    </div>
+                    {/* 「合并为一镜 / 取消合并 + 解除合并组」（用户 2026-11-09 第 03 条）。 */}
+                    <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">{mergeManualActions}</div>
                     {/* 「选择铺链路」：勾几镜 → 只铺这几镜，并把它们合成一个视频链路（一段视频）。
                         勾选态必须**实心高对比**：`activeBg` 是浅米色（浅色主题 #e7e5df、深色主题 #3a3631），
                         拿它当描边 + 12% 填充 + 文字色，在同样浅/同样暗的节点面板上等于没变化，
