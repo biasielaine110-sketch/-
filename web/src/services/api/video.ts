@@ -34,8 +34,8 @@ import {
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
-import { buildJusuanhubVideoRequestBody, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, pinJusuanhubApiKey, readJusuanhubJobId, readJusuanhubJobState } from "./jusuanhub-media";
-import { runWithJusuanhubRetry } from "./jusuanhub-retry";
+import { buildJusuanhubVideoRequestBody, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, orderJusuanhubApiKeys, readJusuanhubJobId, readJusuanhubJobState } from "./jusuanhub-media";
+import { runWithJusuanhubKeyFailover, runWithJusuanhubRetry } from "./jusuanhub-retry";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
@@ -235,6 +235,12 @@ async function collectJusuanhubVideoReferenceUrls(references: ReferenceImage[], 
     return urls;
 }
 
+/** 这次提交可以用的 Key：渠道/模型上配的全部 Key（`config.apiKey` 通常已包含在 `apiKeys` 里，靠 Set 去重）。 */
+function jusuanhubKeyCandidates(config: AiConfig): string[] {
+    const keys = Array.isArray(config.apiKeys) ? config.apiKeys : [];
+    return [...keys, config.apiKey || ""].filter(Boolean);
+}
+
 async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     const modelName = modelOptionName(model).trim() || "minimax-h3";
     const imageUrls = await collectJusuanhubVideoReferenceUrls(references, 9, options?.signal);
@@ -246,26 +252,32 @@ async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt:
         vquality: config.vquality,
         imageUrls,
     });
-    // 🔴 429（上游账户排队/并发额度打满）是这一家最常见的「假失败」：等几秒重发同一个 body 就能进队。
-    // key 放在环外，重试必须复用同一个 Idempotency-Key，否则可能建出两条任务。
-    const headers = { ...aiHeaders(config, "application/json"), "Idempotency-Key": newJusuanhubVideoIdempotencyKey() };
-    const response = await runWithJusuanhubRetry(
-        () =>
-            axios.post<unknown>(aiApiUrl(config, "/media/generations"), body, {
-                headers,
+    // 🔴 429（上游账户排队/并发额度打满）是这一家最常见的「假失败」，两层应对：
+    //   ① 多 Key：随机顺序逐个试，前一个被 401/402/403/429 挡住就换下一个账户
+    //      —— 别把 90 秒耗在一个已经排满的队列上，另一个账户可能还有空位；
+    //   ② 全部 Key 都排满（或只有一个 Key）：回到第一个 Key 做带退避的长等，
+    //      退避 3→6→12→24→30 约 75 秒用完，再不行就把原始 429 抛给用户。
+    // Idempotency-Key 在环外生成一次，换 Key 复用它：每个账户幂等空间独立，不会串单。
+    const idempotencyKey = newJusuanhubVideoIdempotencyKey();
+    const keys = orderJusuanhubApiKeys(jusuanhubKeyCandidates(config));
+    // 实际提交成功的那个 Key 要记下来 —— 轮询 `/v1/jobs/{id}` 必须用它（job 是账户级的）。
+    let submittedKey = keys[0] || config.apiKey;
+    const response = await runWithJusuanhubKeyFailover(
+        keys,
+        (apiKey) => {
+            submittedKey = apiKey;
+            return axios.post<unknown>(aiApiUrl(config, "/media/generations"), body, {
+                headers: { ...aiHeaders({ ...config, apiKey }, "application/json"), "Idempotency-Key": idempotencyKey },
                 signal: options?.signal,
                 timeout: JUSUANHUB_VIDEO_CREATE_TIMEOUT_MS,
-            }),
-        // 429 = 账户队列满：`queued.maxUnits:80 / unitsPerJob:8` 最多排 10 条，
-        // `running.maxUnits:24 / unitsPerJob:6` 同时只跑 4 条，而一条视频要 ~2 分钟。
-        // 所以视频提交的等待预算给到 90 秒（退避 3→6→12→24→30，约 75 秒用完），
-        // 再收不到位置就抛原始 429，让用户看到「稍后重试」而不是白等。
-        { signal: options?.signal, maxAttempts: 6, deadlineMs: 90_000 },
+            });
+        },
+        { signal: options?.signal, perKeyDeadlineMs: 90_000, finalRetry: { maxAttempts: 6, deadlineMs: 90_000 } },
     );
     const jobId = readJusuanhubJobId(response.data);
     if (!jobId) throw new Error(apiText("noVideoTaskId"));
     // 把本次用的 Key 记在任务上：轮询 / 取字节必须用同一个账户，否则 404。
-    return { id: jobId, provider: "jusuanhub", model, apiKey: config.apiKey };
+    return { id: jobId, provider: "jusuanhub", model, apiKey: submittedKey };
 }
 
 async function pollJusuanhubVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -402,10 +414,8 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     // 聚算 Hub（`*.jusuanhub.com`）必须同样放在所有「按模型名猜形状」的启发式之前：
     // 它的 `minimax-h3` 会被 `isRelayMiniMaxH3Video` 命中，套上 CometAPI 形状后打到 /videos 只会 404。
     if (isJusuanhubMediaBaseUrl(requestConfig.baseUrl)) {
-        // 多 Key：每次执行在起点随机挑一个，并一路钉到轮询（job 是账户级的）。
-        const pinned = pinJusuanhubApiKey(requestConfig);
-        assertVideoConfig(pinned, pinned.model);
-        return createJusuanhubVideoTask(pinned, selectedModel, prompt, safeReferences, options);
+        assertVideoConfig(requestConfig, requestConfig.model);
+        return createJusuanhubVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
     }
     // Metaso MiniMax-H3 must use OpenAI /videos before any AutoDL ComfyUI heuristic.
     if (isMetasoH3Video(requestConfig, selectedModel)) {

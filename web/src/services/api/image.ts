@@ -16,12 +16,12 @@ import { fetchRemoteImageBlob, imageToDataUrl } from "@/services/image-storage";
 import {
     buildJusuanhubImageRequestBody,
     isJusuanhubMediaBaseUrl,
-    pinJusuanhubApiKey,
+    orderJusuanhubApiKeys,
     readJusuanhubJobId,
     readJusuanhubJobState,
     readJusuanhubOutputUrls,
 } from "./jusuanhub-media";
-import { runWithJusuanhubRetry } from "./jusuanhub-retry";
+import { runWithJusuanhubKeyFailover, runWithJusuanhubRetry } from "./jusuanhub-retry";
 import type { ReferenceImage } from "@/types/image";
 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
@@ -3233,28 +3233,34 @@ async function collectJusuanhubReferenceUrls(references: ReferenceImage[], limit
 
 /** 提交一个 job；个别 publication 会同步返回 outputs，这里一并吃掉。 */
 async function submitJusuanhubImageJob(config: AiConfig, body: unknown, options?: RequestOptions) {
-    // 🔴 Idempotency-Key 只生成一次，放在重试环外面：429 重发必须是「同一次提交」，
-    // 换 key 就可能建出两个 job（两条都进队 = 白烧一次额度，还多一张图）。
-    const headers = { ...aiHeaders(config, "application/json"), "Idempotency-Key": newJusuanhubIdempotencyKey() };
-    const response = await runWithJusuanhubRetry(
-        () =>
-            axios.post<unknown>(aiApiUrl(config, "/images/generations"), body, {
-                headers,
+    // 🔴 Idempotency-Key 只生成一次，放在重试环/换 Key 环外面：重发必须是「同一次提交」。
+    // 每个账户的幂等空间独立，换 Key 复用同一个 key 不会串单，反而能挡住重复建单。
+    const idempotencyKey = newJusuanhubIdempotencyKey();
+    const keys = orderJusuanhubApiKeys([...(Array.isArray(config.apiKeys) ? config.apiKeys : []), config.apiKey || ""].filter(Boolean));
+    // 多 Key：随机顺序逐个试，401/402/403/429 就换下一个账户（429 是账户队列满，换 Key 最值钱）。
+    let usedKey = keys[0] || config.apiKey;
+    const response = await runWithJusuanhubKeyFailover(
+        keys,
+        (apiKey) => {
+            usedKey = apiKey;
+            return axios.post<unknown>(aiApiUrl(config, "/images/generations"), body, {
+                headers: { ...aiHeaders({ ...config, apiKey }, "application/json"), "Idempotency-Key": idempotencyKey },
                 signal: options?.signal,
                 timeout: IMAGE_REQUEST_TIMEOUT_MS,
-            }),
-        // 429 = 账户队列满（`queued.maxUnits:80 / unitsPerJob:8` → 最多排 10 条）。
-        // 图片 job 排队很快，30 秒预算足够等到腾位；再多就该让用户知道「额度真满了」。
-        { signal: options?.signal, maxAttempts: 4, deadlineMs: 30_000 },
+            });
+        },
+        // 图片 job 排队很快，30 秒预算足够等到腾位；多 Key 时每个 Key 只试一次，全排满再回到第一个等。
+        { signal: options?.signal, perKeyDeadlineMs: 30_000, finalRetry: { maxAttempts: 4, deadlineMs: 30_000 } },
     );
     const urls = readJusuanhubOutputUrls(response.data);
     const jobId = readJusuanhubJobId(response.data);
     if (!jobId && !urls.length) {
         // 把顶层字段带出去：这一家偶尔会换壳（`{ task:{...} }`），有字段名就能一次定位。
-        const keys = response.data && typeof response.data === "object" ? Object.keys(response.data as Record<string, unknown>) : [];
-        throw new Error(apiText("unknownImageResponse", { fields: keys.join(", ") || "（空）" }));
+        const topLevelFields = response.data && typeof response.data === "object" ? Object.keys(response.data as Record<string, unknown>) : [];
+        throw new Error(apiText("unknownImageResponse", { fields: topLevelFields.join(", ") || "（空）" }));
     }
-    return { jobId, urls };
+    // 带上用了哪把 Key：轮询 / 取字节必须用同一个账户，否则 404。
+    return { jobId, urls, apiKey: usedKey };
 }
 
 async function waitJusuanhubJob(config: AiConfig, jobId: string, options?: RequestOptions): Promise<string[]> {
@@ -3342,9 +3348,11 @@ async function requestJusuanhubImages(
     const submitted = await Promise.all(Array.from({ length: total }, () => submitJusuanhubImageJob(config, body, options)));
     const results: GeneratedImageResult[] = [];
     for (const item of submitted) {
-        const outputUrls = item.urls.length ? item.urls : await waitJusuanhubJob(config, item.jobId, options);
+        // 🔴 每个 job 可能落在不同账户上（多 Key 随机）：轮询 / 取字节必须用它自己那把 Key。
+        const jobConfig = item.apiKey && item.apiKey !== config.apiKey ? { ...config, apiKey: item.apiKey } : config;
+        const outputUrls = item.urls.length ? item.urls : await waitJusuanhubJob(jobConfig, item.jobId, options);
         for (const url of outputUrls) {
-            results.push({ id: nanoid(), dataUrl: await fetchJusuanhubImageDataUrl(config, url, options) });
+            results.push({ id: nanoid(), dataUrl: await fetchJusuanhubImageDataUrl(jobConfig, url, options) });
         }
     }
     return results;
@@ -3382,8 +3390,8 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     // 用户显式给模型挂了脚本时让给脚本（脚本优先级更高，跟其它 provider 一致）。
     if (!script && isJusuanhubMediaBaseUrl(requestConfig.baseUrl)) {
         try {
-            // 多 Key：一次执行随机挑一个，提交 / 轮询 / 取字节全程用它（job 是账户级的）。
-            return await requestJusuanhubImages(pinJusuanhubApiKey(requestConfig), prompt, [], n, options);
+            // 多 Key：提交时随机顺序逐个试，失败换下一个（见 submitJusuanhubImageJob）。
+            return await requestJusuanhubImages(requestConfig, prompt, [], n, options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
@@ -3532,8 +3540,8 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     if (!script && isJusuanhubMediaBaseUrl(requestConfig.baseUrl)) {
         if (mask) throw new Error(apiText("geminiMaskUnsupported"));
         try {
-            // 同上：多 Key 随机一次，整条 job 链路复用。
-            return await requestJusuanhubImages(pinJusuanhubApiKey(requestConfig), requestPrompt, references, n, options);
+            // 同上：提交时按随机顺序换 Key，轮询/取字节跟随实际提交的那个账户。
+            return await requestJusuanhubImages(requestConfig, requestPrompt, references, n, options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }

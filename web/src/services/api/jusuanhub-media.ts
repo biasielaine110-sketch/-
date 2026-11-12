@@ -45,39 +45,49 @@ export function isJusuanhubMediaBaseUrl(baseUrl: string): boolean {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════
-// 多 Key：每次执行随机挑一个
+// 多 Key：随机顺序 + 失败换下一个
 // ════════════════════════════════════════════════════════════════════════════════════════
 
 /**
- * 从一组 Key 里随机挑一个（`random` 只为探针注入，业务侧用默认 `Math.random`）。
+ * 把 Key 列表**洗牌**（`random` 只为探针注入，业务侧用默认 `Math.random`）。
  *
- * 为什么是「随机」而不是「轮转」：这一家的额度是**按账户**算的（`queued.maxUnits` /
- * `running.maxUnits` 都是账户级），几个 Key 各属一个账户；固定从第一个开始，等于所有并发
- * 都砸在同一个账户的队列上，撞 429 的概率最高。随机能把并发摊开。
+ * 为什么随机而不是「从第一个开始轮」：这一家的额度是**按账户**算的（`queued.maxUnits` /
+ * `running.maxUnits` 都是账户级），几个 Key 各属一个账户；固定从第一个开始试，等于所有并发
+ * 都先砸在同一个账户的队列上，撞 429 的概率最高。
  *
- * 🔴 **随机只发生在「一次执行」的起点，选中后必须钉住整条链路**（提交 → 轮询 job → 取字节）。
- * 聚算的 job 是**账户级**的：key A 提交的 `jobId`，用 key B 查 `GET /v1/jobs/{id}` 只会 404
- * （`job not found`），看起来像「任务凭空消失」。所以别在 `aiHeaders` 一类每请求都跑的地方随机。
+ * 返回的是**完整列表**而不是单个 Key：提交时按这个顺序逐个试，前面被 401/402/429 挡掉就换下一个
+ * （见 `runWithJusuanhubKeyFailover`）。洗牌保证每个 Key 都有机会排在第一位。
+ *
+ * 🔴 选中的 Key 必须钉住整条链路（提交 → 轮询 job → 取字节）：聚算的 job 是**账户级**的，
+ * key A 提交的 `jobId` 用 key B 查 `GET /v1/jobs/{id}` 只会 404（看起来像「任务凭空消失」）。
+ * 所以别在 `aiHeaders` 一类每请求都跑的地方洗牌。
  */
-export function pickJusuanhubApiKey(keys: readonly string[], random: () => number = Math.random): string {
-    const clean = keys.map((key) => String(key || "").trim()).filter(Boolean);
-    if (!clean.length) return "";
-    if (clean.length === 1) return clean[0];
-    const index = Math.floor(random() * clean.length);
-    return clean[Math.min(Math.max(index, 0), clean.length - 1)] || clean[0];
+export function orderJusuanhubApiKeys(keys: readonly string[], random: () => number = Math.random): string[] {
+    const clean = Array.from(new Set(keys.map((key) => String(key || "").trim()).filter(Boolean)));
+    // Fisher-Yates：保证是均匀的全排列，不是「随机起点后按原序」那种半吊子洗牌。
+    for (let i = clean.length - 1; i > 0; i -= 1) {
+        const raw = Math.floor(random() * (i + 1));
+        const j = Math.min(Math.max(raw, 0), i);
+        const swap = clean[i];
+        clean[i] = clean[j];
+        clean[j] = swap;
+    }
+    return clean;
 }
 
 /**
- * 把「本次执行要用的 Key」钉进 config。只对聚算渠道、且配了 2 个以上 Key 时生效，
- * 其它渠道原样返回（多 Key 在别家是「余额用尽再换」的备用语义，不能抢先打乱）。
+ * 这个状态码该不该换一个 Key 再试。
+ *
+ * 只有「跟这个账户/这把 Key 有关」的失败才值得换：
+ *  · 401 / 403 —— Key 无效、被禁、或该账户没有这个模型的权限；
+ *  · 402       —— 余额/额度不足；
+ *  · 429       —— **这个账户的队列排满**（`queued.maxUnits:80 / unitsPerJob:8` 最多排 10 条）。
+ *                这是换 Key 最值钱的场景：另一个账户可能还有空位。
+ *
+ * 502 / 503 / 504 是上游自己炸，400 是参数错 —— 换 Key 也一样，白白多烧一次请求。
  */
-export function pinJusuanhubApiKey<T extends { baseUrl?: string; apiKey?: string; apiKeys?: readonly string[] }>(config: T, random: () => number = Math.random): T {
-    if (!isJusuanhubMediaBaseUrl(config.baseUrl || "")) return config;
-    const keys = Array.isArray(config.apiKeys) ? config.apiKeys : [];
-    if (keys.length < 2) return config;
-    const picked = pickJusuanhubApiKey(keys, random);
-    if (!picked || picked === config.apiKey) return config;
-    return { ...config, apiKey: picked };
+export function isJusuanhubKeyFailoverStatus(status: number): boolean {
+    return status === 401 || status === 402 || status === 403 || status === 429;
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════
