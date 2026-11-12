@@ -272,7 +272,9 @@ async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt:
                 timeout: JUSUANHUB_VIDEO_CREATE_TIMEOUT_MS,
             });
         },
-        { signal: options?.signal, perKeyDeadlineMs: 90_000, finalRetry: { maxAttempts: 6, deadlineMs: 90_000 } },
+        // 多 Key 时每个 Key 只试一次（`perKeyAttempts` 默认 1、`perKeyDeadlineMs` 默认 0），
+        // 单 Key 没得换，仍按旧的 6 次 / 90 秒等队列腾位 —— 由 `singleKey` 单独给。
+        { signal: options?.signal, singleKey: { maxAttempts: 6, deadlineMs: 90_000 }, finalRetry: { maxAttempts: 6, deadlineMs: 90_000 } },
     );
     const jobId = readJusuanhubJobId(response.data);
     if (!jobId) throw new Error(apiText("noVideoTaskId"));

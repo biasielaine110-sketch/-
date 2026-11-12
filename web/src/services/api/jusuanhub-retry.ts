@@ -79,10 +79,17 @@ export interface JusuanhubKeyFailoverOptions {
     /** 每个 Key 自己的 429 等待预算。多 Key 时默认 0（不等待，直接换下一个）。 */
     perKeyDeadlineMs?: number;
     /**
+     * **只配了 1 个 Key** 时用的重试预算 —— 就是旧的单 Key 行为（视频 6 次 / 图片 4 次）。
+     * 多 Key 时忽略。不给 `singleKey` 才回落到 `perKeyAttempts` / `perKeyDeadlineMs`。
+     */
+    singleKey?: { maxAttempts?: number; deadlineMs?: number };
+    /**
      * 「所有 Key 都被 429 挡回来」时的兜底：回到第一个 Key 做一次带退避的长等。
      * 这是单 Key 的旧行为 —— 多 Key 不该比单 Key 更容易失败（都排满时还是得等位）。
      */
     finalRetry?: { maxAttempts?: number; deadlineMs?: number };
+    /** 退避基数，只有探针该改它（传 1 即毫秒级跑完）。 */
+    baseDelayMs?: number;
     onKeyFailover?: (info: { fromKey: string; toKey: string; status: number }) => void;
 }
 
@@ -96,6 +103,8 @@ export interface JusuanhubKeyFailoverOptions {
  *     所以多 Key 时 `perKeyAttempts` 默认 1（不重试，失败就换），全部试完才走 `finalRetry` 长等。
  *  ② **Idempotency-Key 由调用方在环外生成一次**，换 Key 也复用它。每个账户的幂等空间独立，
  *     复用不会串单，反而能挡住「同一个逻辑提交被重复建单」。
+ *  ③ **单 Key 的预算要单独给**（`singleKey`）。多 Key 缩预算是为了「先试别的账户」；
+ *     只有一个 Key 时没得换，那 90 秒等队列腾位就是唯一出路，不能顺手把它也缩成 1 次。
  */
 export async function runWithJusuanhubKeyFailover<T>(
     keys: readonly string[],
@@ -111,8 +120,13 @@ export async function runWithJusuanhubKeyFailover<T>(
         try {
             return await runWithJusuanhubRetry(() => run(list[index]), {
                 signal: options.signal,
-                maxAttempts: multi ? options.perKeyAttempts ?? 1 : options.perKeyAttempts,
-                deadlineMs: multi ? options.perKeyDeadlineMs ?? 0 : options.perKeyDeadlineMs,
+                baseDelayMs: options.baseDelayMs,
+                maxAttempts: multi
+                    ? options.perKeyAttempts ?? 1
+                    : options.singleKey?.maxAttempts ?? options.perKeyAttempts,
+                deadlineMs: multi
+                    ? options.perKeyDeadlineMs ?? 0
+                    : options.singleKey?.deadlineMs ?? options.perKeyDeadlineMs,
             });
         } catch (error) {
             if (axios.isCancel(error) || options.signal?.aborted) throw error;
@@ -128,6 +142,7 @@ export async function runWithJusuanhubKeyFailover<T>(
     if (multi && status === 429) {
         return runWithJusuanhubRetry(() => run(list[0]), {
             signal: options.signal,
+            baseDelayMs: options.baseDelayMs,
             maxAttempts: options.finalRetry?.maxAttempts,
             deadlineMs: options.finalRetry?.deadlineMs,
         });

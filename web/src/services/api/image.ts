@@ -3249,8 +3249,9 @@ async function submitJusuanhubImageJob(config: AiConfig, body: unknown, options?
                 timeout: IMAGE_REQUEST_TIMEOUT_MS,
             });
         },
-        // 图片 job 排队很快，30 秒预算足够等到腾位；多 Key 时每个 Key 只试一次，全排满再回到第一个等。
-        { signal: options?.signal, perKeyDeadlineMs: 30_000, finalRetry: { maxAttempts: 4, deadlineMs: 30_000 } },
+        // 图片 job 排队很快；多 Key 时每个只试一次、不等待，全排满再回到第一个等 30 秒。
+        // 单 Key 没得换，仍按旧的 4 次 / 30 秒预算（`singleKey`）。
+        { signal: options?.signal, singleKey: { maxAttempts: 4, deadlineMs: 30_000 }, finalRetry: { maxAttempts: 4, deadlineMs: 30_000 } },
     );
     const urls = readJusuanhubOutputUrls(response.data);
     const jobId = readJusuanhubJobId(response.data);
