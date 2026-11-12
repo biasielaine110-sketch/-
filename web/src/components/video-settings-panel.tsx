@@ -34,6 +34,7 @@ import {
     type FisherPipelineMode,
 } from "@/lib/runninghub-workflow";
 import { isRelayMiniMaxH3Video } from "@/services/api/video";
+import { JUSUANHUB_VIDEO_RESOLUTION_OPTIONS, isJusuanhubMediaBaseUrl, normalizeJusuanhubVideoQuality } from "@/services/api/jusuanhub-media";
 import { isApimartMuseVideoModel } from "@/services/api/video";
 import {
     COMFY_H3_STABLE_SEED,
@@ -251,7 +252,14 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const model = config.model || config.videoModel || "";
     const requestConfig = resolveModelRequestConfig(config, model);
     const h3Comfy = isAutodlH3ComfyVideoModel(model, requestConfig.baseUrl);
-    const relayH3 = !h3Comfy && isRelayMiniMaxH3Video(requestConfig, model);
+    /**
+     * 聚算 Hub（`*.jusuanhub.com`）：`minimax-h3` 名字也命中 relay H3 的正则，
+     * 但它只有 **544p / 768p** 两档、并且是异步 job 契约（`/media/generations`）。
+     * 所以它必须比 relayH3 先认出来 —— 否则面板会摆出 720/1080/2K 三个值，
+     * 而这三个值在提交时全被收成 768p（用户点 1080p 拿到的还是 768p）。
+     */
+    const jusuanhubH3 = !h3Comfy && isJusuanhubMediaBaseUrl(requestConfig.baseUrl);
+    const relayH3 = !h3Comfy && !jusuanhubH3 && isRelayMiniMaxH3Video(requestConfig, model);
     const singularityRh = !h3Comfy && isMinimaxH3SingularityWorkflowId(model);
     /** Singularity 形轻量 AI App（211575… MiniMax H3生成视频）。 */
     const singularityLightRh = !h3Comfy && isMinimaxH3SingularityLightAiAppId(model);
@@ -274,11 +282,12 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const museVideo = isZhenzhenMuseVideoModel(model) || isApimartMuseVideoModel(model);
     const qualityChoices = useMemo(() => {
         if (nativeComfy && !h3Comfy) return resolutionOptionsForFamily(nativeFamily);
+        if (jusuanhubH3) return JUSUANHUB_VIDEO_RESOLUTION_OPTIONS;
         if (fisherRh || fisherLightRh) return fisherResolutionOptions;
         if (singularityRh || singularityLightRh || hdDynamicRh || yzjinyuRh || wenxiRh) return twoPassResolutionOptions;
         if (relayH3) return relayH3ResolutionOptions;
         return resolutionOptions;
-    }, [nativeComfy, h3Comfy, nativeFamily, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, relayH3]);
+    }, [nativeComfy, h3Comfy, nativeFamily, jusuanhubH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, relayH3]);
     const fisherModeChoices: Array<{ value: FisherPipelineMode; labelKey: string }> = [
         { value: "video", labelKey: "video" },
         { value: "character", labelKey: "character" },
@@ -345,7 +354,8 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const seconds = config.videoSeconds || "6";
     const size = normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
-    const resolution = normalizeVideoResolutionValue(config.vquality);
+    // 聚算 Hub 只有 544p / 768p：老配置里的 480/720/1080/2k 都要收敛，否则两个 pill 都不亮。
+    const resolution = jusuanhubH3 ? normalizeJusuanhubVideoQuality(config.vquality) : normalizeVideoResolutionValue(config.vquality);
     const steps = config.videoSteps || "40";
     const refImageSize = (config.videoRefImageSize || "max") === "max" ? "max" : "match";
     const samplerName = config.videoSamplerName || "dpmpp_2m";
@@ -535,6 +545,11 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             {t("settingsPanels.video.museQualityHint", { model: modelOptionName(model) })}
                         </div>
                     ) : null}
+                    {jusuanhubH3 ? (
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.jusuanhubQualityHint")}
+                        </div>
+                    ) : null}
                     <div className={`grid gap-2.5 ${qualityChoices.length >= 3 ? "grid-cols-4" : "grid-cols-3"}`}>
                         {qualityChoices.map((item) => (
                             <OptionPill key={item.value} selected={resolution === item.value} theme={theme} onClick={() => onConfigChange("vquality", item.value)}>
@@ -715,6 +730,10 @@ export function videoSettingsSummary(config: AiConfig) {
     }
     // muse 的时长 / 清晰度是服务端写死的，别把画布上的旋钮值写进摘要（会骗人）。
     if (isZhenzhenMuseVideoModel(model) || isApimartMuseVideoModel(model)) return `720p · 10s`;
+    // 聚算 Hub 只有 544p / 768p 两档，摘要必须按「实际会被提交的档位」写。
+    if (isJusuanhubMediaBaseUrl(resolveModelRequestConfig(config, model).baseUrl)) {
+        return `${normalizeJusuanhubVideoQuality(config.vquality)}p · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
+    }
     const base = `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
     if (isMinimaxH3FisherWorkflowId(model) || isWorkFisherLightAiAppId(model) || isMinimaxH3SingularityLightAiAppId(model)) {
         const instance = normalizeRunningHubInstanceType(config.videoRhInstanceType);

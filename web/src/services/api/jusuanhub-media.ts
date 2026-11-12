@@ -233,6 +233,26 @@ export function resolveJusuanhubVideoResolutionTier(vquality: string): "544p" | 
     return "768p";
 }
 
+/**
+ * 面板只该给这两档（列表顺序 = 面板顺序）。`value` 就是 `resolutionTier` 去掉 p。
+ *
+ * 544p 不是「缩水选项」而是正经一档：16:9 出 960×544、21:9 出 1280×544、9:16 出 544×960，
+ * 出片快、适合先看构图再重跑。以前面板借用了 relay H3 的 `720/1080/2K`，三个值全被后端
+ * 收成 768p —— 用户点 1080p 拿到的仍是 768p，等于在骗人。
+ */
+export const JUSUANHUB_VIDEO_RESOLUTION_OPTIONS = [
+    { value: "544", label: "544p" },
+    { value: "768", label: "768p" },
+] as const;
+
+/**
+ * 画布上存的 `vquality` 是历史遗留的（可能有 480 / 720 / 1080 / 2k），
+ * 一律收敛成这两档之一，否则面板会出现「一个都不选中」。
+ */
+export function normalizeJusuanhubVideoQuality(vquality: string): "544" | "768" {
+    return resolveJusuanhubVideoResolutionTier(vquality) === "544p" ? "544" : "768";
+}
+
 export type JusuanhubVideoMode = "t2v" | "i2v" | "first_last_frame_video" | "universal_reference_video";
 
 /**
