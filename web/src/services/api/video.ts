@@ -2511,10 +2511,18 @@ function readAxiosError(error: unknown, fallback: string) {
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
         }
         const responseData = error.response?.data;
+        const status = error.response?.status;
         // Cloudflare edge page instead of an API answer → the provider's own origin is broken.
-        const edge = clarifyVideoEdgeError(error.response?.status, responseData);
+        const edge = clarifyVideoEdgeError(status, responseData);
         if (edge) return edge;
-        return readApiErrorMessage(responseData) || statusMessage(error.response?.status, fallback);
+        // 402 = 渠道没钱 / 没开通这个模型（聚算 Hub 的 minimax-h3 就常返 402）。必须**在读正文之前**拦下：
+        // 中转站常把它包成 `{error:{message:"Payment required"}}` 甚至一段 nginx HTML，照抄正文只会让人
+        // 去改 Base URL / Key，永远改不好。与 `image.ts:readStatusError` 同口径。
+        if (status === 402) return apiText("paymentRequired");
+        // 504 要分清是谁超时：body 以 `proxy error:` 开头 = 站点代理自己（290s）等到超时，改直连 / 本机跑有用；
+        // 其余 = 上游网关自己 504（他们 nginx 等不到后端模型服务），改直连也一样，只能等或换渠道。
+        if (status === 504 && !isProxyErrorBody(responseData)) return apiText("upstreamGatewayTimeout");
+        return readApiErrorMessage(responseData) || statusMessage(status, fallback);
     }
     if (error instanceof DOMException && error.name === "AbortError") return apiText("requestCanceled");
     return error instanceof Error ? readApiErrorMessage(error.message) || readNetworkMessage(error.message) || error.message : fallback;
@@ -2525,6 +2533,17 @@ function readAxiosError(error: unknown, fallback: string) {
  * "1016 Origin DNS error" means Cloudflare cannot resolve the API host at all, 52x means the origin
  * is down/overloaded. Say that plainly — it is a provider outage, not a canvas setting.
  */
+/**
+ * 我们自己的 `/api/proxy` 超时时返回的正文形如
+ * `proxy error: upstream timed out after 290s。站点代理没能连上接口服务器…`。
+ * 用它把「代理自己超时」和「上游网关自己吐 504」分开 —— 这两件事的下一步动作完全相反：
+ * 前者改直连 / 本机跑有用，后者改了也没用（是服务商自己的 nginx 等不到模型服务）。
+ */
+function isProxyErrorBody(data: unknown) {
+    const text = typeof data === "string" ? data : "";
+    return /^proxy error:/i.test(text.trim());
+}
+
 function clarifyVideoEdgeError(status: number | undefined, data: unknown) {
     const text = typeof data === "string" ? data : "";
     if (!text || !/cloudflare/i.test(text)) return "";
@@ -2545,6 +2564,7 @@ function readNetworkMessage(message: string) {
 function statusMessage(status: number | undefined, fallback: string) {
     if (status === 400) return `${fallback}（400）`;
     if (status === 401 || status === 403) return apiText("authenticationFailed");
+    if (status === 402) return apiText("paymentRequired");
     if (status === 413) return apiText("payloadTooLarge");
     if (status === 429) return apiText("rateLimited");
     if (status === 503) return apiText("videoServiceBusy");
