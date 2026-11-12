@@ -1,0 +1,364 @@
+/**
+ * 聚算 Hub（`*.jusuanhub.com`）媒体协议层 —— 2026-11-12 接入 `qwen-image-2.1` / `minimax-h3`。
+ *
+ * 这一家不是 OpenAI 形状：两种媒体都是**异步 job**，而且参数名完全自成一派。
+ * 契约来源不是 /docs/image、/docs/video 那两张通用页（门户里写着「本站暂未开放该类型的模型」，
+ * 只有 endpoint 和「提交 → 查询 → 下载」三段），真正的字段表在门户的公开模型接口：
+ *
+ *   GET /api/models/{model}   →  { endpoint, contract{...}, requestFields[...] }
+ *
+ * 实测到的要点（改动前请先复核这个接口，别凭记忆改）：
+ *
+ *   qwen-image-2.1   POST /v1/images/generations
+ *     · 必填 model / prompt（≤10000 字）
+ *     · 画幅**只收 14 个白名单值**（7 比例 × 2 清晰度档），传别的直接 400；
+ *       标准档 `1024x1024 … 896x1184`、超清档 `1536x2752 … 2752x1536`
+ *     · 参考图 `input_image_urls`（0–10 张，公网 URL 或 `data:image`）；没有上传接口、
+ *       也不收 `*_asset_id`（给了会 `asset_id_not_supported`）
+ *     · steps 固定 8、guidance_scale 固定 1、imageCount 固定 1 —— 一个都别发
+ *
+ *   minimax-h3       POST /v1/media/generations
+ *     · 必填 model / prompt（≤7000）/ **seconds（整数 5–15）** / **generationMode**
+ *     · generationMode 四选一，且必须和素材精确匹配：
+ *         t2v（无图）/ i2v（首帧 input_image_url）/ first_last_frame_video（+ end_image_url）
+ *         / universal_reference_video（referenceInputs[] ≤9 图 + 1 视频 + 3 音频）
+ *     · 可选 resolutionTier（544p|768p）、aspectRatio（16:9|1:1|21:9|3:4|4:3|9:16）
+ *
+ *   两者共用：`GET /v1/jobs/{jobId}` → 终态读 `outputs[].contentUrl`；
+ *   🔴 **下载 contentUrl 也要带同一个 Bearer**，所以结果必须由前端取回二进制再转 dataURL，
+ *      直接丢给 `<img src>` / `<video src>` 只会拿到 401。
+ *
+ * 这里只放**纯逻辑**（谓词 / 尺寸表 / 请求体 / 响应解析），不碰 axios —— 探针可以直接喂 JSON。
+ * 真正的收发在 image.ts / video.ts 里，用它们各自已有的 aiApiUrl / aiHeaders。
+ */
+
+/** `https://yuanhuisuan.space.jusuanhub.com` 之类都算；也接受已带 `/v1` 的写法。 */
+export function isJusuanhubMediaBaseUrl(baseUrl: string): boolean {
+    const raw = String(baseUrl || "").trim();
+    if (!raw) return false;
+    try {
+        const host = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`).hostname;
+        return /(^|\.)jusuanhub\.com$/i.test(host);
+    } catch {
+        return /(^|\.)jusuanhub\.com(\/|:|$)/i.test(raw);
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════
+// 图片：qwen-image-2.1
+// ════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 7 种比例 × 2 档清晰度。**这是白名单，不是可推算的公式**：上游对不认识的尺寸直接 400，
+ * 所以只能查表 + 找最近比例，绝不能把任意 `WxH` 直接塞过去。
+ *
+ * 比例标签按「横 → 方 → 竖」排，`1:1` 放第一位是给「猜不出来时」当兜底的。
+ */
+export const JUSUANHUB_IMAGE_SIZE_TABLE = {
+    standard: {
+        "1:1": "1024x1024",
+        "16:9": "1376x768",
+        "4:3": "1184x896",
+        "3:2": "1248x832",
+        "9:16": "768x1376",
+        "3:4": "896x1184",
+        "2:3": "832x1248",
+    },
+    ultra: {
+        "1:1": "2048x2048",
+        "16:9": "2752x1536",
+        "4:3": "2400x1792",
+        "3:2": "2528x1696",
+        "9:16": "1536x2752",
+        "3:4": "1792x2400",
+        "2:3": "1696x2528",
+    },
+} as const;
+
+export type JusuanhubImageTier = keyof typeof JUSUANHUB_IMAGE_SIZE_TABLE;
+
+/** 所有合法画幅（14 个），给探针 / 兜底校验用。 */
+export function listJusuanhubImageSizes(): string[] {
+    return [
+        ...Object.values(JUSUANHUB_IMAGE_SIZE_TABLE.standard),
+        ...Object.values(JUSUANHUB_IMAGE_SIZE_TABLE.ultra),
+    ];
+}
+
+const JUSUANHUB_RATIO_PRESETS: Array<{ label: keyof (typeof JUSUANHUB_IMAGE_SIZE_TABLE)["standard"]; value: number }> = [
+    { label: "1:1", value: 1 },
+    { label: "16:9", value: 16 / 9 },
+    { label: "4:3", value: 4 / 3 },
+    { label: "3:2", value: 3 / 2 },
+    { label: "9:16", value: 9 / 16 },
+    { label: "3:4", value: 3 / 4 },
+    { label: "2:3", value: 2 / 3 },
+];
+
+/** 把 `9:16` / `1024x1536` / `auto` / 空 都收成一个比例标签；认不出给 `1:1`。 */
+export function resolveJusuanhubImageRatio(size: string): keyof (typeof JUSUANHUB_IMAGE_SIZE_TABLE)["standard"] {
+    const raw = String(size || "").trim();
+    if (!raw || /^(auto|adaptive|adaptive)$/i.test(raw)) return "1:1";
+    const ratioMatch = raw.match(/^(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)$/);
+    const sizeMatch = raw.match(/^(\d+)\s*[xX×]\s*(\d+)$/);
+    const pair = ratioMatch
+        ? [Number(ratioMatch[1]), Number(ratioMatch[2])]
+        : sizeMatch
+          ? [Number(sizeMatch[1]), Number(sizeMatch[2])]
+          : null;
+    if (!pair || !(pair[0] > 0) || !(pair[1] > 0)) return "1:1";
+    const ratio = pair[0] / pair[1];
+    let best = JUSUANHUB_RATIO_PRESETS[0];
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const preset of JUSUANHUB_RATIO_PRESETS) {
+        const distance = Math.abs(Math.log(ratio) - Math.log(preset.value));
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = preset;
+        }
+    }
+    return best.label;
+}
+
+/**
+ * 质量档 → 清晰度档。`QUALITY_BASE`（image.ts）里 1024 是 `低/标准`，2048 起才是 `中/高/HD/2K`，
+ * 所以 ≥2048 一律进超清档（超清档短边 1536 起，正好对上 2K 的观感）。
+ */
+export function resolveJusuanhubImageTier(quality?: string): JusuanhubImageTier {
+    const value = String(quality || "").trim().toLowerCase();
+    if (!value) return "standard";
+    if (/^(medium|hd|high|xhigh|max|2k|4k|1536|2048|2880|3328|3840)$/.test(value)) return "ultra";
+    return "standard";
+}
+
+/** 最终发给上游的 `size`（只可能是那 14 个值之一）。 */
+export function resolveJusuanhubImageSize(size: string, quality?: string): string {
+    const tier = resolveJusuanhubImageTier(quality);
+    const ratio = resolveJusuanhubImageRatio(size);
+    return JUSUANHUB_IMAGE_SIZE_TABLE[tier][ratio];
+}
+
+export type JusuanhubImageRequestBody = {
+    model: string;
+    prompt: string;
+    size: string;
+    input_image_urls?: string[];
+};
+
+/**
+ * 文生图 / 图生图共用一个请求体：有参考图就带 `input_image_urls`（数组），没有就是纯文生图。
+ *
+ * 不发 `imageCount` / `steps` / `guidance_scale`：上游把这三个写死成 1 / 8 / 1，
+ * 发别的值（哪怕一样）只是在给 400 多开一个口子。
+ */
+export function buildJusuanhubImageRequestBody(input: {
+    model: string;
+    prompt: string;
+    size?: string;
+    quality?: string;
+    imageUrls?: string[];
+}): JusuanhubImageRequestBody {
+    const urls = (input.imageUrls || []).map((value) => String(value || "").trim()).filter(Boolean).slice(0, 10);
+    return {
+        model: String(input.model || "").trim(),
+        prompt: String(input.prompt || ""),
+        size: resolveJusuanhubImageSize(input.size || "", input.quality),
+        ...(urls.length ? { input_image_urls: urls } : {}),
+    };
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════
+// 视频：minimax-h3
+// ════════════════════════════════════════════════════════════════════════════════════════
+
+/** 上游只收 5–15 秒的**整数**（枚举，不是区间），越界会被 400。 */
+export const JUSUANHUB_VIDEO_MIN_SECONDS = 5;
+export const JUSUANHUB_VIDEO_MAX_SECONDS = 15;
+
+export function resolveJusuanhubVideoSeconds(value: string | number | undefined): number {
+    const numeric = Math.round(Number(value));
+    if (!Number.isFinite(numeric)) return JUSUANHUB_VIDEO_MIN_SECONDS;
+    return Math.min(JUSUANHUB_VIDEO_MAX_SECONDS, Math.max(JUSUANHUB_VIDEO_MIN_SECONDS, numeric));
+}
+
+const JUSUANHUB_VIDEO_ASPECTS = ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] as const;
+export type JusuanhubVideoAspect = (typeof JUSUANHUB_VIDEO_ASPECTS)[number];
+
+/** 与 `normalizeVideoRatio` 同一套比例（含 21:9），但这里是本模块自足的，避免与 video.ts 循环引用。 */
+export function resolveJusuanhubVideoAspect(size: string): JusuanhubVideoAspect {
+    const raw = String(size || "").trim();
+    if (!raw || /^auto$/i.test(raw) || /^adaptive$/i.test(raw)) return "16:9";
+    if ((JUSUANHUB_VIDEO_ASPECTS as readonly string[]).includes(raw)) return raw as JusuanhubVideoAspect;
+    const ratioMatch = raw.match(/^(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)$/);
+    const sizeMatch = raw.match(/^(\d+)\s*[xX×]\s*(\d+)$/);
+    const pair = ratioMatch
+        ? [Number(ratioMatch[1]), Number(ratioMatch[2])]
+        : sizeMatch
+          ? [Number(sizeMatch[1]), Number(sizeMatch[2])]
+          : null;
+    if (!pair || !(pair[0] > 0) || !(pair[1] > 0)) return "16:9";
+    const ratio = pair[0] / pair[1];
+    let best: JusuanhubVideoAspect = "16:9";
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const aspect of JUSUANHUB_VIDEO_ASPECTS) {
+        const [w, h] = aspect.split(":").map(Number);
+        const distance = Math.abs(Math.log(ratio) - Math.log(w / h));
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = aspect;
+        }
+    }
+    return best;
+}
+
+/**
+ * 清晰度只有 544p / 768p 两档：`vquality` 里 ≤600 的（480/544/576）进 544p，
+ * 其余（720/768/900/1080/2K…）一律 768p —— 上游没有更高档，传 1080p 只会 400。
+ */
+export function resolveJusuanhubVideoResolutionTier(vquality: string): "544p" | "768p" {
+    const raw = String(vquality || "").trim().toLowerCase();
+    const numeric = Number(raw.replace(/p$/, ""));
+    if (Number.isFinite(numeric) && numeric > 0 && numeric <= 600) return "544p";
+    return "768p";
+}
+
+export type JusuanhubVideoMode = "t2v" | "i2v" | "first_last_frame_video" | "universal_reference_video";
+
+/**
+ * 参考图数量 → generationMode。**上游要求「模式与素材精确匹配」，猜错会 400**：
+ *   0 张 → t2v
+ *   1 张 → i2v（首帧）—— 画布里「连一条图片到视频节点」就是这个意思
+ *   ≥2 张 → universal_reference_video（全能参考，≤9 张）
+ *
+ * 为什么不给 2 张走 `first_last_frame_video`：本项目里连到视频节点的多张图是**角色/场景/道具参考**
+ * （一键铺链路就是这么连的），把它们当成「首帧+尾帧」会直接改变出片内容。
+ * 真要首尾帧，得先在节点上给出「谁是尾帧」的入口，否则这里没有可靠依据。
+ */
+export function resolveJusuanhubVideoMode(referenceCount: number): JusuanhubVideoMode {
+    const count = Math.max(0, Math.floor(Number(referenceCount) || 0));
+    if (count === 0) return "t2v";
+    if (count === 1) return "i2v";
+    return "universal_reference_video";
+}
+
+export type JusuanhubVideoRequestBody = {
+    model: string;
+    prompt: string;
+    seconds: number;
+    generationMode: JusuanhubVideoMode;
+    aspectRatio: JusuanhubVideoAspect;
+    resolutionTier: "544p" | "768p";
+    input_image_url?: string;
+    referenceInputs?: Array<{ role: "reference_image"; url: string }>;
+};
+
+export function buildJusuanhubVideoRequestBody(input: {
+    model: string;
+    prompt: string;
+    seconds?: string | number;
+    size?: string;
+    vquality?: string;
+    imageUrls?: string[];
+}): JusuanhubVideoRequestBody {
+    const urls = (input.imageUrls || []).map((value) => String(value || "").trim()).filter(Boolean).slice(0, 9);
+    const generationMode = resolveJusuanhubVideoMode(urls.length);
+    return {
+        model: String(input.model || "").trim(),
+        prompt: String(input.prompt || ""),
+        seconds: resolveJusuanhubVideoSeconds(input.seconds),
+        generationMode,
+        aspectRatio: resolveJusuanhubVideoAspect(input.size || ""),
+        resolutionTier: resolveJusuanhubVideoResolutionTier(input.vquality || ""),
+        ...(generationMode === "i2v" && urls[0] ? { input_image_url: urls[0] } : {}),
+        ...(generationMode === "universal_reference_video"
+            ? { referenceInputs: urls.map((url) => ({ role: "reference_image" as const, url })) }
+            : {}),
+    };
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════
+// 共用：job 提交响应 / 查询响应
+// ════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 提交响应是 `{ jobId, status:"queued", retryAfterSeconds }`；兼容驼峰/下划线/包一层 `data`。
+ * 注意它**不是** `{ id }`，所以通用 `unwrapVideoResponse` / `isAsyncImageTask` 都认不出来。
+ */
+export function readJusuanhubJobId(payload: unknown): string {
+    const record = asRecord(payload) || {};
+    const data = asRecord(record.data) || {};
+    for (const candidate of [record.jobId, record.job_id, data.jobId, data.job_id, record.id, data.id]) {
+        if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+    }
+    return "";
+}
+
+/** 提交时若上游直接给了结果（个别 publication 会同步返回），也能吃到。 */
+export function readJusuanhubOutputUrls(payload: unknown): string[] {
+    const record = asRecord(payload) || {};
+    const outputs = Array.isArray(record.outputs) ? record.outputs : Array.isArray((asRecord(record.data) || {}).outputs) ? (asRecord(record.data) || {}).outputs : [];
+    const urls: string[] = [];
+    for (const item of outputs as unknown[]) {
+        const output = asRecord(item);
+        if (!output) {
+            if (typeof item === "string" && item.trim()) urls.push(item.trim());
+            continue;
+        }
+        for (const key of ["contentUrl", "content_url", "url", "downloadUrl", "download_url"]) {
+            const value = output[key];
+            if (typeof value === "string" && value.trim()) {
+                urls.push(value.trim());
+                break;
+            }
+        }
+    }
+    return urls;
+}
+
+export type JusuanhubJobState =
+    | { status: "pending"; retryAfterSeconds?: number }
+    | { status: "succeeded"; urls: string[] }
+    | { status: "failed"; error: string };
+
+const JUSUANHUB_PENDING_STATUS = new Set(["queued", "pending", "running", "processing", "scheduled", "in_progress", "waiting", "submitted"]);
+const JUSUANHUB_SUCCESS_STATUS = new Set(["succeeded", "success", "completed", "complete", "done", "finished", "ok"]);
+const JUSUANHUB_FAILURE_STATUS = new Set(["failed", "failure", "canceled", "cancelled", "expired", "error", "rejected"]);
+
+/**
+ * 查询响应：`{ id, status, outputs:[{ contentUrl }], error?, retryAfterSeconds? }`。
+ * 状态词按「先认成功、再认失败、其余当排队」处理 —— 认不出来时宁可继续等，
+ * 也不要因为多了个没见过的词就报「生成失败」。
+ */
+export function readJusuanhubJobState(payload: unknown): JusuanhubJobState {
+    const record = asRecord(payload) || {};
+    const data = asRecord(record.data) || record;
+    const status = String(data.status || record.status || "").trim().toLowerCase();
+    const urls = readJusuanhubOutputUrls(data);
+    const retryRaw = Number(data.retryAfterSeconds ?? record.retryAfterSeconds);
+    const retryAfterSeconds = Number.isFinite(retryRaw) && retryRaw > 0 ? Math.min(30, retryRaw) : undefined;
+
+    if (JUSUANHUB_SUCCESS_STATUS.has(status)) {
+        return urls.length ? { status: "succeeded", urls } : { status: "failed", error: "任务成功但响应里没有 outputs[].contentUrl" };
+    }
+    if (JUSUANHUB_FAILURE_STATUS.has(status)) {
+        const error = asRecord(data.error) || asRecord(record.error) || {};
+        const message =
+            firstString([error.message, error.code, data.failureReason, data.failure_reason, data.message, record.message]) ||
+            "任务失败（上游未给原因）";
+        return { status: "failed", error: message };
+    }
+    if (JUSUANHUB_PENDING_STATUS.has(status) || !status) return { status: "pending", retryAfterSeconds };
+    // 没见过的状态词：当排队继续等，别误判成失败。
+    return { status: "pending", retryAfterSeconds };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function firstString(values: unknown[]): string {
+    for (const value of values) {
+        if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
+}

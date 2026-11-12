@@ -13,6 +13,13 @@ import { isMioraQueueBaseUrl, mediaUrlToDataUrl, runMioraGeneration } from "@/li
 import { isMioraImageFamilyModel, isUnsupportedImageSizeError, resolveMioraImageSize } from "@/constant/image-size-presets";
 import { uploadTemporaryPublicImage, uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
 import { fetchRemoteImageBlob, imageToDataUrl } from "@/services/image-storage";
+import {
+    buildJusuanhubImageRequestBody,
+    isJusuanhubMediaBaseUrl,
+    readJusuanhubJobId,
+    readJusuanhubJobState,
+    readJusuanhubOutputUrls,
+} from "./jusuanhub-media";
 import type { ReferenceImage } from "@/types/image";
 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
@@ -3133,6 +3140,178 @@ async function requestMioraImages(
     return images;
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════
+// 聚算 Hub（`*.jusuanhub.com`）图片链路：qwen-image-2.1
+// ════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 这一家**不是 OpenAI 形状**，三个地方和通用路径对不上，硬走 `/images/generations` + 通用解析必挂：
+ *
+ *  ① 提交返回 `{ jobId, status:"queued" }` —— 不是 `{ data:[{url}] }`，也不是 `id`，
+ *     所以 `collectImageList` 找不到图、`isAsyncImageTask` 认不出任务 → 报「没有返回图片」。
+ *  ② 查询是 `GET /v1/jobs/{jobId}` —— 通用轮询只试 `/images/generations/{id}`、`/images/edits/{id}`、
+ *     `/tasks/{id}`，三个都 404。
+ *  ③ 结果在 `outputs[].contentUrl`，而且**下载也要带 Bearer**：直接丢给 `<img>` 是 401，
+ *     必须自己取回二进制再转 dataURL（`fetchJusuanhubImageDataUrl`）。
+ *
+ * 参数口径（画幅白名单、参考图字段名）见 `jusuanhub-media.ts` 的注释，别在这里重复判断。
+ */
+const JUSUANHUB_IMAGE_POLL_TIMEOUT_MS = 6 * 60 * 1000;
+const JUSUANHUB_POLL_DEFAULT_MS = 2_500;
+
+function delayJusuanhub(ms: number, signal?: AbortSignal) {
+    return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new DOMException("Aborted", "AbortError"));
+            return;
+        }
+        const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, Math.max(0, ms));
+        function onAbort() {
+            clearTimeout(timer);
+            reject(new DOMException("Aborted", "AbortError"));
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
+function blobToDataUrlViaReader(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("read blob failed"));
+        reader.readAsDataURL(blob);
+    });
+}
+
+function newJusuanhubIdempotencyKey() {
+    try {
+        if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    } catch {
+        // 非安全上下文没有 randomUUID，退回时间戳 + 随机串。
+    }
+    return `jsh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** 参考图 → 上游要的 URL：公网地址优先（不占请求体），否则压过的 `data:image`。 */
+async function collectJusuanhubReferenceUrls(references: ReferenceImage[], limit: number): Promise<string[]> {
+    const urls: string[] = [];
+    for (const image of references.slice(0, limit)) {
+        const remote = [image.url, image.dataUrl]
+            .map((value) => String(value || "").trim())
+            .find((value) => isPublicHttpUrl(value) && !/^blob:/i.test(value));
+        if (remote) {
+            urls.push(remote);
+            continue;
+        }
+        try {
+            const dataUrl = await imageToDataUrl(image);
+            if (dataUrl?.startsWith("data:image/")) {
+                urls.push(await compressReferenceDataUrl(dataUrl, Math.max(1, references.length)));
+            }
+        } catch {
+            // 单张参考图取不出来就跳过：少一张参考也好过整单失败。
+        }
+    }
+    return urls;
+}
+
+/** 提交一个 job；个别 publication 会同步返回 outputs，这里一并吃掉。 */
+async function submitJusuanhubImageJob(config: AiConfig, body: unknown, options?: RequestOptions) {
+    const response = await axios.post<unknown>(aiApiUrl(config, "/images/generations"), body, {
+        headers: { ...aiHeaders(config, "application/json"), "Idempotency-Key": newJusuanhubIdempotencyKey() },
+        signal: options?.signal,
+        timeout: IMAGE_REQUEST_TIMEOUT_MS,
+    });
+    const urls = readJusuanhubOutputUrls(response.data);
+    const jobId = readJusuanhubJobId(response.data);
+    if (!jobId && !urls.length) {
+        // 把顶层字段带出去：这一家偶尔会换壳（`{ task:{...} }`），有字段名就能一次定位。
+        const keys = response.data && typeof response.data === "object" ? Object.keys(response.data as Record<string, unknown>) : [];
+        throw new Error(apiText("unknownImageResponse", { fields: keys.join(", ") || "（空）" }));
+    }
+    return { jobId, urls };
+}
+
+async function waitJusuanhubJob(config: AiConfig, jobId: string, options?: RequestOptions): Promise<string[]> {
+    const deadline = Date.now() + JUSUANHUB_IMAGE_POLL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        const response = await axios.get<unknown>(aiApiUrl(config, `/jobs/${encodeURIComponent(jobId)}`), {
+            headers: aiHeaders(config),
+            signal: options?.signal,
+            timeout: IMAGE_REQUEST_TIMEOUT_MS,
+        });
+        const state = readJusuanhubJobState(response.data);
+        if (state.status === "succeeded") return state.urls;
+        if (state.status === "failed") throw new Error(state.error);
+        await delayJusuanhub(state.retryAfterSeconds ? state.retryAfterSeconds * 1000 : JUSUANHUB_POLL_DEFAULT_MS, options?.signal);
+    }
+    throw new Error(apiText("imageTimeout"));
+}
+
+/**
+ * 取回 `outputs[].contentUrl` 的字节。**必须带 Bearer**，这是这一家最容易漏的一条：
+ * 拿到的 URL 不是公开直链，`<img src>` / `fetch(url)` 都会 401。
+ */
+async function fetchJusuanhubImageDataUrl(config: AiConfig, url: string, options?: RequestOptions): Promise<string> {
+    const absolute = /^https?:\/\//i.test(url) ? url : buildApiUrl(config.baseUrl, url);
+    try {
+        const response = await axios.get<Blob>(absolute, {
+            headers: aiHeaders(config),
+            responseType: "blob",
+            signal: options?.signal,
+            timeout: IMAGE_REQUEST_TIMEOUT_MS,
+        });
+        return await blobToDataUrlViaReader(response.data);
+    } catch (error) {
+        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        // 少数产物会落到对象存储（不认 Bearer、但允许公网直取）：退回同源媒体代理再取一次。
+        try {
+            const proxied = await axios.get<Blob>(proxyApiUrl(absolute, config.apiTransport), { responseType: "blob", signal: options?.signal });
+            return await blobToDataUrlViaReader(proxied.data);
+        } catch {
+            throw new Error(apiText("imageDownloadFailed"));
+        }
+    }
+}
+
+/**
+ * 整条链路：提交（可并发 n 个独立 job）→ 轮询 → 带 Bearer 取字节 → dataURL。
+ *
+ * 为什么 n 个独立 job 而不是上游的 `n` 字段：`n>1` 时它返回的是 `batch.jobs[]`，
+ * 一条新形状就多一处解析；这里 n 最多 4，并发发 4 个单图 job，形状永远只有一个。
+ */
+async function requestJusuanhubImages(
+    config: AiConfig,
+    prompt: string,
+    references: ReferenceImage[],
+    count: number,
+    options?: RequestOptions,
+): Promise<GeneratedImageResult[]> {
+    const model = (config.model || config.imageModel).trim();
+    const imageUrls = await collectJusuanhubReferenceUrls(references, 10);
+    const body = buildJusuanhubImageRequestBody({
+        model,
+        prompt: withSystemPrompt(config, prompt),
+        size: config.size,
+        quality: config.quality,
+        imageUrls,
+    });
+    const total = Math.max(1, Math.min(4, Math.floor(Number(count) || 1)));
+    const submitted = await Promise.all(Array.from({ length: total }, () => submitJusuanhubImageJob(config, body, options)));
+    const results: GeneratedImageResult[] = [];
+    for (const item of submitted) {
+        const outputUrls = item.urls.length ? item.urls : await waitJusuanhubJob(config, item.jobId, options);
+        for (const url of outputUrls) {
+            results.push({ id: nanoid(), dataUrl: await fetchJusuanhubImageDataUrl(config, url, options) });
+        }
+    }
+    return results;
+}
+
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<GeneratedImageResult[]> {
     const requestConfig = resolveImageRequestConfig(config);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
@@ -3156,6 +3335,16 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     if (shouldUseNativeComfyUi(requestConfig.baseUrl, requestConfig.model, script) || parseComfyApiWorkflow(script)) {
         try {
             return await requestNativeComfyUiImages(requestConfig, withSystemPrompt(requestConfig, prompt), [], options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+    // 聚算 Hub（`*.jusuanhub.com`）：提交 → /v1/jobs/{id} → 带 Bearer 取 outputs[].contentUrl。
+    // 通用 JSON 路径会把 `{ jobId }` 当成空结果，所以必须在它前面分流。
+    // 用户显式给模型挂了脚本时让给脚本（脚本优先级更高，跟其它 provider 一致）。
+    if (!script && isJusuanhubMediaBaseUrl(requestConfig.baseUrl)) {
+        try {
+            return await requestJusuanhubImages(requestConfig, prompt, [], n, options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
@@ -3295,6 +3484,16 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         const refs = await Promise.all(references.map((image) => prepareReferenceDataUrl(image, Math.max(1, references.length))));
         try {
             return await requestNativeComfyUiImages(requestConfig, withSystemPrompt(requestConfig, requestPrompt), refs, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+    // 聚算 Hub（qwen-image-2.1）图生图：参考图走 `input_image_urls`，同一条异步 job 链路。
+    // 上游没有 mask 概念，带 mask 时直接说清楚，别静默忽略用户的蒙版。
+    if (!script && isJusuanhubMediaBaseUrl(requestConfig.baseUrl)) {
+        if (mask) throw new Error(apiText("geminiMaskUnsupported"));
+        try {
+            return await requestJusuanhubImages(requestConfig, requestPrompt, references, n, options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }

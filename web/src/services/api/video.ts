@@ -34,6 +34,7 @@ import {
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
+import { buildJusuanhubVideoRequestBody, isJusuanhubMediaBaseUrl, readJusuanhubJobId, readJusuanhubJobState } from "./jusuanhub-media";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
@@ -58,7 +59,7 @@ type RequestOptions = { signal?: AbortSignal; referenceAudios?: ReferenceAudio[]
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string; extraImages?: string[] };
-export type VideoGenerationTask = { id: string; provider: "openai" | "plugin"; model: string };
+export type VideoGenerationTask = { id: string; provider: "openai" | "plugin" | "jusuanhub"; model: string };
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
 /** Results for scripted (plugin) video models, which run their own create+poll in one shot at task creation. */
@@ -156,6 +157,121 @@ async function retryAlternateTransport<T>(config: AiConfig, path: string, primar
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════
+// 聚算 Hub（`*.jusuanhub.com`）视频链路：minimax-h3
+// ════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 这一家的 minimax-h3 **不是** OpenAI `/v1/videos`，也不是 CometAPI 那套 `input_reference`：
+ *
+ *   POST /v1/media/generations  { model, prompt, seconds, generationMode, aspectRatio,
+ *                                 resolutionTier, input_image_url?, referenceInputs?[] }
+ *   GET  /v1/jobs/{jobId}       → { status, outputs:[{ contentUrl }] }
+ *   GET  contentUrl（**带同一个 Bearer**）
+ *
+ * 🔴 两个必填字段最容易漏，漏了就是 400：
+ *   · `seconds` 只收 5–15 的**整数**（白名单，不是区间）；
+ *   · `generationMode` 必须和素材精确匹配（t2v / i2v / universal_reference_video），
+ *     传了图却报 t2v 会被拒，反之亦然。
+ *
+ * 🔴 分支顺序：`minimax-h3` 会被 `isRelayMiniMaxH3Video` 的 `minimax[-_]?h3` 命中，
+ *    所以本分支必须在它**之前**（与 work-fisher 同一个坑）。
+ */
+const JUSUANHUB_VIDEO_CREATE_TIMEOUT_MS = 120_000;
+const JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS = 60_000;
+
+function newJusuanhubVideoIdempotencyKey() {
+    try {
+        if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    } catch {
+        // 非安全上下文没有 randomUUID，退回时间戳 + 随机串。
+    }
+    return `jsh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** 参考图 → 上游要的 URL（公网优先，其次压过的 data:image；单张失败不影响整单）。 */
+async function collectJusuanhubVideoReferenceUrls(references: ReferenceImage[], limit: number): Promise<string[]> {
+    const urls: string[] = [];
+    for (const image of references.slice(0, limit)) {
+        const remote = [image.url, image.dataUrl]
+            .map((value) => String(value || "").trim())
+            .find((value) => isPublicHttpUrl(value) && !/^blob:/i.test(value));
+        if (remote) {
+            urls.push(remote);
+            continue;
+        }
+        try {
+            const dataUrl = await imageToDataUrl(image);
+            if (dataUrl?.startsWith("data:image/")) urls.push(await compressReferenceDataUrl(dataUrl, Math.max(1, references.length)));
+        } catch {
+            // 取不出来的那张跳过。
+        }
+    }
+    return urls;
+}
+
+async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const modelName = modelOptionName(model).trim() || "minimax-h3";
+    const imageUrls = await collectJusuanhubVideoReferenceUrls(references, 9);
+    const body = buildJusuanhubVideoRequestBody({
+        model: modelName,
+        prompt,
+        seconds: config.videoSeconds,
+        size: config.size,
+        vquality: config.vquality,
+        imageUrls,
+    });
+    const response = await axios.post<unknown>(aiApiUrl(config, "/media/generations"), body, {
+        headers: { ...aiHeaders(config, "application/json"), "Idempotency-Key": newJusuanhubVideoIdempotencyKey() },
+        signal: options?.signal,
+        timeout: JUSUANHUB_VIDEO_CREATE_TIMEOUT_MS,
+    });
+    const jobId = readJusuanhubJobId(response.data);
+    if (!jobId) throw new Error(apiText("noVideoTaskId"));
+    return { id: jobId, provider: "jusuanhub", model };
+}
+
+async function pollJusuanhubVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    const response = await axios.get<unknown>(aiApiUrl(config, `/jobs/${encodeURIComponent(task.id)}`), {
+        headers: aiHeaders(config),
+        signal: options?.signal,
+        timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
+    });
+    const state = readJusuanhubJobState(response.data);
+    if (state.status === "pending") return { status: "pending" };
+    if (state.status === "failed") return { status: "failed", error: state.error };
+    return { status: "completed", result: await fetchJusuanhubVideoResult(config, state.urls[0], options) };
+}
+
+/**
+ * 取回成片。**contentUrl 不是公开直链**：不带 Bearer 就是 401，所以先带 key 取 blob；
+ * 失败再退回同源媒体代理（产物偶尔落在只允许公网直取的对象存储上）；
+ * 两条都不行时退回 url —— 让用户至少能在节点里看到「链接在、但取不回来」而不是一句空错。
+ */
+async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?: RequestOptions): Promise<VideoGenerationResult> {
+    const direct = String(url || "").trim();
+    const absolute = /^https?:\/\//i.test(direct) ? direct : buildApiUrl(config.baseUrl, direct);
+    try {
+        const response = await axios.get<Blob>(absolute, {
+            headers: aiHeaders(config),
+            responseType: "blob",
+            signal: options?.signal,
+            timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
+        });
+        await assertVideoBlob(response.data);
+        return { blob: response.data };
+    } catch (error) {
+        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        try {
+            const proxied = await axios.get<Blob>(proxyMediaUrl(absolute), { responseType: "blob", signal: options?.signal });
+            await assertVideoBlob(proxied.data);
+            return { blob: proxied.data };
+        } catch {
+            return { url: absolute, mimeType: "video/mp4" };
+        }
+    }
+}
+
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
     const task = await createVideoGenerationTask(config, prompt, references, options);
     for (let attempt = 0; attempt < VIDEO_POLL_MAX_ATTEMPTS; attempt += 1) {
@@ -185,6 +301,12 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     if (isWorkFisherVideoHost(requestConfig.baseUrl)) {
         assertVideoConfig(requestConfig, requestConfig.model);
         return createWorkFisherVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
+    }
+    // 聚算 Hub（`*.jusuanhub.com`）必须同样放在所有「按模型名猜形状」的启发式之前：
+    // 它的 `minimax-h3` 会被 `isRelayMiniMaxH3Video` 命中，套上 CometAPI 形状后打到 /videos 只会 404。
+    if (isJusuanhubMediaBaseUrl(requestConfig.baseUrl)) {
+        assertVideoConfig(requestConfig, requestConfig.model);
+        return createJusuanhubVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
     }
     // Metaso MiniMax-H3 must use OpenAI /videos before any AutoDL ComfyUI heuristic.
     if (isMetasoH3Video(requestConfig, selectedModel)) {
@@ -234,6 +356,8 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     }
     const requestConfig = resolveModelRequestConfig(config, task.model);
     assertVideoConfig(requestConfig, requestConfig.model);
+    // 聚算 Hub：查询端点是 `/v1/jobs/{id}`，不是 `/videos/{id}`（后者只会 404）。
+    if (task.provider === "jusuanhub") return pollJusuanhubVideoTask(requestConfig, task, options);
     // muse 走自己的查询端点（`/video/generations/{id}`，结果在 `data.result_url`）。
     if (isZhenzhenMuseVideoModel(task.model)) return pollMuseVideoTask(requestConfig, task, options);
     // APIMart muse 查的是 `/tasks/{id}`（`data.result.videos[0].url[0]`）。

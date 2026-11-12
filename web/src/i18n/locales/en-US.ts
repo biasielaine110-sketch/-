@@ -340,6 +340,8 @@ export default {
         imagePixelLimit: "The total image pixel count must be between 655360 and 8294400.",
         unknownImageResponse: "The API returned data in an unknown format (fields: {{fields}}). Check model or API compatibility.",
         noImageReturned: "The API did not return an image. The prompt may have triggered safety review or the model may not support this operation.",
+        imageTimeout: "Image generation timed out (the job is still queued server-side — try again shortly).",
+        imageDownloadFailed: "The image was generated but the download failed: the result URL requires the channel key, so check whether this channel allows direct browser access (CORS).",
         imageTaskFailed: "The image generation task failed. Check the prompt, model, or try again later.",
         imageTaskPollTimeout: "The image generation task timed out. Try again later.",
         geminiRejected: "Gemini rejected the request: {{reason}}",

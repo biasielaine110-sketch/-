@@ -340,6 +340,8 @@ export default {
         imagePixelLimit: "图像总像素需在 655360 到 8294400 之间，请调整尺寸",
         unknownImageResponse: "接口返回了未知格式的数据（字段：{{fields}}），请检查模型或接口兼容性",
         noImageReturned: "接口没有返回图片，请检查提示词是否触发安全审核或模型是否支持该操作",
+        imageTimeout: "图片生成超时（已提交的任务仍在服务端排队，可稍后重试）",
+        imageDownloadFailed: "图片已生成，但下载失败：结果链接需要渠道 Key 才能取，请检查该渠道是否支持浏览器直连（跨域）",
         imageTaskFailed: "图片生成任务失败，请检查提示词、模型或稍后重试",
         imageTaskPollTimeout: "图片生成任务超时，请稍后重试",
         geminiRejected: "Gemini 拒绝了本次请求：{{reason}}",
