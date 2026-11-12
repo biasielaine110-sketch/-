@@ -97,7 +97,7 @@ export const VIDEO_REVERSE_SKILL_LABEL = VIDEO_REVERSE_SKILL_OPTIONS[0].label;
  * ⚠️ 标签由调用方传进来，本模块**不 import i18n**：它是纯逻辑模块，探针直接 import，
  * 而 `@/i18n` 的模块顶层会读 `localStorage`，在 Node 里会直接崩。
  */
-export function buildDefaultVideoReverseRequirement(imageMentions: readonly string[] = []): string {
+export function buildDefaultVideoReverseRequirement(imageMentions: readonly string[] = [], mode: VideoReverseMode = 2): string {
     /**
      * 2026-11-12 改口径（用户）：「需要的是**反推后，生成同类型的其他剧本**……现在感觉像是直接反推了一份给我，
      * 并不是重新生成的另外同类型的其他剧本。」
@@ -105,20 +105,27 @@ export function buildDefaultVideoReverseRequirement(imageMentions: readonly stri
      * 旧 head「写一份**同款风格**的剧本文案」是在暗示「把这条片的剧本复述出来」——「同款」既可读成
      * 「同类型」，也可读成「同一个」。要框定成后者之外的语义，就得把两个动作写清楚：
      * **先反推类型与写法（当样本看）→ 再另写一份全新的同类型剧本（内容换掉）**。
+     *
+     * 2026-11-12（第 04 条）再拆一档：这个「换个说法」的诉求现在**只属于 03**。02 要的就是复刻同款，
+     * 所以 02 的默认文案必须直接说「复刻」，否则要求框与提示词里的创作口径互相打架（用户会看到
+     * 框里写着「另写新剧本」、实际跑的是复刻 —— 谁也不知道以哪个为准）。
      */
-    const head = "根据我提供的视频，反推出它的类型与写法，另外写一份同类型的全新剧本文案";
+    const head =
+        mode === 2
+            ? "根据我提供的视频，复刻一份同款剧本文案：人物、场景、事件顺序、台词、镜头都照它来"
+            : "根据我提供的视频，反推出它的类型与写法，另外写一份同类型的全新剧本文案";
     const tail = "只要剧本正文，不要提示词、分析和任何注释";
     const mentions = Array.from(new Set((imageMentions || []).map((item) => String(item || "").trim()).filter(Boolean))).map((item) => (item.startsWith("@") ? item : `@${item}`));
     if (!mentions.length) return `${head}，${tail}`;
     return `${head}，同时使用${mentions.join("、")}作为文案中的道具，${tail}`;
 }
 
-/** 没有任何参考图时的默认文案（也用作输入框 placeholder）。 */
-export const DEFAULT_VIDEO_REVERSE_REQUIREMENT = buildDefaultVideoReverseRequirement();
+/** 没有任何参考图时的默认文案（也用作输入框 placeholder）。02 是默认档，取它的口径。 */
+export const DEFAULT_VIDEO_REVERSE_REQUIREMENT = buildDefaultVideoReverseRequirement([], 2);
 
 /**
  * 「秒数」的默认值（用户 2026-11-09 口径：默认 30 秒、可手动改）。
- * 这个秒数是**成片总时长**：02 写文案按它规划台词量，03 生剧本按它规划镜数。
+ * 这个秒数是**成片总时长**：02 / 03 写剧本都按它规划镜头数与台词量（02 复刻原片时长、03 按它拆镜）。
  */
 export const DEFAULT_REVERSE_VIDEO_SECONDS = 30;
 /** 秒数可调范围。上限放宽到 5 分钟：长视频脚本也有人用，但再长就不该用这套「分镜反推」了。 */
@@ -132,7 +139,7 @@ export const REVERSE_VIDEO_SECONDS_MAX = 300;
  * 为什么是「默认值」而不是「归一化时写死」：写进 metadata 就变成「用户已经选过」，
  * 比例 / 分辨率就再也没法表达「我不改、按默认走」，老节点也会被无端改写。
  * 所以 metadata 里空着，**读取时**由 `resolveReverseVideoSize / resolveReverseVideoQuality`
- * 给出有效值 —— UI 显示的和 03 搬给脚本节点的是同一份。
+ * 给出有效值 —— UI 显示的、和 02 / 03 搬给脚本节点的是同一份。
  */
 export const DEFAULT_REVERSE_VIDEO_SIZE = "16:9";
 export const DEFAULT_REVERSE_VIDEO_QUALITY = "720";
@@ -158,7 +165,7 @@ export function resolveReverseVideoQuality(target: Partial<CanvasReverseVideoTar
 }
 
 /**
- * 归一化「目标视频参数」——窗口里选的那一档，也是 03 往脚本节点搬的那一份。
+ * 归一化「目标视频参数」——窗口里选的那一档，也是 02 / 03 往脚本节点搬的那一份。
  *
  * 为什么要有这一步：UI 控件给什么值的都有（`InputNumber` 给 number 或 null、`Select` 允许清空、
  * 风格选择器回调 `undefined`），直接塞进 metadata 会出现 `"30"` / `30` / `null` 三种形态，
@@ -183,7 +190,7 @@ export function normalizeReverseVideoTarget(raw: Partial<CanvasReverseVideoTarge
     const seconds = Number(source.seconds);
     target.seconds = String(Number.isFinite(seconds) && seconds > 0 ? Math.min(REVERSE_VIDEO_SECONDS_MAX, Math.max(REVERSE_VIDEO_SECONDS_MIN, Math.round(seconds))) : DEFAULT_REVERSE_VIDEO_SECONDS);
     /**
-     * 03 的执行方案：**只认白名单里的 id**，认不出就整个丢掉（=「没选」，走默认判定）。
+     * 02 / 03 的执行方案：**只认白名单里的 id**，认不出就整个丢掉（=「没选」，走默认判定）。
      *
      * 🔴 这里绝不能像 `resolveScriptSchemeId` 那样把空串 / 脏值归一成 `builtin`：
      * `buildScriptSchemeSeed` 的退让条件是「元数据里已经有方案」，一旦写进 `"builtin"`，
@@ -212,9 +219,9 @@ export function readReverseVideoTarget(metadata: { reverseVideoTarget?: Partial<
 /**
  * 02 / 03 里那句「按 N 秒写」。
  *
- * 为什么必须进提示词而不是只给脚本生成器：02 只要文案（不建脚本节点），模型默认会按
- * 「一条完整短片」写足一分钟；用户选 30 秒，产出的镜头数与台词量就必须是 30 秒的量。
- * 文案与剧本两头都要压，所以这句话在对话提示词里也出现一次。
+ * 为什么必须进提示词而不是只给脚本生成器：模型默认会按「一条完整短片」写足一分钟；
+ * 用户选 30 秒，产出的镜头数与台词量就必须是 30 秒的量。文案与剧本两头都要压，
+ * 所以这句话在对话提示词里也出现一次（02 / 03 都走这条路，与是否建脚本节点无关）。
  */
 export function buildReverseTargetSecondsHint(seconds: number | string | undefined): string {
     const value = Number(seconds);
@@ -233,14 +240,14 @@ export const VIDEO_REVERSE_MODES = [
     {
         mode: 2 as const,
         no: "02",
-        label: "反推视频生成同类型文案",
-        hint: "同 01，先弹窗填特殊要求（默认「反推出它的类型与写法，另写一份同类型的全新剧本…」），输出同类型的新剧本",
+        label: "反推视频复刻同款文案及视频",
+        hint: "同 01，先弹窗填特殊要求（默认「复刻一份同款剧本文案…」）→ 剧本照原片复刻 → 再接脚本生成器执行一键视频（与 03 的执行流程完全一致）",
     },
     {
         mode: 3 as const,
         no: "03",
         label: "反推视频生成同类型文案及视频",
-        hint: "同 02，再把文本节点接到脚本生成器并执行「一键视频」——剧本按上面选的秒数写，生视频用上面选的模型 / 比例 / 分辨率 / 风格",
+        hint: "同 02，唯一区别是剧本内容：把它当同类型样本、另写一个全新的故事（人物 / 场景 / 情节 / 台词全换）",
     },
 ] as const;
 
@@ -369,7 +376,35 @@ export const VIDEO_REVERSE_REWRITE_PROMPT = "上一次的输出没有按要求�
 
 
 /**
- * 02 / 03 的「创作口径」：这条视频是**样本**，不是要复刻的剧本（用户 2026-11-12 报障）。
+ * **02 的创作口径：复刻同款**（用户 2026-11-12 第 04 条）。
+ *
+ * 用户原话：「02 跟 03 除了在输出的文案上其他完全跟 03 保持一致，即 02 的文案调整为输出**复刻同款**文案……
+ * 02 跟 03 除了输出的剧本内容不一样，其他执行和约束完全一样，02 是复刻同款，03 是根据复刻内容重新输出
+ * 一段同类型的但其他剧情的文案剧本内容。」
+ *
+ * 所以 02 / 03 的差别**只在这条创作口径**（以及下面那条尾钉）：
+ *  - 02 = 把这条片本身写成剧本（人物 / 场景 / 事件 / 台词 / 镜头都照原片）；
+ *  - 03 = 把它当同类型样本，另写一个故事（见 `VIDEO_REVERSE_NEW_STORY_RULE`）。
+ * 其余全部共用：只输出正文、中文强制、时长、参考图当道具、连进对话、建脚本节点 + 一键视频、
+ * 参考图挂道具并进跳过表 —— 一条都不许分叉。
+ *
+ * ⚠️ 与另外两条规则同规格：首尾各钉一次（尾部用 `VIDEO_REVERSE_COPY_STORY_ECHO`），且 **01 / 03 都不带**。
+ */
+export const VIDEO_REVERSE_COPY_STORY_RULE =
+    "创作口径：这次要的是**复刻同款** —— 把这条视频本身写成一份可以直接开拍的剧本，**不要换剧情**。\n" +
+    "① 先在你自己心里把它看明白（人物与身份、场景与服化道、道具、事件顺序与转折、台词口播、镜头景别与运镜、节奏），这一步**一个字的分析都不许写出来**。\n" +
+    "② 再按原样写成剧本正文：同一批人物、同样的场景与道具、同样的事件顺序与转折、同样的台词、同样的镜头与运镜，逐场对齐。\n" +
+    "③ 只允许在**不动剧情与镜数**的前提下把表述补全（口语补成可直接拍的画面描述，补上必要的动作 / 情绪 / 音效）；**不许加戏、不许删戏、不许改结局、不许换人物名字**。\n" +
+    "④ 自检：照着这份剧本拍一遍，应该得到一条和原片几乎一样的片子。如果你写出来的是「另一条同类型的片子」，那就是写偏了。";
+
+/**
+ * 尾钉版（压缩成一句）：与 `VIDEO_REVERSE_NEW_STORY_ECHO` 对称 —— 长输出写到后半段最容易滑回
+ * 「另编一个故事」，所以 02 的结尾必须把「复刻」再收一次口。
+ */
+export const VIDEO_REVERSE_COPY_STORY_ECHO = "再强调一次创作口径：这次是**复刻同款** —— 人物 / 场景 / 事件顺序 / 台词 / 镜头一律照原片来，写成一份可直接开拍的同款剧本，不许换剧情、不许加戏。";
+
+/**
+ * **03 的创作口径：这条视频是样本，不是要复刻的剧本**（用户 2026-11-12 报障）。
  *
  * 报障原话：「需要的是 反推后，生成同类型的其他的剧本……现在经过上次修改确实是只给我剧本内容了，
  * 但是感觉像是直接反推了一份给我，并不是重新生成的另外同类型的其他剧本。」
@@ -382,7 +417,8 @@ export const VIDEO_REVERSE_REWRITE_PROMPT = "上一次的输出没有按要求�
  * ② 定义「写作」的产出物是**另一个故事**（哪些必须换掉，逐项点名）；
  * ③ 给一条可自检的判据（并排看应该像「同一赛道的另一支片子」）。
  *
- * ⚠️ 与另外两条规则一样：首尾各钉一次（尾部用 `VIDEO_REVERSE_NEW_STORY_ECHO` 的压缩版），且 **01 绝不带**。
+ * ⚠️ 与另外两条规则一样：首尾各钉一次（尾部用 `VIDEO_REVERSE_NEW_STORY_ECHO` 的压缩版），
+ * 且**只给 03**（01 是纯反推、02 是复刻同款，都不带）。
  */
 export const VIDEO_REVERSE_NEW_STORY_RULE =
     "创作口径（最容易做错的一条）：我提供的视频只是**同类型的样本**，不是要你复刻的剧本。\n" +
@@ -398,7 +434,7 @@ export const VIDEO_REVERSE_NEW_STORY_RULE =
 export const VIDEO_REVERSE_NEW_STORY_ECHO = "再强调一次创作口径：这条视频只是同类型样本 —— 你必须写**另一个故事**的剧本（人物 / 场景 / 情节 / 台词全新），不许把原片的内容转写成剧本。";
 
 /**
- * 02 / 03 的**唯一输出物**：同类型剧本正文（用户 2026-11-11 第 02 条）。
+ * 02 / 03 的**唯一输出物**：剧本正文（用户 2026-11-11 第 02 条）。
  *
  * 报障原话：「执行 92、03 的时候，输出的反推出来的同类型剧本，输出文本的时候总给我出一堆没用的
  * 注释内容，导致我想要的同类型剧本都生成不完，请直接给我输出反推出来的同类型的剧本内容，
@@ -410,9 +446,12 @@ export const VIDEO_REVERSE_NEW_STORY_ECHO = "再强调一次创作口径：这�
  *
  * ⚠️ 与 `VIDEO_REVERSE_LANGUAGE_RULE` 一样，这段在 `buildVideoReversePrompt` 里首尾各钉一次、只写一份。
  * 2026-11-12 只把「同款」改成「同类型」：旧词同时暗示「同类型」和「同一条」，是这次报障的诱因之一。
+ * 2026-11-12（第 04 条）再把「同类型」这个定语**整个去掉**：02 是复刻、03 是新故事，两者共用的只是
+ * 「形式」约束（只要正文、第一行就是正文、不许有分析 / 注释 / 前言后记），创作口径由各自的规则给。
+ * 共用文案里留一个「同类型 / 同款」的定语，02 与 03 就必有一条是自相矛盾的 —— 模型会挑省力的那条读。
  */
 export const VIDEO_REVERSE_SCRIPT_ONLY_RULE =
-    "输出内容（最高优先级硬要求）：**只输出可以直接拿去用的同类型剧本正文**——分镜/场景标题、镜头、画面、台词、音效、时长这些正文行，第一行就是正文本身。\n" +
+    "输出内容（最高优先级硬要求）：**只输出可以直接拿去用的剧本正文**——分镜/场景标题、镜头、画面、台词、音效、时长这些正文行，第一行就是正文本身。\n" +
     "以下内容一律不许出现在输出里（哪怕只有一句）：① 反推过程、看片分析、风格总结、分镜思路；② 分镜提示词表、参数说明、制作建议、运镜/景别术语解释；③ 任何前言（「好的」「以下是」「根据您提供的视频」）、后记（「希望对你有帮助」「如需调整请告诉我」）、注释 / 备注 / 括号补充 / 免责声明 / 本章说明；④ 用 `---` 或空行隔开的「分析与正文」两段式结构。\n" +
     "内容较长时**优先保证剧本正文完整**：先删掉一切非正文内容再输出，不要为了写分析而把剧本截断。";
 
@@ -495,12 +534,21 @@ export function buildVideoReversePrompt({ videoUrl, mode, requirement, targetSec
          *
          * 2026-11-12 补一刀（用户）：「感觉像是直接反推了一份给我，并不是重新生成的另外同类型的其他剧本。」
          * 上一版只说了「看明白 → 写一份同款风格的剧本」，**没说清「样本」与「复刻」的区别** ——
-         * 模型刚看懂原片，顺手就把它转写了。所以现在拆成两个显式动作：
-         * ① 看片 = 提炼**类型要素**（只在心里）；② 写 = **另一个故事**（见 `VIDEO_REVERSE_NEW_STORY_RULE`）。
-         * 顺序不能反：先立「样本」口径，再立「只输出正文」口径 —— 后者只约束形式，管不住「写的是不是同一个故事」。
+         * 模型刚看懂原片，顺手就把它转写了。现在拆成两个显式动作：看片 = 提炼类型要素（只在心里）；
+         * 写 = 另一个故事（`VIDEO_REVERSE_NEW_STORY_RULE`）。
+         *
+         * 2026-11-12（第 04 条）再按 mode 拆开：**02 = 复刻同款**（把这条片写成剧本）、
+         * **03 = 同类型新故事**。两个分支只换「创作口径」这三行，其余（特殊要求 / 时长 / 链接 /
+         * 语言规则 / 只输出正文 / 中文兜底 / 建脚本节点 + 一键视频 / 参考图挂道具）**完全共用**。
+         * 别在这里给某一条加额外的形式约束 —— 那正是「02 与 03 悄悄分叉」的入口。
          */
-        lines.push(`请先用「${skill}」技能把这条视频看明白（这一步**只在你自己心里做，不要输出任何过程**），然后**另外写一个同类型的新剧本**——不是把这条视频的剧情转写成剧本。`);
-        lines.push(VIDEO_REVERSE_NEW_STORY_RULE);
+        const copy = mode === 2;
+        lines.push(
+            copy
+                ? `请先用「${skill}」技能把这条视频看明白（这一步**只在你自己心里做，不要输出任何过程**），然后**把这条视频复刻成一份同款剧本**——人物、场景、事件顺序、台词、镜头都照它来，不要另编剧情。`
+                : `请先用「${skill}」技能把这条视频看明白（这一步**只在你自己心里做，不要输出任何过程**），然后**另外写一个同类型的新剧本**——不是把这条视频的剧情转写成剧本。`,
+        );
+        lines.push(copy ? VIDEO_REVERSE_COPY_STORY_RULE : VIDEO_REVERSE_NEW_STORY_RULE);
         lines.push(VIDEO_REVERSE_SCRIPT_ONLY_RULE);
     }
     const extra = (requirement || "").trim();
@@ -515,9 +563,10 @@ export function buildVideoReversePrompt({ videoUrl, mode, requirement, targetSec
         lines.push("只输出结果正文，不要解释你的分析过程，也不要写与结果无关的寒暄。");
     } else {
         // 尾钉一次：模型对结尾指令最敏感，而上面还夹着「特殊要求」「时长」「视频链接」三段易被当局部约束的内容。
-        // 2026-11-12 起「样本而非复刻」也在尾部收口一遍（压缩成一句）—— 长输出写到后半段最容易滑回「转写原片」。
+        // 创作口径的尾钉**按 mode 分开**：02 收「复刻」、03 收「另写一个故事」——长输出写到后半段最容易滑到另一边
+        //（02 滑成另编故事、03 滑成转写原片），这两句各自堵各自的方向。
         lines.push(VIDEO_REVERSE_SCRIPT_ONLY_RULE);
-        lines.push(VIDEO_REVERSE_NEW_STORY_ECHO);
+        lines.push(mode === 2 ? VIDEO_REVERSE_COPY_STORY_ECHO : VIDEO_REVERSE_NEW_STORY_ECHO);
     }
     return lines.join("\n");
 }

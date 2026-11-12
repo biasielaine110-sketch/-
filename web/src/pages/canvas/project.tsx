@@ -10603,14 +10603,23 @@ function AtelierCanvasPage() {
                         fontSize: DEFAULT_CANVAS_FONT_SIZE,
                     },
                 ),
-                // 01 = 反推出来的分镜提示词表；02/03 = 由反推结果**另写**的同类型新剧本（不是原片的转写）。
-                title: input.mode === 1 ? "反推分镜提示词" : "同类型新剧本",
+                // 01 = 反推出来的分镜提示词表；02 = 复刻同款剧本；03 = 由反推结果另写的同类型新剧本。
+                // 02 / 03 的差别**只在剧本内容**，节点标题分开写，用户一眼能看出这条链是复刻还是新故事。
+                title: input.mode === 1 ? "反推分镜提示词" : input.mode === 2 ? "复刻同款剧本" : "同类型新剧本",
             };
             pushNodes([textNode]);
 
-            if (input.mode !== 3) return { ok: true, chatNodeId: chatNode.id, textNodeId: textNode.id };
+            /**
+             * 01 到此为止；**02 与 03 的执行流程完全相同**（用户 2026-11-12 第 04 条：
+             * 「02 跟 03 除了输出的剧本内容不一样，其他执行和约束完全一样」）。
+             *
+             * 所以判据是 `mode === 1` 才提前返回 —— 千万别再写回 `mode !== 3`，那会让 02 又退回
+             * 「只出文案不铺链路」，与用户口径直接冲突（而且两处判据一改一漏，就会出现
+             * 「02 建了脚本节点但不跑一键视频」这种半截状态）。
+             */
+            if (input.mode === 1) return { ok: true, chatNodeId: chatNode.id, textNodeId: textNode.id };
 
-            // ④ 03：文本节点 → 脚本生成器（新节点，右接），然后一键视频
+            // ④ 02 / 03：文本节点 → 脚本生成器（新节点，右接），然后一键视频
             report("创建脚本生成器节点并接上文案…");
             /**
              * 脚本节点**一建出来就带上目标参数**（用户 2026-11-09）：
@@ -10638,11 +10647,11 @@ function AtelierCanvasPage() {
                 scriptVideoSize: resolveReverseVideoSize(target),
                 scriptVideoQuality: resolveReverseVideoQuality(target),
                 ...(target.model ? { scriptVideoModel: target.model } : {}),
-                // 02 里选了「MochiAni 生视频节点」→ 03 建脚本节点时记住引擎，铺链路时才知道建哪种窗口
+                // 反推节点里选了「MochiAni 生视频节点」→ 02/03 建脚本节点时记住引擎，铺链路时才知道建哪种窗口
                 // （用户 2026-11-10 第 02 条：「同上，后续在脚本生成器执行生视频时，也铺的是该节点」）。
                 ...(isMochianiVideoEngine(target.videoEngine) ? { scriptVideoEngine: MOCHIANI_VIDEO_ENGINE } : {}),
                 // 「每 3 个镜头合一个视频」（用户 2026-11-11 第 01 条）：反推节点上开了就带过来，
-                // 于是 03 紧接着跑的一键视频 / 之后手点铺链路都是 3 镜一个视频节点。
+                // 于是 02/03 紧接着跑的一键视频 / 之后手点铺链路都是 3 镜一个视频节点。
                 // 取 `input.shotsPerClip` 优先：开关刚点完 metadata 还没提交时也能生效（同 scriptScheme 那个坑）。
                 ...(Number(input.shotsPerClip ?? target.shotsPerClip) === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT ? { scriptShotsPerClip: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT } : {}),
             };
@@ -10650,7 +10659,7 @@ function AtelierCanvasPage() {
              * 🔴 执行方案必须**建节点时就写进去**（用户 2026-11-09 报障：「03 出来的视频运动提示词
              * 不是第四套那套八段格式」）。
              *
-             * 手点新建的脚本节点靠组件挂载后的自动预填拿到方案；但 03 是**同一次点击里**先建节点、
+             * 手点新建的脚本节点靠组件挂载后的自动预填拿到方案；但 02/03 是**同一次点击里**先建节点、
              * 紧接着 `handleOneClickVideo` → `runScriptGeneration` —— React 还没提交渲染，组件还没挂载，
              * 生成就已经读到 `scriptScheme: undefined`（= 第一套内置提示词），第四套的
              * `video_motion_prompt` 八段硬约束（`STORY_SCRIPT_DIRECTOR_VIDEO_FORMAT`）压根没进 system / 任务书；
@@ -10659,7 +10668,7 @@ function AtelierCanvasPage() {
              * 这里用与组件**同一个纯函数**（`buildScriptSchemeSeed`）算好整份补丁，建节点时一次落库，
              * 生成立刻就能读到。词库 / 技能库里取不到内容时它是 `null`，行为与改造前一致（停在第一套）。
              *
-             * 用户在 03 弹窗里**点了第几套**（2026-11-10）时走 `explicit` 分支：不再跑默认判定，
+             * 用户在 02/03 弹窗里**点了第几套**（2026-11-10）时走 `explicit` 分支：不再跑默认判定，
              * 直接照那一套写方案 + 预填三段（第一套 = 只写方案、三段留空 = 内置提示词）。
              * 取值优先用本次调用的入参（弹窗刚改、metadata 还没提交时也生效），其次用节点上存的选择。
              */

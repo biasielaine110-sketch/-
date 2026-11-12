@@ -28,7 +28,7 @@ import { CanvasStylePicker } from "./canvas-style-picker";
  * 真禁用时悬停不出 `title`、点了也没反应，用户只会觉得坏了。
  *
  * 真正的编排在 `project.tsx: runVideoReverse`：建对话节点 → 连视频 → 调技能反推 →
- * 结果落文本节点 →（03）接脚本生成器并跑一键视频。这里只负责「选视频 + 按按钮 + 显示进度」。
+ * 结果落文本节点 →（02 / 03）接脚本生成器并跑一键视频。这里只负责「选视频 + 按按钮 + 显示进度」。
  * 进度 / 结果落在 `metadata.reverseVideoRun`：节点滚出视口会被卸载重挂，只放 state 会凭空消失。
  */
 
@@ -74,7 +74,7 @@ const INTERACTIVE_SELECTOR = "textarea,input,button,[contenteditable],[data-canv
 
 /**
  * 「running」超过这个时长就判定为上次被打断（刷新页面会掐断请求，状态位来不及回写）。
- * 必须**大于 03 一键视频的最长预算（45 分钟）**，否则长任务跑到一半按钮就被解锁，用户能连点两条命令。
+ * 必须**大于 02 / 03 一键视频的最长预算（45 分钟）**，否则长任务跑到一半按钮就被解锁，用户能连点两条命令。
  */
 const STALE_RUN_MS = 60 * 60_000;
 
@@ -143,12 +143,12 @@ export function CanvasReverseVideoNodeContent({
     );
     /**
      * 「每 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条）：存在 `reverseVideoTarget.shotsPerClip`，
-     * 03 建脚本节点时搬进 `scriptShotsPerClip`，之后铺链路按 3 镜切片。
+     * 02 / 03 建脚本节点时搬进 `scriptShotsPerClip`，之后铺链路按 3 镜切片。
      */
     const compactShots = target.shotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT;
     /**
      * 有效出片参数（用户 2026-11-11 第 02 条）：窗口里没选过时给 16:9 / 720p。
-     * 03 搬给脚本节点的是**同一份**（`project.tsx` 里也调这两个函数），所以摘要写的就是实际会用的。
+     * 02 / 03 搬给脚本节点的是**同一份**（`project.tsx` 里也调这两个函数），所以摘要写的就是实际会用的。
      */
     const effectiveSize = resolveReverseVideoSize(target);
     const effectiveQuality = resolveReverseVideoQuality(target);
@@ -162,39 +162,40 @@ export function CanvasReverseVideoNodeContent({
     /** 设置摘要（弹窗里给用户确认「按什么出片」用）。 */
     const targetSummary = useMemo(() => {
         const style = target.styleTemplateId ? getStyleTemplate(target.styleTemplateId)?.label || target.styleTemplateId : "无风格";
-        // 换了引擎要写在摘要里：03 的「按这套出片」是用户最后一眼确认，不能还写着普通视频模型。
+        // 换了引擎要写在摘要里：02 / 03 的「按这套出片」是用户最后一眼确认，不能还写着普通视频模型。
         const engine = isMochianiVideoEngine(target.videoEngine) ? "MochiAni 生视频" : "";
-        // 分段口径也要写：03 是「建脚本节点 → 立刻一键视频」，铺出来几个视频窗口取决于这一档。
+        // 分段口径也要写：02 / 03 都是「建脚本节点 → 立刻一键视频」，铺出来几个视频窗口取决于这一档。
         const clip = target.shotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT ? `每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT} 镜一个视频` : `每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜一个视频`;
         return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${effectiveSize} · ${qualityLabel(effectiveQuality)} · 风格：${style} · ${clip}${engine ? ` · ${engine}` : ""}`;
     }, [target]);
     /**
-     * 03 弹窗里的「执行方案」选项（用户 2026-11-10）。
+     * 02 / 03 弹窗里的「执行方案」选项（用户 2026-11-10）。
      *
      * 为什么必须在**选中之前**就定下来：八套方案对 `视频运动提示词` 的格式约束各不相同
      * （第四套 = 八段标签块、第五套 = 整段 10 秒视频脚本、第六套 = 光影全流程、第七 / 第八套 = 时间码 / 分镜组），
-     * 而 03 是「建脚本节点 → 立刻一键视频」一气呵成，中间没有地方让用户点方案。
+     * 而 02 / 03 都是「建脚本节点 → 立刻一键视频」一气呵成，中间没有地方让用户点方案。
      * 空值 = 不表态，仍按默认判定（第四套 · 影视分镜导演优先），与「手点新建脚本节点」完全一致。
      */
     const schemeOptions = useMemo(() => [{ value: "", label: t("canvas.scriptNode.reverseSchemeFollow") }, ...SCRIPT_SCHEME_IDS.map((id) => ({ value: id, label: t(`canvas.scriptNode.scheme_${id}`) }))], [t]);
     /** 当前选中的方案（空 = 默认），只用于文案。 */
     const chosenSchemeLabel = target.scriptScheme ? t(`canvas.scriptNode.scheme_${target.scriptScheme}`) : t("canvas.scriptNode.reverseSchemeFollow");
     /**
-     * 02 / 03 要求框的**默认文案**（2026-11-12 口径）：
-     * 「根据我提供的视频，反推出它的类型与写法，另外写一份同类型的全新剧本文案，同时使用 @图片1
-     *   作为文案中的道具，只要剧本正文，不要提示词、分析和任何注释。」
+     * 02 / 03 要求框的**默认文案**（2026-11-12 口径）。
      *
      * 两次改口径沿革：
      *  ① 2026-11-11 第 02 条：旧默认是「反推该视频**提示词**及文案」→ 要求框里点名要提示词，
      *     模型就把整张分镜提示词表全吐出来，剧本被挤到后面截断（「总给我出一堆没用的注释，剧本生成不完」）。
      *  ② 2026-11-12：只留「同款风格的剧本文案」还不够 —— 模型会把「同款」读成「同一条」，
-     *     直接拿原片内容转写成剧本（「感觉像是直接反推了一份给我」）。现在把「反推类型 → 另写新剧本」写进默认文案。
+     *     直接拿原片内容转写成剧本（「感觉像是直接反推了一份给我」）。把「反推类型 → 另写新剧本」写进默认文案。
+     *  ③ 2026-11-12 第 04 条：那个「另写新剧本」的口径**只属于 03**。02 改成复刻同款，
+     *     默认文案也必须跟着说「复刻」—— 否则框里写「另写新剧本」、提示词跑「复刻」，用户不知道以哪个为准。
+     *     所以默认文案按 **mode** 取（`buildDefaultVideoReverseRequirement(mentions, mode)`）。
      *
      * `@图片N` 必须按「连进本节点的参考图」逐张点名：没有参考图时不提（提了模型只会瞎猜一件道具），
      * 有 N 张就写 `@图片1、@图片2…` —— 编号与 `project.tsx: runVideoReverse` 把这批图连进对话节点后
      * `sendChatMessage` 用的 mention 编号同源（`imageReferenceLabel`，按连线顺序、从 1 开始）。
      */
-    const requirementDefault = useCallback(() => buildDefaultVideoReverseRequirement((referenceImages || []).map((_, index) => imageReferenceLabel(index))), [referenceImages]);
+    const requirementDefault = useCallback((mode: VideoReverseMode) => buildDefaultVideoReverseRequirement((referenceImages || []).map((_, index) => imageReferenceLabel(index)), mode), [referenceImages]);
     const attached = useMemo(() => videos.find((item) => item.id === attachedVideoId) || null, [attachedVideoId, videos]);
     const selectedVideo = useMemo(() => videos.find((item) => item.id === selectedVideoId) || null, [selectedVideoId, videos]);
     /** 状态位是 running 但已经很久没更新 = 上次被刷新 / 关页面掐断了，别把按钮永久锁死。 */
@@ -272,7 +273,7 @@ export function CanvasReverseVideoNodeContent({
             try {
                 /**
                  * `scriptScheme` 显式带过去（而不是只靠 `patchTarget` 落库）：
-                 * 节点 metadata 的写入要等一次 React 提交，而 03 在**同一次点击里**就要建脚本节点、
+                 * 节点 metadata 的写入要等一次 React 提交，而 02 / 03 在这**同一次点击里**就要建脚本节点、
                  * 立刻生成 —— 读 `nodesRef` 可能拿到还没刷新的旧值（这个坑 2026-11-09 已经踩过一次）。
                  */
                 const outcome = await onRun({ videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id, scriptScheme: target.scriptScheme, shotsPerClip: target.shotsPerClip, skillId: skillOption.id }, (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }));
@@ -308,8 +309,9 @@ export function CanvasReverseVideoNodeContent({
                 void runMode(1);
                 return;
             }
-            // 02 / 03：先弹特殊要求，默认已经把「反推视频 + 用参考图当道具 + 重新输出文案」写好。
-            setRequirementText(requirementDefault());
+            // 02 / 03：先弹特殊要求。默认文案按 mode 取（02 = 复刻同款 / 03 = 另写同类型新剧本），
+            // 两者都自带「参考图当道具 + 只要剧本正文」。
+            setRequirementText(requirementDefault(mode));
             setRequirementMode(mode);
         },
         [attached, message, requirementDefault, runMode, running],
@@ -457,7 +459,7 @@ export function CanvasReverseVideoNodeContent({
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         <CanvasStylePicker value={target.styleTemplateId} onChange={(styleTemplateId) => patchTarget({ styleTemplateId: styleTemplateId || "" })} buttonClassName="!h-7 !max-w-[132px] !shrink-0 !justify-start !rounded-full !px-2.5" placement="topLeft" />
                         {/* 视频模型：最后一项「MochiAni 生视频节点」= 换引擎（用户 2026-11-10 第 02 条）。
-                            选它之后 03 的「一键视频」铺出来的是 MochiAni 窗口，而不是普通视频节点；
+                            选它之后 02 / 03 的「一键视频」铺出来的是 MochiAni 窗口，而不是普通视频节点；
                             两个选择分开存（`model` / `videoEngine`），来回切不互相冲掉。 */}
                         <ModelPicker
                             config={globalConfig}
@@ -490,10 +492,10 @@ export function CanvasReverseVideoNodeContent({
                         <Select size="small" className="!w-[124px]" value={effectiveQuality} onChange={(quality) => patchTarget({ quality })} options={QUALITY_OPTIONS} popupMatchSelectWidth={false} aria-label="视频分辨率" />
                     </div>
                     <div className="mt-1 text-[10px] leading-relaxed opacity-45">
-                        秒数 = 成片总时长：02 写文案、03 生剧本都按它规划镜头数与台词量（默认 {DEFAULT_REVERSE_VIDEO_SECONDS} 秒）；生视频用这里的模型 / 比例 / 分辨率 / 风格（默认 16:9 · 720p，模型跟偏好里的视频模型）。
+                        秒数 = 成片总时长：02 / 03 写剧本都按它规划镜头数与台词量（默认 {DEFAULT_REVERSE_VIDEO_SECONDS} 秒）；生视频用这里的模型 / 比例 / 分辨率 / 风格（默认 16:9 · 720p，模型跟偏好里的视频模型）。
                     </div>
                     {/* 第三行：「每 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条）。
-                        打开后 03 建脚本节点时带过去，铺链路（含一键视频）每 3 镜一个视频节点；关掉回到默认 4 镜。 */}
+                        打开后 02 / 03 建脚本节点时带过去，铺链路（含一键视频）每 3 镜一个视频节点；关掉回到默认 4 镜。 */}
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         <button
                             type="button"
@@ -611,21 +613,28 @@ export function CanvasReverseVideoNodeContent({
                 okText="开始反推"
                 cancelText="取消"
                 width={520}
-                title={requirementMode === 3 ? "03 · 反推视频并生成同类型新剧本及视频" : "02 · 反推视频并生成同类型新剧本"}
+                title={requirementMode === 3 ? "03 · 反推视频并生成同类型新剧本及视频" : "02 · 反推视频并复刻同款剧本及视频"}
                 destroyOnHidden={false}
             >
                 <div className="flex flex-col gap-2 text-sm">
                     <div className="text-xs opacity-60">
                         这段会作为「特殊要求」跟着视频一起发进 AI 对话，可以直接改。
                         {referenceImages?.length ? `连进来的 ${referenceImages.length} 张参考图会一起带进对话，${imageReferenceLabel(0)} 就是第一张（连线顺序）。` : "（本节点还没连参考图，所以默认文案里没有 @图片N。）"}
-                        <span className="mt-1 block opacity-80">视频只当「同类型的样本」用：要的是另写的一个故事（人物 / 场景 / 情节 / 台词全新），不是把这条片转写成剧本。</span>
+                        <span className="mt-1 block opacity-80">
+                            {requirementMode === 2
+                                ? "这次是「复刻同款」：人物 / 场景 / 事件顺序 / 台词 / 镜头都照这条片来，写成一份可以直接开拍的剧本。"
+                                : "视频只当「同类型的样本」用：要的是另写的一个故事（人物 / 场景 / 情节 / 台词全新），不是把这条片转写成剧本。"}
+                        </span>
                     </div>
-                    <Input.TextArea value={requirementText} onChange={(event) => setRequirementText(event.target.value)} rows={4} placeholder={DEFAULT_VIDEO_REVERSE_REQUIREMENT} />
+                    {/* placeholder 也要跟着 mode 走：02 是复刻口径、03 是新故事口径，
+                        用同一个常量会让 03 的框里飘着「复刻一份同款剧本」的占位文字。 */}
+                    <Input.TextArea value={requirementText} onChange={(event) => setRequirementText(event.target.value)} rows={4} placeholder={requirementDefault(requirementMode === 3 ? 3 : 2)} />
                     <div className="text-[11px] opacity-60">
                         本次成片：<span className="font-medium">{targetSummary}</span>
                     </div>
-                    {/* 03 的执行方案（用户 2026-11-10）：分镜表里「视频运动提示词」按哪一套格式出。 */}
-                    {requirementMode === 3 ? (
+                    {/* 02 / 03 的执行方案（用户 2026-11-10）：分镜表里「视频运动提示词」按哪一套格式出。
+                        两条命令现在执行流程完全一样，所以方案选择对两者都要显示。 */}
+                    {requirementMode === 2 || requirementMode === 3 ? (
                         <div className="flex flex-col gap-1">
                             <div className="flex items-center gap-2">
                                 <span className="text-xs opacity-70">{t("canvas.scriptNode.reverseSchemeLabel")}</span>
@@ -642,7 +651,11 @@ export function CanvasReverseVideoNodeContent({
                             <div className="text-[11px] leading-relaxed opacity-50">{t("canvas.scriptNode.reverseSchemeHint")}</div>
                         </div>
                     ) : null}
-                    {requirementMode === 3 ? <div className="text-[11px] opacity-50">确定后会接着把文本节点接到脚本生成器，并执行一键视频 —— 剧本按 {target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒写、分镜表按「{chosenSchemeLabel}」的格式出，生视频用上面这套参数。</div> : null}
+                    {requirementMode === 2 || requirementMode === 3 ? (
+                        <div className="text-[11px] opacity-50">
+                            确定后会接着把文本节点接到脚本生成器，并执行一键视频 —— 剧本按 {target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒写、分镜表按「{chosenSchemeLabel}」的格式出，生视频用上面这套参数。
+                        </div>
+                    ) : null}
                 </div>
             </Modal>
         </div>
