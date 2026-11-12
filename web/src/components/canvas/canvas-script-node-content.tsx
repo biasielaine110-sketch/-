@@ -1541,6 +1541,54 @@ export function CanvasScriptNodeContent({
         </span>
     );
 
+    /**
+     * 「用哪个文本模型 / 哪个视频模型 / 哪套风格模板」这三个控件 —— header 与**缩放态**共用。
+     *
+     * 用户 2026-11-12：「脚本生成器，在缩小后的界面需要能够展示这些按钮……风格模板、对话和生视频模型选择」。
+     * 缩放态（`tableCollapsed`）原来只剩一句提示 + 一个展开按钮，想换个模型 / 换套风格都得先把表展开；
+     * 抽成变量后两处引用同一份 JSX，口径永远一致（不会出现「表体能选、缩放态还显示旧值」）。
+     * 🔴 必须定义在 `header` **之前**：header 是 JSX 变量，定义那一刻就要取值，后置会 TDZ 崩溃。
+     */
+    const textModelPicker = (
+        <ModelPicker
+            config={{ ...globalConfig, model: textModel, reasoningEffort: node.metadata?.reasoningEffort || globalConfig.reasoningEffort || defaultConfig.reasoningEffort }}
+            value={textModel}
+            onChange={(model) => patchMetadata({ model })}
+            capability="text"
+            onMissingConfig={() => openConfigDialog(true)}
+            className="max-w-full"
+            fullWidth
+            placeholder={t("canvas.chat.selectTextModel")}
+        />
+    );
+
+    /** 生视频引擎（详见 header 里的原注释）：空值 = 跟随全局，`mochiani` = 每段建 MochiAni 窗口。 */
+    const videoModelPicker = (
+        <ModelPicker
+            config={{ ...globalConfig, model: videoModelValue }}
+            value={videoModelValue}
+            onChange={(model) => {
+                if (isMochianiVideoEngine(model)) patchMetadata({ scriptVideoEngine: MOCHIANI_VIDEO_ENGINE });
+                else patchMetadata({ scriptVideoEngine: undefined, scriptVideoModel: model });
+            }}
+            capability="video"
+            onMissingConfig={() => openConfigDialog(true)}
+            className="max-w-[158px]"
+            placeholder={t("canvas.scriptNode.videoModelFollow")}
+            extraOptions={[{ value: MOCHIANI_VIDEO_ENGINE, label: t("canvas.scriptNode.videoEngineMochiani"), title: t("canvas.scriptNode.videoEngineMochianiHint") }]}
+        />
+    );
+
+    /** 风格模板：选中的只落到**新建的图片节点**的 `metadata.styleTemplateId`，不改脚本正文。 */
+    const styleTemplatePicker = (
+        <CanvasStylePicker
+            value={node.metadata?.styleTemplateId}
+            onChange={(styleTemplateId) => patchMetadata({ styleTemplateId })}
+            buttonClassName="!h-8 !max-w-[128px] !shrink-0 !justify-start !rounded-full !px-2.5"
+            placement="bottomLeft"
+        />
+    );
+
     const header = (
         <div
             className="flex flex-wrap items-center gap-1.5 px-2 pb-1.5 pt-2"
@@ -1555,18 +1603,7 @@ export function CanvasScriptNodeContent({
             <span className="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[0.8em] opacity-80" style={{ borderColor: theme.node.stroke }} title={t(`canvas.scriptNode.preset_${presetId}_hint`)}>
                 {t(`canvas.scriptNode.preset_${presetId}`)}
             </span>
-            <div className="min-w-0 flex-1">
-                <ModelPicker
-                    config={{ ...globalConfig, model: textModel, reasoningEffort: node.metadata?.reasoningEffort || globalConfig.reasoningEffort || defaultConfig.reasoningEffort }}
-                    value={textModel}
-                    onChange={(model) => patchMetadata({ model })}
-                    capability="text"
-                    onMissingConfig={() => openConfigDialog(true)}
-                    className="max-w-full"
-                    fullWidth
-                    placeholder={t("canvas.chat.selectTextModel")}
-                />
-            </div>
+            <div className="min-w-0 flex-1">{textModelPicker}</div>
 
             {rows.length ? (
                 <>
@@ -1625,31 +1662,14 @@ export function CanvasScriptNodeContent({
                 选中的模板不会去改脚本正文，而是跟着「铺链路 / 一键直接生图 / 逐镜生成 / 按格生成」
                 落到**新建的图片节点**的 `metadata.styleTemplateId` 上 —— 生图链路读的就是节点自己这个字段。
                 面板朝下开：这个控件在节点标题栏，朝上开会顶出画布顶部。 */}
-            <CanvasStylePicker
-                value={node.metadata?.styleTemplateId}
-                onChange={(styleTemplateId) => patchMetadata({ styleTemplateId })}
-                buttonClassName="!h-8 !max-w-[128px] !shrink-0 !justify-start !rounded-full !px-2.5"
-                placement="bottomLeft"
-            />
+            {styleTemplatePicker}
 
             {/* 生视频引擎（用户 2026-11-10 第 01 条）：「铺视频链路 / 一键视频」每一段要建哪种窗口。
                 默认 = 跟随偏好里的默认视频模型（空值 = 不写 model，视频节点自己跟随全局）；
                 也可以直接选「MochiAni 生视频节点」——之后每段建的都是 MochiAni 窗口，
                 提示词 / 参考图 / 风格 / 合并连线与普通视频节点完全一样，只是「生成」由 MochiAni 的「预检」驱动。
                 两个选择分开存（`scriptVideoModel` / `scriptVideoEngine`），来回切不会互相冲掉。 */}
-            <ModelPicker
-                config={{ ...globalConfig, model: videoModelValue }}
-                value={videoModelValue}
-                onChange={(model) => {
-                    if (isMochianiVideoEngine(model)) patchMetadata({ scriptVideoEngine: MOCHIANI_VIDEO_ENGINE });
-                    else patchMetadata({ scriptVideoEngine: undefined, scriptVideoModel: model });
-                }}
-                capability="video"
-                onMissingConfig={() => openConfigDialog(true)}
-                className="max-w-[158px]"
-                placeholder={t("canvas.scriptNode.videoModelFollow")}
-                extraOptions={[{ value: MOCHIANI_VIDEO_ENGINE, label: t("canvas.scriptNode.videoEngineMochiani"), title: t("canvas.scriptNode.videoEngineMochianiHint") }]}
-            />
+            {videoModelPicker}
 
             {fontSizeStepper}
 
@@ -2636,6 +2656,76 @@ export function CanvasScriptNodeContent({
     };
 
     /**
+     * 铺链路的三个动作按钮 —— **表体右下角与缩放态共用**。
+     *
+     * 用户 2026-11-12：「在缩小后的界面需要能够展示这些按钮……一键直接生图、一键铺视频链路、
+     * 一键铺视频链路并生成」。缩放态原来只剩一句提示，想铺链路得先点开表格；抽成变量让两处引用
+     * 同一份实现 —— 否则「视频分段 / 每 3 镜合一视频」改了某一边忘改另一边，就会静默出现
+     * 「表里铺 4 镜、缩放态铺 3 镜」这种不一致（`tableDisplayControl` 也是这么抽的）。
+     */
+    const directAssetButton =
+        onDirectGenerateAssets && directAssetItems.length ? (
+            <button
+                type="button"
+                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+                style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14` }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                    event.stopPropagation();
+                    onDirectGenerateAssets(node.id);
+                }}
+                title={t("canvas.scriptNode.directAssetHint", { count: directAssetItems.length })}
+            >
+                <ImageIcon className="size-3.5" />
+                {t("canvas.scriptNode.directAsset")}
+            </button>
+        ) : null;
+
+    const buildVideoChainButton = onBuildPipeline ? (
+        <button
+            type="button"
+            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+            style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14`, opacity: 0.95 }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+                event.stopPropagation();
+                onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, {
+                    videoOnly: true,
+                    mergeEvery: shotsPerClipForPipeline,
+                });
+            }}
+            title={t("canvas.scriptNode.pipelineVideoChainHint", { count: shotsPerClipForPipeline })}
+        >
+            <Video className="size-3.5" />
+            {t("canvas.scriptNode.pipelineVideoChain")}
+        </button>
+    ) : null;
+
+    const pipelineVideoGenerateButton = onBuildPipeline ? (
+        <button
+            type="button"
+            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
+            style={{ borderColor: theme.toolbar.activeText, color: theme.node.text, opacity: 0.9 }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+                event.stopPropagation();
+                onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, {
+                    videoOnly: true,
+                    group: true,
+                    autoGenerate: true,
+                });
+            }}
+            title={t("canvas.scriptNode.pipelineVideoGenerateTip")}
+        >
+            <Play className="size-3.5" />
+            {t("canvas.scriptNode.pipelineVideoGenerate")}
+        </button>
+    ) : null;
+
+    /**
      * 显示档按钮（收起 → 简洁版 → 完整版 → 收起）。标签写的是**下一个状态**，
      * 与老「简洁版 / 完整版」按钮的写法一致（当前是简洁版时显示「完整版」）。
      *
@@ -2677,23 +2767,61 @@ export function CanvasScriptNodeContent({
     );
 
     /**
-     * 「缩放」态：表体整块不渲染，只留一条提示 + 同一个显示档按钮。
+     * 「缩放」态：表体整块不渲染，但**操作条一条不少**。
      *
      * 用户要求「表格中内容全部收起不显示，但只是不显示，不影响其正常功能的推进和链接图」，
      * 所以这里**绝不能**顺手把 `rows` 清掉或断连线 —— 铺链路 / 一键视频 / 批量重生成读的都是
      * `metadata`，收起态下照常能跑。
+     *
+     * 用户 2026-11-12：「在缩小后的界面需要能够展示这些按钮 —— 展示使用的第几套执行方案、
+     * 风格模板、对话和生视频模型选择、一键直接生图、一键铺视频链路、一键铺视频链路并生成、
+     * 生图比例、每 3 镜合一个视频开关、简洁缩小开关」。原来这里只剩一句提示，改任何一项都得先
+     * 把表展开；现在把这些控件按「设置 → 画幅 → 动作」三行排进去，三行都是**引用同一份 JSX 变量**
+     * （`schemeSelector` / `styleTemplatePicker` / `textModelPicker` / `videoModelPicker` /
+     * `imageSizeSelector` / `shotsPerClipSelector` / 三个动作按钮 / `tableDisplayControl`），
+     * 所以口径与表体、输入视图完全一致，不会出现「两边选项不同 / 缩放态还显示旧值」。
+     *
+     * 高度不写死：自动适配那段按 `提示条.offsetTop + offsetHeight` 算，控件多了节点自己会长高。
      */
     const collapsedPanel = (
         <div
             ref={collapsedStripRef}
-            className="mx-2 mb-2 flex shrink-0 items-center gap-2 rounded-xl border px-2.5 py-1.5 text-[0.923em]"
+            className="mx-2 mb-2 flex shrink-0 flex-col gap-1.5 rounded-xl border px-2.5 py-2 text-[0.923em]"
             style={{ borderColor: theme.node.stroke, background: theme.node.panel, color: theme.node.text }}
         >
-            <AlignJustify className="size-3.5 shrink-0 opacity-60" />
-            <span className="min-w-0 flex-1 truncate opacity-70">
-                {t("canvas.scriptNode.tableCollapsedNotice", { count: rows.length })}
-            </span>
-            {tableDisplayControl}
+            <div className="flex items-center gap-2">
+                <AlignJustify className="size-3.5 shrink-0 opacity-60" />
+                <span className="min-w-0 flex-1 truncate opacity-70">
+                    {t("canvas.scriptNode.tableCollapsedNotice", { count: rows.length })}
+                </span>
+                {tableDisplayControl}
+            </div>
+
+            {/* 「用哪套提示词」比「出什么画幅」更上位，排第一行（与输入视图同序）。 */}
+            {schemeSelector}
+
+            {/* 生成口径：风格模板 / 对话模型 / 生视频模型 —— 与标题栏那三个是同一份控件。 */}
+            <div className="flex flex-wrap items-center gap-1.5">
+                {styleTemplatePicker}
+                <div className="min-w-0 flex-1">{textModelPicker}</div>
+                {videoModelPicker}
+            </div>
+
+            {/* 出图口径：画幅 + 每 3 镜合一视频（决定铺链路时一段拼几镜）。两行合一排，
+                宽度不够时各自内部还会 wrap —— 缩放态要尽量矮。 */}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+                {imageSizeSelector}
+                {shotsPerClipSelector}
+            </div>
+
+            {/* 三个批量动作 —— 与表体右下角完全同一份实现。全都没有（没接回调）时整行不占位。 */}
+            {directAssetButton || buildVideoChainButton || pipelineVideoGenerateButton ? (
+                <div className="flex flex-wrap items-center gap-1.5">
+                    {directAssetButton}
+                    {buildVideoChainButton}
+                    {pipelineVideoGenerateButton}
+                </div>
+            ) : null}
         </div>
     );
 
@@ -3485,24 +3613,7 @@ export function CanvasScriptNodeContent({
                                 （不看「视频分段」档位、也不看手动合并组），铺出来的视频节点自动接进一个
                                 「视频合并」节点；不建文本 / 图片节点、不自动触发生成。
                                 用户点一次就得到一条能直接往下游合并 / 导出的视频链。 */}
-                            <button
-                                type="button"
-                                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-                                style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14`, opacity: 0.95 }}
-                                onMouseDown={(event) => event.stopPropagation()}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                onClick={(event) => {
-                                    event.stopPropagation();
-                                    onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, {
-                                        videoOnly: true,
-                                        mergeEvery: shotsPerClipForPipeline,
-                                    });
-                                }}
-                                title={t("canvas.scriptNode.pipelineVideoChainHint", { count: shotsPerClipForPipeline })}
-                            >
-                                <Video className="size-3.5" />
-                                {t("canvas.scriptNode.pipelineVideoChain")}
-                            </button>
+                            {buildVideoChainButton}
                             {/* 「每 3 镜合一个视频」开关（用户 2026-11-11 第 01 条）：
                                 打开后**所有**铺链路入口（一键铺链路 / 一键铺视频链路 / 一键视频）
                                 都按 3 镜切片；关掉回到原行为（按「视频分段」档位，默认 4 镜）。
@@ -3612,47 +3723,11 @@ export function CanvasScriptNodeContent({
                                     {t("canvas.scriptNode.batchAssetOpen", { count: batchAssetItems.length })}
                                 </button>
                             ) : null}
-                            {onDirectGenerateAssets && directAssetItems.length ? (
-                                <button
-                                    type="button"
-                                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-                                    style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14` }}
-                                    onMouseDown={(event) => event.stopPropagation()}
-                                    onPointerDown={(event) => event.stopPropagation()}
-                                    onClick={(event) => {
-                                        event.stopPropagation();
-                                        onDirectGenerateAssets(node.id);
-                                    }}
-                                    title={t("canvas.scriptNode.directAssetHint", { count: directAssetItems.length })}
-                                >
-                                    <ImageIcon className="size-3.5" />
-                                    {t("canvas.scriptNode.directAsset")}
-                                </button>
-                            ) : null}
+                            {directAssetButton}
                             {/* 「一键铺视频链路并生成」：只铺视频窗口 + 打组 + 接进一个视频合并节点 +
                                 逐个点「生成」（间隔 2 秒，跑一遍即结束）。用户 2026-11-07 第 3 条。
                                 这是「只铺视频」的超集，所以样式更实一点（primary 描边）以示推荐。 */}
-                            {onBuildPipeline ? (
-                                <button
-                                    type="button"
-                                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-                                    style={{ borderColor: theme.toolbar.activeText, color: theme.node.text, opacity: 0.9 }}
-                                    onMouseDown={(event) => event.stopPropagation()}
-                                    onPointerDown={(event) => event.stopPropagation()}
-                                    onClick={(event) => {
-                                        event.stopPropagation();
-                                        onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, {
-                                            videoOnly: true,
-                                            group: true,
-                                            autoGenerate: true,
-                                        });
-                                    }}
-                                    title={t("canvas.scriptNode.pipelineVideoGenerateTip")}
-                                >
-                                    <Play className="size-3.5" />
-                                    {t("canvas.scriptNode.pipelineVideoGenerate")}
-                                </button>
-                            ) : null}
+                            {pipelineVideoGenerateButton}
                         </div>
                     ) : null}
                 </div>
