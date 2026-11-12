@@ -3195,9 +3195,18 @@ function newJusuanhubIdempotencyKey() {
     return `jsh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** 参考图 → 上游要的 URL：公网地址优先（不占请求体），否则压过的 `data:image`。 */
-async function collectJusuanhubReferenceUrls(references: ReferenceImage[], limit: number): Promise<string[]> {
+/**
+ * 参考图 → 上游要的 URL：公网 https 地址优先，本地图**必须先换成公网链接**。
+ *
+ * 🔴 **绝不能发 `data:` URL**（2026-11-12 实测）：这家 nginx 对请求体里的 `data:image` 直接
+ * 返回 `403 <h1>403 Forbidden</h1> nginx`（1×1 的 data URL 也一样），看着像权限错误其实是被拦。
+ * 字段说明里写着「支持 data:image URL」，但实测不通 —— 以实测为准。
+ * 门户也没有素材上传接口（`POST /v1/assets/input` → `Asset upload is not available on this portal`），
+ * 所以本地图只能走临时图床换 https 地址。
+ */
+async function collectJusuanhubReferenceUrls(references: ReferenceImage[], limit: number, signal?: AbortSignal): Promise<string[]> {
     const urls: string[] = [];
+    let uploadFailed = false;
     for (const image of references.slice(0, limit)) {
         const remote = [image.url, image.dataUrl]
             .map((value) => String(value || "").trim())
@@ -3208,13 +3217,15 @@ async function collectJusuanhubReferenceUrls(references: ReferenceImage[], limit
         }
         try {
             const dataUrl = await imageToDataUrl(image);
-            if (dataUrl?.startsWith("data:image/")) {
-                urls.push(await compressReferenceDataUrl(dataUrl, Math.max(1, references.length)));
-            }
+            if (!dataUrl?.startsWith("data:image/")) continue;
+            const compressed = await compressReferenceDataUrl(dataUrl, Math.max(1, references.length));
+            urls.push(await uploadTemporaryPublicImageFromDataUrl(compressed, signal));
         } catch {
-            // 单张参考图取不出来就跳过：少一张参考也好过整单失败。
+            uploadFailed = true;
         }
     }
+    // 有参考图却一张都没换成公网地址：宁可直接报错，也别悄悄生成一张忽略参考的图。
+    if (references.length > 0 && urls.length === 0 && uploadFailed) throw new Error(apiText("tempImageHostUnavailable"));
     return urls;
 }
 
@@ -3297,7 +3308,7 @@ async function requestJusuanhubImages(
     options?: RequestOptions,
 ): Promise<GeneratedImageResult[]> {
     const model = (config.model || config.imageModel).trim();
-    const imageUrls = await collectJusuanhubReferenceUrls(references, 10);
+    const imageUrls = await collectJusuanhubReferenceUrls(references, 10, options?.signal);
     const body = buildJusuanhubImageRequestBody({
         model,
         prompt: withSystemPrompt(config, prompt),

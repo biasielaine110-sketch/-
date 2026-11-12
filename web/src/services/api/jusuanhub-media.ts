@@ -146,6 +146,17 @@ export type JusuanhubImageRequestBody = {
 };
 
 /**
+ * 上游只收**公网 http(s) 地址**。`data:` / `blob:` 一律剔掉：这家 nginx 对请求体里的
+ * `data:image` 直接 403（实测，1×1 的也一样），字面上「支持」但根本过不去。
+ */
+function publicHttpUrls(values: string[] | undefined, limit: number): string[] {
+    return (values || [])
+        .map((value) => String(value || "").trim())
+        .filter((value) => /^https?:\/\//i.test(value))
+        .slice(0, limit);
+}
+
+/**
  * 文生图 / 图生图共用一个请求体：有参考图就带 `input_image_urls`（数组），没有就是纯文生图。
  *
  * 不发 `imageCount` / `steps` / `guidance_scale`：上游把这三个写死成 1 / 8 / 1，
@@ -158,7 +169,7 @@ export function buildJusuanhubImageRequestBody(input: {
     quality?: string;
     imageUrls?: string[];
 }): JusuanhubImageRequestBody {
-    const urls = (input.imageUrls || []).map((value) => String(value || "").trim()).filter(Boolean).slice(0, 10);
+    const urls = publicHttpUrls(input.imageUrls, 10);
     return {
         model: String(input.model || "").trim(),
         prompt: String(input.prompt || ""),
@@ -260,7 +271,7 @@ export function buildJusuanhubVideoRequestBody(input: {
     vquality?: string;
     imageUrls?: string[];
 }): JusuanhubVideoRequestBody {
-    const urls = (input.imageUrls || []).map((value) => String(value || "").trim()).filter(Boolean).slice(0, 9);
+    const urls = publicHttpUrls(input.imageUrls, 9);
     const generationMode = resolveJusuanhubVideoMode(urls.length);
     return {
         model: String(input.model || "").trim(),

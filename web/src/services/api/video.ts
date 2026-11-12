@@ -16,7 +16,7 @@ import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, forceProxyApiUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
-import { uploadTemporaryPublicImage } from "@/lib/temp-public-image";
+import { uploadTemporaryPublicImage, uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import {
     isMinimaxH3FisherWorkflowId,
@@ -189,9 +189,17 @@ function newJusuanhubVideoIdempotencyKey() {
     return `jsh-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** 参考图 → 上游要的 URL（公网优先，其次压过的 data:image；单张失败不影响整单）。 */
-async function collectJusuanhubVideoReferenceUrls(references: ReferenceImage[], limit: number): Promise<string[]> {
+/**
+ * 参考图 → 上游要的 URL：公网 https 优先，本地图**必须先换成公网链接**。
+ *
+ * 🔴 **绝不能发 `data:` URL**（2026-11-12 实测）：这家 nginx 对请求体里的 `data:image` 直接
+ * 返回 `403 <h1>403 Forbidden</h1> nginx`，浏览器里看就是「提交就 403」。门户也不提供素材
+ * 上传（`POST /v1/assets/input` → `Asset upload is not available on this portal`），
+ * 所以本地图只能先传临时图床换 https 地址。公网 URL 是通的（实测 i2v → 202）。
+ */
+async function collectJusuanhubVideoReferenceUrls(references: ReferenceImage[], limit: number, signal?: AbortSignal): Promise<string[]> {
     const urls: string[] = [];
+    let uploadFailed = false;
     for (const image of references.slice(0, limit)) {
         const remote = [image.url, image.dataUrl]
             .map((value) => String(value || "").trim())
@@ -202,17 +210,21 @@ async function collectJusuanhubVideoReferenceUrls(references: ReferenceImage[], 
         }
         try {
             const dataUrl = await imageToDataUrl(image);
-            if (dataUrl?.startsWith("data:image/")) urls.push(await compressReferenceDataUrl(dataUrl, Math.max(1, references.length)));
+            if (!dataUrl?.startsWith("data:image/")) continue;
+            const compressed = await compressReferenceDataUrl(dataUrl, Math.max(1, references.length));
+            urls.push(await uploadTemporaryPublicImageFromDataUrl(compressed, signal));
         } catch {
-            // 取不出来的那张跳过。
+            uploadFailed = true;
         }
     }
+    // 有参考图却一张都没换成公网地址：直接报错，别悄悄退化成 t2v（出来的片会完全不是要的内容）。
+    if (references.length > 0 && urls.length === 0 && uploadFailed) throw new Error(apiText("tempImageHostUnavailable"));
     return urls;
 }
 
 async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     const modelName = modelOptionName(model).trim() || "minimax-h3";
-    const imageUrls = await collectJusuanhubVideoReferenceUrls(references, 9);
+    const imageUrls = await collectJusuanhubVideoReferenceUrls(references, 9, options?.signal);
     const body = buildJusuanhubVideoRequestBody({
         model: modelName,
         prompt,
