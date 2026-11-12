@@ -2,7 +2,7 @@ import axios from "axios";
 
 import i18n from "@/i18n";
 import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
-import { proxyApiUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
+import { proxyApiUrl, forceProxyMediaUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
 import { isComfyH3SingleReferenceImageWorkflow, parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi, type ComfyWorkflow } from "@/lib/comfyui-native";
 import { isKrea2MjStyleWorkflowId, isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, isMinimaxH3YzjinyuWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
@@ -3255,27 +3255,32 @@ async function waitJusuanhubJob(config: AiConfig, jobId: string, options?: Reque
 /**
  * 取回 `outputs[].contentUrl` 的字节。**必须带 Bearer**，这是这一家最容易漏的一条：
  * 拿到的 URL 不是公开直链，`<img src>` / `fetch(url)` 都会 401。
+ *
+ * 🔴 而且**不能先试直连**：`/v1/assets/{id}/content` 不回 `Access-Control-Allow-Origin`，
+ * 带 `Authorization` 的请求会先发 preflight 然后被浏览器的 CORS 拦住（
+ * `No 'Access-Control-Allow-Origin' header`）；不带 `Authorization` 又是 401。
+ * 所以默认就走同源代理，并把 Bearer 交给代理转发
+ * （`functions/_lib/proxy.js` 除黑名单外原样转发请求头，已实测 200 + 4.5MB PNG）。
  */
 async function fetchJusuanhubImageDataUrl(config: AiConfig, url: string, options?: RequestOptions): Promise<string> {
     const absolute = /^https?:\/\//i.test(url) ? url : buildApiUrl(config.baseUrl, url);
-    try {
-        const response = await axios.get<Blob>(absolute, {
-            headers: aiHeaders(config),
-            responseType: "blob",
-            signal: options?.signal,
-            timeout: IMAGE_REQUEST_TIMEOUT_MS,
-        });
-        return await blobToDataUrlViaReader(response.data);
-    } catch (error) {
-        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
-        // 少数产物会落到对象存储（不认 Bearer、但允许公网直取）：退回同源媒体代理再取一次。
+    const proxied = forceProxyMediaUrl(absolute);
+    const targets = proxied ? [proxied, absolute] : [absolute];
+    for (const target of targets) {
         try {
-            const proxied = await axios.get<Blob>(proxyApiUrl(absolute, config.apiTransport), { responseType: "blob", signal: options?.signal });
-            return await blobToDataUrlViaReader(proxied.data);
-        } catch {
-            throw new Error(apiText("imageDownloadFailed"));
+            const response = await axios.get<Blob>(target, {
+                headers: aiHeaders(config),
+                responseType: "blob",
+                signal: options?.signal,
+                timeout: IMAGE_REQUEST_TIMEOUT_MS,
+            });
+            return await blobToDataUrlViaReader(response.data);
+        } catch (error) {
+            if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+            // 换下一条再试（代理不通 → 直连；直连被 CORS 拦 → 报错）。
         }
     }
+    throw new Error(apiText("imageDownloadFailed"));
 }
 
 /**

@@ -244,32 +244,32 @@ async function pollJusuanhubVideoTask(config: AiConfig, task: VideoGenerationTas
 }
 
 /**
- * 取回成片。**contentUrl 不是公开直链**：不带 Bearer 就是 401，所以先带 key 取 blob；
- * 失败再退回同源媒体代理（产物偶尔落在只允许公网直取的对象存储上）；
+ * 取回成片。**contentUrl 不是公开直链**：不带 Bearer 就是 401，而且
+ * `/v1/assets/{id}/content` 不回 `Access-Control-Allow-Origin`，带 Authorization 的浏览器直连
+ * 会先死在 preflight。所以默认走同源代理并把 Bearer 交给它转发（`functions/_lib/proxy.js`
+ * 原样转发请求头，图片侧已实测 200 + 4.5MB）。代理不通再试直连；
  * 两条都不行时退回 url —— 让用户至少能在节点里看到「链接在、但取不回来」而不是一句空错。
  */
 async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?: RequestOptions): Promise<VideoGenerationResult> {
     const direct = String(url || "").trim();
     const absolute = /^https?:\/\//i.test(direct) ? direct : buildApiUrl(config.baseUrl, direct);
-    try {
-        const response = await axios.get<Blob>(absolute, {
-            headers: aiHeaders(config),
-            responseType: "blob",
-            signal: options?.signal,
-            timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
-        });
-        await assertVideoBlob(response.data);
-        return { blob: response.data };
-    } catch (error) {
-        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+    const proxied = forceProxyMediaUrl(absolute);
+    for (const target of proxied ? [proxied, absolute] : [absolute]) {
         try {
-            const proxied = await axios.get<Blob>(proxyMediaUrl(absolute), { responseType: "blob", signal: options?.signal });
-            await assertVideoBlob(proxied.data);
-            return { blob: proxied.data };
-        } catch {
-            return { url: absolute, mimeType: "video/mp4" };
+            const response = await axios.get<Blob>(target, {
+                headers: aiHeaders(config),
+                responseType: "blob",
+                signal: options?.signal,
+                timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
+            });
+            await assertVideoBlob(response.data);
+            return { blob: response.data };
+        } catch (error) {
+            if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+            // 换下一条再试（代理不通 → 直连；直连被 CORS 拦 → 退回 url）。
         }
     }
+    return { url: absolute, mimeType: "video/mp4" };
 }
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
