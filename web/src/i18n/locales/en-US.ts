@@ -422,6 +422,7 @@ export default {
         videoTaskTimedOut: "Video task timed out. Please try again later",
         videoGenerationFailed: "Video generation failed",
         videoTaskQueryFailed: "Failed to query video task",
+        videoPollQueryFailed: "Could not read the video task status {{count}} times in a row: the provider's query endpoint kept timing out (60s each). The job is most likely still running — check the provider's task list first, and avoid resubmitting (it would be charged twice); retry in a moment.",
         videoResultMissing: "The video task completed but the response has no downloadable URL (the channel may use a metadata.url field)",
         videoPromptRequired: "Enter a video prompt or connect a reference image, video, or audio asset",
         referenceImageReadFailed: "Failed to read the reference image. Choose another image or upload it again.",

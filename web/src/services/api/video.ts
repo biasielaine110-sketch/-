@@ -282,17 +282,55 @@ async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt:
     return { id: jobId, provider: "jusuanhub", model, apiKey: submittedKey };
 }
 
+/**
+ * 轮询查询的「瞬时失败」容忍度。
+ *
+ * 🔴 一次 `GET /v1/jobs/{id}` 超时（60s）**不代表任务挂了** —— 聚算的状态接口在自己的提交高峰会卡到
+ * 一两分钟不回应，而任务还在跑。旧实现让这个 axios 异常直接冒到画布上：用户看到的是
+ * `timeout of 60000ms exceeded` 这种原始文本，一条本来能出的片被当成失败。
+ * 所以瞬时失败（超时 / 网络瞬断 / 5xx / 429）只记一次「这轮没问到」，下一轮继续；
+ * 连续 3 次都问不到才放弃，并给一句能照着做的话（去后台看任务列表，别重复提交）。
+ */
+const JUSUANHUB_POLL_TRANSIENT_MAX = 3;
+const jusuanhubPollFailures = new Map<string, number>();
+
 async function pollJusuanhubVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     // 同上：轮询撞 429 只说明查得太勤，不代表任务挂了。
-    const response = await runWithJusuanhubRetry(
-        () =>
-            axios.get<unknown>(aiApiUrl(config, `/jobs/${encodeURIComponent(task.id)}`), {
-                headers: aiHeaders(config),
-                signal: options?.signal,
-                timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
-            }),
-        { signal: options?.signal, maxAttempts: 3 },
-    );
+    let response: Awaited<ReturnType<typeof axios.get<unknown>>>;
+    try {
+        response = await runWithJusuanhubRetry(
+            () =>
+                axios.get<unknown>(aiApiUrl(config, `/jobs/${encodeURIComponent(task.id)}`), {
+                    headers: aiHeaders(config),
+                    signal: options?.signal,
+                    timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
+                }),
+            { signal: options?.signal, maxAttempts: 3 },
+        );
+    } catch (error) {
+        // 取消 / abort 时顺手清计数：同一个 jobId 以后可能被重新轮询（画布恢复轮询），
+        // 留着旧计数会让它一上手就判「连续失败」。
+        if (axios.isCancel(error) || options?.signal?.aborted) {
+            jusuanhubPollFailures.delete(task.id);
+            throw error;
+        }
+        const status = axios.isAxiosError(error) ? Number(error.response?.status) || 0 : 0;
+        // 401/402/403/404 = 换谁查都没用：Key 失效 / 账户没钱 / 任务不存在（job 是账户级的，
+        // 用错 Key 查就是 404）。这类必须立刻报，别在画布上干等 15 分钟。
+        if (status === 401 || status === 402 || status === 403 || status === 404) {
+            jusuanhubPollFailures.delete(task.id);
+            throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
+        }
+        const failures = (jusuanhubPollFailures.get(task.id) || 0) + 1;
+        jusuanhubPollFailures.set(task.id, failures);
+        if (failures < JUSUANHUB_POLL_TRANSIENT_MAX) {
+            // 「这轮没问到」：交给外层按 2.5s 间隔继续问，总预算由 VIDEO_POLL_MAX_ATTEMPTS 兜住。
+            return { status: "pending" };
+        }
+        jusuanhubPollFailures.delete(task.id);
+        throw new Error(apiText("videoPollQueryFailed", { count: failures }));
+    }
+    jusuanhubPollFailures.delete(task.id);
     const state = readJusuanhubJobState(response.data);
     if (state.status === "pending") return { status: "pending" };
     if (state.status === "failed") return { status: "failed", error: state.error };

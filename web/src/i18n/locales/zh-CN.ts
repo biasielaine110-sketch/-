@@ -422,6 +422,7 @@ export default {
         videoTaskTimedOut: "视频任务超时，请稍后重试",
         videoGenerationFailed: "视频生成失败",
         videoTaskQueryFailed: "视频任务查询失败",
+        videoPollQueryFailed: "连续 {{count}} 次查不到视频任务状态：上游的查询接口一直没回应（单次等待 60 秒）。任务大概率仍在生成——请先到服务商后台确认任务列表，别重复提交（会重复扣费），稍后再试。",
         videoResultMissing: "视频任务已完成，但响应里没有可下载的直链（渠道可能只给了临时地址字段，检查是否为 metadata.url）",
         videoPromptRequired: "请输入视频提示词，或连接参考图片/视频/音频",
         referenceImageReadFailed: "参考图读取失败，请换一张图片或重新上传",
