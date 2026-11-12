@@ -35,6 +35,7 @@ import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/m
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
 import { buildJusuanhubVideoRequestBody, isJusuanhubMediaBaseUrl, readJusuanhubJobId, readJusuanhubJobState } from "./jusuanhub-media";
+import { runWithJusuanhubRetry } from "./jusuanhub-retry";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
@@ -233,22 +234,38 @@ async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt:
         vquality: config.vquality,
         imageUrls,
     });
-    const response = await axios.post<unknown>(aiApiUrl(config, "/media/generations"), body, {
-        headers: { ...aiHeaders(config, "application/json"), "Idempotency-Key": newJusuanhubVideoIdempotencyKey() },
-        signal: options?.signal,
-        timeout: JUSUANHUB_VIDEO_CREATE_TIMEOUT_MS,
-    });
+    // 🔴 429（上游账户排队/并发额度打满）是这一家最常见的「假失败」：等几秒重发同一个 body 就能进队。
+    // key 放在环外，重试必须复用同一个 Idempotency-Key，否则可能建出两条任务。
+    const headers = { ...aiHeaders(config, "application/json"), "Idempotency-Key": newJusuanhubVideoIdempotencyKey() };
+    const response = await runWithJusuanhubRetry(
+        () =>
+            axios.post<unknown>(aiApiUrl(config, "/media/generations"), body, {
+                headers,
+                signal: options?.signal,
+                timeout: JUSUANHUB_VIDEO_CREATE_TIMEOUT_MS,
+            }),
+        // 429 = 账户队列满：`queued.maxUnits:80 / unitsPerJob:8` 最多排 10 条，
+        // `running.maxUnits:24 / unitsPerJob:6` 同时只跑 4 条，而一条视频要 ~2 分钟。
+        // 所以视频提交的等待预算给到 90 秒（退避 3→6→12→24→30，约 75 秒用完），
+        // 再收不到位置就抛原始 429，让用户看到「稍后重试」而不是白等。
+        { signal: options?.signal, maxAttempts: 6, deadlineMs: 90_000 },
+    );
     const jobId = readJusuanhubJobId(response.data);
     if (!jobId) throw new Error(apiText("noVideoTaskId"));
     return { id: jobId, provider: "jusuanhub", model };
 }
 
 async function pollJusuanhubVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
-    const response = await axios.get<unknown>(aiApiUrl(config, `/jobs/${encodeURIComponent(task.id)}`), {
-        headers: aiHeaders(config),
-        signal: options?.signal,
-        timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
-    });
+    // 同上：轮询撞 429 只说明查得太勤，不代表任务挂了。
+    const response = await runWithJusuanhubRetry(
+        () =>
+            axios.get<unknown>(aiApiUrl(config, `/jobs/${encodeURIComponent(task.id)}`), {
+                headers: aiHeaders(config),
+                signal: options?.signal,
+                timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
+            }),
+        { signal: options?.signal, maxAttempts: 3 },
+    );
     const state = readJusuanhubJobState(response.data);
     if (state.status === "pending") return { status: "pending" };
     if (state.status === "failed") return { status: "failed", error: state.error };
@@ -268,12 +285,16 @@ async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?
     const proxied = forceProxyMediaUrl(absolute);
     for (const target of proxied ? [proxied, absolute] : [absolute]) {
         try {
-            const response = await axios.get<Blob>(target, {
-                headers: aiHeaders(config),
-                responseType: "blob",
-                signal: options?.signal,
-                timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
-            });
+            const response = await runWithJusuanhubRetry(
+                () =>
+                    axios.get<Blob>(target, {
+                        headers: aiHeaders(config),
+                        responseType: "blob",
+                        signal: options?.signal,
+                        timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
+                    }),
+                { signal: options?.signal, maxAttempts: 3 },
+            );
             await assertVideoBlob(response.data);
             return { blob: response.data };
         } catch (error) {

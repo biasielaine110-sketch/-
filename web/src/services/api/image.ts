@@ -20,6 +20,7 @@ import {
     readJusuanhubJobState,
     readJusuanhubOutputUrls,
 } from "./jusuanhub-media";
+import { runWithJusuanhubRetry } from "./jusuanhub-retry";
 import type { ReferenceImage } from "@/types/image";
 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
@@ -3231,11 +3232,20 @@ async function collectJusuanhubReferenceUrls(references: ReferenceImage[], limit
 
 /** 提交一个 job；个别 publication 会同步返回 outputs，这里一并吃掉。 */
 async function submitJusuanhubImageJob(config: AiConfig, body: unknown, options?: RequestOptions) {
-    const response = await axios.post<unknown>(aiApiUrl(config, "/images/generations"), body, {
-        headers: { ...aiHeaders(config, "application/json"), "Idempotency-Key": newJusuanhubIdempotencyKey() },
-        signal: options?.signal,
-        timeout: IMAGE_REQUEST_TIMEOUT_MS,
-    });
+    // 🔴 Idempotency-Key 只生成一次，放在重试环外面：429 重发必须是「同一次提交」，
+    // 换 key 就可能建出两个 job（两条都进队 = 白烧一次额度，还多一张图）。
+    const headers = { ...aiHeaders(config, "application/json"), "Idempotency-Key": newJusuanhubIdempotencyKey() };
+    const response = await runWithJusuanhubRetry(
+        () =>
+            axios.post<unknown>(aiApiUrl(config, "/images/generations"), body, {
+                headers,
+                signal: options?.signal,
+                timeout: IMAGE_REQUEST_TIMEOUT_MS,
+            }),
+        // 429 = 账户队列满（`queued.maxUnits:80 / unitsPerJob:8` → 最多排 10 条）。
+        // 图片 job 排队很快，30 秒预算足够等到腾位；再多就该让用户知道「额度真满了」。
+        { signal: options?.signal, maxAttempts: 4, deadlineMs: 30_000 },
+    );
     const urls = readJusuanhubOutputUrls(response.data);
     const jobId = readJusuanhubJobId(response.data);
     if (!jobId && !urls.length) {
@@ -3250,11 +3260,17 @@ async function waitJusuanhubJob(config: AiConfig, jobId: string, options?: Reque
     const deadline = Date.now() + JUSUANHUB_IMAGE_POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const response = await axios.get<unknown>(aiApiUrl(config, `/jobs/${encodeURIComponent(jobId)}`), {
-            headers: aiHeaders(config),
-            signal: options?.signal,
-            timeout: IMAGE_REQUEST_TIMEOUT_MS,
-        });
+        // 轮询也会被限流（连续查同一个 job 触发账户级速率限制）。这里必须重试：
+        // 429 不代表 job 失败，直接抛等于把一张已经画好的图扔掉。
+        const response = await runWithJusuanhubRetry(
+            () =>
+                axios.get<unknown>(aiApiUrl(config, `/jobs/${encodeURIComponent(jobId)}`), {
+                    headers: aiHeaders(config),
+                    signal: options?.signal,
+                    timeout: IMAGE_REQUEST_TIMEOUT_MS,
+                }),
+            { signal: options?.signal, maxAttempts: 3 },
+        );
         const state = readJusuanhubJobState(response.data);
         if (state.status === "succeeded") return state.urls;
         if (state.status === "failed") throw new Error(state.error);
@@ -3279,12 +3295,17 @@ async function fetchJusuanhubImageDataUrl(config: AiConfig, url: string, options
     const targets = proxied ? [proxied, absolute] : [absolute];
     for (const target of targets) {
         try {
-            const response = await axios.get<Blob>(target, {
-                headers: aiHeaders(config),
-                responseType: "blob",
-                signal: options?.signal,
-                timeout: IMAGE_REQUEST_TIMEOUT_MS,
-            });
+            // 取字节同样可能撞 429（同一账户额度），别把它当成「这条目标不通」直接跳下一条。
+            const response = await runWithJusuanhubRetry(
+                () =>
+                    axios.get<Blob>(target, {
+                        headers: aiHeaders(config),
+                        responseType: "blob",
+                        signal: options?.signal,
+                        timeout: IMAGE_REQUEST_TIMEOUT_MS,
+                    }),
+                { signal: options?.signal, maxAttempts: 3 },
+            );
             return await blobToDataUrlViaReader(response.data);
         } catch (error) {
             if (axios.isCancel(error) || options?.signal?.aborted) throw error;

@@ -363,6 +363,79 @@ export function readJusuanhubJobState(payload: unknown): JusuanhubJobState {
     return { status: "pending", retryAfterSeconds };
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════
+// 共用：429 限流重试（纯逻辑；真正的收发在 jusuanhub-retry.ts）
+// ════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 这一家的 429 含义很具体：**账户级排队/并发额度瞬时打满**，不是参数错、也不是 Key 错。
+ * 门户的 `GET /v1/admission` 里能看到 `queued.maxUnits: 80` / `running.maxUnits: 24`，
+ * 视频连着提几条很容易撞上；响应还会带 `Retry-After`（实测 `3`）。
+ *
+ * 所以「立刻失败」是最差的选择：等几秒重发**同一个 body**就能进队。代价是白等一个 job。
+ */
+export const JUSUANHUB_RETRY_MAX_ATTEMPTS = 4;
+export const JUSUANHUB_RETRY_BASE_DELAY_MS = 3_000;
+export const JUSUANHUB_RETRY_MAX_DELAY_MS = 30_000;
+
+/**
+ * 只重试「等一会儿就好」的状态码。
+ * 502/504 也带 5xx，但那是上游真的炸了或网关超时，重试只会让用户多等一倍还没结果。
+ */
+export function isJusuanhubRetryableStatus(status: number): boolean {
+    return status === 429;
+}
+
+/**
+ * 解析 `Retry-After`：既接受 `3`（秒）也接受 HTTP-date；
+ * 顺带认 `x-ratelimit-reset` 那类（常见是 epoch 秒）。认不出来就返回 undefined，交给调用方退避。
+ */
+export function readJusuanhubRetryAfterMs(headers: unknown, now = Date.now()): number | undefined {
+    const record = asRecord(headers);
+    if (!record) return undefined;
+    let raw: unknown;
+    for (const [key, value] of Object.entries(record)) {
+        const name = key.toLowerCase();
+        if (name === "retry-after" || name === "x-ratelimit-reset-after" || name === "x-ratelimit-reset") {
+            raw = value;
+            break;
+        }
+    }
+    if (raw === undefined || raw === null) return undefined;
+    const text = (Array.isArray(raw) ? String(raw[0] ?? "") : String(raw)).trim();
+    if (!text) return undefined;
+    let ms: number;
+    if (/^\d+(\.\d+)?$/.test(text)) {
+        const numeric = Number(text);
+        // 秒数 vs epoch 秒：`retry-after: 3` 是秒，`1750000000` 是时间点。
+        ms = numeric > 1e9 ? numeric * 1000 - now : numeric * 1000;
+    } else {
+        const at = Date.parse(text);
+        if (!Number.isFinite(at)) return undefined;
+        ms = at - now;
+    }
+    if (!Number.isFinite(ms)) return undefined;
+    return Math.min(JUSUANHUB_RETRY_MAX_DELAY_MS, Math.max(0, ms));
+}
+
+/**
+ * 第 `attempt` 次重试（0 起）前等多久。
+ *
+ * 取「服务端 hint」与「指数退避」的**较大值**：实测 `Retry-After: 3` 在连发几条时不够抢回额度，
+ * 光信它就会进入「3 秒撞一次」的循环。抖动是**确定性**的（`attempt*173 % 400`）而不是随机数：
+ * 一是让同批并发 job 错开同一毫秒重新撞墙，二是探针能断言出确切值。
+ *
+ * `baseMs` 只为探针留口子（传 1 就能在毫秒级验完重试环），生产一律用默认值。
+ */
+export function resolveJusuanhubRetryDelayMs(attempt: number, serverHintMs?: number, baseMs = JUSUANHUB_RETRY_BASE_DELAY_MS): number {
+    const step = Math.max(0, Math.floor(Number(attempt) || 0));
+    const hint = Number.isFinite(serverHintMs) && Number(serverHintMs) > 0 ? Number(serverHintMs) : 0;
+    const base = Number.isFinite(baseMs) && Number(baseMs) > 0 ? Number(baseMs) : JUSUANHUB_RETRY_BASE_DELAY_MS;
+    const backoff = base * Math.pow(2, step);
+    const jitter = (step * 173) % 400;
+    return Math.min(JUSUANHUB_RETRY_MAX_DELAY_MS, Math.max(hint, backoff) + jitter);
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
     return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
