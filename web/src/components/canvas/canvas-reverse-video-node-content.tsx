@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App, Button, Input, InputNumber, Modal, Select, Tag } from "antd";
-import { CircleAlert, Clapperboard, FileText, Images, Layers, Link2, Loader2, SlidersHorizontal, Sparkles, Video, Wand2 } from "lucide-react";
+import { CircleAlert, Clapperboard, Cpu, FileText, Images, Layers, Link2, Loader2, SlidersHorizontal, Sparkles, Video, Wand2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -11,7 +11,7 @@ import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_CO
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
 import { getStyleTemplate } from "@/constant/style-templates";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
-import { useConfigStore, useEffectiveConfig, resolveModelForCapability } from "@/stores/use-config-store";
+import { useConfigStore, useEffectiveConfig, modelOptionLabel, resolveModelForCapability } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasNodeData, CanvasNodeMetadata, CanvasReverseVideoTarget } from "@/types/canvas";
 import { CanvasSizePicker } from "./canvas-size-picker";
@@ -54,13 +54,18 @@ type CanvasReverseVideoNodeContentProps = {
      * 并且不再单独生成该道具的资产图（见 `project.tsx: mountReferenceAssetsToScript`）。
      */
     referenceImages?: ReverseVideoOption[];
-    /** 反推固定使用的文本模型（展示用，真正生效在 project.tsx） */
-    reverseModelLabel?: string;
+    /**
+     * 反推（看片）的**默认**文本模型（编码值 `channelId::model`，空 = 画布上找不到该模型）。
+     * 由 `project.tsx` 解析（`gemini-3.8-flash` · toapis），节点自己只负责显示 / 覆盖：
+     * 用户在这里选过 → 写 `metadata.reverseVideoChatModel`；没选过 → 用它兜底。
+     * 真正生效的判断在 `project.tsx: runVideoReverse`（`input.chatModel → metadata → 默认 → 偏好`）。
+     */
+    reverseModelDefault?: string;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
     /** 粘贴链接建一个视频节点，返回新节点 id */
     onCreateVideoFromUrl?: (videoUrl: string) => Promise<string>;
     /** 执行一条命令；report 用来把阶段文案打到窗口里 */
-    onRun: (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: ScriptSchemeId; shotsPerClip?: number; skillId?: string }, report: (stage: string) => void) => Promise<VideoReverseResult>;
+    onRun: (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: ScriptSchemeId; shotsPerClip?: number; skillId?: string; chatModel?: string }, report: (stage: string) => void) => Promise<VideoReverseResult>;
 };
 
 const MODE_ICON: Record<VideoReverseMode, typeof Video> = {
@@ -101,7 +106,7 @@ export function CanvasReverseVideoNodeContent({
     attachedVideoId,
     attachSource,
     referenceImages,
-    reverseModelLabel,
+    reverseModelDefault,
     onConfigChange,
     onCreateVideoFromUrl,
     onRun,
@@ -131,6 +136,19 @@ export function CanvasReverseVideoNodeContent({
      * 写的时候只写 id（`reverseVideoSkill`），文案随选项表走，别把中文名存进 metadata。
      */
     const skillOption = useMemo(() => readReverseVideoSkill(node.metadata), [node.metadata]);
+    /**
+     * 反推模型（用户 2026-11-12 第 05 条「反推视频的那个模型也需要能够选择」）：
+     * 「跑反推那个对话节点」用哪个文本模型。
+     *
+     * 与「生视频模型」是两个独立的键，**不能**复用 `reverseVideoTarget.model`：
+     * 前者决定谁来看片反推，后者决定拿什么模型出片；合成一个键就会出现「换反推模型把出片模型改了」。
+     *
+     * 显示口径与视频模型一致：没选过就显示**实际会用的默认值**（`reverseModelDefault`），
+     * metadata 里仍然留空 —— 以后再改默认模型，老节点跟着变。
+     */
+    const chosenReverseModel = String(node.metadata?.reverseVideoChatModel || "").trim();
+    const effectiveReverseModel = chosenReverseModel || reverseModelDefault || "";
+    const effectiveReverseModelLabel = effectiveReverseModel ? modelOptionLabel(globalConfig, effectiveReverseModel) : "";
     /**
      * 写回：**整体覆盖** `reverseVideoTarget`（`applyNodeConfigPatch` 是浅合并，只 patch 一个键会把其它几个抹掉）。
      * `normalizeReverseVideoTarget` 顺手把空串键删掉 = 「跟随全局」，同时把秒数夹到合法区间。
@@ -272,11 +290,15 @@ export function CanvasReverseVideoNodeContent({
             patchRun({ status: "running", mode, stage: "准备中…", at: Date.now() });
             try {
                 /**
-                 * `scriptScheme` 显式带过去（而不是只靠 `patchTarget` 落库）：
+                 * `scriptScheme` / `skillId` / `chatModel` 显式带过去（而不是只靠 patch 落库）：
                  * 节点 metadata 的写入要等一次 React 提交，而 02 / 03 在这**同一次点击里**就要建脚本节点、
                  * 立刻生成 —— 读 `nodesRef` 可能拿到还没刷新的旧值（这个坑 2026-11-09 已经踩过一次）。
+                 * `chatModel` 同理：用户刚在下拉里换完模型就点命令，metadata 可能还没写进去。
                  */
-                const outcome = await onRun({ videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id, scriptScheme: target.scriptScheme, shotsPerClip: target.shotsPerClip, skillId: skillOption.id }, (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }));
+                const outcome = await onRun(
+                    { videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id, scriptScheme: target.scriptScheme, shotsPerClip: target.shotsPerClip, skillId: skillOption.id, chatModel: effectiveReverseModel || undefined },
+                    (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }),
+                );
                 patchRun({
                     status: outcome.ok ? "done" : "error",
                     mode,
@@ -295,7 +317,7 @@ export function CanvasReverseVideoNodeContent({
                 message.error(detail);
             }
         },
-        [attached, message, node.id, onRun, patchRun, skillOption.id, target.scriptScheme, target.shotsPerClip],
+        [attached, effectiveReverseModel, message, node.id, onRun, patchRun, skillOption.id, target.scriptScheme, target.shotsPerClip],
     );
 
     const handleCommand = useCallback(
@@ -444,11 +466,50 @@ export function CanvasReverseVideoNodeContent({
                         })}
                     </div>
                     <div className="mt-1 text-[10px] leading-relaxed opacity-45">
-                        只换「用哪个技能反推」——只输出正文、样本而非复刻、中文、时长与出片参数这些约束一条不变。切换前请确认技能库里装着它，没装会直接报错，不会悄悄换另一个技能跑。
+                        只换「用哪个技能反推」——只输出正文（02 复刻同款 / 03 同类型新故事）、中文、时长与出片参数这些约束一条不变。切换前请确认技能库里装着它，没装会直接报错，不会悄悄换另一个技能跑。
                     </div>
                 </div>
 
-                {/* ④ 生成设置（用户 2026-11-09）：风格 / 模型 / 秒数 / 比例 / 分辨率 */}
+                {/* ④ 反推模型（用户 2026-11-12 第 05 条）：「反推视频的那个模型也需要能够选择」。
+                    默认 gemini-3.8-flash（toapis 渠道）；不选就不写 metadata，以后改默认老节点跟着换。
+                    ⚠️ 与「生成设置」里的视频模型是**两个键**：一个负责看片反推（`reverseVideoChatModel`），
+                    一个负责出片（`reverseVideoTarget.model`）—— 合成一个键会出现「换反推模型把出片模型改了」。 */}
+                <div className="rounded-md px-2.5 py-2" style={{ border: softBorder }}>
+                    <div className="flex items-center gap-1.5 text-[11px]">
+                        <Cpu size={11} className="shrink-0 opacity-70" />
+                        <span className="min-w-0 flex-1 font-medium opacity-80">反推模型</span>
+                        <span className="shrink-0 text-[10px] opacity-45">01 / 02 / 03 都用它</span>
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <ModelPicker
+                            config={globalConfig}
+                            value={effectiveReverseModel || undefined}
+                            onChange={(model) => onConfigChange(node.id, { reverseVideoChatModel: model })}
+                            capability="text"
+                            placeholder="反推模型（默认 gemini-3.8-flash）"
+                            onMissingConfig={() => openConfigDialog(true)}
+                            className="max-w-[220px]"
+                        />
+                        {chosenReverseModel ? (
+                            <button
+                                type="button"
+                                className="inline-flex h-6 items-center rounded-full border px-2 text-[11px] transition"
+                                style={{ borderColor: theme.node.stroke, color: theme.node.text, opacity: 0.7 }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onPointerDown={(event) => event.stopPropagation()}
+                                onClick={() => onConfigChange(node.id, { reverseVideoChatModel: "" })}
+                                title={`清除本节点选的模型，回到默认${reverseModelDefault ? `（${modelOptionLabel(globalConfig, reverseModelDefault)}）` : ""}`}
+                            >
+                                恢复默认
+                            </button>
+                        ) : null}
+                    </div>
+                    <div className="mt-1 text-[10px] leading-relaxed opacity-45">
+                        只影响「看片反推」这一步（真正跑反推的那个 AI 对话节点），默认 gemini-3.8-flash（toapis 渠道）。生视频用什么模型在下面的「生成设置」里选，两者互不覆盖。
+                    </div>
+                </div>
+
+                {/* ⑤ 生成设置（用户 2026-11-09）：风格 / 模型 / 秒数 / 比例 / 分辨率 */}
                 <div className="rounded-md px-2.5 py-2" style={{ border: softBorder }}>
                     <div className="flex items-center gap-1.5 text-[11px]">
                         <SlidersHorizontal size={11} className="shrink-0 opacity-70" />
@@ -522,7 +583,7 @@ export function CanvasReverseVideoNodeContent({
                     </div>
                 </div>
 
-                {/* ⑤ 三条命令 */}
+                {/* ⑥ 三条命令 */}
                 <div className="flex flex-col gap-1.5">
                     {VIDEO_REVERSE_MODES.map((item) => {
                         const Icon = MODE_ICON[item.mode];
@@ -557,7 +618,7 @@ export function CanvasReverseVideoNodeContent({
                     })}
                 </div>
 
-                {/* ⑥ 进度 / 错误 / 产物 */}
+                {/* ⑦ 进度 / 错误 / 产物 */}
                 {run?.status === "running" && run.stage ? (
                     <div className="flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11px]" style={{ background: "rgba(99,102,241,0.14)", color: "#c7d2fe" }}>
                         <Loader2 size={12} className="animate-spin shrink-0" />
@@ -596,13 +657,13 @@ export function CanvasReverseVideoNodeContent({
                 ) : null}
             </div>
 
-            {/* ⑦ 脚注：用的技能 / 模型 */}
+            {/* ⑧ 脚注：用的技能 / 模型 */}
             <div className="flex flex-col gap-0.5 text-[11px] leading-relaxed opacity-45">
                 <span className="flex items-center gap-1.5">
                     <Sparkles size={11} className="shrink-0" />
                     技能「{skillOption.label}」（可在上方切换）；没装会直接报错，不会静默换别的技能硬跑。输出强制简体中文（提示词首尾各钉一次，偶尔跑偏会自动让它原样重写一遍）。
                 </span>
-                {reverseModelLabel ? <span className="truncate">反推模型：{reverseModelLabel}</span> : null}
+                <span className="truncate">反推模型：{effectiveReverseModelLabel || "跟随偏好里的文本模型"}{chosenReverseModel ? "" : "（默认）"}</span>
             </div>
 
             {/* 特殊要求（02 / 03） */}

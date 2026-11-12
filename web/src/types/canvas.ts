@@ -581,6 +581,16 @@ export type CanvasNodeMetadata = {
      */
     reverseVideoSkill?: string;
     /**
+     * 反推视频节点：**反推（看片）用哪个文本模型**（用户 2026-11-12 第 05 条
+     * 「反推视频的那个模型也需要能够选择，放置在反推视频节点窗口」）。
+     *
+     * 存编码值 `channelId::model`（`encodeChannelModel`）；空 / 缺省 = 用内置默认
+     * （`gemini-3.8-flash` · toapis 渠道，见 `project.tsx: reverseVideoModel`）。
+     * ⚠️ **不要**把默认值写进 metadata：写进去就等于「用户已经选过」，以后改默认模型对老节点不生效。
+     * 只影响反推那一步的对话节点；生视频用什么模型是 `reverseVideoTarget.model`，两者互不覆盖。
+     */
+    reverseVideoChatModel?: string;
+    /**
      * 反推视频节点：上一次执行的结果快照。
      * 节点滚出视口会被裁掉重挂，进度只放组件 state 会在回来时凭空消失，所以落到 metadata。
      */

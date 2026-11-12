@@ -73,6 +73,19 @@ export function readReverseVideoSkill(metadata: { reverseVideoSkill?: string | n
 }
 
 /**
+ * 反推（看片）用的**文本模型**（用户 2026-11-12 第 05 条：「反推视频的那个模型也需要能够选择」）。
+ *
+ * 只做「取字符串 + 去空白」这一件事：值是 `encodeChannelModel` 编出来的 `channelId::model`，
+ * 有效性由 `ModelPicker` 与 `resolveModelRequestConfig` 去管，这里**不做渠道校验**
+ * （纯逻辑模块没有渠道表，硬校验只会把「渠道暂时被禁用」误判成「没选」）。
+ *
+ * 空串 = 没选过 → 调用方回落内置默认（`gemini-3.8-flash` · toapis），所以老节点行为不变。
+ */
+export function readReverseVideoChatModel(metadata: { reverseVideoChatModel?: string | null } | null | undefined): string {
+    return String(metadata?.reverseVideoChatModel || "").trim();
+}
+
+/**
  * 兼容旧引用：默认技能的 hints / label。
  * ⚠️ 新代码请走 `readReverseVideoSkill(metadata)` —— 这两个常量只代表**默认技能**，
  * 不再是「唯一的技能」。提示词里点名哪个技能，由 `buildVideoReversePrompt` 的 `skillLabel` 决定。
@@ -319,7 +332,8 @@ export type VideoReversePromptInput = {
      * 提示词里点名的技能名（用户 2026-11-12 第 02 条：节点可切换技能）。
      *
      * 传**实际挑中的技能名**（技能库里的 alias / name），缺省 = 默认技能「视频反推-分镜提示词」。
-     * 只影响这三句「请用 X 技能…」的叫法，输出形态约束（只出正文 / 样本而非复刻 / 中文 / 时长）一条不动。
+     * 只影响这三句「请用 X 技能…」的叫法，输出形态约束（只出正文 / 中文 / 时长）与
+     * 创作口径（02 复刻同款、03 同类型新故事）一条不动。
      */
     skillLabel?: string;
 };

@@ -176,7 +176,7 @@ import { widenLegacyScriptNodes } from "@/lib/canvas/script-node-width";
 import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
-import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cleanVideoReverseScriptOutput, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cleanVideoReverseScriptOutput, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -10412,18 +10412,21 @@ function AtelierCanvasPage() {
     );
 
     /**
-     * 反推固定用 `gemini-3.8-flash`（toapis 渠道）—— 用户口径：「执行反推命令时默认选它」。
+     * 反推的**默认**文本模型：`gemini-3.8-flash`（toapis 渠道）—— 用户 2026-11-09 口径
+     * 「执行反推命令时默认选它」；2026-11-12 第 05 条起节点窗口里可以换，但默认仍是它。
      *
      * 走 `pickOneClickModel` 而不是直接拼 `encodeChannelModel`：渠道可能改名、模型可能挂在别的渠道上，
      * 按「模型名 + 渠道名提示」找比写死 id 稳（和「一键视频」挑模型同一套口径）。
      * 找不到（渠道被禁用 / 模型被删）就返回空串，调用方回落到偏好里的文本模型 ——
      * 硬塞一个画布上不存在的 model 只会换来一次 400。
+     *
+     * 这个值同时传给节点（`reverseModelDefault`）：窗口里没选过模型时，选择器显示的就是它 ——
+     * 显示「实际会用的那个」而不是留一行「默认」，用户一眼能确认。
      */
     const reverseVideoModel = useMemo(() => {
         const target = pickOneClickModel(effectiveConfig.channels, { names: ["gemini-3.8-flash"], channelHints: ["toapis"], capability: "text" });
         return target ? encodeChannelModel(target.channelId, target.modelName) : "";
     }, [effectiveConfig.channels]);
-    const reverseVideoModelLabel = useMemo(() => (reverseVideoModel ? modelOptionLabel(effectiveConfig, reverseVideoModel) : ""), [effectiveConfig, reverseVideoModel]);
 
     /**
      * 「反推视频」三条命令的编排（节点 `CanvasReverseVideoNodeContent` → 这里）。
@@ -10438,7 +10441,7 @@ function AtelierCanvasPage() {
      *  ⑤ 只有 03 才继续：文本节点 → 脚本生成器 → `handleOneClickVideo`（一键视频）。
      */
     const runVideoReverse = useCallback(
-        async (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: string; shotsPerClip?: number; skillId?: string }, report: (stage: string) => void = () => undefined): Promise<VideoReverseResult> => {
+        async (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: string; shotsPerClip?: number; skillId?: string; chatModel?: string }, report: (stage: string) => void = () => undefined): Promise<VideoReverseResult> => {
             const videoNode = nodesRef.current.find((item) => item.id === input.videoNodeId);
             if (!videoNode || videoNode.type !== CanvasNodeType.Video || !videoNode.metadata?.content) {
                 return { ok: false, error: "接入的视频节点已经不在了，请重新接入一次" };
@@ -10478,6 +10481,23 @@ function AtelierCanvasPage() {
             if (!skill) {
                 return { ok: false, error: `技能库里没找到「${skillChoice.label}」：先在 AI 对话节点的技能列表里确认它已经装好（反推技能可在节点上切换）` };
             }
+
+            /**
+             * 反推（看片）用哪个文本模型（用户 2026-11-12 第 05 条）：
+             * 「反推视频的那个模型也需要能够选择，放置在反推视频节点窗口，默认还是用之前设定的
+             *   toapis 的 gemini-3.8-flash。」
+             *
+             * 取值优先级：
+             *  ① `input.chatModel`（UI 点按钮时显式带过来，metadata 还没提交时也生效）；
+             *  ② 节点 metadata 的 `reverseVideoChatModel`（老节点没有 → 空串）；
+             *  ③ 内置默认 `gemini-3.8-flash`（toapis，`reverseVideoModel` memo）；
+             *  ④ 该模型在画布上找不到时，才回落到偏好里的文本模型 —— 硬塞一个不存在的 model
+             *     只会换来一次 400（与改造前同一条兜底）。
+             *
+             * ⚠️ 这里只决定**反推对话节点**用哪个模型；生视频模型是 `reverseVideoTarget.model`，
+             * 两个键分开存，别互相覆盖。
+             */
+            const chatModel = (input.chatModel || "").trim() || readReverseVideoChatModel(reverseNode?.metadata) || reverseVideoModel || resolveModelForCapability(effectiveConfig, effectiveConfig.textModel, "text");
 
             const videoUrl = videoNode.metadata.content;
             const gap = 120;
@@ -10525,8 +10545,8 @@ function AtelierCanvasPage() {
                     messages: [],
                     chatTextEnabled: true,
                     chatImageEnabled: false,
-                    // 反推固定走 gemini-3.8-flash（toapis 渠道）；该模型不可用时才回落到偏好里的文本模型。
-                    model: reverseVideoModel || resolveModelForCapability(effectiveConfig, effectiveConfig.textModel, "text"),
+                    // 反推模型：节点窗口里可选（默认 gemini-3.8-flash / toapis，见上面 `chatModel` 的取值链）。
+                    model: chatModel,
                     imageModel: resolveModelForCapability(effectiveConfig, effectiveConfig.imageModel, "image"),
                     chatSkillIds: [skill.id],
                 },
@@ -10992,7 +11012,7 @@ function AtelierCanvasPage() {
                         attachedVideoId={reverseSource?.videoId || null}
                         attachSource={reverseSource?.source || null}
                         referenceImages={reverseSource?.references || []}
-                        reverseModelLabel={reverseVideoModelLabel}
+                        reverseModelDefault={reverseVideoModel}
                         onConfigChange={handleConfigNodeChange}
                         onCreateVideoFromUrl={createBridgeVideoNode}
                         onRun={runVideoReverse}
@@ -11115,7 +11135,7 @@ function AtelierCanvasPage() {
             handleVideoMergeExport,
             handleVideoMergeRender,
             isNodeGenerating,
-            reverseVideoModelLabel,
+            reverseVideoModel,
             runMergeNode,
             runScriptGeneration,
             runScriptShotGeneration,
