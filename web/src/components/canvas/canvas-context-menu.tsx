@@ -1,6 +1,6 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
+import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Settings2, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useOrderDrag } from "@/hooks/use-order-drag";
@@ -59,6 +59,8 @@ export function CanvasNodeContextMenu({
     onGroupSelected,
     h3OptimizeCount = 0,
     onH3OptimizeSelected,
+    videoBatchCount = 0,
+    onVideoBatchSettings,
 }: {
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
@@ -91,6 +93,9 @@ export function CanvasNodeContextMenu({
     /** 选区里可做「h3 提示词优化」的节点数（图片 / 视频且提示词非空）。>=1 就出现。 */
     h3OptimizeCount?: number;
     onH3OptimizeSelected?: () => void;
+    /** 选区里可批量改视频参数的节点数（视频节点、且不在生成中）。>=2 才在菜单顶部出现。 */
+    videoBatchCount?: number;
+    onVideoBatchSettings?: () => void;
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -109,7 +114,9 @@ export function CanvasNodeContextMenu({
     const showGroup = menu.type === "node" && Boolean(node) && groupCount > 1 && Boolean(onGroupSelected);
     // h3 提示词优化作用在**选区**上（点一次逐个转格式），所以哪怕只选了 1 个也出现。
     const showH3Optimize = menu.type === "node" && Boolean(node) && h3OptimizeCount > 0 && Boolean(onH3OptimizeSelected);
-    const showSelectionActions = showBatchGenerate || showGroup || showH3Optimize;
+    // 批量改视频参数作用在选区里的**视频节点**上：>=2 才叫批量（1 个直接用节点自己的设置面板）。
+    const showVideoBatch = menu.type === "node" && Boolean(node) && videoBatchCount > 1 && Boolean(onVideoBatchSettings);
+    const showSelectionActions = showBatchGenerate || showGroup || showH3Optimize || showVideoBatch;
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -324,6 +331,19 @@ export function CanvasNodeContextMenu({
                             onClick={() => {
                                 onBeforeAction?.();
                                 onBatchGenerate?.();
+                                onClose();
+                            }}
+                        />
+                    ) : null}
+                    {/* 批量设置视频参数：只对选区里的视频节点生效（弹窗里可一次改模型 / 分辨率 / 比例）。
+                        放在「一键生成」之后、「成组」之前 —— 它属于生成参数，不是结构操作。 */}
+                    {showVideoBatch ? (
+                        <MenuButton
+                            icon={<Settings2 className="size-4" />}
+                            label={t("canvas.contextMenu.videoBatch", { count: videoBatchCount })}
+                            onClick={() => {
+                                onBeforeAction?.();
+                                onVideoBatchSettings?.();
                                 onClose();
                             }}
                         />

@@ -217,6 +217,86 @@ const schedulerOptions = ["karras", "simple", "sgm_uniform", "normal"];
 
 export const videoResolutionOptions = resolutionOptions.map((item) => ({ value: item.value, label: item.label }));
 export const videoSizeOptions = sizeOptions.map((item) => ({ value: item.value, get label() { return i18n.t(`settingsPanels.video.sizes.${item.labelKey}`); } }));
+
+/**
+ * 一个视频配置「属于哪一族」—— 族决定可选的分辨率 / 比例档位。
+ *
+ * 🔴 抽成纯函数是为了**单一来源**：节点自己的设置面板和右键「批量设置视频参数」必须给出同一套档位，
+ * 否则会出现在面板里选得到、批量里选不到（或反过来把某族不支持的档位写进节点）。
+ */
+export type VideoSettingFlags = {
+    h3Comfy: boolean;
+    jusuanhubH3: boolean;
+    relayH3: boolean;
+    singularityRh: boolean;
+    singularityLightRh: boolean;
+    hdDynamicRh: boolean;
+    fisherRh: boolean;
+    fisherLightRh: boolean;
+    yzjinyuRh: boolean;
+    wenxiRh: boolean;
+    wenxiLoraRh: boolean;
+    nativeComfy: boolean;
+    nativeFamily: NativeVideoFamily;
+};
+
+export function resolveVideoSettingFlags(config: AiConfig): VideoSettingFlags {
+    const model = config.model || config.videoModel || "";
+    const requestConfig = resolveModelRequestConfig(config, model);
+    const h3Comfy = isAutodlH3ComfyVideoModel(model, requestConfig.baseUrl);
+    /**
+     * 聚算 Hub（`*.jusuanhub.com`）：`minimax-h3` 名字也命中 relay H3 的正则，
+     * 但它只有 **544p / 768p** 两档、并且是异步 job 契约（`/media/generations`）。
+     * 所以它必须比 relayH3 先认出来 —— 否则面板会摆出 720/1080/2K 三个值，
+     * 而这三个值在提交时全被收成 768p（用户点 1080p 拿到的还是 768p）。
+     */
+    const jusuanhubH3 = !h3Comfy && isJusuanhubMediaBaseUrl(requestConfig.baseUrl);
+    const relayH3 = !h3Comfy && !jusuanhubH3 && isRelayMiniMaxH3Video(requestConfig, model);
+    const singularityRh = !h3Comfy && isMinimaxH3SingularityWorkflowId(model);
+    /** Singularity 形轻量 AI App（211575… MiniMax H3生成视频）。 */
+    const singularityLightRh = !h3Comfy && isMinimaxH3SingularityLightAiAppId(model);
+    const hdDynamicRh = !h3Comfy && isMinimaxH3HdDynamicWorkflowId(model);
+    const fisherRh = !h3Comfy && isMinimaxH3FisherWorkflowId(model);
+    /** Work-Fisher 轻量 AI App（211550…）：只露风格 LoRA，不露 Fisher 模式/风格字段全套。 */
+    const fisherLightRh = !h3Comfy && isWorkFisherLightAiAppId(model);
+    const yzjinyuRh = !h3Comfy && isMinimaxH3YzjinyuWorkflowId(model);
+    const wenxiRh = !h3Comfy && isMinimaxH3WenxiWorkflowId(model);
+    /** 只有低配图挂着 `MysticXXX_MMH3-V1`，风格 LoRA 档位只对它显示。 */
+    const wenxiLoraRh = !h3Comfy && isMinimaxH3WenxiLowWorkflowId(model);
+    const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
+    const nativeFamily: NativeVideoFamily = nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other";
+    return { h3Comfy, jusuanhubH3, relayH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, wenxiLoraRh, nativeComfy, nativeFamily };
+}
+
+/** 某一族的可选清晰度档位（AutoDL H3 单列，它的值是 workflow 自己的枚举）。 */
+export function resolutionChoicesForFlags(flags: VideoSettingFlags, model = ""): Array<{ value: string; label: string }> {
+    if (flags.h3Comfy) return autodlH3ResolutionOptions(model).map((value) => ({ value, label: autodlH3ResolutionDisplay(value) }));
+    if (flags.nativeComfy) return resolutionOptionsForFamily(flags.nativeFamily);
+    if (flags.jusuanhubH3) return JUSUANHUB_VIDEO_RESOLUTION_OPTIONS.map((item) => ({ value: item.value, label: item.label }));
+    if (flags.fisherRh || flags.fisherLightRh) return fisherResolutionOptions;
+    if (flags.singularityRh || flags.singularityLightRh || flags.hdDynamicRh || flags.yzjinyuRh || flags.wenxiRh) return twoPassResolutionOptions;
+    if (flags.relayH3) return relayH3ResolutionOptions;
+    return resolutionOptions;
+}
+
+/** 比例档位（带宽高，面板用它画那个小比例图示）。 */
+export type VideoSizeChoice = { value: string; labelKey: string; width: number; height: number };
+
+/** 某一族的画面比例档位。 */
+export function sizeChoicesForFlags(flags: VideoSettingFlags): VideoSizeChoice[] {
+    if (flags.nativeComfy && !flags.h3Comfy) return sizeOptionsForFamily(flags.nativeFamily);
+    return sizeOptions;
+}
+
+/** 给外部（批量设置）用：某个视频配置下可选的分辨率档位。 */
+export function videoResolutionChoicesFor(config: AiConfig): Array<{ value: string; label: string }> {
+    return resolutionChoicesForFlags(resolveVideoSettingFlags(config), config.model || config.videoModel || "");
+}
+
+/** 给外部（批量设置）用：某个视频配置下可选的画面比例。 */
+export function videoSizeChoicesFor(config: AiConfig): VideoSizeChoice[] {
+    return sizeChoicesForFlags(resolveVideoSettingFlags(config));
+}
 export const videoSecondOptions = secondOptions.map((value) => String(value));
 
 type VideoSettingsPanelProps = {
@@ -250,51 +330,24 @@ type VideoSettingsPanelProps = {
 export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
     const model = config.model || config.videoModel || "";
-    const requestConfig = resolveModelRequestConfig(config, model);
-    const h3Comfy = isAutodlH3ComfyVideoModel(model, requestConfig.baseUrl);
-    /**
-     * 聚算 Hub（`*.jusuanhub.com`）：`minimax-h3` 名字也命中 relay H3 的正则，
-     * 但它只有 **544p / 768p** 两档、并且是异步 job 契约（`/media/generations`）。
-     * 所以它必须比 relayH3 先认出来 —— 否则面板会摆出 720/1080/2K 三个值，
-     * 而这三个值在提交时全被收成 768p（用户点 1080p 拿到的还是 768p）。
-     */
-    const jusuanhubH3 = !h3Comfy && isJusuanhubMediaBaseUrl(requestConfig.baseUrl);
-    const relayH3 = !h3Comfy && !jusuanhubH3 && isRelayMiniMaxH3Video(requestConfig, model);
-    const singularityRh = !h3Comfy && isMinimaxH3SingularityWorkflowId(model);
-    /** Singularity 形轻量 AI App（211575… MiniMax H3生成视频）。 */
-    const singularityLightRh = !h3Comfy && isMinimaxH3SingularityLightAiAppId(model);
-    const hdDynamicRh = !h3Comfy && isMinimaxH3HdDynamicWorkflowId(model);
-    const fisherRh = !h3Comfy && isMinimaxH3FisherWorkflowId(model);
-    /** Work-Fisher 轻量 AI App（211550…）：只露风格 LoRA，不露 Fisher 模式/风格字段全套。 */
-    const fisherLightRh = !h3Comfy && isWorkFisherLightAiAppId(model);
-    const yzjinyuRh = !h3Comfy && isMinimaxH3YzjinyuWorkflowId(model);
-    const wenxiRh = !h3Comfy && isMinimaxH3WenxiWorkflowId(model);
-    /** 只有低配图挂着 `MysticXXX_MMH3-V1`，风格 LoRA 档位只对它显示。 */
-    const wenxiLoraRh = !h3Comfy && isMinimaxH3WenxiLowWorkflowId(model);
+    // 族判定统一走 `resolveVideoSettingFlags`（与右键批量设置共用，见文件上半部分）。
+    const flags = useMemo(() => resolveVideoSettingFlags(config), [config]);
+    const { h3Comfy, jusuanhubH3, relayH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, wenxiLoraRh, nativeComfy, nativeFamily } = flags;
     const fisherMode = normalizeFisherPipelineMode(config.videoFisherMode);
     const fisherLoraStrength = normalizeFisherLoraStrength(config.videoFisherLoraStrength);
     /** 「提交视觉风格字段」：只有显式 `on` 才算打开（默认 off = 整行不发，见 `H3_SCAFFOLD_STYLE_LABELS`）。 */
     const fisherStyleFieldsOn = String(config.videoFisherStyleFields || "off") === "on";
     const rhInstanceType = normalizeRunningHubInstanceType(config.videoRhInstanceType);
-    const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
-    const nativeFamily = useMemo(() => (nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other"), [config, nativeComfy, h3Comfy]);
     /** Seedance.nz muse / APIMart muse-video-ext：固定 10s / 720p / 有声，时长与清晰度都不可调（传别的值 API 直接拒）。 */
     const museVideo = isZhenzhenMuseVideoModel(model) || isApimartMuseVideoModel(model);
-    const qualityChoices = useMemo(() => {
-        if (nativeComfy && !h3Comfy) return resolutionOptionsForFamily(nativeFamily);
-        if (jusuanhubH3) return JUSUANHUB_VIDEO_RESOLUTION_OPTIONS;
-        if (fisherRh || fisherLightRh) return fisherResolutionOptions;
-        if (singularityRh || singularityLightRh || hdDynamicRh || yzjinyuRh || wenxiRh) return twoPassResolutionOptions;
-        if (relayH3) return relayH3ResolutionOptions;
-        return resolutionOptions;
-    }, [nativeComfy, h3Comfy, nativeFamily, jusuanhubH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, relayH3]);
+    const qualityChoices = useMemo(() => resolutionChoicesForFlags(flags, model), [flags, model]);
     const fisherModeChoices: Array<{ value: FisherPipelineMode; labelKey: string }> = [
         { value: "video", labelKey: "video" },
         { value: "character", labelKey: "character" },
         { value: "scene", labelKey: "scene" },
         { value: "multiview", labelKey: "multiview" },
     ];
-    const aspectChoices = useMemo(() => (nativeComfy && !h3Comfy ? sizeOptionsForFamily(nativeFamily) : sizeOptions), [nativeComfy, h3Comfy, nativeFamily]);
+    const aspectChoices = useMemo(() => sizeChoicesForFlags(flags), [flags]);
     const showSeedControls = useMemo(
         () => nativeComfy && !h3Comfy && supportsVideoSeedControls(config, nativeFamily),
         [config, nativeComfy, h3Comfy, nativeFamily],

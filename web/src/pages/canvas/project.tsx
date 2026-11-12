@@ -23,7 +23,7 @@ import { buildCanvasAgentSystemPrompt, resolveCanvasAgent } from "@/constant/can
 import { useCanvasAgentsStore } from "@/stores/use-canvas-agents-store";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { requestVideoGeneration, requestVideoUpscale, storeGeneratedVideo, uploadProviderMediaFile } from "@/services/api/video";
-import { defaultConfig, encodeChannelModel, modelOptionLabel, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, encodeChannelModel, modelOptionLabel, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, selectableModelsByCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { parseComfyApiWorkflow, resolveNativeH3VideoSettingDefaults, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import { cancelNativeVideoQueueJobsForNodes, enqueueNativeComfyVideoJob, getNativeVideoQueueSnapshot, isSerializedNativeVideoBaseUrl, pickNativeVideoQueueEntryForNode, subscribeNativeVideoQueue } from "@/lib/canvas/native-video-job-queue";
 import { uploadImage, imageToDataUrl } from "@/services/image-storage";
@@ -236,6 +236,9 @@ import { createZip } from "@/lib/zip";
 import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFileBase, normalizeMergeClip, probeImageSize, probeVideoMeta, resolveMergeCanvasSize, videoMergeClipFromNode, type ResolvedVideoMergeClip } from "@/lib/canvas/video-merge";
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
 import { buildBatchGeneratePlan, isBatchGeneratableNode } from "@/lib/canvas/batch-generate";
+import { buildVideoBatchPatch, collectVideoBatchTargets, hasVideoBatchChange, planVideoBatchSettings, unionChoices, type VideoBatchPatchInput } from "@/lib/canvas/video-batch-settings";
+import { videoResolutionChoicesFor, videoSizeChoicesFor } from "@/components/video-settings-panel";
+import { CanvasVideoBatchDialog } from "@/components/canvas/canvas-video-batch-dialog";
 import { attachNodesToGroup, collectGroupMembers, isGroupableNode, resolveGroupFrame } from "@/lib/canvas/canvas-grouping";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, getGroupMemberNodes, normalizeConnection, resolveConnectionPairs, canConnectNodes, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
@@ -7528,6 +7531,94 @@ function AtelierCanvasPage() {
         return ids.length >= 2 ? ids : [];
     }, [contextMenu, nodes, selectedNodeIds]);
 
+    // ═════════════════════════════════════════════════════════════════════════════════════
+    // 批量设置视频参数（模型 / 分辨率 / 比例）
+    // ═════════════════════════════════════════════════════════════════════════════════════
+    const [videoBatchOpen, setVideoBatchOpen] = useState(false);
+    /**
+     * 作用对象：选区里的**视频节点**（正在生成的除外）。
+     *
+     * 不能直接用选区里的所有节点 —— 画布上框选经常混着图片 / 文本，
+     * 而 `vquality` / `size` 写到图片节点上就是坏数据。
+     */
+    const videoBatchTargets = useMemo(() => {
+        if (!contextMenu || contextMenu.type !== "node") return { ids: [] as string[], skippedGenerating: 0 };
+        return collectVideoBatchTargets(nodes, Array.from(selectedNodeIds), { isGenerating: isNodeGenerating });
+    }, [contextMenu, isNodeGenerating, nodes, selectedNodeIds]);
+    /**
+     * 打开弹窗时**冻结**一份目标列表（与 h3 批量优化同一条坑）。
+     *
+     * 点菜单项会先开弹窗、再 `setContextMenu(null)`，而 `videoBatchTargets` 以 contextMenu 为前提，
+     * 菜单一关就变空数组 → 弹窗显示「0 个」、点应用一个都不改。冻结之后也免疫
+     * 「弹窗开着时选区被改」导致的列表抖动。
+     */
+    const [videoBatchSnapshot, setVideoBatchSnapshot] = useState<{ ids: string[]; skippedGenerating: number }>({ ids: [], skippedGenerating: 0 });
+    const openVideoBatch = useCallback(() => {
+        setVideoBatchSnapshot(videoBatchTargets);
+        setVideoBatchOpen(true);
+    }, [videoBatchTargets]);
+
+    /** 视频模型下拉：与节点工具栏同一个模型目录（渠道名带在 label 里，才知道要改哪条渠道）。 */
+    const videoBatchModelOptions = useMemo(
+        () => selectableModelsByCapability(effectiveConfig, "video").map((value) => ({ value, label: modelOptionLabel(effectiveConfig, value) })),
+        [effectiveConfig],
+    );
+
+    /**
+     * 档位并集：每个节点按**它自己的模型**算可选档位，再合并。
+     *
+     * 🔴 这里必须逐节点算而不是拿全局配置算一次 —— 同一个选区里的视频节点可以挂完全不同的模型
+     * （relay H3 有 2K、聚算只有 544/768），用全局默认算出来的表跟节点实际能提交的值对不上。
+     */
+    const videoBatchChoices = useMemo(() => {
+        const byId = new Map(nodes.map((node) => [node.id, node]));
+        const resolutions: Array<Array<{ value: string; label: string }>> = [];
+        const sizes: Array<Array<{ value: string; label: string }>> = [];
+        for (const id of videoBatchSnapshot.ids) {
+            const node = byId.get(id);
+            if (!node) continue;
+            const config: AiConfig = { ...effectiveConfig, model: resolveModelForCapability(effectiveConfig, node.metadata?.model, "video") };
+            resolutions.push(videoResolutionChoicesFor(config));
+            sizes.push(videoSizeChoicesFor(config).map((item) => ({ value: item.value, label: t(`settingsPanels.video.sizes.${item.labelKey}`) })));
+        }
+        return { resolutions: unionChoices(resolutions), sizes: unionChoices(sizes) };
+    }, [effectiveConfig, nodes, t, videoBatchSnapshot.ids]);
+
+    /**
+     * 落盘：只写用户真改过的字段，并按**每个节点自己的档位**筛一遍。
+     *
+     * 支持性判断要对「切换后的模型」算：用户可能同时把模型改成 X、分辨率改成 X 支持但旧模型不支持的档位，
+     * 拿旧模型判断会把这些节点全跳过。
+     */
+    const handleVideoBatchApply = useCallback(
+        (input: VideoBatchPatchInput) => {
+            const patch = buildVideoBatchPatch(input);
+            if (!hasVideoBatchChange(patch)) {
+                message.warning(t("canvas.videoBatch.needOne"));
+                return;
+            }
+            const byId = new Map(nodesRef.current.map((node) => [node.id, node]));
+            const isSupported = (id: string) => {
+                const node = byId.get(id);
+                if (!node) return false;
+                const model = patch.model || resolveModelForCapability(effectiveConfig, node.metadata?.model, "video");
+                const config: AiConfig = { ...effectiveConfig, model };
+                if (patch.vquality && !videoResolutionChoicesFor(config).some((item) => item.value === patch.vquality)) return false;
+                if (patch.size && !videoSizeChoicesFor(config).some((item) => item.value === patch.size)) return false;
+                return true;
+            };
+            const plan = planVideoBatchSettings(videoBatchSnapshot.ids, patch, isSupported);
+            for (const id of plan.applyIds) handleConfigNodeChange(id, patch);
+            setVideoBatchOpen(false);
+            // 模型与分辨率写在同一份 patch 里：`handleConfigNodeChange` 只在「patch 没给 vquality」时才套
+            // 模型族的默认档位，所以用户选的分辨率不会被模型切换覆盖掉。
+            if (plan.applyIds.length) message.success(t("canvas.videoBatch.applied", { count: plan.applyIds.length }));
+            const skipped = plan.skippedIds.length + videoBatchSnapshot.skippedGenerating;
+            if (skipped > 0) message.info(t("canvas.videoBatch.skipped", { count: skipped }));
+        },
+        [effectiveConfig, handleConfigNodeChange, message, t, videoBatchSnapshot.ids, videoBatchSnapshot.skippedGenerating],
+    );
+
     /**
      * 把选区打成一个分组框。
      *
@@ -11424,6 +11515,8 @@ function AtelierCanvasPage() {
                         onGroupSelected={() => handleGroupSelected(groupableNodeIds)}
                         h3OptimizeCount={h3OptimizeTargets.length}
                         onH3OptimizeSelected={openH3Optimize}
+                        videoBatchCount={videoBatchTargets.ids.length}
+                        onVideoBatchSettings={openVideoBatch}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
@@ -11446,6 +11539,19 @@ function AtelierCanvasPage() {
                 ) : null}
 
                 {h3OptimizeOpen ? <CanvasH3OptimizeDialog open targets={h3OptimizeSnapshot} config={h3OptimizeConfig} onStart={runH3OptimizeBatch} onClose={() => setH3OptimizeOpen(false)} /> : null}
+
+                {/* 右键「批量设置视频参数」：只在打开时渲染，档位按选区里各节点自己的模型族算好传进去。 */}
+                {videoBatchOpen ? (
+                    <CanvasVideoBatchDialog
+                        open
+                        count={videoBatchSnapshot.ids.length}
+                        modelOptions={videoBatchModelOptions}
+                        resolutionChoices={videoBatchChoices.resolutions}
+                        sizeChoices={videoBatchChoices.sizes}
+                        onClose={() => setVideoBatchOpen(false)}
+                        onApply={handleVideoBatchApply}
+                    />
+                ) : null}
 
                 {/* 后台队列的进度 / 停止入口：弹窗关掉以后仍然显示，不挡画布操作。 */}
                 <CanvasH3OptimizeProgress />
