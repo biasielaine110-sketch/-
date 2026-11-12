@@ -16,6 +16,7 @@ import { fetchRemoteImageBlob, imageToDataUrl } from "@/services/image-storage";
 import {
     buildJusuanhubImageRequestBody,
     isJusuanhubMediaBaseUrl,
+    pinJusuanhubApiKey,
     readJusuanhubJobId,
     readJusuanhubJobState,
     readJusuanhubOutputUrls,
@@ -3381,7 +3382,8 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     // 用户显式给模型挂了脚本时让给脚本（脚本优先级更高，跟其它 provider 一致）。
     if (!script && isJusuanhubMediaBaseUrl(requestConfig.baseUrl)) {
         try {
-            return await requestJusuanhubImages(requestConfig, prompt, [], n, options);
+            // 多 Key：一次执行随机挑一个，提交 / 轮询 / 取字节全程用它（job 是账户级的）。
+            return await requestJusuanhubImages(pinJusuanhubApiKey(requestConfig), prompt, [], n, options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
@@ -3530,7 +3532,8 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     if (!script && isJusuanhubMediaBaseUrl(requestConfig.baseUrl)) {
         if (mask) throw new Error(apiText("geminiMaskUnsupported"));
         try {
-            return await requestJusuanhubImages(requestConfig, requestPrompt, references, n, options);
+            // 同上：多 Key 随机一次，整条 job 链路复用。
+            return await requestJusuanhubImages(pinJusuanhubApiKey(requestConfig), requestPrompt, references, n, options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }

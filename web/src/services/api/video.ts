@@ -34,7 +34,7 @@ import {
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
-import { buildJusuanhubVideoRequestBody, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, readJusuanhubJobId, readJusuanhubJobState } from "./jusuanhub-media";
+import { buildJusuanhubVideoRequestBody, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, pinJusuanhubApiKey, readJusuanhubJobId, readJusuanhubJobState } from "./jusuanhub-media";
 import { runWithJusuanhubRetry } from "./jusuanhub-retry";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -60,7 +60,19 @@ type RequestOptions = { signal?: AbortSignal; referenceAudios?: ReferenceAudio[]
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string; extraImages?: string[] };
-export type VideoGenerationTask = { id: string; provider: "openai" | "plugin" | "jusuanhub"; model: string };
+export type VideoGenerationTask = {
+    id: string;
+    provider: "openai" | "plugin" | "jusuanhub";
+    model: string;
+    /**
+     * 聚算 Hub 专用：本次任务随机选中的 Key。
+     *
+     * 这一家的 job 是**账户级**的（key A 提交的 jobId，用 key B 查就是 404），而轮询会重新
+     * `resolveModelRequestConfig`，多 Key 时又会随机到另一个 —— 所以提交时把 Key 记在任务上，
+     * 轮询 / 取字节沿用同一个。其它 provider 不设这个字段，行为不变。
+     */
+    apiKey?: string;
+};
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
 /** Results for scripted (plugin) video models, which run their own create+poll in one shot at task creation. */
@@ -252,7 +264,8 @@ async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt:
     );
     const jobId = readJusuanhubJobId(response.data);
     if (!jobId) throw new Error(apiText("noVideoTaskId"));
-    return { id: jobId, provider: "jusuanhub", model };
+    // 把本次用的 Key 记在任务上：轮询 / 取字节必须用同一个账户，否则 404。
+    return { id: jobId, provider: "jusuanhub", model, apiKey: config.apiKey };
 }
 
 async function pollJusuanhubVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
@@ -389,8 +402,10 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     // 聚算 Hub（`*.jusuanhub.com`）必须同样放在所有「按模型名猜形状」的启发式之前：
     // 它的 `minimax-h3` 会被 `isRelayMiniMaxH3Video` 命中，套上 CometAPI 形状后打到 /videos 只会 404。
     if (isJusuanhubMediaBaseUrl(requestConfig.baseUrl)) {
-        assertVideoConfig(requestConfig, requestConfig.model);
-        return createJusuanhubVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
+        // 多 Key：每次执行在起点随机挑一个，并一路钉到轮询（job 是账户级的）。
+        const pinned = pinJusuanhubApiKey(requestConfig);
+        assertVideoConfig(pinned, pinned.model);
+        return createJusuanhubVideoTask(pinned, selectedModel, prompt, safeReferences, options);
     }
     // Metaso MiniMax-H3 must use OpenAI /videos before any AutoDL ComfyUI heuristic.
     if (isMetasoH3Video(requestConfig, selectedModel)) {
@@ -438,7 +453,9 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
         const result = pluginVideoResults.get(task.id);
         return result ? { status: "completed", result } : { status: "failed", error: apiText("pluginVideoExpired") };
     }
-    const requestConfig = resolveModelRequestConfig(config, task.model);
+    const resolved = resolveModelRequestConfig(config, task.model);
+    // 聚算任务把 Key 钉在任务上（多 Key 随机只发生在提交那一次）：这里沿用它，别重新随机。
+    const requestConfig = task.apiKey && task.apiKey !== resolved.apiKey ? { ...resolved, apiKey: task.apiKey } : resolved;
     assertVideoConfig(requestConfig, requestConfig.model);
     // 聚算 Hub：查询端点是 `/v1/jobs/{id}`，不是 `/videos/{id}`（后者只会 404）。
     if (task.provider === "jusuanhub") return pollJusuanhubVideoTask(requestConfig, task, options);

@@ -45,6 +45,42 @@ export function isJusuanhubMediaBaseUrl(baseUrl: string): boolean {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════
+// 多 Key：每次执行随机挑一个
+// ════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 从一组 Key 里随机挑一个（`random` 只为探针注入，业务侧用默认 `Math.random`）。
+ *
+ * 为什么是「随机」而不是「轮转」：这一家的额度是**按账户**算的（`queued.maxUnits` /
+ * `running.maxUnits` 都是账户级），几个 Key 各属一个账户；固定从第一个开始，等于所有并发
+ * 都砸在同一个账户的队列上，撞 429 的概率最高。随机能把并发摊开。
+ *
+ * 🔴 **随机只发生在「一次执行」的起点，选中后必须钉住整条链路**（提交 → 轮询 job → 取字节）。
+ * 聚算的 job 是**账户级**的：key A 提交的 `jobId`，用 key B 查 `GET /v1/jobs/{id}` 只会 404
+ * （`job not found`），看起来像「任务凭空消失」。所以别在 `aiHeaders` 一类每请求都跑的地方随机。
+ */
+export function pickJusuanhubApiKey(keys: readonly string[], random: () => number = Math.random): string {
+    const clean = keys.map((key) => String(key || "").trim()).filter(Boolean);
+    if (!clean.length) return "";
+    if (clean.length === 1) return clean[0];
+    const index = Math.floor(random() * clean.length);
+    return clean[Math.min(Math.max(index, 0), clean.length - 1)] || clean[0];
+}
+
+/**
+ * 把「本次执行要用的 Key」钉进 config。只对聚算渠道、且配了 2 个以上 Key 时生效，
+ * 其它渠道原样返回（多 Key 在别家是「余额用尽再换」的备用语义，不能抢先打乱）。
+ */
+export function pinJusuanhubApiKey<T extends { baseUrl?: string; apiKey?: string; apiKeys?: readonly string[] }>(config: T, random: () => number = Math.random): T {
+    if (!isJusuanhubMediaBaseUrl(config.baseUrl || "")) return config;
+    const keys = Array.isArray(config.apiKeys) ? config.apiKeys : [];
+    if (keys.length < 2) return config;
+    const picked = pickJusuanhubApiKey(keys, random);
+    if (!picked || picked === config.apiKey) return config;
+    return { ...config, apiKey: picked };
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════
 // 图片：qwen-image-2.1
 // ════════════════════════════════════════════════════════════════════════════════════════
 
