@@ -262,8 +262,20 @@ export function resolveJusuanhubVideoAspect(size: string): JusuanhubVideoAspect 
  * 清晰度只有 544p / 768p 两档：`vquality` 里 ≤600 的（480/544/576）进 544p，
  * 其余（720/768/900/1080/2K…）一律 768p —— 上游没有更高档，传 1080p 只会 400。
  */
+/**
+ * 画布上的 `vquality` → 上游的 `resolutionTier`。上游只有 **544p / 768p** 两档。
+ *
+ * 🔴 **默认档是 544p**（2026-11-12 用户要求）：这一家的 544p 出片快一倍（65s vs 123s），
+ * 适合先看构图再重跑，所以「用户还没选过」就应该落在 544p。
+ *
+ * 难点在于画布没有「未选择」这个状态 —— 全局 `vquality` 的默认值是 `"720"`（给 relay H3 那类
+ * 720/1080/2K 的模型用的），而聚算没有 720 这一档。所以 `""` 和 `"720"` 都当作**未选择 → 544p**：
+ * 用户一旦在面板上点了 544p / 768p，值就变成 `"544"` / `"768"`，从此按他自己的选择走。
+ * `1080` / `2k` / `768` 这些是**显式选过高清**的历史值 → 768p。
+ */
 export function resolveJusuanhubVideoResolutionTier(vquality: string): "544p" | "768p" {
     const raw = String(vquality || "").trim().toLowerCase();
+    if (!raw || raw === "720" || raw === "720p") return "544p";
     const numeric = Number(raw.replace(/p$/, ""));
     if (Number.isFinite(numeric) && numeric > 0 && numeric <= 600) return "544p";
     return "768p";
@@ -283,7 +295,7 @@ export const JUSUANHUB_VIDEO_RESOLUTION_OPTIONS = [
 
 /**
  * 画布上存的 `vquality` 是历史遗留的（可能有 480 / 720 / 1080 / 2k），
- * 一律收敛成这两档之一，否则面板会出现「一个都不选中」。
+ * 一律收敛成这两档之一，否则面板会出现「一个都不选中」。未选择 → `544`（见上一个函数的说明）。
  */
 export function normalizeJusuanhubVideoQuality(vquality: string): "544" | "768" {
     return resolveJusuanhubVideoResolutionTier(vquality) === "544p" ? "544" : "768";

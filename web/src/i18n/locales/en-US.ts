@@ -114,7 +114,7 @@ export default {
             fisherModeHint: "Work-Fisher: the pasted script defaults to multi-ref video. Character / scene / multiview need Export JSON under character / scene / multiview keys in the model script.",
             fisherQualityHint: "Work-Fisher / light App is single-pass (no latent upscale): default ~0.8 MP (720 also maps here); higher picks still clamp. Duration max 12s. If VRAM is tight, raise the compute tier to Plus.",
             museQualityHint: "{{model}} always renders 720p with audio; the quality setting does not apply to it.",
-            jusuanhubQualityHint: "Jusuan Hub minimax-h3 offers only 544p / 768p: 544p renders faster (960×544 at 16:9) for checking the composition, 768p is the delivery tier (1344×768 at 16:9).",
+            jusuanhubQualityHint: "Jusuan Hub minimax-h3 offers only 544p / 768p, defaulting to 544p (renders faster: 960×544 at 16:9, good for checking the composition); 768p is the delivery tier (1344×768 at 16:9).",
             museSecondsHint: "{{model}} is fixed at 10 seconds; the duration setting does not apply to it.",
             rhInstance: "Compute tier",
             rhInstanceHint: "RunningHub machine VRAM: Standard 24GB (recommended), Plus 48GB, Ultra 84GB. Output stays ~0.8 MP; higher tiers mainly avoid OOM.",
