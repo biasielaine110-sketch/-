@@ -434,6 +434,10 @@ export default {
         geminiVideoUnsupported: "Gemini 调用格式暂不支持视频生成，请使用 OpenAI 格式渠道",
         noVideoTask: "接口没有返回视频任务",
         videoDownloadFailed: "视频下载失败",
+        videoDownloadIncomplete: "视频下载未完成（{{reason}}），请重试",
+        videoDownloadEmpty: "视频下载为空，请重试",
+        videoDownloadTruncated: "视频文件不完整（{{bytes}} 字节，缺少 moov 索引），请重试",
+        videoDownloadNotMp4: "服务端返回的不是可播放的 MP4（{{bytes}} 字节）",
         localAssetReadFailed: "读取本地资产失败",
     },
     assets: {

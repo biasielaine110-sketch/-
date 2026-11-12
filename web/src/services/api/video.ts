@@ -34,7 +34,7 @@ import {
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
-import { buildJusuanhubVideoRequestBody, isJusuanhubMediaBaseUrl, readJusuanhubJobId, readJusuanhubJobState } from "./jusuanhub-media";
+import { buildJusuanhubVideoRequestBody, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, readJusuanhubJobId, readJusuanhubJobState } from "./jusuanhub-media";
 import { runWithJusuanhubRetry } from "./jusuanhub-retry";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -276,33 +276,84 @@ async function pollJusuanhubVideoTask(config: AiConfig, task: VideoGenerationTas
  * 取回成片。**contentUrl 不是公开直链**：不带 Bearer 就是 401，而且
  * `/v1/assets/{id}/content` 不回 `Access-Control-Allow-Origin`，带 Authorization 的浏览器直连
  * 会先死在 preflight。所以默认走同源代理并把 Bearer 交给它转发（`functions/_lib/proxy.js`
- * 原样转发请求头，图片侧已实测 200 + 4.5MB）。代理不通再试直连；
- * 两条都不行时退回 url —— 让用户至少能在节点里看到「链接在、但取不回来」而不是一句空错。
+ * 原样转发请求头，图片侧已实测 200 + 4.5MB）。代理不通再试直连。
+ *
+ * 🔴 这里**绝不退回 `{ url }`**。旧实现两条都失败时把 contentUrl 当直链交给画布，而那个 URL
+ * 不带 Bearer 就是 401 —— 画布把它当远程视频取，落库时又被「非媒体也重贴 video/mp4」的规则
+ * 存成一条假 mp4，用户最后看到的就是 `DEMUXER_ERROR_COULD_NOT_OPEN`（"视频无法播放"），
+ * 但真正的原因（下载 401 / 截断）被彻底藏掉了。现在改成：校验字节 + 重试，仍不行就报明确的错。
  */
 async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?: RequestOptions): Promise<VideoGenerationResult> {
     const direct = String(url || "").trim();
     const absolute = /^https?:\/\//i.test(direct) ? direct : buildApiUrl(config.baseUrl, direct);
     const proxied = forceProxyMediaUrl(absolute);
-    for (const target of proxied ? [proxied, absolute] : [absolute]) {
-        try {
-            const response = await runWithJusuanhubRetry(
-                () =>
-                    axios.get<Blob>(target, {
-                        headers: aiHeaders(config),
-                        responseType: "blob",
-                        signal: options?.signal,
-                        timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
-                    }),
-                { signal: options?.signal, maxAttempts: 3 },
-            );
-            await assertVideoBlob(response.data);
-            return { blob: response.data };
-        } catch (error) {
-            if (axios.isCancel(error) || options?.signal?.aborted) throw error;
-            // 换下一条再试（代理不通 → 直连；直连被 CORS 拦 → 退回 url）。
+    const targets = proxied ? [proxied, absolute] : [absolute];
+    let lastError: unknown;
+    for (let round = 0; round < 3; round += 1) {
+        for (const target of targets) {
+            try {
+                const response = await runWithJusuanhubRetry(
+                    () =>
+                        axios.get<Blob>(target, {
+                            headers: aiHeaders(config),
+                            responseType: "blob",
+                            signal: options?.signal,
+                            timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
+                        }),
+                    { signal: options?.signal, maxAttempts: 3 },
+                );
+                await assertVideoBlob(response.data);
+                const blob = await assertJusuanhubPlayableMp4(response.data);
+                // 统一重贴成 video/mp4：`<video>` 只认媒体类型，octet-stream 会被拒。
+                return { blob: blob.type === "video/mp4" ? blob : blob.slice(0, blob.size, "video/mp4"), mimeType: "video/mp4" };
+            } catch (error) {
+                if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+                lastError = error;
+                // 换下一条再试（代理不通 → 直连；直连被 CORS 拦 → 下一轮再来）。
+            }
         }
+        if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        await delay(1_200 * (round + 1), options?.signal);
     }
-    return { url: absolute, mimeType: "video/mp4" };
+    // 最后一轮拿到的仍是「字节层面就能定性」的错（空/截断/不是 MP4），原样抛，
+    // 不要再包一层「下载未完成」，否则用户看到的是「下载未完成（返回的不是可播放的 MP4）」这种绕口话。
+    if (lastError instanceof Error && (lastError as Error & { jusuanhubDefinitive?: boolean }).jusuanhubDefinitive) throw lastError;
+    const reason = lastError instanceof Error && lastError.message ? lastError.message : "下载失败";
+    throw new Error(apiText("videoDownloadIncomplete", { reason }));
+}
+
+/**
+ * 校验「拿到的字节是能播的 MP4」。这一步是把 Chrome 那句
+ * `DEMUXER_ERROR_COULD_NOT_OPEN` 拆成可定位的原因：
+ *  · 文本响应（401 的 JSON / 代理错误页）→ 直接把响应内容带出来；
+ *  · 缺 `moov`（下载被截断）→ 说明还没写完/传输中断，让上层重试；
+ *  · 不是 MP4 容器 → 报「返回的不是 MP4」。
+ */
+async function assertJusuanhubPlayableMp4(input: Blob): Promise<Blob> {
+    const headBytes = await input.slice(0, Math.min(input.size, 1 << 20)).arrayBuffer();
+    const tailBytes = await input.slice(Math.max(0, input.size - (1 << 20))).arrayBuffer();
+    const head = new Uint8Array(headBytes);
+    const tail = new Uint8Array(tailBytes);
+    if (looksLikeTextPayload({ head, contentType: input.type })) {
+        const text = new TextDecoder().decode(head).replace(/\s+/g, " ").trim().slice(0, 160);
+        throw definitiveDownloadError(text || apiText("videoDownloadFailed"));
+    }
+    const verdict = inspectJusuanhubMp4({ size: input.size, head, tail });
+    if (verdict.ok) return input;
+    throw definitiveDownloadError(
+        verdict.reason === "empty"
+            ? apiText("videoDownloadEmpty")
+            : verdict.reason === "missing_moov"
+              ? apiText("videoDownloadTruncated", { bytes: input.size })
+              : apiText("videoDownloadNotMp4", { bytes: input.size }),
+    );
+}
+
+/** 打上标记：这个错误已经说清「字节哪里不对」，调用方不必再套一层笼统文案。 */
+function definitiveDownloadError(message: string): Error {
+    const error = new Error(message) as Error & { jusuanhubDefinitive?: boolean };
+    error.jusuanhubDefinitive = true;
+    return error;
 }
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {

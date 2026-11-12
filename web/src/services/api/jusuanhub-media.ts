@@ -384,6 +384,76 @@ export function readJusuanhubJobState(payload: unknown): JusuanhubJobState {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════
+// 共用：成片完整性速查（MP4 头尾）
+// ════════════════════════════════════════════════════════════════════════════════════════
+
+export type JusuanhubMp4Verdict = { ok: true } | { ok: false; reason: "empty" | "not_mp4" | "missing_moov" };
+
+/**
+ * 判断「拿到的字节到底是不是一条能播的 MP4」。
+ *
+ * 为什么必须查：Chrome 对「不是容器 / 容器残缺」一律只报
+ * `PipelineStatus::DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed`，
+ * 排查时看不出到底是 401 的 JSON、代理的错误页，还是下载被截断。
+ *
+ * 判定依据是 MP4 的 box 结构，不是文件大小：
+ *  · 第 4–8 字节必须是 `ftyp`（Lavf/x264 输出必有）；
+ *  · 必须有 `moov`（描述轨道/时长的索引）。Lavf 默认先写 `mdat` 再写 `moov`，
+ *    所以**被截断的下载恰恰缺 moov** —— 这一条正好对上那个 demuxer 报错。
+ *  · `moov` 可能在头部（faststart，实测这家就是偏移 36）也可能在尾部，
+ *    所以头尾各取一段来扫，别只查前 N 字节。
+ */
+export function inspectJusuanhubMp4(input: { size: number; head: Uint8Array; tail: Uint8Array }): JusuanhubMp4Verdict {
+    if (!input.size || input.head.length < 12) return { ok: false, reason: "empty" };
+    if (asciiAt(input.head, 4, "ftyp")) {
+        if (containsAscii(input.head, "moov") || containsAscii(input.tail, "moov")) return { ok: true };
+        return { ok: false, reason: "missing_moov" };
+    }
+    // 有的封装把 ftyp 放得很靠后（少见）；头里没有就再看尾。
+    if (containsAscii(input.tail, "ftyp") && containsAscii(input.tail, "moov")) return { ok: true };
+    return { ok: false, reason: "not_mp4" };
+}
+
+function asciiAt(bytes: Uint8Array, offset: number, text: string): boolean {
+    if (bytes.length < offset + text.length) return false;
+    for (let i = 0; i < text.length; i += 1) {
+        if (bytes[offset + i] !== text.charCodeAt(i)) return false;
+    }
+    return true;
+}
+
+function containsAscii(bytes: Uint8Array, text: string): boolean {
+    if (bytes.length < text.length) return false;
+    const first = text.charCodeAt(0);
+    const last = bytes.length - text.length;
+    for (let i = 0; i <= last; i += 1) {
+        if (bytes[i] !== first) continue;
+        if (asciiAt(bytes, i, text)) return true;
+    }
+    return false;
+}
+
+/**
+ * 文本响应（401 的 JSON、代理的错误页）不可能是视频。
+ * 用于把「存了个假的 video/mp4」当场拦下，而不是等用户点播放才炸。
+ */
+export function looksLikeTextPayload(input: { head: Uint8Array; contentType?: string }): boolean {
+    const type = String(input.contentType || "").toLowerCase();
+    if (type.includes("json") || type.startsWith("text/") || type.includes("html") || type.includes("xml")) return true;
+    let i = 0;
+    // 跳过 BOM 与空白，看第一个非空白字节是不是 `{` / `[` / `<`。
+    while (i < input.head.length && i < 64) {
+        const byte = input.head[i];
+        if (byte === 0xef || byte === 0xbb || byte === 0xbf || byte === 0x20 || byte === 0x0a || byte === 0x0d || byte === 0x09 || byte === 0x00) {
+            i += 1;
+            continue;
+        }
+        return byte === 0x7b || byte === 0x5b || byte === 0x3c;
+    }
+    return false;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════
 // 共用：429 限流重试（纯逻辑；真正的收发在 jusuanhub-retry.ts）
 // ════════════════════════════════════════════════════════════════════════════════════════
 

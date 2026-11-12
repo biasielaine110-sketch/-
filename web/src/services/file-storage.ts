@@ -18,8 +18,30 @@ function proxyRemoteMediaUrl(url: string) {
     }
 }
 
+/**
+ * 拦下「拿文本冒充媒体」的响应。
+ *
+ * 这是「视频存进库了但播不了」的最后一环：上游 `contentUrl` 不带 Bearer 就是 401，代理挂掉时
+ * 也可能回一段 HTML 错误页；以前这些字节会被下面「非视频也重贴 video/mp4」的规则收下，
+ * 于是库里多出一条 type=video/mp4、内容却是 JSON 的假视频，Chrome 只会说
+ * `DEMUXER_ERROR_COULD_NOT_OPEN: FFmpegDemuxer: open context failed`，真因被彻底埋掉。
+ *
+ * 只嗅前 64 字节里第一个非空白字节（`{` / `[` / `<`），二进制媒体头不可能长这样，误伤率 0。
+ */
+async function assertNotTextPayload(blob: Blob) {
+    const head = new Uint8Array(await blob.slice(0, 64).arrayBuffer());
+    for (const byte of head) {
+        if (byte === 0xef || byte === 0xbb || byte === 0xbf || byte === 0x20 || byte === 0x0a || byte === 0x0d || byte === 0x09) continue;
+        if (byte !== 0x7b && byte !== 0x5b && byte !== 0x3c) return;
+        // 把上游原文带出来：401 的 JSON / 代理错误页本身就是最好的错误说明。
+        const text = new TextDecoder().decode(head).replace(/\s+/g, " ").trim().slice(0, 160);
+        throw new Error(text || "Media download returned text instead of a media file");
+    }
+}
+
 export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
     const raw = typeof input === "string" ? await (await fetch(proxyRemoteMediaUrl(input))).blob() : input;
+    if (prefix === "video" || prefix === "audio") await assertNotTextPayload(raw);
     // ComfyUI /view often lands as application/octet-stream; without a video/* type, Chrome
     // may refuse to decode the blob URL even when the bytes are a valid mp4.
     const desiredType =

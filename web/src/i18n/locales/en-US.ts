@@ -434,6 +434,10 @@ export default {
         geminiVideoUnsupported: "The Gemini API format does not support video generation. Use an OpenAI-format provider.",
         noVideoTask: "The API did not return a video task",
         videoDownloadFailed: "Failed to download video",
+        videoDownloadIncomplete: "Video download did not complete ({{reason}}). Please retry.",
+        videoDownloadEmpty: "The downloaded video is empty. Please retry.",
+        videoDownloadTruncated: "The video file is incomplete ({{bytes}} bytes, missing the moov index). Please retry.",
+        videoDownloadNotMp4: "The server did not return a playable MP4 ({{bytes}} bytes)",
         localAssetReadFailed: "Failed to read local asset",
     },
     assets: {
