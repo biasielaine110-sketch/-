@@ -2752,9 +2752,11 @@ export function CanvasScriptNodeContent({
                 「生图比例」已按用户要求从节点上移除（2026-11-12），改比例去「AI 生成」弹窗里选。 */}
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">{shotsPerClipSelector}</div>
 
-            {/* 三个批量动作 —— 与表体右下角完全同一份实现。全都没有（没接回调）时整行不占位。 */}
+            {/* 三个批量动作 —— 与表体右下角完全同一份实现。全都没有（没接回调）时整行不占位。
+                🔴 靠右（`justify-end`）：用户 2026-11-14「缩放时这几个按钮在最左侧不好选，要放最右侧」。
+                窄节点换行时每一行也贴右边，鼠标不用横跨大半个节点。 */}
             {directAssetButton || buildVideoChainButton || pipelineVideoGenerateButton ? (
-                <div className="flex flex-wrap items-center gap-1.5">
+                <div className="flex flex-wrap items-center justify-end gap-1.5">
                     {directAssetButton}
                     {buildVideoChainButton}
                     {pipelineVideoGenerateButton}
