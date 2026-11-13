@@ -34,7 +34,7 @@ import {
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
-import { buildJusuanhubVideoRequestBody, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, orderJusuanhubApiKeys, readJusuanhubJobId, readJusuanhubJobState } from "./jusuanhub-media";
+import { buildJusuanhubVideoRequestBody, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, orderJusuanhubApiKeys, readJusuanhubJobId, readJusuanhubJobState, resolveJusuanhubRetryDelayMs } from "./jusuanhub-media";
 import { runWithJusuanhubKeyFailover, runWithJusuanhubRetry } from "./jusuanhub-retry";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -355,6 +355,48 @@ function isJusuanhubTimeoutError(error: unknown): boolean {
 }
 
 /**
+ * 同一时刻最多几个成片在搬。
+ *
+ * 聚算的 429 是「账户队列满」，而 contentUrl 这条链路在账户吃紧时会被上游直接 reset：
+ * 一批节点同时跑完时，N 个下载请求一起压上去，浏览器侧看到的是 `/api/proxy` 的 `net::ERR_FAILED`
+ * （代理到上游的连接被掐断），最终只剩 axios 一句 `Network Error`。
+ * 所以给自己加一道闸：**最多 2 个传输同时在飞**，其余的排队等槽位（是等，不是失败）。
+ */
+const JUSUANHUB_VIDEO_DOWNLOAD_CONCURRENCY = 2;
+/** 下载重试间隔基数：4s → 8s（`resolveJusuanhubRetryDelayMs` 再叠指数与抖动，上限 30s）。 */
+const JUSUANHUB_VIDEO_DOWNLOAD_RETRY_BASE_MS = 4_000;
+let jusuanhubDownloadActive = 0;
+const jusuanhubDownloadWaiters: Array<() => void> = [];
+
+async function acquireJusuanhubDownloadSlot(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    if (jusuanhubDownloadActive < JUSUANHUB_VIDEO_DOWNLOAD_CONCURRENCY) {
+        jusuanhubDownloadActive += 1;
+        return;
+    }
+    await new Promise<void>((resolve, reject) => {
+        const grant = () => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        };
+        const onAbort = () => {
+            const index = jusuanhubDownloadWaiters.indexOf(grant);
+            if (index >= 0) jusuanhubDownloadWaiters.splice(index, 1);
+            reject(new DOMException("Aborted", "AbortError"));
+        };
+        jusuanhubDownloadWaiters.push(grant);
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
+function releaseJusuanhubDownloadSlot(): void {
+    // 槽位**直接转交**给下一个等待者（不先递减再让它加回来，避免中间被新来的插队）。
+    const next = jusuanhubDownloadWaiters.shift();
+    if (next) next();
+    else jusuanhubDownloadActive = Math.max(0, jusuanhubDownloadActive - 1);
+}
+
+/**
  * 取回成片。**contentUrl 不是公开直链**：不带 Bearer 就是 401，而且
  * `/v1/assets/{id}/content` 不回 `Access-Control-Allow-Origin`，带 Authorization 的浏览器直连
  * 会先死在 preflight。所以默认走同源代理并把 Bearer 交给它转发（`functions/_lib/proxy.js`
@@ -366,6 +408,16 @@ function isJusuanhubTimeoutError(error: unknown): boolean {
  * 但真正的原因（下载 401 / 截断）被彻底藏掉了。现在改成：校验字节 + 重试，仍不行就报明确的错。
  */
 async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?: RequestOptions): Promise<VideoGenerationResult> {
+    // 并发闸包住**整个下载（含所有重试轮）**：重试不能绕过闸，否则退避只是在放大压力。
+    await acquireJusuanhubDownloadSlot(options?.signal);
+    try {
+        return await downloadJusuanhubVideoBlob(config, url, options);
+    } finally {
+        releaseJusuanhubDownloadSlot();
+    }
+}
+
+async function downloadJusuanhubVideoBlob(config: AiConfig, url: string, options?: RequestOptions): Promise<VideoGenerationResult> {
     const direct = String(url || "").trim();
     const absolute = /^https?:\/\//i.test(direct) ? direct : buildApiUrl(config.baseUrl, direct);
     const proxied = forceProxyMediaUrl(absolute);
@@ -386,9 +438,14 @@ async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?
      *  · 超时（150s 都搬不完）→ 再等一轮只是让用户多干等 2.5 分钟，本轮到点就收口。
      */
     const MAX_ROUNDS = 3;
+    let roundsRun = 0;
     for (let round = 0; round < MAX_ROUNDS; round += 1) {
+        roundsRun = round + 1;
         let timedOut = false;
-        for (const target of targets) {
+        // 直连只在第一轮试一次：`/v1/assets/{id}/content` 不回 ACAO，后面每轮直连都必然死在 preflight，
+        // 只会刷一屏 CORS 红字、把「代理那一轮的真实失败」搅浑。
+        const roundTargets = round === 0 ? targets : [proxied || absolute];
+        for (const target of roundTargets) {
             try {
                 const response = await runWithJusuanhubRetry(
                     () =>
@@ -415,7 +472,11 @@ async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         // 超时不重来：代理已经搬了 150 秒还没搬完，再排一轮只会让用户白等。
         if (timedOut) break;
-        await delay(1_200 * (round + 1), options?.signal);
+        if (round < MAX_ROUNDS - 1) {
+            // 🔴 4s→8s 的退避而不是 1.2s：`ERR_FAILED` 这种「连接被上游掐断」多半是账户正被限流，
+            // 1 秒级的重试撞的还是同一个满载状态，白费一轮。
+            await delay(resolveJusuanhubRetryDelayMs(round, undefined, JUSUANHUB_VIDEO_DOWNLOAD_RETRY_BASE_MS), options?.signal);
+        }
     }
     // 「字节层面就能定性」的错（空 / 截断 / 不是 MP4）优先原样抛：它比代理的 504 更接近真相，
     // 也别再包一层「下载未完成」，否则用户看到的是「下载未完成（返回的不是可播放的 MP4）」这种绕口话。
@@ -427,6 +488,15 @@ async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?
     if (isJusuanhubTimeoutError(reported)) {
         throw new Error(apiText("videoDownloadTimeout"));
     }
+    /**
+     * 429 与「连接被掐断」必须分开说：
+     *  · 429 = 账户队列满，用户唯一能做的就是等 / 少开几条 —— 报 `Network Error` 会让人以为网络坏了；
+     *  · 没有 response 的失败 = 代理到上游的流被 reset（`net::ERR_FAILED`），同样多是限流/过载。
+     * 两种情况都保留「已重试 N 轮」的事实，用户才知道系统不是一下就放弃了。
+     */
+    const reportedStatus = axios.isAxiosError(reported) ? Number(reported.response?.status) || 0 : 0;
+    if (reportedStatus === 429) throw new Error(apiText("videoDownloadRateLimited"));
+    if (!reportedStatus) throw new Error(apiText("videoDownloadInterrupted", { rounds: roundsRun }));
     const reason = reported instanceof Error && reported.message ? reported.message : "下载失败";
     throw new Error(apiText("videoDownloadIncomplete", { reason }));
 }
