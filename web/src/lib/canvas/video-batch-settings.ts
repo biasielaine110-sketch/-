@@ -86,20 +86,90 @@ export function unionChoices(lists: ReadonlyArray<ReadonlyArray<{ value: string;
     return Array.from(seen, ([value, label]) => ({ value, label }));
 }
 
+/** 某个视频模型下可选的档位（只需要 `value`，label 是弹窗的事）。 */
+export type VideoBatchModelChoices = {
+    resolutions: ReadonlyArray<{ value: string }>;
+    sizes: ReadonlyArray<{ value: string }>;
+};
+
+export type VideoBatchPlanTarget = {
+    id: string;
+    /** 节点当前存的清晰度；空 = 从没选过（让模型自己的默认档接管）。 */
+    vquality?: string;
+};
+
+export type VideoBatchPlanOptions = {
+    /** 「不改模型」时这个节点用哪个模型算档位（已按 capability=video 解析过）。 */
+    modelOf: (id: string) => string;
+    /** 某个模型下可选的分辨率 / 比例。 */
+    choicesForModel: (model: string) => VideoBatchModelChoices;
+    /**
+     * 切到这个模型后，旧档位不属于新模型族时拿什么兜底。
+     *
+     * 返回空串 = 清掉旧值（`vquality: ""` 在画布上等于「没选过」，提交时走模型默认），
+     * 好过留一个面板里根本点不亮的假档位（例如 relay H3 节点上留着聚算的 768p）。
+     */
+    fallbackVqualityForModel?: (model: string) => string;
+};
+
+export type VideoBatchPlan = {
+    applyIds: string[];
+    skippedIds: string[];
+    /**
+     * **逐节点**的 patch。
+     *
+     * 不能所有节点共用一份：切模型时每个节点的旧 `vquality` 不一样，要不要兜底、兜到哪一档
+     * 都得按新模型族分别算（见 `fallbackVqualityForModel`）。
+     */
+    patches: Map<string, VideoBatchPatch>;
+};
+
 /**
- * 按「这个节点自己支持的档位」过滤。
+ * 算出「每个节点到底写什么」。
  *
- * 为什么要过滤而不是照写：档位是按模型族给的（relay H3 只有 720/1080/2K、聚算只有 544/768、
- * AutoDL H3 是 workflow 自己的枚举）。混选里的节点模型各不相同，硬写就会出现
- * 「面板里显示 2K、提交时被收成 768p」这种骗人的状态。
+ * 为什么要逐节点过滤而不是照写：档位是按模型族给的（relay H3 只有 720/1080/2K、聚算只有 544/768、
+ * AutoDL H3 是 workflow 自己的枚举）。硬写就会出现「面板里显示 2K、提交时被收成 768p」这种骗人的状态。
+ *
+ * 🔴 支持性判断必须对**切换后的模型**算：用户常常同时改模型 + 分辨率，拿旧模型判断会把整批跳过。
  */
-export function planVideoBatchSettings(
-    targetIds: readonly string[],
-    patch: VideoBatchPatch,
-    isSupported: (id: string) => boolean,
-): { applyIds: string[]; skippedIds: string[] } {
+export function planVideoBatchPatches(targets: readonly VideoBatchPlanTarget[], patch: VideoBatchPatch, options: VideoBatchPlanOptions): VideoBatchPlan {
     const applyIds: string[] = [];
     const skippedIds: string[] = [];
-    for (const id of targetIds) (isSupported(id) ? applyIds : skippedIds).push(id);
-    return { applyIds, skippedIds };
+    const patches = new Map<string, VideoBatchPatch>();
+    for (const target of targets) {
+        const model = patch.model || options.modelOf(target.id);
+        const choices = options.choicesForModel(model);
+        const supportsResolution = (value: string) => choices.resolutions.some((item) => item.value === value);
+        const supportsSize = (value: string) => choices.sizes.some((item) => item.value === value);
+
+        // 用户点名要的档位这个模型给不了 → 整个节点跳过（部分写入会让节点处于半新半旧的自相矛盾状态）。
+        if (patch.vquality && !supportsResolution(patch.vquality)) {
+            skippedIds.push(target.id);
+            continue;
+        }
+        if (patch.size && !supportsSize(patch.size)) {
+            skippedIds.push(target.id);
+            continue;
+        }
+
+        const nodePatch: VideoBatchPatch = {};
+        if (patch.model) nodePatch.model = patch.model;
+        if (patch.vquality) nodePatch.vquality = patch.vquality;
+        if (patch.size) nodePatch.size = patch.size;
+        // 只换了模型、没点名分辨率：旧档位若不属于新模型族，顺手换成新族默认（或清空）。
+        if (patch.model && !patch.vquality) {
+            const current = String(target.vquality ?? "").trim();
+            if (current && !supportsResolution(current)) {
+                nodePatch.vquality = options.fallbackVqualityForModel?.(model) ?? "";
+            }
+        }
+
+        if (!nodePatch.model && !nodePatch.vquality && !nodePatch.size) {
+            skippedIds.push(target.id);
+            continue;
+        }
+        applyIds.push(target.id);
+        patches.set(target.id, nodePatch);
+    }
+    return { applyIds, skippedIds, patches };
 }

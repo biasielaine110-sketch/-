@@ -236,7 +236,7 @@ import { createZip } from "@/lib/zip";
 import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFileBase, normalizeMergeClip, probeImageSize, probeVideoMeta, resolveMergeCanvasSize, videoMergeClipFromNode, type ResolvedVideoMergeClip } from "@/lib/canvas/video-merge";
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
 import { buildBatchGeneratePlan, isBatchGeneratableNode } from "@/lib/canvas/batch-generate";
-import { buildVideoBatchPatch, collectVideoBatchTargets, hasVideoBatchChange, planVideoBatchSettings, unionChoices, type VideoBatchPatchInput } from "@/lib/canvas/video-batch-settings";
+import { buildVideoBatchPatch, collectVideoBatchTargets, hasVideoBatchChange, planVideoBatchPatches, unionChoices, type VideoBatchPatchInput } from "@/lib/canvas/video-batch-settings";
 import { videoResolutionChoicesFor, videoSizeChoicesFor } from "@/components/video-settings-panel";
 import { CanvasVideoBatchDialog } from "@/components/canvas/canvas-video-batch-dialog";
 import { attachNodesToGroup, collectGroupMembers, isGroupableNode, resolveGroupFrame } from "@/lib/canvas/canvas-grouping";
@@ -7564,11 +7564,58 @@ function AtelierCanvasPage() {
         [effectiveConfig],
     );
 
+    /** 「某个模型下有哪些档位」的单一来源：弹窗选模型后重算、落盘前校验，全走这一个函数。 */
+    const videoBatchChoicesForModel = useCallback(
+        (model: string) => {
+            const config: AiConfig = { ...effectiveConfig, model };
+            return {
+                resolutions: videoResolutionChoicesFor(config),
+                sizes: videoSizeChoicesFor(config).map((item) => ({ value: item.value, label: t(`settingsPanels.video.sizes.${item.labelKey}`) })),
+            };
+        },
+        [effectiveConfig, t],
+    );
+
+    /**
+     * 模型 → 档位 的缓存表。
+     *
+     * 弹窗里每换一次模型都要重算档位，而 `videoResolutionChoicesFor` 要解一遍渠道 / baseUrl / 脚本
+     * （`resolveModelRequestConfig` + workflow 解析）。视频模型一般十几个，一次性算好比每次选择重算划算，
+     * 而且数组 identity 稳定 —— 弹窗里「换模型后旧档位自动退回保持不变」的 effect 才能只在该变的时候跑。
+     */
+    const videoBatchModelChoices = useMemo(() => {
+        const map = new Map<string, ReturnType<typeof videoBatchChoicesForModel>>();
+        for (const option of selectableModelsByCapability(effectiveConfig, "video")) map.set(option, videoBatchChoicesForModel(option));
+        return map;
+    }, [effectiveConfig, videoBatchChoicesForModel]);
+
+    /** 弹窗每换一次模型就来查一次表（identity 稳定，弹窗里那个 effect 才不会每帧空跑）。 */
+    const videoBatchChoicesForModelOption = useCallback((model: string) => videoBatchModelChoices.get(model) ?? null, [videoBatchModelChoices]);
+
+    /**
+     * 切模型后旧分辨率不属于新模型族时的兜底档位。
+     *
+     * 优先用原生 H3 workflow 自己声明的默认（U17/U30 是 720、U32 是 1080…），否则取新族里的 720p，
+     * 再不行才拿第一档 —— 720p 是这套渠道里最普遍的默认值，比随手取第一档（fisher 的第一档是 480p）安全。
+     */
+    const videoBatchFallbackVquality = useCallback(
+        (model: string) => {
+            const native = resolveNativeH3VideoSettingDefaults(model, resolveModelScript(effectiveConfig, model)).vquality;
+            if (native) return native;
+            const { resolutions } = videoBatchChoicesForModel(model);
+            return (resolutions.find((item) => item.value === "720") || resolutions[0])?.value || "";
+        },
+        [effectiveConfig, videoBatchChoicesForModel],
+    );
+
     /**
      * 档位并集：每个节点按**它自己的模型**算可选档位，再合并。
      *
      * 🔴 这里必须逐节点算而不是拿全局配置算一次 —— 同一个选区里的视频节点可以挂完全不同的模型
      * （relay H3 有 2K、聚算只有 544/768），用全局默认算出来的表跟节点实际能提交的值对不上。
+     *
+     * 注意这**只是「没选模型」时的表**：用户一旦在弹窗里选了模型，档位就改用那个模型的规则
+     * （`videoBatchModelChoices`），否则「选了别的模型」在弹窗里看起来毫无反应。
      */
     const videoBatchChoices = useMemo(() => {
         const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -7577,18 +7624,22 @@ function AtelierCanvasPage() {
         for (const id of videoBatchSnapshot.ids) {
             const node = byId.get(id);
             if (!node) continue;
-            const config: AiConfig = { ...effectiveConfig, model: resolveModelForCapability(effectiveConfig, node.metadata?.model, "video") };
-            resolutions.push(videoResolutionChoicesFor(config));
-            sizes.push(videoSizeChoicesFor(config).map((item) => ({ value: item.value, label: t(`settingsPanels.video.sizes.${item.labelKey}`) })));
+            const choices = videoBatchChoicesForModel(resolveModelForCapability(effectiveConfig, node.metadata?.model, "video"));
+            resolutions.push(choices.resolutions);
+            sizes.push(choices.sizes);
         }
         return { resolutions: unionChoices(resolutions), sizes: unionChoices(sizes) };
-    }, [effectiveConfig, nodes, t, videoBatchSnapshot.ids]);
+    }, [effectiveConfig, nodes, videoBatchChoicesForModel, videoBatchSnapshot.ids]);
 
     /**
-     * 落盘：只写用户真改过的字段，并按**每个节点自己的档位**筛一遍。
+     * 落盘：只写用户真改过的字段，并按**每个节点自己的（切换后的）模型**筛一遍。
      *
      * 支持性判断要对「切换后的模型」算：用户可能同时把模型改成 X、分辨率改成 X 支持但旧模型不支持的档位，
      * 拿旧模型判断会把这些节点全跳过。
+     *
+     * 逐节点出 patch（`planVideoBatchPatches`）而不是所有节点共用一份：只换模型时，每个节点原来的
+     * `vquality` 不一样，要不要按新族兜底、兜到哪一档都不一样 —— 留着旧族的档位，面板上会是一个
+     * 一个都点不亮的假值，提交时又会被后端静默收掉。
      */
     const handleVideoBatchApply = useCallback(
         (input: VideoBatchPatchInput) => {
@@ -7597,26 +7648,24 @@ function AtelierCanvasPage() {
                 message.warning(t("canvas.videoBatch.needOne"));
                 return;
             }
+            // 用 ref 而不是闭包里的 nodes：弹窗开着的时候后台批量任务可能刚跑完一两个节点（状态/内容变了）。
             const byId = new Map(nodesRef.current.map((node) => [node.id, node]));
-            const isSupported = (id: string) => {
-                const node = byId.get(id);
-                if (!node) return false;
-                const model = patch.model || resolveModelForCapability(effectiveConfig, node.metadata?.model, "video");
-                const config: AiConfig = { ...effectiveConfig, model };
-                if (patch.vquality && !videoResolutionChoicesFor(config).some((item) => item.value === patch.vquality)) return false;
-                if (patch.size && !videoSizeChoicesFor(config).some((item) => item.value === patch.size)) return false;
-                return true;
-            };
-            const plan = planVideoBatchSettings(videoBatchSnapshot.ids, patch, isSupported);
-            for (const id of plan.applyIds) handleConfigNodeChange(id, patch);
+            const targets = videoBatchSnapshot.ids.map((id) => ({ id, vquality: String(byId.get(id)?.metadata?.vquality ?? "") }));
+            const plan = planVideoBatchPatches(targets, patch, {
+                modelOf: (id) => resolveModelForCapability(effectiveConfig, byId.get(id)?.metadata?.model, "video"),
+                choicesForModel: videoBatchChoicesForModel,
+                fallbackVqualityForModel: videoBatchFallbackVquality,
+            });
+            for (const id of plan.applyIds) {
+                const nodePatch = plan.patches.get(id);
+                if (nodePatch) handleConfigNodeChange(id, nodePatch);
+            }
             setVideoBatchOpen(false);
-            // 模型与分辨率写在同一份 patch 里：`handleConfigNodeChange` 只在「patch 没给 vquality」时才套
-            // 模型族的默认档位，所以用户选的分辨率不会被模型切换覆盖掉。
             if (plan.applyIds.length) message.success(t("canvas.videoBatch.applied", { count: plan.applyIds.length }));
             const skipped = plan.skippedIds.length + videoBatchSnapshot.skippedGenerating;
             if (skipped > 0) message.info(t("canvas.videoBatch.skipped", { count: skipped }));
         },
-        [effectiveConfig, handleConfigNodeChange, message, t, videoBatchSnapshot.ids, videoBatchSnapshot.skippedGenerating],
+        [effectiveConfig, handleConfigNodeChange, message, t, videoBatchChoicesForModel, videoBatchFallbackVquality, videoBatchSnapshot.ids, videoBatchSnapshot.skippedGenerating],
     );
 
     /**
@@ -11540,7 +11589,8 @@ function AtelierCanvasPage() {
 
                 {h3OptimizeOpen ? <CanvasH3OptimizeDialog open targets={h3OptimizeSnapshot} config={h3OptimizeConfig} onStart={runH3OptimizeBatch} onClose={() => setH3OptimizeOpen(false)} /> : null}
 
-                {/* 右键「批量设置视频参数」：只在打开时渲染，档位按选区里各节点自己的模型族算好传进去。 */}
+                {/* 右键「批量设置视频参数」：只在打开时渲染。没选模型时档位按选区各节点自己的模型族取并集；
+                    选了模型就换成那个模型的档位规则（用户 2026-11-13 第 2 条）。 */}
                 {videoBatchOpen ? (
                     <CanvasVideoBatchDialog
                         open
@@ -11548,6 +11598,7 @@ function AtelierCanvasPage() {
                         modelOptions={videoBatchModelOptions}
                         resolutionChoices={videoBatchChoices.resolutions}
                         sizeChoices={videoBatchChoices.sizes}
+                        choicesForModel={videoBatchChoicesForModelOption}
                         onClose={() => setVideoBatchOpen(false)}
                         onApply={handleVideoBatchApply}
                     />

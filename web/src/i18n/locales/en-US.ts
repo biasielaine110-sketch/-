@@ -1936,6 +1936,7 @@ export default {
             resolution: "Resolution",
             size: "Aspect ratio",
             keep: "Keep as is",
+            followModel: "Tiers follow {{model}}",
             needOne: "Pick at least one thing to change",
             applyHint: "Will apply to {{count}} video nodes",
             apply: "Apply",

@@ -1935,6 +1935,7 @@ export default {
             resolution: "分辨率",
             size: "画面比例",
             keep: "保持不变",
+            followModel: "已按「{{model}}」的规则换档",
             needOne: "至少要选一项要改的内容",
             applyHint: "将应用到 {{count}} 个视频节点",
             apply: "应用",
