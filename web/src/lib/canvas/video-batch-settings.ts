@@ -10,8 +10,8 @@ import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 /** 批量设置里的「不修改」：空串即不动这个字段（绝不能被当成合法值写进节点）。 */
 export const VIDEO_BATCH_UNCHANGED = "";
 
-/** 真正写到节点 metadata 上的字段（只这三个，且都有值才写）。 */
-export type VideoBatchPatch = { model?: string; vquality?: string; size?: string };
+/** 真正写到节点 metadata 上的字段（只这四个，且都有值才写）。 */
+export type VideoBatchPatch = { model?: string; vquality?: string; size?: string; seconds?: string };
 
 export type VideoBatchPatchInput = {
     /** 目标模型（`channelId::modelName`）；空 = 不改模型。 */
@@ -20,6 +20,8 @@ export type VideoBatchPatchInput = {
     vquality?: string;
     /** 画面比例（`size`，如 `16:9`）；空 = 不改。 */
     size?: string;
+    /** 时长（秒，**写到 metadata 的 `seconds`**，与 `config.videoSeconds` 同名不同层）；空 = 不改。 */
+    seconds?: string;
 };
 
 /**
@@ -61,12 +63,14 @@ export function buildVideoBatchPatch(input: VideoBatchPatchInput): VideoBatchPat
     if (vquality) patch.vquality = vquality;
     const size = String(input.size ?? "").trim();
     if (size) patch.size = size;
+    const seconds = String(input.seconds ?? "").trim();
+    if (seconds) patch.seconds = seconds;
     return patch;
 }
 
-/** patch 里有没有东西可写（三个字段全空 = 用户什么都没选）。 */
+/** patch 里有没有东西可写（四个字段全空 = 用户什么都没选）。 */
 export function hasVideoBatchChange(patch: VideoBatchPatch): boolean {
-    return Boolean(patch.model || patch.vquality || patch.size);
+    return Boolean(patch.model || patch.vquality || patch.size || patch.seconds);
 }
 
 /**
@@ -90,6 +94,13 @@ export function unionChoices(lists: ReadonlyArray<ReadonlyArray<{ value: string;
 export type VideoBatchModelChoices = {
     resolutions: ReadonlyArray<{ value: string }>;
     sizes: ReadonlyArray<{ value: string }>;
+    /**
+     * 可选时长（秒）。
+     *
+     * **空数组 = 这个模型时长固定、不可改**（Muse 系写死 10s）—— 批量遇到就跳过该节点，
+     * 而不是把用户选的秒数硬写进去（后端会静默收掉，面板上还会显示一个点不亮的假值）。
+     */
+    seconds: ReadonlyArray<{ value: string }>;
 };
 
 export type VideoBatchPlanTarget = {
@@ -141,6 +152,8 @@ export function planVideoBatchPatches(targets: readonly VideoBatchPlanTarget[], 
         const choices = options.choicesForModel(model);
         const supportsResolution = (value: string) => choices.resolutions.some((item) => item.value === value);
         const supportsSize = (value: string) => choices.sizes.some((item) => item.value === value);
+        // 空数组（Muse 系固定 10s）= 谁都不支持 → 下面一律跳过。
+        const supportsSeconds = (value: string) => choices.seconds.some((item) => item.value === value);
 
         // 用户点名要的档位这个模型给不了 → 整个节点跳过（部分写入会让节点处于半新半旧的自相矛盾状态）。
         if (patch.vquality && !supportsResolution(patch.vquality)) {
@@ -151,11 +164,18 @@ export function planVideoBatchPatches(targets: readonly VideoBatchPlanTarget[], 
             skippedIds.push(target.id);
             continue;
         }
+        // 🔴 时长也要校验：各家上限不同（fisher 12 / wenxi 15 / 默认 20 / 聚算只收 5–15 整数），
+        // 硬写会「提交时报错 or 被静默收掉」，用户以为是批量没生效。
+        if (patch.seconds && !supportsSeconds(patch.seconds)) {
+            skippedIds.push(target.id);
+            continue;
+        }
 
         const nodePatch: VideoBatchPatch = {};
         if (patch.model) nodePatch.model = patch.model;
         if (patch.vquality) nodePatch.vquality = patch.vquality;
         if (patch.size) nodePatch.size = patch.size;
+        if (patch.seconds) nodePatch.seconds = patch.seconds;
         // 只换了模型、没点名分辨率：旧档位若不属于新模型族，顺手换成新族默认（或清空）。
         if (patch.model && !patch.vquality) {
             const current = String(target.vquality ?? "").trim();
@@ -164,7 +184,7 @@ export function planVideoBatchPatches(targets: readonly VideoBatchPlanTarget[], 
             }
         }
 
-        if (!nodePatch.model && !nodePatch.vquality && !nodePatch.size) {
+        if (!nodePatch.model && !nodePatch.vquality && !nodePatch.size && !nodePatch.seconds) {
             skippedIds.push(target.id);
             continue;
         }

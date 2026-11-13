@@ -19,7 +19,7 @@ import { VIDEO_BATCH_UNCHANGED, type VideoBatchPatchInput } from "@/lib/canvas/v
 export type CanvasVideoBatchChoice = { value: string; label: string };
 
 /** 某个模型下可选的档位；返回 `null` 表示「这个模型没有专属规则，沿用并集」。 */
-export type CanvasVideoBatchChoicesForModel = (model: string) => { resolutions: CanvasVideoBatchChoice[]; sizes: CanvasVideoBatchChoice[] } | null;
+export type CanvasVideoBatchChoicesForModel = (model: string) => { resolutions: CanvasVideoBatchChoice[]; sizes: CanvasVideoBatchChoice[]; seconds: CanvasVideoBatchChoice[] } | null;
 
 export function CanvasVideoBatchDialog({
     open,
@@ -27,6 +27,7 @@ export function CanvasVideoBatchDialog({
     modelOptions,
     resolutionChoices,
     sizeChoices,
+    secondChoices,
     choicesForModel,
     onClose,
     onApply,
@@ -37,6 +38,8 @@ export function CanvasVideoBatchDialog({
     modelOptions: CanvasVideoBatchChoice[];
     resolutionChoices: CanvasVideoBatchChoice[];
     sizeChoices: CanvasVideoBatchChoice[];
+    /** 时长档位（秒）；空数组 = 选区里没有可改时长的节点。 */
+    secondChoices: CanvasVideoBatchChoice[];
     /** 选了模型后按该模型族重算档位（用户 2026-11-13 的第 2 条要求）。 */
     choicesForModel?: CanvasVideoBatchChoicesForModel;
     onClose: () => void;
@@ -46,6 +49,7 @@ export function CanvasVideoBatchDialog({
     const [model, setModel] = useState<string>(VIDEO_BATCH_UNCHANGED);
     const [vquality, setVquality] = useState<string>(VIDEO_BATCH_UNCHANGED);
     const [size, setSize] = useState<string>(VIDEO_BATCH_UNCHANGED);
+    const [seconds, setSeconds] = useState<string>(VIDEO_BATCH_UNCHANGED);
 
     // 每次打开都从「全都不改」开始：上一次的选择留在弹窗里，用户很容易误以为这次也会应用。
     useEffect(() => {
@@ -53,12 +57,18 @@ export function CanvasVideoBatchDialog({
         setModel(VIDEO_BATCH_UNCHANGED);
         setVquality(VIDEO_BATCH_UNCHANGED);
         setSize(VIDEO_BATCH_UNCHANGED);
+        setSeconds(VIDEO_BATCH_UNCHANGED);
     }, [open]);
 
     /** 选中模型后的专属档位；没选模型 / 该模型没有专属规则时退回调用方给的并集。 */
     const followed = useMemo(() => (model ? choicesForModel?.(model) ?? null : null), [choicesForModel, model]);
     const resolutions = followed?.resolutions.length ? followed.resolutions : resolutionChoices;
     const sizes = followed?.sizes.length ? followed.sizes : sizeChoices;
+    /**
+     * 时长**不按长度退回并集**：`followed.seconds === []` 是「这个模型时长固定」（Muse 系），
+     * 退回并集会让用户以为能改，落盘时那批节点又全被跳过。所以只认 `followed` 是否存在。
+     */
+    const secondsChoices = followed ? followed.seconds : secondChoices;
 
     /**
      * 换模型后把「新模型根本没有的档位」退回「保持不变」。
@@ -68,6 +78,7 @@ export function CanvasVideoBatchDialog({
      */
     const resolutionKey = resolutions.map((item) => item.value).join("|");
     const sizeKey = sizes.map((item) => item.value).join("|");
+    const secondKey = secondsChoices.map((item) => item.value).join("|");
     useEffect(() => {
         const allowed = resolutionKey ? new Set(resolutionKey.split("|")) : new Set<string>();
         setVquality((prev) => (prev && !allowed.has(prev) ? VIDEO_BATCH_UNCHANGED : prev));
@@ -76,8 +87,12 @@ export function CanvasVideoBatchDialog({
         const allowed = sizeKey ? new Set(sizeKey.split("|")) : new Set<string>();
         setSize((prev) => (prev && !allowed.has(prev) ? VIDEO_BATCH_UNCHANGED : prev));
     }, [sizeKey]);
+    useEffect(() => {
+        const allowed = secondKey ? new Set(secondKey.split("|")) : new Set<string>();
+        setSeconds((prev) => (prev && !allowed.has(prev) ? VIDEO_BATCH_UNCHANGED : prev));
+    }, [secondKey]);
 
-    const untouched = !model && !vquality && !size;
+    const untouched = !model && !vquality && !size && !seconds;
     const followLabel = model ? modelOptions.find((item) => item.value === model)?.label || model : "";
 
     return (
@@ -106,11 +121,18 @@ export function CanvasVideoBatchDialog({
                     <ChoiceRow choices={sizes} value={size} onChange={setSize} keepLabel={t("canvas.videoBatch.keep")} />
                 </Field>
 
+                <Field
+                    label={t("canvas.videoBatch.seconds")}
+                    hint={followed && !followed.seconds.length ? t("canvas.videoBatch.secondsFixed") : undefined}
+                >
+                    <ChoiceRow choices={secondsChoices} value={seconds} onChange={setSeconds} keepLabel={t("canvas.videoBatch.keep")} />
+                </Field>
+
                 <div className="flex items-center justify-between gap-3 border-t pt-4" style={{ borderColor: "rgba(0,0,0,0.08)" }}>
                     <span className="text-xs opacity-55">{untouched ? t("canvas.videoBatch.needOne") : t("canvas.videoBatch.applyHint", { count })}</span>
                     <div className="flex gap-2">
                         <Button onClick={onClose}>{t("canvas.videoBatch.cancel")}</Button>
-                        <Button type="primary" icon={<Check className="size-4" />} disabled={untouched || count < 1} onClick={() => onApply({ model, vquality, size })}>
+                        <Button type="primary" icon={<Check className="size-4" />} disabled={untouched || count < 1} onClick={() => onApply({ model, vquality, size, seconds })}>
                             {t("canvas.videoBatch.apply")}
                         </Button>
                     </div>

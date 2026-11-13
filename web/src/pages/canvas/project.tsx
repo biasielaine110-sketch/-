@@ -237,7 +237,7 @@ import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFil
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
 import { BATCH_VIDEO_GENERATE_GAP_MS, buildBatchGeneratePlan, isBatchGeneratableNode, planBatchGenerateSchedule } from "@/lib/canvas/batch-generate";
 import { buildVideoBatchPatch, collectVideoBatchTargets, hasVideoBatchChange, planVideoBatchPatches, unionChoices, type VideoBatchPatchInput } from "@/lib/canvas/video-batch-settings";
-import { videoResolutionChoicesFor, videoSizeChoicesFor } from "@/components/video-settings-panel";
+import { videoResolutionChoicesFor, videoSecondsChoicesFor, videoSizeChoicesFor } from "@/components/video-settings-panel";
 import { CanvasVideoBatchDialog } from "@/components/canvas/canvas-video-batch-dialog";
 import { attachNodesToGroup, collectGroupMembers, isGroupableNode, resolveGroupFrame } from "@/lib/canvas/canvas-grouping";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
@@ -7613,6 +7613,9 @@ function AtelierCanvasPage() {
             return {
                 resolutions: videoResolutionChoicesFor(config),
                 sizes: videoSizeChoicesFor(config).map((item) => ({ value: item.value, label: t(`settingsPanels.video.sizes.${item.labelKey}`) })),
+                // 时长档位也走节点面板那一个函数（`videoSecondsChoicesFor`）：Muse 系返回空数组
+                // （固定 10s）→ 批量落盘时按「该模型不支持」整节点跳过，而不是硬写一个后端会收掉的值。
+                seconds: videoSecondsChoicesFor(config).map((value) => ({ value: String(value), label: `${value}s` })),
             };
         },
         [effectiveConfig, t],
@@ -7663,14 +7666,16 @@ function AtelierCanvasPage() {
         const byId = new Map(nodes.map((node) => [node.id, node]));
         const resolutions: Array<Array<{ value: string; label: string }>> = [];
         const sizes: Array<Array<{ value: string; label: string }>> = [];
+        const seconds: Array<Array<{ value: string; label: string }>> = [];
         for (const id of videoBatchSnapshot.ids) {
             const node = byId.get(id);
             if (!node) continue;
             const choices = videoBatchChoicesForModel(resolveModelForCapability(effectiveConfig, node.metadata?.model, "video"));
             resolutions.push(choices.resolutions);
             sizes.push(choices.sizes);
+            seconds.push(choices.seconds);
         }
-        return { resolutions: unionChoices(resolutions), sizes: unionChoices(sizes) };
+        return { resolutions: unionChoices(resolutions), sizes: unionChoices(sizes), seconds: unionChoices(seconds) };
     }, [effectiveConfig, nodes, videoBatchChoicesForModel, videoBatchSnapshot.ids]);
 
     /**
@@ -11640,6 +11645,7 @@ function AtelierCanvasPage() {
                         modelOptions={videoBatchModelOptions}
                         resolutionChoices={videoBatchChoices.resolutions}
                         sizeChoices={videoBatchChoices.sizes}
+                        secondChoices={videoBatchChoices.seconds}
                         choicesForModel={videoBatchChoicesForModelOption}
                         onClose={() => setVideoBatchOpen(false)}
                         onApply={handleVideoBatchApply}

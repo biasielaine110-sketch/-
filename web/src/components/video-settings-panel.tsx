@@ -297,6 +297,42 @@ export function videoResolutionChoicesFor(config: AiConfig): Array<{ value: stri
 export function videoSizeChoicesFor(config: AiConfig): VideoSizeChoice[] {
     return sizeChoicesForFlags(resolveVideoSettingFlags(config));
 }
+
+/**
+ * 某一族的可选时长档位（秒）。
+ *
+ * 🔴 抽成纯函数是为了**单一来源**：节点自己的设置面板和右键「批量设置视频参数」必须给出同一套秒数，
+ * 否则面板里能点 15s、批量里只有 6/10/12，用户会以为两家规则不一样。
+ * Muse 系（固定 10s）不在这里处理 —— 由 `videoSecondsChoicesFor` 返回空数组表示「不可改」。
+ */
+export function secondsChoicesForFlags(flags: VideoSettingFlags, model = ""): number[] {
+    if (flags.h3Comfy) return autodlH3DurationOptions(model);
+    if (flags.fisherRh || flags.fisherLightRh) return fisherSecondOptions;
+    if (flags.singularityLightRh) return singularitySecondOptions;
+    if (flags.wenxiRh) return wenxiSecondOptions;
+    return secondOptions;
+}
+
+/** 某一族自定义时长输入框的上限（面板 `NumberInput` 的 max 用这份，别在两处各写一串三元）。 */
+export function secondsMaxForFlags(flags: VideoSettingFlags): number {
+    if (flags.fisherRh || flags.fisherLightRh) return 12;
+    if (flags.singularityLightRh) return 30;
+    if (flags.wenxiRh) return 15;
+    return 20;
+}
+
+/**
+ * 给外部（批量设置）用：某个视频配置下可选的时长；**空数组 = 这个模型时长固定、不可改**。
+ *
+ * Muse 系（Seedance.nz muse / APIMart muse-video-ext）写死 10s / 720p / 有声，传别的值 API 直接拒，
+ * 所以批量里遇到它们要跳过（见 `planVideoBatchPatches`）而不是硬写一个会被后端静默收掉的秒数。
+ */
+export function videoSecondsChoicesFor(config: AiConfig): number[] {
+    const model = config.model || config.videoModel || "";
+    if (isZhenzhenMuseVideoModel(model) || isApimartMuseVideoModel(model)) return [];
+    return secondsChoicesForFlags(resolveVideoSettingFlags(config), model);
+}
+
 export const videoSecondOptions = secondOptions.map((value) => String(value));
 
 type VideoSettingsPanelProps = {
@@ -651,14 +687,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         </div>
                     ) : (
                     <div className="grid grid-cols-3 gap-2.5">
-                        {(fisherRh || fisherLightRh
-                            ? fisherSecondOptions
-                            : singularityLightRh
-                              ? singularitySecondOptions
-                              : wenxiRh
-                                ? wenxiSecondOptions
-                                : secondOptions
-                        ).map((value) => (
+                        {secondsChoicesForFlags(flags, model).map((value) => (
                             <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                 {value}s
                             </OptionPill>
@@ -666,7 +695,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <NumberInput
                             value={seconds}
                             min={1}
-                            max={fisherRh || fisherLightRh ? 12 : singularityLightRh ? 30 : wenxiRh ? 15 : 20}
+                            max={secondsMaxForFlags(flags)}
                             theme={theme}
                             onChange={(value) =>
                                 onConfigChange(
