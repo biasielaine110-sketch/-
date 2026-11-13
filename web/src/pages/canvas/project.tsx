@@ -3774,10 +3774,19 @@ function AtelierCanvasPage() {
             }
 
             // V = 反推视频节点。Ctrl/Cmd+V 是粘贴，上面已提前 return，不会冲突。
-            // 注意：视频合并节点的「往时间线加素材」已让位给 B（见下方），V 不再兼职。
+            // 注意：视频合并节点的「往时间线加素材」已让位给 Shift+B（见下方），V 不再兼职。
             if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "v") {
                 event.preventDefault();
                 createNode(CanvasNodeType.ReverseVideo);
+                return;
+            }
+
+            // B = 新建视频合并节点，和 Q/E/W/R/T/Z/V 同属「新建节点」这一档。
+            // 「往时间线里加素材」是同一字母的 Shift 档（见下方拾取分支）—— 两条分支各自把
+            // shiftKey 写死在条件里，一次按键只会命中一条，绝不会又建节点又进拾取。
+            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "b") {
+                event.preventDefault();
+                createNode(CanvasNodeType.VideoMerge);
                 return;
             }
 
@@ -3799,7 +3808,7 @@ function AtelierCanvasPage() {
 
             /**
              * 起一条 sticky 连线：选中的节点当锚点，之后连点其他节点即可逐个接上。
-             * X（通用连线）与 B（视频合并拾取）共用这一份，别各写一遍 —— 两处的锚点方向
+             * X（通用连线）与 Shift+B（视频合并拾取）共用这一份，别各写一遍 —— 两处的锚点方向
              * （分组按 source、其余按 target）必须完全一致，复制一份迟早走偏。
              */
             const beginPickConnect = () => {
@@ -3843,11 +3852,11 @@ function AtelierCanvasPage() {
                 return;
             }
 
-            // B = 「往时间线里加素材」的专属键：只对**选中的单个视频合并节点**生效，
-            // 其他情况一律让位（连 preventDefault 都不做），免得占掉别处的 B。
+            // Shift+B = 「往时间线里加素材」：只对**选中的单个视频合并节点**生效，
+            // 其他情况一律让位（连 preventDefault 都不做），免得占掉别处的 Shift+B。
             // 方向与 X 一致（合并节点是 target，点到的素材是 source），所以复用同一份起线动作。
-            // （V 已改为「新建反推视频节点」，所以这里迁到 B。）
-            if (!isModifierShortcut && !event.altKey && !event.shiftKey && key === "b") {
+            // （裸 B 已归「新建视频合并节点」，所以拾取只能挂在 Shift 档上。）
+            if (!isModifierShortcut && !event.altKey && event.shiftKey && key === "b") {
                 if (connectingParamsRef.current) {
                     event.preventDefault();
                     setConnecting(null);
