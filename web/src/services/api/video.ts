@@ -365,6 +365,43 @@ function isJusuanhubTimeoutError(error: unknown): boolean {
 const JUSUANHUB_VIDEO_DOWNLOAD_CONCURRENCY = 2;
 /** 下载重试间隔基数：4s → 8s（`resolveJusuanhubRetryDelayMs` 再叠指数与抖动，上限 30s）。 */
 const JUSUANHUB_VIDEO_DOWNLOAD_RETRY_BASE_MS = 4_000;
+
+/**
+ * 取片改「按片搬」（2026-11-14）。
+ *
+ * 🔴 现场：整段 5–15MB 经 Cloudflare 边缘从这家（国内 nginx）搬回来时，**响应头先到（200）、
+ * body 传到一半被 reset**。浏览器侧拿到的是 XHR 无状态码的 `ERR_NETWORK`，axios 连 `status`
+ * 都没有，于是 3 轮 × 内部 3 次全败、只能报一句「取片连接被上游中断」—— 而 2MB 的图一直取得到。
+ * 按 2MB 切片后每条请求几秒就结束，单条被 reset 只损失这一片，而且**片长可以校验**，
+ * 短了就当这片失败单独重试，不会把残缺字节拼进成片（那会变成缺 `moov` 的坏 mp4）。
+ */
+const JUSUANHUB_VIDEO_RANGE_CHUNK_BYTES = 2 * 1024 * 1024;
+/** 片数上限（2MB × 40 = 80MB）：超了说明不是我们预期的短视频，别切，退回整段搬。 */
+const JUSUANHUB_VIDEO_RANGE_MAX_CHUNKS = 40;
+/** 单片字节超时：2MB 给 60 秒足够，别沿用整段的 150 秒。 */
+const JUSUANHUB_VIDEO_RANGE_TIMEOUT_MS = 60_000;
+/** 单片重试次数（片级，不牵连其它片）。 */
+const JUSUANHUB_VIDEO_RANGE_CHUNK_ATTEMPTS = 3;
+
+/** 把总字节切成 `[{start,end}]`（闭区间，对得上 `Range: bytes=start-end`）。纯逻辑，探针直接测。 */
+export function planJusuanhubRangeChunks(total: number, chunkBytes = JUSUANHUB_VIDEO_RANGE_CHUNK_BYTES): Array<{ start: number; end: number }> {
+    const size = Math.floor(Number(total));
+    const step = Math.floor(Number(chunkBytes));
+    if (!Number.isFinite(size) || size <= 0) return [];
+    if (!Number.isFinite(step) || step <= 0) return [];
+    const chunks: Array<{ start: number; end: number }> = [];
+    for (let start = 0; start < size; start += step) {
+        chunks.push({ start, end: Math.min(size, start + step) - 1 });
+    }
+    return chunks;
+}
+
+/** 解析 `content-range: bytes 0-2097151/15482931` 的总长；没有总长（`*`）返回 0。纯逻辑。 */
+export function readJusuanhubContentRangeTotal(header: unknown): number {
+    const match = /\/(\d+)\s*$/.exec(String(header ?? "").trim());
+    const total = match ? Number(match[1]) : 0;
+    return Number.isFinite(total) && total > 0 ? total : 0;
+}
 let jusuanhubDownloadActive = 0;
 const jusuanhubDownloadWaiters: Array<() => void> = [];
 
@@ -394,6 +431,72 @@ function releaseJusuanhubDownloadSlot(): void {
     const next = jusuanhubDownloadWaiters.shift();
     if (next) next();
     else jusuanhubDownloadActive = Math.max(0, jusuanhubDownloadActive - 1);
+}
+
+/**
+ * 按 2MB 分片把成片搬回来。返回 `null` = 「这家不吃 `Range`」/「片数超限」/「首片长度对不上」，
+ * 调用方退回整段下载（整段那条路仍保留：小片能过、上游不支持 Range 时它照样能用）。
+ *
+ * 只对**代理那一跳**调用 —— contentUrl 不回 ACAO，直连必死在 preflight（见 §5）。
+ */
+async function downloadJusuanhubVideoByRange(config: AiConfig, target: string, options?: RequestOptions): Promise<Blob | null> {
+    const requestRange = async (start: number, end: number) => {
+        const response = await axios.get<Blob>(target, {
+            headers: { ...aiHeaders(config), Range: `bytes=${start}-${end}` },
+            responseType: "blob",
+            signal: options?.signal,
+            timeout: JUSUANHUB_VIDEO_RANGE_TIMEOUT_MS,
+            // 200（忽略 Range 给全量）/ 416（越界）都要**读得到**才能判断，别让 axios 先抛。
+            validateStatus: (status: number) => (status >= 200 && status < 300) || status === 416,
+        });
+        return {
+            status: Number(response.status) || 0,
+            blob: response.data as Blob,
+            headers: response.headers as Record<string, unknown>,
+        };
+    };
+
+    // 首片既是数据，也是「这上游到底吃不吃 Range」的探测。
+    const head = await requestRange(0, JUSUANHUB_VIDEO_RANGE_CHUNK_BYTES - 1);
+    // 200 = 上游忽略 Range、直接回了全量：这一份本身就是完整下载，别再整段搬第二遍
+    // （校验在调用方，坏了会回退到整段重试）。416 / 其它状态交给整段逻辑去定性。
+    if (head.status === 200) return head.blob.size > 0 ? head.blob : null;
+    if (head.status !== 206) return null;
+    const total = readJusuanhubContentRangeTotal(head.headers["content-range"]);
+    if (!total) return null;
+    const chunks = planJusuanhubRangeChunks(total);
+    if (!chunks.length || chunks.length > JUSUANHUB_VIDEO_RANGE_MAX_CHUNKS) return null;
+    // 首片长度对不上 = 这条链路已经开始截断我们了，别再拼一堆不可信的字节。
+    if (head.blob.size !== chunks[0].end - chunks[0].start + 1) return null;
+
+    const parts: Blob[] = [head.blob];
+    for (const chunk of chunks.slice(1)) {
+        const expected = chunk.end - chunk.start + 1;
+        let lastError: unknown = null;
+        for (let attempt = 0; attempt < JUSUANHUB_VIDEO_RANGE_CHUNK_ATTEMPTS; attempt += 1) {
+            if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+            try {
+                const part = await requestRange(chunk.start, chunk.end);
+                // 🔴 片长必须精确等于预期：短了就是「这一条也被 reset 了」，重试这片，
+                // 而不是把缺字节的段拼进去（拼进去的 mp4 会缺 moov、播放器直接打不开）。
+                if (part.status !== 206 || part.blob.size !== expected) {
+                    throw new Error(`range chunk ${chunk.start}-${chunk.end} got ${part.status}/${part.blob.size}`);
+                }
+                parts.push(part.blob);
+                lastError = null;
+                break;
+            } catch (error) {
+                if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+                lastError = error;
+                if (attempt < JUSUANHUB_VIDEO_RANGE_CHUNK_ATTEMPTS - 1) {
+                    await delay(resolveJusuanhubRetryDelayMs(attempt, undefined, 1_500), options?.signal);
+                }
+            }
+        }
+        // 某一片重试到上限仍失败：整片放弃 → 交给外层退回整段下载，别用残缺字节糊一个 mp4。
+        if (lastError) throw lastError;
+    }
+    return new Blob(parts, { type: head.blob.type || "video/mp4" });
 }
 
 /**
@@ -432,6 +535,23 @@ async function downloadJusuanhubVideoBlob(config: AiConfig, url: string, options
      * 「视频下载未完成（Network Error）」，完全没法定位。所以最终 report 时优先用代理这份。
      */
     let proxyError: unknown = null;
+    /** 分片那一轮的失败：它不覆盖 `proxyError`，只在「整段也失败」之后作为补充参考。 */
+    let rangeError: unknown = null;
+    // 🔴 先按 2MB 分片搬（病灶见 JUSUANHUB_VIDEO_RANGE_CHUNK_BYTES 的注释）：整段搬 5–15MB
+    //    才是这条链路一直失败的真因，不是账户限流。返回 null = 上游不吃 Range，落到下面的整段逻辑。
+    if (proxied) {
+        try {
+            const sliced = await downloadJusuanhubVideoByRange(config, proxied, options);
+            if (sliced) {
+                await assertVideoBlob(sliced);
+                const blob = await assertJusuanhubPlayableMp4(sliced);
+                return { blob: blob.type === "video/mp4" ? blob : blob.slice(0, blob.size, "video/mp4"), mimeType: "video/mp4" };
+            }
+        } catch (error) {
+            if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+            rangeError = error;
+        }
+    }
     /**
      * 轮次按「失败类型」收口，而不是拍一个固定次数：
      *  · 链路抖动（ECONNRESET / 502 / 上游刚写完还没落盘）→ 秒级失败，重试很便宜，给 3 轮；
@@ -482,7 +602,7 @@ async function downloadJusuanhubVideoBlob(config: AiConfig, url: string, options
     // 也别再包一层「下载未完成」，否则用户看到的是「下载未完成（返回的不是可播放的 MP4）」这种绕口话。
     const isDefinitive = (error: unknown): error is Error =>
         error instanceof Error && Boolean((error as Error & { jusuanhubDefinitive?: boolean }).jusuanhubDefinitive);
-    const reported = [lastError, proxyError].find(isDefinitive) ?? proxyError ?? lastError;
+    const reported = [lastError, proxyError, rangeError].find(isDefinitive) ?? proxyError ?? lastError ?? rangeError;
     if (isDefinitive(reported)) throw reported;
     // 超时单独给一句能照着做的话：再报 `timeout of 150000ms exceeded` 只会让用户以为模型坏了。
     if (isJusuanhubTimeoutError(reported)) {
@@ -496,7 +616,18 @@ async function downloadJusuanhubVideoBlob(config: AiConfig, url: string, options
      */
     const reportedStatus = axios.isAxiosError(reported) ? Number(reported.response?.status) || 0 : 0;
     if (reportedStatus === 429) throw new Error(apiText("videoDownloadRateLimited"));
-    if (!reportedStatus) throw new Error(apiText("videoDownloadInterrupted", { rounds: roundsRun }));
+    if (!reportedStatus) {
+        // 无状态码 = 浏览器只给了一个 XHR 层失败（`ERR_NETWORK` / `ERR_HTTP2_PROTOCOL_ERROR`），
+        // UI 上没法再细分。控制台留一份现场：分片走没走、失败 code、总轮数 —— 下次报障能直接定性。
+        console.warn("[jusuanhub] 取片失败（无状态码）", {
+            url: absolute,
+            code: (reported as { code?: string } | null | undefined)?.code || "",
+            rounds: roundsRun,
+            rangeTried: Boolean(proxied),
+            rangeError: rangeError instanceof Error ? rangeError.message : String(rangeError || ""),
+        });
+        throw new Error(apiText("videoDownloadInterrupted", { rounds: roundsRun }));
+    }
     const reason = reported instanceof Error && reported.message ? reported.message : "下载失败";
     throw new Error(apiText("videoDownloadIncomplete", { reason }));
 }

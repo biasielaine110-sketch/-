@@ -176,6 +176,9 @@ export async function handleProxy(request) {
             outHeaders.set(key, value);
         });
         outHeaders.set("Access-Control-Allow-Origin", "*");
+        // 分片取片（`Range: bytes=a-b`）要靠 `content-range` 判断总长与片长；它不是 CORS
+        // 安全头，不 expose 浏览器就一个都读不到（axios 拿到 undefined）。暴露这几个只读头即可。
+        outHeaders.set("Access-Control-Expose-Headers", "content-range, accept-ranges, content-length, content-type");
 
         return new Response(upstream.body, {
             status: upstream.status,
