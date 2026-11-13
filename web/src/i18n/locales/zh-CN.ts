@@ -1921,6 +1921,7 @@ export default {
             batchGenerate: "一键生成（{{count}} 个）",
             batchGenerateEmpty: "选中的节点里没有可生成的图片 / 视频（需要先写提示词或连上文本节点）",
             batchGenerateStarted: "已提交 {{count}} 个节点开始生成",
+            batchGenerateQueued: "已排队 {{count}} 个节点，视频每 {{seconds}} 秒启动一个（避免一次发太多把上游打爆）",
             batchGenerateSkipped: "另有 {{count}} 个节点被跳过（正在生成 / 没有提示词 / 类型不支持）",
             group: "成组（{{count}} 个）",
             groupCreated: "已把 {{count}} 个节点打成一个分组 —— 选中这个组按 X 再点下游节点，就能一次取到组内全部素材",

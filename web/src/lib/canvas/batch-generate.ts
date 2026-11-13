@@ -86,3 +86,36 @@ export function buildBatchGeneratePlan({
 
     return plan;
 }
+
+/**
+ * 批量一键生成里，两个**视频**节点之间至少隔多久（用户 2026-11-13 21:41）。
+ *
+ * 一次把 5 个 minimax-h3 全发出去，聚算这类渠道会同时排 5 条大任务：画布卡顿、上游也更容易 504。
+ * 错开 2 秒后请求仍然是并行的，只是不再同一瞬间砸出去。
+ */
+export const BATCH_VIDEO_GENERATE_GAP_MS = 2_000;
+
+export type BatchGenerateScheduleEntry = BatchGeneratePlanItem & { delayMs: number };
+
+/**
+ * 给每个节点算「相对点击那一刻」的启动延迟。
+ *
+ * 只有**视频**会推进这口时钟：图片走的接口不同、体积小得多，本身不加延迟（批量出图不该被拖成串行），
+ * 但它排在视频后面时仍然要等前一个视频让出的 2 秒（不能抢在视频前面挤同一个瞬间）。
+ *  - `[video, video, video]` → 0 / 2000 / 4000
+ *  - `[image, image]` → 0 / 0
+ *  - `[video, image, video]` → 0 / 2000 / 2000（图片不额外加时，所以第二个视频仍是 2 秒后）
+ */
+export function planBatchGenerateSchedule(
+    items: readonly BatchGeneratePlanItem[],
+    gapMs: number = BATCH_VIDEO_GENERATE_GAP_MS,
+): BatchGenerateScheduleEntry[] {
+    const gap = Number.isFinite(gapMs) && gapMs > 0 ? gapMs : 0;
+    const entries: BatchGenerateScheduleEntry[] = [];
+    let elapsed = 0;
+    for (const item of items) {
+        entries.push({ ...item, delayMs: elapsed });
+        if (item.mode === "video") elapsed += gap;
+    }
+    return entries;
+}

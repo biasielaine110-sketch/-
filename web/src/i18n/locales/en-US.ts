@@ -1922,6 +1922,7 @@ export default {
             batchGenerate: "Generate all ({{count}})",
             batchGenerateEmpty: "None of the selected nodes can generate (add a prompt or connect a text node first)",
             batchGenerateStarted: "Started generating {{count}} nodes",
+            batchGenerateQueued: "Queued {{count}} nodes — videos start {{seconds}}s apart so the upstream is not flooded",
             batchGenerateSkipped: "{{count}} more were skipped (already running / no prompt / unsupported type)",
             group: "Group ({{count}})",
             groupCreated: "Grouped {{count}} nodes — select the group, press X and click a node downstream to pull every member in one go",

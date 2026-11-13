@@ -235,7 +235,7 @@ import {
 import { createZip } from "@/lib/zip";
 import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFileBase, normalizeMergeClip, probeImageSize, probeVideoMeta, resolveMergeCanvasSize, videoMergeClipFromNode, type ResolvedVideoMergeClip } from "@/lib/canvas/video-merge";
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
-import { buildBatchGeneratePlan, isBatchGeneratableNode } from "@/lib/canvas/batch-generate";
+import { BATCH_VIDEO_GENERATE_GAP_MS, buildBatchGeneratePlan, isBatchGeneratableNode, planBatchGenerateSchedule } from "@/lib/canvas/batch-generate";
 import { buildVideoBatchPatch, collectVideoBatchTargets, hasVideoBatchChange, planVideoBatchPatches, unionChoices, type VideoBatchPatchInput } from "@/lib/canvas/video-batch-settings";
 import { videoResolutionChoicesFor, videoSizeChoicesFor } from "@/components/video-settings-panel";
 import { CanvasVideoBatchDialog } from "@/components/canvas/canvas-video-batch-dialog";
@@ -7494,11 +7494,24 @@ function AtelierCanvasPage() {
         return ids.length >= 2 ? ids : [];
     }, [contextMenu, nodes, selectedNodeIds]);
 
+    /** 批量一键生成的「错峰」定时器：离开画布时清掉，别让已经离开的页面继续偷偷提交任务。 */
+    const batchGenerateTimersRef = useRef<Set<number>>(new Set());
+    useEffect(
+        () => () => {
+            for (const timer of batchGenerateTimersRef.current) window.clearTimeout(timer);
+            batchGenerateTimersRef.current.clear();
+        },
+        [],
+    );
+
     /**
-     * 批量生成：把选区里的图片 / 视频节点一次性丢进生成队列。
+     * 批量生成：把选区里的图片 / 视频节点丢进生成队列。
      *
      * 刻意复用 `handleGenerateNode`（而不是另写一条请求链路），这样提示词上游合并、风格 / 摄像机修饰、
      * 排队与中止、状态回写全都与单点生成一模一样；每个节点各自持一个 abort controller，互不影响。
+     *
+     * 🔴 视频节点**错开 2 秒**逐个触发（用户 2026-11-13 21:41）：一次把多个 minimax-h3 全发出去，
+     * 聚算这类渠道会同时排几条大任务，画布直接卡、上游也更容易 504。图片不占槽位，照旧立刻发。
      */
     const handleBatchGenerate = useCallback(
         (nodeIds: string[]) => {
@@ -7512,8 +7525,28 @@ function AtelierCanvasPage() {
                 message.warning(t("canvas.contextMenu.batchGenerateEmpty"));
                 return;
             }
-            for (const item of plan.items) void handleGenerateNode(item.nodeId, item.mode, item.prompt);
-            message.success(t("canvas.contextMenu.batchGenerateStarted", { count: plan.items.length }));
+            const schedule = planBatchGenerateSchedule(plan.items);
+            for (const entry of schedule) {
+                if (entry.delayMs <= 0) {
+                    void handleGenerateNode(entry.nodeId, entry.mode, entry.prompt);
+                    continue;
+                }
+                const timer = window.setTimeout(() => {
+                    batchGenerateTimersRef.current.delete(timer);
+                    // 排队期间用户可能停掉了这个节点、或又点了一次生成：到点先复核，别重复提交。
+                    if (isNodeGeneratingRef.current(entry.nodeId)) return;
+                    void handleGenerateNode(entry.nodeId, entry.mode, entry.prompt);
+                }, entry.delayMs);
+                batchGenerateTimersRef.current.add(timer);
+            }
+            const videoCount = plan.items.filter((item) => item.mode === "video").length;
+            if (videoCount > 1) {
+                message.success(
+                    t("canvas.contextMenu.batchGenerateQueued", { count: plan.items.length, seconds: Math.round(BATCH_VIDEO_GENERATE_GAP_MS / 1000) }),
+                );
+            } else {
+                message.success(t("canvas.contextMenu.batchGenerateStarted", { count: plan.items.length }));
+            }
             const skipped = plan.skippedRunning + plan.skippedNoPrompt + plan.skippedType;
             if (skipped > 0) message.info(t("canvas.contextMenu.batchGenerateSkipped", { count: skipped }));
         },
