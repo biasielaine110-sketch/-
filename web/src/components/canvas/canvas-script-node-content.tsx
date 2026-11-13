@@ -2741,27 +2741,27 @@ export function CanvasScriptNodeContent({
             {/* 「用哪套提示词」比「出什么画幅」更上位，排第一行（与输入视图同序）。 */}
             {schemeSelector}
 
-            {/* 生成口径：风格模板 / 对话模型 / 生视频模型 —— 与标题栏那三个是同一份控件。 */}
+            {/* 生成口径：风格模板 / 对话模型 / 生视频模型 —— 与标题栏那三个是同一份控件。
+                🔴 模型必须限宽（`max-w-[220px]`）：这一行在缩放态是整条通栏，而 `textModelPicker` 自带
+                `fullWidth`，不限宽就会拉出一条横跨节点的空长条（用户 2026-11-14「模型的选择条也太长了」）。
+                限宽只加在这个包裹层上 —— `textModelPicker` 是和标题栏共用的变量，别在变量里改。 */}
             <div className="flex flex-wrap items-center gap-1.5">
                 {styleTemplatePicker}
-                <div className="min-w-0 flex-1">{textModelPicker}</div>
+                <div className="min-w-0 max-w-[220px] flex-1">{textModelPicker}</div>
                 {videoModelPicker}
             </div>
 
-            {/* 铺链路口径：每 3 镜合一视频（决定铺链路时一段拼几镜）。
-                「生图比例」已按用户要求从节点上移除（2026-11-12），改比例去「AI 生成」弹窗里选。 */}
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">{shotsPerClipSelector}</div>
-
-            {/* 三个批量动作 —— 与表体右下角完全同一份实现。全都没有（没接回调）时整行不占位。
-                🔴 靠右（`justify-end`）：用户 2026-11-14「缩放时这几个按钮在最左侧不好选，要放最右侧」。
-                窄节点换行时每一行也贴右边，鼠标不用横跨大半个节点。 */}
-            {directAssetButton || buildVideoChainButton || pipelineVideoGenerateButton ? (
-                <div className="flex flex-wrap items-center justify-end gap-1.5">
-                    {directAssetButton}
-                    {buildVideoChainButton}
-                    {pipelineVideoGenerateButton}
-                </div>
-            ) : null}
+            {/* 铺链路口径（每 N 镜合一视频）+ 三个批量动作 —— 同一行、整体贴右。
+                「生图比例」已按用户要求从节点上移除（2026-11-12），改比例去「AI 生成」弹窗里选。
+                🔴 靠右（`justify-end`）：用户 2026-11-14「缩放时这几个按钮在最左侧不好选，要放最右侧」
+                +「每 3 镜合一个这个也要放右面去」。并成一行是因为两者都是「动作」，
+                靠右叠成两行反而把节点右下角堆满了；窄节点换行时每一行仍然贴右边。 */}
+            <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1.5">
+                {shotsPerClipSelector}
+                {directAssetButton}
+                {buildVideoChainButton}
+                {pipelineVideoGenerateButton}
+            </div>
         </div>
     );
 
