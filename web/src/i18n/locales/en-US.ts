@@ -943,6 +943,7 @@ export default {
             pipelineVideoChainHint: "Lays out video nodes only, merged every {{count}} shots into one clip (ignores the segment setting above) and wires them all into one video merge node; no text / image nodes, no auto-generate.",
             shotsPerClipLabel: "Video merge",
             shotsPerClipToggle: "{{count}} shots per video",
+            shotsPerClipOnSuffix: " · On",
             shotsPerClipOnHint: "On: every pipeline run (incl. one-click video) merges 3 shots into one video node. Click again to go back to the segment setting (default 4 per video).",
             shotsPerClipOffHint: "Turn on to merge every 3 shots into one video node in every pipeline run (incl. one-click video); off = current behavior (segment setting, default 4 per video).",
             totalSecondsLabel: "Total length",

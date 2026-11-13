@@ -2291,10 +2291,13 @@ export function CanvasScriptNodeContent({
                 type="button"
                 className="inline-flex h-6 items-center gap-1 rounded-full border px-2.5 transition"
                 style={{
-                    borderColor: compactShotsPerClip ? theme.toolbar.activeText : theme.node.stroke,
-                    // 与「每镜时长」「生图比例」同口径：选中必须实心，浅色描边会被看成「没点上」。
-                    background: compactShotsPerClip ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
-                    color: compactShotsPerClip ? theme.node.panel : theme.node.text,
+                    // 🎨 开/关两态以用户 2026-11-14 给的样张为准：
+                    //   开 = **淡淡的高亮底 + 亮描边 + 文案后缀「· 已开」**；关 = 透明底 + 暗描边。
+                    // 原来「开」是把 activeText 当底色做**实心反白**，用户明确否掉了（它和旁边那些
+                    // 选中的胶囊长得一样，扫视时分不出这是「开关」还是「当前选中的某个档位」）。
+                    borderColor: compactShotsPerClip ? theme.node.activeStroke : theme.node.stroke,
+                    background: compactShotsPerClip ? `${theme.node.text}1a` : "transparent",
+                    color: theme.node.text,
                     opacity: compactShotsPerClip ? 1 : 0.7,
                 }}
                 aria-pressed={Boolean(compactShotsPerClip)}
@@ -2308,6 +2311,8 @@ export function CanvasScriptNodeContent({
             >
                 <Layers className="size-3" />
                 {t("canvas.scriptNode.shotsPerClipToggle", { count: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT })}
+                {/* 后缀单独一个 key：只改「已开」的说法时不用动整句，也不会把 `{{count}}` 弄丢。 */}
+                {compactShotsPerClip ? <span className="opacity-80">{t("canvas.scriptNode.shotsPerClipOnSuffix")}</span> : null}
             </button>
         </div>
     );
@@ -2742,12 +2747,15 @@ export function CanvasScriptNodeContent({
             {schemeSelector}
 
             {/* 生成口径：风格模板 / 对话模型 / 生视频模型 —— 与标题栏那三个是同一份控件。
-                🔴 模型必须限宽（`max-w-[220px]`）：这一行在缩放态是整条通栏，而 `textModelPicker` 自带
-                `fullWidth`，不限宽就会拉出一条横跨节点的空长条（用户 2026-11-14「模型的选择条也太长了」）。
+                ① 整行**靠右**（用户 2026-11-14：「这三个也移动到最右边去」，与下面动作行同一侧）；
+                ② 模型**定宽 220px**：`textModelPicker` 自带 `fullWidth`，不定宽就会拉出一条横跨节点的
+                   空长条（用户同日：「模型的选择条也太长了把？这么不合理啊」）。
                 限宽只加在这个包裹层上 —— `textModelPicker` 是和标题栏共用的变量，别在变量里改。 */}
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
                 {styleTemplatePicker}
-                <div className="min-w-0 max-w-[220px] flex-1">{textModelPicker}</div>
+                {/* 定宽 220px，不用 `flex-1`：整行靠右时 `flex-1` 会把空白全吃掉、把左边三个控件顶回去。
+                    `max-w-full shrink` 保证窄节点里还能压下去。 */}
+                <div className="w-[220px] max-w-full shrink">{textModelPicker}</div>
                 {videoModelPicker}
             </div>
 
