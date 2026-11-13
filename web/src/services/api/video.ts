@@ -191,7 +191,18 @@ async function retryAlternateTransport<T>(config: AiConfig, path: string, primar
  *    所以本分支必须在它**之前**（与 work-fisher 同一个坑）。
  */
 const JUSUANHUB_VIDEO_CREATE_TIMEOUT_MS = 120_000;
-const JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS = 60_000;
+/** 轮询 `GET /v1/jobs/{id}` 的超时。状态接口是秒回的，不需要下载那么长的预算。 */
+const JUSUANHUB_POLL_TIMEOUT_MS = 60_000;
+/**
+ * 取成片的超时。
+ *
+ * 🔴 **不能和轮询共用 60s**（2026-11-13 线上踩坑）：`/v1/assets/{id}/content` 不回
+ * `Access-Control-Allow-Origin`，只能走同源代理、把 Bearer 交给它转发；一条 5–15MB 的成片
+ * 经代理搬回来要几十秒到一两分钟。60 秒一到 axios 先超时，紧接着兜底的直连又被 CORS 拦，
+ * 用户最后看到的是一句没信息量的「视频下载未完成（Network Error）」，真因（代理还在搬）
+ * 被彻底盖住。给足 150 秒，让代理把片子搬完。
+ */
+const JUSUANHUB_VIDEO_DOWNLOAD_TIMEOUT_MS = 150_000;
 
 function newJusuanhubVideoIdempotencyKey() {
     try {
@@ -303,7 +314,7 @@ async function pollJusuanhubVideoTask(config: AiConfig, task: VideoGenerationTas
                 axios.get<unknown>(aiApiUrl(config, `/jobs/${encodeURIComponent(task.id)}`), {
                     headers: aiHeaders(config),
                     signal: options?.signal,
-                    timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
+                    timeout: JUSUANHUB_POLL_TIMEOUT_MS,
                 }),
             { signal: options?.signal, maxAttempts: 3 },
         );
@@ -337,6 +348,12 @@ async function pollJusuanhubVideoTask(config: AiConfig, task: VideoGenerationTas
     return { status: "completed", result: await fetchJusuanhubVideoResult(config, state.urls[0], options) };
 }
 
+/** axios 侧的超时判定（浏览器里 timeout 表现为 `ECONNABORTED` + `timeout of N ms exceeded`）。 */
+function isJusuanhubTimeoutError(error: unknown): boolean {
+    if (!axios.isAxiosError(error)) return false;
+    return error.code === "ECONNABORTED" || error.code === "ETIMEDOUT" || /timeout/i.test(error.message || "");
+}
+
 /**
  * 取回成片。**contentUrl 不是公开直链**：不带 Bearer 就是 401，而且
  * `/v1/assets/{id}/content` 不回 `Access-Control-Allow-Origin`，带 Authorization 的浏览器直连
@@ -352,9 +369,25 @@ async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?
     const direct = String(url || "").trim();
     const absolute = /^https?:\/\//i.test(direct) ? direct : buildApiUrl(config.baseUrl, direct);
     const proxied = forceProxyMediaUrl(absolute);
+    // 代理优先；直连只作兜底（contentUrl 不回 ACAO，直连基本必被 preflight 拦，但它失败得很快，不占时间）。
     const targets = proxied ? [proxied, absolute] : [absolute];
     let lastError: unknown;
-    for (let round = 0; round < 3; round += 1) {
+    /**
+     * 代理那一轮的真实失败，**必须单独留一份**。
+     *
+     * 🔴 兜底直连失败时抛的是浏览器给的 `Network Error`（CORS 被拦），它会把代理的
+     * 401 / 504 / `timeout of N ms exceeded` 全部盖掉，用户只能看到一句
+     * 「视频下载未完成（Network Error）」，完全没法定位。所以最终 report 时优先用代理这份。
+     */
+    let proxyError: unknown = null;
+    /**
+     * 轮次按「失败类型」收口，而不是拍一个固定次数：
+     *  · 链路抖动（ECONNRESET / 502 / 上游刚写完还没落盘）→ 秒级失败，重试很便宜，给 3 轮；
+     *  · 超时（150s 都搬不完）→ 再等一轮只是让用户多干等 2.5 分钟，本轮到点就收口。
+     */
+    const MAX_ROUNDS = 3;
+    for (let round = 0; round < MAX_ROUNDS; round += 1) {
+        let timedOut = false;
         for (const target of targets) {
             try {
                 const response = await runWithJusuanhubRetry(
@@ -363,7 +396,7 @@ async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?
                             headers: aiHeaders(config),
                             responseType: "blob",
                             signal: options?.signal,
-                            timeout: JUSUANHUB_VIDEO_REQUEST_TIMEOUT_MS,
+                            timeout: JUSUANHUB_VIDEO_DOWNLOAD_TIMEOUT_MS,
                         }),
                     { signal: options?.signal, maxAttempts: 3 },
                 );
@@ -374,16 +407,27 @@ async function fetchJusuanhubVideoResult(config: AiConfig, url: string, options?
             } catch (error) {
                 if (axios.isCancel(error) || options?.signal?.aborted) throw error;
                 lastError = error;
+                if (proxied && target === proxied) proxyError = error;
+                if (isJusuanhubTimeoutError(error)) timedOut = true;
                 // 换下一条再试（代理不通 → 直连；直连被 CORS 拦 → 下一轮再来）。
             }
         }
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+        // 超时不重来：代理已经搬了 150 秒还没搬完，再排一轮只会让用户白等。
+        if (timedOut) break;
         await delay(1_200 * (round + 1), options?.signal);
     }
-    // 最后一轮拿到的仍是「字节层面就能定性」的错（空/截断/不是 MP4），原样抛，
-    // 不要再包一层「下载未完成」，否则用户看到的是「下载未完成（返回的不是可播放的 MP4）」这种绕口话。
-    if (lastError instanceof Error && (lastError as Error & { jusuanhubDefinitive?: boolean }).jusuanhubDefinitive) throw lastError;
-    const reason = lastError instanceof Error && lastError.message ? lastError.message : "下载失败";
+    // 「字节层面就能定性」的错（空 / 截断 / 不是 MP4）优先原样抛：它比代理的 504 更接近真相，
+    // 也别再包一层「下载未完成」，否则用户看到的是「下载未完成（返回的不是可播放的 MP4）」这种绕口话。
+    const isDefinitive = (error: unknown): error is Error =>
+        error instanceof Error && Boolean((error as Error & { jusuanhubDefinitive?: boolean }).jusuanhubDefinitive);
+    const reported = [lastError, proxyError].find(isDefinitive) ?? proxyError ?? lastError;
+    if (isDefinitive(reported)) throw reported;
+    // 超时单独给一句能照着做的话：再报 `timeout of 150000ms exceeded` 只会让用户以为模型坏了。
+    if (isJusuanhubTimeoutError(reported)) {
+        throw new Error(apiText("videoDownloadTimeout"));
+    }
+    const reason = reported instanceof Error && reported.message ? reported.message : "下载失败";
     throw new Error(apiText("videoDownloadIncomplete", { reason }));
 }
 

@@ -437,6 +437,7 @@ export default {
         noVideoTask: "接口没有返回视频任务",
         videoDownloadFailed: "视频下载失败",
         videoDownloadIncomplete: "视频下载未完成（{{reason}}），请重试",
+        videoDownloadTimeout: "视频下载超时（成片较大或站点代理较慢），请稍后重试；若反复超时，可到「配置 → 偏好设置」把「API 请求方式」改为「浏览器直连」再试",
         videoDownloadEmpty: "视频下载为空，请重试",
         videoDownloadTruncated: "视频文件不完整（{{bytes}} 字节，缺少 moov 索引），请重试",
         videoDownloadNotMp4: "服务端返回的不是可播放的 MP4（{{bytes}} 字节）",

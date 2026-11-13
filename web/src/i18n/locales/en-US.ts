@@ -437,6 +437,7 @@ export default {
         noVideoTask: "The API did not return a video task",
         videoDownloadFailed: "Failed to download video",
         videoDownloadIncomplete: "Video download did not complete ({{reason}}). Please retry.",
+        videoDownloadTimeout: "The video download timed out (large clip or a slow site proxy). Please retry shortly; if it keeps timing out, switch \"API transport\" to \"Direct browser\" in Config → Preferences.",
         videoDownloadEmpty: "The downloaded video is empty. Please retry.",
         videoDownloadTruncated: "The video file is incomplete ({{bytes}} bytes, missing the moov index). Please retry.",
         videoDownloadNotMp4: "The server did not return a playable MP4 ({{bytes}} bytes)",
