@@ -3,9 +3,11 @@ import {
     collectScriptAssetPromptCandidates,
     normalizeStoryScriptCellAssetMap,
     normalizeStoryScriptNameLockMap,
+    resolveScriptAssetRole,
     resolveStoryScriptImageSize,
     scriptCellAssetIds,
     scriptNameLockIds,
+    scriptNameLockName,
     SCRIPT_ASSET_GENERATABLE_ROLE_IDS,
     setStoryScriptCellAssetIds,
     setStoryScriptNameLock,
@@ -13,6 +15,7 @@ import {
     type StoryScriptExtraColumn,
     type StoryScriptRow,
 } from "@/constant/story-script";
+import { resolveScriptAssetExistingNodeIds } from "@/lib/canvas/script-asset-align";
 import type { CanvasNodeData } from "@/types/canvas";
 
 /**
@@ -41,8 +44,14 @@ export type ScriptAssetBatchItem = {
     existingNodeIds: string[];
 };
 
-/** 已连到脚本节点的素材（用来判断「这个资产已经有图了」）。 */
-export type ScriptAssetExistingAsset = { nodeId: string; title: string; role: ScriptAssetRole };
+/**
+ * 已连到脚本节点的素材（用来判断「这个资产已经有图了」）。
+ *
+ * `role` 可以缺省：用户刚拖进画布 / 刚连上来的图还没在画布上分类（`scriptAssetRoles` 里没有它），
+ * 这时**只按名字认**（见 `resolveScriptAssetExistingNodeIds` 的分类守卫）—— 否则「先备好场景图、
+ * 批量生图别再生一遍」这件事在场景上永远不成立（图默认分类是角色）。
+ */
+export type ScriptAssetExistingAsset = { nodeId: string; title: string; role?: ScriptAssetRole | string | null };
 
 export function scriptAssetBatchKey(role: ScriptAssetRole, title: string) {
     return `${role}:${String(title || "").trim()}`;
@@ -55,15 +64,17 @@ export function scriptAssetBatchKey(role: ScriptAssetRole, title: string) {
  *   同类内保留分镜表里首次出现的顺序：生成的网格顺序与表里读到的顺序一致，看图时好对。
  * - 去重口径 = `collectScriptAssetPromptCandidates`（角色按名字、场景道具按名字 + 描述），
  *   这里只再按「分类 + 标题」兜一层，避免两个分类恰好同名时被当成同一条。
- * - `existing` 用「分类 + 标题」精确匹配（标题就是资产名，生成时我们还会把标题改回来），
+ * - `existing` 先按「分类 + 标题」精确匹配（标题就是资产名，生成时我们还会把标题改回来），
+ *   再按**名字相近**兜一层（`resolveScriptAssetExistingNodeIds`：`林晚 定妆（正面）` 也算 `林晚` 有图）。
  *   对不上就当作没生成过 —— 宁可多勾一条让用户手动取消，也不要静默漏掉一张该出的图。
  */
 export function buildScriptAssetBatchItems(rows: readonly StoryScriptRow[] | null | undefined, existing: readonly ScriptAssetExistingAsset[] = []): ScriptAssetBatchItem[] {
     const existingMap = new Map<string, string[]>();
     for (const asset of existing) {
-        const key = scriptAssetBatchKey(asset.role, asset.title);
+        if (!asset?.nodeId) continue;
+        const key = scriptAssetBatchKey(resolveScriptAssetRole(asset.role), scriptNameLockName(asset.title));
         const list = existingMap.get(key) || [];
-        if (asset.nodeId && !list.includes(asset.nodeId)) list.push(asset.nodeId);
+        if (!list.includes(asset.nodeId)) list.push(asset.nodeId);
         existingMap.set(key, list);
     }
     const seen = new Set<string>();
@@ -73,10 +84,67 @@ export function buildScriptAssetBatchItems(rows: readonly StoryScriptRow[] | nul
             const key = scriptAssetBatchKey(role, candidate.title);
             if (seen.has(key)) continue;
             seen.add(key);
-            items.push({ key, role, title: candidate.title, prompt: candidate.prompt, existingNodeIds: existingMap.get(key) || [] });
+            /**
+             * 已出图的两条来源：**精确同名**（老口径，键是 `分类:去空白标题`）+ **名字相近**（新口径）。
+             * 相近那层必须带分类守卫（见 `resolveScriptAssetExistingNodeIds`），否则一张角色图会把
+             * 名字里含它的场景也算成「已有图」。
+             */
+            const exact = existingMap.get(scriptAssetBatchKey(role, scriptNameLockName(candidate.title))) || [];
+            const near = resolveScriptAssetExistingNodeIds(role, candidate.title, existing).filter((nodeId) => !exact.includes(nodeId));
+            items.push({ key, role, title: candidate.title, prompt: candidate.prompt, existingNodeIds: [...exact, ...near] });
         }
     }
     return items;
+}
+
+/**
+ * 把「已经按资产名锁好的图」并进 `existingNodeIds`（幂等）。
+ *
+ * 为什么批量生图还要看锁表：锁是「这个资产已经有指定图了」的**唯一权威**——
+ * 它可能是上一集沿用过来的、也可能是用户在「按镜按资产」里逐格挑的，那张图未必连在本节点上游。
+ * 不看锁表，就会出现「用户明明已经指定过这张图，批量生图还是照生一张、还把它顶掉」。
+ *
+ * @param aliveNodeIds 还在画布上的图片 id（**必须传**）：锁里可能有已删节点，照着跳过会漏生成。
+ */
+export function mergeScriptAssetBatchLockedIds(
+    items: readonly ScriptAssetBatchItem[],
+    locks: unknown,
+    aliveNodeIds?: readonly string[] | null,
+): ScriptAssetBatchItem[] {
+    if (!items.length || !locks) return items.slice();
+    const alive = aliveNodeIds ? new Set(aliveNodeIds) : null;
+    return items.map((item) => {
+        // 锁的键是表里那一格的**原文**，所以按 `item.title` 精确查（不做相近匹配：锁是权威，不能猜）。
+        const ids = scriptNameLockIds(locks, item.title).filter((nodeId) => (alive ? alive.has(nodeId) : true) && !item.existingNodeIds.includes(nodeId));
+        return ids.length ? { ...item, existingNodeIds: [...item.existingNodeIds, ...ids] } : item;
+    });
+}
+
+/**
+ * 「一键直接生图 / 一键视频」用：剔掉**名字锁已经指定了图**的那几条资产。
+ *
+ * 与 `buildScriptAssetDirectItems` 的「不筛选已出图」不冲突 —— 那条口径讲的是
+ * 「画布上碰巧有一张同名图不算数，全部照生」；而**名字锁**是用户明确指定的图
+ * （自己锁的 / 上一集沿用来的 / 「按镜按资产」里逐格挑的），再生成一张就是白花钱，
+ * 还会把锁变成并集、铺链路时两张图一起接到该镜上。
+ *
+ * @param aliveNodeIds 还在画布上的图片 id：锁里指到已删节点的名字**不算锁定**（否则会漏生成）。
+ */
+export function filterScriptAssetItemsLockedByName(
+    items: readonly ScriptAssetBatchItem[],
+    locks: unknown,
+    aliveNodeIds?: readonly string[] | null,
+): { items: ScriptAssetBatchItem[]; skipped: ScriptAssetBatchItem[] } {
+    if (!items.length || !locks) return { items: items.slice(), skipped: [] };
+    const alive = aliveNodeIds ? new Set(aliveNodeIds) : null;
+    const kept: ScriptAssetBatchItem[] = [];
+    const skipped: ScriptAssetBatchItem[] = [];
+    for (const item of items) {
+        const locked = scriptNameLockIds(locks, item.title).filter((nodeId) => (alive ? alive.has(nodeId) : true));
+        if (locked.length) skipped.push({ ...item, existingNodeIds: locked });
+        else kept.push(item);
+    }
+    return { items: kept, skipped };
 }
 
 /** 按分类分组（弹窗按组渲染）。空分类不返回。 */

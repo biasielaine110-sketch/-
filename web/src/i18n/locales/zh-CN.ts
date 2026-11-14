@@ -872,6 +872,7 @@ export default {
             directAssetHint: "不弹窗、不筛选：把表里全部 {{count}} 个角色 / 场景 / 道具一次性全部生成（角色固定 9:16，场景 / 道具固定 16:9，不受上方「生图比例」影响；不含人物站位图），场景与道具额外追加「空景、不要出现人物」后缀，画幅还会同时写进提示词开头和最后一行；模型取配置偏好里的默认生图模型",
             directAssetStarted: "已开始直接生成 {{count}} 张资产图",
             directAssetEmpty: "分镜表里还没有可生成的资产（角色 / 场景 / 道具至少要有内容）",
+            directAssetLockedSkip: "已锁定 {{count}} 条资产图，本次跳过生成（直接用锁定的图）",
             viewTemplateMissing: "词库里没找到「{{names}}」——这批图不会套视图版式。判据是标题同时含「角色视图 / 角色三视图」+「无头」（场景是「场景视图」+「宫格」），且条目没被关掉；改好标题后再点一次即可",
             oneClickVideo: "一键视频",
             oneClickVideoHint:

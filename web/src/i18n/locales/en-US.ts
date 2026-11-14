@@ -871,6 +871,7 @@ export default {
             directAssetHint: "No dialog, no filtering: generate all {{count}} characters / scenes / props at once (characters locked to 9:16, scenes & props to 16:9, ignoring the size selector above; blocking diagrams excluded). Scene and prop prompts also get an empty-plate suffix (no people), and every prompt states its aspect ratio both at the start and on the last line; the default image model from your preferences is used",
             directAssetStarted: "Started generating {{count}} asset image(s)",
             directAssetEmpty: "No asset to generate yet — the character / scene / prop columns need content",
+            directAssetLockedSkip: "{{count}} asset image(s) already locked — skipping generation and reusing the locked image",
             viewTemplateMissing:
                 "No library entry matched \"{{names}}\" — these images will not get the view layout. A character entry needs \"角色视图 / 角色三视图\" + \"无头\" in its title (scene: \"场景视图\" + \"宫格\") and must stay enabled; fix the title and run again",
             oneClickVideo: "One-click video",

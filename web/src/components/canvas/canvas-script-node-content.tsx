@@ -89,11 +89,12 @@ import {
 } from "@/constant/story-script";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
-import { buildScriptAssetBatchItems, isScriptAssetDirectRole, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { isSameScriptAssetByName, planScriptAssetAlignment, shouldApplyScriptAssetAlignment, type ScriptAssetAlignCandidate } from "@/lib/canvas/script-asset-align";
+import { buildScriptAssetBatchItems, isScriptAssetDirectRole, mergeScriptAssetBatchLockedIds, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import type { ScriptAssetInheritOptions, ScriptAssetInheritSource } from "@/lib/canvas/script-asset-inherit";
 import type { OneClickVideoRun } from "@/lib/canvas/one-click-video";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
-import type { CanvasNodeData } from "@/types/canvas";
+import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 
 /** 素材候选由 project.tsx 计算后传进来，这里只做展示与选择。 */
 export type { ScriptAssetCandidate, ScriptAssetLinkSelection };
@@ -371,6 +372,12 @@ type CanvasScriptNodeContentProps = {
     /** 解除本表全部资产锁定。 */
     onClearNameLocks?: (nodeId: string) => void;
     /**
+     * **预挂资产自动对齐**：把「连到本节点、标题≈表里资产名」的图自动写进 `scriptNameLocks`
+     * （顺带修正分类）。上层只负责合并 metadata —— 判定与写什么全在
+     * `lib/canvas/script-asset-align.ts`，组件不自己算。
+     */
+    onAlignAssets?: (nodeId: string, metadata: Partial<CanvasNodeMetadata>) => void;
+    /**
      * **资产池缩略图拖拽换位**：把本节点上游素材的连线按新顺序重排。
      * 顺序会跟随「铺链路」时把资产条素材接到图片 / 视频节点的先后，所以想让某张参考图排在前面就拖它。
      */
@@ -445,6 +452,7 @@ export function CanvasScriptNodeContent({
     nameLocks,
     onNameLockChange,
     onClearNameLocks,
+    onAlignAssets,
     onReorderScriptAssets,
     onRemoveScriptAsset,
     inheritSources,
@@ -780,17 +788,52 @@ export function CanvasScriptNodeContent({
     /**
      * 一键批量生成的候选：分镜表里能抽出来的角色 / 场景 / 道具（按名字去重）。
      *
-     * 判断「这个资产已经有图了吗」用**已连到本节点的图片素材 + 它们的分类**：生成出来的资产图会
-     * 连成本节点的上游、标题就是资产名，所以「同名 + 同分类」= 出过图。对不上就当作没有 ——
-     * 宁可多勾一条让用户取消，也别静默漏掉一张该出的资产图。
+     * 判断「这个资产已经有图了吗」有三条来源（口径全在 `lib/canvas/script-asset-*.ts`，组件不自己算）：
+     *  ① 已连到本节点的图片，**精确同名 + 同分类**（老口径：出过图的资产图会变成上游素材）；
+     *  ② 同上，**名字相近**（`林晚 定妆（正面）` 也算 `林晚`）—— 用户「把图连上来、改个大概相关的名字、
+     *     别再生一遍」走的就是这条；
+     *  ③ `scriptNameLocks` 里已经指定的图（上一集沿用来 / 在「按镜按资产」里逐格挑的，未必连在本节点）。
+     * 对不上就当作没有 —— 宁可多勾一条让用户取消，也别静默漏掉一张该出的资产图。
      */
+    const aliveImageIds = useMemo(() => (imageCandidates || []).map((item) => item.id), [imageCandidates]);
     const batchAssetItems = useMemo(() => {
         if (!onBatchGenerateAssets || !rows.length) return [] as ScriptAssetBatchItem[];
+        // 分类**原样**传（可能是 null）：没在画布上分类过的素材只按名字认 —— 用户刚拖进来的场景图
+        // 默认落在「角色」上，要是连分类一起卡死，它就永远认不上场景，会被重复生成一遍。
         const existing = activeReferences
             .filter((reference) => reference.kind === "image")
-            .map((reference) => ({ nodeId: reference.nodeId, title: reference.title, role: resolveScriptAssetRole(assetRoles?.[reference.nodeId]) }));
-        return buildScriptAssetBatchItems(rows, existing);
-    }, [activeReferences, assetRoles, onBatchGenerateAssets, rows]);
+            .map((reference) => ({ nodeId: reference.nodeId, title: reference.title, role: assetRoles?.[reference.nodeId] ?? null }));
+        return mergeScriptAssetBatchLockedIds(buildScriptAssetBatchItems(rows, existing), nameLocks, aliveImageIds);
+    }, [activeReferences, aliveImageIds, assetRoles, nameLocks, onBatchGenerateAssets, rows]);
+    /**
+     * **预挂资产自动对齐**（用户 2026-11-13 口径：「把图连上来、改个大概相关的名字，就自动挂到表里、
+     * 不再二次生成」）。
+     *
+     * 为什么做成 effect 而不是挂在「连线成功」的回调上：用户常常**先连线、后改标题**，而改标题发生在
+     * 画布节点上、没有任何回调能钩。这里拿「连进来的素材 id + 标题」当签名，签名一变就算一遍：
+     *  - 幂等：`shouldApplyScriptAssetAlignment` 只在真有新锁 / 新分类时才为真，写完之后再算就是空；
+     *  - 不自激：写 metadata → 重渲染 → 签名没变 → `alignBusyRef` 直接短路（否则会无限写）。
+     */
+    const alignSignature = useMemo(
+        () =>
+            activeReferences
+                .filter((reference) => reference.kind === "image")
+                .map((reference) => `${reference.nodeId}:${reference.title}`)
+                .join("|"),
+        [activeReferences],
+    );
+    const alignBusyRef = useRef("");
+    useEffect(() => {
+        if (!onAlignAssets || !rows.length || isRunning) return;
+        if (!alignSignature || alignBusyRef.current === alignSignature) return;
+        const candidates: ScriptAssetAlignCandidate[] = activeReferences
+            .filter((reference) => reference.kind === "image")
+            .map((reference) => ({ nodeId: reference.nodeId, title: reference.title }));
+        const plan = planScriptAssetAlignment({ scriptNode: node, candidates, rows, preset: presetId, extras: extraColumns });
+        if (!shouldApplyScriptAssetAlignment(plan)) return;
+        alignBusyRef.current = alignSignature;
+        onAlignAssets(node.id, plan.metadata);
+    }, [activeReferences, alignSignature, extraColumns, isRunning, node, onAlignAssets, presetId, rows]);
     /**
      * 「一键直接生图」要生的那几条（只算按钮显不显示 / 提示里的数字）。
      *

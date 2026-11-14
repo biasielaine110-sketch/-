@@ -187,6 +187,7 @@ import {
     buildScriptAssetBatchItems,
     collectScriptAssetOccupied,
     describeScriptAssetAspectMismatch,
+    filterScriptAssetItemsLockedByName,
     matchScriptAssetReferences,
     mountScriptAssetToCells,
     planScriptAssetGrid,
@@ -200,6 +201,7 @@ import {
     type ScriptAssetReference,
 } from "@/lib/canvas/script-asset-batch";
 import { buildScriptAssetInheritPlan, collectScriptInheritSources, scriptRowAssetNames, type ScriptAssetInheritOptions } from "@/lib/canvas/script-asset-inherit";
+import { collectScriptAssetAlignCandidates, planScriptAssetAlignment, shouldApplyScriptAssetAlignment } from "@/lib/canvas/script-asset-align";
 import { planScriptPipelineGenerateOrder, readScriptPipelineVideoOutcome, resolveScriptPipelineRetryModel, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
@@ -8983,6 +8985,36 @@ function AtelierCanvasPage() {
         [message, t],
     );
 
+    /**
+     * **预挂资产自动对齐**：脚本节点把「连上来的图按名字对上表里资产」算成补丁（`scriptNameLocks` /
+     * `scriptAssetRoles`）后交给这里落库（用户 2026-11-13 口径：「改个大概相关的名字就自动挂到表里、
+     * 不再二次生成」）。
+     *
+     * 判定全在 `lib/canvas/script-asset-align.ts`（组件里那个 effect 只负责「什么时候算」），
+     * 这里只做一件事：把补丁**合并**进节点 metadata。合并而不是整份替换 —— 传进来的是
+     * 「组件读到的锁 + 这次新加的」，而这两者之间可能已经有别的写入（比如用户刚在格子里锁了张图）。
+     */
+    const handleAlignScriptAssets = useCallback((nodeId: string, metadata: Partial<CanvasNodeMetadata>) => {
+        if (!metadata || (!metadata.scriptNameLocks && !metadata.scriptAssetRoles)) return;
+        setNodes((prev) =>
+            prev.map((item) => {
+                if (item.id !== nodeId) return item;
+                const nextLocks: Record<string, string[]> = { ...(item.metadata?.scriptNameLocks || {}) };
+                for (const [name, ids] of Object.entries(metadata.scriptNameLocks || {})) {
+                    nextLocks[name] = Array.from(new Set([...(nextLocks[name] || []), ...ids]));
+                }
+                return {
+                    ...item,
+                    metadata: {
+                        ...item.metadata,
+                        ...(metadata.scriptNameLocks ? { scriptNameLocks: nextLocks } : {}),
+                        ...(metadata.scriptAssetRoles ? { scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), ...metadata.scriptAssetRoles } } : {}),
+                    },
+                };
+            }),
+        );
+    }, []);
+
     // 一键铺链路：每一镜铺出「文本（分镜提示词）→ 图片」两个节点，「视频」则按分段方式（单镜 / 每 N 镜 /
     // 按每段时长）合并——同一段里的多个关键帧会一起喂给那一个视频节点，多镜的提示词合成一条视频提示词。
     // 上游素材按分类连线：角色按分镜里的角色名逐镜匹配（名字一个都没对上时按「全连」兜底），场景 / 道具 /
@@ -9235,12 +9267,22 @@ function AtelierCanvasPage() {
             // 一句、最后一行再钉一次，见 `applyScriptAssetDirectDecorations` 的顺序说明）。这里就地改 prompt，
             // 所以「节点上显示的提示词」与「真正发给生图模型的提示词」是同一份（下面 `cell.item.prompt` 两处读的都是它）。
             // ⚠️ `skipAssetKeys` 必须在**整形之前**过滤：键是 `分类:标题`，与整形无关，早过滤少算一批提示词。
-            const wanted = applyScriptAssetDirectDecorations(
+            /**
+             * ⚠️ 2026-11-13：这里**多剔一类** —— 名字锁已经指定了图的资产（`filterScriptAssetItemsLockedByName`）。
+             * 与「一键直接生图不筛选已出图」不冲突：那条口径讲的是「画布上碰巧有张同名图不算数、全部照生」；
+             * 而名字锁是**用户明确指定的图**（自己锁的 / 上一集沿用来 / 按镜按资产里逐格挑的 / 连上来的图
+             * 被自动对齐锁定的）。再生成一张既是白花钱，又会让锁变成并集、铺链路把两张图一起接上去。
+             */
+            const aliveImageIds = nodesRef.current.filter((node) => node.type === CanvasNodeType.Image).map((node) => node.id);
+            const directLocked = filterScriptAssetItemsLockedByName(
                 buildScriptAssetDirectItems(source.metadata?.scriptRows)
                     .filter((item) => !skipKeys.has(item.key))
                     .filter((item) => item.title.trim() && item.prompt.trim()),
-                effectiveConfig.textPrompts,
+                source.metadata?.scriptNameLocks,
+                aliveImageIds,
             );
+            const wanted = applyScriptAssetDirectDecorations(directLocked.items, effectiveConfig.textPrompts);
+            if (directLocked.skipped.length) message.info(t("canvas.scriptNode.directAssetLockedSkip", { count: directLocked.skipped.length }));
             if (!wanted.length) {
                 message.warning(t("canvas.scriptNode.directAssetEmpty"));
                 return { created: [] };
@@ -11314,6 +11356,7 @@ function AtelierCanvasPage() {
                         nameLocks={contentNode.metadata?.scriptNameLocks}
                         onNameLockChange={handleNameLockChange}
                         onClearNameLocks={handleClearNameLocks}
+                        onAlignAssets={handleAlignScriptAssets}
                         onReorderScriptAssets={handleReorderScriptAssets}
                         onRemoveScriptAsset={handleScriptAssetRemove}
                         inheritSources={getScriptInheritSources(contentNode.id)}
@@ -11448,6 +11491,7 @@ function AtelierCanvasPage() {
             handleCellAssetsChange,
             handleCellModelChange,
             handleClearNameLocks,
+            handleAlignScriptAssets,
             handleConfigNodeChange,
             handleGenerateNode,
             handleGenerateScriptAsset,
