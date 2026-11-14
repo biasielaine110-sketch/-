@@ -5,14 +5,18 @@ import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import {
+    applyMergeClipSourceDuration,
     formatMergeClock,
     locateMergePosition,
+    markMergeClipTrimmed,
+    mergeClipFollowsSource,
     MIN_MERGE_CLIP_SEC,
     moveMergeClip,
     nextPlayableMergeIndex,
     normalizeMergeClip,
     probeMediaDuration,
     removeMergeClip,
+    resetMergeClipToFull,
     resolveMergeCanvasSize,
     resolveMergeSpans,
     roundSeconds,
@@ -172,31 +176,46 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
         setSelectedIndex(located.index);
     };
 
-    // 时长探测只做一轮：`durationSec` 一旦回填，key 就不再命中，不会循环。
-    const probeKey = clips
-        .filter((item) => item.clip.kind === "video" && !item.clip.durationSec && item.url)
-        .map((item) => item.clip.nodeId)
-        .join("|");
+    /**
+     * 时长探测：「这一段跟随源片」就测一次真实时长（用户 2026-11-14：
+     * 「视频合并的每段的时间以拾取视频的实际时长为准，即拾取的视频为几秒那么视频合并的段落时长就是几秒」）。
+     *
+     * key 带上 `storageKey` / url 尾巴：**源视频重新生成后必须重测**，只按 nodeId 拼 key 会一直停在旧值。
+     * 回填写回 `durationSec + inSec:0 + outSec`：铺链路建的段一开始是「请求秒数」占位（比如 5s），
+     * 真实片子 10s 的话这里会把它拉齐 —— 这正是用户要的口径。
+     * `changed` 守卫很关键：写回后会触发一轮重渲染（`rawClips` 引用变了），没有它就会「探测 → 写 → 再探测」转圈。
+     */
+    const probeTargets = clips.filter((item) => item.clip.kind === "video" && item.url && mergeClipFollowsSource(item.clip));
+    const probeKey = probeTargets.map((item) => `${item.clip.nodeId}:${item.storageKey || item.url.slice(-24)}`).join("|");
 
     useEffect(() => {
         if (!probeKey) return;
-        const targets = clips.filter((item) => item.clip.kind === "video" && !item.clip.durationSec && item.url);
         let cancelled = false;
-        void Promise.all(targets.map(async (item) => ({ nodeId: item.clip.nodeId, seconds: await probeMediaDuration(item.url) }))).then((results) => {
+        void Promise.all(probeTargets.map(async (item) => ({ nodeId: item.clip.nodeId, seconds: await probeMediaDuration(item.url) }))).then((results) => {
             if (cancelled) return;
             const known = results.filter((item) => item.seconds > 0);
             if (!known.length) return;
+            let changed = false;
             const next = rawClips.map((clip) => {
                 const hit = known.find((item) => item.nodeId === clip.nodeId);
                 if (!hit) return clip;
-                return normalizeMergeClip({ ...clip, durationSec: roundSeconds(hit.seconds), outSec: clip.outSec <= 1 ? roundSeconds(hit.seconds) : clip.outSec });
+                const synced = applyMergeClipSourceDuration(clip, hit.seconds);
+                if (synced === clip) return clip;
+                const sameDuration = Math.abs((Number(synced.durationSec) || 0) - (Number(clip.durationSec) || 0)) < 0.02;
+                const sameRange = Math.abs(synced.outSec - clip.outSec) < 0.02 && synced.inSec === clip.inSec;
+                if (sameDuration && sameRange && synced.autoDuration === clip.autoDuration) return clip;
+                changed = true;
+                return synced;
             });
+            if (!changed) return;
             onConfigChange(node.id, { videoMergeClips: next });
         });
         return () => {
             cancelled = true;
         };
-    }, [probeKey, clips, rawClips, node.id, onConfigChange]);
+        // `probeTargets` 每次渲染都是新数组，进依赖会让 effect 每帧空跑；key 已经包含全部身份信息。
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [probeKey, rawClips, node.id, onConfigChange]);
 
     // 换选中片段时把预览挪到它的入点，避免每次都要手动拖。（整条播放时由视频元素自己接管定位）
     useEffect(() => {
@@ -553,31 +572,33 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
                                     </div>
                                 ) : selected.clip.kind === "video" ? (
                                     <div className="flex flex-wrap items-center gap-1 text-[11px]">
+                                        {/* 手动改入 / 出点一律打 `autoDuration: false`（用户 2026-11-14：段长默认跟随源片，
+                                            但用户裁过的不能被下一次探测回写拉回整段）。「整段」按钮反过来恢复跟随。 */}
                                         <TimeField
                                             label={t("canvas.videoMerge.inPoint")}
                                             value={selected.clip.inSec}
-                                            onCommit={(value) => updateSelected((clip) => ({ ...clip, inSec: value }))}
+                                            onCommit={(value) => updateSelected((clip) => markMergeClipTrimmed({ ...clip, inSec: value }))}
                                         />
                                         <TimeField
                                             label={t("canvas.videoMerge.outPoint")}
                                             value={selected.clip.outSec}
-                                            onCommit={(value) => updateSelected((clip) => ({ ...clip, outSec: value }))}
+                                            onCommit={(value) => updateSelected((clip) => markMergeClipTrimmed({ ...clip, outSec: value }))}
                                         />
                                         <Button size="small" icon={<Scissors className="size-3" />} onClick={() => {
                                             const current = videoRef.current?.currentTime;
                                             if (typeof current !== "number" || !Number.isFinite(current)) return;
-                                            updateSelected((clip) => ({ ...clip, inSec: roundSeconds(Math.min(current, clip.outSec - MIN_MERGE_CLIP_SEC)) }));
+                                            updateSelected((clip) => markMergeClipTrimmed({ ...clip, inSec: roundSeconds(Math.min(current, clip.outSec - MIN_MERGE_CLIP_SEC)) }));
                                         }}>
                                             {t("canvas.videoMerge.setIn")}
                                         </Button>
                                         <Button size="small" onClick={() => {
                                             const current = videoRef.current?.currentTime;
                                             if (typeof current !== "number" || !Number.isFinite(current)) return;
-                                            updateSelected((clip) => ({ ...clip, outSec: roundSeconds(Math.max(current, clip.inSec + MIN_MERGE_CLIP_SEC)) }));
+                                            updateSelected((clip) => markMergeClipTrimmed({ ...clip, outSec: roundSeconds(Math.max(current, clip.inSec + MIN_MERGE_CLIP_SEC)) }));
                                         }}>
                                             {t("canvas.videoMerge.setOut")}
                                         </Button>
-                                        <Button size="small" type="text" onClick={() => updateSelected((clip) => ({ ...clip, inSec: 0, outSec: clip.durationSec || clip.outSec }))}>
+                                        <Button size="small" type="text" onClick={() => updateSelected((clip) => resetMergeClipToFull(clip))}>
                                             {t("canvas.videoMerge.fullClip")}
                                         </Button>
                                     </div>

@@ -1040,9 +1040,11 @@ export function CanvasScriptNodeContent({
     }, [patchMetadata, tableDisplayMode]);
 
     /**
-     * 铺链路「每几镜合一个视频节点」（用户 2026-11-11 第 01 条，2026-11-14 加 2 镜档）。
+     * 铺链路「每几镜合一个视频节点」（用户 2026-11-11 第 01 条，2026-11-14 加 2 镜档 + 默认开启）。
      *
-     * 值是 `0` / `2` / `3`：点了哪颗「每 N 镜合一个视频」就是 N，两颗都没点 = 0 → 原行为（4 镜）。
+     * 值是 `2` / `3` / `4`：`2` / `3` = 点开了对应那颗开关，`4` = 显式关闭（原行为）。
+     * **没写过 = 默认 3 镜开启**（用户 2026-11-14：「默认选择为每 3 镜合一个镜头开启状态」）——
+     * 所以 `readScriptShotsPerClip` 现在直接返回生效档位，不再返回 0。
      * `shotsPerClipForPipeline` 同时喂「一键铺视频链路」按钮的 `mergeEvery` 与提示文案，
      * 保证按钮上写的数 = 实际铺法。
      */
@@ -1057,10 +1059,12 @@ export function CanvasScriptNodeContent({
      * 另一边忘了，用户点了没反应还以为坏了）。
      *
      * 两颗按钮的互斥不用额外状态位：`scriptShotsPerClip` 只存**一个**数字，
-     * 点 2 就覆盖成 2、点 3 就覆盖成 3、再点同一颗才清空（回到 4 镜原行为）。
+     * 点 2 就覆盖成 2、点 3 就覆盖成 3。
+     * 🔴 再点同一颗 = **写 4**（显式关闭），不是删键 —— 删键会回到「默认 3 镜开启」，
+     * 用户点一下看着完全没反应（2026-11-14 默认改 3 之后必须这么处理）。
      */
     const toggleShotsPerClip = (count: number) => {
-        patchMetadata({ scriptShotsPerClip: compactShotsPerClip === count ? undefined : count });
+        patchMetadata({ scriptShotsPerClip: compactShotsPerClip === count ? SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP : count });
     };
 
     /**
@@ -2288,8 +2292,8 @@ export function CanvasScriptNodeContent({
      * 文案 / 提示复用表体那颗的 i18n（`shotsPerClipToggle` / `OnHint` / `OffHint`），
      * 两处说法必须一致，否则用户会以为是两个不同的开关。
      *
-     * 两颗按钮**同级互斥**（都写同一个 `scriptShotsPerClip`）：点了哪颗就是那颗，
-     * 两颗都不点 = 原行为（`SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP` = 4 镜）。
+     * 两颗按钮**同级互斥**（都写同一个 `scriptShotsPerClip`）：点了哪颗就是那颗；
+     * **没写过 = 默认 3 镜开启**（用户 2026-11-14），再点同一颗 = 写 4 = 关闭。
      * 档位数组遍历，别再逐个写死 —— 加档只改常量。
      */
     const shotsPerClipSelector = (
@@ -3572,9 +3576,10 @@ export function CanvasScriptNodeContent({
                                 「视频合并」节点；不建文本 / 图片节点、不自动触发生成。
                                 用户点一次就得到一条能直接往下游合并 / 导出的视频链。 */}
                             {buildVideoChainButton}
-                            {/* 「每 2 / 3 镜合一个视频」开关（用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档）：
+                            {/* 「每 2 / 3 镜合一个视频」开关（用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档 + 默认开启）：
                                 点了哪颗，**所有**铺链路入口（一键铺链路 / 一键铺视频链路 / 一键视频）
-                                都按那颗的镜数切片；两颗都不点 = 原行为（按「视频分段」档位，默认 4 镜）。
+                                都按那颗的镜数切片；**默认就是每 3 镜开启**（用户 2026-11-14），
+                                再点同一颗 = 写 4 = 关闭（交回「视频分段」档位）。
                                 两颗同级互斥，靠 `scriptShotsPerClip` 只存一个数字天然实现。
                                 ⚠️ 与上面几颗一样不用真 `disabled`：开关态靠颜色 + 描边表达。 */}
                             {SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS.map((count) => {

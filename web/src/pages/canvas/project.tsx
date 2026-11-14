@@ -9646,7 +9646,8 @@ function AtelierCanvasPage() {
              *  - 脚本节点点了「每 2 / 3 镜合一个视频」（`scriptShotsPerClip === 2 / 3`，
              *    用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档）
              *    → 一律按那颗的镜数切片，**优先于**分段档位、手动合并组，以及「一键铺视频链路」写死的 4；
-             *  - 都没点 → 原行为：`options.mergeEvery`（= 视频链那 4）优先，其次走「视频分段」档位。
+             *  - 没写过 → **默认 3 镜**（用户 2026-11-14：「默认选择为每 3 镜合一个镜头开启状态」）；
+             *  - 显式关闭（存了 4）→ 交回 `options.mergeEvery`（= 视频链那 4）或「视频分段」档位。
              * （读的是下面那个 `source`，所以这段必须放在它之后。）
              */
             const source = nodesRef.current.find((item) => item.id === nodeId);
@@ -10041,7 +10042,8 @@ function AtelierCanvasPage() {
              *    现在的口径是「铺出来的每个视频节点都要有下游」——1 段照样建合并节点（标题写「1 段」，
              *    之后手动拖进第二段也直接可用）。判据只看「至少有一段」，别再加回 `>= 2`；
              *  - 时间线 `outSec` 先按该段视频节点请求的秒数占位 —— 生成前还没有真实时长，
-             *    合并节点会把这些段标成「缺失」，生成后自然有内容；
+             *    合并节点会把这些段标成「缺失」；同时写 `autoDuration: true`，等视频真的出来后
+             *    合并节点按**源片真实时长**自动回填（用户 2026-11-14：「拾取的视频几秒，段就几秒」）；
              *  - 位置放在这一列视频节点的右侧、竖直居中，与链路之间留 `gapX`。
              */
             let mergeNode: CanvasNodeData | null = null;
@@ -10056,7 +10058,10 @@ function AtelierCanvasPage() {
                     title: node.title || node.id,
                     durationSec: undefined,
                     inSec: 0,
+                    // 占位秒数只为「生成前」先把时间线画出来；`autoDuration` 让合并节点在视频出来之后
+                    // 一律按**源片真实时长**回填（用户 2026-11-14：「拾取的视频几秒，段就几秒」）。
                     outSec: Number(node.metadata?.seconds) || 5,
+                    autoDuration: true,
                 }));
                 mergeNode = {
                     ...createCanvasNode(CanvasNodeType.VideoMerge, { x: 0, y: 0 }, { status: NODE_STATUS_IDLE, videoMergeClips: clips }),
@@ -10887,9 +10892,10 @@ function AtelierCanvasPage() {
                 // 反推节点里选了「MochiAni 生视频节点」→ 02/03 建脚本节点时记住引擎，铺链路时才知道建哪种窗口
                 // （用户 2026-11-10 第 02 条：「同上，后续在脚本生成器执行生视频时，也铺的是该节点」）。
                 ...(isMochianiVideoEngine(target.videoEngine) ? { scriptVideoEngine: MOCHIANI_VIDEO_ENGINE } : {}),
-                // 「每 2 / 3 个镜头合一个视频」（用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档）：
+                // 「每 2 / 3 个镜头合一个视频」（用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档 + 默认开启）：
                 // 反推节点上点了哪颗就带过来，于是 02/03 紧接着跑的一键视频 / 之后手点铺链路都按那颗的镜数切；
-                // 两颗都没点 → 不写这个键 → 仍是原行为（视频分段档位，默认 4 镜）。
+                // 反推节点上**关掉了**（存 4）也要带过来，否则脚本节点会回到「默认 3 镜开启」。
+                // 反推节点没写过（默认 3）→ 不写这个键也行：脚本节点读的默认档同样是 3。
                 ...(targetShotsPerClip ? { scriptShotsPerClip: targetShotsPerClip } : {}),
             };
             /**

@@ -78,6 +78,9 @@ export function videoMergeClipFromNode(node: CanvasNodeData, durationSec?: numbe
         inSec: 0,
         // 时长还没测出来时先给个 1 秒，节点上会自己探测真实时长再回填。
         outSec: source > 0 ? source : 1,
+        // 拾取进来的段默认「跟随源片真实时长」（用户 2026-11-14）：节点上测出几秒就是几秒，
+        // 不靠 `metadata.durationMs` 猜 —— 那个值在老数据 / 别的通道写进来的片子上经常是空的或过期的。
+        autoDuration: true,
     };
 }
 
@@ -111,6 +114,47 @@ export function normalizeMergeClip(clip: CanvasVideoMergeClip): CanvasVideoMerge
 
 export function normalizeMergeClips(clips: readonly CanvasVideoMergeClip[]) {
     return clips.map(normalizeMergeClip);
+}
+
+/**
+ * 这一段要不要「按源片真实时长」对齐（用户 2026-11-14：
+ * 「视频合并的每段的时间以拾取视频的实际时长为准，即拾取的视频为几秒那么视频合并的段落时长就是几秒」）。
+ *
+ * 三条互斥的来历：
+ *  - `autoDuration === true`  → 拾取 / 铺链路写进来的，跟随源片；
+ *  - `autoDuration === false` → 用户手动调过入出点，别覆盖；
+ *  - 不写（老数据）→ 只认「还没有已知时长」的段（铺链路的占位段、老节点），
+ *    已经有 `durationSec` 的旧时间线不动 —— 用户可能早就裁好了，不能因为这次升级把区间全拉回整段。
+ */
+export function mergeClipFollowsSource(clip: CanvasVideoMergeClip) {
+    if (clip.kind !== "video") return false;
+    if (clip.autoDuration === false) return false;
+    const known = Math.max(0, Number(clip.durationSec) || 0);
+    if (known > 0) return clip.autoDuration === true;
+    return clip.autoDuration === true || clip.inSec === 0;
+}
+
+/**
+ * 测出真实时长后把这一段对齐成「整段」：`inSec = 0`、`outSec = 真实时长`、`durationSec = 真实时长`。
+ *
+ * 不跟随源片的段（图片 / 用户手动裁过的）原样返回，调用方可以直接拿返回值做「有没有变化」的比较。
+ */
+export function applyMergeClipSourceDuration(clip: CanvasVideoMergeClip, seconds: number): CanvasVideoMergeClip {
+    if (!mergeClipFollowsSource(clip)) return clip;
+    const real = roundSeconds(Number(seconds) || 0);
+    if (!(real > 0)) return clip;
+    return normalizeMergeClip({ ...clip, autoDuration: true, durationSec: real, inSec: 0, outSec: real });
+}
+
+/** 用户手动裁过这一段 → 打上「别再自动对齐」的标记（入点 / 出点 / 设入点 / 设出点 都走它）。 */
+export function markMergeClipTrimmed(clip: CanvasVideoMergeClip): CanvasVideoMergeClip {
+    return clip.autoDuration === false ? clip : { ...clip, autoDuration: false };
+}
+
+/** 「整段」按钮：区间回到整段，并且重新跟随源片真实时长。 */
+export function resetMergeClipToFull(clip: CanvasVideoMergeClip): CanvasVideoMergeClip {
+    const full = Math.max(0, Number(clip.durationSec) || 0) || clip.outSec;
+    return normalizeMergeClip({ ...clip, autoDuration: clip.kind === "video", inSec: 0, outSec: full });
 }
 
 /**

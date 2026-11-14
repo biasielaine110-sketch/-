@@ -7,7 +7,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
-import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, normalizeScriptShotsPerClip } from "@/constant/story-script";
+import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, normalizeScriptShotsPerClip } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
 import { getStyleTemplate } from "@/constant/style-templates";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
@@ -160,11 +160,14 @@ export function CanvasReverseVideoNodeContent({
         [node.id, onConfigChange, target],
     );
     /**
-     * 「每 2 / 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档）：
-     * 存在 `reverseVideoTarget.shotsPerClip`（值就是 2 或 3），02 / 03 建脚本节点时搬进
-     * `scriptShotsPerClip`，之后铺链路按这颗的镜数切片。两颗都没点 = 0 → 原行为（4 镜）。
+     * 「每 2 / 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档 + 默认开启）：
+     * 存在 `reverseVideoTarget.shotsPerClip`（`2` / `3` = 开启、`4` = 显式关闭），02 / 03 建脚本节点时搬进
+     * `scriptShotsPerClip`，之后铺链路按这颗的镜数切片。
+     * **没写过 = 默认 3 镜开启**（用户 2026-11-14：「默认选择为每 3 镜合一个镜头开启状态」），
+     * 所以显示 / 摘要都读 `compactShots`（生效档位），不能用 `normalize` 的原始值（会得到 0 = 两颗都不亮）。
      */
-    const compactShots = normalizeScriptShotsPerClip(target.shotsPerClip);
+    const shotsChoice = normalizeScriptShotsPerClip(target.shotsPerClip);
+    const compactShots = shotsChoice || SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT;
     /**
      * 有效出片参数（用户 2026-11-11 第 02 条）：窗口里没选过时给 16:9 / 720p。
      * 02 / 03 搬给脚本节点的是**同一份**（`project.tsx` 里也调这两个函数），所以摘要写的就是实际会用的。
@@ -184,8 +187,8 @@ export function CanvasReverseVideoNodeContent({
         // 换了引擎要写在摘要里：02 / 03 的「按这套出片」是用户最后一眼确认，不能还写着普通视频模型。
         const engine = isMochianiVideoEngine(target.videoEngine) ? "MochiAni 生视频" : "";
         // 分段口径也要写：02 / 03 都是「建脚本节点 → 立刻一键视频」，铺出来几个视频窗口取决于这一档。
-        // 两颗开关都没点 = 0 → 显示原行为那档（4 镜），别写成「每 0 镜一个」。
-        const clip = `每 ${compactShots || SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜一个视频`;
+        // `compactShots` 已经是**生效档位**（默认 3、显式关闭 4），直接写，别再 `|| 4` 兜底。
+        const clip = `每 ${compactShots} 镜一个视频`;
         return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${effectiveSize} · ${qualityLabel(effectiveQuality)} · 风格：${style} · ${clip}${engine ? ` · ${engine}` : ""}`;
     }, [target, compactShots]);
     /**
@@ -557,9 +560,10 @@ export function CanvasReverseVideoNodeContent({
                     <div className="mt-1 text-[10px] leading-relaxed opacity-45">
                         秒数 = 成片总时长：02 / 03 写剧本都按它规划镜头数与台词量（默认 {DEFAULT_REVERSE_VIDEO_SECONDS} 秒）；生视频用这里的模型 / 比例 / 分辨率 / 风格（默认 16:9 · 720p，模型跟偏好里的视频模型）。
                     </div>
-                    {/* 第三行：「每 2 / 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条，2026-11-14 加 2 镜档）。
+                    {/* 第三行：「每 2 / 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条，2026-11-14 加 2 镜档 + 默认开启）。
                         两颗同级互斥：点了哪颗，02 / 03 建脚本节点时就把哪档带过去，铺链路（含一键视频）
-                        每 N 镜一个视频节点；再点同一颗关闭。两颗都不点 = 原行为（每 4 镜一个）。 */}
+                        每 N 镜一个视频节点；再点同一颗 = 写 4 = 关闭（交回视频分段档位）。
+                        **默认就是「每 3 镜」开启**（用户 2026-11-14），所以打开窗口时 3 那颗天然是亮的。 */}
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         {SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS.map((count) => {
                             const on = compactShots === count;
@@ -577,11 +581,11 @@ export function CanvasReverseVideoNodeContent({
                                     aria-pressed={on}
                                     onMouseDown={(event) => event.stopPropagation()}
                                     onPointerDown={(event) => event.stopPropagation()}
-                                    onClick={() => patchTarget({ shotsPerClip: on ? undefined : count })}
+                                    onClick={() => patchTarget({ shotsPerClip: on ? SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP : count })}
                                     title={
                                         on
-                                            ? `已开启：铺链路每 ${count} 个镜头合一个视频节点（再点一次关闭）`
-                                            : `打开后铺链路每 ${count} 个镜头合一个视频节点（默认每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜一个）`
+                                            ? `已开启：铺链路每 ${count} 个镜头合一个视频节点（再点一次关闭 → 回到视频分段档位）`
+                                            : `点击开启：铺链路每 ${count} 个镜头合一个视频节点（现在是每 ${compactShots} 镜一个）`
                                     }
                                 >
                                     <Layers size={11} className="shrink-0" />
