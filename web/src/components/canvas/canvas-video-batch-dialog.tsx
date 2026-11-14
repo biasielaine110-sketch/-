@@ -1,16 +1,19 @@
 /**
- * 右键「批量设置视频参数」弹窗：一次改多个视频节点的模型 / 分辨率 / 画面比例（2026-11-13）。
+ * 右键「批量设置视频参数」弹窗：一次改多个视频节点的模型 / 分辨率 / 画面比例 / 时长（秒）（2026-11-13，时长随后补上）。
  *
- * 三组控件的默认值都是「保持不变」（空串），所以用户只改其中一项也不会把另外两项重置。
+ * 几组控件的默认值都是「保持不变」（空串），所以用户只改其中一项也不会把另外几项重置。
  *
  * 档位有两个来源：
  *  - 没选模型时 = 调用方按**选区里各节点自己的模型族**算好的并集（混选时至少能看到一部分节点支持的档位）；
  *  - 选了模型时 = 用 `choicesForModel` 按**这个模型**重算（用户点名要求：「选了不同模型，要把它相关的
  *    分辨率规则一起带过来」）。切换模型后，上一个模型才有的档位会被自动退回「保持不变」，
  *    否则会出现「模型是聚算的、分辨率还挂着 relay 的 2K」这种提交时被静默收掉的组合。
+ *
+ * 时长除了胶囊档位还能**自己填**（`secondMax` 由调用方按模型给）：填的数不在档位里也算合法，
+ * 只要在 1..secondMax 之间 —— 落盘校验（`planVideoBatchPatches`）用同一套口径。
  */
 import { useEffect, useMemo, useState } from "react";
-import { Button, Modal, Select } from "antd";
+import { Button, InputNumber, Modal, Select } from "antd";
 import { Check } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -19,7 +22,7 @@ import { VIDEO_BATCH_UNCHANGED, type VideoBatchPatchInput } from "@/lib/canvas/v
 export type CanvasVideoBatchChoice = { value: string; label: string };
 
 /** 某个模型下可选的档位；返回 `null` 表示「这个模型没有专属规则，沿用并集」。 */
-export type CanvasVideoBatchChoicesForModel = (model: string) => { resolutions: CanvasVideoBatchChoice[]; sizes: CanvasVideoBatchChoice[]; seconds: CanvasVideoBatchChoice[] } | null;
+export type CanvasVideoBatchChoicesForModel = (model: string) => { resolutions: CanvasVideoBatchChoice[]; sizes: CanvasVideoBatchChoice[]; seconds: CanvasVideoBatchChoice[]; secondsMax: number } | null;
 
 export function CanvasVideoBatchDialog({
     open,
@@ -28,6 +31,7 @@ export function CanvasVideoBatchDialog({
     resolutionChoices,
     sizeChoices,
     secondChoices,
+    secondMax,
     choicesForModel,
     onClose,
     onApply,
@@ -40,6 +44,8 @@ export function CanvasVideoBatchDialog({
     sizeChoices: CanvasVideoBatchChoice[];
     /** 时长档位（秒）；空数组 = 选区里没有可改时长的节点。 */
     secondChoices: CanvasVideoBatchChoice[];
+    /** 没选模型时，选区里**最大**的自定义秒数上限（0 = 选区里没有可填时长的节点）。 */
+    secondMax: number;
     /** 选了模型后按该模型族重算档位（用户 2026-11-13 的第 2 条要求）。 */
     choicesForModel?: CanvasVideoBatchChoicesForModel;
     onClose: () => void;
@@ -69,6 +75,8 @@ export function CanvasVideoBatchDialog({
      * 退回并集会让用户以为能改，落盘时那批节点又全被跳过。所以只认 `followed` 是否存在。
      */
     const secondsChoices = followed ? followed.seconds : secondChoices;
+    /** 自定义秒数上限：选了模型就按该模型，否则取选区里的最大值（0 = 都不能填）。 */
+    const secondsMax = followed ? followed.secondsMax : secondMax;
 
     /**
      * 换模型后把「新模型根本没有的档位」退回「保持不变」。
@@ -88,9 +96,17 @@ export function CanvasVideoBatchDialog({
         setSize((prev) => (prev && !allowed.has(prev) ? VIDEO_BATCH_UNCHANGED : prev));
     }, [sizeKey]);
     useEffect(() => {
+        // 时长比分辨率松一档：胶囊档位之外，1..secondsMax 的自定义值也合法，别把它当「新模型不支持」清掉。
+        // 依赖只用 `secondKey`（拼出来的字符串）而不是数组本身：调用方每次渲染都给新数组，会让 effect 每帧空跑。
         const allowed = secondKey ? new Set(secondKey.split("|")) : new Set<string>();
-        setSeconds((prev) => (prev && !allowed.has(prev) ? VIDEO_BATCH_UNCHANGED : prev));
-    }, [secondKey]);
+        setSeconds((prev) => {
+            if (!prev) return prev;
+            if (allowed.has(prev)) return prev;
+            const numeric = Number(prev);
+            if (Number.isInteger(numeric) && numeric >= 1 && numeric <= secondsMax) return prev;
+            return VIDEO_BATCH_UNCHANGED;
+        });
+    }, [secondKey, secondsMax]);
 
     const untouched = !model && !vquality && !size && !seconds;
     const followLabel = model ? modelOptions.find((item) => item.value === model)?.label || model : "";
@@ -123,9 +139,28 @@ export function CanvasVideoBatchDialog({
 
                 <Field
                     label={t("canvas.videoBatch.seconds")}
-                    hint={followed && !followed.seconds.length ? t("canvas.videoBatch.secondsFixed") : undefined}
+                    hint={followed && !followed.seconds.length ? t("canvas.videoBatch.secondsFixed") : secondsMax > 0 ? t("canvas.videoBatch.secondsCustomHint", { max: secondsMax }) : undefined}
                 >
                     <ChoiceRow choices={secondsChoices} value={seconds} onChange={setSeconds} keepLabel={t("canvas.videoBatch.keep")} />
+                    {/* 「自行填写」那一格（用户 2026-11-14）：胶囊档位之外还能填任意整数秒。
+                        与胶囊共用同一个 `seconds` 状态 —— 填了就等于选了时长，清空 = 保持不变。 */}
+                    {secondsMax > 0 ? (
+                        <div className="mt-1.5 flex items-center gap-2">
+                            <span className="text-[11px] opacity-55">{t("canvas.videoBatch.secondsCustom")}</span>
+                            <InputNumber
+                                size="small"
+                                className="w-24"
+                                min={1}
+                                max={secondsMax}
+                                precision={0}
+                                value={seconds ? Number(seconds) : null}
+                                placeholder={t("canvas.videoBatch.secondsCustomPlaceholder", { max: secondsMax })}
+                                onChange={(value) => setSeconds(value === null || value === undefined ? VIDEO_BATCH_UNCHANGED : String(value))}
+                                style={{ borderColor: "rgba(0,0,0,0.12)" }}
+                            />
+                            <span className="text-[11px] opacity-45">{t("canvas.videoBatch.secondsCustomUnit")}</span>
+                        </div>
+                    ) : null}
                 </Field>
 
                 <div className="flex items-center justify-between gap-3 border-t pt-4" style={{ borderColor: "rgba(0,0,0,0.08)" }}>

@@ -237,7 +237,7 @@ import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFil
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
 import { BATCH_VIDEO_GENERATE_GAP_MS, buildBatchGeneratePlan, isBatchGeneratableNode, planBatchGenerateSchedule } from "@/lib/canvas/batch-generate";
 import { buildVideoBatchPatch, collectVideoBatchTargets, hasVideoBatchChange, planVideoBatchPatches, unionChoices, type VideoBatchPatchInput } from "@/lib/canvas/video-batch-settings";
-import { videoResolutionChoicesFor, videoSecondsChoicesFor, videoSizeChoicesFor } from "@/components/video-settings-panel";
+import { videoResolutionChoicesFor, videoSecondsChoicesFor, videoSecondsMaxFor, videoSizeChoicesFor } from "@/components/video-settings-panel";
 import { CanvasVideoBatchDialog } from "@/components/canvas/canvas-video-batch-dialog";
 import { attachNodesToGroup, collectGroupMembers, isGroupableNode, resolveGroupFrame } from "@/lib/canvas/canvas-grouping";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
@@ -7631,6 +7631,9 @@ function AtelierCanvasPage() {
                 // 时长档位也走节点面板那一个函数（`videoSecondsChoicesFor`）：Muse 系返回空数组
                 // （固定 10s）→ 批量落盘时按「该模型不支持」整节点跳过，而不是硬写一个后端会收掉的值。
                 seconds: videoSecondsChoicesFor(config).map((value) => ({ value: String(value), label: `${value}s` })),
+                // 自定义秒数上限（用户 2026-11-14）：「自行填写」那一格按这个夹取，0 = 该模型时长固定。
+                // 与节点面板 `NumberInput` 的 max 同源（`videoSecondsMaxFor`），别在这里另写一套上限。
+                secondsMax: videoSecondsMaxFor(config),
             };
         },
         [effectiveConfig, t],
@@ -7682,6 +7685,11 @@ function AtelierCanvasPage() {
         const resolutions: Array<Array<{ value: string; label: string }>> = [];
         const sizes: Array<Array<{ value: string; label: string }>> = [];
         const seconds: Array<Array<{ value: string; label: string }>> = [];
+        /**
+         * 自定义秒数上限取选区里的**最大值**：混选时只要有一个节点允许填 30s，那一格就允许填 30s；
+         * 真正落盘前 `planVideoBatchPatches` 会按每个节点自己的上限再筛（超了的那几个节点跳过）。
+         */
+        let secondsMax = 0;
         for (const id of videoBatchSnapshot.ids) {
             const node = byId.get(id);
             if (!node) continue;
@@ -7689,8 +7697,9 @@ function AtelierCanvasPage() {
             resolutions.push(choices.resolutions);
             sizes.push(choices.sizes);
             seconds.push(choices.seconds);
+            secondsMax = Math.max(secondsMax, choices.secondsMax);
         }
-        return { resolutions: unionChoices(resolutions), sizes: unionChoices(sizes), seconds: unionChoices(seconds) };
+        return { resolutions: unionChoices(resolutions), sizes: unionChoices(sizes), seconds: unionChoices(seconds), secondsMax };
     }, [effectiveConfig, nodes, videoBatchChoicesForModel, videoBatchSnapshot.ids]);
 
     /**
@@ -11667,6 +11676,7 @@ function AtelierCanvasPage() {
                         resolutionChoices={videoBatchChoices.resolutions}
                         sizeChoices={videoBatchChoices.sizes}
                         secondChoices={videoBatchChoices.seconds}
+                        secondMax={videoBatchChoices.secondsMax}
                         choicesForModel={videoBatchChoicesForModelOption}
                         onClose={() => setVideoBatchOpen(false)}
                         onApply={handleVideoBatchApply}

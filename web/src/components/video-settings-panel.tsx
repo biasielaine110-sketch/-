@@ -199,7 +199,14 @@ function supportsTimbreAudioHint(config: AiConfig, family: NativeVideoFamily) {
     return supportsVideoSeedControls(config, family);
 }
 
-const secondOptions = [6, 10, 12, 16, 20];
+/**
+ * 默认时长档位（秒）。
+ *
+ * 2026-11-14 用户要求：「16 秒换成 15 秒，添加 20 秒选项和 30 秒选项」——
+ * 16 这个值几乎没有任何通道认（聚算 Hub 只收 5–15 整数、Fisher 上限 12、Wenxi 上限 15），
+ * 点它基本等于「提交了但被静默收掉」；15 是这些族里唯一普适的高档位。
+ */
+const secondOptions = [6, 10, 12, 15, 20, 30];
 /** Work-Fisher single-pass multi-ref: keep duration near Export bake (10s) to avoid RH VRAM OOM. */
 const fisherSecondOptions = [6, 8, 10, 12];
 /** 【MINIMAX-H3】八月最强文戏：图里写死 `official_2_to_15s`，两端都夹住。 */
@@ -318,7 +325,8 @@ export function secondsMaxForFlags(flags: VideoSettingFlags): number {
     if (flags.fisherRh || flags.fisherLightRh) return 12;
     if (flags.singularityLightRh) return 30;
     if (flags.wenxiRh) return 15;
-    return 20;
+    // 默认档位现在顶到 30s（2026-11-14），自定义输入的上限必须跟着放开，否则点得了 30s 却填不了 30。
+    return 30;
 }
 
 /**
@@ -331,6 +339,21 @@ export function videoSecondsChoicesFor(config: AiConfig): number[] {
     const model = config.model || config.videoModel || "";
     if (isZhenzhenMuseVideoModel(model) || isApimartMuseVideoModel(model)) return [];
     return secondsChoicesForFlags(resolveVideoSettingFlags(config), model);
+}
+
+/**
+ * 给外部（批量设置）用：**自定义秒数的上限**，`0` = 这个模型时长固定、不许填。
+ *
+ * 与 `videoSecondsChoicesFor` 配对使用：档位胶囊负责「常用值」，这个上限负责「自行填写」——
+ * 两处必须是同一套口径，否则会出现「面板能填 17s、批量填 17s 被整批跳过」。
+ * 复用节点面板 `NumberInput` 的 max（h3Comfy 走 workflow 自己的上限），别在批量里另写一套。
+ */
+export function videoSecondsMaxFor(config: AiConfig): number {
+    const model = config.model || config.videoModel || "";
+    if (isZhenzhenMuseVideoModel(model) || isApimartMuseVideoModel(model)) return 0;
+    const flags = resolveVideoSettingFlags(config);
+    if (flags.h3Comfy) return autodlH3DurationMax(model);
+    return secondsMaxForFlags(flags);
 }
 
 export const videoSecondOptions = secondOptions.map((value) => String(value));

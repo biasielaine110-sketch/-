@@ -1,5 +1,6 @@
 /**
- * 右键「批量设置视频参数」的纯逻辑（2026-11-13 用户要求：选中多个视频窗口，右键批量切换模型 / 分辨率 / 比例）。
+ * 右键「批量设置视频参数」的纯逻辑（2026-11-13 用户要求：选中多个视频窗口，右键批量切换模型 / 分辨率 / 比例；
+ * 2026-11-14 补上「时长（秒）」——含自定义秒数）。
  *
  * 只做三件不需要 React 的事：挑出该改哪些节点、把用户改过的字段拼成 patch、按「该节点自己的档位」筛掉不支持的。
  * 档位本身（哪些分辨率 / 比例可选）不在这里算 —— 那是 `video-settings-panel.tsx` 的
@@ -101,6 +102,14 @@ export type VideoBatchModelChoices = {
      * 而不是把用户选的秒数硬写进去（后端会静默收掉，面板上还会显示一个点不亮的假值）。
      */
     seconds: ReadonlyArray<{ value: string }>;
+    /**
+     * **自定义秒数的上限**（2026-11-14：「添加可以自行填写生成的秒数的位置」）。
+     *
+     * 弹窗里除了胶囊档位还能自己填数字，所以支持性判断不能只看 `seconds` 列表 ——
+     * 否则用户填 17s 会被当成「这个模型不支持」整节点跳过。`0` = 不许自定义（Muse 系）。
+     * 口径来自 `videoSecondsMaxFor`（与节点面板 `NumberInput` 的 max 同一份）。
+     */
+    secondsMax: number;
 };
 
 export type VideoBatchPlanTarget = {
@@ -153,7 +162,13 @@ export function planVideoBatchPatches(targets: readonly VideoBatchPlanTarget[], 
         const supportsResolution = (value: string) => choices.resolutions.some((item) => item.value === value);
         const supportsSize = (value: string) => choices.sizes.some((item) => item.value === value);
         // 空数组（Muse 系固定 10s）= 谁都不支持 → 下面一律跳过。
-        const supportsSeconds = (value: string) => choices.seconds.some((item) => item.value === value);
+        // 非空时：命中胶囊档位 ✅；否则只要是 1..secondsMax 内的整数也算 ✅（弹窗里「自行填写」的那条路）。
+        const supportsSeconds = (value: string) => {
+            if (!choices.seconds.length) return false;
+            if (choices.seconds.some((item) => item.value === value)) return true;
+            const numeric = Number(value);
+            return Number.isInteger(numeric) && numeric >= 1 && numeric <= choices.secondsMax;
+        };
 
         // 用户点名要的档位这个模型给不了 → 整个节点跳过（部分写入会让节点处于半新半旧的自相矛盾状态）。
         if (patch.vquality && !supportsResolution(patch.vquality)) {
