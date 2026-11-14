@@ -2113,29 +2113,59 @@ export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP = 4;
 export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT = 3;
 
 /**
+ * 「每 2 镜合一个视频」开关打开时的镜数（用户 2026-11-14）。
+ *
+ * 与 `..._COMPACT`（3）**完全同级**：同一个 `scriptShotsPerClip` / `reverseVideoTarget.shotsPerClip` 键，
+ * 只是值换成 2；点了哪颗就是那颗，两颗都没点 = 原行为（`..._SHOTS_PER_CLIP` = 4）。
+ * 两颗互斥的关系不是靠状态位，而是靠「这个键只有一个数字」天然实现的。
+ */
+export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR = 2;
+
+/**
+ * 开关的档位（从小到大）：`[2, 3]`。
+ *
+ * 🔴 UI 必须遍历这个数组渲染按钮，别再写死 `SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT`：
+ * 加档/删档时要改的地方只有这里 + `normalizeScriptShotsPerClip`，漏一处就会出现
+ * 「按钮画出来了但点了不生效」这种最难查的漂移。
+ */
+export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS: readonly number[] = [SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT];
+
+/**
+ * 把「每几镜合一个视频」收敛成允许的档位（`2` / `3`）/ `0`（没点 = 不强制）。
+ *
+ * 🔴 只认白名单里的 2 / 3：老节点、手改的脏值（比如 1、4、5、`"2镜"`）一律当「没开」，
+ * 绝不悄悄改变原有铺法 —— 这是 `scriptShotsPerClip` 这个键从 3 扩到 2 时唯一需要放宽的地方。
+ * 反推节点的 `reverseVideoTarget.shotsPerClip` 与脚本节点的 `metadata.scriptShotsPerClip`
+ * 走**同一个**函数归一，别在两处各写一份判断。
+ */
+export function normalizeScriptShotsPerClip(value: unknown): number {
+    const shots = Number(value);
+    return SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS.includes(shots) ? shots : 0;
+}
+
+/**
  * 读「这次铺链路每几镜合一个视频节点」。
  *
- * 返回 `0` = **不强制**（照「视频分段」档位 / 手动合并组走，也就等价于原行为）；
- * 返回 `3` = 用户打开了「每 3 镜合一个视频」，铺链路一律按 3 镜切片 —— 这是显式选择，
- * 所以优先于分段档位、也优先于「一键铺视频链路」写死的 4。
+ * 返回 `0` = **不强制**（照「视频分段」档位 / 手动合并组走，也就等价于原行为 4 镜）；
+ * 返回 `2` / `3` = 用户点了对应那颗「每 N 镜合一个视频」开关，铺链路一律按 N 镜切片 ——
+ * 这是显式选择，所以优先于分段档位、也优先于「一键铺视频链路」写死的 4。
  *
- * 🔴 只认 `3` 这一个值：老节点 / 手改的脏值一律当成「没开」，绝不悄悄改变原有铺法。
+ * 🔴 只认档位白名单：老节点 / 手改的脏值一律当成「没开」，绝不悄悄改变原有铺法。
  */
 export function readScriptShotsPerClip(metadata: { scriptShotsPerClip?: unknown } | null | undefined): number {
-    const value = Number(metadata?.scriptShotsPerClip);
-    return value === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT ? SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT : 0;
+    return normalizeScriptShotsPerClip(metadata?.scriptShotsPerClip);
 }
 
 /**
  * 铺链路时真正用的 `mergeEvery`（0 = 交给「视频分段」档位）。
  *
- * 优先级：**第八套 `mashu` 的 1** > 开关的 3 > 调用方写死的 N（「一键铺视频链路」传 4）> 0。
+ * 优先级：**第八套 `mashu` 的 1** > 开关的 2 / 3 > 调用方写死的 N（「一键铺视频链路」传 4）> 0。
  *
  * 🔴 第八套必须单独先判（用户 2026-11-11 第 02 条：「第八套因为是每个镜头直出的 15 秒，
  * 铺链路的时候直接一镜一视频，只针对第八套，其他方案仍按 3 镜合 / 4 镜合」）：
  * 它一「行」就是一个 15 秒分镜组、本来就是按镜头直出的，再两张并进一个视频节点会让
  * 15 秒 × 2 的脚本塞进一个节点里，时长和提示词两头对不上。所以这里直接返回 1，
- * **优先级高于用户的「每 3 镜合」开关**（那个开关是给别的方案用的）。
+ * **优先级高于用户的「每 2 / 3 镜合」开关**（那些开关是给别的方案用的）。
  * 单独抽成纯函数是为了让探针能直接钉住这条优先级 —— 铺链路那条函数太大、跑不起来。
  */
 export function resolveScriptPipelineMergeEvery(

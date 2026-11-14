@@ -77,7 +77,7 @@ import {
     storyScriptToTsv,
     STORY_SCRIPT_MERGE_MODES,
     SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP,
-    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
+    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS,
     SCRIPT_TOTAL_SECONDS_MAX,
     SCRIPT_TOTAL_SECONDS_MIN,
     readScriptShotsPerClip,
@@ -1040,23 +1040,27 @@ export function CanvasScriptNodeContent({
     }, [patchMetadata, tableDisplayMode]);
 
     /**
-     * 铺链路「每几镜合一个视频节点」（用户 2026-11-11 第 01 条）。
+     * 铺链路「每几镜合一个视频节点」（用户 2026-11-11 第 01 条，2026-11-14 加 2 镜档）。
      *
-     * 开关打开 = 3 镜一个视频节点；关掉 = 原行为（4 镜）。`shotsPerClipForPipeline`
-     * 同时喂「一键铺视频链路」按钮的 `mergeEvery` 与提示文案，保证按钮上写的数 = 实际铺法。
+     * 值是 `0` / `2` / `3`：点了哪颗「每 N 镜合一个视频」就是 N，两颗都没点 = 0 → 原行为（4 镜）。
+     * `shotsPerClipForPipeline` 同时喂「一键铺视频链路」按钮的 `mergeEvery` 与提示文案，
+     * 保证按钮上写的数 = 实际铺法。
      */
     const compactShotsPerClip = readScriptShotsPerClip(node.metadata);
     const shotsPerClipForPipeline = compactShotsPerClip || SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP;
     /**
-     * 开关的**唯一写入口**。
+     * 开关的**唯一写入口**（两颗按钮共用）。
      *
      * 用户 2026-11-11 第 04 条：截图里「输入视图」只有 生成脚本 / 一键视频 两颗按钮，
      * 开关却只在**表体视图**的铺链路按钮列里 —— 想「直接一键视频」的人根本看不到它。
-     * 所以输入视图也挂一个，两处都调这个函数（别再各写一份 `patchMetadata`，否则一边改成 3
+     * 所以输入视图也挂一套，两处都调这个函数（别再各写一份 `patchMetadata`，否则一边改成 3
      * 另一边忘了，用户点了没反应还以为坏了）。
+     *
+     * 两颗按钮的互斥不用额外状态位：`scriptShotsPerClip` 只存**一个**数字，
+     * 点 2 就覆盖成 2、点 3 就覆盖成 3、再点同一颗才清空（回到 4 镜原行为）。
      */
-    const toggleShotsPerClip = () => {
-        patchMetadata({ scriptShotsPerClip: compactShotsPerClip ? undefined : SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT });
+    const toggleShotsPerClip = (count: number) => {
+        patchMetadata({ scriptShotsPerClip: compactShotsPerClip === count ? undefined : count });
     };
 
     /**
@@ -2277,43 +2281,53 @@ export function CanvasScriptNodeContent({
     const imageSize = resolveStoryScriptImageSize(node.metadata?.scriptImageSize);
 
     /**
-     * 「每 3 镜合一个视频」开关 —— **输入视图版**（用户 2026-11-11 第 04 条）。
+     * 「每 2 / 3 镜合一个视频」开关 —— **输入视图版**（用户 2026-11-11 第 04 条、2026-11-14 加 2 镜档）。
      *
      * 截图里输入视图只有「生成脚本 / 一键视频」两颗按钮，而开关原来只长在表体视图的铺链路
-     * 按钮列里：想「打开 3 镜 → 直接一键视频」的人根本找不到它。
+     * 按钮列里：想「打开 N 镜 → 直接一键视频」的人根本找不到它。
      * 文案 / 提示复用表体那颗的 i18n（`shotsPerClipToggle` / `OnHint` / `OffHint`），
      * 两处说法必须一致，否则用户会以为是两个不同的开关。
+     *
+     * 两颗按钮**同级互斥**（都写同一个 `scriptShotsPerClip`）：点了哪颗就是那颗，
+     * 两颗都不点 = 原行为（`SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP` = 4 镜）。
+     * 档位数组遍历，别再逐个写死 —— 加档只改常量。
      */
     const shotsPerClipSelector = (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
             <span className="opacity-60">{t("canvas.scriptNode.shotsPerClipLabel")}</span>
-            <button
-                type="button"
-                className="inline-flex h-6 items-center gap-1 rounded-full border px-2.5 transition"
-                style={{
-                    // 🎨 开/关两态以用户 2026-11-14 给的样张为准：
-                    //   开 = **淡淡的高亮底 + 亮描边 + 文案后缀「· 已开」**；关 = 透明底 + 暗描边。
-                    // 原来「开」是把 activeText 当底色做**实心反白**，用户明确否掉了（它和旁边那些
-                    // 选中的胶囊长得一样，扫视时分不出这是「开关」还是「当前选中的某个档位」）。
-                    borderColor: compactShotsPerClip ? theme.node.activeStroke : theme.node.stroke,
-                    background: compactShotsPerClip ? `${theme.node.text}1a` : "transparent",
-                    color: theme.node.text,
-                    opacity: compactShotsPerClip ? 1 : 0.7,
-                }}
-                aria-pressed={Boolean(compactShotsPerClip)}
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                    event.stopPropagation();
-                    toggleShotsPerClip();
-                }}
-                title={compactShotsPerClip ? t("canvas.scriptNode.shotsPerClipOnHint") : t("canvas.scriptNode.shotsPerClipOffHint")}
-            >
-                <Layers className="size-3" />
-                {t("canvas.scriptNode.shotsPerClipToggle", { count: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT })}
-                {/* 后缀单独一个 key：只改「已开」的说法时不用动整句，也不会把 `{{count}}` 弄丢。 */}
-                {compactShotsPerClip ? <span className="opacity-80">{t("canvas.scriptNode.shotsPerClipOnSuffix")}</span> : null}
-            </button>
+            {SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS.map((count) => {
+                const on = compactShotsPerClip === count;
+                return (
+                    <button
+                        key={count}
+                        type="button"
+                        className="inline-flex h-6 items-center gap-1 rounded-full border px-2.5 transition"
+                        style={{
+                            // 🎨 开/关两态以用户 2026-11-14 给的样张为准：
+                            //   开 = **淡淡的高亮底 + 亮描边 + 文案后缀「· 已开」**；关 = 透明底 + 暗描边。
+                            // 原来「开」是把 activeText 当底色做**实心反白**，用户明确否掉了（它和旁边那些
+                            // 选中的胶囊长得一样，扫视时分不出这是「开关」还是「当前选中的某个档位」）。
+                            borderColor: on ? theme.node.activeStroke : theme.node.stroke,
+                            background: on ? `${theme.node.text}1a` : "transparent",
+                            color: theme.node.text,
+                            opacity: on ? 1 : 0.7,
+                        }}
+                        aria-pressed={on}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            toggleShotsPerClip(count);
+                        }}
+                        title={t(on ? "canvas.scriptNode.shotsPerClipOnHint" : "canvas.scriptNode.shotsPerClipOffHint", { count, fallback: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP })}
+                    >
+                        <Layers className="size-3" />
+                        {t("canvas.scriptNode.shotsPerClipToggle", { count })}
+                        {/* 后缀单独一个 key：只改「已开」的说法时不用动整句，也不会把 `{{count}}` 弄丢。 */}
+                        {on ? <span className="opacity-80">{t("canvas.scriptNode.shotsPerClipOnSuffix")}</span> : null}
+                    </button>
+                );
+            })}
         </div>
     );
 
@@ -2725,7 +2739,7 @@ export function CanvasScriptNodeContent({
      * 所以口径与表体、输入视图完全一致，不会出现「两边选项不同 / 缩放态还显示旧值」。
      *
      * ⚠️ 同一天稍后又按要求**移除了「生图比例」「每镜时长」**（「这两个去掉，因为我基本都已经约束了」），
-     * 所以这里只剩「每 3 镜合一个视频」一个口径开关；上面那句是当天的原始需求，留作沿革。
+     * 所以这里只剩「每 2 / 3 镜合一个视频」这组口径开关；上面那句是当天的原始需求，留作沿革。
      *
      * 高度不写死：自动适配那段按 `提示条.offsetTop + offsetHeight` 算，控件多了节点自己会长高。
      */
@@ -3558,31 +3572,38 @@ export function CanvasScriptNodeContent({
                                 「视频合并」节点；不建文本 / 图片节点、不自动触发生成。
                                 用户点一次就得到一条能直接往下游合并 / 导出的视频链。 */}
                             {buildVideoChainButton}
-                            {/* 「每 3 镜合一个视频」开关（用户 2026-11-11 第 01 条）：
-                                打开后**所有**铺链路入口（一键铺链路 / 一键铺视频链路 / 一键视频）
-                                都按 3 镜切片；关掉回到原行为（按「视频分段」档位，默认 4 镜）。
+                            {/* 「每 2 / 3 镜合一个视频」开关（用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档）：
+                                点了哪颗，**所有**铺链路入口（一键铺链路 / 一键铺视频链路 / 一键视频）
+                                都按那颗的镜数切片；两颗都不点 = 原行为（按「视频分段」档位，默认 4 镜）。
+                                两颗同级互斥，靠 `scriptShotsPerClip` 只存一个数字天然实现。
                                 ⚠️ 与上面几颗一样不用真 `disabled`：开关态靠颜色 + 描边表达。 */}
-                            <button
-                                type="button"
-                                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition"
-                                style={{
-                                    borderColor: compactShotsPerClip ? theme.toolbar.activeText : theme.node.stroke,
-                                    color: compactShotsPerClip ? theme.toolbar.activeText : theme.node.text,
-                                    background: compactShotsPerClip ? `${theme.toolbar.activeText}14` : "transparent",
-                                    opacity: compactShotsPerClip ? 1 : 0.7,
-                                }}
-                                aria-pressed={Boolean(compactShotsPerClip)}
-                                onMouseDown={(event) => event.stopPropagation()}
-                                onPointerDown={(event) => event.stopPropagation()}
-                                onClick={(event) => {
-                                    event.stopPropagation();
-                                    toggleShotsPerClip();
-                                }}
-                                title={compactShotsPerClip ? t("canvas.scriptNode.shotsPerClipOnHint") : t("canvas.scriptNode.shotsPerClipOffHint")}
-                            >
-                                <Layers className="size-3.5" />
-                                {t("canvas.scriptNode.shotsPerClipToggle", { count: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT })}
-                            </button>
+                            {SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS.map((count) => {
+                                const on = compactShotsPerClip === count;
+                                return (
+                                    <button
+                                        key={count}
+                                        type="button"
+                                        className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition"
+                                        style={{
+                                            borderColor: on ? theme.toolbar.activeText : theme.node.stroke,
+                                            color: on ? theme.toolbar.activeText : theme.node.text,
+                                            background: on ? `${theme.toolbar.activeText}14` : "transparent",
+                                            opacity: on ? 1 : 0.7,
+                                        }}
+                                        aria-pressed={on}
+                                        onMouseDown={(event) => event.stopPropagation()}
+                                        onPointerDown={(event) => event.stopPropagation()}
+                                        onClick={(event) => {
+                                            event.stopPropagation();
+                                            toggleShotsPerClip(count);
+                                        }}
+                                        title={t(on ? "canvas.scriptNode.shotsPerClipOnHint" : "canvas.scriptNode.shotsPerClipOffHint", { count, fallback: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP })}
+                                    >
+                                        <Layers className="size-3.5" />
+                                        {t("canvas.scriptNode.shotsPerClipToggle", { count })}
+                                    </button>
+                                );
+                            })}
                         </div>
                     ) : null}
                     {/* 「视频分段」：紧贴在「一键铺链路」下面（用户 2026-11-07 点名）。

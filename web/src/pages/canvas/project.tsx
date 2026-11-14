@@ -85,7 +85,7 @@ import {
     resolveScriptTotalSeconds,
     resolveStoryScriptMergeMode,
     resolveScriptPipelineMergeEvery,
-    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
+    normalizeScriptShotsPerClip,
     resolveStoryScriptPresetId,
     resolveStoryScriptImageSize,
     resolveStoryScriptShotSeconds,
@@ -9634,9 +9634,10 @@ function AtelierCanvasPage() {
             const autoGenerate = Boolean(options?.autoGenerate);
             /**
              * 「每几镜合一个视频节点」：
-             *  - 脚本节点打开了「每 3 镜合一个视频」（`scriptShotsPerClip === 3`，用户 2026-11-11 第 01 条）
-             *    → 一律 3 镜切片，**优先于**分段档位、手动合并组，以及「一键铺视频链路」写死的 4；
-             *  - 没开 → 原行为：`options.mergeEvery`（= 视频链那 4）优先，其次走「视频分段」档位。
+             *  - 脚本节点点了「每 2 / 3 镜合一个视频」（`scriptShotsPerClip === 2 / 3`，
+             *    用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档）
+             *    → 一律按那颗的镜数切片，**优先于**分段档位、手动合并组，以及「一键铺视频链路」写死的 4；
+             *  - 都没点 → 原行为：`options.mergeEvery`（= 视频链那 4）优先，其次走「视频分段」档位。
              * （读的是下面那个 `source`，所以这段必须放在它之后。）
              */
             const source = nodesRef.current.find((item) => item.id === nodeId);
@@ -9644,7 +9645,7 @@ function AtelierCanvasPage() {
             const mergeEvery = resolveScriptPipelineMergeEvery(source.metadata, options?.mergeEvery);
             /**
              * 调用方**显式**要求「每 N 镜一段」= 点的是「一键铺视频链路」那颗按钮。
-             * 与上面的 `mergeEvery` 分开：3 镜开关虽然是同一种固定切片，但它只改**怎么切**，
+             * 与上面的 `mergeEvery` 分开：2 / 3 镜开关虽然是同一种固定切片，但它只改**怎么切**，
              * 不该把「一键铺链路 / 只铺视频」的确认窗标题和按钮文案也改成「一键铺视频链路」。
              */
             const chainMergeEvery = Math.max(0, Math.round(Number(options?.mergeEvery) || 0));
@@ -10856,6 +10857,11 @@ function AtelierCanvasPage() {
              * 模型仍只在用户**明确选过**时才写（`target.model` 空 = 动态跟随偏好里的视频模型，
              * 写死反而会让之后改偏好不再生效）。
              */
+            /**
+             * 「每 2 / 3 个镜头合一个视频」：反推节点上点了哪颗就带过来（0 = 两颗都没点 = 原行为）。
+             * 取 `input.shotsPerClip` 优先：开关刚点完 metadata 还没提交时也能生效（同 scriptScheme 那个坑）。
+             */
+            const targetShotsPerClip = normalizeScriptShotsPerClip(input.shotsPerClip ?? target.shotsPerClip);
             const scriptTargetMeta: Partial<CanvasNodeData["metadata"]> = {
                 ...(target.styleTemplateId ? { styleTemplateId: target.styleTemplateId } : {}),
                 /**
@@ -10872,10 +10878,10 @@ function AtelierCanvasPage() {
                 // 反推节点里选了「MochiAni 生视频节点」→ 02/03 建脚本节点时记住引擎，铺链路时才知道建哪种窗口
                 // （用户 2026-11-10 第 02 条：「同上，后续在脚本生成器执行生视频时，也铺的是该节点」）。
                 ...(isMochianiVideoEngine(target.videoEngine) ? { scriptVideoEngine: MOCHIANI_VIDEO_ENGINE } : {}),
-                // 「每 3 个镜头合一个视频」（用户 2026-11-11 第 01 条）：反推节点上开了就带过来，
-                // 于是 02/03 紧接着跑的一键视频 / 之后手点铺链路都是 3 镜一个视频节点。
-                // 取 `input.shotsPerClip` 优先：开关刚点完 metadata 还没提交时也能生效（同 scriptScheme 那个坑）。
-                ...(Number(input.shotsPerClip ?? target.shotsPerClip) === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT ? { scriptShotsPerClip: SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT } : {}),
+                // 「每 2 / 3 个镜头合一个视频」（用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档）：
+                // 反推节点上点了哪颗就带过来，于是 02/03 紧接着跑的一键视频 / 之后手点铺链路都按那颗的镜数切；
+                // 两颗都没点 → 不写这个键 → 仍是原行为（视频分段档位，默认 4 镜）。
+                ...(targetShotsPerClip ? { scriptShotsPerClip: targetShotsPerClip } : {}),
             };
             /**
              * 🔴 执行方案必须**建节点时就写进去**（用户 2026-11-09 报障：「03 出来的视频运动提示词
