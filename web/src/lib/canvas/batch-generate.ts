@@ -88,12 +88,18 @@ export function buildBatchGeneratePlan({
 }
 
 /**
- * 批量一键生成里，两个**视频**节点之间至少隔多久（用户 2026-11-13 21:41）。
+ * 批量一键生成里，两个**视频**节点之间至少隔多久（2026-11-13 21:41 定 2 秒，2026-11-14 14:00 提到 15 秒）。
  *
- * 一次把 5 个 minimax-h3 全发出去，聚算这类渠道会同时排 5 条大任务：画布卡顿、上游也更容易 504。
- * 错开 2 秒后请求仍然是并行的，只是不再同一瞬间砸出去。
+ * 用户原话：「批量执行的一键视频生成，还是采取每个视频的生成按钮在执行时，间隔 15 秒进行。
+ * 不然一次性发送太多，容易出现卡顿」——尤其 `*.jusuanhub.com` 的 minimax-h3：一次把 5 个全发出去，
+ * 等于同时排 5 条大任务，画布卡顿、上游也更容易 504 / 取片被 reset。
+ *
+ * 🔴 2 秒只够「别落在同一瞬间」，15 秒才是「上一条真的开始跑了再发下一条」：这家渠道光提交就要排
+ * 几十秒的队，2 秒错峰对上游几乎等于同时。
+ * 🔴 不做「按渠道分级」（聚算 15s / 其它 2s）：批量生成时用户看到的是一串节点，间隔忽长忽短更难理解；
+ * 统一 15 秒也是唯一能保证「不再卡」的口径。要调就只改这一个数。
  */
-export const BATCH_VIDEO_GENERATE_GAP_MS = 2_000;
+export const BATCH_VIDEO_GENERATE_GAP_MS = 15_000;
 
 export type BatchGenerateScheduleEntry = BatchGeneratePlanItem & { delayMs: number };
 
@@ -101,10 +107,10 @@ export type BatchGenerateScheduleEntry = BatchGeneratePlanItem & { delayMs: numb
  * 给每个节点算「相对点击那一刻」的启动延迟。
  *
  * 只有**视频**会推进这口时钟：图片走的接口不同、体积小得多，本身不加延迟（批量出图不该被拖成串行），
- * 但它排在视频后面时仍然要等前一个视频让出的 2 秒（不能抢在视频前面挤同一个瞬间）。
- *  - `[video, video, video]` → 0 / 2000 / 4000
+ * 但它排在视频后面时仍然要等前一个视频让出的 15 秒（不能抢在视频前面挤同一个瞬间）。
+ *  - `[video, video, video]` → 0 / 15000 / 30000
  *  - `[image, image]` → 0 / 0
- *  - `[video, image, video]` → 0 / 2000 / 2000（图片不额外加时，所以第二个视频仍是 2 秒后）
+ *  - `[video, image, video]` → 0 / 15000 / 15000（图片不额外加时，所以第二个视频仍是 15 秒后）
  */
 export function planBatchGenerateSchedule(
     items: readonly BatchGeneratePlanItem[],

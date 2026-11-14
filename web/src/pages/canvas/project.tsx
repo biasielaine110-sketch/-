@@ -7505,10 +7505,21 @@ function AtelierCanvasPage() {
 
     /** 批量一键生成的「错峰」定时器：离开画布时清掉，别让已经离开的页面继续偷偷提交任务。 */
     const batchGenerateTimersRef = useRef<Set<number>>(new Set());
+    /**
+     * 已排进错峰队列、但还没到点触发的节点。
+     *
+     * 🔴 15 秒间隔把「重复点击」的窗口拉长了 7 倍（2026-11-14）：点第二次「一键生成」时，前一批里
+     * 还没到点的节点会被**再排一套定时器**，两个 timer 几乎同时到点、`isNodeGeneratingRef` 复核来不及
+     * 拦住 → 同一个节点提交两次，又变成「一次发太多」。
+     * 所以「排队中」也算忙，第二次点击直接跳过它们；但**不清上一批**（用户可能只给新增的节点补点，
+     * 把上一批一起取消就更糟）。
+     */
+    const batchGenerateQueuedRef = useRef<Set<string>>(new Set());
     useEffect(
         () => () => {
             for (const timer of batchGenerateTimersRef.current) window.clearTimeout(timer);
             batchGenerateTimersRef.current.clear();
+            batchGenerateQueuedRef.current.clear();
         },
         [],
     );
@@ -7519,8 +7530,9 @@ function AtelierCanvasPage() {
      * 刻意复用 `handleGenerateNode`（而不是另写一条请求链路），这样提示词上游合并、风格 / 摄像机修饰、
      * 排队与中止、状态回写全都与单点生成一模一样；每个节点各自持一个 abort controller，互不影响。
      *
-     * 🔴 视频节点**错开 2 秒**逐个触发（用户 2026-11-13 21:41）：一次把多个 minimax-h3 全发出去，
-     * 聚算这类渠道会同时排几条大任务，画布直接卡、上游也更容易 504。图片不占槽位，照旧立刻发。
+     * 🔴 视频节点**逐个错开 15 秒**触发（2026-11-14 14:00 从原来的 2 秒提上来）：一次把多个
+     * minimax-h3 全发出去，聚算这类渠道会同时排几条大任务 —— 画布卡、上游 504 / 取片被 reset。
+     * 15 秒 = 上一条真的开始跑了才发下一条；图片不占槽位，照旧立刻发。
      */
     const handleBatchGenerate = useCallback(
         (nodeIds: string[]) => {
@@ -7528,7 +7540,8 @@ function AtelierCanvasPage() {
                 nodes: nodesRef.current,
                 nodeIds,
                 connections: connectionsRef.current,
-                isGenerating: isNodeGenerating,
+                // 排队中 = 忙：防的是「同一节点被排两套定时器」（见 batchGenerateQueuedRef 的注释）。
+                isGenerating: (nodeId: string) => isNodeGenerating(nodeId) || batchGenerateQueuedRef.current.has(nodeId),
             });
             if (!plan.items.length) {
                 message.warning(t("canvas.contextMenu.batchGenerateEmpty"));
@@ -7540,8 +7553,10 @@ function AtelierCanvasPage() {
                     void handleGenerateNode(entry.nodeId, entry.mode, entry.prompt);
                     continue;
                 }
+                batchGenerateQueuedRef.current.add(entry.nodeId);
                 const timer = window.setTimeout(() => {
                     batchGenerateTimersRef.current.delete(timer);
+                    batchGenerateQueuedRef.current.delete(entry.nodeId);
                     // 排队期间用户可能停掉了这个节点、或又点了一次生成：到点先复核，别重复提交。
                     if (isNodeGeneratingRef.current(entry.nodeId)) return;
                     void handleGenerateNode(entry.nodeId, entry.mode, entry.prompt);
