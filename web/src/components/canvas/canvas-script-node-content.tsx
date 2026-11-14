@@ -2,13 +2,14 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragE
 import { createPortal } from "react-dom";
 import { App, InputNumber, Modal } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Layers, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CopyPlus, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Layers, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { useOrderDrag } from "@/hooks/use-order-drag";
 import { CanvasImagePreviewModal } from "@/components/canvas/canvas-image-preview-modal";
 import { CanvasScriptAssetDialog, isAssetFile, type ScriptAssetCandidate, type ScriptAssetLinkSelection, type ScriptAssetPoolAsset, type ScriptRowAssetMode } from "@/components/canvas/canvas-script-asset-dialog";
+import { CanvasScriptAssetInheritDialog } from "@/components/canvas/canvas-script-asset-inherit-dialog";
 import { CanvasScriptBatchAssetDialog } from "@/components/canvas/canvas-script-batch-asset-dialog";
 import { CanvasStylePicker } from "@/components/canvas/canvas-style-picker";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
@@ -89,6 +90,7 @@ import {
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { buildScriptAssetBatchItems, isScriptAssetDirectRole, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import type { ScriptAssetInheritOptions, ScriptAssetInheritSource } from "@/lib/canvas/script-asset-inherit";
 import type { OneClickVideoRun } from "@/lib/canvas/one-click-video";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasNodeData } from "@/types/canvas";
@@ -378,6 +380,17 @@ type CanvasScriptNodeContentProps = {
      * 只断线不清引用的话，表里仍会显示一张已经不属于这张表的图，和「删除链接」对不上。
      */
     onRemoveScriptAsset?: (nodeId: string, assetNodeId: string) => void;
+    /**
+     * **沿用资产**：画布上其它脚本节点（一般就是上一集），各自算好「可沿用的资产 / 自建列 / 出片参数」。
+     * 空数组 = 画布上还没有别的集，按钮会提示「还没有可沿用的脚本节点」。
+     */
+    inheritSources?: ScriptAssetInheritSource[];
+    /** 沿用资产：上层负责补连线 + 合并 metadata（锁 / 分类 / 自建列 / 出片参数）。 */
+    onInheritAssets?: (nodeId: string, payload: { sourceId: string; assetNodeIds: string[]; options: ScriptAssetInheritOptions; auto: boolean }) => void;
+    /** 当前节点记着的来源集 id（`metadata.scriptAssetInheritSource`，用于弹窗默认选中）。 */
+    inheritSourceId?: string;
+    /** 自动沿用开关当前值（`metadata.scriptAssetInheritAuto`）。 */
+    inheritAuto?: boolean;
     /** 生成后按内容多少自动适配节点窗口尺寸（高贴合行数、宽贴合表格宽并封顶）。 */
     onNodeSizeChange?: (nodeId: string, width: number, height: number) => void;
 };
@@ -434,6 +447,10 @@ export function CanvasScriptNodeContent({
     onClearNameLocks,
     onReorderScriptAssets,
     onRemoveScriptAsset,
+    inheritSources,
+    onInheritAssets,
+    inheritSourceId,
+    inheritAuto,
     onNodeSizeChange,
 }: CanvasScriptNodeContentProps) {
     const { t } = useTranslation();
@@ -639,6 +656,8 @@ export function CanvasScriptNodeContent({
     const [assetDialogOpen, setAssetDialogOpen] = useState(false);
     /** 「一键批量生成资产图」弹窗（勾选哪些不生 / 只生哪一类）。 */
     const [batchAssetOpen, setBatchAssetOpen] = useState(false);
+    /** 「沿用资产」弹窗（从上一集搬资产：图 / 资产名锁 / 自建列 / 出片参数）。 */
+    const [inheritOpen, setInheritOpen] = useState(false);
     /** 逐镜「镜头图」弹窗当前瞄准的那一镜（null = 未打开）。 */
     const [rowAssetTarget, setRowAssetTarget] = useState<{ shotNo: number; ids: string[] } | null>(null);
     /** 「按镜按资产」弹窗当前瞄准的那一格（null = 未打开）。 */
@@ -1893,26 +1912,55 @@ export function CanvasScriptNodeContent({
         </div>
     ) : null;
 
+    // 「沿用资产」：把上一集的资产（图 + 资产名锁 + 自建列 + 可选出片参数）搬到本集。
+    // 开着自动沿用时按钮高亮并带上来源集的标题 —— 否则只有一个弹窗入口，用户过几天就忘了
+    // 「这一集的资产是从哪一集来的」。
+    const inheritSourceTitle = (inheritSources || []).find((item) => item.nodeId === inheritSourceId)?.title || "";
+    const inheritEntry = onInheritAssets ? (
+        <button
+            type="button"
+            className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] transition"
+            style={{
+                borderColor: inheritAuto ? theme.toolbar.activeBg : theme.node.stroke,
+                background: inheritAuto ? `${theme.toolbar.activeBg}1f` : `${theme.toolbar.panel}aa`,
+                color: inheritAuto ? theme.toolbar.activeBg : theme.node.text,
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+                event.stopPropagation();
+                setInheritOpen(true);
+            }}
+            title={inheritAuto ? t("canvas.scriptNode.inheritEntryActiveHint", { title: inheritSourceTitle || t("canvas.scriptNode.inheritEntryUnknownSource") }) : t("canvas.scriptNode.inheritEntryHint")}
+        >
+            <CopyPlus className="size-3.5" />
+            {inheritAuto ? t("canvas.scriptNode.inheritEntryActive", { title: inheritSourceTitle || t("canvas.scriptNode.inheritEntryUnknownSource") }) : t("canvas.scriptNode.inheritEntry")}
+        </button>
+    ) : null;
+
     // 「+ 添加资产」按钮：编辑视图与表格视图**都要有**。
     // 表格视图才是用户平时看的地方 —— 之前入口只放在编辑视图里，用户在表格上根本找不到
     // 「导入图片 / 链接图片」，看起来就像「这个表不能加图」。
-    const assetEntryRow = showAssetEntry ? (
+    const assetEntryRow = showAssetEntry || onInheritAssets ? (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-            <button
-                type="button"
-                className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] transition"
-                style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                    event.stopPropagation();
-                    setAssetDialogOpen(true);
-                }}
-                title={t("canvas.scriptNode.addAssetHint")}
-            >
-                <Plus className="size-3.5" />
-                {t("canvas.scriptNode.addAsset")}
-            </button>
+            {showAssetEntry ? (
+                <button
+                    type="button"
+                    className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] transition"
+                    style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        setAssetDialogOpen(true);
+                    }}
+                    title={t("canvas.scriptNode.addAssetHint")}
+                >
+                    <Plus className="size-3.5" />
+                    {t("canvas.scriptNode.addAsset")}
+                </button>
+            ) : null}
+            {inheritEntry}
             {/*
              * 「一键批量生成」2026-11-11 已搬到**右下角「一键直接生图」的左边**
              * （用户要求：「把一键批量生成放在一键直接生图的左侧」）。
@@ -3786,6 +3834,23 @@ export function CanvasScriptNodeContent({
         />
     ) : null;
 
+    // 沿用资产：从画布上别的脚本节点（上一集）把资产图 / 资产名锁 / 自建列搬过来。
+    // 真正的搬运在 project.tsx（补连线 + 合并 metadata），这里只负责问清楚「从哪一集、带哪些」。
+    const inheritDialog = onInheritAssets ? (
+        <CanvasScriptAssetInheritDialog
+            open={inheritOpen}
+            theme={theme}
+            sources={inheritSources || []}
+            defaultSourceId={inheritSourceId}
+            auto={Boolean(inheritAuto)}
+            onCancel={() => setInheritOpen(false)}
+            onConfirm={(payload) => {
+                setInheritOpen(false);
+                onInheritAssets(node.id, payload);
+            }}
+        />
+    ) : null;
+
     // 逐镜「镜头图」弹窗：只给这一镜关联图片。分类 / 按描述生图都不适用，所以走 rowMode。
     // 三条路的回调都直接交给上层（project.tsx 负责建节点并把 id 写回 metadata.scriptRowAssets）。
     const rowAssetDialog = rowAssetTarget ? (
@@ -4050,6 +4115,7 @@ export function CanvasScriptNodeContent({
             {/* 旧的自定义提示词弹窗已合并到上面这一个（按 customPromptKind 分三种）。 */}
             {assetDialog}
             {batchAssetDialog}
+            {inheritDialog}
             {rowAssetDialog}
             {cellAssetDialog}
             {rowAudioDialog}

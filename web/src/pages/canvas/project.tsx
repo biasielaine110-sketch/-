@@ -199,6 +199,7 @@ import {
     type ScriptAssetBatchItem,
     type ScriptAssetReference,
 } from "@/lib/canvas/script-asset-batch";
+import { buildScriptAssetInheritPlan, collectScriptInheritSources, scriptRowAssetNames, type ScriptAssetInheritOptions } from "@/lib/canvas/script-asset-inherit";
 import { planScriptPipelineGenerateOrder, readScriptPipelineVideoOutcome, resolveScriptPipelineRetryModel, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
@@ -1554,6 +1555,23 @@ function AtelierCanvasPage() {
             return value;
         },
         [connections, nodes],
+    );
+    /**
+     * 脚本节点：「沿用资产」的候选来源 —— 画布上其它脚本节点，各自把「可沿用的资产」算出来。
+     *
+     * 缩略图从「引用条」那套预览里补（与资产池缩略图完全同源），这里只做一次 id → 地址的映射，
+     * 不自己拼 storageKey → URL —— 那条链路有代理 / 本地缓存的坑，见项目备忘。
+     */
+    const getScriptInheritSources = useCallback(
+        (targetId: string) => {
+            const sources = collectScriptInheritSources({ targetId, nodes, connections });
+            if (!sources.length) return [];
+            return sources.map((source) => {
+                const previews = new Map(getMentionReferences(source.nodeId).map((reference) => [reference.nodeId, reference.previewUrl]));
+                return { ...source, assets: source.assets.map((asset) => ({ ...asset, previewUrl: previews.get(asset.nodeId) })) };
+            });
+        },
+        [connections, getMentionReferences, nodes],
     );
     /**
      * 反推视频节点：解析「接入的视频」+ 「连进来的参考图」。
@@ -8149,6 +8167,29 @@ function AtelierCanvasPage() {
                             ? normalizeStoryScriptMashuRows(applyMashuVideoScriptOverlay(dedupedRows, sourceText, presetId), presetId)
                             : dedupedRows;
                 /**
+                 * **自动沿用**（`metadata.scriptAssetInheritAuto`，默认关）：生成 / 重生成分镜表后，
+                 * 把来源集里「这一集真的会用到的」资产名锁搬过来 —— 只搬名字锁，**不搬逐镜挂图**。
+                 *
+                 * 过滤口径是 `scriptRowAssetNames(finalRows…)`：上一集 12 个角色锁全灌进来，
+                 * 表里一个都没出现的名字就是纯噪音，还会让「已锁定 N 个资产名」那颗开关失真。
+                 * 来源节点被删了 / 关了开关就整段跳过 —— 这是兜底能力，不该打断写剧本的主流程。
+                 */
+                const autoInheritSource = sourceNode.metadata?.scriptAssetInheritAuto
+                    ? nodesRef.current.find((item) => item.id === sourceNode.metadata?.scriptAssetInheritSource && item.type === CanvasNodeType.Script)
+                    : undefined;
+                const autoInheritNames = autoInheritSource ? scriptRowAssetNames(finalRows, presetId, normalizeStoryScriptExtraColumns(sourceNode.metadata?.scriptExtraColumns)) : [];
+                const autoInheritPlan =
+                    autoInheritSource && autoInheritNames.length
+                        ? buildScriptAssetInheritPlan({
+                              source: autoInheritSource,
+                              target: sourceNode,
+                              nodes: nodesRef.current,
+                              connections: connectionsRef.current,
+                              options: { assets: false, locks: true, columns: false, output: false },
+                              onlyNames: autoInheritNames,
+                          })
+                        : null;
+                /**
                  * 把「认没认出模版」这件事**明说出来**：以前三列为空时用户只能猜
                  * （「是没识别到，还是模型没生成？」），日志和 UI 都没有证据。
                  */
@@ -8181,11 +8222,29 @@ function AtelierCanvasPage() {
                     return {
                         ...node,
                         title: parsed.title || node.title,
-                        metadata: { ...node.metadata, scriptStatus: "success", scriptRows: rowsWithExtras, scriptTitle: parsed.title, scriptRaw: answer, errorDetails: undefined },
+                        metadata: {
+                            ...node.metadata,
+                            ...(autoInheritPlan?.metadata || {}),
+                            scriptStatus: "success",
+                            scriptRows: rowsWithExtras,
+                            scriptTitle: parsed.title,
+                            scriptRaw: answer,
+                            errorDetails: undefined,
+                        },
                     };
                 };
                 nodesRef.current = nodesRef.current.map(applyGeneratedRows);
                 setNodes((prev) => prev.map(applyGeneratedRows));
+                // 自动沿用补的连线要在落库之后单独写一次：`applyGeneratedRows` 只碰节点，连线是另一份 state。
+                if (autoInheritPlan?.connections.length) {
+                    const autoConnections = autoInheritPlan.connections;
+                    setConnections((prev) => {
+                        const keys = new Set(prev.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
+                        const added = autoConnections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`)).map((connection) => ({ id: nanoid(), ...connection }));
+                        return added.length ? [...prev, ...added] : prev;
+                    });
+                    if (autoInheritPlan.lockNames.length) message.info(t("canvas.scriptNode.inheritAutoApplied", { count: autoInheritPlan.lockNames.length }));
+                }
                 message.success(t("canvas.scriptNode.generated", { count: parsedRows.length }));
                 /**
                  * 「补了几镜的出场角色 / 场景 / 道具」也要明说（2026-11-08 第 15/17 条）：补人是有可能补错的
@@ -8873,6 +8932,55 @@ function AtelierCanvasPage() {
             message.success(t("canvas.scriptNode.assetLinked", { count: links.length }));
         },
         [mergeScriptAssetRoles, message, t],
+    );
+
+    /**
+     * 沿用资产：把「上一集」的资产搬到本集（用户 2026-11-15 第 01 条）。
+     *
+     * 三件事一次做完，缺一件都会「看起来搬了、其实没生效」：
+     *  ① **补连线** —— 图不在资产池里，铺链路按分类兜底时根本看不到它；
+     *  ② 合并 `scriptNameLocks` —— 跨集命中的关键：第二集表里出现同名角色 / 场景就直接连到这张图；
+     *  ③ 合并 `scriptAssetRoles` —— 分类不跟着走，音频会被当成角色、场景会被逐镜全连。
+     * 逐镜挂图（`scriptCellAssets` / `scriptRowAssets`）**不搬**：镜号从 1 重排，搬过去就是错位。
+     */
+    const handleInheritScriptAssets = useCallback(
+        (nodeId: string, payload: { sourceId: string; assetNodeIds: string[]; options: ScriptAssetInheritOptions; auto: boolean }) => {
+            const source = nodesRef.current.find((item) => item.id === payload.sourceId);
+            const target = nodesRef.current.find((item) => item.id === nodeId);
+            if (!source || !target) return;
+            const plan = buildScriptAssetInheritPlan({
+                source,
+                target,
+                nodes: nodesRef.current,
+                connections: connectionsRef.current,
+                assetNodeIds: payload.assetNodeIds,
+                options: payload.options,
+            });
+            if (plan.connections.length) {
+                setConnections((prev) => {
+                    const keys = new Set(prev.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
+                    const added = plan.connections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`)).map((connection) => ({ id: nanoid(), ...connection }));
+                    return added.length ? [...prev, ...added] : prev;
+                });
+            }
+            // 来源 / 自动开关无论这次搬了什么都要记住：用户选了「下一集沿用这一集」，就是长期意图。
+            setNodes((prev) =>
+                prev.map((item) =>
+                    item.id === nodeId
+                        ? {
+                              ...item,
+                              metadata: { ...item.metadata, ...plan.metadata, scriptAssetInheritSource: payload.sourceId, scriptAssetInheritAuto: payload.auto ? true : undefined },
+                          }
+                        : item,
+                ),
+            );
+            if (!plan.assetNodeIds.length && !Object.keys(plan.metadata).length) {
+                message.warning(t("canvas.scriptNode.inheritNothing"));
+                return;
+            }
+            message.success(t("canvas.scriptNode.inheritDone", { assets: plan.assetNodeIds.length, locks: plan.lockNames.length }));
+        },
+        [message, t],
     );
 
     // 一键铺链路：每一镜铺出「文本（分镜提示词）→ 图片」两个节点，「视频」则按分段方式（单镜 / 每 N 镜 /
@@ -11208,6 +11316,10 @@ function AtelierCanvasPage() {
                         onClearNameLocks={handleClearNameLocks}
                         onReorderScriptAssets={handleReorderScriptAssets}
                         onRemoveScriptAsset={handleScriptAssetRemove}
+                        inheritSources={getScriptInheritSources(contentNode.id)}
+                        onInheritAssets={handleInheritScriptAssets}
+                        inheritSourceId={contentNode.metadata?.scriptAssetInheritSource}
+                        inheritAuto={contentNode.metadata?.scriptAssetInheritAuto}
                         onBuildPipeline={handleBuildScriptPipeline}
                         onBuildShotVideo={handleBuildShotVideo}
                         onBuildShotVideos={handleBuildShotVideos}

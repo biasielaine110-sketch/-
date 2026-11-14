@@ -340,6 +340,21 @@ export type CanvasNodeMetadata = {
      */
     scriptExtraColumns?: import("@/constant/story-script").StoryScriptExtraColumn[];
     /**
+     * 脚本生成器：**资产沿用来源**（另一个脚本节点的 id，一般就是上一集）。
+     *
+     * 只记录「这台机器的资产是从哪一集搬来的」，真正的搬运动作由
+     * `lib/canvas/script-asset-inherit.ts` 算出来、写进 `scriptAssetRoles` / `scriptNameLocks` /
+     * `scriptExtraColumns`。所以把这个键删掉不会让已沿用的资产失效，只是「自动沿用」不再有目标。
+     */
+    scriptAssetInheritSource?: string;
+    /**
+     * 脚本生成器：**每次生成 / 重生成分镜表后自动沿用来源集的资产**（默认关）。
+     *
+     * 开启后只搬「新表里真的出现过的资产名」的锁（`scriptRowAssetNames` 做过滤），
+     * 上一集没用上的角色锁不会被静默灌进来。手动点「沿用资产」不受这个开关影响。
+     */
+    scriptAssetInheritAuto?: boolean;
+    /**
      * 脚本生成器：在资产格子里**单独挑的生图模型**（不填就跟随节点的默认图片模型）。
      * 只作为「格子生图弹窗」的默认值：每次生成都会把选中的模型写到新建的那张图片节点上。
      */
