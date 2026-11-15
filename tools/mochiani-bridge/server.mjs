@@ -1126,15 +1126,20 @@ export function planPromptAssetBindings({ prompt, titles, references } = {}) {
 /**
  * 回读核验用：提示词是不是「同一段」。
  *
- * 先按原样比（严格）；只有空白不同才放过 —— 因为 chip 渲染时前后是否带空格不由我们控制
- * （实测出现过 `@名字 、` 这种），所以兜底那一路**把所有空白都去掉**再比。
+ * 先按原样比（严格）；只有空白 / `@` 不同才放过 —— 这两样都是 chip 渲染的副产物，不由我们控制
+ * （实测出现过 `@名字 、` 的空格，也出现过 `@名字@@图片1` 这种多吐一个 `@`）。
  * 但**多一段 / 少一段文字**必须报错（多镜头提示词丢了段落就是废片）。
  */
 export function isSameCanvasPrompt(actual, expected) {
     const left = String(actual ?? "");
     const right = String(expected ?? "");
     if (left.trim() === right.trim()) return true;
-    return left.replace(/\s+/g, "") === right.replace(/\s+/g, "");
+    const squeeze = (text) => text.replace(/\s+/g, "");
+    if (squeeze(left) === squeeze(right)) return true;
+    // 再退一步：连 `@` 也不比。实测 chip 渲染会在名字后面多吐一个 `@`
+    // （`粉裙女@mj_xxx-image-1@@图片1`），这个不是我们能控制的，但**文字内容**必须一模一样。
+    const bare = (text) => squeeze(text).replace(/@/g, "");
+    return bare(left) === bare(right);
 }
 
 /**
@@ -3069,7 +3074,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.11",
+            version: "1.6.12",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,

@@ -106,6 +106,12 @@ const titlesFor = (count) => Array.from({ length: count }, (_, index) => MJ(inde
         availableReferences: [{ referenceId: "a", name: "n1" }],
     });
     check("两种字段名都收到 + 去重 + 丢掉无 id", list.length === 2 && list[0].id === "a" && list[1].id === "b", JSON.stringify(list));
+    // 线上真实回执形状：{id, name, type, sourceNodeId, url}（2026-11-15 实测）
+    const live = collectCanvasReferences({
+        documentToken: "t",
+        references: [{ id: "linked-edge-a:upload-a", name: "mj_abc-image-1", type: "image", sourceNodeId: "upload-a", url: "https://x/1.webp" }],
+    });
+    check("线上真实形状可用", live.length === 1 && live[0].id === "linked-edge-a:upload-a" && live[0].name === "mj_abc-image-1", JSON.stringify(live));
     check("空回执不炸", collectCanvasReferences(null).length === 0 && collectCanvasReferences({}).length === 0);
 }
 
@@ -113,6 +119,8 @@ const titlesFor = (count) => Array.from({ length: count }, (_, index) => MJ(inde
 {
     check("完全一致", isSameCanvasPrompt("甲\n乙", "甲\n乙"));
     check("chip 空格差异放过", isSameCanvasPrompt("粉裙女@x-image-1、皮衣男@x-image-2", "粉裙女@x-image-1 、 皮衣男@x-image-2"));
+    // 线上实测：chip 渲染会在名字后面多吐一个 `@`（`mj_xxx-image-1@@图片1`），这个不是我们能控制的
+    check("chip 多吐一个 @ 放过", isSameCanvasPrompt("粉裙女@x-image-1@@图片1", "粉裙女@x-image-1@图片1"));
     check("丢了一段必须报错", !isSameCanvasPrompt("甲", "甲\n乙"));
     check("换了名字必须报错", !isSameCanvasPrompt("@图片1", "@x-image-1"));
 }
