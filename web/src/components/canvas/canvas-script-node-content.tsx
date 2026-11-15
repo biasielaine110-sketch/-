@@ -89,7 +89,7 @@ import {
 } from "@/constant/story-script";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
-import { isSameScriptAssetByName, planScriptAssetAlignment, shouldApplyScriptAssetAlignment, type ScriptAssetAlignCandidate } from "@/lib/canvas/script-asset-align";
+import { isSameScriptAssetByName, isScriptAssetAlignSkipped, planScriptAssetAlignment, shouldApplyScriptAssetAlignment, type ScriptAssetAlignCandidate } from "@/lib/canvas/script-asset-align";
 import { buildScriptAssetBatchItems, isScriptAssetDirectRole, mergeScriptAssetBatchLockedIds, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import type { ScriptAssetInheritOptions, ScriptAssetInheritSource } from "@/lib/canvas/script-asset-inherit";
 import type { OneClickVideoRun } from "@/lib/canvas/one-click-video";
@@ -800,11 +800,14 @@ export function CanvasScriptNodeContent({
         if (!onBatchGenerateAssets || !rows.length) return [] as ScriptAssetBatchItem[];
         // 分类**原样**传（可能是 null）：没在画布上分类过的素材只按名字认 —— 用户刚拖进来的场景图
         // 默认落在「角色」上，要是连分类一起卡死，它就永远认不上场景，会被重复生成一遍。
+        // 用户亲手解绑过的图不算「已有图」：格子已经空了，批量生图得重新出一张。
+        const alignSkip = node.metadata?.scriptAssetAlignSkip;
         const existing = activeReferences
             .filter((reference) => reference.kind === "image")
+            .filter((reference) => !isScriptAssetAlignSkipped(alignSkip, reference.title))
             .map((reference) => ({ nodeId: reference.nodeId, title: reference.title, role: assetRoles?.[reference.nodeId] ?? null }));
         return mergeScriptAssetBatchLockedIds(buildScriptAssetBatchItems(rows, existing), nameLocks, aliveImageIds);
-    }, [activeReferences, aliveImageIds, assetRoles, nameLocks, onBatchGenerateAssets, rows]);
+    }, [activeReferences, aliveImageIds, assetRoles, nameLocks, node.metadata?.scriptAssetAlignSkip, onBatchGenerateAssets, rows]);
     /**
      * **预挂资产自动对齐**（用户 2026-11-13 口径：「把图连上来、改个大概相关的名字，就自动挂到表里、
      * 不再二次生成」）。
@@ -829,7 +832,9 @@ export function CanvasScriptNodeContent({
         const candidates: ScriptAssetAlignCandidate[] = activeReferences
             .filter((reference) => reference.kind === "image")
             .map((reference) => ({ nodeId: reference.nodeId, title: reference.title }));
-        const plan = planScriptAssetAlignment({ scriptNode: node, candidates, rows, preset: presetId, extras: extraColumns });
+        // `scriptAssetAlignSkip` = 用户亲手解绑过的图片标题：不加这份名单，用户点完 ×
+        // 下次签名一变（改名 / 新连一张）就被锁回来，表现就是「解绑不掉、保有历史状态」。
+        const plan = planScriptAssetAlignment({ scriptNode: node, candidates, rows, preset: presetId, extras: extraColumns, skipNames: node.metadata?.scriptAssetAlignSkip });
         if (!shouldApplyScriptAssetAlignment(plan)) return;
         alignBusyRef.current = alignSignature;
         onAlignAssets(node.id, plan.metadata);

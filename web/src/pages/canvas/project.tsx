@@ -91,6 +91,7 @@ import {
     resolveStoryScriptShotSeconds,
     scriptAssetColumnRole,
     scriptCellAssetIds,
+    scriptNameLockIds,
     scriptRowAssetIds,
     scriptRowAudioIds,
     scriptShotPreciseAssetRefs,
@@ -101,7 +102,6 @@ import {
     setStoryScriptRowNote,
     storyScriptGroupDuration,
     storyScriptToMarkdown,
-    stripStoryScriptAssetId,
     syncStoryScriptNameLocks,
     type ScriptAssetRole,
     type ScriptRefLinkKind,
@@ -201,7 +201,8 @@ import {
     type ScriptAssetReference,
 } from "@/lib/canvas/script-asset-batch";
 import { buildScriptAssetInheritPlan, collectScriptInheritSources, scriptRowAssetNames, type ScriptAssetInheritOptions } from "@/lib/canvas/script-asset-inherit";
-import { collectScriptAssetAlignCandidates, planScriptAssetAlignment, shouldApplyScriptAssetAlignment } from "@/lib/canvas/script-asset-align";
+import { collectScriptAssetAlignCandidates, planScriptAssetAlignSkipChange, planScriptAssetAlignment, shouldApplyScriptAssetAlignment } from "@/lib/canvas/script-asset-align";
+import { stripScriptAssetReferences } from "@/lib/canvas/script-asset-detach";
 import { planScriptPipelineGenerateOrder, readScriptPipelineVideoOutcome, resolveScriptPipelineRetryModel, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
@@ -1788,9 +1789,13 @@ function AtelierCanvasPage() {
                     // 否则会留下一条永远连不回来的「源节点已删除」幽灵行。
                     const clips = node.metadata?.videoMergeClips;
                     const pruned = clips?.some((clip) => allIds.has(clip.nodeId)) ? { ...node, metadata: { ...node.metadata, videoMergeClips: clips.filter((clip) => !allIds.has(clip.nodeId)) } } : node;
-                    const groupId = pruned.metadata?.groupId;
-                    if (groupId && allIds.has(groupId)) return { ...pruned, metadata: { ...pruned.metadata, groupId: undefined } };
-                    return pruned;
+                    // 脚本节点同理：素材节点被删 = 连线也没了，表里那几份引用（按格 / 按名 / 逐镜 / 分类）
+                    // 也该跟着摘干净 —— 否则格子里会留一个「图已删除」的空占位，还挡着重新生成。
+                    const detach = pruned.type === CanvasNodeType.Script ? stripScriptAssetReferences(pruned.metadata, [...allIds]) : {};
+                    const cleaned = Object.keys(detach).length ? { ...pruned, metadata: { ...pruned.metadata, ...detach } } : pruned;
+                    const groupId = cleaned.metadata?.groupId;
+                    if (groupId && allIds.has(groupId)) return { ...cleaned, metadata: { ...cleaned.metadata, groupId: undefined } };
+                    return cleaned;
                 });
             });
             setConnections((prev) => prev.filter((conn) => !allIds.has(conn.fromNodeId) && !allIds.has(conn.toNodeId)));
@@ -1820,12 +1825,24 @@ function AtelierCanvasPage() {
         // 「连线即拾取」的反向：断开连进合并节点的线，等于把那段素材从时间线移出。
         const removed = connectionsRef.current.find((conn) => conn.id === connectionId);
         if (removed) {
+            /**
+             * 🔴 断线 ≠ 只删一条线（用户 2026-11-15 报障：「断开链接图片后，表格中的图还是没有断开的」）。
+             *
+             * 只在画布上删连线时，脚本节点的四份引用（按格 `scriptCellAssets` / 按名 `scriptNameLocks` /
+             * 逐镜 `scriptRowAssets` / 分类 `scriptAssetRoles`）**全都没动**，于是表里照旧显示那张图 ——
+             * 因为格子的图大部分是名字锁落下来的、而批量生成还按每一镜各写了一条按格引用。
+             * 缩略图上的「解除链接」早就在清（`handleScriptAssetRemove`），偏偏最自然的「拖走连线 / 按 Delete」
+             * 这条没清。现在两条路都走 `stripScriptAssetReferences`，口径一致。
+             */
+            const fromNodeId = removed.fromNodeId;
             setNodes((prev) =>
                 prev.map((node) => {
                     if (node.id !== removed.toNodeId) return node;
                     const clips = node.metadata?.videoMergeClips;
-                    if (!clips?.some((clip) => clip.nodeId === removed.fromNodeId)) return node;
-                    return { ...node, metadata: { ...node.metadata, videoMergeClips: clips.filter((clip) => clip.nodeId !== removed.fromNodeId) } };
+                    const nextClips = clips?.some((clip) => clip.nodeId === fromNodeId) ? clips.filter((clip) => clip.nodeId !== fromNodeId) : clips;
+                    const detach = node.type === CanvasNodeType.Script ? stripScriptAssetReferences(node.metadata, fromNodeId) : {};
+                    if (nextClips === clips && !Object.keys(detach).length) return node;
+                    return { ...node, metadata: { ...node.metadata, ...(nextClips !== clips ? { videoMergeClips: nextClips } : {}), ...detach } };
                 }),
             );
         }
@@ -9556,26 +9573,45 @@ function AtelierCanvasPage() {
     /**
      * 按镜按资产整体替换（弹窗确认、或缩略图上的 × 解绑）。
      *
-     * 顺带做**资产锁定**：把这一格刚链接好的图按**资产名**记进 `scriptNameLocks`
-     * （「张三」→ @图片1、「客厅」→ @图片2），于是分镜表里别的镜再出现这个名字时也认同一张图。
-     * 解绑（`ids` 为空）**不动锁** —— 锁只能靠格子上的 🔒 显式解除，免得一次误删就把锁定丢掉。
+     * 🔴 2026-11-15 改口径：**被换掉 / 被删掉的那张图，从「这一列的所有镜头 + 名字锁」里一起摘掉**
+     * （用户原话：「点图片的叉子，现在只能删除一个镜头的关联，其他的镜头相关资产也不跟着改，很费劲」）。
+     *
+     * 为什么必须跨镜头：格子里显示的图 = `这一格挂的图 ∪ 同名名字锁落下来的图`，
+     * 而批量生成 / 逐镜挂图会给**每一镜**各写一条 `scriptCellAssets`，名字锁又是一条名字级的引用。
+     * 只删当前这格 → 别的镜头各自存着的引用 + 锁 依然把图送回来，表现就是「点了 × 图还在」。
+     * 所以「换图」与「解绑」统一成：先把被移除的图全表摘干净（限定在这一列），再把这一格写成新图。
+     * 顺带把「换一张图」修对了：老实现会把新图 union 进锁、旧图还留在锁里，于是所有镜头同时显示两张。
      */
     const handleCellAssetsChange = useCallback((nodeId: string, shotNo: number, columnKey: string, ids: string[]) => {
+        // 跳过名单按**图片标题**记（见 `planScriptAssetAlignSkipChange`）。格子里的 × 只是把图从这一格摘掉、
+        // 连线还在，不记名单的话自动对齐下一拍就把图锁回来 —— 就是用户说的「保有历史状态」。
+        const titleOf = (id: string) => nodesRef.current.find((node) => node.id === id)?.title || "";
         setNodes((prev) =>
             prev.map((item) => {
                 if (item.id !== nodeId) return item;
                 const row = (item.metadata?.scriptRows || []).find((candidate, index) => (Number(candidate.shot_no) || index + 1) === shotNo);
                 // 自建资产列的图位也要能写进去（`extra_*` 只有在 extras 里声明过才算合法列）。
                 const extras = normalizeStoryScriptExtraColumns(item.metadata?.scriptExtraColumns);
+                const beforeIds = scriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, extras);
+                const removed = beforeIds.filter((id) => !ids.includes(id));
+                const detach = removed.length ? stripScriptAssetReferences(item.metadata, removed, { columnKey, extras }) : {};
+                const baseMetadata = Object.keys(detach).length ? { ...item.metadata, ...detach } : item.metadata;
+                // 摘掉的名字进跳过名单；新挂进来的图从名单里放出来（用户重新挑了它 = 显式意图）。
+                const addedIds = ids.filter((id) => !beforeIds.includes(id));
+                const skipPatch = planScriptAssetAlignSkipChange(baseMetadata, {
+                    add: removed.map(titleOf),
+                    remove: addedIds.map(titleOf),
+                });
                 return {
                     ...item,
                     metadata: {
-                        ...item.metadata,
-                        scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, ids, extras),
+                        ...baseMetadata,
+                        ...skipPatch,
+                        scriptCellAssets: setStoryScriptCellAssetIds(baseMetadata?.scriptCellAssets, shotNo, columnKey, ids, extras),
                         // 走统一入口而不是 `setStoryScriptNameLock(row[columnKey], ids)`：
                         // 一格多名时那一串名字当一个 key 写进去，就是一条永远命中不了的**假资产锁**，
                         // 并且会把整格图锁到「川晓遥、宁宁、明明」这个并不存在的资产上（用户 2026-11-09 第 01 条）。
-                        scriptNameLocks: ids.length ? addScriptNameLockForCell(item.metadata?.scriptNameLocks, row, columnKey, ids, extras) : item.metadata?.scriptNameLocks,
+                        scriptNameLocks: ids.length ? addScriptNameLockForCell(baseMetadata?.scriptNameLocks, row, columnKey, ids, extras) : baseMetadata?.scriptNameLocks,
                     },
                 };
             }),
@@ -9594,15 +9630,20 @@ function AtelierCanvasPage() {
      */
     const appendCellAssets = useCallback((nodeId: string, shotNo: number, columnKey: string, ids: string[], name?: string) => {
         if (!ids.length) return;
+        const titleOf = (id: string) => nodesRef.current.find((node) => node.id === id)?.title || "";
         setNodes((prev) =>
             prev.map((item) => {
                 if (item.id !== nodeId) return item;
                 const row = (item.metadata?.scriptRows || []).find((candidate, index) => (Number(candidate.shot_no) || index + 1) === shotNo);
                 const extras = normalizeStoryScriptExtraColumns(item.metadata?.scriptExtraColumns);
+                // 新写进这一格的图＝用户（或生成链路）显式要它，从跳过名单里放出来 ——
+                // 否则「解绑过同名图」的旧记录会让这张新图在批量生图里永远算「没有」。
+                const skipPatch = planScriptAssetAlignSkipChange(item.metadata, { remove: ids.map(titleOf) });
                 return {
                     ...item,
                     metadata: {
                         ...item.metadata,
+                        ...skipPatch,
                         scriptCellAssets: setStoryScriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, [...scriptCellAssetIds(item.metadata?.scriptCellAssets, shotNo, columnKey, extras), ...ids], extras),
                         scriptNameLocks: addScriptNameLockForCell(item.metadata?.scriptNameLocks, row, columnKey, ids, extras, name),
                     },
@@ -9611,9 +9652,31 @@ function AtelierCanvasPage() {
         );
     }, []);
 
-    /** 表里给某个资产名「上锁 / 解锁」：锁上就记下这一格当前的图，解开（`ids` 为空）就删掉这条锁。 */
+    /**
+     * 表里给某个资产名「上锁 / 解锁」：锁上就记下这一格当前的图，解开（`ids` 为空）就删掉这条锁。
+     *
+     * 🔴 2026-11-15：**解锁 = 这张图不再属于这个资产**，所以顺带把散落在各镜的显式挂图一起摘掉
+     * （`scriptCellAssets` / `scriptRowAssets` / 其他名字锁里也指向它的那些）。
+     * 用户原话：「点图片的叉子，现在只能删除一个镜头的关联，其他的镜头相关资产也不跟着改，很费劲」——
+     * 格子里显示的图多数是名字锁落下来的，只删锁不删按格引用，别的镜头照样把图显示回来。
+     */
     const handleNameLockChange = useCallback((nodeId: string, name: string, ids: string[]) => {
-        setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptNameLocks: setStoryScriptNameLock(item.metadata?.scriptNameLocks, name, ids) } } : item)));
+        const titleOf = (id: string) => nodesRef.current.find((node) => node.id === id)?.title || "";
+        setNodes((prev) =>
+            prev.map((item) => {
+                if (item.id !== nodeId) return item;
+                const previous = ids.length ? [] : scriptNameLockIds(item.metadata?.scriptNameLocks, name);
+                const detach = previous.length ? stripScriptAssetReferences(item.metadata, previous) : {};
+                const base = Object.keys(detach).length ? { ...item.metadata, ...detach } : item.metadata;
+                // 解锁 = 这几张图不再属于这个资产：标题记进跳过名单，自动对齐别再把它们锁回来；
+                // 上锁 = 用户亲手挑的图，从名单里放出来。
+                const removedTitles = previous.map(titleOf).filter(Boolean);
+                const skipPatch = ids.length
+                    ? planScriptAssetAlignSkipChange(base, { remove: ids.map(titleOf) })
+                    : planScriptAssetAlignSkipChange(base, { add: removedTitles.length ? removedTitles : previous.length && name ? [name] : [] });
+                return { ...item, metadata: { ...base, ...skipPatch, scriptNameLocks: setStoryScriptNameLock(base?.scriptNameLocks, name, ids) } };
+            }),
+        );
     }, []);
 
     /** 解除这个分镜表的全部资产锁定（格子里的图片链接本身保留）。 */
@@ -9655,22 +9718,10 @@ function AtelierCanvasPage() {
             setNodes((prev) =>
                 prev.map((item) => {
                     if (item.id !== nodeId) return item;
-                    const roles = item.metadata?.scriptAssetRoles;
-                    // 只在真要删时才复制，否则原引用透传（避免无意义的对象变更加热画布重渲）。
-                    const nextRoles = roles && roles[assetNodeId] ? { ...roles } : roles;
-                    if (nextRoles && nextRoles !== roles) delete nextRoles[assetNodeId];
-                    return {
-                        ...item,
-                        metadata: {
-                            ...item.metadata,
-                            scriptCellAssets: stripStoryScriptAssetId(item.metadata?.scriptCellAssets, assetNodeId),
-                            scriptRowAssets: stripStoryScriptAssetId(item.metadata?.scriptRowAssets, assetNodeId),
-                            // 逐镜声音也在这条链上：删掉音频链接后，表里「声音」列不该还留着它。
-                            scriptRowAudios: stripStoryScriptAssetId(item.metadata?.scriptRowAudios, assetNodeId),
-                            scriptNameLocks: stripStoryScriptAssetId(item.metadata?.scriptNameLocks, assetNodeId),
-                            scriptAssetRoles: nextRoles,
-                        },
-                    };
+                    // 四份引用（按格 / 按名 / 逐镜 / 分类）由 `stripScriptAssetReferences` 一次摘干净，
+                    // 别在这里各写一遍 —— 漏一份，表里就还挂着那张图。
+                    const detach = stripScriptAssetReferences(item.metadata, assetNodeId);
+                    return Object.keys(detach).length ? { ...item, metadata: { ...item.metadata, ...detach } } : item;
                 }),
             );
         },

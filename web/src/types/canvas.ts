@@ -334,6 +334,14 @@ export type CanvasNodeMetadata = {
      */
     scriptNameLocks?: import("@/constant/story-script").StoryScriptNameLockMap;
     /**
+     * 脚本生成器：**自动对齐跳过名单**（用户亲手解绑过的资产名）。
+     *
+     * 用户点了资产格的 × / 拆了连线之后，图可能仍然连着脚本节点、标题也仍然像那个资产名，
+     * 于是下一次「连线签名变化 → 自动对齐」又把它锁回去 —— 用户看到的就是「解绑不掉、保有历史状态」。
+     * 这里记下被解绑的名字，自动对齐时整张图跳过；用户重新挂图 / 重新上锁时再把名字删掉。
+     */
+    scriptAssetAlignSkip?: string[];
+    /**
      * 脚本生成器：**手动追加的资产列**（例：「宠物」「车辆」）。自建列的行为与内置资产列一致 ——
      * 格子里能放文字、能挂图位、能上资产锁，铺链路时按 `role` 把图连进该镜的图片节点。
      * key 固定 `extra_<n>`（改列名不丢图位），见 constant/story-script.ts 的 `StoryScriptExtraColumn`。

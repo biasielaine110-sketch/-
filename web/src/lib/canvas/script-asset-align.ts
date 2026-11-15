@@ -143,6 +143,13 @@ type AlignSlot = { name: string; role: ScriptAssetRole; order: number };
  *    不会一张图占两个场景。完全同名可以命中多条（同名角色在十几镜出现，本来就是同一张图）。
  *
  * @param rows 当前分镜表（对齐以**表里真实存在的资产名**为准；表里没写的名字不会凭空建锁）。
+ * @param skipNames 用户**亲手解绑过**的图片标题（`metadata.scriptAssetAlignSkip`）。
+ *
+ * 没有它就会出现用户最烦的那种「历史状态」：用户点了图上的 × 把关联解开，图**还连着**脚本节点、
+ * 标题也还像那个资产名 → 下一次连线 / 改名签名一变，自动对齐又把它锁回去。
+ * 所以解绑时把这张图的标题记进名单，自动对齐跳过它；用户把图**改名**（改成别的资产名）就等于解禁。
+ *
+ * 注意口径是**图片标题**，不是资产名：跳过资产名会把「用户换了一张新图来填这个名字」也一起挡掉。
  */
 export function planScriptAssetAlignment(params: {
     scriptNode: CanvasNodeData;
@@ -150,14 +157,17 @@ export function planScriptAssetAlignment(params: {
     rows: readonly StoryScriptRow[] | null | undefined;
     preset: StoryScriptPresetId | string | null | undefined;
     extras?: readonly StoryScriptExtraColumn[] | null;
+    skipNames?: readonly string[] | null;
 }): ScriptAssetAlignPlan {
-    const { scriptNode, candidates, rows, preset, extras } = params;
+    const { scriptNode, candidates, rows, preset, extras, skipNames } = params;
     const empty: ScriptAssetAlignPlan = { matches: [], conflicts: [], unmatched: [], metadata: {}, newLockCount: 0, roleFixCount: 0 };
     const alive = (candidates || []).filter((item) => item?.nodeId && scriptNameLockName(item.title));
     if (!alive.length || !rows?.length) return empty;
 
     const locks = normalizeStoryScriptNameLockMap(scriptNode.metadata?.scriptNameLocks);
     const roleMap: Record<string, ScriptAssetRole> = { ...(scriptNode.metadata?.scriptAssetRoles || {}) };
+    // 用户亲手解绑过的名字一律不碰（大小写不敏感，与名字锁同一口径）。
+    const skip = new Set((skipNames || []).map((name) => scriptNameLockName(name)).filter(Boolean).map((name) => name.toLowerCase()));
 
     // ① 表里每一个资产格的名字，按列序 / 行序展开（一格多值就拆开，与铺链路同一口径）。
     const columns = getStoryScriptAssetColumns(preset, extras);
@@ -187,6 +197,11 @@ export function planScriptAssetAlignment(params: {
     let roleFixCount = 0;
 
     for (const candidate of alive) {
+        // 用户亲手解绑过这个名字 → 整张图都不碰（否则 × 完又被锁回去，就是用户说的「历史状态」）。
+        if (skip.has(scriptNameLockName(candidate.title).toLowerCase())) {
+            unmatched.push({ nodeId: candidate.nodeId, title: candidate.title });
+            continue;
+        }
         // 用户在画布上明确改过分类时，只跟**同分类**的格子对 —— 尊重人的判断。
         const declared = roleMap[candidate.nodeId] ? resolveScriptAssetRole(roleMap[candidate.nodeId]) : null;
         const hits: Hit[] = [];
@@ -215,12 +230,14 @@ export function planScriptAssetAlignment(params: {
         const role = kept[0].slot.role;
         kept = kept.filter((hit) => hit.slot.role === role);
 
+        // ④ 跳过只按**图片标题**判（见上方 `skipNames` 说明）：用户把这张图改名成别的名字，
+        //    或换一张新图来填同一个资产名，都应该重新对齐 —— 所以不能拿资产名去挡。
+        const names = Array.from(new Set(kept.map((hit) => hit.slot.name)));
         const currentRole = resolveScriptAssetRole(roleMap[candidate.nodeId]);
         if (currentRole !== role) {
             roleMap[candidate.nodeId] = role;
             roleFixCount += 1;
         }
-        const names = Array.from(new Set(kept.map((hit) => hit.slot.name)));
         let applied = false;
         for (const name of names) {
             const lockedIds = locks[name] || [];
@@ -260,4 +277,63 @@ export function planScriptAssetAlignment(params: {
  */
 export function shouldApplyScriptAssetAlignment(plan: ScriptAssetAlignPlan): boolean {
     return plan.newLockCount > 0 || plan.roleFixCount > 0;
+}
+
+/** 跳过名单最多记多少条（一直改名切换的话别把 metadata 撑爆；超了丢最早的那些）。 */
+const SCRIPT_ASSET_ALIGN_SKIP_LIMIT = 200;
+
+/** 收成去重（大小写不敏感）、去空白后的标题数组。 */
+export function normalizeScriptAssetAlignSkip(value: unknown): string[] {
+    const list = Array.isArray(value) ? value : [];
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const item of list) {
+        const title = typeof item === "string" ? item.trim() : "";
+        if (!title) continue;
+        const key = title.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(title);
+    }
+    return out;
+}
+
+/**
+ * 这张图是不是「用户亲手解绑过」的（自动对齐 / 批量生图都要绕开它）。
+ *
+ * 两处都必须用：对齐绕开它（别锁回来），批量生图也要绕开它 —— 否则格子已经空了、批量那边
+ * 还因为「这张图还在、名字像」而判定「已经有图」，于是这一镜永远不生成，用户看到的就是另一种
+ * 「解绑了但没反应」。
+ */
+export function isScriptAssetAlignSkipped(skipNames: unknown, title: unknown): boolean {
+    const key = scriptNameLockName(title).toLowerCase();
+    if (!key) return false;
+    return normalizeScriptAssetAlignSkip(skipNames).some((name) => scriptNameLockName(name).toLowerCase() === key);
+}
+
+/**
+ * 维护 `metadata.scriptAssetAlignSkip`：一张图**被解开关联**时把它的标题加进去（自动对齐从此绕开它），
+ * 用户**重新上锁 / 重新挂进某一格**时再摘出来（人名、图名都是显式意图，不该被旧名单挡住）。
+ *
+ * 没有任何变化返回 `{}` —— 调用方据此跳过 setNodes，避免每点一次 × 都白热一次画布。
+ */
+export function planScriptAssetAlignSkipChange(
+    metadata: CanvasNodeMetadata | undefined,
+    change: { add?: unknown; remove?: unknown },
+): Partial<CanvasNodeMetadata> {
+    const current = normalizeScriptAssetAlignSkip(metadata?.scriptAssetAlignSkip);
+    const added = normalizeScriptAssetAlignSkip(change.add);
+    const removedKeys = new Set(normalizeScriptAssetAlignSkip(change.remove).map((title) => title.toLowerCase()));
+    let next = current.filter((title) => !removedKeys.has(title.toLowerCase()));
+    const known = new Set(next.map((title) => title.toLowerCase()));
+    for (const title of added) {
+        const key = title.toLowerCase();
+        if (!key || removedKeys.has(key) || known.has(key)) continue;
+        known.add(key);
+        next.push(title);
+    }
+    if (next.length > SCRIPT_ASSET_ALIGN_SKIP_LIMIT) next = next.slice(-SCRIPT_ASSET_ALIGN_SKIP_LIMIT);
+    const same = next.length === current.length && next.every((title, index) => title === current[index]);
+    if (same) return {};
+    return { scriptAssetAlignSkip: next.length ? next : undefined };
 }
