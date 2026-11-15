@@ -726,6 +726,40 @@ type MediaKind = keyof typeof MEDIA_KIND_META;
  */
 const autoConfirmJobIds = new Set<string>();
 
+/**
+ * 桥数据的**会话内快照**：节点滚出视口被卸载、再滚回来时，面板直接照上次的样子铺开。
+ *
+ * 🔴 为什么需要：画布按视口裁剪节点（`project.tsx` 的 `visibleNodes`，外扩 280px + 2 秒宽限），
+ * 拖走再拖回来就是一次**重新挂载** —— 原来的挂载 effect 会连着做「健康检查 → 读页面上下文 →
+ * 读模型目录 → 回读参数」。其中读模型目录会把 `mochianiConfig` 写回 metadata（触发一次自动保存），
+ * 回读参数还会去改 MochiAni 那边节点的模型/渠道。用户看到的就是「每次离开一下再回来都在刷新」。
+ *
+ * 现在的口径：**每个节点每开一次页面只自动读一次**；之后靠面板右上角的「刷新 / 重新读取」手动来。
+ * 真连不上时错误会顶到面板上（并把顶部那个连接点打红），不会悄无声息地反复重试。
+ *
+ * 放模块级而不是 state：要的就是「跨挂载」活着（和上面的 `autoConfirmJobIds` 同一个原因）。
+ * 整页刷新丢掉是预期行为。
+ */
+type MochianiSessionSnapshot = {
+    pageId: string;
+    kind: "canvas" | "carton" | "";
+    target: MochianiPage | null;
+    work: { workId?: string; nodeCount?: number } | null;
+    points: PointSummary | null;
+    accountUser: string;
+    contextError: string;
+    models: ModelOption[];
+    modelsError: string;
+    categoryOptions: Array<{ key: number; label: string; compatible?: boolean; reason?: string; modelCount?: number }>;
+    paramOptions: Record<string, Record<string, ParamOption[]>>;
+    healthOk: boolean;
+    healthError: string;
+    /** 记下来的时刻，只用于排查。 */
+    loadedAt: number;
+};
+
+const mochianiSession = new Map<string, MochianiSessionSnapshot>();
+
 /** 等待时长 → `03:07`。 */
 function formatWaitTime(seconds: number) {
     const total = Math.max(0, Math.floor(seconds));
@@ -1173,13 +1207,41 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
         [bridgeBase, saveConfig, videoCategory, aspectRatio, probeParams],
     );
 
-    // 挂载：连桥 → 读页面 / 余额 / 模型目录 → 恢复上次任务
+    /**
+     * 会话快照的镜像：这一屏的数据一变就记一份，供「滚出去再滚回来」直接复用。
+     *
+     * 空快照不记（桥没连上时什么都不留）—— 这样下一次挂载还会老老实实重连一次。
+     */
     useEffect(() => {
-        void (async () => {
-            const healthy = await checkHealth();
-            if (!healthy) return;
-            await refreshContext();
-            await loadModels(node.metadata?.mochianiConfig);
+        if (!healthOk && !target && !models.length) return;
+        mochianiSession.set(node.id, {
+            pageId: targetPageRef.current,
+            kind: targetKindRef.current,
+            target,
+            work,
+            points,
+            accountUser,
+            contextError,
+            models,
+            modelsError,
+            categoryOptions,
+            paramOptions,
+            healthOk,
+            healthError,
+            loadedAt: Date.now(),
+        });
+    }, [node.id, target, work, points, accountUser, contextError, models, modelsError, categoryOptions, paramOptions, healthOk, healthError]);
+
+    /**
+     * 挂载：连桥 → 读页面 / 余额 / 模型目录 → 恢复上次任务。
+     *
+     * 🔴 只在**本页第一次**挂载时打这一串桥。之后（滚出视口被裁剪、再滚回来 / 切到别的界面又切回来）
+     * 直接用会话快照铺开，一个请求都不发 —— 否则每回来一次就重读一遍上下文和模型目录，
+     * 模型目录还会把 `mochianiConfig` 写回 metadata、把对面节点的模型/渠道切一遍，
+     * 用户看到的就是「一直在自动刷新，很乱」。要重新读只能手动点右上角「刷新 / 重新读取」。
+     */
+    useEffect(() => {
+        const restoreSavedRun = async () => {
             const saved = node.metadata?.mochianiRun;
             if (!saved?.id || restoredRef.current) return;
             restoredRef.current = true;
@@ -1189,6 +1251,32 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             } catch {
                 // 桥没开就先算了，用户点刷新还能再连
             }
+        };
+        const cached = mochianiSession.get(node.id);
+        if (cached) {
+            targetPageRef.current = cached.pageId;
+            targetKindRef.current = cached.kind;
+            setTarget(cached.target);
+            setWork(cached.work);
+            setPoints(cached.points);
+            setAccountUser(cached.accountUser);
+            setContextError(cached.contextError);
+            setModels(cached.models);
+            setModelsError(cached.modelsError);
+            setCategoryOptions(cached.categoryOptions);
+            setParamOptions(cached.paramOptions);
+            setHealthOk(cached.healthOk);
+            setHealthError(cached.healthError);
+            // 任务状态故意不缓存：进行中的要接着轮询、跑完的要把成片捞回来，必须重新 GET 一次（面板不闪）。
+            void restoreSavedRun();
+            return;
+        }
+        void (async () => {
+            const healthy = await checkHealth();
+            if (!healthy) return;
+            await refreshContext();
+            await loadModels(node.metadata?.mochianiConfig);
+            await restoreSavedRun();
         })();
         // 只在节点挂载时跑一次；bridgeBase 变了走下面的重连按钮
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1690,6 +1778,9 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
             return true;
         } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
+            // 「连不上了」这类失败：顺手把顶部连接状态刷成真实的（别一直亮着「已连接」骗人），
+            // 但**不**去重读模型目录 —— 那会把对面节点的模型/渠道又切一遍，正是要避免的那件事。
+            void checkHealth();
             return false;
         } finally {
             setBusy("");
@@ -1772,6 +1863,8 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
 
     const changeBridge = (value: string) => {
         const next = value.trim() || DEFAULT_BRIDGE;
+        // 换了桥 = 旧快照全作废（页面 / 模型目录都是另一台机器上的），否则会拿旧数据糊一屏。
+        mochianiSession.delete(node.id);
         setBridgeBase(next);
         try {
             window.localStorage.setItem(BRIDGE_STORAGE_KEY, next);
@@ -1905,6 +1998,7 @@ export function CanvasMochianiNodeContent({ node, references, onDetachReference,
                         }
                     })()}
                     className="flex items-center gap-1 text-[11px] opacity-60 transition hover:opacity-100"
+                    title="重新读 MochiAni 页面 / 余额 / 模型目录。只在第一次进这个节点时自动读，之后离开再回来不会自己刷新，要更新点这里"
                     disabled={loadingContext}
                 >
                     {loadingContext ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} 刷新
