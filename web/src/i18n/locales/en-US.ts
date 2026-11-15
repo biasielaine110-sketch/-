@@ -865,6 +865,8 @@ export default {
             inheritNothing: "Nothing to reuse: the checked assets are already linked",
             inheritDone: "Reused {{assets}} assets and {{locks}} name locks",
             inheritAutoApplied: "Auto-reused {{count}} asset name locks",
+            alignLinkedMounted: "Linked {{count}} connected image(s) to the table by name: {{names}}",
+            alignLinkedUnmatched: "These connected images don't match any script asset name, so they were not attached: {{names}}",
             batchAssetOpen: "Generate all ({{count}})",
             batchAssetHint: "Generate every character / scene / prop from the storyboard in one go: untick the ones you don't want, or just generate one type; the images land in a tidy grid on the right",
             directAsset: "Direct generate",

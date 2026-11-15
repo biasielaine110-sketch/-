@@ -866,6 +866,8 @@ export default {
             inheritNothing: "没有可沿用的内容：勾选的资产都已经连上了",
             inheritDone: "已沿用 {{assets}} 个资产、{{locks}} 个资产名锁",
             inheritAutoApplied: "已自动沿用 {{count}} 个资产名锁",
+            alignLinkedMounted: "已把连进来的 {{count}} 张图按名字挂到表里：{{names}}",
+            alignLinkedUnmatched: "这些连进来的图名字对不上剧本资产，没挂上：{{names}}",
             batchAssetOpen: "一键批量生成（{{count}}）",
             batchAssetHint: "把分镜表里的角色 / 场景 / 道具一次全生：能勾掉不想生的那几条，也能只生某一类；生成的图片排在节点右侧",
             directAsset: "一键直接生图",

@@ -105,6 +105,7 @@ import {
     syncStoryScriptNameLocks,
     type ScriptAssetRole,
     type ScriptRefLinkKind,
+    type StoryScriptRow,
 } from "@/constant/story-script";
 import { asScriptSchemeId, buildScriptSchemeSeed, resolveScriptPromptValues, resolveScriptSchemeId } from "@/constant/script-scheme";
 import { buildMochianiNodeConfig, isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE, resolveMochianiPreference } from "@/constant/mochiani-video";
@@ -201,7 +202,7 @@ import {
     type ScriptAssetReference,
 } from "@/lib/canvas/script-asset-batch";
 import { buildScriptAssetInheritPlan, collectScriptInheritSources, scriptRowAssetNames, type ScriptAssetInheritOptions } from "@/lib/canvas/script-asset-inherit";
-import { collectScriptAssetAlignCandidates, planScriptAssetAlignSkipChange, planScriptAssetAlignment, shouldApplyScriptAssetAlignment } from "@/lib/canvas/script-asset-align";
+import { planScriptAssetAlignSkipChange, planScriptAssetAlignment, shouldApplyScriptAssetAlignment } from "@/lib/canvas/script-asset-align";
 import { stripScriptAssetReferences } from "@/lib/canvas/script-asset-detach";
 import { planScriptPipelineGenerateOrder, readScriptPipelineVideoOutcome, resolveScriptPipelineRetryModel, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
@@ -9003,6 +9004,70 @@ function AtelierCanvasPage() {
     );
 
     /**
+     * **确定性对齐**：按名字把「连到脚本节点的图」锁进表里，并把结果**同步**写进 `nodesRef`。
+     *
+     * 为什么不能只靠组件里那个自动对齐 effect：「一键视频」是「生成分镜表 → 立刻生图」一口气跑完的
+     * —— `runScriptGeneration()` 把新表写进 `nodesRef` 之后，**同一轮微任务**就进到生图那一步；
+     * 而 effect 要等渲染提交后才跑（宏任务）。等它跑到，这一批资产图**已经建出来并占住了格子**
+     * （名字锁被新图抢先写上，`planScriptAssetAlignment` 反过来只会报 conflict），
+     * 用户连上来、按剧本改好名的那几张就永远挂不上、也永远跳不过生成。
+     * 用户看到的正是「一键视频不认我连的图，全都没挂进表、全都重新生成了」（2026-11-15 报障）。
+     *
+     * 所以凡是「读名字锁决定生不生图 / 连哪张图」的地方，都先同步调它一次：纯计算 + 只写 metadata，
+     * 幂等（没有新锁就一个字节都不写，不会自激）。
+     *
+     * @param rowsOverride 刚生成、可能还没进 `metadata.scriptRows` 的那份表（一键视频用）。
+     * @returns 本次挂上的资产名（去重；调用方据此提示 / 兜底跳过生成）。
+     */
+    const alignScriptAssetsByConnections = useCallback(
+        (nodeId: string, rowsOverride?: readonly StoryScriptRow[] | null): string[] => {
+            const source = nodesRef.current.find((item) => item.id === nodeId);
+            if (!source || source.type !== CanvasNodeType.Script) return [];
+            const rows = rowsOverride?.length ? rowsOverride : source.metadata?.scriptRows;
+            if (!rows?.length) return [];
+            /**
+             * 候选口径与脚本节点组件里那个自动对齐 effect **完全同源**：都走
+             * `buildNodeMentionReferences`（直连进来的图 + 经 Config 枢纽挂进来的图 + 标注节点里的图），
+             * 而不是「只看 `connection.toNodeId === nodeId` 的 Image 节点」。否则会出现两套名单 ——
+             * 用户手动连一回能被对齐上，一走「一键视频」就漏掉（2026-11-15 报障的第二种成因）。
+             */
+            const candidates = buildNodeMentionReferences(source, nodesRef.current, connectionsRef.current)
+                .filter((reference) => reference.kind === "image")
+                .map((reference) => ({ nodeId: reference.nodeId, title: reference.title }));
+            if (!candidates.length) return [];
+            const plan = planScriptAssetAlignment({
+                scriptNode: source,
+                candidates,
+                rows,
+                preset: resolveStoryScriptPresetId(source.metadata?.scriptPreset),
+                extras: normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns),
+                // 用户亲手解绑过的图（按**图片标题**记）不碰，否则「点 × 又自己锁回来」。
+                skipNames: source.metadata?.scriptAssetAlignSkip,
+            });
+            const names = Array.from(new Set(plan.matches.map((match) => match.name)));
+            if (!shouldApplyScriptAssetAlignment(plan)) return names;
+            const patch = (item: CanvasNodeData): CanvasNodeData =>
+                item.id === nodeId
+                    ? {
+                          ...item,
+                          metadata: {
+                              ...item.metadata,
+                              ...(plan.metadata.scriptNameLocks ? { scriptNameLocks: plan.metadata.scriptNameLocks } : {}),
+                              ...(plan.metadata.scriptAssetRoles ? { scriptAssetRoles: plan.metadata.scriptAssetRoles } : {}),
+                          },
+                      }
+                    : item;
+            nodesRef.current = nodesRef.current.map(patch);
+            setNodes((prev) => prev.map(patch));
+            if (names.length) message.success(t("canvas.scriptNode.alignLinkedMounted", { count: names.length, names: names.join("、") }));
+            const unmatched = plan.unmatched.map((item) => item.title).filter(Boolean);
+            if (unmatched.length) message.warning(t("canvas.scriptNode.alignLinkedUnmatched", { names: unmatched.join("、") }));
+            return names;
+        },
+        [message, setNodes, t],
+    );
+
+    /**
      * **预挂资产自动对齐**：脚本节点把「连上来的图按名字对上表里资产」算成补丁（`scriptNameLocks` /
      * `scriptAssetRoles`）后交给这里落库（用户 2026-11-13 口径：「改个大概相关的名字就自动挂到表里、
      * 不再二次生成」）。
@@ -9264,6 +9329,12 @@ function AtelierCanvasPage() {
          * @returns 本批新建的图片节点。**同步返回**（生成在后台跑），「一键视频」据此等结果 / 挑失败的重试。
          */
         (nodeId: string, options?: { model?: string; skipAssetKeys?: readonly string[] }): { created: CanvasNodeData[] } => {
+            /**
+             * ⚠️ **先对齐、再决定生什么**：连进来、名字对上的图必须先落成名字锁，
+             * 否则「一键视频」会在同一轮里把它们全当「这个资产还没图」重新生成一遍
+             * （= 用户报障「连了图、改了名，一键视频不认，全都重新生成」，2026-11-15）。
+             */
+            alignScriptAssetsByConnections(nodeId);
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source) return { created: [] };
             /**
@@ -9402,7 +9473,7 @@ function AtelierCanvasPage() {
             })();
             return { created };
         },
-        [effectiveConfig.quality, effectiveConfig.textPrompts, message, revealNodes, t],
+        [alignScriptAssetsByConnections, effectiveConfig.quality, effectiveConfig.textPrompts, message, revealNodes, t],
     );
 
     // ---- 逐镜「镜头图」（metadata.scriptRowAssets）----
@@ -9851,6 +9922,9 @@ function AtelierCanvasPage() {
              *  - 显式关闭（存了 4）→ 交回 `options.mergeEvery`（= 视频链那 4）或「视频分段」档位。
              * （读的是下面那个 `source`，所以这段必须放在它之后。）
              */
+            // 铺链路前先把「连进来、名字对上」的图锁进表里（同 `handleDirectGenerateScriptAssets`
+            // 开头那次对齐）—— 否则刚一键视频出来的表还没被 effect 对齐过，这里就会漏掉这些图。
+            alignScriptAssetsByConnections(nodeId);
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             const mergeEvery = resolveScriptPipelineMergeEvery(source.metadata, options?.mergeEvery);
@@ -10478,7 +10552,7 @@ function AtelierCanvasPage() {
                 onOk: runPipeline,
             });
         },
-        [effectiveConfig, message, modal, t, revealNodes],
+        [alignScriptAssetsByConnections, effectiveConfig, message, modal, t, revealNodes],
     );
 
     /**
