@@ -868,6 +868,8 @@ export default {
             inheritAutoApplied: "已自动沿用 {{count}} 个资产名锁",
             alignLinkedMounted: "已把连进来的 {{count}} 张图按名字挂到表里：{{names}}",
             alignLinkedUnmatched: "这些连进来的图名字对不上剧本资产，没挂上：{{names}}",
+            alignVoiceMounted: "已把 {{count}} 段声音按台词挂到对应镜头的声音格：{{names}}",
+            alignVoiceUnmatched: "这些声音没对上任何镜头的台词，仍按整表音频每段都连：{{names}}",
             batchAssetOpen: "一键批量生成（{{count}}）",
             batchAssetHint: "把分镜表里的角色 / 场景 / 道具一次全生：能勾掉不想生的那几条，也能只生某一类；生成的图片排在节点右侧",
             directAsset: "一键直接生图",

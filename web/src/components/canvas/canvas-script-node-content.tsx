@@ -90,6 +90,7 @@ import {
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { isSameScriptAssetByName, isScriptAssetAlignSkipped, planScriptAssetAlignment, shouldApplyScriptAssetAlignment, type ScriptAssetAlignCandidate } from "@/lib/canvas/script-asset-align";
+import { planScriptVoiceAlignment, shouldApplyScriptVoiceAlignment } from "@/lib/canvas/script-voice-align";
 import { buildScriptAssetBatchItems, isScriptAssetDirectRole, mergeScriptAssetBatchLockedIds, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import type { ScriptAssetInheritOptions, ScriptAssetInheritSource } from "@/lib/canvas/script-asset-inherit";
 import type { OneClickVideoRun } from "@/lib/canvas/one-click-video";
@@ -820,8 +821,9 @@ export function CanvasScriptNodeContent({
     const alignSignature = useMemo(
         () =>
             activeReferences
-                .filter((reference) => reference.kind === "image")
-                .map((reference) => `${reference.nodeId}:${reference.title}`)
+                // 音频也进签名：用户把音频改名成「张曼」、或新连一段配音，都要重新算一遍台词对齐。
+                .filter((reference) => reference.kind === "image" || reference.kind === "audio")
+                .map((reference) => `${reference.nodeId}:${reference.kind}:${reference.title}`)
                 .join("|"),
         [activeReferences],
     );
@@ -832,12 +834,25 @@ export function CanvasScriptNodeContent({
         const candidates: ScriptAssetAlignCandidate[] = activeReferences
             .filter((reference) => reference.kind === "image")
             .map((reference) => ({ nodeId: reference.nodeId, title: reference.title }));
-        // `scriptAssetAlignSkip` = 用户亲手解绑过的图片标题：不加这份名单，用户点完 ×
+        // `scriptAssetAlignSkip` = 用户亲手解绑过的图片 / 音频标题：不加这份名单，用户点完 ×
         // 下次签名一变（改名 / 新连一张）就被锁回来，表现就是「解绑不掉、保有历史状态」。
         const plan = planScriptAssetAlignment({ scriptNode: node, candidates, rows, preset: presetId, extras: extraColumns, skipNames: node.metadata?.scriptAssetAlignSkip });
-        if (!shouldApplyScriptAssetAlignment(plan)) return;
+        /**
+         * **音色**（用户 2026-11-15）：连进来、标题改成「张曼」/「张曼的音色」的音频，按这一镜有没有
+         * 这个人说话挂进「声音」列。与图片共用同一个 effect、同一份解绑名单，但落到另一个字段
+         * （逐镜 `scriptRowAudios`，不做名字锁 —— 同一个人不同镜头可以用不同音色）。
+         */
+        const voiceCandidates = activeReferences
+            .filter((reference) => reference.kind === "audio")
+            .map((reference) => ({ nodeId: reference.nodeId, title: reference.title }));
+        const voicePlan = planScriptVoiceAlignment({ scriptNode: node, candidates: voiceCandidates, rows, skipNames: node.metadata?.scriptAssetAlignSkip });
+        const patch = {
+            ...(shouldApplyScriptAssetAlignment(plan) ? plan.metadata : {}),
+            ...(shouldApplyScriptVoiceAlignment(voicePlan) ? voicePlan.metadata : {}),
+        };
+        if (!Object.keys(patch).length) return;
         alignBusyRef.current = alignSignature;
-        onAlignAssets(node.id, plan.metadata);
+        onAlignAssets(node.id, patch);
     }, [activeReferences, alignSignature, extraColumns, isRunning, node, onAlignAssets, presetId, rows]);
     /**
      * 「一键直接生图」要生的那几条（只算按钮显不显示 / 提示里的数字）。

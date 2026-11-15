@@ -20,6 +20,10 @@ import type { CanvasNodeData } from "@/types/canvas";
  * 编号由 `labelResourceNodeIds` 复用渲染层的同一个计数器算出来，保证与输入框一致。
  *
  * 名字取不到（表里没有资产名、资产图也没有标题）的整条丢掉，不写 `图片1=` 这种空绑定。
+ *
+ * 2026-11-15 起**音频也进这一行**（用户：「铺视频节点的时候也 @具体声音文件并描述为 张曼的音色参考」）：
+ * 音频条目写成 `张曼的音色参考@参考音频 1` —— 标签同样取 `labelResourceNodeIds` 的
+ * `参考音频 N` 原文（chip 才认得出），前面挂一句「谁的音色参考」，让模型知道这段音轨该给谁配音。
  */
 export function buildScriptAssetBindingPrompt(
     orderedAssetNodeIds: ReadonlyArray<string | undefined | null>,
@@ -29,16 +33,34 @@ export function buildScriptAssetBindingPrompt(
 ) {
     const items = collectScriptAssetPromptItems(orderedAssetNodeIds, allNodes, assetNameOf, assetRoleOf);
     if (!items.length) return "";
-    const joined = items.map((item) => `${item.name}@${item.label}`).join(i18n.t("imageReferences.separator"));
+    const joined = items.map((item) => `${scriptAssetBindingName(item)}@${item.label}`).join(i18n.t("imageReferences.separator"));
     return i18n.t("canvas.scriptNode.assetBindingLine", { items: joined });
 }
 
-/** 一条「@图片N = 什么资产」的待渲染条目（两个渲染器共用同一个收集结果）。 */
-type ScriptAssetPromptItem = { name: string; label: string; role: ScriptAssetRole | null };
+/** 一条「@图片N / @参考音频N = 什么资产」的待渲染条目（两个渲染器共用同一个收集结果）。 */
+type ScriptAssetPromptItem = { name: string; label: string; role: ScriptAssetRole | null; kind: "image" | "audio" };
+
+/**
+ * 绑定文案里「资产那一半」怎么写：
+ *  - 图片：原样（`张三` → `张三@图片1`）；
+ *  - 音频：补成「谁的音色参考」（`张曼` / `张曼的音色` → 都是 `张曼的音色参考`，
+ *    已经写了「参考」的不重复叠加）。
+ */
+function scriptAssetBindingName(item: ScriptAssetPromptItem) {
+    if (item.kind !== "audio") return item.name;
+    const base = item.name.trim();
+    if (/参考$/.test(base)) return base;
+    if (/音色$/.test(base)) return `${base}参考`;
+    return `${base}的音色参考`;
+}
 
 /**
  * 两个渲染器（老的单行「资产绑定」/ 第四套的「资产锁定」块）共用的收集逻辑：
- * 去重保序 → 只留图片 → 名字回落 → 编号按连线顺序。
+ * 去重保序 → 只留图片与音频 → 名字回落 → 编号按连线顺序。
+ *
+ * ⚠️ 分类在这一层**按 kind 强制**：音频节点在 `scriptAssetRoles` 里可能没标（`resolveScriptAssetRole`
+ * 的缺省是「角色」），照抄会把音轨写成「张曼人物参考，锁定面容、发型、服装、体型」。所以音频一律
+ * 按 `audio` 处理，不看上游分类。
  */
 function collectScriptAssetPromptItems(
     orderedAssetNodeIds: ReadonlyArray<string | undefined | null>,
@@ -54,22 +76,27 @@ function collectScriptAssetPromptItems(
         seen.add(id);
         return true;
     });
-    const imageRefs = labelResourceNodeIds(uniqueIds, allNodes).filter((reference) => reference.kind === "image");
-    if (!imageRefs.length) return [];
+    const refs = labelResourceNodeIds(uniqueIds, allNodes).filter((reference) => reference.kind === "image" || reference.kind === "audio");
+    if (!refs.length) return [];
     // 注意：不能用 `reference.title` —— 它是 `node.title || label`，没标题时会回落成「图片1」，
     // 于是拼出毫无信息量的 `图片1@图片1`。这里取**节点自己的标题**，空就是空，让下游整条丢掉。
     const nodeById = new Map(allNodes.map((node) => [node.id, node]));
     const bindings = collectScriptAssetBindings(
-        imageRefs.map((reference) => ({
+        refs.map((reference) => ({
             nodeId: reference.nodeId,
             name: assetNameOf(reference.nodeId),
             title: nodeById.get(reference.nodeId)?.title,
-            role: assetRoleOf(reference.nodeId),
+            role: reference.kind === "audio" ? ("audio" as ScriptAssetRole) : assetRoleOf(reference.nodeId),
         })),
     );
-    const labelById = new Map(imageRefs.map((reference) => [reference.nodeId, reference.label]));
+    const refById = new Map(refs.map((reference) => [reference.nodeId, reference]));
     return bindings
-        .map((binding) => ({ name: binding.name, label: labelById.get(binding.nodeId) || "", role: binding.role }))
+        .map((binding) => ({
+            name: binding.name,
+            label: refById.get(binding.nodeId)?.label || "",
+            role: binding.role,
+            kind: refById.get(binding.nodeId)?.kind === "audio" ? ("audio" as const) : ("image" as const),
+        }))
         .filter((item) => Boolean(item.label));
 }
 
@@ -103,10 +130,13 @@ export function buildScriptAssetLockPrompt(
     return ["- **资产锁定：**", ...items.map((item) => `@${item.label}：${scriptAssetLockText(item)}`)].join("\n");
 }
 
-/** 一行「锁什么」的文案：按资产分类写死，用户 2026-10-27 拍的五种写法。 */
+/** 一行「锁什么」的文案：按资产分类写死，用户 2026-10-27 拍的五种写法（+ 2026-11-15 的音色）。 */
 function scriptAssetLockText(item: ScriptAssetPromptItem) {
     const name = item.name;
     switch (item.role) {
+        case "audio":
+            // 音色参考：`@参考音频 1：张曼的音色参考。`（用户 2026-11-15 的原话口径）
+            return `${scriptAssetBindingName(item)}。`;
         case "character":
             // 名字本身已经带「人物 / 角色」（「李曼人物」）→ 不再叠一层，否则「李曼人物人物参考」。
             return /(人物|角色)$/.test(name) ? `${name}参考，锁定面容、发型、服装、体型。` : `${name}人物参考，锁定面容、发型、服装、体型。`;

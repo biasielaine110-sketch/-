@@ -203,6 +203,7 @@ import {
 } from "@/lib/canvas/script-asset-batch";
 import { buildScriptAssetInheritPlan, collectScriptInheritSources, scriptRowAssetNames, type ScriptAssetInheritOptions } from "@/lib/canvas/script-asset-inherit";
 import { planScriptAssetAlignSkipChange, planScriptAssetAlignment, shouldApplyScriptAssetAlignment } from "@/lib/canvas/script-asset-align";
+import { isRowMountedAudio, planScriptVoiceAlignment, shouldApplyScriptVoiceAlignment } from "@/lib/canvas/script-voice-align";
 import { stripScriptAssetReferences } from "@/lib/canvas/script-asset-detach";
 import { planScriptPipelineGenerateOrder, readScriptPipelineVideoOutcome, resolveScriptPipelineRetryModel, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import {
@@ -9068,6 +9069,53 @@ function AtelierCanvasPage() {
     );
 
     /**
+     * **确定性音色对齐**：把「连到脚本节点、标题改成角色名 / XX 的音色」的音频，按**这一镜有没有
+     * 这个人说话**挂进「声音」列（`metadata.scriptRowAudios`），同样**同步**写进 `nodesRef`。
+     *
+     * 与 `alignScriptAssetsByConnections` 是同一套体例、同一处调用点（两个入口各调一次），
+     * 只是判据不同（台词说话人 ← 图片是资产格名字）、写入字段不同（逐镜 vs 名字锁）。
+     * 用户 2026-11-15 的口径：「链接了声音文件并改名，某镜张曼有台词就挂到那一镜的声音格」。
+     *
+     * 幂等：没有新增挂载就一个字节都不写、也不提示（`shouldApplyScriptVoiceAlignment`）。
+     * @param rowsOverride 刚生成、可能还没进 `metadata.scriptRows` 的那份表（一键视频用）。
+     * @returns 本次新挂上的音频标题（去重）。
+     */
+    const alignScriptVoicesByConnections = useCallback(
+        (nodeId: string, rowsOverride?: readonly StoryScriptRow[] | null): string[] => {
+            const source = nodesRef.current.find((item) => item.id === nodeId);
+            if (!source || source.type !== CanvasNodeType.Script) return [];
+            const rows = rowsOverride?.length ? rowsOverride : source.metadata?.scriptRows;
+            if (!rows?.length) return [];
+            // 候选口径与图片对齐一致：`buildNodeMentionReferences` 里的音频（直连 + 经 Config 枢纽），
+            // 这样「手动连一次」和「一键视频前」不会出现两套名单。
+            const candidates = buildNodeMentionReferences(source, nodesRef.current, connectionsRef.current)
+                .filter((reference) => reference.kind === "audio")
+                .map((reference) => ({ nodeId: reference.nodeId, title: reference.title }));
+            if (!candidates.length) return [];
+            const plan = planScriptVoiceAlignment({
+                scriptNode: source,
+                candidates,
+                rows,
+                // 与图片共用一份解绑名单（按标题记）：用户在声音格点过 × 的音频不许被挂回来。
+                skipNames: source.metadata?.scriptAssetAlignSkip,
+            });
+            const titles = Array.from(new Set(plan.matches.map((match) => match.title)));
+            if (!shouldApplyScriptVoiceAlignment(plan)) return titles;
+            const patch = (item: CanvasNodeData): CanvasNodeData =>
+                item.id === nodeId
+                    ? { ...item, metadata: { ...item.metadata, ...(plan.metadata.scriptRowAudios ? { scriptRowAudios: plan.metadata.scriptRowAudios } : {}) } }
+                    : item;
+            nodesRef.current = nodesRef.current.map(patch);
+            setNodes((prev) => prev.map(patch));
+            if (titles.length) message.success(t("canvas.scriptNode.alignVoiceMounted", { count: titles.length, names: titles.join("、") }));
+            const unmatched = plan.unmatched.map((item) => item.title).filter(Boolean);
+            if (unmatched.length) message.info(t("canvas.scriptNode.alignVoiceUnmatched", { names: unmatched.join("、") }));
+            return titles;
+        },
+        [message, setNodes, t],
+    );
+
+    /**
      * **预挂资产自动对齐**：脚本节点把「连上来的图按名字对上表里资产」算成补丁（`scriptNameLocks` /
      * `scriptAssetRoles`）后交给这里落库（用户 2026-11-13 口径：「改个大概相关的名字就自动挂到表里、
      * 不再二次生成」）。
@@ -9077,7 +9125,7 @@ function AtelierCanvasPage() {
      * 「组件读到的锁 + 这次新加的」，而这两者之间可能已经有别的写入（比如用户刚在格子里锁了张图）。
      */
     const handleAlignScriptAssets = useCallback((nodeId: string, metadata: Partial<CanvasNodeMetadata>) => {
-        if (!metadata || (!metadata.scriptNameLocks && !metadata.scriptAssetRoles)) return;
+        if (!metadata || (!metadata.scriptNameLocks && !metadata.scriptAssetRoles && !metadata.scriptRowAudios)) return;
         setNodes((prev) =>
             prev.map((item) => {
                 if (item.id !== nodeId) return item;
@@ -9085,12 +9133,22 @@ function AtelierCanvasPage() {
                 for (const [name, ids] of Object.entries(metadata.scriptNameLocks || {})) {
                     nextLocks[name] = Array.from(new Set([...(nextLocks[name] || []), ...ids]));
                 }
+                /**
+                 * 逐镜声音同样只做**并集**：自动对齐算出来的是「这一镜该有的音色」，
+                 * 而用户可能刚在同一镜手动挂了另一条配音 —— 整份替换会把它抹掉。
+                 */
+                let nextAudios = item.metadata?.scriptRowAudios;
+                for (const [shotNo, ids] of Object.entries(metadata.scriptRowAudios || {})) {
+                    const current = scriptRowAudioIds(nextAudios, shotNo);
+                    nextAudios = setStoryScriptRowAudioIds(nextAudios, shotNo, Array.from(new Set([...current, ...ids])));
+                }
                 return {
                     ...item,
                     metadata: {
                         ...item.metadata,
                         ...(metadata.scriptNameLocks ? { scriptNameLocks: nextLocks } : {}),
                         ...(metadata.scriptAssetRoles ? { scriptAssetRoles: { ...(item.metadata?.scriptAssetRoles || {}), ...metadata.scriptAssetRoles } } : {}),
+                        ...(metadata.scriptRowAudios ? { scriptRowAudios: nextAudios } : {}),
                     },
                 };
             }),
@@ -9335,6 +9393,8 @@ function AtelierCanvasPage() {
              * （= 用户报障「连了图、改了名，一键视频不认，全都重新生成」，2026-11-15）。
              */
             alignScriptAssetsByConnections(nodeId);
+            // 音色同理：台词对上「张曼」的那几镜要先把音轨挂进声音列，铺链路才连得到这一段配音。
+            alignScriptVoicesByConnections(nodeId);
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source) return { created: [] };
             /**
@@ -9473,7 +9533,7 @@ function AtelierCanvasPage() {
             })();
             return { created };
         },
-        [alignScriptAssetsByConnections, effectiveConfig.quality, effectiveConfig.textPrompts, message, revealNodes, t],
+        [alignScriptAssetsByConnections, alignScriptVoicesByConnections, effectiveConfig.quality, effectiveConfig.textPrompts, message, revealNodes, t],
     );
 
     // ---- 逐镜「镜头图」（metadata.scriptRowAssets）----
@@ -9584,16 +9644,41 @@ function AtelierCanvasPage() {
 
     /** 逐镜声音整体替换（弹窗确认、或胶囊上的 × 解绑）。 */
     const handleRowAudiosChange = useCallback((nodeId: string, shotNo: number, ids: string[]) => {
-        setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptRowAudios: setStoryScriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo, ids) } } : item)));
+        setNodes((prev) =>
+            prev.map((item) => {
+                if (item.id !== nodeId) return item;
+                const before = scriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo);
+                const titleOf = (audioId: string) => nodesRef.current.find((node) => node.id === audioId)?.title || "";
+                /**
+                 * 解绑 / 重新挂上要同步「自动对齐跳过名单」（与图片共用 `scriptAssetAlignSkip`，
+                 * 按**标题**记）：
+                 *  - 被移除的音频 → 记进去，否则台词还在，自动对齐下一拍就把它挂回来（用户说的「解绑不掉」）；
+                 *  - 新挂上的音频 → 摘出来，人手动挑的就是显式意图，不该被旧名单挡着。
+                 * 没有变化时 `planScriptAssetAlignSkipChange` 返回 `{}`，不会白改 metadata。
+                 */
+                const removed = before.filter((audioId) => !ids.includes(audioId)).map(titleOf).filter(Boolean);
+                const added = ids.filter((audioId) => !before.includes(audioId)).map(titleOf).filter(Boolean);
+                const skipPatch = planScriptAssetAlignSkipChange(item.metadata, { add: removed, remove: added });
+                return {
+                    ...item,
+                    metadata: { ...item.metadata, ...skipPatch, scriptRowAudios: setStoryScriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo, ids) },
+                };
+            }),
+        );
     }, []);
 
     /** 把新导入的音频追加关联到某一镜（保留这一镜已有的声音）。 */
     const appendRowAudios = useCallback((nodeId: string, shotNo: number, ids: string[]) => {
         if (!ids.length) return;
         setNodes((prev) =>
-            prev.map((item) =>
-                item.id === nodeId ? { ...item, metadata: { ...item.metadata, scriptRowAudios: setStoryScriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo, [...scriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo), ...ids]) } } : item,
-            ),
+            prev.map((item) => {
+                if (item.id !== nodeId) return item;
+                const merged = Array.from(new Set([...scriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo), ...ids]));
+                // 用户手动挂进来的音频要解禁（摘出跳过名单），否则自动对齐的旧名单会让它「挂上了也不生效」。
+                const titles = ids.map((audioId) => nodesRef.current.find((node) => node.id === audioId)?.title || "").filter(Boolean);
+                const skipPatch = titles.length ? planScriptAssetAlignSkipChange(item.metadata, { remove: titles }) : {};
+                return { ...item, metadata: { ...item.metadata, ...skipPatch, scriptRowAudios: setStoryScriptRowAudioIds(item.metadata?.scriptRowAudios, shotNo, merged) } };
+            }),
         );
     }, []);
 
@@ -9925,6 +10010,7 @@ function AtelierCanvasPage() {
             // 铺链路前先把「连进来、名字对上」的图锁进表里（同 `handleDirectGenerateScriptAssets`
             // 开头那次对齐）—— 否则刚一键视频出来的表还没被 effect 对齐过，这里就会漏掉这些图。
             alignScriptAssetsByConnections(nodeId);
+            alignScriptVoicesByConnections(nodeId);
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             const mergeEvery = resolveScriptPipelineMergeEvery(source.metadata, options?.mergeEvery);
@@ -9971,7 +10057,14 @@ function AtelierCanvasPage() {
             const upstreamAssets = upstreamNodes.filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content)).map((node) => ({ id: node.id, title: node.title, role: assetRoleOf(node.id) }));
             // ⚠️ 这里**不再**分「角色 / 全局」两拨：所有素材都交给 `matchScriptRowAssetsByRole` 按分类逐镜匹配。
             // 老实现把场景 / 道具 / 站位无条件连到每一镜，一张表十几个资产 → 每个视频节点挂十几张图（用户报障）。
-            const audioRefs = upstreamNodes.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey)).map((node) => ({ id: node.id, title: node.title }));
+            const upstreamAudioRefs = upstreamNodes.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey)).map((node) => ({ id: node.id, title: node.title }));
+            /**
+             * 音频分两拨（用户 2026-11-15）：
+             *  - **音色参考**：已经按台词挂进某一镜「声音」列（`scriptRowAudios` 里出现过）→ 只连它被挂到的那几镜；
+             *  - **整表音频**：没挂进去的（BGM / 全局旁白 / 还没对齐过的）→ 老口径，每段视频都连。
+             * 判据只看 metadata、不看标题：用户手动把一条 BGM 挂到第 3 镜，它在第 3 镜就该只属于这一镜。
+             */
+            const audioRefs = upstreamAudioRefs.filter((asset) => !isRowMountedAudio(source.metadata, asset.id));
 
             const textWidth = NODE_DEFAULT_SIZE[CanvasNodeType.Text].width;
             // 文本节点默认 480 高，铺链路时压到 240：否则每一镜的横向三件套会占掉整屏。
@@ -10246,7 +10339,10 @@ function AtelierCanvasPage() {
                 const orderedGroupAssetIds = orderScriptRefIds([...groupAssetIds], (assetId) => groupAssetKinds.get(assetId));
                 // 视频节点的资产文案（第四套=资产锁定块，其余=资产绑定行）：本段所有资产图都是直连视频节点的，
                 // 顺序与写连线时一致 —— orderedGroupAssetIds → 音频（音频只连视频、但不进「图片资产」文案，拼装时按 kind 过滤掉）。
-                const videoBinding = assetBindingOf([...orderedGroupAssetIds, ...audioRefs.map((asset) => asset.id)], nodesRef.current, assetNameOf, assetRoleOf);
+                // 音频也要进文案（用户 2026-11-15）：整表音频在前、本段按台词挂的音色在后 ——
+                // **顺序必须与下面写连线的顺序一致**，否则 `@参考音频 N` 的编号与输入框 chip 对不上。
+                const groupAudioList = [...audioRefs.map((asset) => asset.id), ...groupAudioIds];
+                const videoBinding = assetBindingOf([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf);
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
                 // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产绑定块在前、禁止项 / 强制声明收尾。
                 const videoPrompt = withVideoComplianceSuffix(withScriptAssetBinding(baseVideoPrompt, videoBinding));
@@ -10552,7 +10648,7 @@ function AtelierCanvasPage() {
                 onOk: runPipeline,
             });
         },
-        [alignScriptAssetsByConnections, effectiveConfig, message, modal, t, revealNodes],
+        [alignScriptAssetsByConnections, alignScriptVoicesByConnections, effectiveConfig, message, modal, t, revealNodes],
     );
 
     /**
@@ -11293,8 +11389,10 @@ function AtelierCanvasPage() {
                 extras: shotExtras,
                 coveredColumns: new Set(preciseRefs.map((ref) => ref.columnKey)),
             });
-            // 音频素材只连视频节点（不参与生图），与整条铺链路一致。
-            const audioRefs = upstreamNodes.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey));
+            // 音频素材只连视频节点（不参与生图），与整条铺链路一致。但**按台词挂进声音列的那些**
+            // 只连它们被挂到的镜（用户 2026-11-15）：这里先剔掉，剩下的才是「整表音频」（BGM / 全局旁白）。
+            const upstreamAudioRefs = upstreamNodes.filter((node) => node.type === CanvasNodeType.Audio && Boolean(node.metadata?.content || node.metadata?.storageKey));
+            const audioRefs = upstreamAudioRefs.filter((asset) => !isRowMountedAudio(source.metadata, asset.id));
             // 这一镜自己的「镜头图」也直连视频节点；已删掉的图片节点直接跳过。
             const rowAssetRefs = scriptRowAssetIds(source.metadata?.scriptRowAssets, shotNo).filter((id) => nodesRef.current.some((node) => node.id === id));
             // 这一镜在表里「声音」列挂的音频：只连视频节点（同口径：已删的跳过）。
