@@ -766,9 +766,33 @@ async function importReferenceMedia(job, pageId, origin, nodeId, kind, files) {
         } else {
             pushLog(job, `${label} ${index + 1} 已导入并连上视频节点`);
         }
-        connected.push({ nodeId: mediaNodeId, label: `${label} ${index + 1}` });
+        connected.push({ nodeId: mediaNodeId, label: `${label} ${index + 1}`, kind, index, title: "" });
     }
+    // 标题是「把 @图片N 换成 MochiAni 引用名」要用的，必须读回来。但它是纯读、彼此独立，
+    // 并发送一遍就好 —— 别在串行的上传循环里一张张等（5 张图 = 5 个多余往返）。
+    const titles = await mapLimit(connected, 6, (item) => readNodeTitle(pageId, origin, item.nodeId));
+    titles.forEach((result, position) => {
+        if (result.ok) connected[position].title = result.value || "";
+    });
     return connected;
+}
+
+/**
+ * 读一个节点在 MochiAni 里的**标题**。
+ *
+ * 为什么要它：MochiAni 把我们上传的图命名成 `mj_<id>-image-N`，提示词里能锁定的就是这个名字
+ * （结构化引用渲染出来也是 `@这个名字`）。所以我们上传完必须把它读回来，才能把 `@图片N` 换过去。
+ * 读不到就返回空串 —— 调用方会退化成「这条编号没有对应素材」的告警，而不是瞎猜一个名字。
+ */
+async function readNodeTitle(pageId, origin, nodeId) {
+    try {
+        const node = await callTool("mochiani_canvas_get_node", { pageId, origin, nodeId });
+        const record = node?.node || node;
+        const title = record?.title ?? record?.name ?? record?.media?.name ?? "";
+        return typeof title === "string" ? title.trim() : "";
+    } catch {
+        return "";
+    }
 }
 
 /** 参考素材的下载并发数：MochiAni 侧是浏览器页面，太高会被它排队挡回来，4 比较稳。 */
@@ -977,21 +1001,178 @@ async function tidyCanvasOverlaps(pageId, origin) {
     return { moved, rounds: 6 };
 }
 
+/* ─────────────────── 画布口径：把「@图片N」换成 MochiAni 能锁定的引用 ─────────────────── */
+
+/**
+ * 我们画布的资源标签 → MochiAni 画布的资源标签，**两套名字根本不一样**。
+ *
+ * 用户报障（2026-11-15）：「画布模式下发送过去的资产绑定，我的画布是 @图片1、@图片2，
+ * 而 mochani 的画布资产锁定似乎是另一个名字，需要发送过去的时候把资产锁定自行适配成
+ * mochani 画布能锁定的名字。」
+ *
+ * 实测（`mochiani_canvas_read`）：我们上传的每张图在 MochiAni 里被命名成
+ * `mj_mwh8qa6b_drnkc-image-1`、`-image-2`…（= 上传节点的 `title`），
+ * 而 `mochiani_canvas_generation_context` 的 `currentPrompt` 里，用户手动插的那个 chip 渲染成
+ * `粉裙女@mj_mwh8qa6b_drnkc-image-1@@图片1` ——
+ *   · chip（结构化引用）→ 渲染成 `@<节点标题>`；
+ *   · 我们写过去的 `@图片1` → 只是一段**死文字**，MochiAni 不认，锁不住任何素材。
+ *
+ * 所以这里做的是「换名字」：把 `@图片N / 视频N / 音频N` 换成 MochiAni 侧的引用
+ * （优先结构化 chip，其次退化成 `@<节点标题>` 文本）。
+ *
+ * ⚠️ 编号口径必须与前端一致：同类型**各自**计数（图片1、图片2…），且顺序 = 连线到达顺序
+ * = 我们上传的顺序。所以 `titles.image[i]` 就是 `图片(i+1)`。
+ */
+const REFERENCE_MARKER_RE = /@(图片|视频|音频)\s*(\d{1,2})/gu;
+const REFERENCE_MARKER_KIND = { 图片: "image", 视频: "video", 音频: "audio" };
+
+/** 从一条引用记录里抠出 id（字段名没文档，见过的写法都收）。 */
+function pickReferenceId(reference) {
+    const value = reference?.referenceId ?? reference?.id ?? reference?.refId ?? reference?.token;
+    return typeof value === "string" ? value.trim() : "";
+}
+
+/** 从一条引用记录里抠出它在 MochiAni 里显示的名字。 */
+function pickReferenceName(reference) {
+    const value = reference?.name ?? reference?.label ?? reference?.title ?? reference?.displayName ?? reference?.nodeTitle;
+    return typeof value === "string" ? value.trim() : "";
+}
+
+/** `mochiani_canvas_references` 的回执 → `[{ id, name }]`（去重、丢掉没有 id 的）。 */
+export function collectCanvasReferences(payload) {
+    const out = [];
+    const seen = new Set();
+    const lists = [payload?.references, payload?.availableReferences, payload?.available];
+    for (const list of lists) {
+        if (!Array.isArray(list)) continue;
+        for (const reference of list) {
+            const id = pickReferenceId(reference);
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            out.push({ id, name: pickReferenceName(reference) });
+        }
+    }
+    return out;
+}
+
+/** 名字能不能对上（先精确，再双向包含 —— MochiAni 可能给标题加后缀/去扩展名）。 */
+function referenceNameMatches(left, right) {
+    const a = String(left || "").trim().toLowerCase();
+    const b = String(right || "").trim().toLowerCase();
+    if (!a || !b) return false;
+    return a === b || a.includes(b) || b.includes(a);
+}
+
+/**
+ * 把提示词里的 `@图片1 / 视频2 / 音频1` 换成 MochiAni 的引用片段。纯函数，不读 store、不发请求。
+ *
+ * @param prompt 我们画布写好的提示词（含 `@图片N` 死文字）
+ * @param titles `{ image: [上传节点标题…], video: [...], audio: [...] }`，下标 = 编号 - 1
+ * @param references `collectCanvasReferences()` 的结果；空数组 = 只能退化成名字文本
+ *
+ * @returns `{ segments, rendered, chipCount, textCount, unresolved }`
+ *  - `segments` 直接喂 `mochiani_canvas_edit_references`；
+ *  - `rendered` = 期望 MochiAni 侧渲染出来的提示词（`@图片1` 换成 `@<标题>`），用于回读核验；
+ *  - 列表里没有对应标题的编号（比如 `@图片9` 但只连了 5 张）**原样保留**，不猜。
+ */
+export function planPromptAssetBindings({ prompt, titles, references } = {}) {
+    const text = String(prompt || "");
+    const titleMap = titles || {};
+    const refs = Array.isArray(references) ? references : [];
+    const segments = [];
+    const unresolved = [];
+    let rendered = "";
+    let chipCount = 0;
+    let textCount = 0;
+    let cursor = 0;
+
+    for (const match of text.matchAll(REFERENCE_MARKER_RE)) {
+        const kind = REFERENCE_MARKER_KIND[match[1]];
+        const index = Number(match[2]) - 1;
+        const list = Array.isArray(titleMap[kind]) ? titleMap[kind] : [];
+        const title = String(list[index] || "").trim();
+        if (!title) {
+            // 这一种素材没连 / 编号超界：文字原样留着（最后统一走 pushText），别静默删掉用户的话
+            unresolved.push({ marker: match[0], kind, index });
+            continue;
+        }
+        const before = text.slice(cursor, match.index);
+        if (before) segments.push({ text: before });
+        rendered += before;
+        cursor = match.index + match[0].length;
+
+        const reference = refs.find((item) => referenceNameMatches(pickReferenceName(item), title));
+        // 引用记录的 id 字段名不统一（`referenceId` / `id`），必须统一走 `pickReferenceId`，
+        // 否则 chip 段会变成 `{ referenceId: undefined }` —— 探针就是这么把这个 bug 抓出来的。
+        const referenceId = reference ? pickReferenceId(reference) : "";
+        if (referenceId) {
+            segments.push({ referenceId });
+            chipCount += 1;
+        } else {
+            // 拿不到 referenceId（面板没挂载 / 引用还没生成）→ 至少把名字换成 MochiAni 认识的那个
+            segments.push({ text: `@${title}` });
+            textCount += 1;
+        }
+        rendered += `@${title}`;
+    }
+
+    const tail = text.slice(cursor);
+    if (tail) segments.push({ text: tail });
+    rendered += tail;
+
+    return { segments, rendered, chipCount, textCount, unresolved };
+}
+
+/**
+ * 回读核验用：提示词是不是「同一段」。
+ *
+ * 先按原样比（严格）；只有空白不同才放过 —— 因为 chip 渲染时前后是否带空格不由我们控制
+ * （实测出现过 `@名字 、` 这种），所以兜底那一路**把所有空白都去掉**再比。
+ * 但**多一段 / 少一段文字**必须报错（多镜头提示词丢了段落就是废片）。
+ */
+export function isSameCanvasPrompt(actual, expected) {
+    const left = String(actual ?? "");
+    const right = String(expected ?? "");
+    if (left.trim() === right.trim()) return true;
+    return left.replace(/\s+/g, "") === right.replace(/\s+/g, "");
+}
+
 /**
  * 写提示词。
  *
  * ⚠️ 一旦节点连上参考图，提示词在 MochiAni 侧就变成「结构化文档」（有 documentToken + references），
  * 这时 `set_prompt` 会被页面拒绝，而且它吐的错误是没填模板的 `画布操作未执行：{reason}`（页面侧 bug，
  * 看不出真实原因）。所以这里先读 references，有引用就走 `edit_references`，没有才用 `set_prompt`。
+ *
+ * 🔴 2026-11-15 起：写之前先把 `@图片N` 换成 MochiAni 的引用（见 `planPromptAssetBindings`）——
+ * 否则那段资产绑定在 MochiAni 里只是死文字，锁不住任何素材。
  */
 async function writeCanvasPrompt(job, pageId, origin, nodeId, fallbackRevision) {
     const refs = await callTool("mochiani_canvas_references", { pageId, origin, nodeId }).catch(() => null);
-    const hasReferences = Boolean(refs?.documentToken) && Array.isArray(refs?.references) && refs.references.length > 0;
+    const references = collectCanvasReferences(refs);
+    const hasReferences = Boolean(refs?.documentToken) && references.length > 0;
+
+    // ① 资产绑定换名字：`@图片1` → MochiAni 的引用 / `@mj_xxx-image-1`
+    const binding = planPromptAssetBindings({ prompt: job.prompt, titles: job.refTitles, references });
+    job.promptRendered = binding.rendered;
+    if (binding.chipCount || binding.textCount) {
+        pushLog(
+            job,
+            `资产绑定已适配成 MochiAni 的引用：${binding.chipCount} 条结构化引用` +
+                (binding.textCount ? `、${binding.textCount} 条按名字写入（没读到引用 ID）` : ""),
+        );
+    }
+    if (binding.unresolved.length) {
+        const markers = [...new Set(binding.unresolved.map((item) => item.marker))].join("、");
+        pushLog(job, `这些编号在 MochiAni 侧没有对应素材，按原文保留：${markers}`);
+        job.warnings.push(`资产绑定里有 ${binding.unresolved.length} 处编号没有对应素材（${markers}）`);
+    }
 
     if (hasReferences) {
-        // 只保留文档里本来就有的引用片段，不新造 chip（连线本身已经让素材参与生成）
+        // 文档本来就有的引用片段要留着（否则等于把用户之前插的 chip 删了），但不重复插我们刚插的那些。
+        const inserted = new Set(binding.segments.filter((segment) => segment.referenceId).map((segment) => segment.referenceId));
         const kept = (Array.isArray(refs.segments) ? refs.segments : [])
-            .filter((segment) => segment && typeof segment.referenceId === "string" && segment.referenceId)
+            .filter((segment) => segment && typeof segment.referenceId === "string" && segment.referenceId && !inserted.has(segment.referenceId))
             .map((segment) => ({ referenceId: segment.referenceId }));
         await canvasWrite(
             pageId,
@@ -1000,7 +1181,7 @@ async function writeCanvasPrompt(job, pageId, origin, nodeId, fallbackRevision) 
             {
                 nodeId,
                 expectedDocument: refs.documentToken,
-                segments: [{ text: job.prompt }, ...kept],
+                segments: [...binding.segments, ...kept],
             },
             { job, label: "写提示词（结构化引用）" },
         );
@@ -1015,7 +1196,8 @@ async function writeCanvasPrompt(job, pageId, origin, nodeId, fallbackRevision) 
         "mochiani_canvas_set_prompt",
         {
             nodeId,
-            prompt: job.prompt,
+            // 没有结构化引用可插时用 `rendered`：名字已经是 MochiAni 那一套，至少不是死编号。
+            prompt: binding.rendered,
             expectedPrompt: before.currentPrompt ?? "",
         },
         { job, label: "写提示词" },
@@ -1074,6 +1256,18 @@ async function planCanvasJob(job, ctx) {
         }
     }
     const refNodeIds = connectedRefs.map((item) => item.nodeId);
+    /**
+     * 编号 → MochiAni 节点标题（`图片1` = `refTitles.image[0]`）。
+     *
+     * 顺序必须与前端编号一致：同类型各自计数，且下标就是**原列表下标**（上传失败的那几张留空），
+     * 不能按 `connectedRefs` 的顺序重排 —— 少一张就会整体错位，把 A 的脸锁到 B 身上。
+     */
+    job.refTitles = { image: [], video: [], audio: [] };
+    for (const item of connectedRefs) {
+        const list = job.refTitles[item.kind];
+        if (!Array.isArray(list) || !Number.isInteger(item.index)) continue;
+        list[item.index] = String(item.title || "").trim();
+    }
     const uploadCheck = confirmReferenceUploads(job, pageId, origin, connectedRefs).catch(() => null);
 
     // 2.5) 排一下 MochiAni 画布：参考图网格，视频节点挪到右侧（失败只告警）
@@ -1090,7 +1284,9 @@ async function planCanvasJob(job, ctx) {
 
     // 4) 回读核验：提示词、模型、渠道三样都必须对上，否则宁可停在预检
     const after = await callTool("mochiani_canvas_generation_context", { pageId, origin, nodeId });
-    if (String(after.currentPrompt || "").trim() !== job.prompt) {
+    // 比的是 `promptRendered`：`@图片1` 已经被换成 `@mj_xxx-image-1`（chip 就是这么渲染的），
+    // 拿原始 `job.prompt` 比会永远不等。空白差异（chip 前后有没有空格）不算改动，按去空白比。
+    if (!isSameCanvasPrompt(after.currentPrompt, job.promptRendered ?? job.prompt)) {
         throw new BridgeError("提示词写入后回读不一致，先别下单，去 MochiAni 画布看一眼", "PROMPT_VERIFY_FAILED", after);
     }
     if (job.modelKey && String(after.modelKey || "") !== job.modelKey) {
@@ -1133,7 +1329,7 @@ async function confirmCanvasJob(job) {
     const { pageId, origin } = job.work;
     const read = await canvasRead(pageId, origin);
     const ctx = await callTool("mochiani_canvas_generation_context", { pageId, origin, nodeId: job.nodeId });
-    if (String(ctx.currentPrompt || "").trim() !== job.prompt) {
+    if (!isSameCanvasPrompt(ctx.currentPrompt, job.promptRendered ?? job.prompt)) {
         throw new BridgeError("画布上的提示词被改过了，请重新预检", "PROMPT_CHANGED", ctx);
     }
     job.stage = "submitting";
@@ -2873,7 +3069,7 @@ async function handle(req, res) {
         send(res, 200, {
             ok: true,
             service: "mochiani-canvas-bridge",
-            version: "1.6.10",
+            version: "1.6.11",
             mcp: { ...mcpState, root: MCP_ROOT, url: MCP_URL },
             pollMs: POLL_MS,
             jobs: jobs.size,
