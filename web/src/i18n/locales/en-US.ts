@@ -113,6 +113,7 @@ export default {
             fisherMode: "Pipeline mode",
             fisherModeHint: "Work-Fisher: the pasted script defaults to multi-ref video. Character / scene / multiview need Export JSON under character / scene / multiview keys in the model script.",
             fisherQualityHint: "Work-Fisher / light App is single-pass (no latent upscale): default ~0.8 MP (720 also maps here); higher picks still clamp. Duration max 12s. If VRAM is tight, raise the compute tier to Plus.",
+            fisherComfyQualityHint: "The H3 ComfyUI family accepts only two aspect ratios (16:9 / 9:16) and seven resolutions (480p / 608p / 768p / 896p / 1088p / 1280p / 1440p). Legacy 720 maps to 768p and 1080 to 1088p; other ratios are folded into landscape or portrait — the upstream rejects invalid combos at price preview.",
             museQualityHint: "{{model}} always renders 720p with audio; the quality setting does not apply to it.",
             jusuanhubQualityHint: "Jusuan Hub minimax-h3 offers only 544p / 768p, defaulting to 544p (renders faster: 960×544 at 16:9, good for checking the composition); 768p is the delivery tier (1344×768 at 16:9).",
             museSecondsHint: "{{model}} is fixed at 10 seconds; the duration setting does not apply to it.",

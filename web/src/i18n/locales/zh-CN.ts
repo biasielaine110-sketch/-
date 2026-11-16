@@ -113,6 +113,7 @@ export default {
             fisherMode: "全流程模式",
             fisherModeHint: "Work-Fisher：当前脚本默认是「多参生视频」。角色/场景/多视角需在模型脚本里用 character / scene / multiview 键挂上对应 Export JSON。",
             fisherQualityHint: "Work-Fisher / 轻量 App 为单采（无 latent 放大）：默认约 0.8MP（选 720 也是这档），再高会被压回；时长上限 12s。显存不够请改「算力档位」选 Plus。",
+            fisherComfyQualityHint: "H3 ComfyUI 系只收两档画面比例（16:9 / 9:16）与七档分辨率（480p / 608p / 768p / 896p / 1088p / 1280p / 1440p）。老配置里的 720 会自动并到 768p、1080 并到 1088p，其它比例的图会被收成横屏或竖屏 —— 上游在价格预览阶段就会拒掉不合法组合。",
             museQualityHint: "{{model}} 固定输出 720p（带音轨），清晰度设置对它不生效。",
             jusuanhubQualityHint: "聚算 Hub 的 minimax-h3 只有 544p / 768p 两档，默认 544p（出片更快，16:9 为 960×544，适合先看构图再重跑）；768p 为交付档（16:9 为 1344×768）。",
             museSecondsHint: "{{model}} 固定 10 秒，时长设置对它不生效。",

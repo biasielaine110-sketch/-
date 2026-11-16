@@ -1702,8 +1702,11 @@ async function createWorkFisherVideoTask(config: AiConfig, model: string, prompt
     if (!promptText && !references.length) throw new Error(apiText("videoPromptRequired"));
     if (!promptText) console.warn(`[work-fisher] ${modelName} 这次没有提示词，上游会用工作流自带的示例提示词出片`);
 
-    const ratio = normalizeVideoRatio(config.size);
-    const resolution = normalizeWorkFisherResolution(config.vquality);
+    // H3 ComfyUI 系（`minimax-h3-comfyui-max`）只认 16:9 / 9:16 与七档分辨率，
+    // 其余 fisher 模型仍用通用映射 —— 两者口径不同，统一在下面两个入口收口。
+    const h3Comfyui = isWorkFisherH3ComfyuiModel(modelName);
+    const ratio = h3Comfyui ? normalizeWorkFisherH3ComfyuiRatio(config.size) : normalizeVideoRatio(config.size);
+    const resolution = normalizeWorkFisherResolution(config.vquality, modelName);
     const seconds = workFisherSeconds(config.videoSeconds);
     const generateAudio = boolConfig(config.videoGenerateAudio, true);
 
@@ -1784,8 +1787,75 @@ async function createWorkFisherVideoTask(config: AiConfig, model: string, prompt
     throw new Error(readAxiosError(lastError, apiText("videoTaskCreateFailed")));
 }
 
-/** work-fisher 清晰度档位：480p / 720p / 1080p / 2k / 4k（另有 native1080p / native4k）。 */
-export function normalizeWorkFisherResolution(value: string) {
+/**
+ * work-fisher 上的 MiniMax H3 **ComfyUI 系**（`minimax-h3-comfyui-max` 等）。
+ *
+ * 🔴 这一族的口径和其余 fisher 模型完全不同：上游在**价格预览**阶段就校验参数，
+ *    比例只收 `16:9` / `9:16`，清晰度只收 `480p / 608p / 768p / 896p / 1088p / 1280p / 1440p`。
+ *    面板默认档 `720p`、以及 1:1 / 3:4 / 4:3 / 21:9 都会被直接打回 400：
+ *    `Aspect ratio must be 16:9 or 9:16 and resolution one of 480p, 608p, …`
+ *    （2026-11-16 实测于 `minimax-h3-comfyui-max`。）
+ */
+export function isWorkFisherH3ComfyuiModel(model?: string | null) {
+    const raw = String(model || "").trim().toLowerCase();
+    if (!raw) return false;
+    // `minimax-h3-comfyui-max` / `minimax_h3_comfyui` / 裸 `h3-comfyui-*` 都算这一族。
+    return /minimax[_-]?h3[_-]?comfyui|(?:^|[^a-z0-9])h3[_-]?comfyui/.test(raw);
+}
+
+/** H3 ComfyUI 系唯一合法的七档清晰度（顺序 = 面板排列顺序）。 */
+export const WORK_FISHER_H3_COMFYUI_RESOLUTIONS = ["480p", "608p", "768p", "896p", "1088p", "1280p", "1440p"] as const;
+
+const WORK_FISHER_H3_COMFYUI_TIERS = [480, 608, 768, 896, 1088, 1280, 1440];
+
+/** 比例档位：只留 16:9 / 9:16，按横竖取向收敛（1:1 归横屏，3:4 归竖屏）。 */
+export function normalizeWorkFisherH3ComfyuiRatio(value: string) {
+    const ratio = normalizeVideoRatio(value);
+    const [width, height] = ratio.split(":").map((part) => Number(part));
+    if (!(width > 0) || !(height > 0)) return "16:9";
+    return width / height < 0.9 ? "9:16" : "16:9";
+}
+
+/** 七档内的最近邻：720→768、1080→1088、2k/4k→1440（超出上限一律夹到顶档）。 */
+export function normalizeWorkFisherH3ComfyuiResolution(value: string) {
+    const raw = (value || "").trim().toLowerCase().replace(/\s+/g, "");
+    if (!raw) return "768p";
+    const aliases: Record<string, number> = {
+        low: 480,
+        sd: 480,
+        medium: 768,
+        standard: 768,
+        auto: 768,
+        high: 1088,
+        hd: 1088,
+        fhd: 1088,
+        "2k": 1440,
+        "4k": 1440,
+        native1080p: 1088,
+        native4k: 1440,
+        "896": 896,
+        "900": 896,
+        "1080": 1088,
+        "2.5k": 1280,
+        "1536": 1440,
+    };
+    if (aliases[raw] !== undefined) return `${aliases[raw]}p`;
+    const numeric = Number(raw.replace(/p$/, ""));
+    if (!Number.isFinite(numeric) || numeric <= 0) return "768p";
+    let best = WORK_FISHER_H3_COMFYUI_TIERS[0];
+    for (const tier of WORK_FISHER_H3_COMFYUI_TIERS) {
+        if (Math.abs(tier - numeric) < Math.abs(best - numeric)) best = tier;
+    }
+    return `${best}p`;
+}
+
+/**
+ * work-fisher 清晰度档位：480p / 720p / 1080p / 2k / 4k（另有 native1080p / native4k）。
+ * 传了 `model` 且属于 H3 ComfyUI 系时改走它的七档白名单 —— **提交与面板都走这一个入口**，
+ * 别在别处另写一套 720/1080 的映射。
+ */
+export function normalizeWorkFisherResolution(value: string, model?: string | null) {
+    if (isWorkFisherH3ComfyuiModel(model)) return normalizeWorkFisherH3ComfyuiResolution(value);
     const raw = (value || "").trim().toLowerCase().replace(/\s+/g, "");
     if (!raw) return "720p";
     if (raw === "native1080p" || raw === "native4k" || raw === "2k" || raw === "4k") return raw;

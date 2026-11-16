@@ -34,6 +34,7 @@ import {
     type FisherPipelineMode,
 } from "@/lib/runninghub-workflow";
 import { isRelayMiniMaxH3Video } from "@/services/api/video";
+import { WORK_FISHER_H3_COMFYUI_RESOLUTIONS, isWorkFisherH3ComfyuiModel, isWorkFisherVideoHost, normalizeWorkFisherH3ComfyuiRatio, normalizeWorkFisherResolution } from "@/services/api/video";
 import { JUSUANHUB_VIDEO_RESOLUTION_OPTIONS, isJusuanhubMediaBaseUrl, normalizeJusuanhubVideoQuality } from "@/services/api/jusuanhub-media";
 import { isApimartMuseVideoModel } from "@/services/api/video";
 import {
@@ -105,6 +106,12 @@ const sizeOptions = [
     { value: "21:9", labelKey: "widescreen", width: 1792, height: 768 },
     { value: "3:4", labelKey: "tall", width: 768, height: 1024 },
     { value: "auto", labelKey: "auto", width: 0, height: 0 },
+];
+
+/** work-fisher H3 ComfyUI 系只收横 / 竖两档：摆出 1:1、4:3 这些只会被价格预览 400 掉。 */
+const fisherComfySizeOptions = [
+    { value: "16:9", labelKey: "landscape", width: 1280, height: 720 },
+    { value: "9:16", labelKey: "portrait", width: 720, height: 1280 },
 ];
 
 /** U37 SelfLift: landscape/portrait first so orientation is one click. */
@@ -240,6 +247,8 @@ export type VideoSettingFlags = {
     hdDynamicRh: boolean;
     fisherRh: boolean;
     fisherLightRh: boolean;
+    /** work-fisher 上的 MiniMax H3 ComfyUI 系（`minimax-h3-comfyui-max`）：16:9/9:16 + 七档分辨率。 */
+    fisherComfyH3: boolean;
     yzjinyuRh: boolean;
     wenxiRh: boolean;
     wenxiLoraRh: boolean;
@@ -266,13 +275,19 @@ export function resolveVideoSettingFlags(config: AiConfig): VideoSettingFlags {
     const fisherRh = !h3Comfy && isMinimaxH3FisherWorkflowId(model);
     /** Work-Fisher 轻量 AI App（211550…）：只露风格 LoRA，不露 Fisher 模式/风格字段全套。 */
     const fisherLightRh = !h3Comfy && isWorkFisherLightAiAppId(model);
+    /**
+     * work-fisher 的 `minimax-h3-comfyui-*`：上游只收 16:9 / 9:16 + 七档分辨率
+     * （480p / 608p / 768p / 896p / 1088p / 1280p / 1440p），且是**价格预览阶段**就校验，
+     * 面板摆 720p 或 1:1 会直接 400。必须单独认出来，别落到通用档位。
+     */
+    const fisherComfyH3 = !h3Comfy && isWorkFisherVideoHost(requestConfig.baseUrl || "") && isWorkFisherH3ComfyuiModel(model);
     const yzjinyuRh = !h3Comfy && isMinimaxH3YzjinyuWorkflowId(model);
     const wenxiRh = !h3Comfy && isMinimaxH3WenxiWorkflowId(model);
     /** 只有低配图挂着 `MysticXXX_MMH3-V1`，风格 LoRA 档位只对它显示。 */
     const wenxiLoraRh = !h3Comfy && isMinimaxH3WenxiLowWorkflowId(model);
     const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
     const nativeFamily: NativeVideoFamily = nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other";
-    return { h3Comfy, jusuanhubH3, relayH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, wenxiLoraRh, nativeComfy, nativeFamily };
+    return { h3Comfy, jusuanhubH3, relayH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, fisherComfyH3, yzjinyuRh, wenxiRh, wenxiLoraRh, nativeComfy, nativeFamily };
 }
 
 /** 某一族的可选清晰度档位（AutoDL H3 单列，它的值是 workflow 自己的枚举）。 */
@@ -280,6 +295,8 @@ export function resolutionChoicesForFlags(flags: VideoSettingFlags, model = ""):
     if (flags.h3Comfy) return autodlH3ResolutionOptions(model).map((value) => ({ value, label: autodlH3ResolutionDisplay(value) }));
     if (flags.nativeComfy) return resolutionOptionsForFamily(flags.nativeFamily);
     if (flags.jusuanhubH3) return JUSUANHUB_VIDEO_RESOLUTION_OPTIONS.map((item) => ({ value: item.value, label: item.label }));
+    // H3 ComfyUI 系：值就是提交字符串（带 p），面板 / 提交 / 摘要共用这一套。
+    if (flags.fisherComfyH3) return WORK_FISHER_H3_COMFYUI_RESOLUTIONS.map((value) => ({ value, label: value }));
     if (flags.fisherRh || flags.fisherLightRh) return fisherResolutionOptions;
     if (flags.singularityRh || flags.singularityLightRh || flags.hdDynamicRh || flags.yzjinyuRh || flags.wenxiRh) return twoPassResolutionOptions;
     if (flags.relayH3) return relayH3ResolutionOptions;
@@ -291,6 +308,7 @@ export type VideoSizeChoice = { value: string; labelKey: string; width: number; 
 
 /** 某一族的画面比例档位。 */
 export function sizeChoicesForFlags(flags: VideoSettingFlags): VideoSizeChoice[] {
+    if (flags.fisherComfyH3) return fisherComfySizeOptions;
     if (flags.nativeComfy && !flags.h3Comfy) return sizeOptionsForFamily(flags.nativeFamily);
     return sizeOptions;
 }
@@ -391,7 +409,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const model = config.model || config.videoModel || "";
     // 族判定统一走 `resolveVideoSettingFlags`（与右键批量设置共用，见文件上半部分）。
     const flags = useMemo(() => resolveVideoSettingFlags(config), [config]);
-    const { h3Comfy, jusuanhubH3, relayH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, yzjinyuRh, wenxiRh, wenxiLoraRh, nativeComfy, nativeFamily } = flags;
+    const { h3Comfy, jusuanhubH3, relayH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, fisherComfyH3, yzjinyuRh, wenxiRh, wenxiLoraRh, nativeComfy, nativeFamily } = flags;
     const fisherMode = normalizeFisherPipelineMode(config.videoFisherMode);
     const fisherLoraStrength = normalizeFisherLoraStrength(config.videoFisherLoraStrength);
     /** 「提交视觉风格字段」：只有显式 `on` 才算打开（默认 off = 整行不发，见 `H3_SCAFFOLD_STYLE_LABELS`）。 */
@@ -464,10 +482,17 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     }
 
     const seconds = config.videoSeconds || "6";
-    const size = normalizeVideoSizeValue(config.size);
+    // H3 ComfyUI 系只收横/竖：`auto` 与 1:1 之类也在提交时被收敛，面板就按收敛后的值显示，
+    // 免得出现「一个 pill 都不亮、实际却按 16:9 出片」。
+    const size = fisherComfyH3 ? normalizeWorkFisherH3ComfyuiRatio(config.size) : normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
     // 聚算 Hub 只有 544p / 768p：老配置里的 480/720/1080/2k 都要收敛，否则两个 pill 都不亮。
-    const resolution = jusuanhubH3 ? normalizeJusuanhubVideoQuality(config.vquality) : normalizeVideoResolutionValue(config.vquality);
+    // H3 ComfyUI 系同理：老配置里的 720/1080 要收敛到七档白名单，否则一个 pill 都不亮、提交还会 400。
+    const resolution = jusuanhubH3
+        ? normalizeJusuanhubVideoQuality(config.vquality)
+        : fisherComfyH3
+          ? normalizeWorkFisherResolution(config.vquality, model)
+          : normalizeVideoResolutionValue(config.vquality);
     const steps = config.videoSteps || "40";
     const refImageSize = (config.videoRefImageSize || "max") === "max" ? "max" : "match";
     const samplerName = config.videoSamplerName || "dpmpp_2m";
@@ -650,6 +675,11 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     {fisherRh || fisherLightRh ? (
                         <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
                             {t("settingsPanels.video.fisherQualityHint")}
+                        </div>
+                    ) : null}
+                    {fisherComfyH3 ? (
+                        <div className="rounded-xl border px-3 py-2 text-[11px] leading-5 opacity-70" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+                            {t("settingsPanels.video.fisherComfyQualityHint")}
                         </div>
                     ) : null}
                     {museVideo ? (
@@ -838,6 +868,10 @@ export function videoSettingsSummary(config: AiConfig) {
     // 聚算 Hub 只有 544p / 768p 两档，摘要必须按「实际会被提交的档位」写。
     if (isJusuanhubMediaBaseUrl(resolveModelRequestConfig(config, model).baseUrl)) {
         return `${normalizeJusuanhubVideoQuality(config.vquality)}p · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
+    }
+    // work-fisher H3 ComfyUI 系：摘要同样写「实际提交值」（720 → 768p / 1080 → 1088p）。
+    if (isWorkFisherVideoHost(resolveModelRequestConfig(config, model).baseUrl || "") && isWorkFisherH3ComfyuiModel(model)) {
+        return `${normalizeWorkFisherResolution(config.vquality, model)} · ${videoSizeLabel(normalizeWorkFisherH3ComfyuiRatio(config.size))} · ${videoSecondsLabel(config.videoSeconds)}`;
     }
     const base = `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
     if (isMinimaxH3FisherWorkflowId(model) || isWorkFisherLightAiAppId(model) || isMinimaxH3SingularityLightAiAppId(model)) {
