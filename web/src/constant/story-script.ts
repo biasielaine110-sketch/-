@@ -5417,7 +5417,12 @@ function momanBeatsOf(action: string, content: string, duration: number): Array<
  * ⚠️ 幂等：拼出来的结果本身就满足 `isMomanVideoScript` + 长度下限，下一次 normalize 不会再动它。
  */
 export function buildMomanScriptFromRow(row: StoryScriptRow, sourceText?: unknown): string | null {
-    const duration = Math.max(1, Math.round(Number(row?.duration) || 0) || STORY_SCRIPT_SEGMENT_TARGET_SECONDS);
+    /**
+     * ⚠️ 用宽容解析（`momanRowDurationSeconds`）：表格格子可能被写成 `6秒` / `6s`，
+     * `Number()` 会得到 `NaN` 再回落到默认段长 —— 于是 6 秒的行被铺成 3 个节拍共 15 秒，
+     * 时间码又跑出本行时长（用户 2026-11-16 报障的同一类现象）。
+     */
+    const duration = Math.max(1, Math.round(momanRowDurationSeconds(row?.duration)) || STORY_SCRIPT_SEGMENT_TARGET_SECONDS);
     const salvage = momanSalvageBody(sourceText);
     const content = museOneLine(row?.visual_description) || museOneLine(row?.key_visual) || salvage;
     const action = museOneLine(row?.character_action) || museOneLine(row?.blocking) || salvage;
@@ -5481,14 +5486,43 @@ function hasMomanRowMaterial(row: StoryScriptRow): boolean {
 const MOMAN_MIN_SCRIPT_LENGTH = 90;
 
 /**
+ * 这一行的时间码覆盖到第几秒（取所有 `起—止` 里最大的「止」；没有时间码返回 0）。
+ *
+ * 第七套的时间码必须是「从 `0.00` 起、覆盖到本行 `duration` 的最后一秒」。
+ * 只看得出「有没有两段时间码」是不够的 —— 把源剧本里某条**未拆解的大镜头**（完整秒数，
+ * 时间码跑到 30 秒甚至 60 秒）整段抄进第一行，形态上完全合格。
+ */
+function momanScriptSpan(text: unknown): number {
+    let end = 0;
+    for (const match of String(text ?? "").matchAll(/(\d+(?:\.\d+)?)\s*[—–\-~～至]\s*(\d+(?:\.\d+)?)/g)) {
+        const to = Number(match[2]);
+        if (Number.isFinite(to) && to > end) end = to;
+    }
+    return end;
+}
+
+/**
+ * 本行 `duration` 压成秒数（宽容解析）。
+ *
+ * 表格是文本格子，`duration` 可能被写成 `6` / `6.0` / `6秒` / `6s` —— 直接 `Number()` 会把
+ * 后面三种判成 `NaN`，⑤ 的时间码越界校验就整条失效（用户手改过一格就漏）。取第一个数字即可。
+ */
+function momanRowDurationSeconds(value: unknown): number {
+    const matched = String(value ?? "").match(/\d+(?:\.\d+)?/)?.[0];
+    const seconds = Number(matched ?? 0);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+/**
  * 第七套整表后处理（幂等）：保证 `video_motion_prompt` 是**按时间码分段**的形态。
  *
- * 处理四件事（都只在确实需要时动手）：
+ * 处理五件事（都只在确实需要时动手）：
  *  ① 字面量 `\\n` / 被压成一行的段落在 → `reflowLongVideoScript(text, "moman")` 还原换行；
  *  ② 视频列空着、但 `shot_prompt` 里塞的是这份时间码脚本（模型写错列）→ 挪到视频列并清空分镜列；
  *  ③ 视频列整格是 JSON（`{"prompt": "…"}` / 整个 storyboard 对象）→ 取 `prompt` 字段；
  *  ④ **空着 / 只有一段概括 / 压根不是时间码形态** → 按这一行自己的列重建一份（见 `buildMomanScriptFromRow`）。
  *     没有 ④ 的话「模型偷懒少写」会原样留在表里，用户看到的就是「有几镜是空的或只有一句」。
+ *  ⑤ **时间码跑出本行时长**（整段抄了源剧本未拆解的大镜头）→ 同样按本行列重建（见 `momanScriptSpan`）。
  */
 export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], preset?: StoryScriptPresetId | string | null): StoryScriptRow[] {
     if (!rows?.length) return rows as StoryScriptRow[];
@@ -5507,6 +5541,21 @@ export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], p
             return rebuilt ? { ...row, video_motion_prompt: rebuilt } : row;
         }
         const text = reflowLongVideoScript(unwrapMomanJsonPrompt(rawText), "moman");
+        /**
+         * ⑤ **时间码跑出本行时长**（用户 2026-11-16 报障：第一镜的视频运动提示词直接是
+         * 源剧本那条「未拆解的大镜头」，完整秒数）。
+         *
+         * `isMomanVideoScript` 只数「有没有 ≥2 段时间码」，0.00—15.00 / 15.00—30.00 这种
+         * 全片时间轴的镜头照样算合格，于是第一行留着整段原稿。判据：最大「止」明显超过本行
+         * `duration`（容差 15% + 1 秒，扛住四舍五入与合并镜）→ 按本行自己的列重建。
+         * 重建**不拿这段错内容当 salvage**，否则等于把大镜头正文换个头接着抄。
+         */
+        const duration = momanRowDurationSeconds(row.duration);
+        const span = momanScriptSpan(text);
+        if (duration > 0 && span > duration * 1.15 + 1 && hasMomanRowMaterial(row)) {
+            const rebuilt = buildMomanScriptFromRow(row);
+            if (rebuilt) return { ...row, video_motion_prompt: rebuilt };
+        }
         /**
          * ④ 另一个入口：**写了但没写够**。只有一段 `0.00—15.00：…` 的概括、
          * 或者写了一整段散文（压根没有时间码）都算没写完。重建用行内素材 + 模型这句半成品，
@@ -7436,6 +7485,7 @@ export const STORY_SCRIPT_MOMAN_VIDEO_FORMAT = [
     "硬约束：",
     "- 每一行**必须以 `起.止—终.止` 的时间码开头**（两位小数，如 `0.00—1.50`），紧接着冒号 `：` 与方括号 `【景别，运镜】`。方括号里第一项写景别（`局部特写` / `双人中景` / `全景`），第二项写运镜（`微幅下移` / `缓慢后移` / `固定机位`）。",
     "- 时间码**从 `0.00` 起、首尾相接、连续覆盖到这一镜 `duration` 的最后一秒**，不许跳空、不许重叠、不许只写一段概括。",
+    "- 🔴 **每一行（尤其是第一行）都必须按本行 `duration` 重新切段**：源内容里的一条镜头常常是「原剧本一镜到底的完整秒数」（`0.00—15.00`，甚至写到 30 / 60 秒）。**禁止**把那条大镜头的脚本整段复制进第一行的视频列 —— 先看本行 `duration` 是几秒，再把这几十秒的内容重新按时间码切开。视频列里出现超出本行时长的止秒（本行 6 秒却写到 `15.00`）一律算不合格。",
     "- 段数按内容需要给（通常 2—4 段），但每一段都要能独立指导生成：景别 + 机位 + 动作 + 光线 + 声音，不要只写「继续上一个动作」。",
     "- 台词写进它发生的那一段里，标明说话人与语气（`奶奶：“我不认识你，不能收你的花。” 语气平缓偏冷`）；没有台词就写环境音与音乐进入 / 退出。",
     "- 源稿用 `@role_xxx` / `@scene_xxx` / `@prop_xxx` 这类资产 id 指代角色、场景、道具时，**在视频列里原样保留**，不要换成自然语言描述；源稿没给这类 id 时不要自己造。",
