@@ -38,6 +38,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, mergeDataUrls, resizeDataUrlByPercent, splitDataUrl, upscaleDataUrl, adjustDataUrl, type ImageAdjustParams } from "@/lib/canvas/canvas-image-data";
 import { loadVideoBlob, scaleVideoBlob, VIDEO_SCALE_SHORTCUT_PERCENT } from "@/lib/canvas/canvas-video-tools";
 import { fitNodeSize, nodeSizeFromRatio, sizeFromDisplayScalePercent } from "@/lib/canvas/canvas-node-size";
+import { collectReplacePrimaryCandidates, type ReplacePrimaryCandidate } from "@/lib/canvas/canvas-replace-primary";
 import { App, Button, Modal } from "antd";
 import { DEFAULT_CANVAS_FONT_SIZE, NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { buildStylePromptText, composeStyledPrompt, getStyleTemplate } from "@/constant/style-templates";
@@ -88,6 +89,7 @@ import {
     normalizeScriptShotsPerClip,
     resolveStoryScriptPresetId,
     resolveStoryScriptImageSize,
+    resolveStoryScriptVideoRatio,
     resolveStoryScriptShotSeconds,
     scriptAssetColumnRole,
     scriptCellAssetIds,
@@ -7468,6 +7470,93 @@ function AtelierCanvasPage() {
         return nodes.find((node) => node.id === contextMenu.nodeId) || null;
     }, [contextMenu, nodes]);
 
+    /**
+     * 「替换首图」候选 = 右键的这个图片节点上**连着的**链接图（含多图源里的每一张）。
+     * 只在右键菜单开着时才算，不进渲染路径；点菜单项时再冻结一份，弹窗不受菜单关闭影响。
+     */
+    const replacePrimaryCandidates = useMemo(() => {
+        if (!contextMenu || contextMenu.type !== "node" || contextMenuNode?.type !== CanvasNodeType.Image) return [];
+        return collectReplacePrimaryCandidates(contextMenuNode, nodes, connections);
+    }, [contextMenu, contextMenuNode, connections, nodes]);
+
+    const [replacePrimaryTargetId, setReplacePrimaryTargetId] = useState<string | null>(null);
+    /** 弹窗打开时冻结的候选列表（同 h3 弹窗的道理：菜单一关 memo 就空了）。 */
+    const [replacePrimarySnapshot, setReplacePrimarySnapshot] = useState<ReplacePrimaryCandidate[]>([]);
+
+    /**
+     * 把选中的链接图落成图片节点的新首图。
+     *
+     * 原图进历史：现有 `metadata.images` 列表（旧版单图会被包装成一条）整体保留，
+     * 新首图追加到末尾并置为 `primaryImageId` —— 展示层按 `primaryImageId` 取大图，
+     * 列表里其余的就是历史。同一张图重复替换会先去重，不会在历史里攒重复条目；
+     * 超过 `MAX_IMAGE_NODE_HISTORY` 时从最旧的一头裁（与生成写历史的口径一致）。
+     */
+    const applyReplacePrimaryImage = useCallback(
+        (nodeId: string, candidate: ReplacePrimaryCandidate) => {
+            setNodes((prev) =>
+                prev.map((node) => {
+                    if (node.id !== nodeId) return node;
+                    const history = collectSuccessfulImageHistory(node);
+                    const deduped = history.filter((image) => image.content !== candidate.content);
+                    const retained = deduped.length + 1 > MAX_IMAGE_NODE_HISTORY ? deduped.slice(Math.max(0, deduped.length - (MAX_IMAGE_NODE_HISTORY - 1))) : deduped;
+                    const nextImage: CanvasNodeImage = {
+                        id: nanoid(),
+                        status: NODE_STATUS_SUCCESS,
+                        content: candidate.content,
+                        storageKey: candidate.storageKey,
+                        thumbnailContent: candidate.thumbnailContent,
+                        thumbnailStorageKey: candidate.thumbnailStorageKey,
+                        naturalWidth: candidate.naturalWidth,
+                        naturalHeight: candidate.naturalHeight,
+                        bytes: candidate.bytes,
+                        mimeType: candidate.mimeType,
+                    };
+                    const images = [...retained, nextImage];
+                    const size = node.metadata?.freeResize || !candidate.naturalWidth || !candidate.naturalHeight
+                        ? { width: node.width, height: node.height }
+                        : fitNodeSize(candidate.naturalWidth, candidate.naturalHeight, Math.max(node.width, node.height), Math.max(node.width, node.height));
+                    return {
+                        ...node,
+                        position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 },
+                        ...size,
+                        metadata: {
+                            ...node.metadata,
+                            content: nextImage.content,
+                            storageKey: nextImage.storageKey,
+                            thumbnailContent: nextImage.thumbnailContent,
+                            thumbnailStorageKey: nextImage.thumbnailStorageKey,
+                            naturalWidth: nextImage.naturalWidth || undefined,
+                            naturalHeight: nextImage.naturalHeight || undefined,
+                            bytes: nextImage.bytes || undefined,
+                            mimeType: nextImage.mimeType || undefined,
+                            images,
+                            count: images.length,
+                            primaryImageId: nextImage.id,
+                            status: NODE_STATUS_SUCCESS,
+                            errorDetails: undefined,
+                        },
+                    };
+                }),
+            );
+            message.success(t("canvas.contextMenu.replacePrimaryDone"));
+        },
+        [message, t],
+    );
+
+    const openReplacePrimary = useCallback(() => {
+        const nodeId = contextMenu?.type === "node" ? contextMenu.nodeId : null;
+        if (!nodeId || contextMenuNode?.type !== CanvasNodeType.Image) return;
+        const candidates = collectReplacePrimaryCandidates(contextMenuNode, nodes, connections);
+        if (!candidates.length) return;
+        // 只有一张链接图：直接换，不弹选择窗；多张才让用户挑。
+        if (candidates.length === 1) {
+            applyReplacePrimaryImage(nodeId, candidates[0]);
+            return;
+        }
+        setReplacePrimarySnapshot(candidates);
+        setReplacePrimaryTargetId(nodeId);
+    }, [applyReplacePrimaryImage, contextMenu, contextMenuNode, connections, nodes]);
+
     /** 右键菜单顶部「h3 提示词优化」作用的节点：选区里的图片 / 视频节点，且提示词非空。 */
     const [h3OptimizeOpen, setH3OptimizeOpen] = useState(false);
     /**
@@ -10095,7 +10184,7 @@ function AtelierCanvasPage() {
              * 133 宽 —— 提示词面板直接没法用。窗口保持默认，画幅由 `metadata.size` 决定。
              */
             const scriptVideoModel = String(source.metadata?.scriptVideoModel || "").trim();
-            const scriptVideoSize = resolveStoryScriptImageSize(source.metadata?.scriptVideoSize);
+            const scriptVideoSize = resolveStoryScriptVideoRatio(source.metadata?.scriptVideoSize);
             const scriptVideoQuality = String(source.metadata?.scriptVideoQuality || "").trim();
             /**
              * **生视频引擎**（用户 2026-11-10 第 01 条）：脚本节点上选了「MochiAni 生视频节点」时，
@@ -11332,6 +11421,9 @@ function AtelierCanvasPage() {
             const shotUseMochiani = isMochianiVideoEngine(source.metadata?.scriptVideoEngine);
             const shotMochianiPreference = shotUseMochiani ? resolveMochianiPreference(effectiveConfig) : null;
             const shotVideoType = shotUseMochiani ? CanvasNodeType.Mochiani : CanvasNodeType.Video;
+            // 视频画幅（2026-11-16）：与「一键铺链路」同口径 —— 未设置 / 认不出一律默认 16:9，
+            // 普通视频节点写 `metadata.size`、MochiAni 写 `aspectRatio`；生图比例（scriptImageSize）不受影响。
+            const shotVideoRatio = resolveStoryScriptVideoRatio(source.metadata?.scriptVideoSize);
             const videoWidth = NODE_DEFAULT_SIZE[shotVideoType].width;
             const videoHeight = NODE_DEFAULT_SIZE[shotVideoType].height;
             // 与「一键铺链路」同口径：视频节点只放视频段，不再拼分镜提示词（用户 2026-10-19 要求）；
@@ -11345,12 +11437,15 @@ function AtelierCanvasPage() {
                           status: NODE_STATUS_IDLE,
                           // 与「一键铺链路」同口径：单行建出来的窗口也默认继承脚本节点的风格模板
                           ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
-                          mochianiConfig: buildMochianiNodeConfig(shotMochianiPreference, { aspectRatio: resolveStoryScriptImageSize(source.metadata?.scriptVideoSize) }),
+                          mochianiConfig: buildMochianiNodeConfig(shotMochianiPreference, { aspectRatio: shotVideoRatio }),
                       })
                     : createCanvasNode(CanvasNodeType.Video, { x: 0, y: 0 }, {
                           prompt: videoPrompt,
                           status: NODE_STATUS_IDLE,
                           ...(seconds ? { seconds: String(seconds) } : {}),
+                          // 与「一键铺链路」同口径：单行建出来的视频节点也带「视频画幅」约束
+                          // （脚本节点上的选择器，默认 16:9；`buildGenerationConfig` 读的就是节点 `metadata.size`）。
+                          size: shotVideoRatio,
                           // 与「一键铺链路」同口径：单行建出来的视频节点也默认继承脚本节点的风格模板
                           // （2026-11-08 第 05 条：脚本里选了风格，生图与生视频窗口都默认跟着走）。
                           ...(source.metadata?.styleTemplateId ? { styleTemplateId: source.metadata.styleTemplateId } : {}),
@@ -12028,6 +12123,8 @@ function AtelierCanvasPage() {
                         onH3OptimizeSelected={openH3Optimize}
                         videoBatchCount={videoBatchTargets.ids.length}
                         onVideoBatchSettings={openVideoBatch}
+                        replacePrimaryCount={replacePrimaryCandidates.length}
+                        onReplacePrimaryImage={openReplacePrimary}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
@@ -12088,6 +12185,39 @@ function AtelierCanvasPage() {
                 />
 
                 <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} />
+
+                {/* 右键「替换首图」的选择窗：连了多张链接图时让用户挑一张当首图（antd Modal 不受画布吞 pointerdown 影响）。 */}
+                {replacePrimaryTargetId ? (
+                    <Modal
+                        open
+                        title={t("canvas.contextMenu.replacePrimaryTitle", { count: replacePrimarySnapshot.length })}
+                        footer={null}
+                        width={720}
+                        onCancel={() => {
+                            setReplacePrimaryTargetId(null);
+                            setReplacePrimarySnapshot([]);
+                        }}
+                    >
+                        <div className="thin-scrollbar grid max-h-[60vh] grid-cols-3 gap-3 overflow-y-auto py-2">
+                            {replacePrimarySnapshot.map((candidate, index) => (
+                                <button
+                                    key={`${candidate.nodeId}:${candidate.imageId}:${index}`}
+                                    type="button"
+                                    className="flex min-w-0 flex-col gap-1.5 rounded-lg border border-white/10 p-2 text-left transition hover:border-sky-400/60 hover:bg-sky-400/10"
+                                    onClick={() => {
+                                        const nodeId = replacePrimaryTargetId;
+                                        setReplacePrimaryTargetId(null);
+                                        setReplacePrimarySnapshot([]);
+                                        if (nodeId) applyReplacePrimaryImage(nodeId, candidate);
+                                    }}
+                                >
+                                    <img src={candidate.thumbnailContent || candidate.content} alt={candidate.title} className="h-36 w-full rounded-md bg-black/20 object-cover" />
+                                    <span className="truncate text-xs opacity-75">{candidate.title || t("canvas.contextMenu.replacePrimaryUntitled", { index: index + 1 })}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </Modal>
+                ) : null}
 
                 {cropNode?.metadata?.content ? <CanvasNodeCropDialog dataUrl={cropNode.metadata.content} open={Boolean(cropNode)} onClose={() => setCropNodeId(null)} onConfirm={(crop) => void cropImageNode(cropNode!, crop)} /> : null}
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Scissors, Settings2, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
+import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Replace, Scissors, Settings2, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useOrderDrag } from "@/hooks/use-order-drag";
@@ -61,6 +61,9 @@ export function CanvasNodeContextMenu({
     onH3OptimizeSelected,
     videoBatchCount = 0,
     onVideoBatchSettings,
+    /** 图片节点上连着的链接图数量。>=1 才出现「替换首图」。 */
+    replacePrimaryCount = 0,
+    onReplacePrimaryImage,
 }: {
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
@@ -96,6 +99,9 @@ export function CanvasNodeContextMenu({
     /** 选区里可批量改视频参数的节点数（视频节点、且不在生成中）。>=2 才在菜单顶部出现。 */
     videoBatchCount?: number;
     onVideoBatchSettings?: () => void;
+    /** 图片节点连着的链接图数量（图片 / 标注源）。>=1 才显示「替换首图」。 */
+    replacePrimaryCount?: number;
+    onReplacePrimaryImage?: () => void;
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -398,6 +404,21 @@ export function CanvasNodeContextMenu({
                             }}
                         />
                     ))}
+                </div>
+            ) : null}
+            {/* 替换首图：图片节点专属的结构操作（同「转换为 XX」一样不进可排序工具列表）。
+                候选 = 连进来的链接图；多张时由弹窗挑一张，原图进节点历史。 */}
+            {node?.type === CanvasNodeType.Image && replacePrimaryCount > 0 && onReplacePrimaryImage ? (
+                <div className="mb-1 border-b pb-1" style={{ borderColor: theme.toolbar.border }}>
+                    <MenuButton
+                        icon={<Replace className="size-4" />}
+                        label={t("canvas.contextMenu.replacePrimary", { count: replacePrimaryCount })}
+                        onClick={() => {
+                            onBeforeAction?.();
+                            onReplacePrimaryImage();
+                            onClose();
+                        }}
+                    />
                 </div>
             ) : null}
             {canReorder ? (

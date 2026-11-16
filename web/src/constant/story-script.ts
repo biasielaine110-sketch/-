@@ -2091,6 +2091,34 @@ export function resolveStoryScriptImageSize(value: unknown): string {
     return `${width}:${height}`;
 }
 
+/**
+ * 脚本节点「视频画幅」档位 —— **只约束铺视频链路**（一键铺链路 / 单镜铺视频建出来的视频节点）。
+ *
+ * 与「AI 生图比例」（`scriptImageSize`，仍走弹窗里那套 + 角色 9:16 硬规则）是两回事：
+ * 这里只管视频节点落地的 `metadata.size`（`buildGenerationConfig` 读它）与
+ * MochiAni 引擎的 `aspectRatio`。档位含 `16:9 / 9:16 / 1:1 / 4:3 / 3:4`。
+ */
+export const STORY_SCRIPT_VIDEO_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4"] as const;
+export type StoryScriptVideoRatio = (typeof STORY_SCRIPT_VIDEO_RATIOS)[number];
+export const DEFAULT_STORY_SCRIPT_VIDEO_RATIO: StoryScriptVideoRatio = "16:9";
+
+/**
+ * 归一化视频画幅：认 `16:9` / `16x9` / 全角 × / 带空格。
+ * **未设置 / `auto` / 认不出的写法一律回落默认 16:9**（不是「跟随全局」——
+ * 用户 2026-11-16 拍板：这个选项默认就是 16:9，铺出来的视频节点都带上这个约束）。
+ */
+export function resolveStoryScriptVideoRatio(value: unknown): StoryScriptVideoRatio {
+    const normalized = resolveStoryScriptImageSize(value);
+    return (STORY_SCRIPT_VIDEO_RATIOS as readonly string[]).includes(normalized) ? (normalized as StoryScriptVideoRatio) : DEFAULT_STORY_SCRIPT_VIDEO_RATIO;
+}
+
+/** 下一档视频画幅（循环）—— 给节点上「点击切换」的 chip 用。 */
+export function nextStoryScriptVideoRatio(value: unknown): StoryScriptVideoRatio {
+    const current = resolveStoryScriptVideoRatio(value);
+    const index = STORY_SCRIPT_VIDEO_RATIOS.indexOf(current);
+    return STORY_SCRIPT_VIDEO_RATIOS[(index + 1) % STORY_SCRIPT_VIDEO_RATIOS.length];
+}
+
 /** 铺链路时的视频分段方式：单镜 / 每 N 镜合并（2~5）/ 按每段时长自动合并。 */
 export type StoryScriptMergeMode = "shot" | "2" | "3" | "4" | "5" | "duration";
 export const STORY_SCRIPT_MERGE_MODES: StoryScriptMergeMode[] = ["shot", "2", "3", "4", "5", "duration"];

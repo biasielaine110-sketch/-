@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragE
 import { createPortal } from "react-dom";
 import { App, InputNumber, Modal } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CopyPlus, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Layers, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CopyPlus, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Layers, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, Ratio, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -48,6 +48,8 @@ import {
     resolveScriptTotalSeconds,
     resolveStoryScriptShotCount,
     resolveStoryScriptImageSize,
+    resolveStoryScriptVideoRatio,
+    nextStoryScriptVideoRatio,
     resolveStoryScriptMergeMode,
     resolveStoryScriptPresetId,
     resolveStoryScriptSegmentSeconds,
@@ -1677,6 +1679,34 @@ export function CanvasScriptNodeContent({
         />
     );
 
+    /**
+     * 视频画幅（用户 2026-11-16）：**只约束铺视频链路**建出来的视频节点 ——
+     * 一键铺链路 / 单镜铺视频会把这一档写进视频节点的 `metadata.size`（MochiAni 引擎则写 `aspectRatio`），
+     * 生图比例完全不受它影响（`scriptImageSize` 仍走「AI 生成」弹窗那套 + 角色硬规则）。
+     *
+     * 档位 `16:9 / 9:16 / 1:1 / 4:3 / 3:4`，**默认 16:9**（没写过 metadata 也是 16:9，
+     * `resolveStoryScriptVideoRatio` 收口）。位置在「风格选项」左边，点击循环切换。
+     */
+    const videoRatio = resolveStoryScriptVideoRatio(node.metadata?.scriptVideoSize);
+    const videoRatioSelector = (
+        <button
+            type="button"
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-2.5 transition"
+            style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+                event.stopPropagation();
+                patchMetadata({ scriptVideoSize: nextStoryScriptVideoRatio(node.metadata?.scriptVideoSize) });
+            }}
+            title={t("canvas.scriptNode.videoRatioHint", { ratio: videoRatio })}
+        >
+            <Ratio className="size-3.5" />
+            <span className="opacity-60">{t("canvas.scriptNode.videoRatioLabel")}</span>
+            <span className="font-medium">{videoRatio}</span>
+        </button>
+    );
+
     const header = (
         <div
             className="flex flex-wrap items-center gap-1.5 px-2 pb-1.5 pt-2"
@@ -1750,6 +1780,7 @@ export function CanvasScriptNodeContent({
                 选中的模板不会去改脚本正文，而是跟着「铺链路 / 一键直接生图 / 逐镜生成 / 按格生成」
                 落到**新建的图片节点**的 `metadata.styleTemplateId` 上 —— 生图链路读的就是节点自己这个字段。
                 面板朝下开：这个控件在节点标题栏，朝上开会顶出画布顶部。 */}
+            {videoRatioSelector}
             {styleTemplatePicker}
 
             {/* 生视频引擎（用户 2026-11-10 第 01 条）：「铺视频链路 / 一键视频」每一段要建哪种窗口。
@@ -2881,6 +2912,7 @@ export function CanvasScriptNodeContent({
                    空长条（用户同日：「模型的选择条也太长了把？这么不合理啊」）。
                 限宽只加在这个包裹层上 —— `textModelPicker` 是和标题栏共用的变量，别在变量里改。 */}
             <div className="flex flex-wrap items-center justify-end gap-1.5">
+                {videoRatioSelector}
                 {styleTemplatePicker}
                 {/* 定宽 220px，不用 `flex-1`：整行靠右时 `flex-1` 会把空白全吃掉、把左边三个控件顶回去。
                     `max-w-full shrink` 保证窄节点里还能压下去。 */}
