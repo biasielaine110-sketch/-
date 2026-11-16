@@ -5416,17 +5416,27 @@ function momanBeatsOf(action: string, content: string, duration: number): Array<
  *
  * ⚠️ 幂等：拼出来的结果本身就满足 `isMomanVideoScript` + 长度下限，下一次 normalize 不会再动它。
  */
-export function buildMomanScriptFromRow(row: StoryScriptRow, sourceText?: unknown): string | null {
+export function buildMomanScriptFromRow(row: StoryScriptRow, sourceText?: unknown, durationOverride?: number): string | null {
     /**
-     * ⚠️ 用宽容解析（`momanRowDurationSeconds`）：表格格子可能被写成 `6秒` / `6s`，
+     * ⚠️ 用宽容解析（`momanRowDurationSeconds`）：表格格子可能被写成 `6秒` / `6s` / `0—6`，
      * `Number()` 会得到 `NaN` 再回落到默认段长 —— 于是 6 秒的行被铺成 3 个节拍共 15 秒，
      * 时间码又跑出本行时长（用户 2026-11-16 报障的同一类现象）。
+     *
+     * `durationOverride`：本行 `duration` 读不出来、但同表其余行能读出来时，由调用方传参照时长进来
+     * （见 `momanPeerDurationSeconds`）。不给就按本行 / 默认段长。
      */
-    const duration = Math.max(1, Math.round(momanRowDurationSeconds(row?.duration)) || STORY_SCRIPT_SEGMENT_TARGET_SECONDS);
+    const duration = Math.max(1, Math.round(durationOverride ?? 0) || Math.round(momanRowDurationSeconds(row?.duration)) || STORY_SCRIPT_SEGMENT_TARGET_SECONDS);
     const salvage = momanSalvageBody(sourceText);
     const content = museOneLine(row?.visual_description) || museOneLine(row?.key_visual) || salvage;
     const action = museOneLine(row?.character_action) || museOneLine(row?.blocking) || salvage;
-    if (!content && !action) return null;
+    /**
+     * ⚠️ 判「有没有素材」的口径要与 `hasMomanRowMaterial` 对齐（用户 2026-11-02 第二次报障）：
+     * 旧实现只认「画面描述 / 关键视觉」与「角色动作 / 人物站位」两对列，于是「只有景别 + 场景 + 音效」
+     * 的行会返回 `null` → 上游 `return row` 把那条照抄来的大镜头**原样留下**。
+     * 现在的下限是「这一行随便有一列能被用」就出脚本：缺正文的段落由 `momanBeatsOf` 写中性占位
+     * （不编剧情），比留一段 30 秒的错内容强。
+     */
+    if (!content && !action && !salvage && !hasMomanRowMaterial(row)) return null;
     const sceneName = museOneLine(row?.scene);
     /**
      * 光线只取**一两句**：`lighting_mood` / `scene_description` / `visual_description` 三列经常都在讲同一束光，
@@ -5504,13 +5514,49 @@ function momanScriptSpan(text: unknown): number {
 /**
  * 本行 `duration` 压成秒数（宽容解析）。
  *
- * 表格是文本格子，`duration` 可能被写成 `6` / `6.0` / `6秒` / `6s` —— 直接 `Number()` 会把
- * 后面三种判成 `NaN`，⑤ 的时间码越界校验就整条失效（用户手改过一格就漏）。取第一个数字即可。
+ * 表格是文本格子，`duration` 可能被写成 `6` / `6.0` / `6秒` / `6s` / `6 秒` —— 直接 `Number()`
+ * 会把后面几种判成 `NaN`，⑤ 的时间码越界校验就整条失效。
+ *
+ * ⚠️ **区间写法必须先认出来**（用户 2026-11-02 第二次报障的真因之一）：源稿 storyboard 的
+ * `duration` 常写成 `0—15` / `0.00—15.00` / `第0—4秒`（一镜的绝对起止），旧实现「取第一个数字」
+ * 会得到 **0** → `seconds > 0` 不成立 → 返回 0 → ⑤ 的 `duration > 0` 直接短路，
+ * **整条越界校验静默失效**。第一行于是原样留着那条「一镜到底」的大镜头，而第二行起本来就写对了
+ * —— 用户看到的正是「只有第一镜有问题」。
+ *
+ * 区间口径：`起—止` 取 `止 - 起`（本镜真实时长）；差值太小（`3—4秒` 这种「约 X 秒」的写法）
+ * 或退化区间取「止」，避免把 4 秒的行算成 1 秒。
  */
 function momanRowDurationSeconds(value: unknown): number {
-    const matched = String(value ?? "").match(/\d+(?:\.\d+)?/)?.[0];
+    const text = String(value ?? "");
+    const range = text.match(/(\d+(?:\.\d+)?)\s*[—–\-~～至]\s*(\d+(?:\.\d+)?)/);
+    if (range) {
+        const from = Number(range[1]);
+        const to = Number(range[2]);
+        if (Number.isFinite(from) && Number.isFinite(to)) {
+            const diff = to - from;
+            const seconds = diff >= 2 ? diff : to;
+            if (seconds > 0) return seconds;
+        }
+    }
+    const matched = text.match(/\d+(?:\.\d+)?/)?.[0];
     const seconds = Number(matched ?? 0);
     return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+/**
+ * 整表「可比时长」的中位数（只统计能读出行时长的那几行）。
+ *
+ * 用途：某一行 `duration` 是空的（模型漏写 / 源稿没给这一格）时，⑤ 的越界校验会整条短路，
+ * 那行就会原样留下一条远超本镜的脚本。这时用同表其余行的中位时长当**参照系** —— 只用来判断
+ * 「这一行的脚本是不是明显跑飞了」，不写回表格、不改变任何一行的 `duration` 显示值。
+ * 整表都读不出时长 → 返回 0（无从判断，保持旧行为：不动）。
+ */
+function momanPeerDurationSeconds(rows: readonly StoryScriptRow[]): number {
+    const values = rows.map((row) => momanRowDurationSeconds(row?.duration)).filter((seconds) => seconds > 0).sort((a, b) => a - b);
+    if (!values.length) return 0;
+    const middle = Math.floor(values.length / 2);
+    const median = values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+    return Math.max(1, Math.round(median));
 }
 
 /**
@@ -5528,8 +5574,15 @@ export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], p
     if (!rows?.length) return rows as StoryScriptRow[];
     const columns = getStoryScriptColumns(preset);
     if (!columns.some((column) => column.key === "video_motion_prompt")) return rows as StoryScriptRow[];
+    /**
+     * 同表中位时长：本行 `duration` 空着时用它当参照（只判越界 / 定节拍，不写回表格）。
+     * 没有它，`duration` 一格空着就等于「这一行的越界校验被关掉」，第一行会原样留下大镜头。
+     */
+    const peerDuration = momanPeerDurationSeconds(rows);
     return rows.map((row) => {
         const rawText = String(row.video_motion_prompt ?? "");
+        const rowDuration = momanRowDurationSeconds(row.duration);
+        const duration = rowDuration > 0 ? rowDuration : peerDuration;
         if (!rawText.trim()) {
             const shotText = String(row.shot_prompt ?? "");
             if (isMomanVideoScript(shotText) || /^\s*\{/.test(shotText)) {
@@ -5537,7 +5590,7 @@ export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], p
                 if (text && isMomanVideoScript(text)) return { ...row, video_motion_prompt: reflowLongVideoScript(text, "moman"), shot_prompt: "" };
             }
             // ④ 空着且分镜列也不是时间码脚本 → 用这一行的列重建。
-            const rebuilt = buildMomanScriptFromRow(row);
+            const rebuilt = buildMomanScriptFromRow(row, undefined, duration);
             return rebuilt ? { ...row, video_motion_prompt: rebuilt } : row;
         }
         const text = reflowLongVideoScript(unwrapMomanJsonPrompt(rawText), "moman");
@@ -5549,11 +5602,13 @@ export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], p
          * 全片时间轴的镜头照样算合格，于是第一行留着整段原稿。判据：最大「止」明显超过本行
          * `duration`（容差 15% + 1 秒，扛住四舍五入与合并镜）→ 按本行自己的列重建。
          * 重建**不拿这段错内容当 salvage**，否则等于把大镜头正文换个头接着抄。
+         *
+         * ⚠️ `duration` 可能读不出来（格子空着 / 区间写法，后者已在 `momanRowDurationSeconds` 修掉）
+         * —— 此时用同表中位时长，别让判据静默短路（用户 2026-11-02 第二次报障）。
          */
-        const duration = momanRowDurationSeconds(row.duration);
         const span = momanScriptSpan(text);
         if (duration > 0 && span > duration * 1.15 + 1 && hasMomanRowMaterial(row)) {
-            const rebuilt = buildMomanScriptFromRow(row);
+            const rebuilt = buildMomanScriptFromRow(row, undefined, duration);
             if (rebuilt) return { ...row, video_motion_prompt: rebuilt };
         }
         /**
@@ -5562,7 +5617,7 @@ export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], p
          * 重建不出来（行内也空）才保留原文，绝不把原有内容丢掉。
          */
         if ((!isMomanVideoScript(text) || text.length < MOMAN_MIN_SCRIPT_LENGTH) && hasMomanRowMaterial(row)) {
-            const rebuilt = buildMomanScriptFromRow(row, text);
+            const rebuilt = buildMomanScriptFromRow(row, text, duration);
             if (rebuilt) return { ...row, video_motion_prompt: rebuilt };
         }
         return text === rawText ? row : { ...row, video_motion_prompt: text };
