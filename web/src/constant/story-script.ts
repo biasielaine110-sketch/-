@@ -5496,19 +5496,57 @@ function hasMomanRowMaterial(row: StoryScriptRow): boolean {
 const MOMAN_MIN_SCRIPT_LENGTH = 90;
 
 /**
- * 这一行的时间码覆盖到第几秒（取所有 `起—止` 里最大的「止」；没有时间码返回 0）。
+ * `00:19` / `01:02:03` / `19` / `1.50` → 秒。
+ *
+ * 源剧本的分镜时间码常写成 `00 - 00:19`、`00:19 - 00:29`（mm:ss），第七套要求的是
+ * `0.00—1.50`（小数秒）。两种都要能算成秒，否则「这格覆盖到第几秒」永远算不出来。
+ */
+function momanClockSeconds(token: unknown): number {
+    const parts = String(token ?? "")
+        .split(":")
+        .map((part) => Number(part.trim()));
+    if (!parts.length || parts.some((part) => !Number.isFinite(part))) return 0;
+    if (parts.length === 1) return parts[0];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+}
+
+/**
+ * 这一格的时间码覆盖到第几秒（取所有 `起—止` 里最大的「止」；没有时间码返回 0）。
  *
  * 第七套的时间码必须是「从 `0.00` 起、覆盖到本行 `duration` 的最后一秒」。
  * 只看得出「有没有两段时间码」是不够的 —— 把源剧本里某条**未拆解的大镜头**（完整秒数，
  * 时间码跑到 30 秒甚至 60 秒）整段抄进第一行，形态上完全合格。
+ *
+ * ⚠️ 必须同时认 `mm:ss`：源剧本写成 `00 - 00:19 | …` 时，只认小数秒的旧实现会把「止」
+ * 算成 `00`（`00 - 00` 被当成一段），于是越界校验整条失效（用户 2026-11-17 报障的真因之一）。
  */
 function momanScriptSpan(text: unknown): number {
+    const pattern = /(\d{1,2}(?::\d{2}){1,2}|\d+(?:\.\d+)?)\s*[—–\-~～至]\s*(\d{1,2}(?::\d{2}){1,2}|\d+(?:\.\d+)?)/g;
     let end = 0;
-    for (const match of String(text ?? "").matchAll(/(\d+(?:\.\d+)?)\s*[—–\-~～至]\s*(\d+(?:\.\d+)?)/g)) {
-        const to = Number(match[2]);
+    for (const match of String(text ?? "").matchAll(pattern)) {
+        const to = momanClockSeconds(match[2]);
         if (Number.isFinite(to) && to > end) end = to;
     }
     return end;
+}
+
+/**
+ * 这一格是不是「照抄源剧本的原始分镜行」，而不是第七套要求的 `0.00—1.50：【景别，运镜】…`。
+ *
+ * 原始剧本的写法是 `00 - 00:19 | 中景至近景 | 手持微晃，正向跟拍 | …`（mm:ss + 管道分隔），
+ * 模型整段抄进来时还常带 `**镜头 N**` 与 `<br>`。这种内容即使时间码没越界也不合格 ——
+ * 它没有方括号景别运镜、没有按本行时长切段，喂给视频模型只会得到一条 19 秒的连续镜头。
+ */
+function isRawScriptDump(text: string): boolean {
+    if (!text.trim()) return false;
+    if (/<br\s*\/?>/i.test(text)) return true;
+    if (/\*{0,2}\s*镜头\s*[0-9０-９]{1,2}\s*\*{0,2}\s*\|/.test(text)) return true;
+    // 第七套的格式只收小数秒（`0.00—1.50`）。出现 ≥2 个 `mm:ss` 时间码，就一定是源剧本的写法。
+    if ((text.match(/\d{1,2}:\d{2}(?::\d{2})?/g) || []).length >= 2) return true;
+    const strictHeads = text.match(/(?:^|\n)\s*\d+\.\d+\s*[—–\-~～至]\s*\d+\.\d+\s*(?:秒|s)?\s*[：:]/g) || [];
+    const pipes = (text.match(/\s\|\s/g) || []).length;
+    return strictHeads.length < 2 && pipes >= 3;
 }
 
 /**
@@ -5607,6 +5645,18 @@ export function normalizeStoryScriptMomanRows(rows: readonly StoryScriptRow[], p
          * —— 此时用同表中位时长，别让判据静默短路（用户 2026-11-02 第二次报障）。
          */
         const span = momanScriptSpan(text);
+        /**
+         * ⑤-a **整格是源剧本原样的分镜行**（`00 - 00:19 | 中景至近景 | 手持微晃…`，常带
+         * `<br>` 与 `**镜头 N**`）。这种内容即使时间码没越界也不合格：没有方括号景别运镜、
+         * 没按本行 `duration` 切段，喂给视频模型就是一条 19 秒的连续镜头。
+         *
+         * 它来自 `applyMomanVideoScriptOverlay`（源稿逐字进视频列）—— 源剧本的「一镜」
+         * 往往是十几秒的大镜头，与表格行粒度天然不同，所以这里必须按本行重建，不能放行。
+         */
+        if (isRawScriptDump(text) && hasMomanRowMaterial(row)) {
+            const rebuilt = buildMomanScriptFromRow(row, undefined, duration);
+            if (rebuilt) return { ...row, video_motion_prompt: rebuilt };
+        }
         if (duration > 0 && span > duration * 1.15 + 1 && hasMomanRowMaterial(row)) {
             const rebuilt = buildMomanScriptFromRow(row, undefined, duration);
             if (rebuilt) return { ...row, video_motion_prompt: rebuilt };
@@ -5656,13 +5706,31 @@ function momanRecordShotNo(record: Record<string, unknown>): number {
 function extractMomanPlainScriptRecords(text: string): Record<string, unknown>[] {
     const raw = String(text ?? "").replace(/\\n/g, "\n").replace(/\r\n?/g, "\n").trim();
     if (!raw) return [];
-    const pattern = /\d+(?:\.\d+)?\s*[—–\-~～至]\s*\d+(?:\.\d+)?\s*(?:秒|s)?\s*[：:]/gi;
-    const marks: Array<{ start: number; time: number }> = [];
-    let match: RegExpExecArray | null = pattern.exec(raw);
-    while (match) {
-        marks.push({ start: match.index, time: Number.parseFloat(match[0]) });
-        match = pattern.exec(raw);
+    /**
+     * ① 源稿带 `镜头 N` / `**镜头 N**` 标记（原始剧本最常见）→ **按标记切块**。
+     *
+     * 旧实现只按「时间码归零」切：`0.00—1.50` 起的段算新的一镜，其余续在同镜里。
+     * 但原始剧本的时间码是**绝对时间轴**（`00 - 00:19` / `00:19 - 00:29`，永不归零），
+     * 于是一整份剧本被并成**一块**，`applyMomanVideoScriptOverlay` 又把这一整块塞进表格
+     * 第 1 行 —— 用户看到的「第一镜是完整大镜头、第二镜起都正常」就是这么来的（2026-11-17 报障）。
+     */
+    const shotMarks: number[] = [];
+    for (const match of raw.matchAll(/\*{0,2}\s*镜头\s*[0-9０-９]{1,2}\s*\*{0,2}/g)) shotMarks.push(match.index ?? 0);
+    if (shotMarks.length >= 2) {
+        // 第一镜常常没有标记（正文直接从 `00 - 00:19` 起）→ 补一个 0 当第一块的起点。
+        const cuts = shotMarks[0] > 0 ? [0, ...shotMarks] : shotMarks;
+        const blocks = cuts
+            .map((from, index) => raw.slice(from, index + 1 < cuts.length ? cuts[index + 1] : raw.length))
+            // 去掉块首的 `**镜头 2** |`：这一镜的正文从时间码开始。
+            .map((piece) => piece.replace(/^\s*\*{0,2}\s*镜头\s*[0-9０-９]{1,2}\s*\*{0,2}\s*[|｜]?\s*/, "").trim())
+            .filter((piece) => /^\s*(\d{1,2}(?::\d{2}){1,2}|\d+(?:\.\d+)?)\s*[—–\-~～至]/.test(piece));
+        if (blocks.length >= 2) return blocks.map((block) => ({ prompt: block }));
     }
+    // ② 没有镜头标记 → 沿用「时间码归零算新的一镜」（第七套 storyboard 纯文本的写法）。
+    //    时间码一律走 `momanClockSeconds`：`00 - 00:19` 这种绝对时间码只认小数秒会被读成 0。
+    const pattern = /(\d{1,2}(?::\d{2}){1,2}|\d+(?:\.\d+)?)\s*[—–\-~～至]\s*(\d{1,2}(?::\d{2}){1,2}|\d+(?:\.\d+)?)\s*(?:秒|s)?\s*[：:]/gi;
+    const marks: Array<{ start: number; time: number }> = [];
+    for (const match of raw.matchAll(pattern)) marks.push({ start: match.index ?? 0, time: momanClockSeconds(match[1]) });
     if (marks.length < 2) return [];
     const blocks: string[] = [];
     for (let index = 0; index < marks.length; index += 1) {
@@ -5674,7 +5742,7 @@ function extractMomanPlainScriptRecords(text: string): Record<string, unknown>[]
         else blocks[blocks.length - 1] = `${blocks[blocks.length - 1]}\n${piece}`;
     }
     return blocks
-        .filter((block) => /^\s*\d+(?:\.\d+)?\s*[—–\-~～至]/i.test(block))
+        .filter((block) => /^\s*(\d{1,2}(?::\d{2}){1,2}|\d+(?:\.\d+)?)\s*[—–\-~～至]/i.test(block))
         .map((block) => ({ prompt: block }));
 }
 
@@ -5732,6 +5800,19 @@ export function applyMomanVideoScriptOverlay(
         .map((record) => ({ shotNo: momanRecordShotNo(record), text: buildMomanVideoPrompt(record) }))
         .filter((item) => item.text);
     if (!prompts.length) return rows as StoryScriptRow[];
+    /**
+     * ⚠️ **纯文本源稿（不是 storyboard JSON）必须「一段一行」对得上才搬**（2026-11-17 报障）。
+     *
+     * 原始剧本的「一镜」常常是十几二十秒的大镜头，而表格是 6 秒一行 —— 条数不一致时
+     * `prompts[index]` 只会把源稿第 1 条硬塞给第 1 行，其余行整体错位；抽块逻辑一旦把整份
+     * 剧本并成一块，第 1 行拿到的就直接是**整篇原稿**（用户看到的「第一镜是完整大镜头」）。
+     * 这种源稿交给 `normalizeStoryScriptMomanRows` 按行重建才是对的 —— 重建出来的时间码
+     * 与表格粒度一致。
+     *
+     * JSON storyboard 不设这条闸：它的 `prompt` 本来就是逐镜、与本表一一对应。
+     */
+    const plainOnly = records.every((record) => typeof record.prompt === "string" && Object.keys(record).length === 1);
+    if (plainOnly && prompts.length !== rows.length) return rows as StoryScriptRow[];
     const rowShotNos = new Set(rows.map((row, index) => Number(row.shot_no) || index + 1));
     // 条数对得上整表（最常见：源稿 N 条 = 表格 N 行）→ 一律按顺序；
     // 只有源稿比表格少、且镜号能对上时才按源镜号找（避免「源稿镜3 撞上表格第3行」的错位）。
@@ -7541,6 +7622,7 @@ export const STORY_SCRIPT_MOMAN_VIDEO_FORMAT = [
     "- 每一行**必须以 `起.止—终.止` 的时间码开头**（两位小数，如 `0.00—1.50`），紧接着冒号 `：` 与方括号 `【景别，运镜】`。方括号里第一项写景别（`局部特写` / `双人中景` / `全景`），第二项写运镜（`微幅下移` / `缓慢后移` / `固定机位`）。",
     "- 时间码**从 `0.00` 起、首尾相接、连续覆盖到这一镜 `duration` 的最后一秒**，不许跳空、不许重叠、不许只写一段概括。",
     "- 🔴 **每一行（尤其是第一行）都必须按本行 `duration` 重新切段**：源内容里的一条镜头常常是「原剧本一镜到底的完整秒数」（`0.00—15.00`，甚至写到 30 / 60 秒）。**禁止**把那条大镜头的脚本整段复制进第一行的视频列 —— 先看本行 `duration` 是几秒，再把这几十秒的内容重新按时间码切开。视频列里出现超出本行时长的止秒（本行 6 秒却写到 `15.00`）一律算不合格。",
+    "- 🔴 **禁止原样搬运源剧本的分镜行**：源稿可能是 `00 - 00:19 | 中景至近景 | 手持微晃，正向跟拍 | …` 这种 `mm:ss` + 竖线分隔的写法，还夹着 `<br>`、`**镜头 2**`。那是**源稿**，不是本列要求的值 —— 竖线、`<br>`、`镜头 N` 标记一个都不许出现在 `video_motion_prompt` 里。第一行尤其容易犯：必须把源稿第一个大镜头里属于这几秒的那一段，改写成 `0.00—X.XX：【景别，运镜】画面内容：… 声音：… 对白：…`。",
     "- 段数按内容需要给（通常 2—4 段），但每一段都要能独立指导生成：景别 + 机位 + 动作 + 光线 + 声音，不要只写「继续上一个动作」。",
     "- 台词写进它发生的那一段里，标明说话人与语气（`奶奶：“我不认识你，不能收你的花。” 语气平缓偏冷`）；没有台词就写环境音与音乐进入 / 退出。",
     "- 源稿用 `@role_xxx` / `@scene_xxx` / `@prop_xxx` 这类资产 id 指代角色、场景、道具时，**在视频列里原样保留**，不要换成自然语言描述；源稿没给这类 id 时不要自己造。",
