@@ -2,10 +2,16 @@ import { saveAs } from "file-saver";
 
 import { forceProxyMediaUrl, proxyMediaUrl } from "@/lib/api-proxy";
 import { supportsFileSystemAccess, writeBlobToDraftDirectory } from "@/lib/canvas/canvas-draft";
+import { getMediaBlob } from "@/services/file-storage";
 
 export type SaveBlobOptions = {
     /** When set, try writing into this project's bound draft folder first. */
     projectId?: string | null;
+    /**
+     * 节点自己的 IndexedDB 副本键（`metadata.storageKey`）。远程直链过期、`blob:` 地址随刷新作废时，
+     * 这条是唯一能救回来的路 —— 见 `resolveBlobSource` 的第 ③ 步。
+     */
+    storageKey?: string | null;
 };
 
 export type SaveBlobResult =
@@ -17,18 +23,53 @@ export type SaveBlobResult =
  * fails here: media elements are not CORS-checked, fetch() is. That is why a playing video could
  * never be downloaded from an external host — the rejection escaped as an unhandled error and the
  * button looked dead. Retry through the same-origin media proxy before giving up.
+ *
+ * 取字节的顺序（与 `lib/canvas/canvas-video-tools.ts` 的 `loadVideoBlob` 同一套体例，别各写一套）：
+ *  ① 直连（`blob:` / `data:` 也就这一条路，读不到说明对象 URL 已被回收）；
+ *  ② 非 `blob:`/`data:` 的地址再强制走一次站点代理（`/api/proxy?target=…`）；
+ *  ③ 都失败 → **节点自己的 IndexedDB 副本**（`options.storageKey`）。
+ *
+ * ③ 不是锦上添花：视频节点的 `metadata.content` 经常是上次会话创建的对象 URL，刷新页面就失效，
+ * `fetch` 只会抛一句 `Failed to fetch` —— 而字节好端端躺在本地库里。用户看到的
+ * 「下载失败: Failed to fetch」绝大多数就是这一种，别再去猜 CORS 或代理挂了。
  */
-export async function resolveBlobSource(source: Blob | string): Promise<Blob> {
+export async function resolveBlobSource(source: Blob | string, options?: { storageKey?: string | null }): Promise<Blob> {
     if (typeof source !== "string") return source;
+    const raw = String(source || "").trim();
+    const isObjectUrl = raw.startsWith("blob:") || raw.startsWith("data:");
+    if (!raw) return await storedMediaOrThrow(options?.storageKey, new Error("没有可下载的地址"));
     try {
-        return await fetchBlobOrThrow(source);
+        return await fetchBlobOrThrow(raw);
     } catch (error) {
+        // 对象 URL / data URL：代理对非 http(s) 无能为力，直接交给本地副本兜底。
+        if (isObjectUrl) return await storedMediaOrThrow(options?.storageKey, error);
         // proxyMediaUrl declines to rewrite "known CORS-open" hosts, but that list is about API
         // POSTs with Authorization — not media GETs — so force the proxy as a last resort.
-        const proxied = forceProxyMediaUrl(source) || proxyMediaUrl(source);
-        if (!proxied || proxied === source) throw error;
-        return await fetchBlobOrThrow(proxied);
+        const proxied = forceProxyMediaUrl(raw) || proxyMediaUrl(raw);
+        if (!proxied || proxied === raw) return await storedMediaOrThrow(options?.storageKey, error);
+        try {
+            return await fetchBlobOrThrow(proxied);
+        } catch (proxyError) {
+            return await storedMediaOrThrow(options?.storageKey, proxyError);
+        }
     }
+}
+
+/**
+ * 最后一道：读节点自己的本地副本（`metadata.storageKey`）。读不到就把原始失败原因抛回去，
+ * 但把浏览器的 `Failed to fetch` 翻译成人能看懂的一句话（保留原词，方便继续定位）。
+ */
+async function storedMediaOrThrow(storageKey: string | null | undefined, reason: unknown): Promise<Blob> {
+    const key = String(storageKey || "").trim();
+    if (key) {
+        const stored = await getMediaBlob(key).catch(() => null);
+        if (stored && stored.size) return stored;
+    }
+    const message = reason instanceof Error ? reason.message : String(reason ?? "");
+    if (/failed to fetch|networkerror|load failed|net::/i.test(message)) {
+        throw new Error(`链接已失效或被跨域拦截（${message}），这个节点本地也没有可用的副本`);
+    }
+    throw reason instanceof Error ? reason : new Error(message || "无法读取媒体数据");
 }
 
 async function fetchBlobOrThrow(url: string) {
@@ -52,7 +93,7 @@ export function resolveCanvasProjectIdFromLocation() {
  */
 export async function saveBlobAs(source: Blob | string, suggestedName: string, options?: SaveBlobOptions): Promise<SaveBlobResult> {
     const fileName = suggestedName.trim() || "download.bin";
-    let blob = await resolveBlobSource(source);
+    let blob = await resolveBlobSource(source, { storageKey: options?.storageKey });
     // file-saver falls back to inferring the name from the URL when a Blob has an empty or
     // generic ("application/octet-stream") type; a blob: URL has no path, so downloads lose
     // their extension (e.g. "canvas-video" instead of "canvas-video.mp4"). Upstream servers

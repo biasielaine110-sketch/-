@@ -4451,7 +4451,19 @@ function AtelierCanvasPage() {
                 // mp4 for a WebM/Audio payload would be a container the bytes do not have, so ask the
                 // mime: save-blob re-types the blob after the extension it is given.
                 const extension = node.type === CanvasNodeType.Video ? videoExtension(node.metadata.mimeType) : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content);
-                const result = await saveBlobAs(node.metadata.content, `canvas-${node.type}-${node.id}.${extension}`, { projectId });
+                /**
+                 * 🔴 必须把节点的本地副本键带下去：视频节点的 `metadata.content` 经常是**上次会话**
+                 * 创建的对象 URL（`blob:`），刷新页面就失效，`fetch` 只回一句 `Failed to fetch`，
+                 * 而字节就在 IndexedDB 里 —— 用户报的「下载失败: Failed to fetch」正是这一种。
+                 * 批图节点的内容取首图那份副本（表格/播放器也是这个口径）。
+                 */
+                const primaryImageKey = node.metadata.primaryImageId
+                    ? node.metadata.images?.find((image) => image.id === node.metadata?.primaryImageId)?.storageKey
+                    : undefined;
+                const result = await saveBlobAs(node.metadata.content, `canvas-${node.type}-${node.id}.${extension}`, {
+                    projectId,
+                    storageKey: primaryImageKey || node.metadata.storageKey,
+                });
                 if (result.method === "draft") {
                     message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
                 } else if (result.method === "download" && draftMeta && !draftMeta.hasDirectory) {

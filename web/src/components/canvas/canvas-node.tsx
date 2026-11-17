@@ -1483,7 +1483,9 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
             // Prefer the stored bytes: they are the ones on screen, need no network and cannot be
             // refused by CORS. Only re-fetch the source URL when the stored blob is gone.
             const stored = storageKey ? await getMediaBlob(storageKey).catch(() => null) : null;
-            const blob = stored && stored.size > 0 ? stored : await resolveBlobSource(playableSrc);
+            // 远程直链过期 / `blob:` 被回收时，`resolveBlobSource` 里还有一次「本地副本」兜底
+            // （同一套顺序见 `lib/fs/save-blob.ts`），所以这里把 storageKey 一并带下去。
+            const blob = stored && stored.size > 0 ? stored : await resolveBlobSource(playableSrc, { storageKey });
             if (!blob.size) throw new Error("no media bytes");
             // Name the file after the real container. Calling WebM bytes ".mp4" is not cosmetic:
             // save-blob re-types the blob to match the extension, so the file would not play.
