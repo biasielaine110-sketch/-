@@ -89,7 +89,7 @@ import {
     type StoryScriptExtraColumn,
     type StoryScriptPresetId,
 } from "@/constant/story-script";
-import type { CanvasTheme } from "@/lib/canvas-theme";
+import { withAlpha, type CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { isSameScriptAssetByName, isScriptAssetAlignSkipped, planScriptAssetAlignment, shouldApplyScriptAssetAlignment, type ScriptAssetAlignCandidate } from "@/lib/canvas/script-asset-align";
 import { planScriptVoiceAlignment, shouldApplyScriptVoiceAlignment } from "@/lib/canvas/script-voice-align";
@@ -498,7 +498,7 @@ export function CanvasScriptNodeContent({
     /**
      * 「五套执行方案」：`builtin` = 预设自带的内置提示词；`library` = 词库（分镜表 · 首帧图和视频提示词）；
      * `x20` = 词库（火_X20_主图分镜图_简洁版）；`director` = 词库（影视分镜导演）；`muse` = 词库（muse-长视频）
-     * —— **默认是第四套**，见 `resolveAutoApplyScriptScheme`（词库没这条才退第二套）；第五套只手动选。
+     * —— **默认是第七套（魔漫 15 秒分镜）**，见 `resolveAutoApplyScriptScheme`（词库 / 技能里没那两段才退第四套、第二套）；其余各套只手动选。
      *
      * 为什么只预填、不另开注入通道：三个字段本来就是节点级覆盖入口，预填完用户还能照常点开改；
      * 而且切换方案**绝不碰 `scriptSource`** —— 用户单独设定的分镜表识别内容（第四套那套
@@ -1152,8 +1152,8 @@ export function CanvasScriptNodeContent({
     };
 
     /**
-     * 「第四套（影视分镜导演）是默认方案」——用户 2026-10-23 的要求
-     * （词库里没有这条时回落第二套「分镜表」；都没有就停在内置）。
+     * 「第七套（魔漫 15 秒分镜）是默认方案」——用户 2026-11-17 的要求
+     * （词库 / 技能里没有那两段时回落第四套「影视分镜导演」、再退第二套「分镜表」；都没有就停在内置）。
      *
      * 为什么靠挂载后**自动预填一次**，而不是把 `resolveScriptSchemeId` 的默认值改掉：
      * 那个函数只做归一化。默认值一改，按钮会亮成第四套、可三个输入框还是空的，生成时照样走
@@ -1592,7 +1592,7 @@ export function CanvasScriptNodeContent({
     const fontSizeStepper = (
         <span
             className="inline-flex shrink-0 items-center gap-0.5 rounded-full border px-1 py-0.5"
-            style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
+            style={{ borderColor: theme.node.stroke, background: withAlpha(theme.toolbar.panel, 0.67), color: theme.node.text }}
             title={t("canvas.scriptNode.fontSizeHint")}
         >
             <button
@@ -1692,7 +1692,7 @@ export function CanvasScriptNodeContent({
         <button
             type="button"
             className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-2.5 transition"
-            style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
+            style={{ borderColor: theme.node.stroke, background: withAlpha(theme.toolbar.panel, 0.67), color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
@@ -1714,7 +1714,7 @@ export function CanvasScriptNodeContent({
             onMouseDown={stopIfInteractive}
             onPointerDown={stopIfInteractive}
         >
-            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 font-medium opacity-85" style={{ background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke }}>
+            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 font-medium opacity-85" style={{ background: withAlpha(theme.toolbar.panel, 0.87), borderColor: theme.node.stroke }}>
                 <ScrollText className="size-4" />
                 {t("canvas.scriptNode.title")}
             </span>
@@ -1745,7 +1745,7 @@ export function CanvasScriptNodeContent({
                     <button
                         type="button"
                         className={chromeButtonClass}
-                        style={{ borderColor: theme.node.stroke, background: view === "table" ? theme.toolbar.activeBg : `${theme.toolbar.panel}aa`, color: view === "table" ? theme.toolbar.activeText : theme.node.text }}
+                        style={{ borderColor: theme.node.stroke, background: view === "table" ? theme.toolbar.activeBg : withAlpha(theme.toolbar.panel, 0.67), color: view === "table" ? theme.toolbar.activeText : theme.node.text }}
                         onClick={() => setView("table")}
                         title={t("canvas.scriptNode.viewTable")}
                     >
@@ -1755,7 +1755,7 @@ export function CanvasScriptNodeContent({
                     <button
                         type="button"
                         className={chromeButtonClass}
-                        style={{ borderColor: theme.node.stroke, background: view === "source" ? theme.toolbar.activeBg : `${theme.toolbar.panel}aa`, color: view === "source" ? theme.toolbar.activeText : theme.node.text }}
+                        style={{ borderColor: theme.node.stroke, background: view === "source" ? theme.toolbar.activeBg : withAlpha(theme.toolbar.panel, 0.67), color: view === "source" ? theme.toolbar.activeText : theme.node.text }}
                         onClick={() => setView("source")}
                         title={t("canvas.scriptNode.editSource")}
                     >
@@ -1795,7 +1795,7 @@ export function CanvasScriptNodeContent({
             <button
                 type="button"
                 className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border transition"
-                style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
+                style={{ borderColor: theme.node.stroke, background: withAlpha(theme.toolbar.panel, 0.67), color: theme.node.text }}
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
@@ -1841,7 +1841,7 @@ export function CanvasScriptNodeContent({
                         style={{
                             borderColor: oneClickVideo?.status === "paused" ? "#dc2626" : theme.node.stroke,
                             color: oneClickVideo?.status === "paused" ? "#dc2626" : theme.node.text,
-                            background: `${theme.toolbar.panel}cc`,
+                            background: withAlpha(theme.toolbar.panel, 0.8),
                         }}
                         disabled={oneClickRunning || !canGenerate}
                         onClick={(event) => {
@@ -2016,7 +2016,7 @@ export function CanvasScriptNodeContent({
             className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] transition"
             style={{
                 borderColor: inheritAuto ? theme.toolbar.activeBg : theme.node.stroke,
-                background: inheritAuto ? `${theme.toolbar.activeBg}1f` : `${theme.toolbar.panel}aa`,
+                background: inheritAuto ? `${theme.toolbar.activeBg}1f` : withAlpha(theme.toolbar.panel, 0.67),
                 color: inheritAuto ? theme.toolbar.activeBg : theme.node.text,
             }}
             onMouseDown={(event) => event.stopPropagation()}
@@ -2041,7 +2041,7 @@ export function CanvasScriptNodeContent({
                 <button
                     type="button"
                     className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[0.923em] transition"
-                    style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text }}
+                    style={{ borderColor: theme.node.stroke, background: withAlpha(theme.toolbar.panel, 0.67), color: theme.node.text }}
                     onMouseDown={(event) => event.stopPropagation()}
                     onPointerDown={(event) => event.stopPropagation()}
                     onClick={(event) => {
@@ -2137,7 +2137,7 @@ export function CanvasScriptNodeContent({
 
     // 「执行方案」总开关：第一套 = 预设自带的内置提示词；第二套 = 词库（分镜表 · 首帧图和视频提示词）；
     // 第三套 = 词库（火_X20_主图分镜图_简洁版）；第四套 = 词库（影视分镜导演）；第五套 = 词库（muse-长视频）。
-    // —— **默认是第四套**（词库没这条才退第二套），换哪套由用户自己点（第五 / 第六套只手动选，不参与默认判定）。
+    // —— **默认是第七套（魔漫 15 秒分镜）**（词库 / 技能里没那两段才退第四套、第二套），换哪套由用户自己点（其余各套只手点，不参与默认判定）。
     // 放在预设切换行**之前**——预设决定「出哪些列」，方案决定「用哪套提示词」，后者层次更高。
     const schemeSelector = (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[0.923em]" style={{ color: theme.node.text }}>
@@ -2153,7 +2153,7 @@ export function CanvasScriptNodeContent({
                             borderColor: active ? theme.toolbar.activeText : theme.node.stroke,
                             // 选中态必须实心：`activeBg` 是浅米色，和未选中的半透明底几乎没差别，
                             // 看起来像「没点上」（这坑在时长 pill 上踩过）。
-                            background: active ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                            background: active ? theme.toolbar.activeText : withAlpha(theme.toolbar.panel, 0.67),
                             color: active ? theme.node.panel : theme.node.text,
                             opacity: active ? 1 : 0.7,
                         }}
@@ -2175,7 +2175,7 @@ export function CanvasScriptNodeContent({
                     {t("canvas.scriptNode.schemeLibraryMissing", { count: schemePrefill.missing.length })}
                 </span>
             ) : null}
-            {/* 默认是第四套；各套都取不到「自定义 / 分镜」那一段时自动切不动，必须说清楚
+            {/* 默认是第七套；各套都取不到「自定义 / 分镜」那一段时自动切不动，必须说清楚
                 「为什么还亮着第一套」，否则看着像功能失效。判据只认那一段 —— 资产段几套共用，
                 只有资产词条时切过去也等于没切（见 `resolveAutoApplyScriptScheme`）。
                 第五 / 第六套只手动选、不参与默认判定，但要一起数进来判断「到底有没有词可用」；
@@ -2199,7 +2199,7 @@ export function CanvasScriptNodeContent({
                         className="inline-flex h-6 items-center gap-1 rounded-full border px-2.5 transition"
                         style={{
                             borderColor: theme.node.stroke,
-                            background: active ? theme.toolbar.activeBg : `${theme.toolbar.panel}aa`,
+                            background: active ? theme.toolbar.activeBg : withAlpha(theme.toolbar.panel, 0.67),
                             color: active ? theme.toolbar.activeText : theme.node.text,
                             opacity: active ? 1 : 0.7,
                         }}
@@ -2221,7 +2221,7 @@ export function CanvasScriptNodeContent({
                 className="inline-flex h-6 items-center gap-1 rounded-full border px-2.5 transition"
                 style={{
                     borderColor: theme.node.stroke,
-                    background: hasCustomSystemPrompt ? theme.toolbar.activeBg : `${theme.toolbar.panel}aa`,
+                    background: hasCustomSystemPrompt ? theme.toolbar.activeBg : withAlpha(theme.toolbar.panel, 0.67),
                     color: hasCustomSystemPrompt ? theme.toolbar.activeText : theme.node.text,
                     opacity: hasCustomSystemPrompt ? 1 : 0.7,
                 }}
@@ -2240,7 +2240,7 @@ export function CanvasScriptNodeContent({
                 <button
                     type="button"
                     className="inline-flex h-6 items-center rounded-full border px-2.5 transition"
-                    style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa`, color: theme.node.text, opacity: 0.7 }}
+                    style={{ borderColor: theme.node.stroke, background: withAlpha(theme.toolbar.panel, 0.67), color: theme.node.text, opacity: 0.7 }}
                     onMouseDown={(event) => event.stopPropagation()}
                     onPointerDown={(event) => event.stopPropagation()}
                     onClick={(event) => {
@@ -2268,7 +2268,7 @@ export function CanvasScriptNodeContent({
                     className="inline-flex h-6 items-center gap-1 rounded-full border px-2.5 transition"
                     style={{
                         borderColor: item.active ? theme.toolbar.activeText : theme.node.stroke,
-                        background: item.active ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                        background: item.active ? theme.toolbar.activeText : withAlpha(theme.toolbar.panel, 0.67),
                         color: item.active ? theme.node.panel : theme.node.text,
                         opacity: item.active ? 1 : 0.7,
                     }}
@@ -2384,7 +2384,7 @@ export function CanvasScriptNodeContent({
                 style={{
                     borderColor: totalSecondsUnlimited ? theme.toolbar.activeText : theme.node.stroke,
                     // 与其它 pill 同口径：选中实心。
-                    background: totalSecondsUnlimited ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                    background: totalSecondsUnlimited ? theme.toolbar.activeText : withAlpha(theme.toolbar.panel, 0.67),
                     color: totalSecondsUnlimited ? theme.node.panel : theme.node.text,
                     opacity: totalSecondsUnlimited ? 1 : 0.7,
                 }}
@@ -2598,7 +2598,7 @@ export function CanvasScriptNodeContent({
                         className="inline-flex h-6 items-center rounded-full border px-2 transition disabled:opacity-35"
                         style={{
                             borderColor: active ? theme.toolbar.activeText : theme.node.stroke,
-                            background: active ? theme.toolbar.activeText : `${theme.toolbar.panel}aa`,
+                            background: active ? theme.toolbar.activeText : withAlpha(theme.toolbar.panel, 0.67),
                             color: active ? theme.node.panel : theme.node.text,
                             opacity: disabled ? 0.4 : active ? 1 : 0.7,
                         }}

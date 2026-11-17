@@ -197,7 +197,7 @@ export function CanvasReverseVideoNodeContent({
      * 为什么必须在**选中之前**就定下来：八套方案对 `视频运动提示词` 的格式约束各不相同
      * （第四套 = 八段标签块、第五套 = 整段 10 秒视频脚本、第六套 = 光影全流程、第七 / 第八套 = 时间码 / 分镜组），
      * 而 02 / 03 都是「建脚本节点 → 立刻一键视频」一气呵成，中间没有地方让用户点方案。
-     * 空值 = 不表态，仍按默认判定（第四套 · 影视分镜导演优先），与「手点新建脚本节点」完全一致。
+     * 空值 = 不表态，仍按默认判定（第七套 · 魔漫 15 秒分镜优先），与「手点新建脚本节点」完全一致。
      */
     const schemeOptions = useMemo(() => [{ value: "", label: t("canvas.scriptNode.reverseSchemeFollow") }, ...SCRIPT_SCHEME_IDS.map((id) => ({ value: id, label: t(`canvas.scriptNode.scheme_${id}`) }))], [t]);
     /** 当前选中的方案（空 = 默认），只用于文案。 */

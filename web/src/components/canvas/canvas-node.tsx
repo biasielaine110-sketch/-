@@ -6,7 +6,7 @@ import { ChevronDown, ChevronRight, Clapperboard, Clock, Combine, Copy, Download
 import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas-display-image";
 import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
 import type { TextExportFormat } from "@/lib/canvas/document-text";
-import { canvasThemes } from "@/lib/canvas-theme";
+import { canvasThemes, withAlpha } from "@/lib/canvas-theme";
 import { useElapsedSeconds } from "@/hooks/use-elapsed-seconds";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
@@ -511,7 +511,7 @@ export const CanvasNode = React.memo(function CanvasNode({
             <div
                 className="relative h-full w-full overflow-visible rounded-3xl border-2"
                 style={{
-                    background: isGroup ? `${theme.toolbar.panel}66` : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
+                    background: isGroup ? withAlpha(theme.toolbar.panel, 0.4) : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
                     borderColor: isGroup
                         ? isGroupDropTarget || isActive
                             ? selectionBlue
@@ -947,7 +947,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
     const { t } = useTranslation();
     const fontSize = Math.max(10, Math.min(48, node.metadata?.fontSize || DEFAULT_CANVAS_FONT_SIZE));
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;
-    const actionButtonStyle = { background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke, color: theme.node.text };
+    const actionButtonStyle = { background: withAlpha(theme.toolbar.panel, 0.87), borderColor: theme.node.stroke, color: theme.node.text };
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const restoredScrollNodeRef = useRef<string | null>(null);
     const SCROLL_KEY = "infinite-atelier:canvas-text-scroll-position";

@@ -45,12 +45,12 @@ import type { TextPromptEntry } from "@/constant/text-prompt-library";
  *   ⚠️ 这一套**切过去就顺手把「每镜时长」设成 15 秒**（用户 2026-11-06 明确要求）——
  *   一个分镜组正好就是一行 15 秒的成片，组内 2~5 个镜头相加凑满 15 秒。
  *
- * ⚠️ 默认是 **`director`（第四套）**（2026-10-23 用户要求：01 分镜表默认走第四套；词库里没有
- * 影视分镜导演那一条时回落第二套 `library`；都没有则停在内置）。`resolveScriptSchemeId`
- * **只做归一化**，不承担默认值 —— 默认行为由 `resolveAutoApplyScriptScheme` 判定，组件在挂载后
- * 真的把三段预填进去。若把这里的默认值改成 `director`，按钮会亮成第四套、而三个输入框还是空的，
- * 生成时照样走内置提示词，界面与行为对不上（这个坑第一版就踩过）。
- * 第五 / 第六 / 第七 / 第八套同样**只手点、不进自动判定**。
+ * ⚠️ 默认是 **`moman`（第七套 · 魔漫 15 秒分镜）**（2026-11-17 用户要求：02 脚本生成器默认选择第 7 套；
+ * 词库 / 技能里没有魔漫那两段时依次回落第四套 `director`、第二套 `library`；都没有则停在内置）。`resolveScriptSchemeId`
+ * **只做归一化**，不承担默认值 —— 默认行为由 `resolveAutoApplyScriptScheme` 判定（默认值唯一出口是
+ * `DEFAULT_SCRIPT_SCHEME`），组件在挂载后真的把三段预填进去。若把这里的默认值改成 `moman`，
+ * 按钮会亮成第七套、而三个输入框还是空的，生成时照样走内置提示词，界面与行为对不上（这个坑第一版就踩过）。
+ * 其它几套同样只在被点名时才用，不会自己跳出来。
  *
  * 为什么是「预填进那三个输入框」而不是另开一条注入通道：那三个字段本来就是这个节点的
  * 覆盖入口（`resolveScriptSystemPrompt` / `buildScriptGenerationPromptSections` 都读它们），
@@ -60,6 +60,16 @@ export type ScriptSchemeId = "builtin" | "library" | "x20" | "director" | "muse"
 
 /** 方案切换器的渲染顺序（第一套 → 第八套）。 */
 export const SCRIPT_SCHEME_IDS = ["builtin", "library", "x20", "director", "muse", "ghost", "moman", "mashu"] as const satisfies readonly ScriptSchemeId[];
+
+/**
+ * 新建脚本节点（含 03 反推建节点）默认套用的方案 —— 用户 2026-11-17：「02 脚本生成器默认选择在第7套方案」。
+ *
+ * 只影响「节点上还没选过方案」的自动预填（见 `resolveAutoApplyScriptScheme`）：
+ * 用户点过任何一套（包括第一套）就一律尊重；之前默认落成 `director` 的老节点也不会被改写。
+ * 依赖词库「剧本转分镜15秒（不固定为15秒镜头时长）-魔漫」+ 技能库里同名 doc 技能 ——
+ * 两段都取不到时自动沿 `director → library → 内置` 回落，不会亮着一个空方案。
+ */
+export const DEFAULT_SCRIPT_SCHEME: ScriptLibrarySchemeId = "moman";
 
 /** 读方案：认不出 / 没设过一律按 `builtin` 渲染，默认值交给自动预填。 */
 export function resolveScriptSchemeId(value: unknown): ScriptSchemeId {
@@ -534,13 +544,14 @@ function hasSchemePrompt(prefill?: ScriptSchemePrefill | null): boolean {
 }
 
 /**
- * 节点建好（或老节点第一次打开）时该**自动**套用哪套方案 —— 用户 2026-10-23 要求
- * 「01 分镜表默认使用第四套执行方案（影视分镜导演），要换由用户自己选」。
+ * 节点建好（或老节点第一次打开）时该**自动**套用哪套方案。
  *
- * 默认优先级：**第四套 `director` → 第二套 `library` → 不预填（留在第一套内置）**。
- * 第四套排在最前是用户点名的默认；回落第二套只发生在「词库里没有影视分镜导演那一条」时
- * —— 那不是「换了方案」，而是「这套根本没有词可用」，停在第一套会让明明能用词库的用户
- * 白白退回内置提示词。
+ * 默认优先级：**第七套 `moman` → 第四套 `director` → 第二套 `library` → 不预填（留在第一套内置）**。
+ *
+ * 第七套排最前是用户 2026-11-17 点名的默认（「02 脚本生成器默认选择在第7套方案」）：
+ * 新建脚本节点 / 03 反推建节点都直接亮第七套 · 魔漫 15 秒分镜，要换由用户自己点。
+ * 回落链保留原来的第四套 → 第二套，只发生在「词库 / 技能里没有魔漫那两段」时 —— 那不是
+ * 「换了方案」，而是「这套根本没有词可用」，停在第一套会让明明能用词库的用户白白退回内置提示词。
  *
  * ⚠️ **选定的方案内部不做跨方案回落**（2026-10-23 用户追加口径）：某一套在词库里缺内容时
  * 该段直接用**第一套内置提示词**（= 字段留空，见 `resolveScriptSystemPrompt` /
@@ -557,11 +568,14 @@ function hasSchemePrompt(prefill?: ScriptSchemePrefill | null): boolean {
  *  4. prefill 还没就绪（词库尚未从 store 拿到）—— 先不动，等它到了再判断。
  *
  * 注意：**没有「老节点迁移」**。10-19 那版把 `library` 写进 metadata 的节点，仍是合法的第二套，
- * 不必也不能再迁到别的方案（那会把用户看到/用着的方案偷偷换掉）。
+ * 不必也不能再迁到别的方案（那会把用户看到/用着的方案偷偷换掉）；同理，之前默认落成 `director`
+ * 的老节点也不会被改成第七套 —— 那条只影响「新建 / 没选过」的节点。
  */
 export function resolveAutoApplyScriptScheme(options: {
     scheme?: unknown;
+    momanPrefill?: ScriptSchemePrefill | null;
     directorPrefill?: ScriptSchemePrefill | null;
+
     x20Prefill?: ScriptSchemePrefill | null;
     libraryPrefill?: ScriptSchemePrefill | null;
     customSystemPrompt?: unknown;
@@ -570,7 +584,9 @@ export function resolveAutoApplyScriptScheme(options: {
 }): ScriptLibrarySchemeId | null {
     if (hasText(options.scheme)) return null;
     if (hasText(options.customSystemPrompt) || hasText(options.customAssetPrompt) || hasText(options.customShotPrompt)) return null;
-    // 第四套（影视分镜导演）是当前默认；词库里没这条才退第二套。第五 / 六套只手点，不参与。
+    // 第七套（魔漫 15 秒分镜）是当前默认；词库 / 技能里没那两段才依次退第四套、第二套。
+    // 第五 / 六 / 八套只手动选，不参与默认判定。
+    if (hasSchemePrompt(options.momanPrefill)) return DEFAULT_SCRIPT_SCHEME;
     if (hasSchemePrompt(options.directorPrefill)) return "director";
     if (hasSchemePrompt(options.libraryPrefill)) return "library";
     return null;
@@ -636,6 +652,10 @@ export function buildScriptSchemeSeed(options: {
             // 脏值（`"whatever"` / 空串）**不能**当「用户选过了」交给默认判定 —— 那会让自动预填永远退让，
             // 界面亮着第一套、词库明明有第四套也不用。归一成「没选」再判。
             scheme: asScriptSchemeId(options.scheme) ?? undefined,
+            // 第七套是默认（用户 2026-11-17）：它两段来源分别在**词库**与**技能库**，
+            // 所以要连 `skills` 一起交给预填 —— 少了这个参数，默认判定永远看不到技能正文，
+            // 第七套会被判成「没词可用」，默认就退成第四套了。
+            momanPrefill: buildScriptMomanPrefill(options.textPrompts, options.skills),
             directorPrefill: buildScriptSchemePrefill(options.textPrompts, "director"),
             x20Prefill: buildScriptSchemePrefill(options.textPrompts, "x20"),
             libraryPrefill: buildScriptSchemePrefill(options.textPrompts, "library"),

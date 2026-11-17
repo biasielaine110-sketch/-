@@ -8,7 +8,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { CanvasPromptChipInput } from "@/components/canvas/canvas-prompt-chip-input";
 import { CanvasTextEditDialog } from "@/components/canvas/canvas-text-edit-dialog";
 import { useOrderDrag } from "@/hooks/use-order-drag";
-import type { CanvasTheme } from "@/lib/canvas-theme";
+import { withAlpha, type CanvasTheme } from "@/lib/canvas-theme";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { resolveChatSendOptions, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { getChatSkillDisplayName, getChatSkillListHint, listChatSkills, resolveChatSkillIds, splitChatSkillsByVisibility } from "@/lib/chat-skills";
@@ -514,7 +514,7 @@ export function CanvasChatContent({
         <div className={`canvas-chat-shell flex h-full w-full cursor-move flex-col overflow-hidden text-[20px] ${headerRows > 1 ? "pt-32" : "pt-16"}`} style={{ color: theme.node.text }}>
             <div className="absolute inset-x-2 top-2 z-20 flex flex-col gap-1.5">
                 <div className="flex items-center gap-2">
-                    <div className="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[20px] font-medium opacity-80" style={{ background: `${theme.toolbar.panel}dd`, borderColor: theme.node.stroke }}>
+                    <div className="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[20px] font-medium opacity-80" style={{ background: withAlpha(theme.toolbar.panel, 0.87), borderColor: theme.node.stroke }}>
                         <MessageSquareText className="size-4" />
                         {t("canvas.chat.title")}
                     </div>
@@ -996,7 +996,7 @@ export function CanvasChatContent({
                         </div>
                     ) : null}
                     {onFontSizeChange ? (
-                        <div className="ml-auto inline-flex items-center gap-0.5 rounded-full border px-1.5 py-1" style={{ borderColor: theme.node.stroke, background: `${theme.toolbar.panel}aa` }}>
+                        <div className="ml-auto inline-flex items-center gap-0.5 rounded-full border px-1.5 py-1" style={{ borderColor: theme.node.stroke, background: withAlpha(theme.toolbar.panel, 0.67) }}>
                             <button
                                 type="button"
                                 className="grid size-7 place-items-center rounded-full opacity-80 transition hover:opacity-100 disabled:opacity-35"
@@ -1105,7 +1105,7 @@ function ModeToggle({ active, label, icon, theme, onClick, title }: { active: bo
             type="button"
             className="inline-flex h-11 items-center gap-1.5 rounded-full border px-3 text-[20px] font-medium transition"
             style={{
-                background: active ? theme.toolbar.activeBg : `${theme.toolbar.panel}aa`,
+                background: active ? theme.toolbar.activeBg : withAlpha(theme.toolbar.panel, 0.67),
                 color: active ? theme.toolbar.activeText : theme.node.text,
                 borderColor: active ? "transparent" : theme.node.stroke,
                 opacity: active ? 1 : 0.75,
