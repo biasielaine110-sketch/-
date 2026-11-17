@@ -178,6 +178,85 @@ export function resolveReverseVideoQuality(target: Partial<CanvasReverseVideoTar
 }
 
 /**
+ * 02 / 03 自动接着跑的**三个阶段**（用户 2026-11-17）：
+ * 「生成分镜 / 一键生图 / 一键生视频，这 3 个选项对勾，默认都是勾选的……取消勾选即不执行
+ *  后续脚本生成器中相关的内容」。
+ *
+ * 顺序即执行顺序（`handleOneClickVideo` 的三段：分镜表 → 资产图 → 铺链路并生成），
+ * 所以**级联只能往下游连坐**：关上游必然关下游，反过来勾下游必须把上游拉起来。
+ */
+export const VIDEO_REVERSE_STAGE_OPTIONS = [
+    { id: "script" as const, label: "生成分镜", hint: "脚本生成器按剧本出分镜表（分镜 / 角色 / 场景 / 道具 / 台词）" },
+    { id: "image" as const, label: "一键生图", hint: "把分镜表里的角色 / 场景 / 道具一次全生（资产图）" },
+    { id: "video" as const, label: "一键生视频", hint: "铺视频链路并开始生成（关键帧 → 视频节点）" },
+];
+
+export type VideoReverseStageId = (typeof VIDEO_REVERSE_STAGE_OPTIONS)[number]["id"];
+
+/** 三颗勾的生效结果。全 `true` = 与改造前完全一致（02 / 03 一路跑到视频）。 */
+export type ReverseVideoStages = { script: boolean; image: boolean; video: boolean };
+
+/** 默认：三颗全勾。 */
+export const DEFAULT_REVERSE_VIDEO_STAGES: ReverseVideoStages = { script: true, image: true, video: true };
+
+/**
+ * 级联收口（**唯一裁定入口**，UI 与 `handleOneClickVideo` 都走它）。
+ *
+ * 口径：`true` 以外的一切值都按「勾上」处理（缺省 / 脏值 / 老节点没这个字段 = 全勾），
+ * 然后按「上游没勾 → 下游一律没勾」往下压。这样调用方永远拿不到
+ * 「不出分镜表却要生图」「不生图却要生视频」这种互相矛盾的组合，执行器也就不会铺出一堆空节点。
+ */
+export function cascadeReverseVideoStages(raw?: Partial<Record<VideoReverseStageId, unknown>> | null): ReverseVideoStages {
+    const source = (raw || {}) as Partial<Record<VideoReverseStageId, unknown>>;
+    const wants = (id: VideoReverseStageId) => source[id] !== false;
+    const script = wants("script");
+    const image = script && wants("image");
+    const video = image && wants("video");
+    return { script, image, video };
+}
+
+/**
+ * 勾 / 取消一颗，并把联动一次算清（用户 2026-11-17 的两条规则）：
+ *  - 取消「生成分镜」→ 一键生图、一键生视频一起取消；取消「一键生图」→ 一键生视频一起取消；
+ *  - 反过来勾下游必须**拉起上游**（勾「一键生视频」= 生图与分镜也一起勾上）——
+ *    否则会出现「不生成分镜表，却要铺视频链路」这种执行器根本跑不动的状态。
+ *
+ * 上游取消后**不会被自动勾回来**：用户取消分镜、再勾生图时，分镜也会跟着被拉起（这是他要生图的前提），
+ * 但那是「勾生图」这个动作的连带结果，不是取消动作被撤销。
+ */
+export function setReverseVideoStage(current: Partial<ReverseVideoStages> | null | undefined, id: VideoReverseStageId, checked: boolean): ReverseVideoStages {
+    const next: ReverseVideoStages = { ...cascadeReverseVideoStages(current) };
+    next[id] = checked;
+    if (!checked) {
+        if (id === "script") {
+            next.image = false;
+            next.video = false;
+        } else if (id === "image") {
+            next.video = false;
+        }
+        return next;
+    }
+    if (id === "image") next.script = true;
+    if (id === "video") {
+        next.image = true;
+        next.script = true;
+    }
+    return next;
+}
+
+/** 读节点 metadata 上的三颗勾（老节点 / 缺省 → 全勾）。 */
+export function readReverseVideoStages(metadata: { reverseVideoTarget?: Partial<CanvasReverseVideoTarget> | null } | null | undefined): ReverseVideoStages {
+    return cascadeReverseVideoStages(metadata?.reverseVideoTarget?.autoStages);
+}
+
+/** 三颗勾的人话摘要（节点提示 / 启动报告用）：`生成分镜 → 一键生图 → 一键生视频`。 */
+export function describeReverseVideoStages(stages?: Partial<ReverseVideoStages> | null): string {
+    const resolved = cascadeReverseVideoStages(stages);
+    const labels = VIDEO_REVERSE_STAGE_OPTIONS.filter((item) => resolved[item.id]).map((item) => item.label);
+    return labels.length ? labels.join(" → ") : "全部跳过（只出剧本）";
+}
+
+/**
  * 归一化「目标视频参数」——窗口里选的那一档，也是 02 / 03 往脚本节点搬的那一份。
  *
  * 为什么要有这一步：UI 控件给什么值的都有（`InputNumber` 给 number 或 null、`Select` 允许清空、
@@ -223,6 +302,14 @@ export function normalizeReverseVideoTarget(raw: Partial<CanvasReverseVideoTarge
      */
     const shotsPerClip = normalizeScriptShotsPerClip(source.shotsPerClip);
     if (shotsPerClip) target.shotsPerClip = shotsPerClip;
+    /**
+     * 02 / 03 的三颗勾（用户 2026-11-17）：级联收口后**只有非全勾才写**。
+     *
+     * 全勾 = 缺省语义，不写进去 —— 一旦写进 metadata 就等于「用户手动确认过」，
+     * 以后默认值改动对老节点不生效（同 `size` / `quality` 的「默认值不落盘」口径）。
+     */
+    const stages = cascadeReverseVideoStages(source.autoStages);
+    if (!stages.script || !stages.image || !stages.video) target.autoStages = stages;
     return target;
 }
 

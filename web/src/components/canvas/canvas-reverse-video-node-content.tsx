@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Input, InputNumber, Modal, Select, Tag } from "antd";
+import { App, Button, Checkbox, Input, InputNumber, Modal, Select, Tag } from "antd";
 import { CircleAlert, Clapperboard, Cpu, FileText, Images, Layers, Link2, Loader2, SlidersHorizontal, Sparkles, Video, Wand2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, buildDefaultVideoReverseRequirement, normalizeReverseVideoTarget, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, VIDEO_REVERSE_STAGE_OPTIONS, buildDefaultVideoReverseRequirement, describeReverseVideoStages, normalizeReverseVideoTarget, readReverseVideoSkill, readReverseVideoStages, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, setReverseVideoStage, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult, type VideoReverseStageId } from "@/lib/canvas/video-reverse";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, normalizeScriptShotsPerClip } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
@@ -65,7 +65,25 @@ type CanvasReverseVideoNodeContentProps = {
     /** 粘贴链接建一个视频节点，返回新节点 id */
     onCreateVideoFromUrl?: (videoUrl: string) => Promise<string>;
     /** 执行一条命令；report 用来把阶段文案打到窗口里 */
-    onRun: (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: ScriptSchemeId; shotsPerClip?: number; skillId?: string; chatModel?: string }, report: (stage: string) => void) => Promise<VideoReverseResult>;
+    onRun: (
+        input: {
+            videoNodeId: string;
+            mode: VideoReverseMode;
+            requirement?: string;
+            reverseNodeId?: string;
+            scriptScheme?: ScriptSchemeId;
+            shotsPerClip?: number;
+            skillId?: string;
+            chatModel?: string;
+            /**
+             * 02 / 03 自动接着跑哪几步（用户 2026-11-17：生成分镜 / 一键生图 / 一键生视频，默认全勾）。
+             * 这里显式带过去（而不是只靠 metadata）是因为「刚在弹窗里取消勾选、立刻点开始」时
+             * `patchTarget` 还没落库 —— 同 `scriptScheme` / `chatModel` 那个坑。
+             */
+            stages?: ReverseVideoStages;
+        },
+        report: (stage: string) => void,
+    ) => Promise<VideoReverseResult>;
 };
 
 const MODE_ICON: Record<VideoReverseMode, typeof Video> = {
@@ -192,6 +210,24 @@ export function CanvasReverseVideoNodeContent({
         return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${effectiveSize} · ${qualityLabel(effectiveQuality)} · 风格：${style} · ${clip}${engine ? ` · ${engine}` : ""}`;
     }, [target, compactShots]);
     /**
+     * 02 / 03 自动接着跑的**三颗勾**（用户 2026-11-17）：「生成分镜 / 一键生图 / 一键生视频，默认都是勾选的；
+     * 不勾生成分镜 → 后面两步一起取消；不勾一键生图 → 一键生视频一起取消；取消勾选即不执行脚本生成器里
+     * 对应的那一步」。
+     *
+     * 读的时候一律走 `readReverseVideoStages`（老节点没这个字段 → 全勾，升级前后行为不变）；
+     * 写回走 `setReverseVideoStage`（勾 / 取消的联动**只有这一处**），再整体落 `reverseVideoTarget.autoStages`。
+     * 全勾时 `normalizeReverseVideoTarget` 会把键丢掉 —— 缺省即全勾，不必把默认值冻进数据里。
+     */
+    const stages = useMemo(() => readReverseVideoStages(node.metadata), [node.metadata]);
+    const toggleStage = useCallback(
+        (id: VideoReverseStageId, checked: boolean) => {
+            patchTarget({ autoStages: setReverseVideoStage(stages, id, checked) });
+        },
+        [patchTarget, stages],
+    );
+    /** 02 / 03 弹窗里那行「本次会执行：…」的文案（与真正传给执行器的是同一份级联结果）。 */
+    const stagePlanLabel = useMemo(() => describeReverseVideoStages(stages), [stages]);
+    /**
      * 02 / 03 弹窗里的「执行方案」选项（用户 2026-11-10）。
      *
      * 为什么必须在**选中之前**就定下来：八套方案对 `视频运动提示词` 的格式约束各不相同
@@ -301,7 +337,18 @@ export function CanvasReverseVideoNodeContent({
                  * `chatModel` 同理：用户刚在下拉里换完模型就点命令，metadata 可能还没写进去。
                  */
                 const outcome = await onRun(
-                    { videoNodeId: attached.id, mode, requirement, reverseNodeId: node.id, scriptScheme: target.scriptScheme, shotsPerClip: target.shotsPerClip, skillId: skillOption.id, chatModel: effectiveReverseModel || undefined },
+                    {
+                        videoNodeId: attached.id,
+                        mode,
+                        requirement,
+                        reverseNodeId: node.id,
+                        scriptScheme: target.scriptScheme,
+                        shotsPerClip: target.shotsPerClip,
+                        skillId: skillOption.id,
+                        chatModel: effectiveReverseModel || undefined,
+                        // 三颗勾只对 02 / 03 有意义（01 只反推、不碰脚本生成器），01 不带。
+                        stages: mode === 1 ? undefined : stages,
+                    },
                     (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }),
                 );
                 patchRun({
@@ -322,7 +369,7 @@ export function CanvasReverseVideoNodeContent({
                 message.error(detail);
             }
         },
-        [attached, effectiveReverseModel, message, node.id, onRun, patchRun, skillOption.id, target.scriptScheme, target.shotsPerClip],
+        [attached, effectiveReverseModel, message, node.id, onRun, patchRun, skillOption.id, stages, target.scriptScheme, target.shotsPerClip],
     );
 
     const handleCommand = useCallback(
@@ -596,7 +643,10 @@ export function CanvasReverseVideoNodeContent({
                     </div>
                 </div>
 
-                {/* ⑥ 三条命令 */}
+                {/* ⑥ 三条命令
+                    上面那行小字是 02 / 03 的**自动执行计划**（用户 2026-11-17 的三颗勾）：
+                    不点开弹窗也能一眼看到「这次会跑到哪一步」，取消勾选后这里立刻跟着变。 */}
+                <div className="px-1 text-[10px] leading-relaxed opacity-45">02 / 03 之后自动执行：{stagePlanLabel}（点命令时可在弹窗里取消勾选；取消上游会自动取消下游）</div>
                 <div className="flex flex-col gap-1.5">
                     {VIDEO_REVERSE_MODES.map((item) => {
                         const Icon = MODE_ICON[item.mode];
@@ -725,9 +775,29 @@ export function CanvasReverseVideoNodeContent({
                             <div className="text-[11px] leading-relaxed opacity-50">{t("canvas.scriptNode.reverseSchemeHint")}</div>
                         </div>
                     ) : null}
+                    {/* 02 / 03 的三颗勾（用户 2026-11-17）：默认全勾，取消上游自动取消下游。
+                        写回走 `setReverseVideoStage`（联动唯一出口），落 `reverseVideoTarget.autoStages`。 */}
+                    <div className="flex flex-col gap-1 rounded-md px-2 py-1.5" style={{ border: `1px solid ${theme.node.stroke}` }}>
+                        <span className="text-xs opacity-70">自动执行（默认全勾）</span>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                            {VIDEO_REVERSE_STAGE_OPTIONS.map((item) => (
+                                <Checkbox
+                                    key={item.id}
+                                    checked={stages[item.id]}
+                                    onChange={(event) => toggleStage(item.id, event.target.checked)}
+                                    title={item.hint}
+                                >
+                                    <span className="text-xs">{item.label}</span>
+                                </Checkbox>
+                            ))}
+                        </div>
+                        <div className="text-[11px] leading-relaxed opacity-50">取消「生成分镜」→ 生图与生视频一起取消；取消「一键生图」→ 生视频一起取消。取消的那一步在脚本生成器里不会执行（节点照建、剧本照写，之后随时可以在脚本节点上手动点）。</div>
+                    </div>
                     {requirementMode === 2 || requirementMode === 3 ? (
                         <div className="text-[11px] opacity-50">
-                            确定后会接着把文本节点接到脚本生成器，并执行一键视频 —— 剧本按 {target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒写、分镜表按「{chosenSchemeLabel}」的格式出，生视频用上面这套参数。
+                            {stages.script || stages.image || stages.video
+                                ? `确定后会接着把文本节点接到脚本生成器，并按「${stagePlanLabel}」执行 —— 剧本按 ${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒写${stages.script ? `、分镜表按「${chosenSchemeLabel}」的格式出` : ""}${stages.video ? "，生视频用上面这套参数" : ""}。`
+                                : `三步都没勾：只把反推出来的剧本写进文本节点，并接一个空的脚本生成器节点（之后可以在那里手动点生成）。`}
                         </div>
                     ) : null}
                 </div>

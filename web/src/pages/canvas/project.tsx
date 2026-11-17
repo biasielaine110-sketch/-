@@ -179,7 +179,7 @@ import { widenLegacyScriptNodes } from "@/lib/canvas/script-node-width";
 import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
-import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cleanVideoReverseScriptOutput, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cascadeReverseVideoStages, cleanVideoReverseScriptOutput, describeReverseVideoStages, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -10928,8 +10928,12 @@ function AtelierCanvasPage() {
          * @param options.referenceAssets 反推节点上连进来的参考图（只有 03 会传）：分镜表出来后先按名字
          *        把它们挂到道具格，并把命中的道具从「一键直接生图」那一批里剔掉 —— 见
          *        `mountReferenceAssetsToScript`。不传 = 与以前完全一致。
+         * @param options.stages 02 / 03 弹窗里的**三颗勾**（用户 2026-11-17：生成分镜 / 一键生图 / 一键生视频）：
+         *        取消勾选的那一步**不执行**。级联由 `cascadeReverseVideoStages` 收口（关上游必关下游），
+         *        所以这里只需要按位判断，不用再考虑「不出分镜表却要生视频」这种组合。
+         *        不传 = 三颗全勾，与改造前完全一致（脚本节点上手动点「一键视频」走的就是这条）。
          */
-        async (nodeId: string, options?: { referenceAssets?: readonly ScriptAssetReference[] }) => {
+        async (nodeId: string, options?: { referenceAssets?: readonly ScriptAssetReference[]; stages?: Partial<ReverseVideoStages> | null }) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             if (oneClickVideoRunningRef.current.has(nodeId)) return;
@@ -10938,6 +10942,11 @@ function AtelierCanvasPage() {
                 return;
             }
             oneClickVideoRunningRef.current.add(nodeId);
+            /**
+             * 三颗勾的**生效值**：老调用（不传）→ 全勾。判定只在开头做一次，
+             * 后面按 `stages.script / image / video` 分支，中途不再重读（同一趟里不会变）。
+             */
+            const stages = cascadeReverseVideoStages(options?.stages);
 
             const notify = (stage: OneClickVideoRun["stage"], key: string, params?: Record<string, string | number>) => patchOneClickVideoRun(nodeId, { status: "running", stage, message: t(key, params) });
             /** 暂停：按钮上留一行原因 + 一条 error 提示，然后结束整个流程。 */
@@ -10992,6 +11001,15 @@ function AtelierCanvasPage() {
             };
 
             try {
+                /**
+                 * ⓿ 「生成分镜」没勾（用户 2026-11-17）→ 整条链连分镜表都不出，后面两步在级联下必然也为 false，
+                 * 直接收工。节点 / 剧本都已经建好，用户之后想在脚本节点上手动跑随时可以点。
+                 */
+                if (!stages.script) {
+                    patchOneClickVideoRun(nodeId, { status: "done", stage: "script", message: t("canvas.scriptNode.oneClickSkippedScript") });
+                    message.success(t("canvas.scriptNode.oneClickSkippedScript"));
+                    return;
+                }
                 // ---- ① 生成分镜表（报错 → deepseek-flash 重试一次；15 分钟封顶，重试共用这段预算）----
                 const scriptDeadline = Date.now() + ONE_CLICK_STAGE_TIMEOUT_MS;
                 const stopScript = () => handleStopScriptGeneration(nodeId);
@@ -11086,6 +11104,17 @@ function AtelierCanvasPage() {
                 }
 
                 // ---- ② 一键直接生图（偏好模型重试一次 → seedream-5.0-pro 托底一次；**35 分钟**封顶）----
+                /**
+                 * 「一键生图」没勾（用户 2026-11-17）→ 分镜表已出（上面），资产图不生。
+                 * 级联已经把「一键生视频」压成 false（没有关键帧就铺不了视频），所以到这里就结束。
+                 * ⚠️ ①.5 的参考图挂载**仍然执行**：它不生成任何东西，只是把用户连进来的实物图锁进道具格
+                 * （并进「不再单独生图」的跳过表），以后手动点批量生图时才不会把那张图顶掉。
+                 */
+                if (!stages.image) {
+                    patchOneClickVideoRun(nodeId, { status: "done", stage: "script", message: t("canvas.scriptNode.oneClickSkippedImage") });
+                    message.success(t("canvas.scriptNode.oneClickSkippedImage"));
+                    return;
+                }
                 const imageDeadline = Date.now() + ONE_CLICK_IMAGE_STAGE_TIMEOUT_MS;
                 notify("image", "canvas.scriptNode.oneClickStageImage");
                 const launched = handleDirectGenerateScriptAssets(nodeId, { skipAssetKeys });
@@ -11139,6 +11168,15 @@ function AtelierCanvasPage() {
                 }
 
                 // ---- ③ 一键铺视频链路并生成（不再弹确认：本条流程前面已经确认过）----
+                /**
+                 * 「一键生视频」没勾（用户 2026-11-17）→ 分镜表 + 资产图已出，到此为止，不铺链路。
+                 * 铺链路是 fire-and-forget，所以这里必须**在调用之前**返回，不能靠事后 abort。
+                 */
+                if (!stages.video) {
+                    patchOneClickVideoRun(nodeId, { status: "done", stage: "image", message: t("canvas.scriptNode.oneClickSkippedVideo") });
+                    message.success(t("canvas.scriptNode.oneClickSkippedVideo"));
+                    return;
+                }
                 notify("pipeline", "canvas.scriptNode.oneClickStagePipeline");
                 /**
                  * 铺链路是 fire-and-forget（2 秒一段点下去就返回），所以这里不能 await；
@@ -11194,7 +11232,21 @@ function AtelierCanvasPage() {
      *  ⑤ 只有 03 才继续：文本节点 → 脚本生成器 → `handleOneClickVideo`（一键视频）。
      */
     const runVideoReverse = useCallback(
-        async (input: { videoNodeId: string; mode: VideoReverseMode; requirement?: string; reverseNodeId?: string; scriptScheme?: string; shotsPerClip?: number; skillId?: string; chatModel?: string }, report: (stage: string) => void = () => undefined): Promise<VideoReverseResult> => {
+        async (
+            input: {
+                videoNodeId: string;
+                mode: VideoReverseMode;
+                requirement?: string;
+                reverseNodeId?: string;
+                scriptScheme?: string;
+                shotsPerClip?: number;
+                skillId?: string;
+                chatModel?: string;
+                /** 02 / 03 自动接着跑哪三步（用户 2026-11-17，默认全勾；级联见 `cascadeReverseVideoStages`） */
+                stages?: Partial<ReverseVideoStages> | null;
+            },
+            report: (stage: string) => void = () => undefined,
+        ): Promise<VideoReverseResult> => {
             const videoNode = nodesRef.current.find((item) => item.id === input.videoNodeId);
             if (!videoNode || videoNode.type !== CanvasNodeType.Video || !videoNode.metadata?.content) {
                 return { ok: false, error: "接入的视频节点已经不在了，请重新接入一次" };
@@ -11223,6 +11275,15 @@ function AtelierCanvasPage() {
              */
             const reverseNode = input.reverseNodeId ? nodesRef.current.find((item) => item.id === input.reverseNodeId) : undefined;
             const target = readReverseVideoTarget(reverseNode?.metadata);
+            /**
+             * 02 / 03 自动接着跑哪三步（用户 2026-11-17 的三颗勾）。
+             *
+             * 取值优先 `input.stages`（弹窗里刚改完就点开始，metadata 可能还没落库），其次读节点上存的；
+             * 两处都没有 → 全勾（升级前行为）。级联在这里再收一次口：即使调用方传了
+             * 「不出分镜表但要生视频」这种组合，也会被压成「只出剧本」，绝不会铺出一堆空视频节点。
+             * 01 不碰它（01 只反推，不建脚本节点）。
+             */
+            const stages = cascadeReverseVideoStages(input.stages ?? target.autoStages);
             /**
              * 反推技能（用户 2026-11-12 第 02 条：节点可切换「视频反推-分镜提示词」/「SS视频反推」）。
              *
@@ -11456,8 +11517,16 @@ function AtelierCanvasPage() {
             const scriptNode = createCanvasNode(CanvasNodeType.Script, scriptSlot, { status: NODE_STATUS_IDLE, scriptSource: "", scriptPrompt: "", scriptRows: [], ...scriptSchemeSeed, ...scriptTargetMeta });
             pushNodes([scriptNode], resolveConnectionPairs(textNode.id, scriptNode.id, [...nodesRef.current, scriptNode], "source"));
 
-            report(referenceAssets.length ? `执行一键视频（参考图 ${referenceAssets.length} 张会先按名字挂到道具格，最长约 45 分钟）…` : "执行一键视频（进度见脚本节点，最长约 45 分钟）…");
-            await handleOneClickVideo(scriptNode.id, { referenceAssets });
+            /**
+             * 启动文案要写出**这次真的会跑到哪一步**（用户 2026-11-17 的三颗勾）：
+             * 全勾时是「生成分镜 → 一键生图 → 一键生视频（最长约 45 分钟）」；
+             * 取消勾选后就不再承诺 45 分钟，用户能看到「只到分镜表」这类真实计划。
+             */
+            const stagePlan = describeReverseVideoStages(stages);
+            const stageBudget = stages.video ? "，最长约 45 分钟" : "";
+            const stageRefs = referenceAssets.length && stages.image ? `参考图 ${referenceAssets.length} 张会先按名字挂到道具格，` : "";
+            report(`开始执行：${stagePlan}（${stageRefs}进度见脚本节点${stageBudget}）…`);
+            await handleOneClickVideo(scriptNode.id, { referenceAssets, stages });
             return { ok: true, chatNodeId: chatNode.id, textNodeId: textNode.id, scriptNodeId: scriptNode.id };
         },
         [chatSkillPacks, effectiveConfig.imageModel, effectiveConfig.textModel, effectiveConfig.textPrompts, handleOneClickVideo, resolveModelForCapability, reverseVideoModel, sendChatMessage],

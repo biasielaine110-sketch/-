@@ -209,6 +209,20 @@ export type CanvasReverseVideoTarget = {
      * 之后铺链路读的是脚本节点自己的那个键（反推节点删了也不影响已建好的脚本节点）。
      */
     shotsPerClip?: number;
+    /**
+     * 02 / 03 自动接着跑哪几步（用户 2026-11-17）：「生成分镜 / 一键生图 / 一键生视频」三颗勾。
+     *
+     * 三颗**默认全勾**，且是**级联**的（关上游 = 下游一起关）：
+     *  - 不勾「生成分镜」→ 一键生图 / 一键生视频 都不跑（连分镜表都不出，后面两步没有东西可跑）；
+     *  - 不勾「一键生图」→ 一键生视频 不跑（没有关键帧，铺出来的视频节点是空的）。
+     * 所以只可能存在四种组合：全勾 / 只关生视频 / 只到分镜表 / 全不勾。
+     * 收口在 `lib/canvas/video-reverse.ts` 的 `cascadeReverseVideoStages`，
+     * 勾选联动在 `setReverseVideoStage` —— UI 与执行器共用这两个函数，别各写一遍。
+     *
+     * 🔴 **全勾时不写这个键**（`normalizeReverseVideoTarget` 会丢掉）：缺省本身就是「全勾」，
+     * 写进去等于「用户手动确认过」，以后改默认对老节点就不生效了（同 size / quality 那个坑）。
+     */
+    autoStages?: { script?: boolean; image?: boolean; video?: boolean };
 };
 
 /**
