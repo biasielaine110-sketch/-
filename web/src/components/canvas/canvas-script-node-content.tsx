@@ -3094,10 +3094,10 @@ export function CanvasScriptNodeContent({
                                     // 一格多角色（「苏晚、阿杰、小雨」）时逐人取锁再并起来，与铺链路的
                                     // `scriptShotPreciseAssetRefs` 同口径 —— 否则群里只挂到第一个人的图。
                                     const cellLockIds = scriptCellNameLockIds(nameLocks, column.key, row[column.key], extraColumns);
-                                    // 角色列 / 道具列一格可以写好多个（「苏晚、阿杰、小雨」/「宁宁的智能手机、佳佳的智能手机」）：
-                                    // 拆开逐个上锁 / 逐个解锁，不能把整串当成一个资产名（那样锁出来的是叫
-                                    // 「宁宁的智能手机、佳佳的智能手机」的假资产，永远命中不了任何一格）。
-                                    // 场景列仍按整格一个名字（场景就是「一个」）。
+                                    // 角色列 / 道具列 / **场景列**一格可以写好多个（「苏晚、阿杰、小雨」/
+                                    // 「宁宁的智能手机、佳佳的智能手机」/「电竞房,办公室」）：拆开逐个上锁 / 逐个解锁，
+                                    // 不能把整串当成一个资产名（那样锁出来的是叫「宁宁的智能手机、佳佳的智能手机」的假资产，
+                                    // 永远命中不了任何一格）。场景 2026-11-17 起也拆 —— 见 `isMultiNameAssetRole`。
                                     const cellNameList =
                                         showCellSlot && isMultiNameAssetColumn(column.key, extraColumns)
                                             ? splitScriptAssetNames(row[column.key])

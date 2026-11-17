@@ -1461,16 +1461,24 @@ export function resolveScriptAssetRole(value: unknown): ScriptAssetRole {
  * - `prop`：🔴 也必须是多值 —— 用户 2026-11-08 第 19 条报障「资产表里通过顿号分开的资产，他是多个资产，
  *   需要识别链接具体的资产图，不要当成一个资产去单独生成」（截图：`宁宁的智能手机、佳佳的智能手机、
  *   川晓遥的浅棕色单肩挎包、川晓遥的智能手机` 四件道具挤在一格，最后只出了一张图、锁成了一条假资产名）；
- * - `scene`：**不拆** —— 场景就是「一个」，`海边栈道` 里出现顿号也是同一个场景的一部分；
+ * - `scene`：🔴 2026-11-17 起**也拆**（以前是「不拆：场景就是『一个』」）。用户报障：「电竞房和办公室，
+ *   这是两个场景，单独存在时是对的，挂在同一镜里（`电竞房,办公室`）却重新生成了一张两个场景合在一起的图，
+ *   应该把之前生成的那两张单图同时挂在这一镜上」。不拆的后果是一整串被当成一个新场景名：
+ *   资产批量生图认不出「这两张图已经有了」→ 照生一张合并图；名字匹配拿整串去算相似度 → 两张单图全落空；
+ *   名字锁按整串写 → 逐格挑图那把锁也永远命中不了。
+ *   ⚠️ 提示词侧已收口「场景列按地点写、一格只写一个地名」（见 `STORY_SCRIPT_STYLE_HINT_ASSET` 第 1 条），
+ *   所以出现分隔符基本等于「这一镜真有两个地点」。极少数场景名自带顿号（`海边、栈道`）会被拆成两个场景，
+ *   代价是多一张图（用户可删），远小于「两张已有的单图都挂不上 + 白出一张合并图」。
  * - `blocking` / `audio`：没有名字列，无所谓。
  *
- * ⚠️ 拆与不拆是**同一个口径**贯穿五处：名字匹配（`scriptRowAssetRoleTexts`）、格位（`collectScriptAssetCellTargets`）、
+ * ⚠️ 拆与不拆是**同一个口径**贯穿六处：名字匹配（`scriptRowAssetRoleTexts`）、格位（`collectScriptAssetCellTargets`）、
  * 候选（`collectScriptAssetPromptCandidates`）、锁表（`scriptCellNameLockIds` / `addScriptNameLockForCell`）、
- * 表格显示（`canvas-script-node-content.tsx`）。只改一处 = 「生成出来了但挂不回去」或反过来。
+ * 精准格位（`scriptShotPreciseAssetRefs`）、表格显示（`canvas-script-node-content.tsx`）+ 两条资产链路
+ * （`script-asset-align.ts` / `script-asset-inherit.ts`）。只改一处 = 「生成出来了但挂不回去」或反过来。
  */
 export function isMultiNameAssetRole(role: unknown): boolean {
     const id = resolveScriptAssetRole(role);
-    return id === "character" || id === "prop";
+    return id === "character" || id === "prop" || id === "scene";
 }
 
 /** 按**列 key** 判这件事（表格渲染 / 锁表只有列 key，没有 role）。自建列按它自己的 role 算。 */
@@ -3066,8 +3074,8 @@ export function stripStoryScriptAssetId<T extends Record<string, string[]>>(map:
  * 追加顺序保证各人自己的图排在前面（`mountScriptAssetToCells` 精确写、广播只是往后追加）。
  */
 export function scriptCellNameLockIds(locks: unknown, columnKey: unknown, value: unknown, extras?: readonly StoryScriptExtraColumn[] | null): string[] {
-    // 角色格与**道具格**都可能是一格多值（`苏晚、阿杰` / `宁宁的智能手机、佳佳的智能手机`）→ 逐名取锁并起来。
-    // 场景格不拆：场景就是「一个」，整串当一个名字。
+    // 角色格 / **道具格 / 场景格**都可能是一格多值（`苏晚、阿杰` / `宁宁的智能手机、佳佳的智能手机`
+    // / `电竞房,办公室`）→ 逐名取锁并起来（2026-11-17 场景也并入，见 `isMultiNameAssetRole`）。
     const names = isMultiNameAssetColumn(columnKey, extras) ? splitScriptAssetNames(value) : [];
     if (names.length > 1) {
         const union: string[] = [];
@@ -3305,12 +3313,15 @@ export function orderScriptRefIds<T>(items: readonly T[], kindOf: (item: T) => u
 const SCRIPT_ASSET_NAME_SEPARATOR = /[、，,／/＋+&＆;；]+/;
 
 /**
- * 把一格「角色名」拆成多个名字；单名字 → 长度 1 的数组，空 / 「无」→ 空数组。
+ * 把一格「资产名」（角色 / 道具 / **场景**）拆成多个名字；单名字 → 长度 1 的数组，空 / 「无」→ 空数组。
  *
  * 为什么需要它：分镜表只有**两个角色列**（`character_1` / `character_2`），而一场戏常有一群人
  * （用户报障：「5 个人一起旅游，后面只有 2 个人说话，镜头里 5 人合拍时其他角色就挂不上」）。
  * 所以口径改成「**一格可以写多个名字**」：`character_1 = 苏晚、阿杰、小雨`。
  * 但匹配 / 挂图 / 生图都必须**逐名字**做 —— 拿整串去算相似度谁都对不上，等于没写。
+ *
+ * 场景 2026-11-17 起同样按分隔符拆（`电竞房,办公室` → 两个场景，各自复用已有单图），
+ * 判据与理由见 `isMultiNameAssetRole`。
  *
  * 纯函数，探针可直接钉。
  */
