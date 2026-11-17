@@ -5,7 +5,8 @@ import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, VIDEO_REVERSE_STAGE_OPTIONS, buildDefaultVideoReverseRequirement, describeReverseVideoStages, normalizeReverseVideoTarget, readReverseVideoSkill, readReverseVideoStages, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, setReverseVideoStage, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult, type VideoReverseStageId } from "@/lib/canvas/video-reverse";
+import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, VIDEO_REVERSE_STAGE_OPTIONS, buildDefaultVideoReverseRequirement, describeReverseVideoStages, normalizeReverseVideoTarget, readReverseVideoEpisodeSeconds, readReverseVideoScript, readReverseVideoSkill, readReverseVideoStages, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, setReverseVideoStage, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult, type VideoReverseStageId } from "@/lib/canvas/video-reverse";
+import { DEFAULT_EPISODE_SECONDS, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, normalizeScriptShotsPerClip } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
@@ -67,6 +68,7 @@ type CanvasReverseVideoNodeContentProps = {
     /** 执行一条命令；report 用来把阶段文案打到窗口里 */
     onRun: (
         input: {
+            /** 01 / 02 / 03 必传；04 是「文字剧本」输入，不需要视频，这里给空串 */
             videoNodeId: string;
             mode: VideoReverseMode;
             requirement?: string;
@@ -81,6 +83,12 @@ type CanvasReverseVideoNodeContentProps = {
              * `patchTarget` 还没落库 —— 同 `scriptScheme` / `chatModel` 那个坑。
              */
             stages?: ReverseVideoStages;
+            /**
+             * 04 的输入剧本。显式带过去同理：用户粘贴完就点 04，metadata 可能还没写进去。
+             */
+            script?: string;
+            /** 04 的每集时长（秒）。不传 = 按节点 metadata / 默认 120。 */
+            episodeSeconds?: number;
         },
         report: (stage: string) => void,
     ) => Promise<VideoReverseResult>;
@@ -90,6 +98,7 @@ const MODE_ICON: Record<VideoReverseMode, typeof Video> = {
     1: Video,
     2: FileText,
     3: Clapperboard,
+    4: Layers,
 };
 
 /** 落在窗口里会挡住「拖整个节点」的控件：命中就让事件停在这层。 */
@@ -139,6 +148,20 @@ export function CanvasReverseVideoNodeContent({
     const [creating, setCreating] = useState(false);
     const [requirementMode, setRequirementMode] = useState<VideoReverseMode | null>(null);
     const [requirementText, setRequirementText] = useState(DEFAULT_VIDEO_REVERSE_REQUIREMENT);
+    /**
+     * 04 的**输入剧本**草稿（用户 2026-11-17：「在执行 04 的时候需要输入剧本到反推视频节点才可执行」）。
+     *
+     * 落库到 `metadata.reverseVideoScript`（与 `content` 分开：本节点也可能是被生成出来的节点，
+     * 混用会被生图 / 生视频流程当成产物）。这里再存一份 state 是因为输入框每敲一个字都写 store
+     * 会让整块画布重渲染 —— 用「输入写 state、失焦 / 开跑时落库」这一档，既不掉字也不卡。
+     */
+    const [scriptDraft, setScriptDraft] = useState(() => readReverseVideoScript(node.metadata));
+    /** 换节点（组件实例被复用到别的节点）时把草稿重置成那个节点上存的剧本。 */
+    const [draftOwnerId, setDraftOwnerId] = useState(node.id);
+    if (draftOwnerId !== node.id) {
+        setDraftOwnerId(node.id);
+        setScriptDraft(readReverseVideoScript(node.metadata));
+    }
     const scrollRef = useRef<HTMLDivElement | null>(null);
 
     const run = node.metadata?.reverseVideoRun;
@@ -219,6 +242,18 @@ export function CanvasReverseVideoNodeContent({
      * 全勾时 `normalizeReverseVideoTarget` 会把键丢掉 —— 缺省即全勾，不必把默认值冻进数据里。
      */
     const stages = useMemo(() => readReverseVideoStages(node.metadata), [node.metadata]);
+    /**
+     * 04 的「每集时长」（用户口径：默认 120 秒）：读的是 `reverseVideoTarget.episodeSeconds`，
+     * 缺省 / 脏值一律走 `readReverseVideoEpisodeSeconds` 回落默认 —— UI 与执行器同一份。
+     */
+    const episodeSeconds = useMemo(() => readReverseVideoEpisodeSeconds(node.metadata), [node.metadata]);
+    const commitScript = useCallback(
+        (value: string) => {
+            setScriptDraft(value);
+            onConfigChange(node.id, { reverseVideoScript: value });
+        },
+        [node.id, onConfigChange],
+    );
     const toggleStage = useCallback(
         (id: VideoReverseStageId, checked: boolean) => {
             patchTarget({ autoStages: setReverseVideoStage(stages, id, checked) });
@@ -254,7 +289,7 @@ export function CanvasReverseVideoNodeContent({
      * 有 N 张就写 `@图片1、@图片2…` —— 编号与 `project.tsx: runVideoReverse` 把这批图连进对话节点后
      * `sendChatMessage` 用的 mention 编号同源（`imageReferenceLabel`，按连线顺序、从 1 开始）。
      */
-    const requirementDefault = useCallback((mode: VideoReverseMode) => buildDefaultVideoReverseRequirement((referenceImages || []).map((_, index) => imageReferenceLabel(index)), mode), [referenceImages]);
+    const requirementDefault = useCallback((mode: 2 | 3) => buildDefaultVideoReverseRequirement((referenceImages || []).map((_, index) => imageReferenceLabel(index)), mode), [referenceImages]);
     const attached = useMemo(() => videos.find((item) => item.id === attachedVideoId) || null, [attachedVideoId, videos]);
     const selectedVideo = useMemo(() => videos.find((item) => item.id === selectedVideoId) || null, [selectedVideoId, videos]);
     /** 状态位是 running 但已经很久没更新 = 上次被刷新 / 关页面掐断了，别把按钮永久锁死。 */
@@ -323,8 +358,12 @@ export function CanvasReverseVideoNodeContent({
     }, [attach, message, onCreateVideoFromUrl, urlDraft]);
 
     const runMode = useCallback(
-        async (mode: VideoReverseMode, requirement?: string) => {
-            if (!attached) {
+        async (mode: VideoReverseMode, requirement?: string, extra?: { script?: string; episodeSeconds?: number }) => {
+            /**
+             * 01 / 02 / 03 的前提是「接入了一条视频」；**04 不是** —— 它的输入是文字剧本，
+             * 所以门禁只在 1~3 上生效（下面 `attached` 的取值也对应放宽）。
+             */
+            if (mode !== 4 && !attached) {
                 message.warning("先接入视频：把视频节点连到本节点，或点「接入视频」挑一个");
                 return;
             }
@@ -335,10 +374,11 @@ export function CanvasReverseVideoNodeContent({
                  * 节点 metadata 的写入要等一次 React 提交，而 02 / 03 在这**同一次点击里**就要建脚本节点、
                  * 立刻生成 —— 读 `nodesRef` 可能拿到还没刷新的旧值（这个坑 2026-11-09 已经踩过一次）。
                  * `chatModel` 同理：用户刚在下拉里换完模型就点命令，metadata 可能还没写进去。
+                 * 04 的剧本 / 每集时长同理（`script` / `episodeSeconds`）。
                  */
                 const outcome = await onRun(
                     {
-                        videoNodeId: attached.id,
+                        videoNodeId: attached?.id || "",
                         mode,
                         requirement,
                         reverseNodeId: node.id,
@@ -346,8 +386,9 @@ export function CanvasReverseVideoNodeContent({
                         shotsPerClip: target.shotsPerClip,
                         skillId: skillOption.id,
                         chatModel: effectiveReverseModel || undefined,
-                        // 三颗勾只对 02 / 03 有意义（01 只反推、不碰脚本生成器），01 不带。
+                        // 三颗勾只对 02 / 03 / 04 有意义（01 只反推、不碰脚本生成器），01 不带。
                         stages: mode === 1 ? undefined : stages,
+                        ...(mode === 4 ? { script: extra?.script ?? scriptDraft, episodeSeconds: extra?.episodeSeconds ?? episodeSeconds } : {}),
                     },
                     (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }),
                 );
@@ -361,7 +402,7 @@ export function CanvasReverseVideoNodeContent({
                     scriptNodeId: outcome.scriptNodeId,
                     at: Date.now(),
                 });
-                if (outcome.ok) message.success(mode === 3 ? "反推 + 一键视频已启动/完成，进度见脚本节点" : "反推完成，结果已写进文本节点");
+                if (outcome.ok) message.success(mode === 1 ? "反推完成，结果已写进文本节点" : mode === 4 ? "剧集已拆分并开始执行，进度见各集脚本节点" : "反推 + 一键视频已启动/完成，进度见脚本节点");
                 else message.error(outcome.error || "执行失败");
             } catch (error) {
                 const detail = error instanceof Error ? error.message : String(error);
@@ -369,18 +410,29 @@ export function CanvasReverseVideoNodeContent({
                 message.error(detail);
             }
         },
-        [attached, effectiveReverseModel, message, node.id, onRun, patchRun, skillOption.id, stages, target.scriptScheme, target.shotsPerClip],
+        [attached, effectiveReverseModel, episodeSeconds, message, node.id, onRun, patchRun, scriptDraft, skillOption.id, stages, target.scriptScheme, target.shotsPerClip],
     );
 
     const handleCommand = useCallback(
         (mode: VideoReverseMode) => {
-            if (!attached) {
+            if (running) return;
+            // 04 的输入是文字剧本（不接视频也行）；01 / 02 / 03 必须先接入视频。
+            if (mode !== 4 && !attached) {
                 message.warning("先接入视频：把视频节点连到本节点，或点「接入视频」挑一个");
                 return;
             }
-            if (running) return;
             if (mode === 1) {
                 void runMode(1);
+                return;
+            }
+            if (mode === 4) {
+                /**
+                 * 04：弹窗与 02 / 03 同构，但**多了「每集时长」**，并且要求先有剧本。
+                 * 剧本空着就直接点开弹窗（弹窗里也能填），但点「开始」时必须有内容 ——
+                 * 没有剧本就没有东西可拆，跑下去只会白建一个对话节点。
+                 */
+                setRequirementText("");
+                setRequirementMode(4);
                 return;
             }
             // 02 / 03：先弹特殊要求。默认文案按 mode 取（02 = 复刻同款 / 03 = 另写同类型新剧本），
@@ -393,10 +445,20 @@ export function CanvasReverseVideoNodeContent({
 
     const confirmRequirement = useCallback(() => {
         const mode = requirementMode;
-        setRequirementMode(null);
         if (!mode) return;
+        if (mode === 4) {
+            // 剧本必须非空（用户口径：输入剧本到反推视频节点才可执行）。
+            if (!scriptDraft.trim()) {
+                message.warning("先在上面填剧本：04 会把这段文字按每集时长拆成多集，没有剧本就没有可拆的内容");
+                return;
+            }
+            setRequirementMode(null);
+            void runMode(4, requirementText.trim() || undefined, { script: scriptDraft.trim(), episodeSeconds });
+            return;
+        }
+        setRequirementMode(null);
         void runMode(mode, requirementText.trim());
-    }, [requirementMode, requirementText, runMode]);
+    }, [episodeSeconds, message, requirementMode, requirementText, runMode, scriptDraft]);
 
     const softBorder = `1px solid ${theme.node.stroke}`;
 
@@ -426,7 +488,7 @@ export function CanvasReverseVideoNodeContent({
                                     </Tag>
                                 </div>
                                 <div className="mt-0.5 truncate text-[11px] opacity-45">{attached.url}</div>
-                                {attachSource === "connection" ? <div className="mt-0.5 text-[11px] opacity-55">下面三条命令可用（断开那根线 = 取消接入）</div> : null}
+                                {attachSource === "connection" ? <div className="mt-0.5 text-[11px] opacity-55">下面 01 / 02 / 03 可用（断开那根线 = 取消接入）</div> : null}
                             </div>
                         </div>
                     ) : (
@@ -486,7 +548,7 @@ export function CanvasReverseVideoNodeContent({
                     <div className="flex items-center gap-1.5 text-[11px]">
                         <Sparkles size={11} className="shrink-0 opacity-70" />
                         <span className="min-w-0 flex-1 font-medium opacity-80">反推技能</span>
-                        <span className="shrink-0 text-[10px] opacity-45">01 / 02 / 03 都用它</span>
+                        <span className="shrink-0 text-[10px] opacity-45">01 / 02 / 03 用它</span>
                     </div>
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         {VIDEO_REVERSE_SKILL_OPTIONS.map((item) => {
@@ -518,7 +580,7 @@ export function CanvasReverseVideoNodeContent({
                         })}
                     </div>
                     <div className="mt-1 text-[10px] leading-relaxed opacity-45">
-                        只换「用哪个技能反推」——只输出正文（02 复刻同款 / 03 同类型新故事）、中文、时长与出片参数这些约束一条不变。切换前请确认技能库里装着它，没装会直接报错，不会悄悄换另一个技能跑。
+                        只换「用哪个技能反推」——只输出正文（02 复刻同款 / 03 同类型新故事）、中文、时长与出片参数这些约束一条不变。切换前请确认技能库里装着它，没装会直接报错，不会悄悄换另一个技能跑。04 不受这里影响：它固定用「{EPISODE_SPLIT_SKILL_LABEL}」拆集。
                     </div>
                 </div>
 
@@ -643,14 +705,41 @@ export function CanvasReverseVideoNodeContent({
                     </div>
                 </div>
 
-                {/* ⑥ 三条命令
-                    上面那行小字是 02 / 03 的**自动执行计划**（用户 2026-11-17 的三颗勾）：
+                {/* ⑤.5 04 的输入剧本（用户 2026-11-17）：「在执行 04 的时候需要输入剧本到反推视频节点才可执行」。
+                    放在命令按钮上方，是因为它只服务 04 —— 01 / 02 / 03 的输入是连线接进来的视频。
+                    落 `metadata.reverseVideoScript`（与 `content` 分开存，见 types 里的说明）。 */}
+                <div className="rounded-md px-2.5 py-2" style={{ border: softBorder }}>
+                    <div className="flex items-center gap-1.5 text-[11px]">
+                        <FileText size={11} className="shrink-0 opacity-70" />
+                        <span className="min-w-0 flex-1 font-medium opacity-80">04 · 剧集剧本</span>
+                        <span className="shrink-0 text-[10px] opacity-45">{scriptDraft.trim() ? `${scriptDraft.trim().length} 字` : "未填写"}</span>
+                    </div>
+                    <Input.TextArea
+                        className="!mt-1.5"
+                        value={scriptDraft}
+                        onChange={(event) => commitScript(event.target.value)}
+                        autoSize={{ minRows: 3, maxRows: 8 }}
+                        placeholder={`把小说 / 故事 / 剧本正文粘到这里 —— 04 会先用「${EPISODE_SPLIT_SKILL_LABEL}」技能按每集时长拆成多集（一集一个文本节点，纵向排开），再逐集走分镜 → 生图 → 生视频`}
+                        aria-label="04 剧集剧本"
+                    />
+                    <div className="mt-1 text-[10px] leading-relaxed opacity-45">
+                        只有 04 读这段文字（01 / 02 / 03 的输入是连线接进来的视频）。拆出来的多集会共享同名资产图：同一批里上一集已经有的角色 / 场景 / 道具，下一集直接挂同一张图，不会重复生成。
+                    </div>
+                </div>
+
+                {/* ⑥ 四条命令
+                    上面那行小字是 02 / 03 / 04 的**自动执行计划**（用户 2026-11-17 的三颗勾）：
                     不点开弹窗也能一眼看到「这次会跑到哪一步」，取消勾选后这里立刻跟着变。 */}
-                <div className="px-1 text-[10px] leading-relaxed opacity-45">02 / 03 之后自动执行：{stagePlanLabel}（点命令时可在弹窗里取消勾选；取消上游会自动取消下游）</div>
+                <div className="px-1 text-[10px] leading-relaxed opacity-45">02 / 03 / 04 之后自动执行：{stagePlanLabel}（点命令时可在弹窗里取消勾选；取消上游会自动取消下游）</div>
                 <div className="flex flex-col gap-1.5">
                     {VIDEO_REVERSE_MODES.map((item) => {
                         const Icon = MODE_ICON[item.mode];
-                        const usable = Boolean(attached) && !running;
+                        /**
+                         * 01 / 02 / 03 必须先接入视频；**04 的输入是文字剧本**，没接视频也能点
+                         * （它只在剧本为空时由弹窗拦一次）。
+                         */
+                        const needsVideo = item.mode !== 4;
+                        const usable = (Boolean(attached) || !needsVideo) && !running;
                         const isBusy = running && run?.mode === item.mode;
                         return (
                             <button
@@ -724,41 +813,93 @@ export function CanvasReverseVideoNodeContent({
             <div className="flex flex-col gap-0.5 text-[11px] leading-relaxed opacity-45">
                 <span className="flex items-center gap-1.5">
                     <Sparkles size={11} className="shrink-0" />
-                    技能「{skillOption.label}」（可在上方切换）；没装会直接报错，不会静默换别的技能硬跑。输出强制简体中文（提示词首尾各钉一次，偶尔跑偏会自动让它原样重写一遍）。
+                    技能「{skillOption.label}」（01 / 02 / 03，可在上方切换；04 固定用「{EPISODE_SPLIT_SKILL_LABEL}」拆集）；没装会直接报错，不会静默换别的技能硬跑。输出强制简体中文（提示词首尾各钉一次，偶尔跑偏会自动让它原样重写一遍）。
                 </span>
                 <span className="truncate">反推模型：{effectiveReverseModelLabel || "跟随偏好里的文本模型"}{chosenReverseModel ? "" : "（默认）"}</span>
             </div>
 
-            {/* 特殊要求（02 / 03） */}
+            {/* 特殊要求（02 / 03）+ 04 的剧集拆集设置 */}
             <Modal
                 open={requirementMode !== null}
                 onCancel={() => setRequirementMode(null)}
                 onOk={confirmRequirement}
-                okText="开始反推"
+                okText={requirementMode === 4 ? "开始拆集并执行" : "开始反推"}
                 cancelText="取消"
-                width={520}
-                title={requirementMode === 3 ? "03 · 反推视频并生成同类型新剧本及视频" : "02 · 反推视频并复刻同款剧本及视频"}
+                width={requirementMode === 4 ? 620 : 520}
+                title={requirementMode === 4 ? "04 · 剧集批量生成（文字剧本 → 多集）" : requirementMode === 3 ? "03 · 反推视频并生成同类型新剧本及视频" : "02 · 反推视频并复刻同款剧本及视频"}
                 destroyOnHidden={false}
             >
                 <div className="flex flex-col gap-2 text-sm">
-                    <div className="text-xs opacity-60">
-                        这段会作为「特殊要求」跟着视频一起发进 AI 对话，可以直接改。
-                        {referenceImages?.length ? `连进来的 ${referenceImages.length} 张参考图会一起带进对话，${imageReferenceLabel(0)} 就是第一张（连线顺序）。` : "（本节点还没连参考图，所以默认文案里没有 @图片N。）"}
-                        <span className="mt-1 block opacity-80">
-                            {requirementMode === 2
-                                ? "这次是「复刻同款」：人物 / 场景 / 事件顺序 / 台词 / 镜头都照这条片来，写成一份可以直接开拍的剧本。"
-                                : "视频只当「同类型的样本」用：要的是另写的一个故事（人物 / 场景 / 情节 / 台词全新），不是把这条片转写成剧本。"}
-                        </span>
+                    {requirementMode === 4 ? (
+                        <>
+                            <div className="text-xs leading-relaxed opacity-60">
+                                这次<span className="font-medium">不接视频</span>：输入是下面这段<span className="font-medium">文字剧本</span>。执行时先用「{EPISODE_SPLIT_SKILL_LABEL}」技能把它按<span className="font-medium">每集 {episodeSeconds} 秒</span>拆成多集，一集输出一个文本节点（纵向排开），每集右边接一个脚本节点，再按勾选逐集跑分镜 / 生图 / 生视频。
+                                <span className="mt-1 block opacity-80">
+                                    同一批拆出来的多集<span className="font-medium">共享资产图</span>：上一集已经生成（或正在生成）的角色 / 场景 / 道具，下一集直接挂同一张图，不会重复生成；等这一批的图全齐了，才开始铺视频。
+                                </span>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <span className="text-xs opacity-70">剧集剧本（必填）</span>
+                                <Input.TextArea
+                                    value={scriptDraft}
+                                    onChange={(event) => commitScript(event.target.value)}
+                                    rows={8}
+                                    placeholder={`把小说 / 故事 / 剧本正文粘到这里（${scriptDraft.trim().length} 字）`}
+                                    aria-label="04 剧集剧本"
+                                />
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs opacity-70">每集时长</span>
+                                <InputNumber
+                                    size="small"
+                                    className="!w-[128px]"
+                                    min={EPISODE_SECONDS_MIN}
+                                    max={EPISODE_SECONDS_MAX}
+                                    step={15}
+                                    precision={0}
+                                    value={episodeSeconds}
+                                    addonAfter="秒"
+                                    onChange={(value) => patchTarget({ episodeSeconds: String(resolveEpisodeSeconds(value ?? DEFAULT_EPISODE_SECONDS)) })}
+                                    aria-label="每集时长（秒）"
+                                />
+                                <span className="text-[11px] opacity-50">默认 {DEFAULT_EPISODE_SECONDS} 秒一集，也就是每集脚本节点的「成片总时长」；改这里会一起改掉分镜表的镜头与台词量。</span>
+                            </div>
+                        </>
+                    ) : (
+                        <div className="text-xs opacity-60">
+                            这段会作为「特殊要求」跟着视频一起发进 AI 对话，可以直接改。
+                            {referenceImages?.length ? `连进来的 ${referenceImages.length} 张参考图会一起带进对话，${imageReferenceLabel(0)} 就是第一张（连线顺序）。` : "（本节点还没连参考图，所以默认文案里没有 @图片N。）"}
+                            <span className="mt-1 block opacity-80">
+                                {requirementMode === 2
+                                    ? "这次是「复刻同款」：人物 / 场景 / 事件顺序 / 台词 / 镜头都照这条片来，写成一份可以直接开拍的剧本。"
+                                    : "视频只当「同类型的样本」用：要的是另写的一个故事（人物 / 场景 / 情节 / 台词全新），不是把这条片转写成剧本。"}
+                            </span>
+                        </div>
+                    )}
+                    {/* 特殊要求：02 / 03 是主输入（默认文案自带创作口径）；04 是可选（拆集时的额外要求）。 */}
+                    <div className="flex flex-col gap-1">
+                        {requirementMode === 4 ? <span className="text-xs opacity-70">特殊要求（可选：拆集时想额外强调的，比如「每集结尾留钩子」）</span> : null}
+                        <Input.TextArea
+                            value={requirementText}
+                            onChange={(event) => setRequirementText(event.target.value)}
+                            rows={requirementMode === 4 ? 2 : 4}
+                            placeholder={requirementMode === 4 ? "（可留空）拆集时的额外要求" : requirementDefault(requirementMode === 3 ? 3 : 2)}
+                        />
                     </div>
-                    {/* placeholder 也要跟着 mode 走：02 是复刻口径、03 是新故事口径，
-                        用同一个常量会让 03 的框里飘着「复刻一份同款剧本」的占位文字。 */}
-                    <Input.TextArea value={requirementText} onChange={(event) => setRequirementText(event.target.value)} rows={4} placeholder={requirementDefault(requirementMode === 3 ? 3 : 2)} />
                     <div className="text-[11px] opacity-60">
-                        本次成片：<span className="font-medium">{targetSummary}</span>
+                        {requirementMode === 4 ? (
+                            <>
+                                每集：<span className="font-medium">{episodeSeconds} 秒</span> · 生图 / 生视频参数：<span className="font-medium">{targetSummary}</span>
+                            </>
+                        ) : (
+                            <>
+                                本次成片：<span className="font-medium">{targetSummary}</span>
+                            </>
+                        )}
                     </div>
-                    {/* 02 / 03 的执行方案（用户 2026-11-10）：分镜表里「视频运动提示词」按哪一套格式出。
-                        两条命令现在执行流程完全一样，所以方案选择对两者都要显示。 */}
-                    {requirementMode === 2 || requirementMode === 3 ? (
+                    {/* 执行方案（用户 2026-11-10）：分镜表里「视频运动提示词」按哪一套格式出。
+                        02 / 03 / 04 的执行流程一样（建脚本节点 → 一键视频），所以方案选择对三者都要显示。 */}
+                    {requirementMode === 2 || requirementMode === 3 || requirementMode === 4 ? (
                         <div className="flex flex-col gap-1">
                             <div className="flex items-center gap-2">
                                 <span className="text-xs opacity-70">{t("canvas.scriptNode.reverseSchemeLabel")}</span>
@@ -775,7 +916,7 @@ export function CanvasReverseVideoNodeContent({
                             <div className="text-[11px] leading-relaxed opacity-50">{t("canvas.scriptNode.reverseSchemeHint")}</div>
                         </div>
                     ) : null}
-                    {/* 02 / 03 的三颗勾（用户 2026-11-17）：默认全勾，取消上游自动取消下游。
+                    {/* 三颗勾（用户 2026-11-17）：默认全勾，取消上游自动取消下游。
                         写回走 `setReverseVideoStage`（联动唯一出口），落 `reverseVideoTarget.autoStages`。 */}
                     <div className="flex flex-col gap-1 rounded-md px-2 py-1.5" style={{ border: `1px solid ${theme.node.stroke}` }}>
                         <span className="text-xs opacity-70">自动执行（默认全勾）</span>
@@ -793,13 +934,19 @@ export function CanvasReverseVideoNodeContent({
                         </div>
                         <div className="text-[11px] leading-relaxed opacity-50">取消「生成分镜」→ 生图与生视频一起取消；取消「一键生图」→ 生视频一起取消。取消的那一步在脚本生成器里不会执行（节点照建、剧本照写，之后随时可以在脚本节点上手动点）。</div>
                     </div>
-                    {requirementMode === 2 || requirementMode === 3 ? (
+                    {requirementMode === 4 ? (
+                        <div className="text-[11px] leading-relaxed opacity-50">
+                            {stages.script || stages.image || stages.video
+                                ? `确定后先拆集（一集一个文本节点 + 一个脚本节点），再按「${stagePlanLabel}」逐集执行 —— 每集剧本按 ${episodeSeconds} 秒写${stages.script ? `、分镜表按「${chosenSchemeLabel}」的格式出` : ""}${stages.video ? "，等这一批的资产图全齐了才开始铺视频" : ""}。`
+                                : `三步都没勾：只拆集、只建空的脚本节点（之后可以在各集脚本节点上手动点生成）。`}
+                        </div>
+                    ) : (
                         <div className="text-[11px] opacity-50">
                             {stages.script || stages.image || stages.video
                                 ? `确定后会接着把文本节点接到脚本生成器，并按「${stagePlanLabel}」执行 —— 剧本按 ${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒写${stages.script ? `、分镜表按「${chosenSchemeLabel}」的格式出` : ""}${stages.video ? "，生视频用上面这套参数" : ""}。`
                                 : `三步都没勾：只把反推出来的剧本写进文本节点，并接一个空的脚本生成器节点（之后可以在那里手动点生成）。`}
                         </div>
-                    ) : null}
+                    )}
                 </div>
             </Modal>
         </div>

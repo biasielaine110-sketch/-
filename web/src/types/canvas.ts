@@ -152,7 +152,7 @@ export type CanvasReverseVideoRun = {
     /** 当前阶段文案（「反推中…」「写进文本节点…」），给人看进度用。 */
     stage?: string;
     error?: string;
-    /** 01 / 02 / 03 */
+    /** 01 / 02 / 03 / 04（04 = 剧集批量生成） */
     mode?: number;
     chatNodeId?: string;
     textNodeId?: string;
@@ -223,6 +223,14 @@ export type CanvasReverseVideoTarget = {
      * 写进去等于「用户手动确认过」，以后改默认对老节点就不生效了（同 size / quality 那个坑）。
      */
     autoStages?: { script?: boolean; image?: boolean; video?: boolean };
+    /**
+     * 04「剧集批量生成」：**每集时长（秒）**，默认 120。
+     *
+     * 拆集时按它算「一集 = 多少秒的剧本」，脚本节点的 `scriptTotalSeconds` 也写这个数 ——
+     * 于是每集的分镜表按同一套镜数 / 台词量规划，不会出现「第一集 30 秒、第二集 3 分钟」。
+     * 空 = 用默认 120（`resolveEpisodeSeconds` 在读取时给，不写死进 metadata）。
+     */
+    episodeSeconds?: string;
 };
 
 /**
@@ -640,6 +648,15 @@ export type CanvasNodeMetadata = {
      * 只影响反推那一步的对话节点；生视频用什么模型是 `reverseVideoTarget.model`，两者互不覆盖。
      */
     reverseVideoChatModel?: string;
+    /**
+     * 反推视频节点：**04「剧集批量生成」用的剧本正文**（用户 2026-11-17 第 04 条：
+     * 「在执行 04 的时候需要输入剧本到反推视频节点才可执行」）。
+     *
+     * 02 / 03 的输入是一条视频（走连线），04 的输入是**文字剧本**（小说 / 故事 / 大纲都行）——
+     * 它先被拆成每集 N 秒的多集剧本，再逐集走「分镜 → 生图 → 生视频」。
+     * 与 `content` 分开存：本节点自己也可能是被生成出来的节点，混用会被生图 / 生视频流程当成产物。
+     */
+    reverseVideoScript?: string;
     /**
      * 反推视频节点：上一次执行的结果快照。
      * 节点滚出视口会被裁掉重挂，进度只放组件 state 会在回来时凭空消失，所以落到 metadata。

@@ -179,7 +179,8 @@ import { widenLegacyScriptNodes } from "@/lib/canvas/script-node-width";
 import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix";
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
-import { VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cascadeReverseVideoStages, cleanVideoReverseScriptOutput, describeReverseVideoStages, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { VIDEO_REVERSE_LANGUAGE_RULE, VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cascadeReverseVideoStages, cleanVideoReverseScriptOutput, describeReverseVideoStages, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoEpisodeSeconds, readReverseVideoScript, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type ReverseVideoStages, type VideoReverseMode, type VideoReversePromptMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
+import { EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, parseEpisodeSplitOutput, planEpisodeStackSlots, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -9130,7 +9131,13 @@ function AtelierCanvasPage() {
      * 逐镜挂图（`scriptCellAssets` / `scriptRowAssets`）**不搬**：镜号从 1 重排，搬过去就是错位。
      */
     const handleInheritScriptAssets = useCallback(
-        (nodeId: string, payload: { sourceId: string; assetNodeIds: string[]; options: ScriptAssetInheritOptions; auto: boolean }) => {
+        /**
+         * @param payload.assetNodeIds 用户在弹窗里勾中的资产；**不传 = 全部**（04 剧集批量用这一档：
+         *        同一批拆出来的集之间没有「挑几张」这回事，整批共享同一个资产池）。
+         * @param payload.silent 不弹提示。04 是批量调用的，逐集弹两条 toast 会糊满屏幕 ——
+         *        它自己用 `report()` 把进度写在反推节点上。
+         */
+        (nodeId: string, payload: { sourceId: string; assetNodeIds?: string[]; options: ScriptAssetInheritOptions; auto: boolean; silent?: boolean }) => {
             const source = nodesRef.current.find((item) => item.id === payload.sourceId);
             const target = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || !target) return;
@@ -9142,24 +9149,31 @@ function AtelierCanvasPage() {
                 assetNodeIds: payload.assetNodeIds,
                 options: payload.options,
             });
+            /**
+             * 🔴 连线与 metadata 都要**同步写 `connectionsRef` / `nodesRef`**：
+             * 04 是「这一集沿用完 → 紧接着下一集出表 / 生图 → 最后统一铺视频」一口气跑完的，
+             * 铺链路读的全是 ref。只 `setState` 的话最后那一集刚补的连线与分类还没提交，
+             * 铺出来的视频就会漏掉共享图（与 `handleDirectGenerateScriptAssets` 同一口径）。
+             */
             if (plan.connections.length) {
-                setConnections((prev) => {
-                    const keys = new Set(prev.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
-                    const added = plan.connections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`)).map((connection) => ({ id: nanoid(), ...connection }));
-                    return added.length ? [...prev, ...added] : prev;
-                });
+                const keys = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
+                const added = plan.connections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`)).map((connection) => ({ id: nanoid(), ...connection }));
+                if (added.length) {
+                    connectionsRef.current = [...connectionsRef.current, ...added];
+                    setConnections(connectionsRef.current);
+                }
             }
             // 来源 / 自动开关无论这次搬了什么都要记住：用户选了「下一集沿用这一集」，就是长期意图。
-            setNodes((prev) =>
-                prev.map((item) =>
-                    item.id === nodeId
-                        ? {
-                              ...item,
-                              metadata: { ...item.metadata, ...plan.metadata, scriptAssetInheritSource: payload.sourceId, scriptAssetInheritAuto: payload.auto ? true : undefined },
-                          }
-                        : item,
-                ),
-            );
+            const patchNode = (item: CanvasNodeData): CanvasNodeData =>
+                item.id === nodeId
+                    ? {
+                          ...item,
+                          metadata: { ...item.metadata, ...plan.metadata, scriptAssetInheritSource: payload.sourceId, scriptAssetInheritAuto: payload.auto ? true : undefined },
+                      }
+                    : item;
+            nodesRef.current = nodesRef.current.map(patchNode);
+            setNodes((prev) => prev.map(patchNode));
+            if (payload.silent) return;
             if (!plan.assetNodeIds.length && !Object.keys(plan.metadata).length) {
                 message.warning(t("canvas.scriptNode.inheritNothing"));
                 return;
@@ -10832,10 +10846,17 @@ function AtelierCanvasPage() {
      * 已经铺出来的图片 / 视频节点一律**保留**：用户看得到失败在哪几张，手动补比清空更有用。
      */
     const [oneClickVideoRuns, setOneClickVideoRuns] = useState<Record<string, OneClickVideoRun>>({});
+    /**
+     * 运行态的 **ref 镜像**：`handleOneClickVideo` 跑完一集之后，04 要读「这一集是不是被暂停了」
+     * 才能决定后面的集还跑不跑。`oneClickVideoRuns` 是 state，在 await 之后读到的是闭包里的旧值
+     * （永远拿不到刚写进去的 paused），所以必须有一份同步的 ref。
+     */
+    const oneClickVideoRunsRef = useRef<Record<string, OneClickVideoRun>>({});
     /** 防连点：`useState` 更新是异步的，双击会在同一帧里进两次。 */
     const oneClickVideoRunningRef = useRef<Set<string>>(new Set());
 
     const patchOneClickVideoRun = useCallback((nodeId: string, run: OneClickVideoRun) => {
+        oneClickVideoRunsRef.current = { ...oneClickVideoRunsRef.current, [nodeId]: run };
         setOneClickVideoRuns((prev) => ({ ...prev, [nodeId]: run }));
     }, []);
 
@@ -11276,6 +11297,12 @@ function AtelierCanvasPage() {
             const reverseNode = input.reverseNodeId ? nodesRef.current.find((item) => item.id === input.reverseNodeId) : undefined;
             const target = readReverseVideoTarget(reverseNode?.metadata);
             /**
+             * 拼「视频反推」提示词只认 01 / 02 / 03（`buildVideoReversePrompt` 的类型刻意收窄，
+             * 让「给 04 拼反推提示词」在编译期就写不出来）。04 由 `handleReverseVideoRun` 分流到
+             * `runVideoReverseEpisodes`，根本不会走到这里；显式映射一次只是为了拿到窄类型。
+             */
+            const promptMode: VideoReversePromptMode = input.mode === 2 ? 2 : input.mode === 3 ? 3 : 1;
+            /**
              * 02 / 03 自动接着跑哪三步（用户 2026-11-17 的三颗勾）。
              *
              * 取值优先 `input.stages`（弹窗里刚改完就点开始，metadata 可能还没落库），其次读节点上存的；
@@ -11389,7 +11416,7 @@ function AtelierCanvasPage() {
 
             // ② 把视频链接 + 要求发进对话，等它把反推结果说完
             report("把视频链接发进对话，反推中…");
-            let body = (await sendChatMessage(chatNode.id, buildVideoReversePrompt({ videoUrl, mode: input.mode, requirement: input.requirement, targetSeconds: target.seconds, skillLabel: skill.name || skillChoice.label }), { text: true, image: false })).trim();
+            let body = (await sendChatMessage(chatNode.id, buildVideoReversePrompt({ videoUrl, mode: promptMode, requirement: input.requirement, targetSeconds: target.seconds, skillLabel: skill.name || skillChoice.label }), { text: true, image: false })).trim();
             /**
              * 语言兜底（用户 2026-11-09：「强化执行反推节点任务时，输出的文案文本内容必须为中文」）。
              *
@@ -11530,6 +11557,294 @@ function AtelierCanvasPage() {
             return { ok: true, chatNodeId: chatNode.id, textNodeId: textNode.id, scriptNodeId: scriptNode.id };
         },
         [chatSkillPacks, effectiveConfig.imageModel, effectiveConfig.textModel, effectiveConfig.textPrompts, handleOneClickVideo, resolveModelForCapability, reverseVideoModel, sendChatMessage],
+    );
+
+    /**
+     * **04「剧集批量生成」**（用户 2026-11-17）：
+     * 「在执行 04 的时候需要输入剧本到反推视频节点才可执行，执行时先调用技能中的
+     *  15秒-小说转剧本分镜 技能进行拆分……按照我约束的 120 秒一集进行分集剧本，每拆出来一份
+     *  120 秒的文本内容就是一集，就输出到一个文本节点，输出的多个文本节点依次向下进行排列，
+     *  然后再根据勾选的内容再开始生成分镜、一键生图、一键生视频。需要注意的是在执行一键生图时
+     *  同一批拆分出来的文本节点内容，他们的资产图需要共享……上一集正在生成该角色或者道具场景，
+     *  要是下一集也用到了这个资产，那么下一集不要重新生成，直接挂上上一集正在生成的图片节点，
+     *  等图齐了，然后再执行后续的一键视频任务」。
+     *
+     * 与 01 / 02 / 03 的根本差别：**输入不是视频，是一段文字剧本**（`metadata.reverseVideoScript`）。
+     * 所以整条链是「剧本 → 拆集（一次模型调用）→ N 个文本节点 + N 个脚本节点 → 逐集分镜 / 生图 → 统一铺视频」。
+     *
+     * 🔴 三个不能想当然的点：
+     *  ① **跨集共享靠「名字锁」**，不是复制 `scriptCellAssets`：每集镜号从 1 重排，照搬必然错位。
+     *     每集建脚本节点时就写 `scriptAssetInheritAuto` + `scriptAssetInheritSource`（= 上一集），
+     *     于是 `runScriptGeneration` 出表时会把「本集真的用到的资产名」的锁搬过来
+     *     （`buildScriptAssetInheritPlan` 的 onlyNames 那一路）—— 同一张图，不是新生成一张。
+     *     搬完之后再调 `handleInheritScriptAssets` 补**连线 + 分类**：锁让「不再重复生图」成立，
+     *     连线 / 分类让铺链路按分类兜底时也看得见这些图（少一样就会「图生成了但视频里没连上」）。
+     *  ② **必须一集一集串行**：第 N 集的锁来自第 N-1 集「已经建出来的图片节点」。并行跑的话
+     *     第 N 集出表时第 N-1 集还没开始生图 → 一个锁都没有 → 同名资产被重新生成一遍（正是用户要避免的）。
+     *  ③ **视频要等全批的图**：分镜 / 生图逐集跑（每集内部仍走 `handleOneClickVideo` 那套
+     *     15 分钟 / 35 分钟超时与换模型重试，不重写），但视频统一放到最后一起铺 ——
+     *     否则第 1 集铺视频时第 3 集的共享图还在生成中，视频节点会连到空图。
+     */
+    const runVideoReverseEpisodes = useCallback(
+        async (
+            input: {
+                reverseNodeId?: string;
+                /** 04 的输入剧本（不传 = 读反推节点 metadata 上那份） */
+                script?: string;
+                /** 每集时长（秒）；不传 = 读节点 / 默认 120 */
+                episodeSeconds?: number | string;
+                requirement?: string;
+                scriptScheme?: string;
+                shotsPerClip?: number;
+                chatModel?: string;
+                stages?: Partial<ReverseVideoStages> | null;
+            },
+            report: (stage: string) => void = () => undefined,
+        ): Promise<VideoReverseResult> => {
+            const reverseNode = input.reverseNodeId ? nodesRef.current.find((item) => item.id === input.reverseNodeId) : undefined;
+            const target = readReverseVideoTarget(reverseNode?.metadata);
+            const stages = cascadeReverseVideoStages(input.stages ?? target.autoStages);
+            /** 剧本：弹窗里刚粘贴的那份优先（metadata 可能还没提交），其次节点上存的。 */
+            const scriptText = String((input.script !== undefined ? input.script : readReverseVideoScript(reverseNode?.metadata)) || "").trim();
+            if (!scriptText) {
+                return { ok: false, error: "04 需要先把剧本填进反推视频节点（节点上的「04 · 剧集剧本」输入框），没有剧本就没有可拆的内容" };
+            }
+            const seconds = resolveEpisodeSeconds(input.episodeSeconds ?? readReverseVideoEpisodeSeconds(reverseNode?.metadata));
+            /** 拆集技能：04 固定用「15秒-小说转剧本分镜」，与 01 / 02 / 03 那个可切换的反推技能是两回事。 */
+            const splitSkill = pickVideoReverseSkill(listChatSkills(), EPISODE_SPLIT_SKILL_HINTS);
+            if (!splitSkill) {
+                return { ok: false, error: `技能库里没找到「${EPISODE_SPLIT_SKILL_LABEL}」：先在 AI 对话节点的技能列表里确认它已经装好（04 靠它把剧本拆成多集）` };
+            }
+            /** 拆集 / 出分镜用哪个文本模型：与 01 / 02 / 03 同一条取值链（入参 → 节点 → 内置默认 → 偏好）。 */
+            const chatModel = (input.chatModel || "").trim() || readReverseVideoChatModel(reverseNode?.metadata) || reverseVideoModel || resolveModelForCapability(effectiveConfig, effectiveConfig.textModel, "text");
+
+            const gap = 120;
+            const chatSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Chat];
+            const textSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Text];
+            const scriptSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Script];
+            const anchor = reverseNode ? { position: reverseNode.position, width: reverseNode.width, height: reverseNode.height } : { position: { x: 0, y: 0 }, width: chatSpec.width, height: chatSpec.height };
+            const [chatSlot] = planRightwardChainSlots({ source: anchor, sizes: [chatSpec], occupied: collectCanvasOccupied(nodesRef.current), gap });
+
+            /** 一次落盘（state + nodesRef 同时写）：紧接着的 `handleOneClickVideo` / `runScriptGeneration` 读的全是 ref。 */
+            const pushNodes = (created: CanvasNodeData[], pairs: Array<{ fromNodeId: string; toNodeId: string }> = []) => {
+                const nodesNext = [...nodesRef.current, ...created];
+                const existing = new Set(connectionsRef.current.map((conn) => `${conn.fromNodeId}->${conn.toNodeId}`));
+                const additions = pairs.filter((pair) => !existing.has(`${pair.fromNodeId}->${pair.toNodeId}`)).map((pair) => ({ id: nanoid(), ...pair }));
+                const connectionsNext = [...connectionsRef.current, ...additions];
+                nodesRef.current = nodesNext;
+                connectionsRef.current = connectionsNext;
+                setNodes(nodesNext);
+                setConnections(connectionsNext);
+                setSelectedNodeIds(new Set(created.map((node) => node.id)));
+                setSelectedConnectionId(null);
+            };
+
+            // ① 拆集用的对话节点（不连视频：04 的输入是下面这段文字）
+            report(`创建拆集对话节点（技能「${splitSkill.name || EPISODE_SPLIT_SKILL_LABEL}」）…`);
+            const chatNode = createCanvasNode(CanvasNodeType.Chat, chatSlot, {
+                status: NODE_STATUS_IDLE,
+                messages: [],
+                chatTextEnabled: true,
+                chatImageEnabled: false,
+                model: chatModel,
+                imageModel: resolveModelForCapability(effectiveConfig, effectiveConfig.imageModel, "image"),
+                chatSkillIds: [splitSkill.id],
+            });
+            pushNodes([chatNode]);
+
+            // ② 拆集：一次模型调用，回来的是 JSON（解析器仍保留「分集标记 / 整段一集」两条兜底）
+            report(`按每集 ${seconds} 秒拆集中…`);
+            let body = (
+                await sendChatMessage(
+                    chatNode.id,
+                    buildEpisodeSplitPrompt({
+                        script: scriptText,
+                        episodeSeconds: seconds,
+                        requirement: input.requirement,
+                        skillLabel: splitSkill.name || EPISODE_SPLIT_SKILL_LABEL,
+                        languageRule: VIDEO_REVERSE_LANGUAGE_RULE,
+                    }),
+                    { text: true, image: false },
+                )
+            ).trim();
+            // 语言兜底与 01 / 02 / 03 同一套判据（整篇明显不是中文才多打一轮「只换语言」）。
+            if (body && needsChineseRewrite(body)) {
+                report("拆集结果不是中文，正在让模型原样改写成中文…");
+                const rewritten = (await sendChatMessage(chatNode.id, VIDEO_REVERSE_REWRITE_PROMPT, { text: true, image: false })).trim();
+                if (rewritten) body = rewritten;
+            }
+            const drafts = parseEpisodeSplitOutput(body);
+            if (!drafts.length) {
+                return {
+                    ok: false,
+                    error: `拆集没有返回可用内容：检查技能「${splitSkill.name || EPISODE_SPLIT_SKILL_LABEL}」是否可用、文本模型是否已配置（也可能被手动停止了）`,
+                    chatNodeId: chatNode.id,
+                };
+            }
+
+            // ③ 一集一个文本节点（**纵向**排开），右边跟一个脚本生成器
+            report(`拆出 ${drafts.length} 集（每集 ${seconds} 秒），创建文本 / 脚本节点…`);
+            const chatLeft = chatSlot.x - chatSpec.width / 2;
+            const chatTop = chatSlot.y - chatSpec.height / 2;
+            const slots = planEpisodeStackSlots({
+                origin: { x: chatLeft + chatSpec.width + gap, y: chatTop },
+                count: drafts.length,
+                text: textSpec,
+                script: scriptSpec,
+                occupied: collectCanvasOccupied(nodesRef.current),
+                gapX: gap,
+                gapY: 36,
+            });
+            const chosenScheme = asScriptSchemeId(input.scriptScheme) ?? asScriptSchemeId(target.scriptScheme);
+            const scriptSchemeSeed = buildScriptSchemeSeed({ scheme: chosenScheme || undefined, explicit: Boolean(chosenScheme), textPrompts: effectiveConfig.textPrompts, skills: chatSkillPacks }) || {};
+            const targetShotsPerClip = normalizeScriptShotsPerClip(input.shotsPerClip ?? target.shotsPerClip);
+            /**
+             * 每集脚本节点的出片参数 = 02 / 03 那套，只有「成片总时长」换成**每集时长**：
+             * 于是每一集的分镜表都按同一套镜数 / 台词量规划，不会出现「第一集 30 秒、第二集 3 分钟」。
+             */
+            const episodeMeta: Partial<CanvasNodeData["metadata"]> = {
+                ...(target.styleTemplateId ? { styleTemplateId: target.styleTemplateId } : {}),
+                scriptTotalSeconds: seconds,
+                scriptImageSize: resolveReverseVideoSize(target),
+                scriptVideoSize: resolveReverseVideoSize(target),
+                scriptVideoQuality: resolveReverseVideoQuality(target),
+                ...(target.model ? { scriptVideoModel: target.model } : {}),
+                ...(isMochianiVideoEngine(target.videoEngine) ? { scriptVideoEngine: MOCHIANI_VIDEO_ENGINE } : {}),
+                ...(targetShotsPerClip ? { scriptShotsPerClip: targetShotsPerClip } : {}),
+            };
+            const textNodes: CanvasNodeData[] = [];
+            const scriptNodes: CanvasNodeData[] = [];
+            const pairs: Array<{ fromNodeId: string; toNodeId: string }> = [];
+            drafts.forEach((draft, index) => {
+                const slot = slots[index];
+                if (!slot) return;
+                const textNode = {
+                    ...createCanvasNode(CanvasNodeType.Text, slot.text, {
+                        content: draft.script,
+                        prompt: draft.script,
+                        composerContent: draft.script,
+                        promptSyncAt: Date.now(),
+                        status: NODE_STATUS_SUCCESS,
+                        fontSize: DEFAULT_CANVAS_FONT_SIZE,
+                    }),
+                    title: draft.title,
+                };
+                const scriptNode = {
+                    ...createCanvasNode(CanvasNodeType.Script, slot.script, {
+                        status: NODE_STATUS_IDLE,
+                        scriptSource: draft.script,
+                        scriptPrompt: "",
+                        scriptRows: [],
+                        ...scriptSchemeSeed,
+                        ...episodeMeta,
+                        /**
+                         * 跨集沿用（🔴 见函数头 ①）：第 2 集起把「上一集」记成本集来源，
+                         * `runScriptGeneration` 出表时会自动把**本集用到的**资产名锁搬过来 →
+                         * `handleDirectGenerateScriptAssets` 因此跳过这些名字，不再重复生图。
+                         */
+                        ...(index > 0 && scriptNodes[index - 1] ? { scriptAssetInheritAuto: true, scriptAssetInheritSource: scriptNodes[index - 1].id } : {}),
+                    }),
+                    title: `${draft.title} · 分镜脚本`,
+                };
+                textNodes.push(textNode);
+                scriptNodes.push(scriptNode);
+                pairs.push({ fromNodeId: textNode.id, toNodeId: scriptNode.id });
+            });
+            pushNodes([...textNodes, ...scriptNodes], pairs);
+            if (!textNodes.length) {
+                return { ok: false, error: "拆集结果为空：没有可建的文本节点", chatNodeId: chatNode.id };
+            }
+
+            const firstText = textNodes[0];
+            /** 三颗勾「生成分镜」没勾：拆集 + 建节点已做完，后面三步一步都不跑。 */
+            if (!stages.script) {
+                report(`已拆成 ${describeEpisodeSplit(drafts, seconds)}；三步都没勾生成，节点已建好，可随时在各集脚本节点上手动跑`);
+                return { ok: true, chatNodeId: chatNode.id, textNodeId: firstText.id, scriptNodeId: scriptNodes[0]?.id };
+            }
+
+            // ④ 逐集：分镜表 → 资产图（**串行**，视频留到全批出图后统一铺）
+            for (let index = 0; index < scriptNodes.length; index += 1) {
+                const scriptNode = scriptNodes[index];
+                const label = drafts[index]?.title || `第 ${index + 1} 集`;
+                report(`第 ${index + 1}/${scriptNodes.length} 集（${label}）：${stages.image ? "生成分镜表 → 资产图…" : "生成分镜表…"}`);
+                await handleOneClickVideo(scriptNode.id, { stages: { script: true, image: stages.image, video: false } });
+                /**
+                 * 这一集被暂停了（分镜表失败 / 生图超时 / 换模型仍失败）就**整批停下**：
+                 * 继续往下跑只会让后面的集去连一批不存在的共享图，铺出来的视频全是空帧。
+                 * 原因已经写在该集脚本节点上（`oneClickVideoRuns` 是内存态，节点按钮上能看到）。
+                 */
+                const state = oneClickVideoRunsRef.current[scriptNode.id];
+                if (state?.status === "paused") {
+                    return {
+                        ok: false,
+                        chatNodeId: chatNode.id,
+                        textNodeId: firstText.id,
+                        scriptNodeId: scriptNodes[0]?.id,
+                        error: `${label} 已暂停：${state.message || "见该集脚本节点上的提示"}（本批后面的集不再继续，修好后可单独跑那一集）`,
+                    };
+                }
+                /** 出图阶段结束：把上一集的**连线 + 资产分类**补进来（锁已经由出表时的自动沿用搬过）。 */
+                if (index > 0) {
+                    const previous = scriptNodes[index - 1];
+                    if (previous) handleInheritScriptAssets(scriptNode.id, { sourceId: previous.id, options: { assets: true, locks: true, columns: true, output: false }, auto: true, silent: true });
+                }
+                /**
+                 * 覆盖掉「一键视频」留下的「已跳过一键生视频」文案 —— 04 不是跳过，是**等全批出图后统一铺**，
+                 * 照抄那句话会让用户以为这集永远不会生成视频。
+                 */
+                patchOneClickVideoRun(scriptNode.id, {
+                    status: "done",
+                    stage: "image",
+                    message: stages.image ? "本集分镜表 + 资产图已完成（视频等这一批的图全齐后统一铺）" : "本集分镜表已完成（没勾一键生图，后面两步都不执行）",
+                });
+            }
+            if (!stages.image) {
+                report(`${describeEpisodeSplit(drafts, seconds)} 的分镜表已全部生成；没勾一键生图 / 一键生视频，到此为止`);
+                return { ok: true, chatNodeId: chatNode.id, textNodeId: firstText.id, scriptNodeId: scriptNodes[0]?.id };
+            }
+
+            // ⑤ 全批资产图都落定了才铺视频（🔴 见函数头 ③）
+            report(`${scriptNodes.length} 集的资产图已齐，开始逐集铺视频链路并生成…`);
+            scriptNodes.forEach((scriptNode) => {
+                handleBuildScriptPipeline(scriptNode.id, undefined, {
+                    videoOnly: true,
+                    group: true,
+                    autoGenerate: true,
+                    skipConfirm: true,
+                    onVideoPause: (detail) => patchOneClickVideoRun(scriptNode.id, { status: "paused", stage: "pipeline", message: detail }),
+                });
+                patchOneClickVideoRun(scriptNode.id, { status: "done", stage: "pipeline", message: t("canvas.scriptNode.oneClickDone") });
+            });
+            message.success(`04 完成：${describeEpisodeSplit(drafts, seconds)}，已逐集铺视频（进度见各集脚本节点）`);
+            return { ok: true, chatNodeId: chatNode.id, textNodeId: firstText.id, scriptNodeId: scriptNodes[0]?.id };
+        },
+        [
+            chatSkillPacks,
+            effectiveConfig,
+            handleBuildScriptPipeline,
+            handleInheritScriptAssets,
+            handleOneClickVideo,
+            message,
+            patchOneClickVideoRun,
+            resolveModelForCapability,
+            reverseVideoModel,
+            sendChatMessage,
+            t,
+        ],
+    );
+
+    /**
+     * 反推节点的**统一入口**：01 / 02 / 03 走 `runVideoReverse`（看片反推），04 走
+     * `runVideoReverseEpisodes`（文字剧本拆集）。
+     *
+     * ⚠️ 这层包一下而不是在 `runVideoReverse` 里 `if (mode === 4)`：后者要把
+     * `runVideoReverseEpisodes` 塞进它的 deps，而那个函数声明在后面 —— 渲染到
+     * `useCallback(..., [runVideoReverseEpisodes])` 那一行时它还在 TDZ 里，直接白屏。
+     */
+    const handleReverseVideoRun = useCallback(
+        (input: Parameters<typeof runVideoReverse>[0] & { script?: string; episodeSeconds?: number }, report: (stage: string) => void) =>
+            input.mode === 4 ? runVideoReverseEpisodes(input, report) : runVideoReverse(input, report),
+        [runVideoReverse, runVideoReverseEpisodes],
     );
 
     /** 「反推视频」节点里可选的目标：画布上所有有内容的视频节点。 */
@@ -11856,7 +12171,7 @@ function AtelierCanvasPage() {
                         reverseModelDefault={reverseVideoModel}
                         onConfigChange={handleConfigNodeChange}
                         onCreateVideoFromUrl={createBridgeVideoNode}
-                        onRun={runVideoReverse}
+                        onRun={handleReverseVideoRun}
                     />
                 );
             }
@@ -11978,6 +12293,7 @@ function AtelierCanvasPage() {
             handleVideoMergeRender,
             isNodeGenerating,
             reverseVideoModel,
+            handleReverseVideoRun,
             runMergeNode,
             runScriptGeneration,
             runScriptShotGeneration,

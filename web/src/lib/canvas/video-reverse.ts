@@ -11,8 +11,17 @@ import type { CanvasReverseVideoTarget } from "@/types/canvas";
 import { SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { normalizeScriptShotsPerClip } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
-/** 三条命令。数字即用户看到的 01 / 02 / 03。 */
-export type VideoReverseMode = 1 | 2 | 3;
+import { DEFAULT_EPISODE_SECONDS, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
+/** 三条命令 + 04「剧集批量生成」。数字即用户看到的 01 / 02 / 03 / 04。 */
+export type VideoReverseMode = 1 | 2 | 3 | 4;
+
+/**
+ * 会拼「视频反推」提示词的那三条（01 / 02 / 03）。
+ *
+ * 04 是另一种输入（文字剧本，不是视频），走 `video-reverse-episodes.ts` 那套拆集提示词，
+ * 所以 `buildVideoReversePrompt` 的类型收窄到这里 —— 让「给 04 拼反推提示词」在类型层就写不出来。
+ */
+export type VideoReversePromptMode = 1 | 2 | 3;
 
 export type VideoReverseResult = {
     ok: boolean;
@@ -110,7 +119,7 @@ export const VIDEO_REVERSE_SKILL_LABEL = VIDEO_REVERSE_SKILL_OPTIONS[0].label;
  * ⚠️ 标签由调用方传进来，本模块**不 import i18n**：它是纯逻辑模块，探针直接 import，
  * 而 `@/i18n` 的模块顶层会读 `localStorage`，在 Node 里会直接崩。
  */
-export function buildDefaultVideoReverseRequirement(imageMentions: readonly string[] = [], mode: VideoReverseMode = 2): string {
+export function buildDefaultVideoReverseRequirement(imageMentions: readonly string[] = [], mode: VideoReversePromptMode = 2): string {
     /**
      * 2026-11-12 改口径（用户）：「需要的是**反推后，生成同类型的其他剧本**……现在感觉像是直接反推了一份给我，
      * 并不是重新生成的另外同类型的其他剧本。」
@@ -310,12 +319,33 @@ export function normalizeReverseVideoTarget(raw: Partial<CanvasReverseVideoTarge
      */
     const stages = cascadeReverseVideoStages(source.autoStages);
     if (!stages.script || !stages.image || !stages.video) target.autoStages = stages;
+    /**
+     * 04 的「每集时长」：与 `size` / `quality` 同口径 —— **只有偏离默认 120 才写**。
+     * 写进去就等于「用户手动确认过」，以后改默认值对老节点不生效。
+     */
+    const episodeSeconds = resolveEpisodeSeconds(source.episodeSeconds);
+    if (episodeSeconds !== DEFAULT_EPISODE_SECONDS) target.episodeSeconds = String(episodeSeconds);
     return target;
 }
 
 /** 读 metadata 上的目标参数，永远给出一个「秒数有值、其它可能为空」的对象（UI 直接拿去渲染）。 */
 export function readReverseVideoTarget(metadata: { reverseVideoTarget?: Partial<CanvasReverseVideoTarget> | null } | null | undefined): CanvasReverseVideoTarget {
     return normalizeReverseVideoTarget(metadata?.reverseVideoTarget);
+}
+
+/**
+ * 04 的「每集时长」有效值（UI 与执行器共用）：缺省 / 脏值 → 120 秒。
+ *
+ * 单独出一个读函数而不是让调用方从 `episodeSeconds` 里 `Number()`：
+ * 那个字段是**可能不存在**的（默认值不落盘），调用方每处都写一遍回落地就必然有一处写错。
+ */
+export function readReverseVideoEpisodeSeconds(metadata: { reverseVideoTarget?: Partial<CanvasReverseVideoTarget> | null } | null | undefined): number {
+    return resolveEpisodeSeconds(metadata?.reverseVideoTarget?.episodeSeconds);
+}
+
+/** 读 04 的输入剧本（02 / 03 不用这个字段）。 */
+export function readReverseVideoScript(metadata: { reverseVideoScript?: string | null } | null | undefined): string {
+    return String(metadata?.reverseVideoScript ?? "").trim();
 }
 
 /**
@@ -350,6 +380,12 @@ export const VIDEO_REVERSE_MODES = [
         no: "03",
         label: "反推视频生成同类型文案及视频",
         hint: "同 02，唯一区别是剧本内容：把它当同类型样本、另写一个全新的故事（人物 / 场景 / 情节 / 台词全换）",
+    },
+    {
+        mode: 4 as const,
+        no: "04",
+        label: "剧集批量生成",
+        hint: "输入文字剧本（不是视频）→ 用「15秒-小说转剧本分镜」技能按每集 N 秒拆成多集文本节点（纵向排列）→ 逐集接脚本生成器，同名资产跨集共享同一张图，图齐了再铺视频",
     },
 ] as const;
 
@@ -409,7 +445,11 @@ export function pickVideoReverseSkill(skills: readonly VideoReverseSkillLike[], 
 export type VideoReversePromptInput = {
     /** 接入的视频地址（画布视频节点 `metadata.content`） */
     videoUrl?: string;
-    mode: VideoReverseMode;
+    /**
+     * 🔴 只收 01 / 02 / 03：04 的输入是**文字剧本**、走 `buildEpisodeSplitPrompt`，
+     * 这里收窄类型就是为了让「给 04 拼视频反推提示词」在编译期写不出来。
+     */
+    mode: VideoReversePromptMode;
     /** 02 / 03 的特殊要求 */
     requirement?: string;
     /**
