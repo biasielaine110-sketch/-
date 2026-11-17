@@ -166,7 +166,7 @@ import { CanvasNodePromptPanel, type CanvasNodeGenerationMode } from "@/componen
 import { CanvasToolbar } from "@/components/canvas/canvas-toolbar";
 import { CanvasMochianiPanel } from "@/components/canvas/canvas-mochiani-panel";
 import { CanvasMochianiNodeContent } from "@/components/canvas/canvas-mochiani-node-content";
-import { CanvasReverseVideoNodeContent } from "@/components/canvas/canvas-reverse-video-node-content";
+import { CanvasReverseVideoNodeContent, type ReverseVideoLinkedText } from "@/components/canvas/canvas-reverse-video-node-content";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { CanvasSidePanel } from "@/components/canvas/canvas-side-panel";
 import { CanvasZoomControls } from "@/components/canvas/canvas-zoom-controls";
@@ -180,7 +180,7 @@ import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix"
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { VIDEO_REVERSE_LANGUAGE_RULE, VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cascadeReverseVideoStages, cleanVideoReverseScriptOutput, describeReverseVideoStages, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoEpisodeSeconds, readReverseVideoScript, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type ReverseVideoStages, type VideoReverseMode, type VideoReversePromptMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
-import { EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, parseEpisodeSplitOutput, planEpisodeStackSlots, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
+import { EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeSeconds, splitScriptByDuration } from "@/lib/canvas/video-reverse-episodes";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -1631,6 +1631,30 @@ function AtelierCanvasPage() {
             return resolved;
         },
         [connections, nodeById, nodes],
+    );
+    /**
+     * 04 的剧本来源：连进反推节点的**文本节点**（用户 2026-11-18：「这个聚集剧本文本框可手动输入，
+     * 也可以链接文本节点进行写入」）。
+     *
+     * 只认 `Text`（取 `metadata.content`）：对话节点的回复、图片节点的提示词都不算剧本正文。
+     * 与 `getReverseVideoSource` 分开是因为那个函数「没有视频就返回 null」——04 恰恰不需要视频，
+     * 但一样要能读到连进来的文字。
+     */
+    const getReverseVideoLinkedTexts = useCallback(
+        (nodeId: string): ReverseVideoLinkedText[] => {
+            const out: ReverseVideoLinkedText[] = [];
+            for (const connection of connections) {
+                if (connection.toNodeId !== nodeId) continue;
+                const candidate = nodeById.get(connection.fromNodeId);
+                if (candidate?.type !== CanvasNodeType.Text) continue;
+                const content = String(candidate.metadata?.content ?? "").trim();
+                if (!content) continue;
+                if (out.some((item) => item.id === candidate.id)) continue;
+                out.push({ id: candidate.id, title: candidate.title || "文本节点", content });
+            }
+            return out;
+        },
+        [connections, nodeById],
     );
     const createNode = useCallback(
         (type: CanvasNodeTypeId, position?: Position) => {
@@ -11569,8 +11593,14 @@ function AtelierCanvasPage() {
      *  要是下一集也用到了这个资产，那么下一集不要重新生成，直接挂上上一集正在生成的图片节点，
      *  等图齐了，然后再执行后续的一键视频任务」。
      *
-     * 与 01 / 02 / 03 的根本差别：**输入不是视频，是一段文字剧本**（`metadata.reverseVideoScript`）。
-     * 所以整条链是「剧本 → 拆集（一次模型调用）→ N 个文本节点 + N 个脚本节点 → 逐集分镜 / 生图 → 统一铺视频」。
+     * 与 01 / 02 / 03 的根本差别：**输入不是视频，是一段文字剧本**（`metadata.reverseVideoScript`，
+     * 可以直接手打 / 粘贴，也可以从连线接进来的文本节点写入）。
+     * 整条链是「剧本 → AI 出连续正文（一次模型调用）→ **本地按每集时长切段** → N 个文本节点 + N 个脚本节点
+     * → 逐集分镜 / 生图 → 统一铺视频」。
+     *
+     * 🔴 2026-11-18 改口径（用户）：「等 AI 对话给到结果后，再自行按照时长进行输出为 1 个文本节点还是多个
+     * 文本节点，再分别执行脚本生成器的相关内容」—— 切几集不再由模型决定（让它自己切必然忽长忽短），
+     * 而是 `splitScriptByDuration()` 按字数换算秒数确定性切段。
      *
      * 🔴 三个不能想当然的点：
      *  ① **跨集共享靠「名字锁」**，不是复制 `scriptCellAssets`：每集镜号从 1 重排，照搬必然错位。
@@ -11652,8 +11682,8 @@ function AtelierCanvasPage() {
             });
             pushNodes([chatNode]);
 
-            // ② 拆集：一次模型调用，回来的是 JSON（解析器仍保留「分集标记 / 整段一集」两条兜底）
-            report(`按每集 ${seconds} 秒拆集中…`);
+            // ② 让 AI 先出**完整剧本正文**（按技能改写成分场剧本）；切几集由下一次调用本地算
+            report(`AI 改写剧本中（技能「${splitSkill.name || EPISODE_SPLIT_SKILL_LABEL}」）…`);
             let body = (
                 await sendChatMessage(
                     chatNode.id,
@@ -11669,21 +11699,29 @@ function AtelierCanvasPage() {
             ).trim();
             // 语言兜底与 01 / 02 / 03 同一套判据（整篇明显不是中文才多打一轮「只换语言」）。
             if (body && needsChineseRewrite(body)) {
-                report("拆集结果不是中文，正在让模型原样改写成中文…");
+                report("剧本不是中文，正在让模型原样改写成中文…");
                 const rewritten = (await sendChatMessage(chatNode.id, VIDEO_REVERSE_REWRITE_PROMPT, { text: true, image: false })).trim();
                 if (rewritten) body = rewritten;
             }
-            const drafts = parseEpisodeSplitOutput(body);
+            /**
+             * 🔴 用户 2026-11-18：「等 AI 对话给到结果后，再**自行**按照时长输出为 1 个文本节点还是多个文本节点」。
+             * 所以这里**不等模型自己分集**：`splitScriptByDuration` 按「字数 / 每秒 4.5 字」确定性切段 ——
+             * 模型数不准字数，让它自己切必然忽长忽短（第一集 30 秒、第二集 3 分钟）。
+             * 模型若还是吐了 JSON（老口径 / 擅自照旧格式），`extractScriptText` 会先把各集正文拼回一份再切。
+             */
+            report(`按每集 ${seconds} 秒切分正文…`);
+            const drafts = splitScriptByDuration(body, seconds);
             if (!drafts.length) {
                 return {
                     ok: false,
-                    error: `拆集没有返回可用内容：检查技能「${splitSkill.name || EPISODE_SPLIT_SKILL_LABEL}」是否可用、文本模型是否已配置（也可能被手动停止了）`,
+                    error: `对话没有返回可用的剧本正文：检查技能「${splitSkill.name || EPISODE_SPLIT_SKILL_LABEL}」是否可用、文本模型是否已配置（也可能被手动停止了）`,
                     chatNodeId: chatNode.id,
                 };
             }
+            const estimatedSeconds = Math.round(estimateScriptSeconds(body));
 
             // ③ 一集一个文本节点（**纵向**排开），右边跟一个脚本生成器
-            report(`拆出 ${drafts.length} 集（每集 ${seconds} 秒），创建文本 / 脚本节点…`);
+            report(`正文约 ${estimatedSeconds} 秒 → 按每集 ${seconds} 秒切出 ${drafts.length} 集，创建文本 / 脚本节点…`);
             const chatLeft = chatSlot.x - chatSpec.width / 2;
             const chatTop = chatSlot.y - chatSpec.height / 2;
             const slots = planEpisodeStackSlots({
@@ -12168,6 +12206,7 @@ function AtelierCanvasPage() {
                         attachedVideoId={reverseSource?.videoId || null}
                         attachSource={reverseSource?.source || null}
                         referenceImages={reverseSource?.references || []}
+                        linkedTexts={getReverseVideoLinkedTexts(contentNode.id)}
                         reverseModelDefault={reverseVideoModel}
                         onConfigChange={handleConfigNodeChange}
                         onCreateVideoFromUrl={createBridgeVideoNode}

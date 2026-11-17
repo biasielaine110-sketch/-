@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, VIDEO_REVERSE_STAGE_OPTIONS, buildDefaultVideoReverseRequirement, describeReverseVideoStages, normalizeReverseVideoTarget, readReverseVideoEpisodeSeconds, readReverseVideoScript, readReverseVideoSkill, readReverseVideoStages, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, setReverseVideoStage, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult, type VideoReverseStageId } from "@/lib/canvas/video-reverse";
-import { DEFAULT_EPISODE_SECONDS, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
+import { DEFAULT_EPISODE_SECONDS, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, SCRIPT_CHARS_PER_SECOND, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, normalizeScriptShotsPerClip } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
@@ -39,6 +39,18 @@ export type ReverseVideoOption = {
     url: string;
 };
 
+/**
+ * 04 的剧本来源之一：**连进反推节点的文本节点**（用户 2026-11-18）。
+ *
+ * 「这个剧集剧本文本框可手动输入，也可以链接文本节点进行写入」—— 所以两个入口都留着：
+ * 手动打字 / 点「写入剧本框」把连线里那几段搬进来（`content` 已经是节点上的正文）。
+ */
+export type ReverseVideoLinkedText = {
+    id: string;
+    title: string;
+    content: string;
+};
+
 type CanvasReverseVideoNodeContentProps = {
     node: CanvasNodeData;
     /** 画布上所有可用的视频节点 */
@@ -55,6 +67,11 @@ type CanvasReverseVideoNodeContentProps = {
      * 并且不再单独生成该道具的资产图（见 `project.tsx: mountReferenceAssetsToScript`）。
      */
     referenceImages?: ReverseVideoOption[];
+    /**
+     * 04 的剧本来源：连进本节点的**文本节点**（按连线顺序，`project.tsx` 解析）。
+     * 只服务 04 —— 01 / 02 / 03 的输入是视频，文本连线对它们没有意义（也不会被读）。
+     */
+    linkedTexts?: ReverseVideoLinkedText[];
     /**
      * 反推（看片）的**默认**文本模型（编码值 `channelId::model`，空 = 画布上找不到该模型）。
      * 由 `project.tsx` 解析（`gemini-3.8-flash` · toapis），节点自己只负责显示 / 覆盖：
@@ -133,6 +150,7 @@ export function CanvasReverseVideoNodeContent({
     attachedVideoId,
     attachSource,
     referenceImages,
+    linkedTexts,
     reverseModelDefault,
     onConfigChange,
     onCreateVideoFromUrl,
@@ -254,6 +272,63 @@ export function CanvasReverseVideoNodeContent({
         },
         [node.id, onConfigChange],
     );
+    /**
+     * 04 的剧本还可以**从连线来**（用户 2026-11-18）：「文本节点输入到反推视频节点的时候，
+     * 也需要能够直接写入到 04 的剧集剧本文本框内……可手动输入，也可以链接文本节点进行写入」。
+     *
+     * 两段文本按连线顺序用空行拼起来 —— 与「一集一段」的口径一致（空行本来就是我们切集的天然边界）。
+     */
+    const linkedScript = useMemo(
+        () =>
+            (linkedTexts || [])
+                .map((item) => String(item.content || "").trim())
+                .filter(Boolean)
+                .join("\n\n"),
+        [linkedTexts],
+    );
+    const linkedTitles = useMemo(() => (linkedTexts || []).map((item) => String(item.title || "文本节点").trim()).filter(Boolean), [linkedTexts]);
+    /**
+     * 上一次「由连线自动写进来」的值。
+     *
+     * 判定口径（刻意做得保守，宁可不覆盖也不吃掉用户手打的内容）：
+     *  - 框里是空的 → 自动写入（连上文本节点就能直接跑 04，不用再点一次）；
+     *  - 框里的内容 **=== 上次自动写入的内容** → 说明用户没动过，连线里的文字改了/换了就跟着更新；
+     *  - 其它情况（用户手打过）→ 一个字都不动，只显示「内容与连线不同」+ 一个写入按钮。
+     */
+    const autoScriptRef = useRef("");
+    useEffect(() => {
+        if (draftOwnerId !== node.id) autoScriptRef.current = "";
+    }, [draftOwnerId, node.id]);
+    useEffect(() => {
+        // 组件实例被复用到别的节点时，这一轮 `scriptDraft` 还是**上一个节点**的内容 ——
+        // 拿它跟新节点的连线比会误判，直接把上一集的剧本写进这个节点。等换节点那次提交完成再说。
+        if (draftOwnerId !== node.id) return;
+        if (!linkedScript) return;
+        const current = scriptDraft.trim();
+        if (!current) {
+            autoScriptRef.current = linkedScript;
+            commitScript(linkedScript);
+            return;
+        }
+        if (current === autoScriptRef.current.trim() && linkedScript !== autoScriptRef.current) {
+            autoScriptRef.current = linkedScript;
+            commitScript(linkedScript);
+        }
+    }, [commitScript, draftOwnerId, linkedScript, node.id, scriptDraft]);
+    /** 连线内容与框里内容是否已经一致（按钮文案 / 状态点都看它）。 */
+    const linkedApplied = Boolean(linkedScript) && scriptDraft.trim() === linkedScript;
+    /** 按连线内容覆盖剧本框；之后连线里的文字再改也会**继续跟随**（重置基准值）。 */
+    const applyLinkedScript = useCallback(() => {
+        if (!linkedScript) return;
+        autoScriptRef.current = linkedScript;
+        commitScript(linkedScript);
+    }, [commitScript, linkedScript]);
+    /** 追加到末尾（已经有手打内容、又想把连线那几段并进来时用）。 */
+    const appendLinkedScript = useCallback(() => {
+        if (!linkedScript) return;
+        const merged = [scriptDraft.trim(), linkedScript].filter(Boolean).join("\n\n");
+        commitScript(merged);
+    }, [commitScript, linkedScript, scriptDraft]);
     const toggleStage = useCallback(
         (id: VideoReverseStageId, checked: boolean) => {
             patchTarget({ autoStages: setReverseVideoStage(stages, id, checked) });
@@ -714,12 +789,49 @@ export function CanvasReverseVideoNodeContent({
                         <span className="min-w-0 flex-1 font-medium opacity-80">04 · 剧集剧本</span>
                         <span className="shrink-0 text-[10px] opacity-45">{scriptDraft.trim() ? `${scriptDraft.trim().length} 字` : "未填写"}</span>
                     </div>
+                    {/* 连线来源（用户 2026-11-18）：文本节点连进来 → 剧本框直接可写入。
+                        框空着会自动写入；手打过的内容一律不覆盖，只留两个按钮自己点。 */}
+                    {linkedScript ? (
+                        <div className="mt-1.5 rounded px-1.5 py-1" style={{ background: "rgba(99,102,241,0.10)" }}>
+                            <div className="flex items-center gap-1 text-[10px] leading-relaxed">
+                                <Link2 size={10} className="shrink-0 opacity-70" />
+                                <span className="min-w-0 flex-1 truncate opacity-70" title={linkedTitles.join(" / ")}>
+                                    已连接文本节点：{linkedTitles.join(" / ")}（{linkedScript.length} 字）
+                                </span>
+                                <span className="shrink-0" style={{ color: linkedApplied ? "#5eead4" : "#fbbf24" }}>
+                                    {linkedApplied ? "已写入" : "未写入"}
+                                </span>
+                            </div>
+                            <div className="mt-1 flex items-center gap-1">
+                                <button
+                                    type="button"
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={applyLinkedScript}
+                                    className="rounded px-1.5 py-0.5 text-[10px] transition"
+                                    style={{ border: `1px solid ${theme.node.stroke}`, opacity: linkedApplied ? 0.55 : 1 }}
+                                >
+                                    {linkedApplied ? "重新写入" : "写入剧本框"}
+                                </button>
+                                <button
+                                    type="button"
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                    onPointerDown={(event) => event.stopPropagation()}
+                                    onClick={appendLinkedScript}
+                                    className="rounded px-1.5 py-0.5 text-[10px] opacity-70 transition"
+                                    style={{ border: `1px solid ${theme.node.stroke}` }}
+                                >
+                                    追加到末尾
+                                </button>
+                            </div>
+                        </div>
+                    ) : null}
                     <Input.TextArea
                         className="!mt-1.5"
                         value={scriptDraft}
                         onChange={(event) => commitScript(event.target.value)}
                         autoSize={{ minRows: 3, maxRows: 8 }}
-                        placeholder={`把小说 / 故事 / 剧本正文粘到这里 —— 04 会先用「${EPISODE_SPLIT_SKILL_LABEL}」技能按每集时长拆成多集（一集一个文本节点，纵向排开），再逐集走分镜 → 生图 → 生视频`}
+                        placeholder={`把小说 / 故事 / 剧本正文粘到这里（也可以连一个文本节点后点「写入剧本框」）—— 04 会先用「${EPISODE_SPLIT_SKILL_LABEL}」技能把原文改写成剧本正文，再按每集时长自动切段（一集一个文本节点，纵向排开），最后逐集走分镜 → 生图 → 生视频`}
                         aria-label="04 剧集剧本"
                     />
                     <div className="mt-1 text-[10px] leading-relaxed opacity-45">
@@ -833,13 +945,26 @@ export function CanvasReverseVideoNodeContent({
                     {requirementMode === 4 ? (
                         <>
                             <div className="text-xs leading-relaxed opacity-60">
-                                这次<span className="font-medium">不接视频</span>：输入是下面这段<span className="font-medium">文字剧本</span>。执行时先用「{EPISODE_SPLIT_SKILL_LABEL}」技能把它按<span className="font-medium">每集 {episodeSeconds} 秒</span>拆成多集，一集输出一个文本节点（纵向排开），每集右边接一个脚本节点，再按勾选逐集跑分镜 / 生图 / 生视频。
+                                这次<span className="font-medium">不接视频</span>：输入是下面这段<span className="font-medium">文字剧本</span>（可手打 / 粘贴，也可以连一个文本节点后点「写入剧本框」）。执行时先用「{EPISODE_SPLIT_SKILL_LABEL}」技能把原文改写成<span className="font-medium">连续剧本正文</span>，<span className="font-medium">拿到对话结果后</span>再按每集 <span className="font-medium">{episodeSeconds} 秒</span>自动切段（约 {Math.round(episodeSeconds * SCRIPT_CHARS_PER_SECOND)} 字 / 集），切出几集就建几个文本节点（纵向排开），每集右边接一个脚本节点，再按勾选逐集跑分镜 / 生图 / 生视频。
                                 <span className="mt-1 block opacity-80">
                                     同一批拆出来的多集<span className="font-medium">共享资产图</span>：上一集已经生成（或正在生成）的角色 / 场景 / 道具，下一集直接挂同一张图，不会重复生成；等这一批的图全齐了，才开始铺视频。
                                 </span>
                             </div>
                             <div className="flex flex-col gap-1">
-                                <span className="text-xs opacity-70">剧集剧本（必填）</span>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xs opacity-70">剧集剧本（必填）</span>
+                                    {linkedScript ? (
+                                        <button
+                                            type="button"
+                                            onClick={applyLinkedScript}
+                                            className="rounded px-1.5 py-0.5 text-[11px]"
+                                            style={{ border: `1px solid ${theme.node.stroke}` }}
+                                            title={`用连线里的 ${linkedTitles.join(" / ")} 覆盖剧本框`}
+                                        >
+                                            从连线文本节点写入（{linkedScript.length} 字）
+                                        </button>
+                                    ) : null}
+                                </div>
                                 <Input.TextArea
                                     value={scriptDraft}
                                     onChange={(event) => commitScript(event.target.value)}

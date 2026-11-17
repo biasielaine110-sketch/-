@@ -32,6 +32,15 @@ export const EPISODE_SECONDS_MIN = 15;
 export const EPISODE_SECONDS_MAX = 300;
 
 /**
+ * 每秒剧本大约多少个字（把「时长」换成「字数」的唯一换算点）。
+ *
+ * 4.5 字/秒 ≈ 中文口播的常速（2 分钟 ≈ 540 字）：再快一点听着像快进，再慢一集就装不满。
+ * 这个数同时喂给提示词（「约 N 字 / 集」）和切分器（累积到 N 秒就断开），两边必须是同一个值，
+ * 否则模型按 A 写、我们按 B 切，最后一集要么爆长要么只剩两行。
+ */
+export const SCRIPT_CHARS_PER_SECOND = 4.5;
+
+/**
  * 拆集用的技能（唯一来源）。
  *
  * 🔴 只给这一个精确名，不加宽松变体：`pickVideoReverseSkill` 是双向包含匹配（见 `video-reverse.ts`
@@ -54,21 +63,31 @@ export function buildEpisodeTitle(index: number, raw?: string | null): string {
     return `第${Math.max(1, Math.round(index) + 1)}集`;
 }
 
-/** 拆集提示词里那句「一集多少秒」。 */
+/**
+ * 拆集提示词里那句「一集多少秒」。
+ *
+ * 2026-11-18 起「切集」这件事已经不归模型管（本地按字数切），所以这句话只负责**篇幅密度**：
+ * 让它按「N 秒该怎么写」来安排镜头数与台词量，别提「拆成几集」。
+ */
 function episodeSecondsRule(seconds: number): string {
-    return `每集时长 **${seconds} 秒**（这是硬要求：一集的剧本要正好够拍 ${seconds} 秒，镜头数与台词量都按 ${seconds} 秒规划，多一秒少一秒都要重新分配；不要把两集的内容塞进一集，也不要把一集拆成好几集）。`;
+    return `篇幅密度 **${seconds} 秒 / 段**（硬要求：每 ${seconds} 秒的画面与台词大约 ${Math.round(seconds * SCRIPT_CHARS_PER_SECOND)} 字 —— 镜头数、台词量都按这个密度写。不要一段写满五分钟，也不要整篇只有两三句话）。`;
 }
 
 /**
- * 04 的输入要求（拼在提示词里）：只输出 JSON、按集切、保持剧情顺序。
+ * 04 的输入要求（拼在提示词里）。
  *
- * 为什么要**强制 JSON**：解析器要拿它去建 N 个文本节点，一旦模型写成「第一集……\n第二集……」
- * 那种散文，后面就得靠猜边界；JSON 是唯一能确定性对上的形态（解析器仍保留散文兜底，但那是备胎）。
+ * 🔴 2026-11-18 改口径（用户）：「在执行 04 时，需要在对话窗口得到对话回话后，再将输出给到的内容
+ *  按照约束的时长进行分段 复制到新的文本节点里……等 AI 对话给到结果后，再**自行**按照时长进行输出为
+ *  1 个文本节点还是多个文本节点」。
+ *
+ * 所以提示词**不再要 JSON 分集**：模型只负责把原文改写成可直接开拍的剧本正文，切几集由本地
+ * `splitScriptByDuration()` 按字数 / 秒数确定性算出来（模型数不清字数，让它自己切必然忽长忽短）。
+ * 唯一要它配合的是**分场**：场与场之间空行，本地按空行累积到一集就断开，尽量不把一场戏劈成两半。
  */
 export const EPISODE_SPLIT_OUTPUT_RULE =
-    "输出格式（最高优先级硬要求）：**只输出一个 JSON 对象**，不要 Markdown 代码块、不要解释、不要前言后语、不要写任何分析。结构必须是：\n" +
-    '{"episodes":[{"title":"第1集","script":"这一集的剧本正文……"},{"title":"第2集","script":"……"}]}\n' +
-    "约束：① `episodes` 至少 1 项，顺序就是剧情顺序；② `title` 用「第N集」（N 从 1 开始）；③ `script` 是**可以直接开拍的分集剧本正文**（场景 / 镜头 / 画面 / 台词 / 时长），字符串里的换行用 \\n 转义；④ 每集 `script` 的时长必须等于规定的每集时长，全部集数加起来覆盖整份剧本的剧情，不许漏、不许重复、不许改变剧情顺序与人物关系。";
+    "输出格式（最高优先级硬要求）：**只输出剧本正文**——不要 JSON、不要 Markdown 代码块、不要「第1集」这类集号、不要任何解释或前言后语。\n" +
+    "正文必须按**分场**写：每个场景第一行单独一行写「场景：地点 · 时间」，场景与场景之间空一行；场景内部再按「画面 / 台词」分段。\n" +
+    "切集由我在拿到你的正文后按每集时长自动完成，你**不要**自己分集、也不要标注时长。";
 
 /**
  * 拼发给 AI 的那段话（04）。
@@ -82,9 +101,12 @@ export function buildEpisodeSplitPrompt(params: { script: string; episodeSeconds
     const languageRule = String(params.languageRule ?? "").trim();
     const lines: string[] = [];
     if (languageRule) lines.push(languageRule);
-    lines.push(`请用「${skill}」技能，把我下面这份剧本拆成**多集分集剧本**：一集一个 script 字段，集与集之间剧情连续、不重不漏。`);
-    lines.push(`⚠️ 先按技能做「小说 → 剧本分镜」的转换（把叙述文字改写成可直接拍摄的剧本正文：场景、镜头、画面、台词），再把结果**按时间切集**。`);
+    lines.push(`请用「${skill}」技能，把我下面这份剧本改写、续写成**可以直接开拍的连续剧本正文**：把叙述文字改写成剧本正文（场景、镜头、画面、台词），剧情按原文顺序推进，不跳段、不漏内容。`);
     lines.push(episodeSecondsRule(seconds));
+    lines.push(
+        `篇幅控制：这份正文会被我按每集 ${seconds} 秒自动切集，约 **${Math.round(seconds * SCRIPT_CHARS_PER_SECOND)} 字 / 集**。` +
+            `所以每个场景都尽量在 ${seconds} 秒内闭合（约 ${Math.round(seconds * SCRIPT_CHARS_PER_SECOND)} 字），不要写出一个需要几集才演完的超长场景。`,
+    );
     const extra = String(params.requirement ?? "").trim();
     if (extra) lines.push(`特殊要求：${extra}`);
     lines.push(`原文剧本（可能很长，务必全部覆盖，不要只处理开头一段）：\n<<<\n${String(params.script ?? "").trim()}\n>>>`);
@@ -114,23 +136,161 @@ function sliceJson(text: string): string {
 export type EpisodeDraft = { title: string; script: string };
 
 /**
- * 解析拆集结果。
+ * 一段文字大概够演多少秒（`字数 / SCRIPT_CHARS_PER_SECOND`）。
  *
- * 三条路，按可靠性从高到低：
- *  ① **JSON**（首选形态，提示词强制要求）：`{"episodes":[…]}` / 直接数组 / 单对象带 `script`；
- *  ② **分集标记**（`第1集` / `【第一集】` / `## 第 2 集` 这类独占一行的标记）→ 按标记切块；
- *  ③ 都没有 → **整段当一集**（用户只写了短剧本 / 模型没照格式来，至少别把内容弄丢）。
- *
- * 空字符串里的 `script` 会被丢掉（模型有时给个空壳 item）；全部为空 → 返回空数组，由调用方报错。
+ * 汉字按 1 个字算；英文单词按 1.5、数字串按 0.5（念一个单词比念一个字慢，念「120」比念两个汉字快）。
+ * 只是**估算**，用途是「累积到一集就断」，不参与任何精确计算。
  */
-export function parseEpisodeSplitOutput(text: string | null | undefined): EpisodeDraft[] {
-    const body = stripFence(String(text || ""));
+export function estimateScriptSeconds(text: string | null | undefined): number {
+    const body = String(text ?? "");
+    if (!body.trim()) return 0;
+    const cjk = (body.match(/[\u3400-\u4dbf\u4e00-\u9fff]/g) || []).length;
+    const latin = (body.match(/[A-Za-z]+/g) || []).length;
+    const digits = (body.match(/\d+/g) || []).length;
+    const units = cjk + latin * 1.5 + digits * 0.5;
+    return Math.max(0, units / SCRIPT_CHARS_PER_SECOND);
+}
+
+/**
+ * 把模型的回复变成**纯剧本正文**。
+ *
+ * 三种情况都要能吃：
+ *  ① 正常：就是正文（提示词已经不要 JSON）→ 原样返回；
+ *  ② 老口径 / 模型擅自 JSON：`{"episodes":[…]}` → 把各集 `script` 用空行拼回一份连续正文
+ *     （拼完仍会被按时长重新切，模型给的分集边界不作为最终结果）；
+ *  ③ 包了 ``` 代码块 / 前后带一句「好的，以下是…」→ 剥掉围栏，正文原样保留。
+ */
+export function extractScriptText(text: string | null | undefined): string {
+    const body = stripFence(String(text ?? ""));
+    if (!body) return "";
+    const episodes = tryParseJsonEpisodes(body);
+    if (episodes.length) return episodes.map((item) => item.script.trim()).filter(Boolean).join("\n\n");
+    return body;
+}
+
+/**
+ * 按「每集 N 秒」把正文切成 1 个或多个分集剧本（用户 2026-11-18：切几集由我们自己算）。
+ *
+ * 切法（都是**确定性**的，同样的输入永远得到同样的结果，探针能直接测）：
+ *  ① 先按**空行**分块（一份剧本里「场景：…」之间本来就是空行）；整篇没有空行 → 按行分块；
+ *  ② 某一块本身就超过一集的 115% → 按句子（。！？…；）再切小，避免「一句台词劈成两集」；
+ *  ③ 逐块累加：**够一集（≥90%）就断**、加上下一块会超 115% 也断、
+ *     碰到「第N集 / 场景： / 内景 / 外景 / INT. / EXT.」这类行**强制断**（天然剧情断点）；
+ *  ④ 最后一块不足一集的 40%（且不止一块）→ 并进前一块，不留一个两三行的尾巴集。
+ *
+ * 返回的 `title` 默认「第N集」；正文里本来就有「第X集」标记的话，沿用那个编号。
+ */
+export function splitScriptByDuration(text: string | null | undefined, seconds: number | string | null | undefined): EpisodeDraft[] {
+    const target = resolveEpisodeSeconds(seconds);
+    const blocks = expandOversizedBlocks(toBlocks(extractScriptText(text)), target);
+    if (!blocks.length) return [];
+
+    const chunks: string[] = [];
+    let current: string[] = [];
+    let currentSeconds = 0;
+    const flush = () => {
+        const script = current.join("\n\n").trim();
+        if (script) chunks.push(script);
+        current = [];
+        currentSeconds = 0;
+    };
+    for (const block of blocks) {
+        const blockSeconds = estimateScriptSeconds(block);
+        const boundary = SCRIPT_BOUNDARY_LINE.test(block);
+        if (current.length && (boundary || currentSeconds >= target * 0.9 || currentSeconds + blockSeconds > target * 1.15)) flush();
+        current.push(block);
+        currentSeconds += blockSeconds;
+        if (currentSeconds >= target) flush();
+    }
+    flush();
+    if (chunks.length > 1) {
+        const tail = chunks[chunks.length - 1];
+        if (estimateScriptSeconds(tail) < target * 0.4) {
+            chunks[chunks.length - 2] = `${chunks[chunks.length - 2]}\n\n${tail}`;
+            chunks.pop();
+        }
+    }
+    return chunks.map((script, index) => ({ title: buildEpisodeTitle(index, markerTitleOf(script)), script }));
+}
+
+/** 分块：空行优先（一份剧本里场景之间本来就空行），整篇没空行才退回按行。 */
+function toBlocks(text: string): string[] {
+    const body = String(text ?? "").replace(/\r\n/g, "\n").trim();
     if (!body) return [];
-    const parsed = tryParseJsonEpisodes(body);
-    if (parsed.length) return parsed;
-    const marked = splitByEpisodeMarkers(body);
-    if (marked.length) return marked;
-    return [{ title: buildEpisodeTitle(0), script: body }];
+    const byBlank = body.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+    if (byBlank.length > 1) return byBlank;
+    return body.split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+/**
+ * 天然断点：分集标记 / 场景标题。
+ * 命中这些行时**立刻结束上一集**——「第3集」「场景：医院走廊」后面接的必然是新的剧情单元。
+ */
+const SCRIPT_BOUNDARY_LINE =
+    /^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*(?:【|\[)?\s*(?:第\s*[0-9一二三四五六七八九十百]+\s*[集话章回]|场景\s*[:：]|内景|外景|INT\.|EXT\.)/;
+
+/** 句末标点（切超长段落用；不用正则 lookbehind —— 老 Safari 不支持）。 */
+const SENTENCE_END_CHARS = "。！？!?…；;";
+
+function splitSentences(block: string): string[] {
+    const out: string[] = [];
+    let buffer = "";
+    for (const char of block) {
+        buffer += char;
+        if (SENTENCE_END_CHARS.includes(char)) {
+            if (buffer.trim()) out.push(buffer.trim());
+            buffer = "";
+        }
+    }
+    if (buffer.trim()) out.push(buffer.trim());
+    return out;
+}
+
+/** 把远超一集的段落按句子拆小（否则一整章会被塞进一个节点）。 */
+function expandOversizedBlocks(blocks: readonly string[], targetSeconds: number): string[] {
+    const limit = targetSeconds * 1.15;
+    /** 一句都超长（整段没标点）时的最后手段：按字数硬切，单块不超过一集。 */
+    const maxChars = Math.max(1, Math.round(targetSeconds * SCRIPT_CHARS_PER_SECOND));
+    const out: string[] = [];
+    for (const block of blocks) {
+        if (estimateScriptSeconds(block) <= limit) {
+            out.push(block);
+            continue;
+        }
+        let buffer = "";
+        for (const sentence of splitSentences(block)) {
+            const pieces = estimateScriptSeconds(sentence) > limit ? sliceByChars(sentence, maxChars) : [sentence];
+            for (const piece of pieces) {
+                const merged = buffer ? `${buffer}\n${piece}` : piece;
+                if (buffer && estimateScriptSeconds(merged) > limit) {
+                    out.push(buffer);
+                    buffer = piece;
+                    continue;
+                }
+                buffer = merged;
+            }
+        }
+        if (buffer.trim()) out.push(buffer);
+    }
+    return out;
+}
+
+/** 按字数硬切（用 `Array.from` 遍历，避免把 emoji / 生僻字的代理对切成两半）。 */
+function sliceByChars(text: string, maxChars: number): string[] {
+    const chars = Array.from(String(text ?? ""));
+    const out: string[] = [];
+    for (let index = 0; index < chars.length; index += maxChars) {
+        const piece = chars.slice(index, index + maxChars).join("").trim();
+        if (piece) out.push(piece);
+    }
+    return out;
+}
+
+/** 正文开头的「第X集」标记（有就用它当标题，没有退回「第N集」）。 */
+function markerTitleOf(script: string): string {
+    const firstLine = String(script ?? "").split("\n")[0] || "";
+    const match = firstLine.match(/第\s*([0-9一二三四五六七八九十百]+)\s*[集话章回]/);
+    return match ? match[0].replace(/\s+/g, "") : "";
 }
 
 function coerceEpisodeItems(value: unknown): EpisodeDraft[] {
@@ -175,32 +335,6 @@ function tryParseJsonEpisodes(body: string): EpisodeDraft[] {
         }
     }
     return [];
-}
-
-/** 分集标记：独占一行、以「第N集 / 第N话 / 第N章」开头（允许 **粗体** / ## / 【】 包裹）。 */
-const EPISODE_MARKER = /^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*(?:【|\[)?\s*第\s*[0-9一二三四五六七八九十百]+\s*[集话章回]\s*(?:】|\])?\s*(?:\*\*)?\s*[:：]?\s*(.*)$/;
-
-function splitByEpisodeMarkers(body: string): EpisodeDraft[] {
-    const lines = body.split("\n");
-    const blocks: Array<{ title: string; lines: string[] }> = [];
-    for (const line of lines) {
-        const match = line.match(EPISODE_MARKER);
-        if (match) {
-            const title = (match[0].match(/第\s*[0-9一二三四五六七八九十百]+\s*[集话章回]/) || [""])[0].replace(/\s+/g, "");
-            blocks.push({ title: title || buildEpisodeTitle(blocks.length), lines: [] });
-            const rest = (match[1] || "").trim();
-            if (rest) blocks[blocks.length - 1].lines.push(rest);
-            continue;
-        }
-        if (blocks.length) blocks[blocks.length - 1].lines.push(line);
-    }
-    const out: EpisodeDraft[] = [];
-    for (const block of blocks) {
-        const script = block.lines.join("\n").trim();
-        if (!script) continue;
-        out.push({ title: buildEpisodeTitle(out.length, block.title), script });
-    }
-    return out;
 }
 
 /**
