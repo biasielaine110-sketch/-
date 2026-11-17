@@ -245,8 +245,10 @@ import { captureMergeCover, isVideoMergeSourceNode, mediaExtension, mergeClipFil
 import { canRenderMergedVideo, MERGE_RENDER_EMPTY, MERGE_RENDER_UNSUPPORTED, renderMergedVideo, type MergeRenderClip } from "@/lib/canvas/video-merge-render";
 import { BATCH_VIDEO_GENERATE_GAP_MS, buildBatchGeneratePlan, isBatchGeneratableNode, planBatchGenerateSchedule } from "@/lib/canvas/batch-generate";
 import { buildVideoBatchPatch, collectVideoBatchTargets, hasVideoBatchChange, planVideoBatchPatches, unionChoices, type VideoBatchPatchInput } from "@/lib/canvas/video-batch-settings";
+import { buildImageBatchPatch, collectImageBatchTargets, hasImageBatchChange, imageBatchMetadataPatch, type ImageBatchPatchInput } from "@/lib/canvas/image-batch-settings";
 import { videoResolutionChoicesFor, videoSecondsChoicesFor, videoSecondsMaxFor, videoSizeChoicesFor } from "@/components/video-settings-panel";
 import { CanvasVideoBatchDialog } from "@/components/canvas/canvas-video-batch-dialog";
+import { CanvasImageBatchDialog } from "@/components/canvas/canvas-image-batch-dialog";
 import { attachNodesToGroup, collectGroupMembers, isGroupableNode, resolveGroupFrame } from "@/lib/canvas/canvas-grouping";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, canvasNodeImageFromUpload, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findContainingGroupId, findGroupDropTarget, getConnectionTargetAnchor, getGroupMemberNodes, normalizeConnection, resolveConnectionPairs, canConnectNodes, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
@@ -7717,6 +7719,68 @@ function AtelierCanvasPage() {
     }, [contextMenu, nodes, selectedNodeIds]);
 
     // ═════════════════════════════════════════════════════════════════════════════════════
+    // 批量设置图片参数（模型 / 画幅比例 / 分辨率 / 风格）
+    // ═════════════════════════════════════════════════════════════════════════════════════
+    const [imageBatchOpen, setImageBatchOpen] = useState(false);
+    /**
+     * 作用对象：选区里的**图片节点**（正在生成的除外）—— 与视频批量同一条口径。
+     *
+     * 混选是常态（画布上框选一片常混着文本 / 视频），拿选区大小当目标数就会把 `quality` /
+     * `size` 写到别的类型上；`size` 在视频节点上是画面比例、在图片节点上是像素尺寸，含义都不一样。
+     */
+    const imageBatchTargets = useMemo(() => {
+        if (!contextMenu || contextMenu.type !== "node") return { ids: [] as string[], skippedGenerating: 0 };
+        return collectImageBatchTargets(nodes, Array.from(selectedNodeIds), { isGenerating: isNodeGenerating });
+    }, [contextMenu, isNodeGenerating, nodes, selectedNodeIds]);
+    /**
+     * 打开弹窗时**冻结**一份目标列表（与 h3 优化 / 视频批量同一条坑）。
+     * 点菜单项会先开弹窗、再 `setContextMenu(null)`，而 `imageBatchTargets` 以 contextMenu 为前提，
+     * 菜单一关就变空数组 → 弹窗显示「0 个」、点应用一个都不改。
+     */
+    const [imageBatchSnapshot, setImageBatchSnapshot] = useState<{ ids: string[]; skippedGenerating: number }>({ ids: [], skippedGenerating: 0 });
+    const openImageBatch = useCallback(() => {
+        setImageBatchSnapshot(imageBatchTargets);
+        setImageBatchOpen(true);
+    }, [imageBatchTargets]);
+
+    /** 图片模型下拉：与节点工具栏同一个模型目录（渠道名带在 label 里，才知道要改哪条渠道）。 */
+    const imageBatchModelOptions = useMemo(
+        () => selectableModelsByCapability(effectiveConfig, "image").map((value) => ({ value, label: modelOptionLabel(effectiveConfig, value) })),
+        [effectiveConfig],
+    );
+
+    /**
+     * 落盘：只写用户真改过的字段（空串一律不写，见 `buildImageBatchPatch`）。
+     *
+     * 🔴 与视频批量不同，这里**没有**「按模型族筛档位」那一步：图片节点的设置面板本身不随模型换档
+     * （`ImageSettingsPanel` 的画幅 / 分辨率是固定表，muse 也只是多一行提示语）。批量里再按模型筛一遍，
+     * 就会出现「面板里能选、批量里选不到」的分裂。
+     *
+     * 风格走 `imageBatchMetadataPatch`：它的「清空」翻译成 `styleTemplateId: undefined`，
+     * 与节点面板里点「清除」写出来的是同一个状态。
+     */
+    const handleImageBatchApply = useCallback(
+        (input: ImageBatchPatchInput) => {
+            const patch = buildImageBatchPatch(input);
+            if (!hasImageBatchChange(patch)) {
+                message.warning(t("canvas.imageBatch.needOne"));
+                return;
+            }
+            const metadata = imageBatchMetadataPatch(patch);
+            // 用快照里的 id 而不是闭包 nodes：弹窗开着的时候后台可能刚跑完一两个节点。
+            let applied = 0;
+            for (const id of imageBatchSnapshot.ids) {
+                handleConfigNodeChange(id, metadata);
+                applied += 1;
+            }
+            setImageBatchOpen(false);
+            if (applied) message.success(t("canvas.imageBatch.applied", { count: applied }));
+            if (imageBatchSnapshot.skippedGenerating > 0) message.info(t("canvas.imageBatch.skipped", { count: imageBatchSnapshot.skippedGenerating }));
+        },
+        [handleConfigNodeChange, imageBatchSnapshot.ids, imageBatchSnapshot.skippedGenerating, message, t],
+    );
+
+    // ═════════════════════════════════════════════════════════════════════════════════════
     // 批量设置视频参数（模型 / 分辨率 / 比例）
     // ═════════════════════════════════════════════════════════════════════════════════════
     const [videoBatchOpen, setVideoBatchOpen] = useState(false);
@@ -12121,6 +12185,8 @@ function AtelierCanvasPage() {
                         onGroupSelected={() => handleGroupSelected(groupableNodeIds)}
                         h3OptimizeCount={h3OptimizeTargets.length}
                         onH3OptimizeSelected={openH3Optimize}
+                        imageBatchCount={imageBatchTargets.ids.length}
+                        onImageBatchSettings={openImageBatch}
                         videoBatchCount={videoBatchTargets.ids.length}
                         onVideoBatchSettings={openVideoBatch}
                         replacePrimaryCount={replacePrimaryCandidates.length}
@@ -12147,6 +12213,12 @@ function AtelierCanvasPage() {
                 ) : null}
 
                 {h3OptimizeOpen ? <CanvasH3OptimizeDialog open targets={h3OptimizeSnapshot} config={h3OptimizeConfig} onStart={runH3OptimizeBatch} onClose={() => setH3OptimizeOpen(false)} /> : null}
+
+                {/* 右键「批量设置图片参数」：只在打开时渲染。档位与节点自己的设置面板同一份来源，
+                    弹窗里的「不变」= 空串 = 不写该字段。 */}
+                {imageBatchOpen ? (
+                    <CanvasImageBatchDialog open count={imageBatchSnapshot.ids.length} modelOptions={imageBatchModelOptions} onClose={() => setImageBatchOpen(false)} onApply={handleImageBatchApply} />
+                ) : null}
 
                 {/* 右键「批量设置视频参数」：只在打开时渲染。没选模型时档位按选区各节点自己的模型族取并集；
                     选了模型就换成那个模型的档位规则（用户 2026-11-13 第 2 条）。 */}

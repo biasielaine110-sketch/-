@@ -1,6 +1,6 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Replace, Scissors, Settings2, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
+import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Replace, Scissors, Settings2, SlidersHorizontal, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useOrderDrag } from "@/hooks/use-order-drag";
@@ -59,6 +59,9 @@ export function CanvasNodeContextMenu({
     onGroupSelected,
     h3OptimizeCount = 0,
     onH3OptimizeSelected,
+    /** 选区里可批量改图片参数的节点数（图片节点、且不在生成中）。>=2 才在菜单顶部出现。 */
+    imageBatchCount = 0,
+    onImageBatchSettings,
     videoBatchCount = 0,
     onVideoBatchSettings,
     /** 图片节点上连着的链接图数量。>=1 才出现「替换首图」。 */
@@ -99,6 +102,9 @@ export function CanvasNodeContextMenu({
     /** 选区里可批量改视频参数的节点数（视频节点、且不在生成中）。>=2 才在菜单顶部出现。 */
     videoBatchCount?: number;
     onVideoBatchSettings?: () => void;
+    /** 选区里可批量改图片参数的节点数（图片节点、且不在生成中）。>=2 才在菜单顶部出现。 */
+    imageBatchCount?: number;
+    onImageBatchSettings?: () => void;
     /** 图片节点连着的链接图数量（图片 / 标注源）。>=1 才显示「替换首图」。 */
     replacePrimaryCount?: number;
     onReplacePrimaryImage?: () => void;
@@ -120,9 +126,12 @@ export function CanvasNodeContextMenu({
     const showGroup = menu.type === "node" && Boolean(node) && groupCount > 1 && Boolean(onGroupSelected);
     // h3 提示词优化作用在**选区**上（点一次逐个转格式），所以哪怕只选了 1 个也出现。
     const showH3Optimize = menu.type === "node" && Boolean(node) && h3OptimizeCount > 0 && Boolean(onH3OptimizeSelected);
+    // 批量改图片参数作用在选区里的**图片节点**上：>=2 才叫批量（1 个直接用节点自己的设置面板）。
+    // 与视频批量同一条门槛：只认目标类型、跳过生成中的节点，数字由调用方算好传进来。
+    const showImageBatch = menu.type === "node" && Boolean(node) && imageBatchCount > 1 && Boolean(onImageBatchSettings);
     // 批量改视频参数作用在选区里的**视频节点**上：>=2 才叫批量（1 个直接用节点自己的设置面板）。
     const showVideoBatch = menu.type === "node" && Boolean(node) && videoBatchCount > 1 && Boolean(onVideoBatchSettings);
-    const showSelectionActions = showBatchGenerate || showGroup || showH3Optimize || showVideoBatch;
+    const showSelectionActions = showBatchGenerate || showGroup || showH3Optimize || showImageBatch || showVideoBatch;
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -337,6 +346,19 @@ export function CanvasNodeContextMenu({
                             onClick={() => {
                                 onBeforeAction?.();
                                 onBatchGenerate?.();
+                                onClose();
+                            }}
+                        />
+                    ) : null}
+                    {/* 批量设置图片参数：只对选区里的图片节点生效（弹窗里可一次改模型 / 画幅 / 分辨率 / 风格）。
+                        放在「一键生成」之后、视频批量之前 —— 图片 / 视频两块参数各归各的，按生成类型贴近排。 */}
+                    {showImageBatch ? (
+                        <MenuButton
+                            icon={<SlidersHorizontal className="size-4" />}
+                            label={t("canvas.contextMenu.imageBatch", { count: imageBatchCount })}
+                            onClick={() => {
+                                onBeforeAction?.();
+                                onImageBatchSettings?.();
                                 onClose();
                             }}
                         />
