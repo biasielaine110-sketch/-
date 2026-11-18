@@ -883,6 +883,18 @@ export default {
             directAssetEmpty: "分镜表里还没有可生成的资产（角色 / 场景 / 道具至少要有内容）",
             directAssetLockedSkip: "已锁定 {{count}} 条资产图，本次跳过生成（直接用锁定的图）",
             directAssetAllShared: "这张表里的 {{count}} 个资产都已有图（含从别的脚本共用过来的），没有需要新生成的",
+            /**
+             * 「一键生图 / 一键铺视频链路并生成」的暂停口径（用户 2026-11-18：
+             * 「点击后再次点击可以暂停，点击后，即暂停后续的操作」）。
+             * 注意措辞：**已经发出去的请求不会 abort**，停的是「后面的那一批 / 那几段」，
+             * 所以文案写「不再发起」，不写「已取消」——否则用户会以为画布上那张也在跑是 bug。
+             */
+            taskPause: "暂停",
+            taskPaused: "已暂停",
+            taskPausing: "正在暂停…",
+            taskPauseHint: "再点一次 = 暂停：后面还没发出去的图 / 视频不再发起（已经在跑的那几条会照常出完）",
+            taskPausedHint: "已暂停，后续没有继续发起。再点一次可以重新开始",
+            taskStopping: "上一趟还在收尾（最多十几秒），等它停下来再点",
             viewTemplateMissing: "词库里没找到「{{names}}」——这批图不会套视图版式。判据是标题同时含「角色视图 / 角色三视图」+「无头」（场景是「场景视图」+「宫格」），且条目没被关掉；改好标题后再点一次即可",
             oneClickVideo: "一键视频",
             oneClickVideoHint:
@@ -891,6 +903,8 @@ export default {
             oneClickStageImage: "生成图片…",
             oneClickStagePipeline: "铺视频链路…",
             oneClickPaused: "已暂停",
+            oneClickPausing: "正在暂停…",
+            oneClickUserPaused: "已按你的要求暂停：后续的分镜 / 生图 / 视频都没有再发起",
             oneClickDone: "一键视频完成：分镜表 → 资产图 → 视频链路都已铺好并开始生成",
             oneClickBusy: "这一步还在生成中，等它结束再点一键视频",
             oneClickStopped: "已停止：后续流程没有执行",

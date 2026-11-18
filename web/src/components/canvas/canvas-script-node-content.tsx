@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragE
 import { createPortal } from "react-dom";
 import { App, InputNumber, Modal } from "antd";
 import copy from "copy-to-clipboard";
-import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CopyPlus, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Layers, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, PencilLine, Play, Plus, Ratio, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpRight, AlignJustify, Combine, Copy, CopyPlus, CornerDownRight, FileText, GripVertical, Image as ImageIcon, Layers, Loader2, Lock, Maximize2, Minus, Minimize2, Music2, Pause, PencilLine, Play, Plus, Ratio, RotateCcw, ScrollText, Sparkles, Square, Table2, Trash2, Unlock, User, Video, Wand2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -97,6 +97,11 @@ import { planScriptVoiceAlignment, shouldApplyScriptVoiceAlignment } from "@/lib
 import { buildScriptAssetBatchItems, isScriptAssetDirectRole, mergeScriptAssetBatchLockedIds, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import type { ScriptAssetInheritOptions, ScriptAssetInheritSource } from "@/lib/canvas/script-asset-inherit";
 import type { OneClickVideoRun } from "@/lib/canvas/one-click-video";
+/**
+ * 「一键生图 / 一键铺视频链路并生成」的运行态 + 暂停（用户 2026-11-18）：
+ * 按钮运行中**不再 disabled**，再点一次就是「暂停后续操作」。
+ */
+import type { ScriptTaskKind, ScriptTaskRun } from "@/lib/canvas/script-task-run";
 // 铺链路「逐个点生成」的间隔：提示文案必须读同一个常量，否则改了节奏文案还是旧数字。
 import { SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
@@ -261,6 +266,13 @@ type CanvasScriptNodeContentProps = {
      */
     oneClickVideo?: OneClickVideoRun;
     onOneClickVideo?: (nodeId: string) => void;
+    /**
+     * 「一键生图」/「一键铺视频链路并生成」的运行态（用户 2026-11-18）：
+     * 运行中再点一次那两颗按钮 = 暂停后续操作（`onPauseScriptTask`）。
+     */
+    imageTaskRun?: ScriptTaskRun;
+    videoTaskRun?: ScriptTaskRun;
+    onPauseScriptTask?: (nodeId: string, kind: ScriptTaskKind) => void;
     onInsertPrompt?: (nodeId: string, text: string, title: string) => void;
     /** 「试一试」快捷动作：建上游节点并连边。 */
     onScriptAction?: (nodeId: string, action: ScriptGenAction) => void;
@@ -420,6 +432,9 @@ export function CanvasScriptNodeContent({
     onStop,
     oneClickVideo,
     onOneClickVideo,
+    imageTaskRun,
+    videoTaskRun,
+    onPauseScriptTask,
     onInsertPrompt,
     onScriptAction,
     assetCandidates,
@@ -779,6 +794,21 @@ export function CanvasScriptNodeContent({
         : oneClickVideo?.status === "paused"
           ? t("canvas.scriptNode.oneClickPaused")
           : t("canvas.scriptNode.oneClickVideo");
+    /**
+     * 「一键生图 / 一键铺视频链路并生成」三态（用户 2026-11-18：**再点一次 = 暂停**）。
+     *
+     * 🔴 运行中**不能 disabled** —— 以前 disabled 就是「点了没反应」的根因：
+     * 用户想停只能去画布上逐张点停止。现在运行中可点，点了交给 `onPauseScriptTask` 打暂停令牌，
+     * 上层循环读到就**不再发下一张图 / 下一段视频、也不再重试**。
+     */
+    const imageTaskRunning = imageTaskRun?.status === "running";
+    const imageTaskPaused = imageTaskRun?.status === "paused";
+    const imageTaskLabel = imageTaskRunning ? t("canvas.scriptNode.taskPause") : imageTaskPaused ? t("canvas.scriptNode.taskPaused") : t("canvas.scriptNode.directAsset");
+    const videoTaskRunning = videoTaskRun?.status === "running";
+    const videoTaskPaused = videoTaskRun?.status === "paused";
+    const videoTaskLabel = videoTaskRunning ? t("canvas.scriptNode.taskPause") : videoTaskPaused ? t("canvas.scriptNode.taskPaused") : t("canvas.scriptNode.pipelineVideoGenerate");
+    /** 运行 / 暂停两态的公共描边色：红色 = 「这条自动化停下了 / 再点就停」，与「一键视频」暂停态一致。 */
+    const taskTone = (running: boolean, paused: boolean) => (running ? theme.toolbar.activeText : paused ? "#dc2626" : theme.toolbar.activeText);
     /**
      * 源内容里认到的「逐镜模版」块数（`- **首帧图片提示词**：…` 那种）。
      * >0 就说明「分镜提示词 / 视频运动提示词 / 风格提示词」会按模版原文填进去。
@@ -1846,13 +1876,18 @@ export function CanvasScriptNodeContent({
                             color: oneClickVideo?.status === "paused" ? "#dc2626" : theme.node.text,
                             background: withAlpha(theme.toolbar.panel, 0.8),
                         }}
-                        disabled={oneClickRunning || !canGenerate}
+                        /**
+                         * 🔴 运行中**不再 disabled**（用户 2026-11-18：「点击后再次点击可以暂停」）。
+                         * `canGenerate` 里含 `!isRunning`，分镜阶段它一定是 false —— 照旧 disabled 的话，
+                         * 恰恰是最该暂停的那一段点不动。所以运行中一律可点。
+                         */
+                        disabled={!oneClickRunning && !canGenerate}
                         onClick={(event) => {
                             event.stopPropagation();
                             onOneClickVideo(node.id);
                         }}
                         // 暂停原因写在 title 上：按钮太小放不下一整句，但用户能悬停看到「为什么停在这」。
-                        title={oneClickVideo?.message || t("canvas.scriptNode.oneClickVideoHint")}
+                        title={oneClickRunning ? t("canvas.scriptNode.taskPauseHint") : oneClickVideo?.message || t("canvas.scriptNode.oneClickVideoHint")}
                     >
                         {oneClickRunning ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
                         {oneClickLabel}
@@ -2770,21 +2805,32 @@ export function CanvasScriptNodeContent({
      * 「表里铺 4 镜、缩放态铺 3 镜」这种不一致（`tableDisplayControl` 也是这么抽的）。
      */
     const directAssetButton =
-        onDirectGenerateAssets && directAssetItems.length ? (
+        onDirectGenerateAssets && (directAssetItems.length || imageTaskRun) ? (
             <button
                 type="button"
                 className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-                style={{ borderColor: theme.toolbar.activeText, color: theme.toolbar.activeText, background: `${theme.toolbar.activeText}14` }}
+                style={{ borderColor: taskTone(imageTaskRunning, imageTaskPaused), color: taskTone(imageTaskRunning, imageTaskPaused), background: `${theme.toolbar.activeText}14` }}
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
                     event.stopPropagation();
+                    // 再点一次 = 暂停后续（用户 2026-11-18）；已暂停时点 = 重新开始。
+                    if (imageTaskRunning) {
+                        onPauseScriptTask?.(node.id, "image");
+                        return;
+                    }
                     onDirectGenerateAssets(node.id);
                 }}
-                title={t("canvas.scriptNode.directAssetHint", { count: directAssetItems.length })}
+                title={
+                    imageTaskRunning
+                        ? t("canvas.scriptNode.taskPauseHint")
+                        : imageTaskPaused
+                          ? imageTaskRun?.message || t("canvas.scriptNode.taskPausedHint")
+                          : t("canvas.scriptNode.directAssetHint", { count: directAssetItems.length })
+                }
             >
-                <ImageIcon className="size-3.5" />
-                {t("canvas.scriptNode.directAsset")}
+                {imageTaskRunning ? <Loader2 className="size-3.5 animate-spin" /> : imageTaskPaused ? <Pause className="size-3.5" /> : <ImageIcon className="size-3.5" />}
+                {imageTaskLabel}
             </button>
         ) : null;
 
@@ -2813,21 +2859,32 @@ export function CanvasScriptNodeContent({
         <button
             type="button"
             className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 transition hover:opacity-100"
-            style={{ borderColor: theme.toolbar.activeText, color: theme.node.text, opacity: 0.9 }}
+            style={{ borderColor: taskTone(videoTaskRunning, videoTaskPaused), color: videoTaskPaused ? "#dc2626" : theme.node.text, opacity: 0.9 }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
                 event.stopPropagation();
+                // 再点一次 = 暂停后续（用户 2026-11-18）：不再点下一段视频、也不再换模型重试。
+                if (videoTaskRunning) {
+                    onPauseScriptTask?.(node.id, "video");
+                    return;
+                }
                 onBuildPipeline(node.id, selectedRows.size ? Array.from(selectedRows).sort((a, b) => a - b) : undefined, {
                     videoOnly: true,
                     group: true,
                     autoGenerate: true,
                 });
             }}
-            title={t("canvas.scriptNode.pipelineVideoGenerateTip", { seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000 })}
+            title={
+                videoTaskRunning
+                    ? t("canvas.scriptNode.taskPauseHint")
+                    : videoTaskPaused
+                      ? videoTaskRun?.message || t("canvas.scriptNode.taskPausedHint")
+                      : t("canvas.scriptNode.pipelineVideoGenerateTip", { seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000 })
+            }
         >
-            <Play className="size-3.5" />
-            {t("canvas.scriptNode.pipelineVideoGenerate")}
+            {videoTaskRunning ? <Loader2 className="size-3.5 animate-spin" /> : videoTaskPaused ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
+            {videoTaskLabel}
         </button>
     ) : null;
 

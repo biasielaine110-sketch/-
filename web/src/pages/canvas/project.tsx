@@ -222,6 +222,18 @@ import {
     withDeadline,
     type OneClickVideoRun,
 } from "@/lib/canvas/one-click-video";
+/**
+ * 三颗按钮的「再点一次 = 暂停」口径（用户 2026-11-18）见模块头注释：
+ * 令牌按 `nodeId::kind` 分槽 —— 一键视频内部自己会去调一键生图 / 铺链路，共用一个槽会互相掐。
+ */
+import {
+    clearScriptTaskPause,
+    isScriptTaskPauseRequested,
+    requestScriptTaskPause,
+    scriptTaskKey,
+    type ScriptTaskKind,
+    type ScriptTaskRun,
+} from "@/lib/canvas/script-task-run";
 import { extractPromptFromReply, type ChatSendOptions } from "@/lib/canvas/canvas-chat-helpers";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { buildJianyingBundle, secondsToMicro, type JianyingDraftClip } from "@/lib/canvas/jianying-draft";
@@ -9572,6 +9584,88 @@ function AtelierCanvasPage() {
     );
 
     /**
+     * 「一键生图 / 一键生视频」的运行态（用户 2026-11-18）：
+     *
+     * 这两颗按钮以前是「点一下开始、跑起来就 disabled」，用户想停只能去画布上逐张点停止。
+     * 现在改成 toggle：**运行中再点一次 = 请求暂停**，后续的图 / 视频 / 重试一律不再发起。
+     *
+     * 键是 `scriptTaskKey(nodeId, kind)`（`nodeId::image` / `nodeId::video`），**刻意按 kind 分槽**：
+     * 「一键视频」内部自己也会调这两个函数，共用一个槽会让两条流程互相掐死。
+     * 暂停令牌本身在 `script-task-run.ts` 的模块级 Set 里（同步可见，见那个文件头注释），
+     * 这份 state 只负责「按钮上显示什么」。
+     */
+    const [scriptTaskRuns, setScriptTaskRuns] = useState<Record<string, ScriptTaskRun>>({});
+    const scriptTaskRunsRef = useRef<Record<string, ScriptTaskRun>>({});
+    /** 正在跑的那几颗按钮的键（同步）：用来判定「这一下点击是开始还是暂停」。 */
+    const scriptTaskRunningRef = useRef<Set<string>>(new Set());
+
+    /** 写运行态；`run = null` 表示这一趟结束（按钮回到默认文案）。 */
+    const patchScriptTaskRun = useCallback((nodeId: string, kind: ScriptTaskKind, run: ScriptTaskRun | null) => {
+        const key = scriptTaskKey(nodeId, kind);
+        if (run) {
+            scriptTaskRunsRef.current = { ...scriptTaskRunsRef.current, [key]: run };
+            setScriptTaskRuns((prev) => ({ ...prev, [key]: run }));
+            return;
+        }
+        const next = { ...scriptTaskRunsRef.current };
+        delete next[key];
+        scriptTaskRunsRef.current = next;
+        setScriptTaskRuns((prev) => {
+            if (!(key in prev)) return prev;
+            const copy = { ...prev };
+            delete copy[key];
+            return copy;
+        });
+    }, []);
+
+    /** 这一趟开跑：清掉上一次的暂停令牌 + 记 running。返回「要不要真的开跑」（已在跑就返回 false）。 */
+    const beginScriptTask = useCallback(
+        (nodeId: string, kind: ScriptTaskKind): boolean => {
+            const key = scriptTaskKey(nodeId, kind);
+            if (scriptTaskRunningRef.current.has(key)) return false;
+            clearScriptTaskPause(nodeId, kind);
+            scriptTaskRunningRef.current.add(key);
+            patchScriptTaskRun(nodeId, kind, { status: "running" });
+            return true;
+        },
+        [patchScriptTaskRun],
+    );
+
+    /**
+     * 这一趟收尾。`paused` = 是「用户点暂停 / 中途被判暂停」结束的 → 保留「已暂停」让用户看得见；
+     * 正常跑完 → 把运行态删掉，按钮回到默认文案（下一步可以直接再点一次）。
+     */
+    const finishScriptTask = useCallback(
+        (nodeId: string, kind: ScriptTaskKind, paused: boolean, message?: string) => {
+            const key = scriptTaskKey(nodeId, kind);
+            scriptTaskRunningRef.current.delete(key);
+            clearScriptTaskPause(nodeId, kind);
+            patchScriptTaskRun(nodeId, kind, paused ? { status: "paused", message } : null);
+        },
+        [patchScriptTaskRun],
+    );
+
+    /**
+     * 节点 UI 上「再点一次」的入口：把暂停令牌打进这一趟正在跑的循环里。
+     *
+     * 这里**不直接 stop 请求**：生图 / 视频都是「点出去就不再管」的 fire-and-forget，
+     * 强行 abort 会让节点留下「已取消」的空壳，用户还得自己删。让在跑的那几张自己落定、
+     * 只把**后续**掐掉，更符合用户那句「即暂停后续的操作」。
+     * 唯一的例外是分镜表（文本请求，一次几十秒）：它在 `handleOneClickVideo` 里有现成的 abort，
+     * 那一层自己会停。
+     */
+    const handlePauseScriptTask = useCallback(
+        (nodeId: string, kind: ScriptTaskKind) => {
+            const key = scriptTaskKey(nodeId, kind);
+            if (!scriptTaskRunningRef.current.has(key)) return;
+            if (isScriptTaskPauseRequested(nodeId, kind)) return;
+            requestScriptTaskPause(nodeId, kind);
+            patchScriptTaskRun(nodeId, kind, { status: "paused", message: t("canvas.scriptNode.taskPausing") });
+        },
+        [patchScriptTaskRun, t],
+    );
+
+    /**
      * 一键批量生成资产图：把弹窗里勾好的角色 / 场景 / 道具一次铺成图片节点，再逐张触发生图。
      *
      * 只有四点和单张不同，且都用 `lib/canvas/script-asset-batch.ts` 的口径，别在组件里另算：
@@ -9729,9 +9823,22 @@ function AtelierCanvasPage() {
          * @param options.skipAssetKeys 这一批**不要生成**的资产键（`分类:标题`）。给「一键视频」用：
          *                    反推节点上连进来的产品参考图已经直接挂到道具格了（见 `matchScriptAssetReferences`），
          *                    再生成一张同名道具图就是白花钱、而且会和真产品图抢资产锁。
+         * @param options.shouldStop 用户点了「暂停」（2026-11-18）→ 返回 true 就**不再发下一批**。
+         *                    不传 = 读本节点 `image` 槽的暂停令牌（手动点「一键生图」走这条）。
+         *                    「一键视频」传自己的 `oneClick` 槽，两条流程互不干扰。
+         * @param options.trackRun 要不要在脚本节点按钮上显示运行态。手动点「一键生图」= true；
+         *                    「一键视频」/ 04 内部调用 = false（那颗按钮的状态由 `oneClickVideoRuns` 承载）。
          * @returns 本批新建的图片节点。**同步返回**（生成在后台跑），「一键视频」据此等结果 / 挑失败的重试。
          */
-        (nodeId: string, options?: { model?: string; skipAssetKeys?: readonly string[] }): { created: CanvasNodeData[] } => {
+        (nodeId: string, options?: { model?: string; skipAssetKeys?: readonly string[]; shouldStop?: () => boolean; trackRun?: boolean }): { created: CanvasNodeData[] } => {
+            const tracked = options?.trackRun !== false;
+            const shouldStop = options?.shouldStop || (() => isScriptTaskPauseRequested(nodeId, "image"));
+            if (tracked && !beginScriptTask(nodeId, "image")) {
+                // 上一次那一趟还在收尾（最多几秒）：别并发再起一批，也别假装开始了。
+                message.info(t("canvas.scriptNode.taskStopping"));
+                return { created: [] };
+            }
+
             /**
              * ⚠️ **先把该共用的资产补上**（用户 2026-11-18 第 01 条）：04 拆出来的两集各自手点
              * 「一键生图」时，第二集必须先拿到第一集已有的**同名资产锁**，否则它会自己再生成一套 ——
@@ -9748,8 +9855,10 @@ function AtelierCanvasPage() {
             // 音色同理：台词对上「张曼」的那几镜要先把音轨挂进声音列，铺链路才连得到这一段配音。
             alignScriptVoicesByConnections(nodeId);
             const source = nodesRef.current.find((item) => item.id === nodeId);
-            if (!source) return { created: [] };
-            /**
+            if (!source) {
+                if (tracked) finishScriptTask(nodeId, "image", false);
+                return { created: [] };
+            }            /**
              * 跳过表 = 本次调用方点名的键 ∪ **节点上落库的「参考图已挂载」键**。
              *
              * 后者是 2026-11-09 报障的修法：用户把产品图连到反推节点、一键视频挂上了、道具也不再单独生图，
@@ -9790,6 +9899,7 @@ function AtelierCanvasPage() {
             if (!wanted.length) {
                 if (lockedCount) message.success(t("canvas.scriptNode.directAssetAllShared", { count: lockedCount }));
                 else message.warning(t("canvas.scriptNode.directAssetEmpty"));
+                if (tracked) finishScriptTask(nodeId, "image", false);
                 return { created: [] };
             }
             if (lockedCount) message.info(t("canvas.scriptNode.directAssetLockedSkip", { count: lockedCount }));
@@ -9819,6 +9929,7 @@ function AtelierCanvasPage() {
             const slots = layout.slots;
             if (!slots.length) {
                 message.warning(t("canvas.scriptNode.batchAssetNoRoom"));
+                if (tracked) finishScriptTask(nodeId, "image", false);
                 return { created: [] };
             }
             const created = planned.slice(0, slots.length).map((cell, index) => {
@@ -9876,22 +9987,41 @@ function AtelierCanvasPage() {
             if (created.length < wanted.length) message.info(t("canvas.scriptNode.batchAssetSkipped", { count: wanted.length - created.length }));
 
             void (async () => {
-                for (let index = 0; index < created.length; index += SCRIPT_ASSET_LAUNCH_BATCH) {
-                    const chunk = created.slice(index, index + SCRIPT_ASSET_LAUNCH_BATCH);
-                    await Promise.all(
-                        chunk.map((node, offset) => {
-                            const prompt = planned[index + offset].item.prompt;
-                            // 生图会把标题改写成「提示词前 32 字」，资产节点要留住资产名，生成结束后改回来。
-                            return Promise.resolve(generateNodeRef.current?.(node.id, "image", prompt)).finally(() => {
-                                setNodes((prev) => prev.map((item) => (item.id === node.id && item.title !== node.title ? { ...item, title: node.title } : item)));
-                            });
-                        }),
-                    );
+                /**
+                 * 用户点了「暂停」（2026-11-18）→ **不再发下一批**。已经点出去的这几张不 abort
+                 * （钱已经付了，强行取消只会在画布上留一堆「已取消」的空图），让它们自己落定。
+                 */
+                let paused = false;
+                try {
+                    for (let index = 0; index < created.length; index += SCRIPT_ASSET_LAUNCH_BATCH) {
+                        if (shouldStop()) {
+                            paused = true;
+                            break;
+                        }
+                        const chunk = created.slice(index, index + SCRIPT_ASSET_LAUNCH_BATCH);
+                        await Promise.all(
+                            chunk.map((node, offset) => {
+                                const prompt = planned[index + offset].item.prompt;
+                                // 生图会把标题改写成「提示词前 32 字」，资产节点要留住资产名，生成结束后改回来。
+                                return Promise.resolve(generateNodeRef.current?.(node.id, "image", prompt)).finally(() => {
+                                    setNodes((prev) => prev.map((item) => (item.id === node.id && item.title !== node.title ? { ...item, title: node.title } : item)));
+                                });
+                            }),
+                        );
+                    }
+                    // 最后一批跑完时用户才点的暂停：也算暂停（剩下的没发了）。
+                    if (!paused && shouldStop()) paused = true;
+                } finally {
+                    /**
+                     * ⚠️ 必须放 `finally`：运行态一旦卡在 running，那颗按钮就永远显示「暂停」，
+                     * 用户再也点不回「一键生图」（这是「点了没反应」最难查的一种）。
+                     */
+                    if (tracked) finishScriptTask(nodeId, "image", paused, paused ? t("canvas.scriptNode.taskPaused") : undefined);
                 }
             })();
             return { created };
         },
-        [alignScriptAssetsByConnections, alignScriptVoicesByConnections, effectiveConfig.quality, effectiveConfig.textPrompts, inheritSharedScriptAssets, message, revealNodes, t],
+        [alignScriptAssetsByConnections, alignScriptVoicesByConnections, beginScriptTask, effectiveConfig.quality, effectiveConfig.textPrompts, finishScriptTask, inheritSharedScriptAssets, message, revealNodes, t],
     );
 
     // ---- 逐镜「镜头图」（metadata.scriptRowAssets）----
@@ -10351,8 +10481,13 @@ function AtelierCanvasPage() {
          *                   只给「一键铺视频链路」用（用户 2026-11-09 第 02 条：固定每 4 镜合并为 1 镜）。
          * @param options.onVideoPause 某段视频「换模型再生成一次」仍失败 → 判定暂停时回调（带原因文案）。
          *                   只给「一键视频」用：那条流程要把暂停原因写到脚本节点的运行态上。
+         * @param options.shouldStop 用户点了「暂停」（2026-11-18）→ 返回 true 就**不再点下一段**。
+         *                   不传 = 读本节点 `video` 槽的暂停令牌（手动点「一键铺视频链路并生成」走这条）。
+         *                   「一键视频」传自己的 `oneClick` 槽，两条流程互不干扰。
+         * @param options.trackRun 要不要在脚本节点按钮上显示运行态。手动点按钮 / 04 = true（默认）；
+         *                   「一键视频」= false（那颗按钮的状态由 `oneClickVideoRuns` 承载）。
          */
-        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean; skipConfirm?: boolean; mergeEvery?: number; onVideoPause?: (message: string) => void }) => {
+        (nodeId: string, rowIndexes?: number[], options?: { videoOnly?: boolean; group?: boolean; autoGenerate?: boolean; skipConfirm?: boolean; mergeEvery?: number; onVideoPause?: (message: string) => void; shouldStop?: () => boolean; trackRun?: boolean }) => {
             const videoOnly = Boolean(options?.videoOnly);
             const groupVideos = Boolean(options?.group);
             const autoGenerate = Boolean(options?.autoGenerate);
@@ -10371,6 +10506,15 @@ function AtelierCanvasPage() {
             alignScriptVoicesByConnections(nodeId);
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
+            /**
+             * 「再点一次 = 暂停」（用户 2026-11-18）。
+             *  - `shouldStop`：循环 / 重试前的唯一判据。手动点按钮读本节点 `video` 槽；
+             *    「一键视频」传自己的 `oneClick` 槽（两条流程互不干扰，见 `script-task-run.ts`）。
+             *  - `trackPipelineRun`：只有**真的会自动点生成**才在按钮上显示运行态；
+             *    「只铺链路 / 只铺视频」不生成任何东西，一闪而过的 running 只会让用户以为能暂停。
+             */
+            const shouldStop = options?.shouldStop || (() => isScriptTaskPauseRequested(nodeId, "video"));
+            const trackPipelineRun = Boolean(options?.autoGenerate) && options?.trackRun !== false;
             const mergeEvery = resolveScriptPipelineMergeEvery(source.metadata, options?.mergeEvery);
             /**
              * 调用方**显式**要求「每 N 镜一段」= 点的是「一键铺视频链路」那颗按钮。
@@ -10973,9 +11117,13 @@ function AtelierCanvasPage() {
                                 message.error(detail);
                                 options?.onVideoPause?.(detail);
                             };
+                            /** 用户主动暂停 + 失败判停，统一一个判据（循环里两处判定都读它）。 */
+                            const stopNow = () => pipelinePaused || shouldStop();
                             const superviseVideo = async (target: { nodeId: string; prompt: string; index: number }) => {
                                 await fireVideoGenerate(target);
                                 if (readScriptPipelineVideoOutcome(videoNodeOf(target.nodeId)) !== "error") return;
+                                // 用户已经点暂停 → 不再换模型重打一发（重试也是钱）。
+                                if (stopNow()) return;
                                 const failedModel = String(videoNodeOf(target.nodeId)?.metadata?.model || "");
                                 const retryModel = resolveScriptPipelineRetryModel({ preferred: preferredVideoModel, settingsSelected: settingsVideoModel, failed: failedModel });
                                 const triedLabels = [failedModel, retryModel].filter(Boolean).map((model) => modelOptionLabel(effectiveConfig, model));
@@ -10990,19 +11138,35 @@ function AtelierCanvasPage() {
                                 if (readScriptPipelineVideoOutcome(videoNodeOf(target.nodeId)) !== "error") return;
                                 pauseVideoPipeline(target, triedLabels.join(" → "));
                             };
-                            void (async () => {
-                                const jobs: Promise<void>[] = [];
-                                for (const target of targets) {
-                                    // 判定放两次：进循环先看一眼（别白等 10 秒），等完再看一眼
-                                    // —— 这 10 秒里前一段可能刚好被判成暂停。
-                                    if (pipelinePaused) break;
-                                    // 全局节拍（跨集共享）：每个视频之间隔 10 秒左右，不是每集各起一个节拍。
-                                    await waitScriptPipelineGenerateSlot();
-                                    if (pipelinePaused) break;
-                                    jobs.push(superviseVideo(target));
-                                }
-                                await Promise.all(jobs);
-                            })();
+                            /**
+                             * 开跑前先抢运行态（用户在生成过程中再点一次那颗按钮 = 暂停）。
+                             * 抢不到 = 上一次那一趟还在收尾（最多一个 10 秒节拍）→ 这一趟不发。
+                             */
+                            if (trackPipelineRun && !beginScriptTask(nodeId, "video")) {
+                                message.info(t("canvas.scriptNode.taskStopping"));
+                            } else {
+                                void (async () => {
+                                    const jobs: Promise<void>[] = [];
+                                    try {
+                                        for (const target of targets) {
+                                            // 判定放两次：进循环先看一眼（别白等 10 秒），等完再看一眼
+                                            // —— 这 10 秒里前一段可能刚好被判成暂停 / 用户点了暂停。
+                                            if (stopNow()) break;
+                                            // 全局节拍（跨集共享）：每个视频之间隔 10 秒左右，不是每集各起一个节拍。
+                                            await waitScriptPipelineGenerateSlot();
+                                            if (stopNow()) break;
+                                            jobs.push(superviseVideo(target));
+                                        }
+                                        await Promise.all(jobs);
+                                    } finally {
+                                        // 同上：运行态卡住的后果是按钮永远显示「暂停」，必须放 finally。
+                                        if (trackPipelineRun) {
+                                            const userPaused = shouldStop();
+                                            finishScriptTask(nodeId, "video", pipelinePaused || userPaused, userPaused ? t("canvas.scriptNode.taskPaused") : undefined);
+                                        }
+                                    }
+                                })();
+                            }
                         }
                     }
                 }
@@ -11028,7 +11192,7 @@ function AtelierCanvasPage() {
                 onOk: runPipeline,
             });
         },
-        [alignScriptAssetsByConnections, alignScriptVoicesByConnections, effectiveConfig, message, modal, t, revealNodes],
+        [alignScriptAssetsByConnections, alignScriptVoicesByConnections, beginScriptTask, effectiveConfig, finishScriptTask, message, modal, t, revealNodes],
     );
 
     /**
@@ -11169,12 +11333,36 @@ function AtelierCanvasPage() {
         async (nodeId: string, options?: { referenceAssets?: readonly ScriptAssetReference[]; stages?: Partial<ReverseVideoStages> | null; skipScript?: boolean; quiet?: boolean; prelaunchedImageIds?: readonly string[] }) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
-            if (oneClickVideoRunningRef.current.has(nodeId)) return;
+            /**
+             * 🔴 再点一次 = **请求暂停**（用户 2026-11-18：「点击后再次点击可以暂停，点击后，
+             * 即暂停后续的操作」）。以前这里直接 `return`，运行中按钮还被 `disabled`，
+             * 用户只能去画布上逐个节点点停止。
+             *
+             * 只打令牌、不硬拆这条 Promise：每个阶段开头都会读令牌（分镜 / 生图等待 / 重试 / 铺链路），
+             * 读到就 `pauseWith` 收尾。分镜那一段额外 abort 一次 —— 文本请求一跑就是几十秒，
+             * 光等它自然结束，用户会以为按钮没反应。
+             */
+            if (oneClickVideoRunningRef.current.has(nodeId)) {
+                if (!isScriptTaskPauseRequested(nodeId, "oneClick")) {
+                    requestScriptTaskPause(nodeId, "oneClick");
+                    const current = oneClickVideoRunsRef.current[nodeId];
+                    const stage = current?.stage || "script";
+                    patchOneClickVideoRun(nodeId, { status: "running", stage, message: t("canvas.scriptNode.oneClickPausing") });
+                    if (stage === "script") handleStopScriptGeneration(nodeId);
+                }
+                return;
+            }
             if (isNodeGenerating(nodeId)) {
                 message.warning(t("canvas.scriptNode.oneClickBusy"));
                 return;
             }
             oneClickVideoRunningRef.current.add(nodeId);
+            /** 上一次的暂停令牌必须清掉，否则这一趟第一步就会被自己掐死。 */
+            clearScriptTaskPause(nodeId, "oneClick");
+            /** 用户这一趟是不是被点了暂停（按钮上要保住「已暂停」的红色原因）。 */
+            const userStopped = () => isScriptTaskPauseRequested(nodeId, "oneClick");
+            /** 用户暂停 → 收尾（与失败暂停同一套渲染，文案分开）。 */
+            const pauseByUser = (stage: OneClickVideoRun["stage"]) => pauseWith(stage, t("canvas.scriptNode.oneClickUserPaused"));
             /**
              * 三颗勾的**生效值**：老调用（不传）→ 全勾。判定只在开头做一次，
              * 后面按 `stages.script / image / video` 分支，中途不再重读（同一趟里不会变）。
@@ -11197,9 +11385,15 @@ function AtelierCanvasPage() {
                 const node = nodesRef.current.find((item) => item.id === id);
                 return isNodeGenerating(id) || node?.metadata?.status === NODE_STATUS_LOADING;
             };
-            /** 等到这一批**全部落定**（成功或失败）或到点；到点先把还在跑的 abort 掉。 */
-            const waitSettled = async (ids: string[], deadlineAt: number): Promise<"settled" | "timeout"> => {
+            /**
+             * 等到这一批**全部落定**（成功或失败）或到点；到点先把还在跑的 abort 掉。
+             *
+             * 第三个返回值 `paused` 是用户这一趟点的暂停（2026-11-18）：命中就立刻返回，
+             * **不等在跑的那几张** —— 它们会自己落定，但后面的重试 / 铺链路必须停。
+             */
+            const waitSettled = async (ids: string[], deadlineAt: number): Promise<"settled" | "timeout" | "paused"> => {
                 while (true) {
+                    if (userStopped()) return "paused";
                     const pending = ids.filter(isNodePending);
                     if (!pending.length) return "settled";
                     if (Date.now() >= deadlineAt) {
@@ -11218,12 +11412,16 @@ function AtelierCanvasPage() {
             /**
              * 换模型再跑一批：模型只能通过 `metadata.model` 传下去（`buildGenerationConfig` 只认它），
              * 所以先把模型写进节点、同步 `nodesRef`，再一个个 fire。
+             *
+             * 用户点了暂停 → **一张都不再发**（重试和托底都是钱），直接按暂停收尾。
              */
             const retryBatch = async (ids: string[], model: string, deadlineAt: number) => {
+                if (userStopped()) return "paused" as const;
                 const patch = (item: CanvasNodeData): CanvasNodeData => (ids.includes(item.id) ? { ...item, metadata: { ...item.metadata, ...(model ? { model } : {}), status: NODE_STATUS_IDLE, errorDetails: undefined } } : item);
                 nodesRef.current = nodesRef.current.map(patch);
                 setNodes((prev) => prev.map(patch));
                 for (let index = 0; index < ids.length; index += SCRIPT_ASSET_LAUNCH_BATCH) {
+                    if (userStopped()) return "paused" as const;
                     for (const id of ids.slice(index, index + SCRIPT_ASSET_LAUNCH_BATCH)) {
                         const prompt = nodesRef.current.find((item) => item.id === id)?.metadata?.prompt || "";
                         if (!prompt.trim()) continue;
@@ -11275,9 +11473,19 @@ function AtelierCanvasPage() {
                     noteScriptModel(
                         nodesRef.current.find((item) => item.id === nodeId)?.metadata?.model || effectiveConfig.textModel || "",
                     );
+                    // 进分镜之前已经被点了暂停（点得快，按钮还没来得及变）：一步都不走。
+                    if (userStopped()) {
+                        pauseByUser("script");
+                        return;
+                    }
                     const firstPass = await withDeadline(runScriptGeneration(nodeId), scriptDeadline, stopScript);
                     if (firstPass.timedOut) {
                         pauseWith("script", t("canvas.scriptNode.oneClickScriptTimeout"));
+                        return;
+                    }
+                    // 分镜这一发被用户 abort 掉 → 不换模型重试，直接按暂停收尾。
+                    if (userStopped()) {
+                        pauseByUser("script");
                         return;
                     }
                     let outcome = firstPass.value;
@@ -11293,9 +11501,18 @@ function AtelierCanvasPage() {
                         }
                         noteScriptModel(retryModel);
                         notify("script", "canvas.scriptNode.oneClickScriptRetry", { model: modelOptionLabel(effectiveConfig, retryModel) });
+                        // 换模型重试之前再看一眼：这几十秒里用户可能已经点了暂停。
+                        if (userStopped()) {
+                            pauseByUser("script");
+                            return;
+                        }
                         const retryPass = await withDeadline(runScriptGeneration(nodeId, { model: retryModel }), scriptDeadline, stopScript);
                         if (retryPass.timedOut) {
                             pauseWith("script", t("canvas.scriptNode.oneClickScriptTimeout"));
+                            return;
+                        }
+                        if (userStopped()) {
+                            pauseByUser("script");
                             return;
                         }
                         outcome = retryPass.value;
@@ -11303,7 +11520,8 @@ function AtelierCanvasPage() {
                     if (!outcome?.ok) {
                         if (outcome?.cancelled) {
                             // 用户自己点了停止 / 前置条件不满足：不算报错，别弹「失败」。
-                            patchOneClickVideoRun(nodeId, { status: "paused", stage: "script", message: t("canvas.scriptNode.oneClickStopped") });
+                            // 点的是本按钮的「暂停」和点节点上的「停止」是两件事，文案要分开。
+                            patchOneClickVideoRun(nodeId, { status: "paused", stage: "script", message: t(userStopped() ? "canvas.scriptNode.oneClickUserPaused" : "canvas.scriptNode.oneClickStopped") });
                             return;
                         }
                         pauseWith(
@@ -11374,12 +11592,19 @@ function AtelierCanvasPage() {
                 const imageIds =
                     prelaunchedImageIds !== undefined
                         ? prelaunchedImageIds.filter((id) => Boolean(id))
-                        : handleDirectGenerateScriptAssets(nodeId, { skipAssetKeys }).created.map((node) => node.id);
+                        : // `trackRun: false`：这一趟的暂停由本函数的 `oneClick` 槽承载，
+                          // 别把「一键生图」那颗按钮也点亮（用户点它会把这条流程掐掉）。
+                          handleDirectGenerateScriptAssets(nodeId, { skipAssetKeys, trackRun: false, shouldStop: userStopped }).created.map((node) => node.id);
                 if (!imageIds.length) {
                     // 表里没有可生成的资产 / 画布排不下：不算失败，直接进第三步（铺链路仍然有意义）。
                     if (!options?.quiet) message.info(t("canvas.scriptNode.oneClickImageSkipped"));
                 } else {
-                    if ((await waitSettled(imageIds, imageDeadline)) === "timeout") {
+                    const imageOutcome = await waitSettled(imageIds, imageDeadline);
+                    if (imageOutcome === "paused") {
+                        pauseByUser("image");
+                        return;
+                    }
+                    if (imageOutcome === "timeout") {
                         pauseWith("image", t("canvas.scriptNode.oneClickImageTimeout", { count: imageIds.length }));
                         return;
                     }
@@ -11391,7 +11616,12 @@ function AtelierCanvasPage() {
                             model: modelOptionLabel(effectiveConfig, preferredModel),
                         });
                         // 偏好模型可能是空串（用户没配 imageModel）：空 = 保持节点原样，仍算「再跑一次」。
-                        if ((await retryBatch(failed, preferredModel, imageDeadline)) === "timeout") {
+                        const retried = await retryBatch(failed, preferredModel, imageDeadline);
+                        if (retried === "paused") {
+                            pauseByUser("image");
+                            return;
+                        }
+                        if (retried === "timeout") {
                             pauseWith("image", t("canvas.scriptNode.oneClickImageTimeout", { count: failed.length }));
                             return;
                         }
@@ -11411,7 +11641,12 @@ function AtelierCanvasPage() {
                             count: failed.length,
                             model: modelOptionLabel(effectiveConfig, fallbackModel),
                         });
-                        if ((await retryBatch(failed, fallbackModel, imageDeadline)) === "timeout") {
+                        const fellBack = await retryBatch(failed, fallbackModel, imageDeadline);
+                        if (fellBack === "paused") {
+                            pauseByUser("image");
+                            return;
+                        }
+                        if (fellBack === "timeout") {
                             pauseWith("image", t("canvas.scriptNode.oneClickImageTimeout", { count: failed.length }));
                             return;
                         }
@@ -11421,6 +11656,11 @@ function AtelierCanvasPage() {
                         pauseWith("image", t("canvas.scriptNode.oneClickImageFailed", { count: failed.length }));
                         return;
                     }
+                }
+                // 图齐了但用户已经点了暂停 → 不铺视频（铺链路是 fire-and-forget，事后 abort 会留下半截链路）。
+                if (userStopped()) {
+                    pauseByUser("image");
+                    return;
                 }
 
                 // ---- ③ 一键铺视频链路并生成（不再弹确认：本条流程前面已经确认过）----
@@ -11445,6 +11685,10 @@ function AtelierCanvasPage() {
                     group: true,
                     autoGenerate: true,
                     skipConfirm: true,
+                    // 暂停由本函数的 `oneClick` 槽承载（`trackRun: false`：别把「一键铺视频链路并生成」
+                    // 那颗按钮也点亮 —— 用户点它会把这条流程掐掉，而且它已经在这条流程里了）。
+                    trackRun: false,
+                    shouldStop: userStopped,
                     onVideoPause: (detail) => patchOneClickVideoRun(nodeId, { status: "paused", stage: "pipeline", message: detail }),
                 });
                 patchOneClickVideoRun(nodeId, { status: "done", stage: "pipeline", message: t("canvas.scriptNode.oneClickDone") });
@@ -11454,6 +11698,12 @@ function AtelierCanvasPage() {
                 pauseWith("script", t("canvas.scriptNode.oneClickError", { error: detail }));
             } finally {
                 oneClickVideoRunningRef.current.delete(nodeId);
+                /**
+                 * 令牌必须在这里清：留着的话，用户下一次点同一颗「一键视频」会在 `waitSettled` 的
+                 * 第一圈就判成暂停（表现是「点了一点反应都没有」）。暂停原因已经写进运行态了，
+                 * 令牌本身只是个瞬时信号。
+                 */
+                clearScriptTaskPause(nodeId, "oneClick");
             }
         },
         [effectiveConfig, handleBuildScriptPipeline, handleDirectGenerateScriptAssets, handleStopScriptGeneration, isNodeGenerating, message, mountReferenceAssetsToScript, patchOneClickVideoRun, resolveModelForCapability, runScriptGeneration, stopGenerationForNode, t],
@@ -12525,6 +12775,9 @@ function AtelierCanvasPage() {
                         onStop={handleStopScriptGeneration}
                         oneClickVideo={oneClickVideoRuns[contentNode.id]}
                         onOneClickVideo={(nodeId) => void handleOneClickVideo(nodeId)}
+                        imageTaskRun={scriptTaskRuns[scriptTaskKey(contentNode.id, "image")]}
+                        videoTaskRun={scriptTaskRuns[scriptTaskKey(contentNode.id, "video")]}
+                        onPauseScriptTask={handlePauseScriptTask}
                         onInsertPrompt={handleInsertShotPrompt}
                         references={scriptReferences}
                         onScriptAction={handleScriptAction}
