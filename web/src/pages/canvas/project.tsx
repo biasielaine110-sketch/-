@@ -180,7 +180,7 @@ import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix"
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { VIDEO_REVERSE_LANGUAGE_RULE, VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cascadeReverseVideoStages, cleanVideoReverseScriptOutput, describeReverseVideoStages, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoEpisodeSeconds, readReverseVideoScript, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type ReverseVideoStages, type VideoReverseMode, type VideoReversePromptMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
-import { EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeSeconds, splitScriptByDuration } from "@/lib/canvas/video-reverse-episodes";
+import { EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeSeconds, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -11715,7 +11715,7 @@ function AtelierCanvasPage() {
              * 模型数不准字数，让它自己切必然忽长忽短（第一集 30 秒、第二集 3 分钟）。
              * 模型若还是吐了 JSON（老口径 / 擅自照旧格式），`extractScriptText` 会先把各集正文拼回一份再切。
              */
-            report(`按每集 ${seconds} 秒切分正文…`);
+            report(`按每集 ${seconds} 秒（${segmentsPerEpisode(seconds)} 个片段）切分正文…`);
             const drafts = splitScriptByDuration(body, seconds);
             if (!drafts.length) {
                 return {
@@ -11724,10 +11724,16 @@ function AtelierCanvasPage() {
                     chatNodeId: chatNode.id,
                 };
             }
-            const estimatedSeconds = Math.round(estimateScriptSeconds(body));
+            /**
+             * 片段数 / 总时长走「段落口径」：有 `【片段编号】` 就数段（每段读 `【片段时长】`），
+             * 没有标记（技能没按格式输出）才退回字数估算 —— 两种口径的进度提示别混着报。
+             */
+            const segments = splitScriptSegments(body);
+            const estimatedSeconds = segments.length ? Math.round(segments.reduce((sum, segment) => sum + segment.seconds, 0)) : Math.round(estimateScriptSeconds(body));
+            const segmentHint = segments.length ? `${segments.length} 个片段（每段 ${EPISODE_SEGMENT_SECONDS} 秒，合计约 ${estimatedSeconds} 秒）` : `约 ${estimatedSeconds} 秒（没按片段格式输出，按字数估）`;
 
             // ③ 一集一个文本节点（**纵向**排开），右边跟一个脚本生成器
-            report(`正文约 ${estimatedSeconds} 秒 → 按每集 ${seconds} 秒切出 ${drafts.length} 集，创建文本 / 脚本节点…`);
+            report(`正文 ${segmentHint} → 按每集 ${seconds} 秒（${segmentsPerEpisode(seconds)} 段）切出 ${drafts.length} 集，创建文本 / 脚本节点…`);
             const chatLeft = chatSlot.x - chatSpec.width / 2;
             const chatTop = chatSlot.y - chatSpec.height / 2;
             const slots = planEpisodeStackSlots({

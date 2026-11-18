@@ -41,6 +41,20 @@ export const EPISODE_SECONDS_MAX = 300;
 export const SCRIPT_CHARS_PER_SECOND = 4.5;
 
 /**
+ * 一个「片段」的固定时长（秒）—— 用户 2026-11-18 第 5 轮口径：
+ * 「时长按照输出的段落去拆分，每个段落 15 秒，即 90 秒就是 6 个段落，120 秒就是 8 个段落的内容」。
+ *
+ * 于是「一集几段」是**确定的整数**：`round(每集秒数 / 15)`，不再按字数估。
+ * 模型侧也按这个粒度写（一片段 = 15 秒 = 一条完整叙事节拍），两边同一个常量。
+ */
+export const EPISODE_SEGMENT_SECONDS = 15;
+
+/** 一集里应该有幾個片段（120 秒 = 8、90 秒 = 6、15 秒 = 1）。 */
+export function segmentsPerEpisode(seconds: number | string | null | undefined): number {
+    return Math.max(1, Math.round(resolveEpisodeSeconds(seconds) / EPISODE_SEGMENT_SECONDS));
+}
+
+/**
  * 拆集用的技能（唯一来源）。
  *
  * 🔴 只给这一个精确名，不加宽松变体：`pickVideoReverseSkill` 是双向包含匹配（见 `video-reverse.ts`
@@ -70,8 +84,38 @@ export function buildEpisodeTitle(index: number, raw?: string | null): string {
  * 让它按「N 秒该怎么写」来安排镜头数与台词量，别提「拆成几集」。
  */
 function episodeSecondsRule(seconds: number): string {
-    return `篇幅密度 **${seconds} 秒 / 段**（硬要求：每 ${seconds} 秒的画面与台词大约 ${Math.round(seconds * SCRIPT_CHARS_PER_SECOND)} 字 —— 镜头数、台词量都按这个密度写。不要一段写满五分钟，也不要整篇只有两三句话）。`;
+    const perEpisode = segmentsPerEpisode(seconds);
+    return `段落密度 **${EPISODE_SEGMENT_SECONDS} 秒 / 1 个片段**（硬要求：一个片段 = 一条完整叙事节拍，镜头时间码从 0 秒起、合计不超过 ${EPISODE_SEGMENT_SECONDS} 秒。我会把 **${perEpisode} 个片段**拼成 ${seconds} 秒一集，所以整份正文要按 ${EPISODE_SEGMENT_SECONDS} 秒的整数倍铺开——不要一个片段里塞三个场景，也不要一个场景拆成五六个片段）。`;
 }
+
+/**
+ * 片段正文的**固定格式**（用户 2026-11-18 第 5 轮给的实样，逐字段照抄，不许增删）。
+ *
+ * 本地切集只认 `【片段编号】` 那一行当块边界 —— 这套字段缺一个、顺序换一处，
+ * 切出来的集就会错位，所以模板必须原样进提示词，不在这里做任何「美化」。
+ */
+export const EPISODE_SEGMENT_TEMPLATE = `## 【片段编号】1 | 【片段时长】${EPISODE_SEGMENT_SECONDS}秒
+【场景】〖场景01〗内景·地点 - 时间（日/夜）
+【画面基础】时间 · 内景/外景 · 地点，机位朝向
+【人物】本片段出场人物
+【道具】关键道具（重要道具可带一句状态说明）
+【全局画风】画风 / 画质 / 表演与节奏的硬约束（每个片段都写全）
+【负向词】不要出现的东西（畸形、字幕、水印、重复人物……）
+【镜头1】：0秒 - 3.5秒
+画面描述：景别 + 机位 + 运镜 + 这一镜里发生了什么
+音效：…
+台词：无（有台词写成「第X秒 角色-[说话方式]，语气：…，语速：…："台词"」）
+字幕：无
+运镜：…
+镜头结束状态：这一镜定格的画面
+【镜头2】：3.5秒 - 7秒
+画面描述：…
+音效：…
+台词：无
+字幕：无
+运镜：…
+镜头结束状态：…
+---`;
 
 /**
  * 04 的输入要求（拼在提示词里）。
@@ -80,14 +124,15 @@ function episodeSecondsRule(seconds: number): string {
  *  按照约束的时长进行分段 复制到新的文本节点里……等 AI 对话给到结果后，再**自行**按照时长进行输出为
  *  1 个文本节点还是多个文本节点」。
  *
- * 所以提示词**不再要 JSON 分集**：模型只负责把原文改写成可直接开拍的剧本正文，切几集由本地
- * `splitScriptByDuration()` 按字数 / 秒数确定性算出来（模型数不清字数，让它自己切必然忽长忽短）。
- * 唯一要它配合的是**分场**：场与场之间空行，本地按空行累积到一集就断开，尽量不把一场戏劈成两半。
+ * 第 5 轮再收一次：**片段格式固定**（`EPISODE_SEGMENT_TEMPLATE`）+ **每段 15 秒**，
+ * 于是「一集 = N 个片段」可以直接数出来，不用再按字数估。
+ * 所以提示词不要 JSON 分集，只要它按格式铺满片段；切集由本地 `splitScriptByDuration()` 数片段完成。
  */
 export const EPISODE_SPLIT_OUTPUT_RULE =
-    "输出格式（最高优先级硬要求）：**只输出剧本正文**——不要 JSON、不要 Markdown 代码块、不要「第1集」这类集号、不要任何解释或前言后语。\n" +
-    "正文必须按**分场**写：每个场景第一行单独一行写「场景：地点 · 时间」，场景与场景之间空一行；场景内部再按「画面 / 台词」分段。\n" +
-    "切集由我在拿到你的正文后按每集时长自动完成，你**不要**自己分集、也不要标注时长。";
+    "输出格式（最高优先级硬要求）：**只输出片段正文**——不要 JSON、不要 Markdown 代码块、不要任何解释或前言后语（不要写「好的，以下是剧本」这类话）。\n" +
+    "每个片段严格按下面这套字段逐行输出，字段名一个字都不许改、一项都不许省、顺序不许调换：\n" +
+    `${EPISODE_SEGMENT_TEMPLATE}\n` +
+    `硬规则：① 【片段编号】从 1 开始连续递增；② 每个片段固定 ${EPISODE_SEGMENT_SECONDS} 秒，镜头时间码从 0 秒起、不得越过 ${EPISODE_SEGMENT_SECONDS} 秒；③ 片段与片段之间用单独一行 --- 分隔；④ 【镜头N】可以有 2～5 个，时间码必须首尾相接、不许重叠；⑤ 切集由我在拿到正文后按每集时长自动完成，你**不要**自己分集、不要写「第几集」、不要标总时长。`;
 
 /**
  * 拼发给 AI 的那段话（04）。
@@ -101,11 +146,11 @@ export function buildEpisodeSplitPrompt(params: { script: string; episodeSeconds
     const languageRule = String(params.languageRule ?? "").trim();
     const lines: string[] = [];
     if (languageRule) lines.push(languageRule);
-    lines.push(`请用「${skill}」技能，把我下面这份剧本改写、续写成**可以直接开拍的连续剧本正文**：把叙述文字改写成剧本正文（场景、镜头、画面、台词），剧情按原文顺序推进，不跳段、不漏内容。`);
+    lines.push(`请用「${skill}」技能，把我下面这份剧本改写、续写成**可以直接开拍的连续片段正文**：把叙述文字改写成片段（场景、镜头、画面、台词），剧情按原文顺序推进，不跳段、不漏内容。`);
     lines.push(episodeSecondsRule(seconds));
     lines.push(
-        `篇幅控制：这份正文会被我按每集 ${seconds} 秒自动切集，约 **${Math.round(seconds * SCRIPT_CHARS_PER_SECOND)} 字 / 集**。` +
-            `所以每个场景都尽量在 ${seconds} 秒内闭合（约 ${Math.round(seconds * SCRIPT_CHARS_PER_SECOND)} 字），不要写出一个需要几集才演完的超长场景。`,
+        `篇幅控制：这份正文会被我按每集 ${seconds} 秒自动切集 = **${segmentsPerEpisode(seconds)} 个片段 / 集**（每个片段 ${EPISODE_SEGMENT_SECONDS} 秒）。` +
+            `所以请按 ${EPISODE_SEGMENT_SECONDS} 秒一个片段均匀往下铺，不要写出需要好几集才演完的超长片段，也不要一个片段里只有一句台词。`,
     );
     const extra = String(params.requirement ?? "").trim();
     if (extra) lines.push(`特殊要求：${extra}`);
@@ -169,19 +214,109 @@ export function extractScriptText(text: string | null | undefined): string {
 }
 
 /**
- * 按「每集 N 秒」把正文切成 1 个或多个分集剧本（用户 2026-11-18：切几集由我们自己算）。
+ * 片段化口径（用户 2026-11-18 第 5 轮）：模型必须按 `EPISODE_SEGMENT_TEMPLATE` 逐字段输出，
+ * **一个片段固定 15 秒**；切集就是「数片段」—— `segmentsPerEpisode(seconds)` 个片段拼成一集
+ * （120 秒 = 8 段、90 秒 = 6 段），全程确定性，探针能直接测。
  *
- * 切法（都是**确定性**的，同样的输入永远得到同样的结果，探针能直接测）：
- *  ① 先按**空行**分块（一份剧本里「场景：…」之间本来就是空行）；整篇没有空行 → 按行分块；
- *  ② 某一块本身就超过一集的 115% → 按句子（。！？…；）再切小，避免「一句台词劈成两集」；
- *  ③ 逐块累加：**够一集（≥90%）就断**、加上下一块会超 115% 也断、
- *     碰到「第N集 / 场景： / 内景 / 外景 / INT. / EXT.」这类行**强制断**（天然剧情断点）；
- *  ④ 最后一块不足一集的 40%（且不止一块）→ 并进前一块，不留一个两三行的尾巴集。
- *
- * 返回的 `title` 默认「第N集」；正文里本来就有「第X集」标记的话，沿用那个编号。
+ * 老的「按字数估 + 空行分块」那套保留成**兜底**（`splitByCharBudget`）：技能不按格式输出时
+ * 也不能空手而归。
  */
+/** 片段块边界：`## 【片段编号】1 | 【片段时长】15秒`（允许前面带 # / ** / 缩进）。 */
+const SEGMENT_HEADER_LINE = /^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*【\s*片段编号\s*】/;
+/** 片段编号（模型漏写就按出现顺序补）。 */
+const SEGMENT_NUMBER = /【\s*片段编号\s*】\s*(\d+)/;
+/** 片段时长：`【片段时长】14秒`；读不到就当一段 15 秒。 */
+const SEGMENT_SECONDS = /【\s*片段时长\s*】\s*(\d+(?:\.\d+)?)\s*秒/;
+/** 纯分隔行（`---` / `___` / `***`）。 */
+const SEGMENT_RULE_LINE = /^\s*(?:-{3,}|_{3,}|\*{3,})\s*$/;
+
+export type ScriptSegment = {
+    /** 原文里的片段编号（`【片段编号】N`；漏写时按出现顺序补） */
+    index: number;
+    /** 这一段多少秒（读 `【片段时长】`，读不到 = 15） */
+    seconds: number;
+    /** 这一段完整正文：含 `## 【片段编号】…` 头行与全部字段，**不含**结尾那条 `---` */
+    script: string;
+};
+
+/**
+ * 把模型回复切成**片段块**（用户 2026-11-18 第 5 轮给的格式：
+ * `## 【片段编号】1 | 【片段时长】15秒` + 【场景】/【画面基础】/【人物】/【道具】/【全局画风】/
+ * 【负向词】/【镜头N】…/ `---`）。
+ *
+ * 一个片段 = 从 `【片段编号】` 那一行起、到下一个 `【片段编号】` 之前的一整块。
+ * 🔴 **第一个标记之前的内容全部丢掉**：那只会是「好的，以下是剧本」这类前言，
+ * 而用户要求「输出到文本节点的内容只要这种格式」。
+ * 找不到任何标记 → 返回 `[]`，由调用方退回按字数切（老文本 / 技能不听话时不能直接切不出来）。
+ */
+export function splitScriptSegments(text: string | null | undefined): ScriptSegment[] {
+    const body = extractScriptText(text);
+    if (!body) return [];
+    const blocks: string[][] = [];
+    let current: string[] | null = null;
+    for (const line of body.replace(/\r\n/g, "\n").split("\n")) {
+        if (SEGMENT_HEADER_LINE.test(line)) {
+            current = [line];
+            blocks.push(current);
+            continue;
+        }
+        if (current) current.push(line);
+    }
+    return blocks
+        .map((blockLines, order) => {
+            /** 去掉块尾的分隔线：拼集时由 `---` 统一补，否则一集里会出现两条挨着的 `---`。 */
+            const kept = [...blockLines];
+            while (kept.length > 1 && SEGMENT_RULE_LINE.test(kept[kept.length - 1] || "")) kept.pop();
+            const script = kept.join("\n").trim();
+            const header = kept[0] || "";
+            const numberMatch = header.match(SEGMENT_NUMBER);
+            const secondsMatch = header.match(SEGMENT_SECONDS);
+            return {
+                index: numberMatch ? Number(numberMatch[1]) : order + 1,
+                seconds: secondsMatch ? Math.max(1, Number(secondsMatch[1])) : EPISODE_SEGMENT_SECONDS,
+                script,
+            };
+        })
+        .filter((segment) => Boolean(segment.script));
+}
+
+/**
+ * 按「一集 = `segmentsPerEpisode(seconds)` 个片段」聚合（用户口径：120 秒 = 8 段、90 秒 = 6 段）。
+ *
+ * 满段即断，**不看字数、也不合并尾巴** —— 用户给的是硬换算式（120 秒就是 8 段），
+ * 这里再「凑整」会把 10 段拼成一集（= 150 秒），反而对不上他填的时长。
+ * 片段时长由模型写在 `【片段时长】` 里，数段数比数字数可靠。
+ */
+function groupSegmentsIntoEpisodes(segments: readonly ScriptSegment[], target: number): EpisodeDraft[] {
+    const perEpisode = Math.max(1, Math.round(target / EPISODE_SEGMENT_SECONDS));
+    const groups: ScriptSegment[][] = [];
+    let current: ScriptSegment[] = [];
+    const flush = () => {
+        if (current.length) groups.push(current);
+        current = [];
+    };
+    for (const segment of segments) {
+        current.push(segment);
+        if (current.length >= perEpisode) flush();
+    }
+    flush();
+    return groups.map((group, index) => ({
+        title: buildEpisodeTitle(index),
+        script: group.map((segment) => segment.script).join("\n\n---\n\n"),
+    }));
+}
+
 export function splitScriptByDuration(text: string | null | undefined, seconds: number | string | null | undefined): EpisodeDraft[] {
     const target = resolveEpisodeSeconds(seconds);
+    /** ① 有 `【片段编号】` 标记 → 按**段数**切（现行口径：120 秒 = 8 段）。 */
+    const segments = splitScriptSegments(text);
+    if (segments.length) return groupSegmentsIntoEpisodes(segments, target);
+    /** ② 没有标记（老文本 / 技能没按格式输出）→ 退回按字数估的兜底，绝不空手而归。 */
+    return splitByCharBudget(text, target);
+}
+
+/** 字数兜底：原先那套「空行分块 → 超长按句切 → 累积到 90% 断」的确定性切法。 */
+function splitByCharBudget(text: string | null | undefined, target: number): EpisodeDraft[] {
     const blocks = expandOversizedBlocks(toBlocks(extractScriptText(text)), target);
     if (!blocks.length) return [];
 
@@ -339,13 +474,13 @@ function tryParseJsonEpisodes(body: string): EpisodeDraft[] {
 
 /**
  * 拆集结果的**自检摘要**（写进进度 / 完成提示）。
- * 例：`3 集 · 每集 120 秒 · 字数 1.2k`。
+ * 例：`3 集 · 每集 120 秒（8 段×15 秒）· 字数 1.2k`。
  */
 export function describeEpisodeSplit(episodes: readonly EpisodeDraft[], seconds: number): string {
     const count = episodes.length;
     const chars = episodes.reduce((sum, item) => sum + item.script.length, 0);
     const size = chars >= 1000 ? `${(chars / 1000).toFixed(1)}k` : String(chars);
-    return `${count} 集 · 每集 ${resolveEpisodeSeconds(seconds)} 秒 · 字数 ${size}`;
+    return `${count} 集 · 每集 ${resolveEpisodeSeconds(seconds)} 秒（${segmentsPerEpisode(seconds)} 段 × ${EPISODE_SEGMENT_SECONDS} 秒）· 字数 ${size}`;
 }
 
 /** 一集的落位：文本节点（剧本）+ 脚本节点（分镜表）各一个中心点（`createCanvasNode` 的口径）。 */
