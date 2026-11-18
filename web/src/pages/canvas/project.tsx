@@ -361,6 +361,14 @@ const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
 /** Soft cap so same-panel re-generations do not grow without bound. */
 const MAX_IMAGE_NODE_HISTORY = 24;
+/**
+ * 04 剧集批量：集与集之间「启动资产图生成」的最小间隔。
+ *
+ * 每集第一波固定打 `SCRIPT_ASSET_LAUNCH_BATCH`（5）张，八集挤在同一 tick 里打出去就是 40 并发，
+ * 用户那几条渠道很容易被限流成一片失败（失败还要各自两轮重试，反而更慢）。
+ * 错开半秒仍然**整体并行**（只是不同时撞在同一瞬间），单集内部还是 5 张一波。
+ */
+const EPISODE_ASSET_LAUNCH_GAP_MS = 600;
 
 /**
  * 浮层（弹窗 / 下拉 / 选择器）里的 mousedown 是否应该放行给浮层自己处理。
@@ -11117,8 +11125,14 @@ function AtelierCanvasPage() {
          *        与本参数无关，缺表时仍然暂停（没内容就进不了下一环）。
          * @param options.quiet 不弹成功 toast（04 的并行预跑用：N 集各弹一条「已跳过一键生图」会糊屏）。
          *        错误 / 暂停提示照旧弹，别把该看的遮掉。
+         * @param options.prelaunchedImageIds 本集资产图**已经启动过**（04 ④-B-1 一次性登记 + 启动所有集）：
+         *        传了就**不再**调 `handleDirectGenerateScriptAssets`，直接等这批节点落定 + 两轮重试。
+         *        之所以必须分开：那一遍重调时每张图都已被名字锁占住（含别的集刚建、还在 generated 中的），
+         *        只会返回空 → 这一集会被误判成「没图可生」→ 紧接着铺视频拿到的是空帧。
+         *        ⚠️ 判 `!== undefined` 而不是 `?.length`：空数组是有效结论（本集资产全是共用来的），
+         *        不能掉进「重新生一遍」那条老分支。
          */
-        async (nodeId: string, options?: { referenceAssets?: readonly ScriptAssetReference[]; stages?: Partial<ReverseVideoStages> | null; skipScript?: boolean; quiet?: boolean }) => {
+        async (nodeId: string, options?: { referenceAssets?: readonly ScriptAssetReference[]; stages?: Partial<ReverseVideoStages> | null; skipScript?: boolean; quiet?: boolean; prelaunchedImageIds?: readonly string[] }) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             if (oneClickVideoRunningRef.current.has(nodeId)) return;
@@ -11317,11 +11331,19 @@ function AtelierCanvasPage() {
                 }
                 const imageDeadline = Date.now() + ONE_CLICK_IMAGE_STAGE_TIMEOUT_MS;
                 notify("image", "canvas.scriptNode.oneClickStageImage");
-                const launched = handleDirectGenerateScriptAssets(nodeId, { skipAssetKeys });
-                const imageIds = launched.created.map((node) => node.id);
+                /**
+                 * 🔴 `prelaunchedImageIds`（用户 2026-11-18 第 7 轮「谁先生就用谁的」）：
+                 * 04 已经把**所有集**的资产图一次性登记 + 启动完了（`runVideoReverseEpisodes` ④-B-1），
+                 * 这一趟只负责「等本集图落定 → 失败重试」，绝不重新登记 —— 见参数注释。
+                 */
+                const prelaunchedImageIds = options?.prelaunchedImageIds;
+                const imageIds =
+                    prelaunchedImageIds !== undefined
+                        ? prelaunchedImageIds.filter((id) => Boolean(id))
+                        : handleDirectGenerateScriptAssets(nodeId, { skipAssetKeys }).created.map((node) => node.id);
                 if (!imageIds.length) {
                     // 表里没有可生成的资产 / 画布排不下：不算失败，直接进第三步（铺链路仍然有意义）。
-                    message.info(t("canvas.scriptNode.oneClickImageSkipped"));
+                    if (!options?.quiet) message.info(t("canvas.scriptNode.oneClickImageSkipped"));
                 } else {
                     if ((await waitSettled(imageIds, imageDeadline)) === "timeout") {
                         pauseWith("image", t("canvas.scriptNode.oneClickImageTimeout", { count: imageIds.length }));
@@ -11374,7 +11396,8 @@ function AtelierCanvasPage() {
                  */
                 if (!stages.video) {
                     patchOneClickVideoRun(nodeId, { status: "done", stage: "image", message: t("canvas.scriptNode.oneClickSkippedVideo") });
-                    message.success(t("canvas.scriptNode.oneClickSkippedVideo"));
+                    // `quiet`：04 逐集调用（N 集会各弹一条），进度由 04 自己 report + 节点按钮承载。
+                    if (!options?.quiet) message.success(t("canvas.scriptNode.oneClickSkippedVideo"));
                     return;
                 }
                 notify("pipeline", "canvas.scriptNode.oneClickStagePipeline");
@@ -11764,23 +11787,22 @@ function AtelierCanvasPage() {
      *     （`buildScriptAssetInheritPlan` 的 onlyNames 那一路）—— 同一张图，不是新生成一张。
      *     搬完之后再调 `handleInheritScriptAssets` 补**连线 + 分类**：锁让「不再重复生图」成立，
      *     连线 / 分类让铺链路按分类兜底时也看得见这些图（少一样就会「图生成了但视频里没连上」）。
-     *  ② **拆段 / 分镜并行，生图按集顺序**（2026-11-18 第 6 轮改口径，用户：「该拆段拆段，该生分镜脚本
-     *     生分镜脚本……除非说是因为缺少内容无法到下个任务环节才进行等待」）：
-     *     N 个文本 / 脚本节点一次建完 → **所有集的分镜表并行生**（各集互不依赖，谁也不等谁）。
-     *     只有「缺内容」的两处才停下来等：① 本集生图必须等**本集分镜表**出来（`handleOneClickVideo`
-     *     内部自己 await）；② 复用上一集的同名图必须等那张图**已经建好** → 生图 / 视频仍按集顺序。
-     *     这条顺序是**资产去重的前提**：并行生图时两集都读不到对方的图片节点，同名资产会各生一张。
-     *     因此循环里 `handleInheritScriptAssets` 必须排在 `handleOneClickVideo` **之前**（此时上一集已出图），
-     *     并且第二趟用 `skipScript` 让每一集**不再重出分镜表**。
+     *  ② **拆段 / 分镜 / 生图三件事都并行，只有「缺内容」才等**（2026-11-18 第 6、7 轮改口径）：
+     *     N 个文本 / 脚本节点一次建完 → **所有集的分镜表并行生**（各集互不依赖，谁也不等谁）；
+     *     分镜表齐了 → **一次性把每一集的资产图登记 + 启动**（④-B-1，逐集「先沿用 → 再登记」，
+     *     但**不 await 任何图**）→ 于是所有集在同时生图。
+     *     🔴 这里最容易写错：以前是「逐集 `await handleOneClickVideo`」，它内部 `waitSettled` 要等本集每张图
+     *     真落定才返回，第二集就得等第一集全部出完 —— 表现成「只有第一集在跑资产图」。去重**不靠**这个顺序：
+     *     登记是同步的（图片节点 + 名字锁立刻进 `nodesRef`），第二集登记时读到的锁已经指向第一集那张
+     *     **还在生成**的图 → 不再生、直接挂同一张（用户：「哪怕是生成中也先挂上，谁先生就用谁的」）。
      *  ③ **本集图齐就铺本集视频**（2026-11-18 第 4 轮改口径，用户：「相同资产不额外生图，本集图齐就铺本集视频」）：
-     *     生图逐集跑（每集内部仍走 `handleOneClickVideo` 那套 15 分钟 / 35 分钟超时与换模型重试，
-     *     不重写），**这一集的资产图落定后立刻铺这一集的视频链路并开生成**，不再等全批出图。
-     *     「图齐」的判据是 `handleOneClickVideo` 内部的 `waitSettled(imageIds)` —— 它 await 到本集每个资产节点
-     *     都落定（含两轮重试）才返回，所以循环里「返回 = 本集图真的齐了」。
-     *     铺链路必须排在 `handleInheritScriptAssets` 之后：它拿「连进来的图」当资产池，上一集的共享图连线
-     *     刚补完这里才连得上；同名资产靠名字锁复用，不会再排一次生图。
+     *     ④-B-2 逐集 `await handleOneClickVideo(..., { skipScript, prelaunchedImageIds })` —— 每集内部仍走那套
+     *     35 分钟超时与换模型重试（不重写），**这一集的资产图落定后立刻铺这一集的视频链路并开生成**，
+     *     不等全批出图。`prelaunchedImageIds` 是关键：图已经启动过，这一趟只等 + 重试，
+     *     再调一遍登记只会因为锁全在而返回空（会被误判成「没图可生」→ 铺出空帧）。
+     *     铺链路必须排在沿用之后：它拿「连进来的图」当资产池，共享图连线补完这里才连得上。
      *     ⚠️ 这样第 1 集不用等最后一集，但会出现「后面几集还在生图、前面几集已经开始出视频」，
-     *     渠道并发是共享的 —— 如果某条渠道扛不住，回到「等全批」只需把这段挪出循环。
+     *     渠道并发是共享的 —— 如果某条渠道扛不住，调大 `EPISODE_ASSET_LAUNCH_GAP_MS` 或把 ④-B-2 挪成全批等。
      */
     const runVideoReverseEpisodes = useCallback(
         async (
@@ -12023,22 +12045,74 @@ function AtelierCanvasPage() {
                 }
             }
 
-            // ④-B 逐集：**生图 →（图齐就）本集视频**（分镜表已经在 ④-A 出完了）
+            /**
+             * ④-B-1 **一次性登记 + 启动所有集的资产图**（用户 2026-11-18 第 7 轮口径：
+             * 「他们共用资产图池，有相同的名字就不生成，使用已经生成的资产图挂载分镜表里，
+             *  哪怕是这个资产图还是生成中也先挂上，就是说谁先生就用谁的挂载上」）。
+             *
+             * 为什么不能像以前那样「逐集 await 生图」：`handleOneClickVideo` 内部要
+             * `waitSettled(imageIds)` 等**本集每张图真的落定**才返回，于是第二集必须等第一集的图全部出完才开始
+             * 登记 → 用户看到的现象就是「只有第一集在跑资产图，别的集一张都不生」。
+             *
+             * 拆成两趟之后，去重照样成立：
+             *  · 逐集「先沿用 → 再登记」，而登记（`handleDirectGenerateScriptAssets`）是**同步**的：
+             *    建图片节点 + 写名字锁立刻落进 `nodesRef`，节点 `status` 还是 idle 也算「活着」
+             *    （`filterScriptAssetItemsLockedByName` 的 alive 判据只看节点在不在，不看出没出图）。
+             *    所以第二集读到的锁直接指向第一集那张**还在生成**的图 → 不再生，`mountScriptAssetToCells`
+             *    把同一张挂进本集格子 = 「生成中也先挂上」。
+             *  · 这一趟**不 await 任何图**，N 集的生成几乎同时在跑（只按 `EPISODE_ASSET_LAUNCH_GAP_MS`
+             *    错开半秒，免得八集同一瞬间把渠道打满）。
+             */
+            const launchedByScript = new Map<string, string[]>();
+            if (stages.image) {
+                report(`${scriptNodes.length} 集一起生成本集资产图（同名资产只生一张，其余集直接挂同一张，含还在生成中的）…`);
+                for (let index = 0; index < scriptNodes.length; index += 1) {
+                    const scriptNode = scriptNodes[index];
+                    /**
+                     * 🔴 沿用必须排在**本集登记之前**：名字锁来自上一集「已经建出来的图片节点」，
+                     * 先搬锁 → 本集登记时同名资产直接跳过；顺序反了就等于没沿用（会多生一张同名图）。
+                     */
+                    if (index > 0) {
+                        const previous = scriptNodes[index - 1];
+                        if (previous) handleInheritScriptAssets(scriptNode.id, { sourceId: previous.id, options: { assets: true, locks: true, columns: true, output: false }, auto: true, silent: true });
+                        await new Promise((resolve) => setTimeout(resolve, EPISODE_ASSET_LAUNCH_GAP_MS));
+                    }
+                    /**
+                     * 只登记 + fire，不等结果：所有集跑完这一圈时，图**已经全在画布上生成中**了。
+                     * 同名资产由名字锁挡住（`inheritSharedScriptAssets` / `handleInheritScriptAssets` 两路并锁）。
+                     */
+                    const launched = handleDirectGenerateScriptAssets(scriptNode.id);
+                    const ids = launched.created.map((node) => node.id);
+                    launchedByScript.set(scriptNode.id, ids);
+                    if (ids.length) {
+                        patchOneClickVideoRun(scriptNode.id, {
+                            status: "running",
+                            stage: "image",
+                            message: `已启动 ${ids.length} 张资产图生成（同名资产与其它集共用同一张）…`,
+                        });
+                    }
+                }
+            }
+
+            // ④-B-2 逐集：**等本集图落定 →（图齐就）本集视频**（分镜表 ④-A 已出、图 ④-B-1 已启动）
             for (let index = 0; index < scriptNodes.length; index += 1) {
                 const scriptNode = scriptNodes[index];
                 const label = drafts[index]?.title || `第 ${index + 1} 集`;
-                /**
-                 * 🔴 沿用必须排在**本集生图之前**：名字锁来自上一集「已经建出来的图片节点」，
-                 * 先搬锁 → 本集生图时同名资产直接跳过；顺序反了就等于没沿用（会多生一张同名图）。
-                 */
-                if (index > 0) {
-                    const previous = scriptNodes[index - 1];
-                    if (previous) handleInheritScriptAssets(scriptNode.id, { sourceId: previous.id, options: { assets: true, locks: true, columns: true, output: false }, auto: true, silent: true });
-                }
                 if (!stages.image) continue;
-                report(`第 ${index + 1}/${scriptNodes.length} 集（${label}）：分镜表已就绪，生成本集资产图…`);
-                // `skipScript`：表已经有了，这一趟只补生图（不重出表、不白花模型钱）。
-                await handleOneClickVideo(scriptNode.id, { stages: { script: true, image: true, video: false }, skipScript: true });
+                report(`第 ${index + 1}/${scriptNodes.length} 集（${label}）：等本集资产图落定…`);
+                /**
+                 * `skipScript`：表已经有了，不许重出；
+                 * `prelaunchedImageIds`：图在 ④-B-1 已经启动过，这一趟只**等 + 两轮重试**，
+                 * 不许再调一遍 `handleDirectGenerateScriptAssets`（那一遍只会因为锁全在而返回空，
+                 * 这一集会被误判成「没图可生」，紧接着铺视频拿到空帧）；
+                 * `quiet`：N 集各弹一条「已完成」会糊屏，进度看节点按钮与反推节点上的 report。
+                 */
+                await handleOneClickVideo(scriptNode.id, {
+                    stages: { script: true, image: true, video: false },
+                    skipScript: true,
+                    quiet: true,
+                    prelaunchedImageIds: launchedByScript.get(scriptNode.id) || [],
+                });
                 /**
                  * 这一集被暂停了（生图超时 / 换模型仍失败）就**整批停下**：
                  * 继续往下跑只会让后面的集去连一批不存在的共享图，铺出来的视频全是空帧。
@@ -12106,6 +12180,7 @@ function AtelierCanvasPage() {
             chatSkillPacks,
             effectiveConfig,
             handleBuildScriptPipeline,
+            handleDirectGenerateScriptAssets,
             handleInheritScriptAssets,
             handleOneClickVideo,
             message,
