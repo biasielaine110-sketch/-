@@ -10977,8 +10977,13 @@ function AtelierCanvasPage() {
          *        取消勾选的那一步**不执行**。级联由 `cascadeReverseVideoStages` 收口（关上游必关下游），
          *        所以这里只需要按位判断，不用再考虑「不出分镜表却要生视频」这种组合。
          *        不传 = 三颗全勾，与改造前完全一致（脚本节点上手动点「一键视频」走的就是这条）。
+         * @param options.skipScript 分镜表**已经有了**，别再出一遍（04 并行模式用）：
+         *        拆段阶段已把每一集的分镜表并行跑完，第二趟只补「生图 → 本集视频」。
+         *        与本参数无关，缺表时仍然暂停（没内容就进不了下一环）。
+         * @param options.quiet 不弹成功 toast（04 的并行预跑用：N 集各弹一条「已跳过一键生图」会糊屏）。
+         *        错误 / 暂停提示照旧弹，别把该看的遮掉。
          */
-        async (nodeId: string, options?: { referenceAssets?: readonly ScriptAssetReference[]; stages?: Partial<ReverseVideoStages> | null }) => {
+        async (nodeId: string, options?: { referenceAssets?: readonly ScriptAssetReference[]; stages?: Partial<ReverseVideoStages> | null; skipScript?: boolean; quiet?: boolean }) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             if (oneClickVideoRunningRef.current.has(nodeId)) return;
@@ -11055,70 +11060,85 @@ function AtelierCanvasPage() {
                     message.success(t("canvas.scriptNode.oneClickSkippedScript"));
                     return;
                 }
-                // ---- ① 生成分镜表（报错 → deepseek-flash 重试一次；15 分钟封顶，重试共用这段预算）----
-                const scriptDeadline = Date.now() + ONE_CLICK_STAGE_TIMEOUT_MS;
-                const stopScript = () => handleStopScriptGeneration(nodeId);
-                notify("script", "canvas.scriptNode.oneClickStageScript");
                 /**
-                 * 失败提示要**点名试过哪几个模型**（用户 2026-11-09：报错只看到「HTTP 402 / 500」，
-                 * 分不清是哪条渠道挂了 —— 他手上两条文本渠道一条 402（没钱）一条 500（对方服务端故障））。
-                 * 标签走 `modelOptionLabel`，会带上渠道名，用户才知道该去改哪个。
+                 * 🔴 `skipScript`（用户 2026-11-18「并行」口径）：04 在拆段阶段就把**每一集**的分镜表
+                 * 并行跑完了，第二趟逐集只补「生图 → 本集视频」，不许再把表重出一遍
+                 * （重出会覆盖用户已经看过的表、也会白花一轮模型钱）。
+                 * 表不在（那一集分镜失败了 / 被手动清过）→ 和以前一样暂停，没内容就不往下走。
                  */
-                const scriptTriedModels: string[] = [];
-                const noteScriptModel = (model?: string) => {
-                    const label = model ? modelOptionLabel(effectiveConfig, model) : "";
-                    const text = label || t("canvas.scriptNode.oneClickScriptModelUnknown");
-                    if (!scriptTriedModels.includes(text)) scriptTriedModels.push(text);
-                };
-                noteScriptModel(
-                    nodesRef.current.find((item) => item.id === nodeId)?.metadata?.model || effectiveConfig.textModel || "",
-                );
-                const firstPass = await withDeadline(runScriptGeneration(nodeId), scriptDeadline, stopScript);
-                if (firstPass.timedOut) {
-                    pauseWith("script", t("canvas.scriptNode.oneClickScriptTimeout"));
-                    return;
-                }
-                let outcome = firstPass.value;
-                if (!outcome?.ok && !outcome?.cancelled) {
-                    const retryModel = seekModel({
-                        names: ONE_CLICK_SCRIPT_RETRY_MODEL_NAMES,
-                        channelHints: ONE_CLICK_SCRIPT_RETRY_CHANNEL_HINTS,
-                        capability: "text",
-                    });
-                    if (!retryModel) {
-                        pauseWith("script", t("canvas.scriptNode.oneClickScriptRetryMissing"));
+                let rowCount = 0;
+                if (options?.skipScript) {
+                    rowCount = nodesRef.current.find((item) => item.id === nodeId)?.metadata?.scriptRows?.length ?? 0;
+                    if (!rowCount) {
+                        pauseWith("script", t("canvas.scriptNode.oneClickScriptEmpty"));
                         return;
                     }
-                    noteScriptModel(retryModel);
-                    notify("script", "canvas.scriptNode.oneClickScriptRetry", { model: modelOptionLabel(effectiveConfig, retryModel) });
-                    const retryPass = await withDeadline(runScriptGeneration(nodeId, { model: retryModel }), scriptDeadline, stopScript);
-                    if (retryPass.timedOut) {
+                } else {
+                    // ---- ① 生成分镜表（报错 → deepseek-flash 重试一次；15 分钟封顶，重试共用这段预算）----
+                    const scriptDeadline = Date.now() + ONE_CLICK_STAGE_TIMEOUT_MS;
+                    const stopScript = () => handleStopScriptGeneration(nodeId);
+                    notify("script", "canvas.scriptNode.oneClickStageScript");
+                    /**
+                     * 失败提示要**点名试过哪几个模型**（用户 2026-11-09：报错只看到「HTTP 402 / 500」，
+                     * 分不清是哪条渠道挂了 —— 他手上两条文本渠道一条 402（没钱）一条 500（对方服务端故障））。
+                     * 标签走 `modelOptionLabel`，会带上渠道名，用户才知道该去改哪个。
+                     */
+                    const scriptTriedModels: string[] = [];
+                    const noteScriptModel = (model?: string) => {
+                        const label = model ? modelOptionLabel(effectiveConfig, model) : "";
+                        const text = label || t("canvas.scriptNode.oneClickScriptModelUnknown");
+                        if (!scriptTriedModels.includes(text)) scriptTriedModels.push(text);
+                    };
+                    noteScriptModel(
+                        nodesRef.current.find((item) => item.id === nodeId)?.metadata?.model || effectiveConfig.textModel || "",
+                    );
+                    const firstPass = await withDeadline(runScriptGeneration(nodeId), scriptDeadline, stopScript);
+                    if (firstPass.timedOut) {
                         pauseWith("script", t("canvas.scriptNode.oneClickScriptTimeout"));
                         return;
                     }
-                    outcome = retryPass.value;
-                }
-                if (!outcome?.ok) {
-                    if (outcome?.cancelled) {
-                        // 用户自己点了停止 / 前置条件不满足：不算报错，别弹「失败」。
-                        patchOneClickVideoRun(nodeId, { status: "paused", stage: "script", message: t("canvas.scriptNode.oneClickStopped") });
+                    let outcome = firstPass.value;
+                    if (!outcome?.ok && !outcome?.cancelled) {
+                        const retryModel = seekModel({
+                            names: ONE_CLICK_SCRIPT_RETRY_MODEL_NAMES,
+                            channelHints: ONE_CLICK_SCRIPT_RETRY_CHANNEL_HINTS,
+                            capability: "text",
+                        });
+                        if (!retryModel) {
+                            pauseWith("script", t("canvas.scriptNode.oneClickScriptRetryMissing"));
+                            return;
+                        }
+                        noteScriptModel(retryModel);
+                        notify("script", "canvas.scriptNode.oneClickScriptRetry", { model: modelOptionLabel(effectiveConfig, retryModel) });
+                        const retryPass = await withDeadline(runScriptGeneration(nodeId, { model: retryModel }), scriptDeadline, stopScript);
+                        if (retryPass.timedOut) {
+                            pauseWith("script", t("canvas.scriptNode.oneClickScriptTimeout"));
+                            return;
+                        }
+                        outcome = retryPass.value;
+                    }
+                    if (!outcome?.ok) {
+                        if (outcome?.cancelled) {
+                            // 用户自己点了停止 / 前置条件不满足：不算报错，别弹「失败」。
+                            patchOneClickVideoRun(nodeId, { status: "paused", stage: "script", message: t("canvas.scriptNode.oneClickStopped") });
+                            return;
+                        }
+                        pauseWith(
+                            "script",
+                            t("canvas.scriptNode.oneClickScriptFailed", {
+                                models: scriptTriedModels.join(" → ") || t("canvas.scriptNode.oneClickScriptModelUnknown"),
+                                error: outcome?.error || t("canvas.scriptNode.parseFailed"),
+                            }),
+                        );
                         return;
                     }
-                    pauseWith(
-                        "script",
-                        t("canvas.scriptNode.oneClickScriptFailed", {
-                            models: scriptTriedModels.join(" → ") || t("canvas.scriptNode.oneClickScriptModelUnknown"),
-                            error: outcome?.error || t("canvas.scriptNode.parseFailed"),
-                        }),
-                    );
-                    return;
-                }
-                // 行数以 `runScriptGeneration` 的返回值为准（它同时已把新表同步进 `nodesRef`）。
-                const rowCount = outcome.rows ?? nodesRef.current.find((item) => item.id === nodeId)?.metadata?.scriptRows?.length ?? 0;
-                if (!rowCount) {
-                    pauseWith("script", t("canvas.scriptNode.oneClickScriptEmpty"));
-                    return;
-                }
+                    // 行数以 `runScriptGeneration` 的返回值为准（它同时已把新表同步进 `nodesRef`）。
+                    rowCount = outcome.rows ?? nodesRef.current.find((item) => item.id === nodeId)?.metadata?.scriptRows?.length ?? 0;
+                    if (!rowCount) {
+                        pauseWith("script", t("canvas.scriptNode.oneClickScriptEmpty"));
+                        return;
+                    }
+                } // ← 结束「跳过 ①」分支（`skipScript` 为真时整段不出表）
 
                 // ---- ①.5 参考图（产品）直接挂成道具资产，并把这些道具剔出下一步的生图清单 ----
                 // 必须排在这里：分镜表刚出来（stage ①）才有「道具名」可对齐；而 stage ② 要读挂载结果 + 跳过表。
@@ -11157,7 +11177,7 @@ function AtelierCanvasPage() {
                  */
                 if (!stages.image) {
                     patchOneClickVideoRun(nodeId, { status: "done", stage: "script", message: t("canvas.scriptNode.oneClickSkippedImage") });
-                    message.success(t("canvas.scriptNode.oneClickSkippedImage"));
+                    if (!options?.quiet) message.success(t("canvas.scriptNode.oneClickSkippedImage"));
                     return;
                 }
                 const imageDeadline = Date.now() + ONE_CLICK_IMAGE_STAGE_TIMEOUT_MS;
@@ -11609,10 +11629,16 @@ function AtelierCanvasPage() {
      *     （`buildScriptAssetInheritPlan` 的 onlyNames 那一路）—— 同一张图，不是新生成一张。
      *     搬完之后再调 `handleInheritScriptAssets` 补**连线 + 分类**：锁让「不再重复生图」成立，
      *     连线 / 分类让铺链路按分类兜底时也看得见这些图（少一样就会「图生成了但视频里没连上」）。
-     *  ② **必须一集一集串行**：第 N 集的锁来自第 N-1 集「已经建出来的图片节点」。并行跑的话
-     *     第 N 集出表时第 N-1 集还没开始生图 → 一个锁都没有 → 同名资产被重新生成一遍（正是用户要避免的）。
+     *  ② **拆段 / 分镜并行，生图按集顺序**（2026-11-18 第 6 轮改口径，用户：「该拆段拆段，该生分镜脚本
+     *     生分镜脚本……除非说是因为缺少内容无法到下个任务环节才进行等待」）：
+     *     N 个文本 / 脚本节点一次建完 → **所有集的分镜表并行生**（各集互不依赖，谁也不等谁）。
+     *     只有「缺内容」的两处才停下来等：① 本集生图必须等**本集分镜表**出来（`handleOneClickVideo`
+     *     内部自己 await）；② 复用上一集的同名图必须等那张图**已经建好** → 生图 / 视频仍按集顺序。
+     *     这条顺序是**资产去重的前提**：并行生图时两集都读不到对方的图片节点，同名资产会各生一张。
+     *     因此循环里 `handleInheritScriptAssets` 必须排在 `handleOneClickVideo` **之前**（此时上一集已出图），
+     *     并且第二趟用 `skipScript` 让每一集**不再重出分镜表**。
      *  ③ **本集图齐就铺本集视频**（2026-11-18 第 4 轮改口径，用户：「相同资产不额外生图，本集图齐就铺本集视频」）：
-     *     分镜 / 生图逐集串行跑（每集内部仍走 `handleOneClickVideo` 那套 15 分钟 / 35 分钟超时与换模型重试，
+     *     生图逐集跑（每集内部仍走 `handleOneClickVideo` 那套 15 分钟 / 35 分钟超时与换模型重试，
      *     不重写），**这一集的资产图落定后立刻铺这一集的视频链路并开生成**，不再等全批出图。
      *     「图齐」的判据是 `handleOneClickVideo` 内部的 `waitSettled(imageIds)` —— 它 await 到本集每个资产节点
      *     都落定（含两轮重试）才返回，所以循环里「返回 = 本集图真的齐了」。
@@ -11812,14 +11838,67 @@ function AtelierCanvasPage() {
                 return { ok: true, chatNodeId: chatNode.id, textNodeId: firstText.id, scriptNodeId: scriptNodes[0]?.id };
             }
 
-            // ④ 逐集：分镜表 → 资产图 →（图齐就）本集视频（**串行**，见函数头 ③）
+            /**
+             * ④-A **每一集的分镜表并行生**（用户 2026-11-18：拆段 / 分镜不许互相等）。
+             *
+             * 这里是整条 04 里唯一能真正并行的一步：每集的输入只是它自己那个文本节点，
+             * 出表既不依赖上一集、也不依赖任何图 —— 所以 `Promise.all` 一起打，
+             * 谁先回来谁先落库（`runScriptGeneration` 的写回是「同步改 ref + 函数式 setState」，
+             * 不同节点互不覆盖）。
+             *
+             * 勾了「生成分镜」才跑；没勾的话 `stages` 已在级联里把后面两步压成 false。
+             */
+            if (stages.script && scriptNodes.length > 1) {
+                report(`${scriptNodes.length} 集同时生成分镜表（并行，谁也不等谁）…`);
+                await Promise.all(
+                    scriptNodes.map((node) => handleOneClickVideo(node.id, { stages: { script: true, image: false, video: false }, quiet: true })),
+                );
+                /** 并行阶段有集挂了：照样把**其它集**的表跑完（已经在同一批里），但不再往下生图 / 铺视频。 */
+                const stuck = scriptNodes
+                    .map((node, index) => ({ label: drafts[index]?.title || `第 ${index + 1} 集`, state: oneClickVideoRunsRef.current[node.id] }))
+                    .filter((item) => item.state?.status === "paused");
+                if (stuck.length) {
+                    return {
+                        ok: false,
+                        chatNodeId: chatNode.id,
+                        textNodeId: firstText.id,
+                        scriptNodeId: scriptNodes[0]?.id,
+                        error: `${stuck.map((item) => `${item.label}：${item.state?.message || "见该集脚本节点上的提示"}`).join("；")}（缺分镜表的集不会继续生图 / 铺视频，修好后可单独跑那一集）`,
+                    };
+                }
+            } else if (stages.script) {
+                // 只有一集：并行没有意义，直接走原来那条（顺带把「单集也走一遍」的路径留作回归基准）。
+                await handleOneClickVideo(scriptNodes[0].id, { stages: { script: true, image: false, video: false } });
+                const state = oneClickVideoRunsRef.current[scriptNodes[0].id];
+                if (state?.status === "paused") {
+                    return {
+                        ok: false,
+                        chatNodeId: chatNode.id,
+                        textNodeId: firstText.id,
+                        scriptNodeId: scriptNodes[0]?.id,
+                        error: `${drafts[0]?.title || "第 1 集"} 已暂停：${state.message || "见该集脚本节点上的提示"}（修好后可单独跑那一集）`,
+                    };
+                }
+            }
+
+            // ④-B 逐集：**生图 →（图齐就）本集视频**（分镜表已经在 ④-A 出完了）
             for (let index = 0; index < scriptNodes.length; index += 1) {
                 const scriptNode = scriptNodes[index];
                 const label = drafts[index]?.title || `第 ${index + 1} 集`;
-                report(`第 ${index + 1}/${scriptNodes.length} 集（${label}）：${stages.image ? "生成分镜表 → 资产图…" : "生成分镜表…"}`);
-                await handleOneClickVideo(scriptNode.id, { stages: { script: true, image: stages.image, video: false } });
                 /**
-                 * 这一集被暂停了（分镜表失败 / 生图超时 / 换模型仍失败）就**整批停下**：
+                 * 🔴 沿用必须排在**本集生图之前**：名字锁来自上一集「已经建出来的图片节点」，
+                 * 先搬锁 → 本集生图时同名资产直接跳过；顺序反了就等于没沿用（会多生一张同名图）。
+                 */
+                if (index > 0) {
+                    const previous = scriptNodes[index - 1];
+                    if (previous) handleInheritScriptAssets(scriptNode.id, { sourceId: previous.id, options: { assets: true, locks: true, columns: true, output: false }, auto: true, silent: true });
+                }
+                if (!stages.image) continue;
+                report(`第 ${index + 1}/${scriptNodes.length} 集（${label}）：分镜表已就绪，生成本集资产图…`);
+                // `skipScript`：表已经有了，这一趟只补生图（不重出表、不白花模型钱）。
+                await handleOneClickVideo(scriptNode.id, { stages: { script: true, image: true, video: false }, skipScript: true });
+                /**
+                 * 这一集被暂停了（生图超时 / 换模型仍失败）就**整批停下**：
                  * 继续往下跑只会让后面的集去连一批不存在的共享图，铺出来的视频全是空帧。
                  * 原因已经写在该集脚本节点上（`oneClickVideoRuns` 是内存态，节点按钮上能看到）。
                  */
@@ -11833,11 +11912,6 @@ function AtelierCanvasPage() {
                         error: `${label} 已暂停：${state.message || "见该集脚本节点上的提示"}（本批后面的集不再继续，修好后可单独跑那一集）`,
                     };
                 }
-                /** 出图阶段结束：把上一集的**连线 + 资产分类**补进来（锁已经由出表时的自动沿用搬过）。 */
-                if (index > 0) {
-                    const previous = scriptNodes[index - 1];
-                    if (previous) handleInheritScriptAssets(scriptNode.id, { sourceId: previous.id, options: { assets: true, locks: true, columns: true, output: false }, auto: true, silent: true });
-                }
                 /**
                  * 覆盖掉「一键视频」留下的「已跳过一键生视频」文案 —— 04 不是跳过，是**本集图齐就铺**，
                  * 照抄那句话会让用户以为这集永远不会生成视频。
@@ -11845,11 +11919,7 @@ function AtelierCanvasPage() {
                 patchOneClickVideoRun(scriptNode.id, {
                     status: "done",
                     stage: "image",
-                    message: stages.image
-                        ? stages.video
-                            ? "本集分镜表 + 资产图已完成，接着铺本集视频…"
-                            : "本集分镜表 + 资产图已完成（没勾一键生视频，这一集不铺视频）"
-                        : "本集分镜表已完成（没勾一键生图，后面两步都不执行）",
+                    message: stages.video ? "本集分镜表 + 资产图已完成，接着铺本集视频…" : "本集分镜表 + 资产图已完成（没勾一键生视频，这一集不铺视频）",
                 });
                 /**
                  * 🔴 「本集图齐就铺本集视频」（用户 2026-11-18 第 4 轮）—— 三个位置都不能挪：
