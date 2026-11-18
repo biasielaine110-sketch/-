@@ -11596,7 +11596,7 @@ function AtelierCanvasPage() {
      * 与 01 / 02 / 03 的根本差别：**输入不是视频，是一段文字剧本**（`metadata.reverseVideoScript`，
      * 可以直接手打 / 粘贴，也可以从连线接进来的文本节点写入）。
      * 整条链是「剧本 → AI 出连续正文（一次模型调用）→ **本地按每集时长切段** → N 个文本节点 + N 个脚本节点
-     * → 逐集分镜 / 生图 → 统一铺视频」。
+     * → 逐集（分镜 → 生图 → **本集图齐就铺本集视频**）」。
      *
      * 🔴 2026-11-18 改口径（用户）：「等 AI 对话给到结果后，再自行按照时长进行输出为 1 个文本节点还是多个
      * 文本节点，再分别执行脚本生成器的相关内容」—— 切几集不再由模型决定（让它自己切必然忽长忽短），
@@ -11611,9 +11611,15 @@ function AtelierCanvasPage() {
      *     连线 / 分类让铺链路按分类兜底时也看得见这些图（少一样就会「图生成了但视频里没连上」）。
      *  ② **必须一集一集串行**：第 N 集的锁来自第 N-1 集「已经建出来的图片节点」。并行跑的话
      *     第 N 集出表时第 N-1 集还没开始生图 → 一个锁都没有 → 同名资产被重新生成一遍（正是用户要避免的）。
-     *  ③ **视频要等全批的图**：分镜 / 生图逐集跑（每集内部仍走 `handleOneClickVideo` 那套
-     *     15 分钟 / 35 分钟超时与换模型重试，不重写），但视频统一放到最后一起铺 ——
-     *     否则第 1 集铺视频时第 3 集的共享图还在生成中，视频节点会连到空图。
+     *  ③ **本集图齐就铺本集视频**（2026-11-18 第 4 轮改口径，用户：「相同资产不额外生图，本集图齐就铺本集视频」）：
+     *     分镜 / 生图逐集串行跑（每集内部仍走 `handleOneClickVideo` 那套 15 分钟 / 35 分钟超时与换模型重试，
+     *     不重写），**这一集的资产图落定后立刻铺这一集的视频链路并开生成**，不再等全批出图。
+     *     「图齐」的判据是 `handleOneClickVideo` 内部的 `waitSettled(imageIds)` —— 它 await 到本集每个资产节点
+     *     都落定（含两轮重试）才返回，所以循环里「返回 = 本集图真的齐了」。
+     *     铺链路必须排在 `handleInheritScriptAssets` 之后：它拿「连进来的图」当资产池，上一集的共享图连线
+     *     刚补完这里才连得上；同名资产靠名字锁复用，不会再排一次生图。
+     *     ⚠️ 这样第 1 集不用等最后一集，但会出现「后面几集还在生图、前面几集已经开始出视频」，
+     *     渠道并发是共享的 —— 如果某条渠道扛不住，回到「等全批」只需把这段挪出循环。
      */
     const runVideoReverseEpisodes = useCallback(
         async (
@@ -11800,7 +11806,7 @@ function AtelierCanvasPage() {
                 return { ok: true, chatNodeId: chatNode.id, textNodeId: firstText.id, scriptNodeId: scriptNodes[0]?.id };
             }
 
-            // ④ 逐集：分镜表 → 资产图（**串行**，视频留到全批出图后统一铺）
+            // ④ 逐集：分镜表 → 资产图 →（图齐就）本集视频（**串行**，见函数头 ③）
             for (let index = 0; index < scriptNodes.length; index += 1) {
                 const scriptNode = scriptNodes[index];
                 const label = drafts[index]?.title || `第 ${index + 1} 集`;
@@ -11827,33 +11833,55 @@ function AtelierCanvasPage() {
                     if (previous) handleInheritScriptAssets(scriptNode.id, { sourceId: previous.id, options: { assets: true, locks: true, columns: true, output: false }, auto: true, silent: true });
                 }
                 /**
-                 * 覆盖掉「一键视频」留下的「已跳过一键生视频」文案 —— 04 不是跳过，是**等全批出图后统一铺**，
+                 * 覆盖掉「一键视频」留下的「已跳过一键生视频」文案 —— 04 不是跳过，是**本集图齐就铺**，
                  * 照抄那句话会让用户以为这集永远不会生成视频。
                  */
                 patchOneClickVideoRun(scriptNode.id, {
                     status: "done",
                     stage: "image",
-                    message: stages.image ? "本集分镜表 + 资产图已完成（视频等这一批的图全齐后统一铺）" : "本集分镜表已完成（没勾一键生图，后面两步都不执行）",
+                    message: stages.image
+                        ? stages.video
+                            ? "本集分镜表 + 资产图已完成，接着铺本集视频…"
+                            : "本集分镜表 + 资产图已完成（没勾一键生视频，这一集不铺视频）"
+                        : "本集分镜表已完成（没勾一键生图，后面两步都不执行）",
                 });
+                /**
+                 * 🔴 「本集图齐就铺本集视频」（用户 2026-11-18 第 4 轮）—— 三个位置都不能挪：
+                 *  ① 在 `handleOneClickVideo` 之后：它内部 `waitSettled(imageIds)` 已经 await 到**本集**每个资产
+                 *     节点落定（含两轮重试），所以「这句返回 = 本集图真的齐了」；
+                 *  ② 在 `handleInheritScriptAssets` 之后：铺链路拿「连进来的图」当资产池，上一集的共享图连线
+                 *     刚补完这里才连得上（同名资产走名字锁复用，不会再排一次生图）；
+                 *  ③ 在 paused 判断之后：这一集挂了直接退出整批，不能带着空图去铺视频。
+                 *
+                 * `handleBuildScriptPipeline` 本体是同步的（对齐 → 建节点 → 连边 → 排生成），
+                 * 返回时 `nodesRef` 已写完，不会和下一集的分镜 / 生图抢写。
+                 */
+                if (stages.video) {
+                    report(`第 ${index + 1}/${scriptNodes.length} 集（${label}）：图已齐，铺本集视频链路并生成…`);
+                    handleBuildScriptPipeline(scriptNode.id, undefined, {
+                        videoOnly: true,
+                        group: true,
+                        autoGenerate: true,
+                        skipConfirm: true,
+                        onVideoPause: (detail) => patchOneClickVideoRun(scriptNode.id, { status: "paused", stage: "pipeline", message: detail }),
+                    });
+                    patchOneClickVideoRun(scriptNode.id, { status: "done", stage: "pipeline", message: t("canvas.scriptNode.oneClickDone") });
+                }
             }
             if (!stages.image) {
                 report(`${describeEpisodeSplit(drafts, seconds)} 的分镜表已全部生成；没勾一键生图 / 一键生视频，到此为止`);
                 return { ok: true, chatNodeId: chatNode.id, textNodeId: firstText.id, scriptNodeId: scriptNodes[0]?.id };
             }
-
-            // ⑤ 全批资产图都落定了才铺视频（🔴 见函数头 ③）
-            report(`${scriptNodes.length} 集的资产图已齐，开始逐集铺视频链路并生成…`);
-            scriptNodes.forEach((scriptNode) => {
-                handleBuildScriptPipeline(scriptNode.id, undefined, {
-                    videoOnly: true,
-                    group: true,
-                    autoGenerate: true,
-                    skipConfirm: true,
-                    onVideoPause: (detail) => patchOneClickVideoRun(scriptNode.id, { status: "paused", stage: "pipeline", message: detail }),
-                });
-                patchOneClickVideoRun(scriptNode.id, { status: "done", stage: "pipeline", message: t("canvas.scriptNode.oneClickDone") });
-            });
-            message.success(`04 完成：${describeEpisodeSplit(drafts, seconds)}，已逐集铺视频（进度见各集脚本节点）`);
+            /**
+             * 🔴 「一键生视频」单独没勾（分镜 ✓ 生图 ✓ 视频 ✗）：图照出，视频一步都不许铺。
+             * 循环里那道 `if (stages.video)` 已经拦住，这里只补一句人话 ——
+             * 否则用户会以为视频还在排队，一直在等。
+             */
+            if (!stages.video) {
+                report(`${describeEpisodeSplit(drafts, seconds)} 的分镜表 + 资产图已完成；没勾「一键生视频」，这一批不铺视频（想铺可在各集脚本节点上手动点）`);
+                return { ok: true, chatNodeId: chatNode.id, textNodeId: firstText.id, scriptNodeId: scriptNodes[0]?.id };
+            }
+            message.success(`04 完成：${describeEpisodeSplit(drafts, seconds)}，已逐集铺视频（每集图齐就铺，进度见各集脚本节点）`);
             return { ok: true, chatNodeId: chatNode.id, textNodeId: firstText.id, scriptNodeId: scriptNodes[0]?.id };
         },
         [
