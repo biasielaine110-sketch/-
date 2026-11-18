@@ -417,7 +417,8 @@ const STORY_SCRIPT_STYLE_HINT_COMMON = [
     "- 单镜时长以任务里的「时长要求」为准；没特别指定时按「每 15 秒 4 个镜头」（每镜 3~4 秒），绝不写 1~2 秒的碎镜",
     "- 景别写法类似 `近景 / 特写`、`中景 / 仰视`",
     "- 角色描述尽量写成 `[角色ID: ...]` 形式",
-    "- 同一个人物在所有行里必须用完全一致的角色名",
+    "- 🔴 **同一个造型必须用完全一致的角色名；同一个人换了衣服 / 造型，就写成 `角色名@造型`**（`叶辰@便服` 家里、`叶辰@校服` 学校、`叶辰@西服` 正式场合）。角色名就是资产键 —— 同名不同造型不加 `@` 区分，后面所有镜头都会被套成同一套衣服。造型词只用两三个字（`便服` / `校服` / `西服` / `睡衣` / `礼服`），同一套造型在全表用同一个词，不要带括号、不要带描述",
+    "- `@造型` 只用来区分资产：分镜提示词 / 视频运动提示词 / 台词里提到这个人时只写 `@` 前面的名字（`叶辰`），服装交给角色描述列和参考图",
     "- 一镜里出现两个角色时，第二个填进角色2 / 角色描述2",
 ];
 
@@ -2472,6 +2473,78 @@ function normalizeScriptAssetMatchText(value: string): string {
         .toLowerCase();
 }
 
+/**
+ * **造型变体签名**分隔符：`叶辰@校服`（全角 `＠` 也认）。
+ *
+ * ⚠️ 只认 `@` 这一个符号。别扩到 `-` / `｜` / `·` —— 那些符号在普通资产名里本来就会出现
+ * （`奶茶店-门口`、`苏晚｜阿杰`），扩过去等于把正常名字劈成两半。
+ */
+const SCRIPT_ASSET_VARIANT_SEPARATOR = /[@＠]/;
+
+/** 一个资产名拆出来的「本体 + 造型签名」。 */
+export type ScriptAssetVariantName = {
+    /** 角色 / 资产本体（`叶辰@校服` → `叶辰`；没写造型 → 原名）。 */
+    base: string;
+    /** 造型签名（`叶辰@校服` → `校服`；没写 → 空串）。 */
+    variant: string;
+    /** 原文里到底有没有真的写 `@造型`。 */
+    explicit: boolean;
+};
+
+/**
+ * 把资产名拆成「本体 + 造型签名」：`叶辰@校服` → `{ base: "叶辰", variant: "校服" }`。
+ *
+ * 为什么需要：同一个角色在不同场合穿不同衣服（家里的便服 / 学校校服 / 正式场合西服），名字都叫
+ * `叶辰`。资产池是**按名字**共享的（`scriptNameLocks` 精确键 + `storyScriptAssetNameSimilarity`
+ * 模糊键），不区分的话第二集学校戏会直接复用第一集家里那套衣服 —— 用户原话「后面就都是同一套衣服」。
+ * 约定写法 `角色名@造型`，`@` 后面那截就是区分不同服装的签名。
+ *
+ * 容错：
+ *  - `@` 前面没名字（`@图片1` 这类误写）→ 去掉 `@` 整个当裸名，不让一个孤零零的 `@` 拆坏名字；
+ *  - `@` 后面是空（`叶辰@`）→ 当裸名。
+ */
+export function splitScriptAssetVariant(value: unknown): ScriptAssetVariantName {
+    const text = storyScriptCellText(value);
+    if (!text) return { base: "", variant: "", explicit: false };
+    const at = text.search(SCRIPT_ASSET_VARIANT_SEPARATOR);
+    if (at < 0) return { base: text, variant: "", explicit: false };
+    const base = text.slice(0, at).trim();
+    const variant = text.slice(at + 1).trim();
+    if (!base) return { base: text.replace(/^[@＠]+/, "").trim(), variant: "", explicit: false };
+    if (!variant) return { base, variant: "", explicit: false };
+    return { base, variant, explicit: true };
+}
+
+/**
+ * 造型签名闸门：`叶辰@校服` vs `叶辰@便服` 必须判成**两个资产**。
+ *
+ * 返回 `null` = 这一层没有意见（交给后面的字符相似度）；返回 `0` = 明确不是同一个资产。
+ *
+ * 三条判定（顺序不能动）：
+ *  ① 本体对不上（`叶辰` vs `苏晚`）→ 没意见，走老逻辑（`苏晚` vs `苏小晚` 那种仍然要能命中）；
+ *  ② 本体相同、两边都**没写** `@` → 没意见 —— 老行为逐字不变，历史项目一个判据都不变；
+ *  ③ 本体相同但造型签名不同 → `0`。**裸名对带造型的名字同样给 `0`**：裸名说不清是哪一套衣服，
+ *     宁可多生一张图。唯一例外是裸名那边原文本来就把造型词写进了括号（`叶辰（校服）`）——
+ *     那是同一个造型的另一种写法。
+ */
+function scriptAssetVariantGate(left: unknown, right: unknown): 0 | null {
+    const l = splitScriptAssetVariant(left);
+    const r = splitScriptAssetVariant(right);
+    const leftBase = normalizeScriptAssetMatchText(l.base);
+    const rightBase = normalizeScriptAssetMatchText(r.base);
+    if (!leftBase || !rightBase || leftBase !== rightBase) return null;
+    if (!l.explicit && !r.explicit) return null;
+    if (l.explicit && r.explicit) {
+        // 造型词本身允许带括号注释（`叶辰@校服（蓝白短袖）` 与 `叶辰@校服` 是同一套）。
+        return normalizeScriptAssetMatchText(l.variant) === normalizeScriptAssetMatchText(r.variant) ? null : 0;
+    }
+    const explicitSide = l.explicit ? l : r;
+    const bareSide = l.explicit ? r : l;
+    const variantText = explicitSide.variant.trim();
+    if (!variantText) return null;
+    return storyScriptCellText(bareSide.base).includes(variantText) ? null : 0;
+}
+
 /** 字符二元组（中文按字切，英文数字按字切都够用）。 */
 function scriptAssetBigrams(text: string): string[] {
     const chars = Array.from(text);
@@ -2482,12 +2555,12 @@ function scriptAssetBigrams(text: string): string[] {
 }
 
 /**
- * 资产名相似度（0~1）：完全相同 1、双向包含 0.9、其余取「二元组 Dice」与「字符集合 Jaccard」的较大值。
+ * 纯文本相似度（0~1）：完全相同 1、双向包含 0.9、其余取「二元组 Dice」与「字符集合 Jaccard」的较大值。
  *
  * 为什么两个指标都要：`奶茶店门外人行道` vs `奶茶店门口` 靠 Dice 命中（0.55），
  * `苏晚` vs `苏小晚` 靠 Jaccard 命中（0.67）—— 单用任何一个都会漏一类「明显是同一个资产」的名字。
  */
-export function storyScriptAssetNameSimilarity(left: string, right: string): number {
+function scriptAssetTextSimilarity(left: string, right: string): number {
     const a = normalizeScriptAssetMatchText(left);
     const b = normalizeScriptAssetMatchText(right);
     if (!a || !b) return 0;
@@ -2512,6 +2585,23 @@ export function storyScriptAssetNameSimilarity(left: string, right: string): num
     for (const char of leftSet) if (rightSet.has(char)) shared += 1;
     const jaccard = shared / (leftSet.size + rightSet.size - shared);
     return Math.max(dice, jaccard);
+}
+
+/**
+ * 资产名相似度（0~1）：完全相同 1、双向包含 0.9、其余取「二元组 Dice」与「字符集合 Jaccard」的较大值。
+ *
+ * 🔴 **造型闸门必须排在最前面**（`scriptAssetVariantGate`）：`叶辰@校服` 是包含 `叶辰` 的，
+ * 闸门排在「双向包含 = 0.9」后面就会先被判成同一个资产，换装区分当场失效。
+ *
+ * 闸门放行之后**只拿本体去比**（`@造型` 那一截整段摘掉）：否则造型词会白白贡献相似度，
+ * `苏晚@校服` vs `苏晴@校服` 会因为共用 `@校服` 三个字拿到 0.67 直接合并 —— 换了两个人
+ * 反而因为穿了同样校服被认成同一个。两边都没写造型时逐字走老逻辑，历史判据一个都不变。
+ */
+export function storyScriptAssetNameSimilarity(left: string, right: string): number {
+    if (scriptAssetVariantGate(left, right) === 0) return 0;
+    const l = splitScriptAssetVariant(left);
+    const r = splitScriptAssetVariant(right);
+    return scriptAssetTextSimilarity(l.explicit ? l.base : String(left ?? ""), r.explicit ? r.base : String(right ?? ""));
 }
 
 /** 判定「算同一个资产」的相似度门槛。0.5 = 一半字符二元组重合，够宽松又不会把苏晚对上苏晴。 */
@@ -3425,6 +3515,30 @@ function hasScriptAssetRoleColumn(role: ScriptAssetRole, preset?: StoryScriptPre
 }
 
 /**
+ * 描述兜底用：归一化后的本镜描述里，是不是**字面**提到了这个素材标题。
+ *
+ * 比 `haystack.includes(title)` 多一层造型变体保护（换装区分，见 `splitScriptAssetVariant`）：
+ *  - 素材带 `@造型`（`叶辰@校服`）→ 只认描述里逐字出现「名字@造型」，普通写法（`叶辰穿着校服…`）
+ *    不算 —— 否则便服那张图会被挂进学校那一镜；
+ *  - 素材是裸名（`叶辰`）→ 描述里出现的是 `叶辰@校服` 时**不算**（那是另一个造型的资产），
+ *    否则裸名图会把换装那一镜又合并回去。
+ */
+function hasScriptAssetTitleMention(haystack: string, assetTitle: unknown): boolean {
+    const title = normalizeScriptAssetMatchText(String(assetTitle ?? ""));
+    if (!title || !haystack.includes(title)) return false;
+    if (splitScriptAssetVariant(assetTitle).explicit) return true;
+    // 裸名：逐个出现位置检查，只要有一处后面不是 `@…` 就算真的提到了。
+    let from = 0;
+    while (from < haystack.length) {
+        const at = haystack.indexOf(title, from);
+        if (at < 0) return false;
+        if (haystack.charAt(at + title.length) !== "@") return true;
+        from = at + title.length;
+    }
+    return false;
+}
+
+/**
  * **按分类逐镜匹配上游素材**（取代「角色按名字、场景 / 道具 / 站位无条件每镜全连」）。
  *
  * 报障现场（用户 2026-11-08）：「铺出来的视频节点给我链接了 16 张图？明明这个视频镜头用不到那么多」——
@@ -3471,7 +3585,8 @@ export function matchScriptRowAssetsByRole(
             const title = normalizeScriptAssetMatchText(asset.title);
             if (!title) return false;
             if (names.some((name) => storyScriptAssetNameSimilarity(name, asset.title) >= STORY_SCRIPT_ASSET_MATCH_THRESHOLD)) return true;
-            return Boolean(haystack) && haystack.includes(title);
+            if (!haystack) return false;
+            return hasScriptAssetTitleMention(haystack, asset.title);
         });
         if (matched.length) out.push(...matched);
         else if (list.length === 1) out.push(list[0]);
@@ -3595,6 +3710,20 @@ export type ScriptAssetPromptCandidateOptions = {
     allProps?: boolean;
 };
 
+/**
+ * 造型签名补进提示词：`叶辰@校服` 的角色描述如果没写「校服」两个字，生出来的图看不出换装，
+ * 等于白拆一个资产。名字带 `@造型` 且提示词里一次都没出现造型词时，把造型词补在最前面
+ * （`校服造型 · 原描述`）；提示词本来就写了造型词 → **一个字都不动**（用户写的描述最优先）。
+ */
+function withScriptAssetVariantHint(title: string, prompt: string): string {
+    const variant = splitScriptAssetVariant(title);
+    const word = variant.variant.trim();
+    if (!variant.explicit || !word) return prompt;
+    const body = String(prompt ?? "");
+    if (body.includes(word)) return body;
+    return body.trim() ? `${word}造型 · ${body.trim()}` : `${word}造型`;
+}
+
 export function collectScriptAssetPromptCandidates(
     role: unknown,
     rows?: readonly StoryScriptRow[] | null,
@@ -3676,7 +3805,8 @@ export function collectScriptAssetPromptCandidates(
         }
     }
     for (const [title, entry] of propPromptByTitle) out.push({ title, prompt: entry.prompt });
-    return out;
+    // 造型签名补进提示词（换装区分，见 `withScriptAssetVariantHint`）：没写造型词的那条补在最前面。
+    return out.map((item) => ({ ...item, prompt: withScriptAssetVariantHint(item.title, item.prompt) }));
 }
 
 /**
@@ -4132,6 +4262,21 @@ export function backfillStoryScriptCastNames(
             }
             const missing: string[] = [];
             /**
+             * 已经「认领」的**本体**：`叶辰@校服` 补进去之后，`叶辰@便服` / `叶辰` 不再补第二遍。
+             * 同一镜里同一个人不会同时穿两套衣服，按全名去重会把角色格写成
+             * `叶辰@校服、叶辰@便服` —— 那是两个资产，等于凭空多生一张图。
+             */
+            const claimedBases = new Set<string>();
+            const claimBase = (name: unknown): boolean => {
+                const base = normalizeScriptAssetMatchText(splitScriptAssetVariant(name).base);
+                if (!base) return false;
+                if (claimedBases.has(base)) return false;
+                claimedBases.add(base);
+                return true;
+            };
+            // 角色格里已经写着的人也先占住本体（归一化过的键同样能拆出本体）。
+            for (const key of present) claimBase(key);
+            /**
              * 段头名单先来：这一段声明了谁，这一镜就必须有谁（作者写死的，不是推断）。
              * 之后才是「画面文字里提到、但漏挂」的人 —— 后者只补**全表当过角色名**的，避免瞎编。
              */
@@ -4140,12 +4285,14 @@ export function backfillStoryScriptCastNames(
                 if (!key || present.has(key)) continue;
                 present.add(key);
                 if (haystack.includes(key)) haystack = haystack.split(key).join("\u0000");
+                if (!claimBase(name)) continue;
                 missing.push(name);
             }
             for (const name of orderedRoster) {
                 const key = normalizeScriptAssetMatchText(name);
                 if (!key || present.has(key) || !haystack.includes(key)) continue;
                 haystack = haystack.split(key).join("\u0000");
+                if (!claimBase(name)) continue;
                 missing.push(name);
             }
             if (missing.length) {
@@ -4257,6 +4404,7 @@ export const STORY_SCRIPT_CAST_COMPLETENESS_HINT = [
     "- 表里只有 `character_1` / `character_2` 两个角色格，但**一格可以写多个人**：多个名字用 `、` 分隔，例如 `苏晚、阿杰、小雨、老周、莉莉`。画面里出现的所有人必须分布在这两格之中，不许因为「只有两格」就丢人。",
     "- 一格写了多个名字时，`character_description_N` 必须**逐人分条**：`苏晚：28岁女性……｜阿杰：30岁男性……｜小雨：……`（用 `｜` 分隔），每个人都有自己的一条外观卡；只描述第一个人的写法视为不合格。",
     "- 源内容里的段头 `【场景】` / `【人物】` / `【道具】` 是**作者写死的这一段资产清单**（例如 `【场景】外景·街角咖啡店门口 - 午后` / `【人物】女人、男人` / `【道具】外带咖啡杯、纸巾`）：这一段就算拆成 3 个镜头，**每一镜都要把这段的人物全写进角色列、场景列写同一个场景名**。拆分镜只改变景别 / 机位 / 动作，**不许改出场名单**。",
+    "- 🔴 **同一个角色换了造型，名字必须带 `@造型`**：角色列里写 `叶辰@便服` / `叶辰@校服` / `叶辰@西服`。角色列的名字就是这张资产图的键 —— 名字一样就是同一套衣服，同名不同造型不加 `@` 区分，后面所有集、所有镜头都会被套成第一套。造型词两三个字、全表统一（`便服` / `校服` / `西服` / `睡衣` / `礼服` / `泳装`），**不要**写成 `叶辰（校服版）`、`穿校服的叶辰`、`叶辰 校服` 这类不带 `@` 的写法。这个角色**整部戏只有一套衣服**时，就只写名字、不加 `@`。",
     "- ⚠️ `【道具】` 是**例外，不要照抄**：段头那一串是「这一段可能出现的所有东西」（常含餐具、摆件、纸巾、包装、门帘这类次要物件），而**道具列只挑这一镜真正依赖、跨镜要保持同一个样子的关键道具，一镜最多 3 件**；次要道具改用一句话写进「画面描述」。道具列每多写一件就多一张资产图 —— 宁可少写，不要凑数。",
     "- 🔴 **同一件道具在全表必须用完全相同的名字**：这一镜写 `面碗`、那一镜写 `青花瓷面碗`，或写成 `两杯茶`，都会被当成**不同的道具各生一张图**；名字里不要带数量。只在一镜出现、后面不再用的道具**不要**写进道具列，写进「画面描述」即可（画面照样带得出来）。",
     "- 场景列每一镜都必须有名字：同一场次沿用同一个场景名，不要写 `无`、不要留空。",

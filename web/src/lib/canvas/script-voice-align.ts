@@ -2,6 +2,7 @@ import {
     scriptNameLockName,
     scriptRowAudioIds,
     setStoryScriptRowAudioIds,
+    splitScriptAssetVariant,
     storyScriptAssetNameSimilarity,
     storyScriptCellText,
     STORY_SCRIPT_ASSET_MATCH_THRESHOLD,
@@ -123,8 +124,16 @@ export function isSameScriptVoiceByName(title: unknown, speaker: unknown): boole
     const name = scriptNameLockName(speaker);
     if (!base || !name) return false;
     if (base.toLowerCase() === name.toLowerCase()) return true;
-    if (Array.from(name).length <= 3) return false;
-    return storyScriptAssetNameSimilarity(base, name) >= STORY_SCRIPT_ASSET_MATCH_THRESHOLD;
+    /**
+     * **音色跟人走，不跟衣服走**：角色格写 `叶辰@校服`、音频标题只叫 `叶辰`，是同一个人。
+     * 所以模糊匹配一律按**本体**（`@` 前面那截）算 —— 不剥的话造型闸门
+     * （`storyScriptAssetNameSimilarity`）会把它们判成两个资产，换装那一整段台词就挂不上音色。
+     */
+    const baseName = splitScriptAssetVariant(base).base || base;
+    const speakerName = splitScriptAssetVariant(name).base || name;
+    if (baseName.toLowerCase() === speakerName.toLowerCase()) return true;
+    if (Array.from(speakerName).length <= 3) return false;
+    return storyScriptAssetNameSimilarity(baseName, speakerName) >= STORY_SCRIPT_ASSET_MATCH_THRESHOLD;
 }
 
 /**
