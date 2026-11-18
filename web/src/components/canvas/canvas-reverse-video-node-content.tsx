@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, REVERSE_VIDEO_SECONDS_MIN, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, VIDEO_REVERSE_STAGE_OPTIONS, buildDefaultVideoReverseRequirement, describeReverseVideoStages, normalizeReverseVideoTarget, readReverseVideoEpisodeSeconds, readReverseVideoScript, readReverseVideoSkill, readReverseVideoStages, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, setReverseVideoStage, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult, type VideoReverseStageId } from "@/lib/canvas/video-reverse";
+import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, VIDEO_REVERSE_STAGE_OPTIONS, buildDefaultVideoReverseRequirement, describeReverseVideoStages, normalizeReverseVideoTarget, readReverseVideoScript, readReverseVideoSkill, readReverseVideoStages, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, setReverseVideoStage, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult, type VideoReverseStageId } from "@/lib/canvas/video-reverse";
 import { DEFAULT_EPISODE_SECONDS, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, SCRIPT_CHARS_PER_SECOND, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, normalizeScriptShotsPerClip } from "@/constant/story-script";
@@ -240,16 +240,21 @@ export function CanvasReverseVideoNodeContent({
      */
     const preferredVideoModel = useMemo(() => resolveModelForCapability(globalConfig, globalConfig.videoModel, "video"), [globalConfig]);
     const effectiveVideoModel = target.model || preferredVideoModel;
-    /** 设置摘要（弹窗里给用户确认「按什么出片」用）。 */
-    const targetSummary = useMemo(() => {
+    /**
+     * 出片参数摘要（弹窗里给用户确认「按什么出片」用）。
+     * 秒数单独拆出来：04 的摘要那行已经写了「每集 N 秒」，再拼一次秒数就会出现两套数字并排
+     * （老版本的「每集 120 秒 · 30 秒 · 16:9」正是这么来的）。
+     */
+    const paramSummary = useMemo(() => {
         const style = target.styleTemplateId ? getStyleTemplate(target.styleTemplateId)?.label || target.styleTemplateId : "无风格";
         // 换了引擎要写在摘要里：02 / 03 的「按这套出片」是用户最后一眼确认，不能还写着普通视频模型。
         const engine = isMochianiVideoEngine(target.videoEngine) ? "MochiAni 生视频" : "";
         // 分段口径也要写：02 / 03 都是「建脚本节点 → 立刻一键视频」，铺出来几个视频窗口取决于这一档。
         // `compactShots` 已经是**生效档位**（默认 3、显式关闭 4），直接写，别再 `|| 4` 兜底。
         const clip = `每 ${compactShots} 镜一个视频`;
-        return `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${effectiveSize} · ${qualityLabel(effectiveQuality)} · 风格：${style} · ${clip}${engine ? ` · ${engine}` : ""}`;
-    }, [target, compactShots]);
+        return `${effectiveSize} · ${qualityLabel(effectiveQuality)} · 风格：${style} · ${clip}${engine ? ` · ${engine}` : ""}`;
+    }, [compactShots, effectiveQuality, effectiveSize, target.styleTemplateId, target.videoEngine]);
+    const targetSummary = `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${paramSummary}`;
     /**
      * 02 / 03 自动接着跑的**三颗勾**（用户 2026-11-17）：「生成分镜 / 一键生图 / 一键生视频，默认都是勾选的；
      * 不勾生成分镜 → 后面两步一起取消；不勾一键生图 → 一键生视频一起取消；取消勾选即不执行脚本生成器里
@@ -261,10 +266,35 @@ export function CanvasReverseVideoNodeContent({
      */
     const stages = useMemo(() => readReverseVideoStages(node.metadata), [node.metadata]);
     /**
-     * 04 的「每集时长」（用户口径：默认 120 秒）：读的是 `reverseVideoTarget.episodeSeconds`，
-     * 缺省 / 脏值一律走 `readReverseVideoEpisodeSeconds` 回落默认 —— UI 与执行器同一份。
+     * 04 的「每集时长」与主界面「生成设置 · 秒数」是**同一个值**（用户 2026-11-18 第 8 轮：
+     * 「选择的时间秒数跟主界面的时间秒数相通，即主界面写 120，那么弹出窗口也是 120」）。
+     *
+     * 以前是两个键、两套默认：主界面 = `reverseVideoTarget.seconds`（默认 30，给 02 / 03），
+     * 04 弹窗 = `reverseVideoTarget.episodeSeconds`（默认 120）。于是主界面写 120、弹窗还是自己的老值；
+     * 更刺眼的是 04 弹窗那行摘要还写着「30 秒 · 16:9 · …」—— 两套数字并排，看着就是没通。
+     *
+     * 现在：`seconds` 是**唯一来源**（用户显式写过才算，`normalizeReverseVideoTarget` 会给缺省值塞 30，
+     * 所以这里读的是 metadata 上的原始值），`episodeSeconds` 只作**同写镜像**保留
+     * （老节点 / `runVideoReverseEpisodes` 的兜底读取还在用它）。任何一处改动都走 `applySeconds`，
+     * 两边永远同一个数。04 默认仍是 120：**打开 04 弹窗时**若这个键从没写过就落成 120
+     * （主界面同步显示 120，见 `handleCommand` 里 mode === 4 那一段）。
      */
-    const episodeSeconds = useMemo(() => readReverseVideoEpisodeSeconds(node.metadata), [node.metadata]);
+    const rawSeconds = String(node.metadata?.reverseVideoTarget?.seconds || "").trim();
+    const episodeSeconds = useMemo(
+        () => resolveEpisodeSeconds(Number(rawSeconds) || Number(target.episodeSeconds) || DEFAULT_EPISODE_SECONDS),
+        [rawSeconds, target.episodeSeconds],
+    );
+    /**
+     * 秒数写回的唯一出口：`seconds`（主界面）+ `episodeSeconds`（04 镜像）一起写。
+     * 区间统一按 **04 口径**夹（15～300）：一集至少要一个 15 秒片段，比这更小的秒数对 02 / 03 也没意义。
+     */
+    const applySeconds = useCallback(
+        (value: number | string | null | undefined, fallback: number) => {
+            const next = resolveEpisodeSeconds(Number(value) || fallback);
+            patchTarget({ seconds: String(next), episodeSeconds: String(next) });
+        },
+        [patchTarget],
+    );
     const commitScript = useCallback(
         (value: string) => {
             setScriptDraft(value);
@@ -507,6 +537,12 @@ export function CanvasReverseVideoNodeContent({
                  * 没有剧本就没有东西可拆，跑下去只会白建一个对话节点。
                  */
                 setRequirementText("");
+                /**
+                 * 打开 04 弹窗时把「秒数」落成 120（**只在从没写过时落**）：这样主界面显示的秒数
+                 * 与弹窗里的「每集时长」立刻是同一个数，之后谁改都两边一起变（`applySeconds`）。
+                 * 老节点若已经存过 `episodeSeconds`（120 之外的数），`episodeSeconds` 取的就是它，不覆盖。
+                 */
+                if (!String(node.metadata?.reverseVideoTarget?.seconds || "").trim()) applySeconds(DEFAULT_EPISODE_SECONDS, DEFAULT_EPISODE_SECONDS);
                 setRequirementMode(4);
                 return;
             }
@@ -515,7 +551,7 @@ export function CanvasReverseVideoNodeContent({
             setRequirementText(requirementDefault(mode));
             setRequirementMode(mode);
         },
-        [attached, message, requirementDefault, runMode, running],
+        [applySeconds, attached, message, node.metadata, requirementDefault, runMode, running],
     );
 
     const confirmRequirement = useCallback(() => {
@@ -723,26 +759,27 @@ export function CanvasReverseVideoNodeContent({
                             onMissingConfig={() => openConfigDialog(true)}
                             className="max-w-[168px]"
                             extraOptions={[{ value: MOCHIANI_VIDEO_ENGINE, label: "MochiAni 生视频节点", title: "铺链路时改成 MochiAni 生视频窗口（模型/渠道取偏好里的 MochiAni 配置）" }]}
-                        />                    </div>
-                    {/* 第二行：秒数（成片总时长，默认 30）+ 比例 + 分辨率 */}
+                        />
+                    </div>
+                    {/* 第二行：秒数（成片总时长，默认 30；**与 04 的「每集时长」是同一个值**）+ 比例 + 分辨率 */}
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         <InputNumber
                             size="small"
                             className="!w-[104px]"
-                            min={REVERSE_VIDEO_SECONDS_MIN}
+                            min={EPISODE_SECONDS_MIN}
                             max={REVERSE_VIDEO_SECONDS_MAX}
                             step={5}
                             precision={0}
                             value={Number(target.seconds) || DEFAULT_REVERSE_VIDEO_SECONDS}
                             addonAfter="秒"
-                            onChange={(value) => patchTarget({ seconds: String(value ?? DEFAULT_REVERSE_VIDEO_SECONDS) })}
+                            onChange={(value) => applySeconds(value, DEFAULT_REVERSE_VIDEO_SECONDS)}
                             aria-label="成片总时长（秒）"
                         />
                         <CanvasSizePicker value={effectiveSize} onChange={(size) => patchTarget({ size })} className="h-6 w-[96px]" />
                         <Select size="small" className="!w-[124px]" value={effectiveQuality} onChange={(quality) => patchTarget({ quality })} options={QUALITY_OPTIONS} popupMatchSelectWidth={false} aria-label="视频分辨率" />
                     </div>
                     <div className="mt-1 text-[10px] leading-relaxed opacity-45">
-                        秒数 = 成片总时长：02 / 03 写剧本都按它规划镜头数与台词量（默认 {DEFAULT_REVERSE_VIDEO_SECONDS} 秒）；生视频用这里的模型 / 比例 / 分辨率 / 风格（默认 16:9 · 720p，模型跟偏好里的视频模型）。
+                        秒数 = 成片总时长：02 / 03 写剧本按它规划镜头数与台词量（默认 {DEFAULT_REVERSE_VIDEO_SECONDS} 秒），04 则是「每集时长」（默认 {DEFAULT_EPISODE_SECONDS} 秒）—— <span className="opacity-90">两个位置写的是同一个值，改哪边都一样</span>；生视频用这里的模型 / 比例 / 分辨率 / 风格（默认 16:9 · 720p，模型跟偏好里的视频模型）。
                     </div>
                     {/* 第三行：「每 2 / 3 个镜头合一个视频」开关（用户 2026-11-11 第 01 条，2026-11-14 加 2 镜档 + 默认开启）。
                         两颗同级互斥：点了哪颗，02 / 03 建脚本节点时就把哪档带过去，铺链路（含一键视频）
@@ -984,10 +1021,50 @@ export function CanvasReverseVideoNodeContent({
                                     precision={0}
                                     value={episodeSeconds}
                                     addonAfter="秒"
-                                    onChange={(value) => patchTarget({ episodeSeconds: String(resolveEpisodeSeconds(value ?? DEFAULT_EPISODE_SECONDS)) })}
+                                    onChange={(value) => applySeconds(value, DEFAULT_EPISODE_SECONDS)}
                                     aria-label="每集时长（秒）"
                                 />
-                                <span className="text-[11px] opacity-50">默认 {DEFAULT_EPISODE_SECONDS} 秒一集，也就是每集脚本节点的「成片总时长」；改这里会一起改掉分镜表的镜头与台词量。</span>
+                                <span className="text-[11px] opacity-50">与主界面「生成设置 · 秒数」是同一个值（默认 {DEFAULT_EPISODE_SECONDS} 秒一集）；也就是每集脚本节点的「成片总时长」，改这里会一起改掉分镜表的镜头与台词量。</span>
+                            </div>
+                            {/* 生成设置（用户 2026-11-18 第 8 轮）：「同时风格，画幅比例，生成视频模型，对话模型，
+                                也按照主界面的选择执行」。这四个控件与主界面**写的是同一份 metadata**
+                                （`reverseVideoTarget.*` / `reverseVideoChatModel`），所以是真正「相通」而不是各存一份：
+                                在这里改，主界面立刻跟着变，反之亦然。 */}
+                            <div className="rounded-md px-2 py-1.5" style={{ border: `1px solid ${theme.node.stroke}` }}>
+                                <div className="text-[11px] opacity-60">生成设置（与主界面同一份，改哪边都一样）</div>
+                                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                    {/* 对话模型 = 拆集那步用的文本模型（`reverseVideoChatModel`，与生视频模型是两个键）。 */}
+                                    <ModelPicker
+                                        config={globalConfig}
+                                        value={effectiveReverseModel || undefined}
+                                        onChange={(model) => onConfigChange(node.id, { reverseVideoChatModel: model })}
+                                        capability="text"
+                                        placeholder="对话模型（拆集用）"
+                                        onMissingConfig={() => openConfigDialog(true)}
+                                        className="max-w-[186px]"
+                                    />
+                                    <CanvasStylePicker
+                                        value={target.styleTemplateId}
+                                        onChange={(styleTemplateId) => patchTarget({ styleTemplateId: styleTemplateId || "" })}
+                                        buttonClassName="!h-7 !max-w-[120px] !shrink-0 !justify-start !rounded-full !px-2.5"
+                                        placement="topLeft"
+                                    />
+                                    <ModelPicker
+                                        config={globalConfig}
+                                        value={isMochianiVideoEngine(target.videoEngine) ? MOCHIANI_VIDEO_ENGINE : effectiveVideoModel}
+                                        onChange={(model) => {
+                                            if (isMochianiVideoEngine(model)) patchTarget({ videoEngine: MOCHIANI_VIDEO_ENGINE });
+                                            else patchTarget({ videoEngine: undefined, model });
+                                        }}
+                                        capability="video"
+                                        placeholder="视频模型（跟随偏好）"
+                                        onMissingConfig={() => openConfigDialog(true)}
+                                        className="max-w-[168px]"
+                                        extraOptions={[{ value: MOCHIANI_VIDEO_ENGINE, label: "MochiAni 生视频节点", title: "铺链路时改成 MochiAni 生视频窗口（模型/渠道取偏好里的 MochiAni 配置）" }]}
+                                    />
+                                    <CanvasSizePicker value={effectiveSize} onChange={(size) => patchTarget({ size })} className="h-6 w-[96px]" />
+                                    <Select size="small" className="!w-[112px]" value={effectiveQuality} onChange={(quality) => patchTarget({ quality })} options={QUALITY_OPTIONS} popupMatchSelectWidth={false} aria-label="视频分辨率" />
+                                </div>
                             </div>
                         </>
                     ) : (
@@ -1014,7 +1091,7 @@ export function CanvasReverseVideoNodeContent({
                     <div className="text-[11px] opacity-60">
                         {requirementMode === 4 ? (
                             <>
-                                每集：<span className="font-medium">{episodeSeconds} 秒</span> · 生图 / 生视频参数：<span className="font-medium">{targetSummary}</span>
+                                每集：<span className="font-medium">{episodeSeconds} 秒</span>（= 主界面秒数） · 生图 / 生视频参数：<span className="font-medium">{paramSummary}</span>
                             </>
                         ) : (
                             <>
