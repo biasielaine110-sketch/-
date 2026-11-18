@@ -494,7 +494,55 @@ export function describeEpisodeSplit(episodes: readonly EpisodeDraft[], seconds:
 }
 
 /** 一集的落位：文本节点（剧本）+ 脚本节点（分镜表）各一个中心点（`createCanvasNode` 的口径）。 */
-export type EpisodeSlot = { text: Position; script: Position };
+export type EpisodeSlot = {
+    text: Position;
+    script: Position;
+    /**
+     * 「一集一条横带」的坐标（只在传了 `band` 时有）。
+     * `baseX` 是**整批共用**的一个值（列线锁死），`top` / `height` 只描述本集自己的纵向区间。
+     */
+    band?: { top: number; height: number; baseX: number };
+};
+
+/**
+ * 🔴 04 多集排布的「带宽」与「带间距」（用户 2026-11-18 第 9 轮：
+ * 「一次出 3、5 集的时候，就全挤到一起了……生出的图也是全是乱放的」）。
+ *
+ * 老算法按「文本节点高度 + 36px」排集（= 516px 一集），但一集铺出来的链路是
+ * `镜头数 × (240 + 72) - 72` —— 90 秒 = 24 镜 = **7416px**。516px 的间距配上 7416px 的竖带，
+ * 后一集必然压进前一集的链路占位里，`findFreeColumnX` 只能整条往右推 `laneWidth + 48 = 1244px`，
+ * 5 集就是 5 条斜排的长条 = 用户看到的「乱放」。资产图同一机制往**左**让，所以图也错位。
+ *
+ * 所以落位单位从「节点」换成「集」：每集一条横带（band），带宽 = 文本列 + 脚本列 + 整条链路，
+ * 带间距按**链路真实高度**预留；下一集的 y = 上一集 band 底 + `EPISODE_BAND_GAP_Y`，
+ * 而**列线（baseX）全批共用一个值** —— 铺链路时不再需要逐节点找空地，也就没有互相推挤。
+ */
+export const EPISODE_BAND_GAP_Y = 240;
+/** 链路一行的高度 / 行距 —— 与 `handleBuildScriptPipeline` 的 `rowHeight` / `gapY` 同口径。 */
+export const EPISODE_LANE_ROW_HEIGHT = 240;
+export const EPISODE_LANE_ROW_GAP_Y = 72;
+/**
+ * 脚本列预留宽度 = 脚本节点自适应宽度的上限（`canvas-script-node-content.tsx` 的
+ * `AUTO_SIZE_MAX_WIDTH = 2200`）。按上限留，链路就永远不会压在本集脚本节点上；
+ * 代价是脚本节点只有 1520 宽时会留出一段空白 —— 这段空白是「列线不漂移」的票价。
+ */
+export const EPISODE_SCRIPT_COLUMN_WIDTH = 2_200;
+/** 链路整体预留宽度（文本 340 + 48 + 图 340 + 48 + 视频 420，再给 Mochiani 的 560 留余量）。 */
+export const EPISODE_LANE_WIDTH = 1_400;
+/** 预估镜数的冗余行：模型偶尔多给一两镜，多留 2 行（624px）比事后挪节点便宜得多。 */
+export const EPISODE_BAND_ROW_SLACK = 2;
+
+/** 「一集一条横带」的参数；不传这个就没有 band，走老的紧凑竖排（单集 / 兼容路径）。 */
+export type EpisodeBandOptions = {
+    /** 每集预计镜头数（按「每集秒数」确定性估算），用来算 band 高度 */
+    rowsPerEpisode: readonly number[];
+    /** 链路一行的高度与行距；不传用 `EPISODE_LANE_ROW_HEIGHT` / `EPISODE_LANE_ROW_GAP_Y` */
+    row?: { height: number; gapY: number };
+    /** 脚本列预留宽度；不传用 `EPISODE_SCRIPT_COLUMN_WIDTH` */
+    scriptColumnWidth?: number;
+    /** 整条链路预留宽度；不传用 `EPISODE_LANE_WIDTH` */
+    laneWidth?: number;
+};
 
 /**
  * 04 的落位：**文本节点一列纵向排下来**，每集右边跟一个脚本节点。
@@ -511,6 +559,10 @@ export type EpisodeSlot = { text: Position; script: Position };
  * ② 脚本列从文本列右侧开始，把刚排好的文本节点也算进占位再找 x —— 否则脚本列可能正好压在
  *    右边已有的图上；
  * ③ 竖向：第 i 集的文本 / 脚本都以同一行顶边对齐，行距 = 文本节点高度 + `gapY`。
+ *
+ * 🔴 传了 `band` 时改走「一集一条横带」（见 `EPISODE_BAND_GAP_Y`）：整条带（文本 + 脚本 + 链路）
+ * 当成**一个矩形**只做一次 `findColumnX`，因此全批共用同一个 `baseX`；竖向按每集链路真实高度预留。
+ * 这条分支只影响 04 的落位，老调用（单集 / 探针）不传 `band`，行为逐像素不变。
  */
 export function planEpisodeStackSlots(params: {
     /** 列左上角（通常取反推节点的右下角） */
@@ -521,6 +573,8 @@ export function planEpisodeStackSlots(params: {
     gapX?: number;
     gapY?: number;
     occupied?: readonly CanvasFreeRect[];
+    /** 传了就走「一集一条横带」，`gapY` 同时变成**带间距**（建议传 `EPISODE_BAND_GAP_Y`） */
+    band?: EpisodeBandOptions;
 }): EpisodeSlot[] {
     const count = Math.max(0, Math.round(Number(params.count) || 0));
     if (!count) return [];
@@ -532,7 +586,6 @@ export function planEpisodeStackSlots(params: {
     const textHeight = Math.max(1, params.text.height);
     const scriptWidth = Math.max(1, params.script.width);
     const scriptHeight = Math.max(1, params.script.height);
-    const stackHeight = count * textHeight + (count - 1) * gapY;
 
     /** 从 `desiredX` 往右找第一个「这一列不压任何占位」的 x（64 次上限只是防脏数据死循环）。 */
     const findColumnX = (desiredX: number, width: number, height: number, pool: readonly CanvasFreeRect[]): number => {
@@ -546,6 +599,43 @@ export function planEpisodeStackSlots(params: {
         return x;
     };
 
+    /**
+     * 🔴 「一集一条横带」：竖向按**链路真实高度**排，横向整批只定一次 x。
+     *
+     * 高度 = `max(镜头数 × (行高 + 行距) - 行距, 脚本节点高)` —— 与 `handleBuildScriptPipeline`
+     * 算 `laneHeight` 的公式逐字同源；两处只要有一处改口径，band 就会和链路对不上。
+     */
+    if (params.band) {
+        const rowsPerEpisode = params.band.rowsPerEpisode;
+        const rowHeight = Math.max(1, params.band.row?.height ?? EPISODE_LANE_ROW_HEIGHT);
+        const rowGapY = Math.max(0, params.band.row?.gapY ?? EPISODE_LANE_ROW_GAP_Y);
+        const scriptColumnWidth = Math.max(scriptWidth, params.band.scriptColumnWidth ?? EPISODE_SCRIPT_COLUMN_WIDTH);
+        const laneWidth = Math.max(1, params.band.laneWidth ?? EPISODE_LANE_WIDTH);
+        const heights = Array.from({ length: count }, (_, index) => {
+            const rows = Math.max(0, Math.round(Number(rowsPerEpisode[index]) || 0));
+            const laneHeight = rows > 0 ? rows * (rowHeight + rowGapY) - rowGapY : 0;
+            return Math.max(laneHeight, scriptHeight);
+        });
+        const stackHeight = heights.reduce((sum, height) => sum + height, 0) + (count - 1) * gapY;
+        const bandWidth = textWidth + gapX + scriptColumnWidth + 64 + laneWidth;
+        // 整条带当一个矩形找列：一次定下全批共用的 x，列线天然对齐（没有「逐节点找空地」就没有阶梯）。
+        const bandX = findColumnX(params.origin.x, bandWidth, stackHeight, occupied);
+        const scriptX = bandX + textWidth + gapX;
+        const baseX = scriptX + scriptColumnWidth + 64;
+        const slots: EpisodeSlot[] = [];
+        let cursor = top;
+        for (let index = 0; index < count; index += 1) {
+            slots.push({
+                text: { x: bandX + textWidth / 2, y: cursor + textHeight / 2 },
+                script: { x: scriptX + scriptWidth / 2, y: cursor + scriptHeight / 2 },
+                band: { top: cursor, height: heights[index], baseX },
+            });
+            cursor += heights[index] + gapY;
+        }
+        return slots;
+    }
+
+    const stackHeight = count * textHeight + (count - 1) * gapY;
     const textX = findColumnX(params.origin.x, textWidth, stackHeight, occupied);
     const textRects: CanvasFreeRect[] = Array.from({ length: count }, (_, index) => ({
         x: textX,

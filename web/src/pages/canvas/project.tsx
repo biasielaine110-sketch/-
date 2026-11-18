@@ -91,6 +91,7 @@ import {
     resolveStoryScriptImageSize,
     resolveStoryScriptVideoRatio,
     resolveStoryScriptShotSeconds,
+    resolveStoryScriptShotCount,
     scriptAssetColumnRole,
     scriptCellAssetIds,
     scriptNameLockIds,
@@ -180,7 +181,7 @@ import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix"
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { VIDEO_REVERSE_LANGUAGE_RULE, VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cascadeReverseVideoStages, cleanVideoReverseScriptOutput, describeReverseVideoStages, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoEpisodeSeconds, readReverseVideoScript, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type ReverseVideoStages, type VideoReverseMode, type VideoReversePromptMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
-import { EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeSeconds, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
+import { EPISODE_BAND_GAP_Y, EPISODE_BAND_ROW_SLACK, EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeSeconds, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -694,6 +695,17 @@ function AtelierCanvasPage() {
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
 
     const nodesRef = useRef(nodes);
+    /**
+     * 🔴 04「一集一条横带」的登记表：`scriptNodeId → { baseX, top, textId, label }`。
+     *
+     * 为什么要一个 ref 而不是从节点 metadata 里读：`handleBuildScriptPipeline` 每次被调用时都要
+     * 「这一集的链路从哪开始铺」，而这个 x 必须是**整批共用**的一个值（列线锁死），否则每集各自
+     * `findFreeColumnX` 就会往右让出阶梯 —— 那正是用户看到的「全挤到一起 / 乱放」。
+     *
+     * 登记在拆集时写（`planEpisodeStackSlots` 的 band 分支已经算好 baseX / top），铺链路时读。
+     * 单集手工点「铺视频链路」照样能读到（节点 id 是 band 的 key），读不到就退回老的空地查找。
+     */
+    const episodeBandsRef = useRef<Map<string, { baseX: number; top: number; height: number; textId?: string; label?: string }>>(new Map());
     const chatSessionsRef = useRef(chatSessions);
     const connectionsRef = useRef(connections);
     const selectedNodeIdsRef = useRef(selectedNodeIds);
@@ -10481,7 +10493,18 @@ function AtelierCanvasPage() {
             const laneWidth = videoOnly ? videoWidth : textWidth + gapX + imageWidth + gapX + videoWidth;
             const laneHeight = Math.max(rowHeight, rows.length * (rowHeight + gapY) - gapY);
             const baseY = source.position.y;
-            const baseX = findFreeColumnX({
+            /**
+             * 🔴 04 拆出来的集：**直接吃 band 给的列线**，不再走 `findFreeColumnX`。
+             *
+             * 这就是「多集乱放」的正解：老逻辑每铺一集都拿本集脚本节点当锚点找空地，而上一集的链路
+             * 高 7416px、集间只隔 516px，于是「这一列全是占位」→ 整条往右推 1244px → 5 集变 5 条
+             * 斜排长条。band 已经把全批共用的 baseX 算好了，这里只做一道保护：脚本节点执行后可能
+             * 自适应变宽（到 2000+），所以还要和 `desiredBaseX` 取大值，避免链路压在本集脚本节点上。
+             *
+             * `baseY` 恒取脚本节点自己的 y —— band 登记的就是这个值，用户手动拖过节点后也跟着走。
+             */
+            const band = episodeBandsRef.current.get(source.id);
+            const baseX = band ? Math.max(band.baseX, desiredBaseX) : findFreeColumnX({
                 desiredX: desiredBaseX,
                 width: laneWidth,
                 top: baseY,
@@ -10795,21 +10818,27 @@ function AtelierCanvasPage() {
              *
              * 只框视频节点，不框合并节点 —— 合并节点是下游产物，圈进来会让「整组接进去」变成自环。
              * 组框和右键成组（`handleGroupSelected`）同一套口径：包围盒 + 留白，成员位置一个都不动。
+             *
+             * 🔴 04 拆出来的集（有 band）：组框要盖住**整条带** —— 剧本文字节点 + 脚本节点 + 视频节点，
+             * 标题直接用集名（「第 2 集」）。一次出 3、5 集时，这个框就是分集边界，缩到最小也能数清几集。
+             * 合并节点仍然排除在外（同一条自环理由）。
              */
+            const bandTextNode = band?.textId ? nodesRef.current.find((node) => node.id === band.textId) : undefined;
+            const groupMembers: CanvasNodeData[] = band ? [...(bandTextNode ? [bandTextNode] : []), source, ...createdVideoNodes] : createdVideoNodes;
             let groupNode: CanvasNodeData | null = null;
-            if (groupVideos && createdVideoNodes.length >= 2) {
-                const frame = resolveGroupFrame(createdVideoNodes);
+            if (groupVideos && (createdVideoNodes.length >= 2 || (band && createdVideoNodes.length >= 1))) {
+                const frame = resolveGroupFrame(groupMembers);
                 if (frame) {
                     groupNode = {
                         ...createCanvasNode(CanvasNodeType.Group, { x: 0, y: 0 }),
-                        title: t("canvas.scriptNode.pipelineVideoGroupTitle", { count: createdVideoNodes.length }),
+                        title: band?.label || t("canvas.scriptNode.pipelineVideoGroupTitle", { count: createdVideoNodes.length }),
                         position: frame.position,
                         width: frame.width,
                         height: frame.height,
                     };
                 }
             }
-            const groupMemberIds = new Set(createdVideoNodes.map((node) => node.id));
+            const groupMemberIds = new Set(groupMembers.map((node) => node.id));
             /**
              * 组框要**垫在成员下面**（数组靠前 = 渲染靠后），否则半透明的框会盖在视频窗口上方、把它们压灰。
              * 与右键成组同一个处理：插到第一个成员的位置。
@@ -11924,6 +11953,19 @@ function AtelierCanvasPage() {
             report(`正文 ${segmentHint} → 按每集 ${seconds} 秒（${segmentsPerEpisode(seconds)} 段）切出 ${drafts.length} 集，创建文本 / 脚本节点…`);
             const chatLeft = chatSlot.x - chatSpec.width / 2;
             const chatTop = chatSlot.y - chatSpec.height / 2;
+            /**
+             * 🔴 落位按「一集一条横带」排（用户 2026-11-18 第 9 轮：「一次出 3、5 集全挤到一起，
+             * 生出的图也全是乱放的」）。
+             *
+             * 关键差别只有三处，其他系数与 `handleBuildScriptPipeline` 逐字同源：
+             *  ① `gapY` 从 36 变成 `EPISODE_BAND_GAP_Y`（240）—— 集间距不再是「文本节点高 + 36」；
+             *  ② `band` 分支按**链路真实高度**给每集预留纵向空间（90 秒 24 镜 = 7416px + 2 行冗余）；
+             *  ③ 整条带只做一次 `findColumnX` → 全批 `baseX` 相同，铺链路时不再逐节点找空地。
+             *
+             * 预估镜数用 `resolveStoryScriptShotCount(每集秒数)`：这就是任务书里要求模型给的镜数，
+             * 两边同一个公式，所以 band 高度和真实链路高度不会打架。
+             */
+            const estimatedRows = resolveStoryScriptShotCount(seconds) + EPISODE_BAND_ROW_SLACK;
             const slots = planEpisodeStackSlots({
                 origin: { x: chatLeft + chatSpec.width + gap, y: chatTop },
                 count: drafts.length,
@@ -11931,7 +11973,8 @@ function AtelierCanvasPage() {
                 script: scriptSpec,
                 occupied: collectCanvasOccupied(nodesRef.current),
                 gapX: gap,
-                gapY: 36,
+                gapY: EPISODE_BAND_GAP_Y,
+                band: { rowsPerEpisode: drafts.map(() => estimatedRows) },
             });
             const chosenScheme = asScriptSchemeId(input.scriptScheme) ?? asScriptSchemeId(target.scriptScheme);
             const scriptSchemeSeed = buildScriptSchemeSeed({ scheme: chosenScheme || undefined, explicit: Boolean(chosenScheme), textPrompts: effectiveConfig.textPrompts, skills: chatSkillPacks }) || {};
@@ -11999,6 +12042,20 @@ function AtelierCanvasPage() {
             if (!textNodes.length) {
                 return { ok: false, error: "拆集结果为空：没有可建的文本节点", chatNodeId: chatNode.id };
             }
+            /**
+             * 把每集的 band 登记下来（`handleBuildScriptPipeline` 与「每集成组」都靠它）。
+             * `baseX` 全批相同 → 后续每集铺出来的文本 / 图片 / 视频 / 合并四列都落在同一组列线上，
+             * 不会再出现「第二集被推到右边 1244px」的阶梯。
+             */
+            slots.forEach((slot, index) => {
+                const scriptNode = scriptNodes[index];
+                if (!scriptNode || !slot.band) return;
+                episodeBandsRef.current.set(scriptNode.id, {
+                    ...slot.band,
+                    textId: textNodes[index]?.id,
+                    label: drafts[index]?.title,
+                });
+            });
 
             const firstText = textNodes[0];
             /** 三颗勾「生成分镜」没勾：拆集 + 建节点已做完，后面三步一步都不跑。 */
