@@ -16,6 +16,8 @@ import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, forceProxyApiUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
+// 传输层判定与请求体估算抽到 `net-transport`，与生图/音频共用同一口径（唯一咽喉）。
+import { PROXY_BODY_SAFE_BYTES, estimateBodyBytes, isProxiedApiUrl, isTransportFailure } from "./net-transport";
 import { uploadTemporaryPublicImage, uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
 import { parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi } from "@/lib/comfyui-native";
 import {
@@ -89,9 +91,6 @@ function aiHeaders(config: AiConfig, contentType?: string) {
     };
 }
 
-/** Vercel serverless functions reject request bodies over ~4.5MB with HTTP 413. */
-const PROXY_BODY_SAFE_BYTES = 3_400_000;
-
 /**
  * 视频任务轮询上限。原先为 120 次 × 2500ms（≈6 分钟），但长时长任务会超过它：
  * 实测 10s 片约 4 分 40 秒（能过），15s 片约 8 分 20 秒（会被误判超时）。
@@ -99,23 +98,6 @@ const PROXY_BODY_SAFE_BYTES = 3_400_000;
  */
 const VIDEO_POLL_MAX_ATTEMPTS = 360;
 const VIDEO_POLL_INTERVAL_MS = 2500;
-
-function estimateBodyBytes(body: unknown): number {
-    if (typeof body === "string") return body.length;
-    if (body instanceof FormData) {
-        let total = 0;
-        body.forEach((value) => {
-            if (typeof value === "string") total += value.length;
-            else if (value instanceof Blob) total += value.size;
-        });
-        return total;
-    }
-    try {
-        return JSON.stringify(body ?? "").length;
-    } catch {
-        return 0;
-    }
-}
 
 /**
  * Most CN relay sites (New API / hfsyapi / autodl) allow browser CORS, so when a
@@ -133,20 +115,6 @@ function mapOversizeUploadError(error: unknown, bypassed: boolean): unknown {
 }
 
 /**
- * True for a browser network-layer failure (no HTTP response at all). Axios collapses every
- * transport failure to `ERR_NETWORK`, so an HTTP/2 reset (`net::ERR_HTTP2_PROTOCOL_ERROR`, which is
- * what a relay edge does when it slams the connection shut) lands here too — that is exactly the
- * case worth retrying on the other transport, because the proxy hop often still answers with a
- * readable edge error page.
- */
-function isTransportFailure(error: unknown) {
-    if (!axios.isAxiosError(error) || error.response) return false;
-    const code = String((error as { code?: string }).code || "");
-    if (!code || code === "ERR_NETWORK" || code === "ERR_FAILED") return true;
-    return /ERR_(HTTP2|HTTP3|CONNECTION|QUIC|SSL|TIMED_OUT|EMPTY_RESPONSE|INCOMPLETE_CHUNKED)/i.test(code);
-}
-
-/**
  * Run a create POST, and when the transport dies without a response, retry once on the *other*
  * transport (direct ↔ site proxy). Two reasons this is worth doing rather than just surfacing the
  * error:
@@ -161,7 +129,7 @@ async function retryAlternateTransport<T>(config: AiConfig, path: string, primar
         return await run(primaryUrl);
     } catch (error) {
         if (axios.isCancel(error) || !isTransportFailure(error)) throw error;
-        const proxied = /\/api(?:-)?proxy\?target=/i.test(primaryUrl);
+        const proxied = isProxiedApiUrl(primaryUrl);
         const alternate = proxied ? buildApiUrl(config.baseUrl, path) : forceProxyApiUrl(primaryUrl);
         if (!alternate || alternate === primaryUrl) throw error;
         if (!proxied && estimateBodyBytes(body) > PROXY_BODY_SAFE_BYTES) throw error;
@@ -2887,11 +2855,11 @@ function readAxiosError(error: unknown, fallback: string) {
                 return `${apiText("videoTaskTimedOut")}${hint}`;
             }
             // Pages proxy 502 without ACAO used to surface here as a fake CORS/network failure.
-            if (/\/api(?:-)?proxy\?target=/i.test(url)) {
+            if (isProxiedApiUrl(url)) {
                 if (/runninghub\.ai/i.test(url)) return `${apiText("runningHubAiUnreachable")}${hint}`;
                 return `${apiText("proxyUnreachable")}${hint}`;
             }
-            if (error.code === "ERR_NETWORK" && isKnownDirectCorsUrl(url)) {
+            if (isKnownDirectCorsUrl(url) && isTransportFailure(error)) {
                 if (/runninghub\.ai/i.test(url)) return `${apiText("runningHubAiUnreachable")}${hint}`;
                 // Only a ts.net tunnel deserves the Tailscale/Funnel checklist — an ordinary relay
                 // (aicost.me, autodl.art …) failing this way is the provider's edge, not a tunnel.

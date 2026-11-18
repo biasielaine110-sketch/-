@@ -3,6 +3,7 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { proxyApiUrl, forceProxyMediaUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
+import { isProxiedApiUrl, isTransportFailure, withProxyFallback } from "./net-transport";
 import { isComfyH3SingleReferenceImageWorkflow, parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi, type ComfyWorkflow } from "@/lib/comfyui-native";
 import { isKrea2MjStyleWorkflowId, isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, isMinimaxH3YzjinyuWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
@@ -695,10 +696,17 @@ async function uploadProviderReferenceImage(config: AiConfig, image: ReferenceIm
     formData.set("file", file);
     formData.set("purpose", "generation");
     try {
-        const response = await axios.post<{ success?: boolean; message?: string; data?: { url?: string }; url?: string }>(aiApiUrl(config, "/uploads/images"), formData, {
-            headers: aiHeaders(config),
-            signal: options?.signal,
-        });
+        // 参考图上传也吃同一跳兜底：它是生图的第一步，这一跳被掐断时用户看到的同样是
+        // 「生成失败」，而真正断在上传。
+        const response = await withProxyFallback(
+            aiApiUrl(config, "/uploads/images"),
+            (target) =>
+                axios.post<{ success?: boolean; message?: string; data?: { url?: string }; url?: string }>(target, formData, {
+                    headers: aiHeaders(config),
+                    signal: options?.signal,
+                }),
+            formData,
+        );
         const payload = response.data;
         const url = payload?.data?.url || payload?.url;
         if (typeof url === "string" && isPublicHttpUrl(url)) return url;
@@ -1796,14 +1804,22 @@ function readAxiosError(error: unknown, fallback: string) {
             // proxy-oriented copy when the URL is our /api/proxy hop so users do not chase CORS first.
             const url = typeof error.config?.url === "string" ? error.config.url : "";
             const hint = url ? `\n${url}` : "";
-            if (/\/api(?:-)?proxy\?target=/i.test(url)) {
+            if (isProxiedApiUrl(url)) {
                 return `${apiText("proxyUnreachable")}${hint}`;
             }
-            // Verified CORS-open host (e.g. ts.net funnel) that produced no response at all: the
-            // endpoint is down, not blocked — say so instead of sending users to CORS settings.
-            if (error.code === "ERR_NETWORK" && isKnownDirectCorsUrl(url)) {
+            // Verified CORS-open host (e.g. ts.net funnel, aicost.me) that produced no response at
+            // all: the endpoint is down, not blocked — say so instead of sending users to CORS
+            // settings. 判定用 `isTransportFailure`（含着 ERR_NETWORK / ECONNABORTED /
+            // ERR_HTTP2_PROTOCOL_ERROR …）：以前只认 `ERR_NETWORK`，于是一次「直连被掐断」的超时
+            // 会落到下面那句泛化的 networkFailed，还劝人去改成「浏览器直连」—— 可它本来就是直连。
+            if (isKnownDirectCorsUrl(url) && isTransportFailure(error)) {
                 // ts.net gets the Funnel checklist; an ordinary relay gets the generic relay advice.
                 return `${apiText(isTunnelCorsUrl(url) ? "directHostUnreachable" : "directHostUnreachableApi")}${hint}`;
+            }
+            // A reset/protocol failure is not "blocked by CORS" — the request went out and the
+            // connection died mid-flight (HTTP/2 RST_STREAM, TLS teardown, proxy kill).
+            if (/ERR_(HTTP2|HTTP3|QUIC|CONNECTION_RESET|CONNECTION_CLOSED|EMPTY_RESPONSE|INCOMPLETE_CHUNKED)/i.test(String(error.code || ""))) {
+                return `${apiText("endpointReset")}${hint}`;
             }
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
         }
@@ -2515,20 +2531,36 @@ function aiApiUrl(config: AiConfig, path: string) {
 /** Seedream / image APIs often take 1–3 minutes; keep client wait aligned with the site proxy (Hobby ≤300s). */
 const IMAGE_REQUEST_TIMEOUT_MS = 300_000;
 
+/**
+ * 生图 POST。走 `withProxyFallback`：`aicost.me` 这类被刻意放进 `DIRECT_CORS_HOSTS` 的站点是
+ * 浏览器直连，而直连那一跳跑在用户本机网络上（代理/加速器/边缘都可能把它掐断）。断到「一个
+ * 字节都没回来」时自动换站点代理再试一次，而不是直接把传输层错误吐给用户。
+ */
 async function postImageJson<T>(config: AiConfig, path: string, data: unknown, options?: RequestOptions) {
-    return axios.post<T>(aiApiUrl(config, path), data, {
-        headers: aiHeaders(config, "application/json"),
-        signal: options?.signal,
-        timeout: IMAGE_REQUEST_TIMEOUT_MS,
-    });
+    return withProxyFallback(
+        aiApiUrl(config, path),
+        (target) =>
+            axios.post<T>(target, data, {
+                headers: aiHeaders(config, "application/json"),
+                signal: options?.signal,
+                timeout: IMAGE_REQUEST_TIMEOUT_MS,
+            }),
+        data,
+    );
 }
 
+/** 同 `postImageJson`：multipart 生图/改图也吃这一跳兜底（body 过大时不换跳，见 `withProxyFallback`）。 */
 async function postImageForm<T>(config: AiConfig, path: string, data: FormData, options?: RequestOptions) {
-    return axios.post<T>(aiApiUrl(config, path), data, {
-        headers: aiHeaders(config),
-        signal: options?.signal,
-        timeout: IMAGE_REQUEST_TIMEOUT_MS,
-    });
+    return withProxyFallback(
+        aiApiUrl(config, path),
+        (target) =>
+            axios.post<T>(target, data, {
+                headers: aiHeaders(config),
+                signal: options?.signal,
+                timeout: IMAGE_REQUEST_TIMEOUT_MS,
+            }),
+        data,
+    );
 }
 
 function aiHeaders(config: AiConfig, contentType?: string) {

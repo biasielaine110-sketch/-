@@ -24,6 +24,7 @@ import {
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { proxyApiUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
+import { isProxiedApiUrl, isTransportFailure, withProxyFallback } from "./net-transport";
 import type { ReferenceAudio } from "@/types/media";
 import { uploadProviderMediaFile } from "./video";
 import { runModelPlugin } from "./model-plugin";
@@ -334,11 +335,17 @@ async function requestSeedanceAudioGenerations(config: AiConfig, prompt: string,
 
     let submit;
     try {
-        submit = await axios.post(aiApiUrl(config, "/audio/generations"), body, {
-            headers: aiHeaders(config),
-            signal: options?.signal,
-            transformResponse: [(data) => data],
-        });
+        // 直连那条跳被掐断（无任何响应）时自动换站点代理再试一次，与生图/视频同口径。
+        submit = await withProxyFallback(
+            aiApiUrl(config, "/audio/generations"),
+            (target) =>
+                axios.post(target, body, {
+                    headers: aiHeaders(config),
+                    signal: options?.signal,
+                    transformResponse: [(data) => data],
+                }),
+            body,
+        );
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
     }
@@ -524,12 +531,17 @@ async function requestSunoMusic(config: AiConfig, prompt: string, options?: Requ
 
     let submit;
     try {
-        submit = await axios.post(aiApiUrl(config, "/music/generations"), body, {
-            headers: aiHeaders(config),
-            signal: options?.signal,
-            // Keep raw text so we can recover JSON even if a proxy left a binary prefix.
-            transformResponse: [(data) => data],
-        });
+        submit = await withProxyFallback(
+            aiApiUrl(config, "/music/generations"),
+            (target) =>
+                axios.post(target, body, {
+                    headers: aiHeaders(config),
+                    signal: options?.signal,
+                    // Keep raw text so we can recover JSON even if a proxy left a binary prefix.
+                    transformResponse: [(data) => data],
+                }),
+            body,
+        );
     } catch (error) {
         throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
     }
@@ -991,9 +1003,13 @@ function readAxiosError(error: unknown, fallback: string) {
             const url = typeof error.config?.url === "string" ? error.config.url : "";
             const hint = url ? `\n${url}` : "";
             // Pages proxy 502 without ACAO used to surface here as a fake CORS/network failure.
-            if (/\/api(?:-)?proxy\?target=/i.test(url)) return `${apiText("proxyUnreachable")}${hint}`;
-            if (error.code === "ERR_NETWORK" && isKnownDirectCorsUrl(url)) {
+            if (isProxiedApiUrl(url)) return `${apiText("proxyUnreachable")}${hint}`;
+            if (isKnownDirectCorsUrl(url) && isTransportFailure(error)) {
                 return `${apiText(isTunnelCorsUrl(url) ? "directHostUnreachable" : "directHostUnreachableApi")}${hint}`;
+            }
+            // 连接被掐断（HTTP/2 复位 / TLS 掉线）不是跨域问题：请求已经发出去了，是中途断的。
+            if (/ERR_(HTTP2|HTTP3|QUIC|CONNECTION_RESET|CONNECTION_CLOSED|EMPTY_RESPONSE|INCOMPLETE_CHUNKED)/i.test(String(error.code || ""))) {
+                return `${apiText("endpointReset")}${hint}`;
             }
             return error.code === "ERR_NETWORK" ? `${apiText("corsRequired")}${hint}` : `${apiText("networkFailed")}${hint}`;
         }
