@@ -63,6 +63,16 @@ export function segmentsPerEpisode(seconds: number | string | null | undefined):
 export const EPISODE_SPLIT_SKILL_HINTS = ["15秒-小说转剧本分镜"] as const;
 export const EPISODE_SPLIT_SKILL_LABEL = EPISODE_SPLIT_SKILL_HINTS[0];
 
+/**
+ * 04 弹窗「特殊要求」的**默认文案**（用户 2026-11-18 第 9 轮：「弹出得窗口 特殊要求这里 默认填入
+ * 每集结尾留钩子」）。
+ *
+ * 为什么值得有个默认值：04 是批量拆集，一拆就是好几集连播；不给钩子的剧本每集都在同一口气上停住，
+ * 观众没有理由点下一集。这句话会原样进 `buildEpisodeSplitPrompt` 的「特殊要求：」那一段，
+ * 用户可以改 / 清空（清空 = 完全不要这条约束）。
+ */
+export const EPISODE_DEFAULT_REQUIREMENT = "每集结尾留钩子";
+
 /** 每集时长的有效值：非法 / 空 → 120；超范围夹到区间内取整。 */
 export function resolveEpisodeSeconds(raw: number | string | null | undefined): number {
     const value = Number(String(raw ?? "").trim());

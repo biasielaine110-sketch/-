@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, VIDEO_REVERSE_STAGE_OPTIONS, buildDefaultVideoReverseRequirement, describeReverseVideoStages, normalizeReverseVideoTarget, readReverseVideoScript, readReverseVideoSkill, readReverseVideoStages, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, setReverseVideoStage, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult, type VideoReverseStageId } from "@/lib/canvas/video-reverse";
-import { DEFAULT_EPISODE_SECONDS, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, SCRIPT_CHARS_PER_SECOND, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
+import { DEFAULT_EPISODE_SECONDS, EPISODE_DEFAULT_REQUIREMENT, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, SCRIPT_CHARS_PER_SECOND, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, normalizeScriptShotsPerClip } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
@@ -536,7 +536,11 @@ export function CanvasReverseVideoNodeContent({
                  * 剧本空着就直接点开弹窗（弹窗里也能填），但点「开始」时必须有内容 ——
                  * 没有剧本就没有东西可拆，跑下去只会白建一个对话节点。
                  */
-                setRequirementText("");
+                /**
+                 * 04 的「特殊要求」默认填一句钩子（用户 2026-11-18 第 9 轮）：批量拆出来的几集是连播的，
+                 * 每集结尾不给钩子就没有点下一集的理由。用户可以整句改掉 / 清空（清空 = 不要这条约束）。
+                 */
+                setRequirementText(EPISODE_DEFAULT_REQUIREMENT);
                 /**
                  * 打开 04 弹窗时把「秒数」落成 120（**只在从没写过时落**）：这样主界面显示的秒数
                  * 与弹窗里的「每集时长」立刻是同一个数，之后谁改都两边一起变（`applySeconds`）。
@@ -1080,12 +1084,12 @@ export function CanvasReverseVideoNodeContent({
                     )}
                     {/* 特殊要求：02 / 03 是主输入（默认文案自带创作口径）；04 是可选（拆集时的额外要求）。 */}
                     <div className="flex flex-col gap-1">
-                        {requirementMode === 4 ? <span className="text-xs opacity-70">特殊要求（可选：拆集时想额外强调的，比如「每集结尾留钩子」）</span> : null}
+                        {requirementMode === 4 ? <span className="text-xs opacity-70">特殊要求（默认已填「{EPISODE_DEFAULT_REQUIREMENT}」，可随手改；清空 = 不加这条约束）</span> : null}
                         <Input.TextArea
                             value={requirementText}
                             onChange={(event) => setRequirementText(event.target.value)}
                             rows={requirementMode === 4 ? 2 : 4}
-                            placeholder={requirementMode === 4 ? "（可留空）拆集时的额外要求" : requirementDefault(requirementMode === 3 ? 3 : 2)}
+                            placeholder={requirementMode === 4 ? `（可留空）拆集时的额外要求，例如「${EPISODE_DEFAULT_REQUIREMENT}」` : requirementDefault(requirementMode === 3 ? 3 : 2)}
                         />
                     </div>
                     <div className="text-[11px] opacity-60">
