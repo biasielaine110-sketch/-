@@ -11,6 +11,7 @@ import {
     loadVideoBlob,
     scaleVideoBlob,
     trimVideoBlob,
+    upscaleResolutionFromModelName,
     VIDEO_SCALE_PERCENTAGES,
     VIDEO_UPSCALE_RESOLUTIONS,
     type VideoScalePercentage,
@@ -65,6 +66,8 @@ export function CanvasNodeVideoToolsDialog({ open, videoUrl, videoStorageKey, co
     }, [videoUrl]);
 
     const videoModels = useMemo(() => selectableModelsByCapability(config, "video"), [config]);
+    /** `火山-超分-720p` 这类档位模型名里写死了输出分辨率：锁住档位选择，别让用户白点。 */
+    const lockedResolution = useMemo(() => upscaleResolutionFromModelName(upscaleModel), [upscaleModel]);
     const preferredUpscaler = useMemo(() => {
         const fromPreferred = findPreferredModelOption(config.channels, "video", ["zhenzhen-upscaler"]);
         if (fromPreferred) return fromPreferred;
@@ -84,6 +87,11 @@ export function CanvasNodeVideoToolsDialog({ open, videoUrl, videoStorageKey, co
         abortRef.current?.abort();
         abortRef.current = null;
     }, [open, initialTab, preferredUpscaler, videoUrl]);
+
+    // 档位模型（`-720p` / `-1080p`）只能输出它那一档，跟着模型名把档位拉过去。
+    useEffect(() => {
+        if (lockedResolution) setResolution(lockedResolution);
+    }, [lockedResolution]);
 
     useEffect(() => {
         if (!open || tab !== "frame") return;
@@ -413,10 +421,14 @@ export function CanvasNodeVideoToolsDialog({ open, videoUrl, videoStorageKey, co
                                                     value={resolution}
                                                     options={VIDEO_UPSCALE_RESOLUTIONS.map((item) => ({ label: item.label, value: item.value }))}
                                                     onChange={(value) => setResolution(value as VideoUpscaleResolution)}
-                                                    disabled={busy}
+                                                    disabled={busy || Boolean(lockedResolution)}
                                                 />
                                             </div>
-                                            <div className="rounded-xl border px-3 py-2 text-xs leading-5 opacity-70">{t("canvas.videoTools.upscaleHint")}</div>
+                                            <div className="rounded-xl border px-3 py-2 text-xs leading-5 opacity-70">
+                                                {lockedResolution
+                                                    ? t("canvas.videoTools.upscaleResolutionLocked", { resolution: lockedResolution })
+                                                    : t("canvas.videoTools.upscaleHint")}
+                                            </div>
                                             <div className="flex gap-2">
                                                 {busy ? (
                                                     <Button size="large" block onClick={cancelBusy}>

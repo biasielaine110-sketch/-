@@ -1475,6 +1475,7 @@ export default {
             upscaleModelRequired: "Add a video upscale model in your provider (e.g. zhenzhen-upscaler)",
             resolution: "Target resolution",
             upscaleHint: "Uploads a temporary public URL, then submits the upscale task and creates a new video node.",
+            upscaleResolutionLocked: "This model always outputs {{resolution}} (fixed by its name), so switching tiers has no effect.",
             upscaleAction: "Start upscale",
             upscaleFailed: "Video upscale failed",
             trimSuccess: "Created a trimmed video node",

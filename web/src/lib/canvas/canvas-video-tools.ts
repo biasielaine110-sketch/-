@@ -38,8 +38,26 @@ export type VideoScalePercentage = (typeof VIDEO_SCALE_PERCENTAGES)[number];
  */
 export const VIDEO_SCALE_SHORTCUT_PERCENT = 60;
 
+/**
+ * 「这个视频模型能不能拿来超分」——只用来**预选**下拉框，不限制可选范围。
+ *
+ * 三种都被认：Seedance 的 `zhenzhen-upscaler`、new-api 火山 MediaKit 的
+ * `volc-enhance-video-*`、以及渠道侧给它们起的中文别名（aicost 的「火山-超分-720p」）。
+ */
 export function isVideoUpscalerModel(model: string) {
-    return /upscaler|zhenzhen-upscaler/i.test(model.trim());
+    return /upscaler|zhenzhen-upscaler|volc[-_]?enhance|enhance[-_]?video|超分|视频增强|画质增强/i.test(model.trim());
+}
+
+/**
+ * 模型名自带分辨率后缀就说明它是**固定档位**模型（`-720p` / `-1080p`），
+ * 面板上的档位选择对它无效，UI 用来锁死并提示，别让用户以为选了 1080p 就出 1080p。
+ */
+export function upscaleResolutionFromModelName(model: string): VideoUpscaleResolution | "" {
+    const matched = model.trim().match(/(?:^|[^0-9])(720|1080)\s*p(?:[^a-z0-9]|$)/i);
+    if (matched) return `${matched[1]}p` as VideoUpscaleResolution;
+    const k = model.trim().match(/(?:^|[^0-9])(2k|4k)(?:[^a-z0-9]|$)/i);
+    if (k) return k[1].toLowerCase() as VideoUpscaleResolution;
+    return "";
 }
 
 const isLocalUrl = (url: string) => url.startsWith("blob:") || url.startsWith("data:");

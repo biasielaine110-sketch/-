@@ -1339,7 +1339,46 @@ export type VideoUpscaleOptions = {
     signal?: AbortSignal;
 };
 
-/** Seedance zhenzhen-upscaler via POST /v1/videos + poll. */
+/**
+ * 火山 MediaKit「画质增强 / 视频超分」档位模型。
+ *
+ * aicost.me 模型广场里那两个中文名（「火山-超分-720p」「火山-超分-1080p」）就是这类模型在渠道侧的
+ * 别名，底层是 new-api 的 `volc-enhance-video-*`（极速 / 标准 / 专业版）。
+ * 它们和 Seedance 那套**不是同一个契约**：
+ *   `POST /v1/videos` + `{ model, video_url, resolution }`，
+ *   **不收** `prompt`、**不收** `metadata.content[]`、**也不支持** `callback_url`；
+ *   查询 `GET /v1/videos/{task_id}`，成片直链在 `metadata.url`（`videoResultUrl` 已经认这个字段）。
+ * 参考：https://future-api.doc.vodeshop.com/doc-9018092（同族 new-api 的火山画质增强文档）
+ */
+export function isVolcEnhanceUpscaleModel(model: string) {
+    return /volc[-_]?enhance|enhance[-_]?video|超分|视频超分|视频增强|画质增强/i.test(modelOptionName(model));
+}
+
+/**
+ * 纯函数：超分请求体。**请求形状跟着模型族走，不跟渠道走**——
+ * 火山档位模型无论挂哪个中转都收 `video_url`；aicost 文档也只列顶层 `video` / `videos` / `video_url`，
+ * 老代码的 `metadata.content[]` 是方舟形状，在那边直接 400。
+ *
+ * 分辨率优先取模型名自带的后缀（`-720p` / `-1080p`）：这类档位模型固定输出，
+ * UI 上选了别的档位也不该发出去（发错档等于直接参数错误）。
+ */
+export function buildVideoUpscaleRequestBody(input: { model: string; videoUrl: string; resolution?: string; baseUrl?: string }): Record<string, unknown> {
+    const modelName = modelOptionName(input.model) || "zhenzhen-upscaler";
+    const resolution = resolutionFromModelName(modelName) || normalizeUpscaleResolution(input.resolution || "1080p");
+    if (isVolcEnhanceUpscaleModel(modelName) || isAicostJsonVideoHost(input.baseUrl || "")) {
+        return { model: modelName, video_url: input.videoUrl, resolution };
+    }
+    return {
+        model: modelName,
+        prompt: "upscale",
+        metadata: {
+            resolution,
+            content: [{ type: "video_url", video_url: { url: input.videoUrl } }],
+        },
+    };
+}
+
+/** 视频超分：Seedance zhenzhen-upscaler / 火山 MediaKit 画质增强，统一 `POST /v1/videos` + 轮询。 */
 export async function requestVideoUpscale(config: AiConfig, options: VideoUpscaleOptions): Promise<VideoGenerationResult> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.videoModel);
     const modelName = modelOptionName(requestConfig.model || "zhenzhen-upscaler") || "zhenzhen-upscaler";
@@ -1347,15 +1386,12 @@ export async function requestVideoUpscale(config: AiConfig, options: VideoUpscal
     if (!options.videoUrl || !/^https?:\/\//i.test(options.videoUrl)) {
         throw new Error(apiText("videoTaskCreateFailed"));
     }
-    const resolution = normalizeUpscaleResolution(options.resolution || "1080p");
-    const payload = {
+    const payload = buildVideoUpscaleRequestBody({
         model: modelName,
-        prompt: "upscale",
-        metadata: {
-            resolution,
-            content: [{ type: "video_url", video_url: { url: options.videoUrl } }],
-        },
-    };
+        videoUrl: options.videoUrl,
+        resolution: options.resolution,
+        baseUrl: requestConfig.baseUrl,
+    });
     let taskId = "";
     try {
         const postUrl = aiApiUrl(requestConfig, "/videos");
@@ -1399,8 +1435,14 @@ function unwrapVideoTaskResponse(payload: ApiVideoResponse): VideoResponse {
         const record = data as VideoResponse & { task_id?: string };
         return { ...record, id: record.id || record.task_id || "" };
     }
-    const record = payload as VideoResponse & { task_id?: string };
-    return { ...record, id: record.id || record.task_id || "" };
+    const record = payload as VideoResponse & { task_id?: string; success?: unknown; data?: VideoResponse & { task_id?: string } };
+    // aicost / new-api 常把结果包成 `{ success, message, data }`：失败必须把服务商原话带出来，
+    // 否则用户只看到「没拿到任务 ID」，完全定位不了（超分这类新模型最容易踩）。
+    if (record.success === false) {
+        throw new Error(readApiErrorMessage(payload) || apiText("requestFailed"));
+    }
+    const inner = record.success === true && record.data && typeof record.data === "object" ? record.data : record;
+    return { ...inner, id: inner.id || inner.task_id || "" };
 }
 
 /**
