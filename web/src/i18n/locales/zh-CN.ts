@@ -867,6 +867,10 @@ export default {
             inheritNothing: "没有可沿用的内容：勾选的资产都已经连上了",
             inheritDone: "已沿用 {{assets}} 个资产、{{locks}} 个资产名锁",
             inheritAutoApplied: "已自动沿用 {{count}} 个资产名锁",
+            shareNeedTwo: "资产关联至少要选中 2 个脚本节点",
+            shareDone: "已关联 {{nodes}} 个脚本节点：共用 {{assets}} 个资产图、{{locks}} 个资产名 —— 之后任意一个点一键生图，同名资产都不会再生一遍",
+            shareConflict: "这些资产名在不同脚本里锁了不同的图，已统一用第一个节点的图：{{names}}（想换就直接在该格子上重新挂图）",
+            shareMissing: "这些资产名锁着的图已经被删掉了，本次跳过：{{names}}",
             alignLinkedMounted: "已把连进来的 {{count}} 张图按名字挂到表里：{{names}}",
             alignLinkedUnmatched: "这些连进来的图名字对不上剧本资产，没挂上：{{names}}",
             alignVoiceMounted: "已把 {{count}} 段声音按台词挂到对应镜头的声音格：{{names}}",
@@ -878,6 +882,7 @@ export default {
             directAssetStarted: "已开始直接生成 {{count}} 张资产图",
             directAssetEmpty: "分镜表里还没有可生成的资产（角色 / 场景 / 道具至少要有内容）",
             directAssetLockedSkip: "已锁定 {{count}} 条资产图，本次跳过生成（直接用锁定的图）",
+            directAssetAllShared: "这张表里的 {{count}} 个资产都已有图（含从别的脚本共用过来的），没有需要新生成的",
             viewTemplateMissing: "词库里没找到「{{names}}」——这批图不会套视图版式。判据是标题同时含「角色视图 / 角色三视图」+「无头」（场景是「场景视图」+「宫格」），且条目没被关掉；改好标题后再点一次即可",
             oneClickVideo: "一键视频",
             oneClickVideoHint:
@@ -1980,6 +1985,7 @@ export default {
             replacePrimaryTitle: "选择用哪张链接图作为首图",
             replacePrimaryUntitled: "链接图 {{index}}",
             replacePrimaryDone: "已替换首图，原图已存入节点历史",
+            scriptAssetShare: "资产关联（{{count}} 个脚本）",
         },
         imageBatch: {
             title: "批量设置图片参数（{{count}} 个节点）",

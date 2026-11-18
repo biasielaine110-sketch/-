@@ -866,6 +866,10 @@ export default {
             inheritNothing: "Nothing to reuse: the checked assets are already linked",
             inheritDone: "Reused {{assets}} assets and {{locks}} name locks",
             inheritAutoApplied: "Auto-reused {{count}} asset name locks",
+            shareNeedTwo: "Asset sharing needs at least 2 script nodes selected",
+            shareDone: "Linked {{nodes}} script nodes: sharing {{assets}} asset images and {{locks}} asset names — clicking one-click image on any of them will no longer regenerate the same asset",
+            shareConflict: "These asset names pointed to different images across the scripts; the first node's image now wins: {{names}} (re-attach a cell's image to change it)",
+            shareMissing: "These asset names point to images that were deleted and were skipped: {{names}}",
             alignLinkedMounted: "Linked {{count}} connected image(s) to the table by name: {{names}}",
             alignLinkedUnmatched: "These connected images don't match any script asset name, so they were not attached: {{names}}",
             alignVoiceMounted: "Mounted {{count}} voice clip(s) into the shots where that character speaks: {{names}}",
@@ -877,6 +881,7 @@ export default {
             directAssetStarted: "Started generating {{count}} asset image(s)",
             directAssetEmpty: "No asset to generate yet — the character / scene / prop columns need content",
             directAssetLockedSkip: "{{count}} asset image(s) already locked — skipping generation and reusing the locked image",
+            directAssetAllShared: "All {{count}} assets in this table already have images (including ones shared from other scripts) — nothing new to generate",
             viewTemplateMissing:
                 "No library entry matched \"{{names}}\" — these images will not get the view layout. A character entry needs \"角色视图 / 角色三视图\" + \"无头\" in its title (scene: \"场景视图\" + \"宫格\") and must stay enabled; fix the title and run again",
             oneClickVideo: "One-click video",
@@ -1981,6 +1986,7 @@ export default {
             replacePrimaryTitle: "Choose a linked image as the primary image",
             replacePrimaryUntitled: "Linked image {{index}}",
             replacePrimaryDone: "Primary image replaced; the previous image is kept in the node history",
+            scriptAssetShare: "Share assets ({{count}} scripts)",
         },
         imageBatch: {
             title: "Batch image settings ({{count}} nodes)",

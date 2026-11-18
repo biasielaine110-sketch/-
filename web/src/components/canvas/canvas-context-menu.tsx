@@ -1,6 +1,6 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Maximize2, Plus, Copy, Replace, Scissors, Settings2, SlidersHorizontal, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
+import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Link2, Maximize2, Plus, Copy, Replace, Scissors, Settings2, SlidersHorizontal, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useOrderDrag } from "@/hooks/use-order-drag";
@@ -67,6 +67,8 @@ export function CanvasNodeContextMenu({
     /** 图片节点上连着的链接图数量。>=1 才出现「替换首图」。 */
     replacePrimaryCount = 0,
     onReplacePrimaryImage,
+    scriptAssetShareCount = 0,
+    onScriptAssetShare,
 }: {
     menu: ContextMenuState;
     node?: CanvasNodeData | null;
@@ -108,6 +110,9 @@ export function CanvasNodeContextMenu({
     /** 图片节点连着的链接图数量（图片 / 标注源）。>=1 才显示「替换首图」。 */
     replacePrimaryCount?: number;
     onReplacePrimaryImage?: () => void;
+    /** 选区里的脚本节点数（`CanvasNodeType.Script`）。>=2 才出现「资产关联」。 */
+    scriptAssetShareCount?: number;
+    onScriptAssetShare?: () => void;
 }) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -131,7 +136,9 @@ export function CanvasNodeContextMenu({
     const showImageBatch = menu.type === "node" && Boolean(node) && imageBatchCount > 1 && Boolean(onImageBatchSettings);
     // 批量改视频参数作用在选区里的**视频节点**上：>=2 才叫批量（1 个直接用节点自己的设置面板）。
     const showVideoBatch = menu.type === "node" && Boolean(node) && videoBatchCount > 1 && Boolean(onVideoBatchSettings);
-    const showSelectionActions = showBatchGenerate || showGroup || showH3Optimize || showImageBatch || showVideoBatch;
+    // 「资产关联」只对脚本节点有意义（多集 / 多分场共用一套角色场景图）：>=2 个脚本节点才出现。
+    const showScriptAssetShare = menu.type === "node" && Boolean(node) && (scriptAssetShareCount ?? 0) > 1 && Boolean(onScriptAssetShare);
+    const showSelectionActions = showBatchGenerate || showGroup || showH3Optimize || showImageBatch || showVideoBatch || showScriptAssetShare;
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -382,6 +389,17 @@ export function CanvasNodeContextMenu({
                             label={t("canvas.contextMenu.group", { count: groupCount })}
                             onClick={() => {
                                 onGroupSelected?.();
+                                onClose();
+                            }}
+                        />
+                    ) : null}
+                    {showScriptAssetShare ? (
+                        <MenuButton
+                            icon={<Link2 className="size-4" />}
+                            label={t("canvas.contextMenu.scriptAssetShare", { count: scriptAssetShareCount })}
+                            onClick={() => {
+                                onBeforeAction?.();
+                                onScriptAssetShare?.();
                                 onClose();
                             }}
                         />

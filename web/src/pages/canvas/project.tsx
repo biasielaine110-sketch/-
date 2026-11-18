@@ -204,7 +204,7 @@ import {
     type ScriptAssetBatchItem,
     type ScriptAssetReference,
 } from "@/lib/canvas/script-asset-batch";
-import { buildScriptAssetInheritPlan, collectScriptInheritSources, scriptRowAssetNames, type ScriptAssetInheritOptions } from "@/lib/canvas/script-asset-inherit";
+import { buildScriptAssetInheritPlan, buildScriptAssetSharePlan, collectScriptAssetGroupPeers, collectScriptInheritSources, scriptAssetGroupIdOf, scriptRowAssetNames, type ScriptAssetInheritOptions } from "@/lib/canvas/script-asset-inherit";
 import { planScriptAssetAlignSkipChange, planScriptAssetAlignment, shouldApplyScriptAssetAlignment } from "@/lib/canvas/script-asset-align";
 import { isRowMountedAudio, planScriptVoiceAlignment, shouldApplyScriptVoiceAlignment } from "@/lib/canvas/script-voice-align";
 import { stripScriptAssetReferences } from "@/lib/canvas/script-asset-detach";
@@ -7755,6 +7755,17 @@ function AtelierCanvasPage() {
         return ids.length >= 2 ? ids : [];
     }, [contextMenu, nodes, selectedNodeIds]);
 
+    /**
+     * 右键菜单「资产关联」作用的节点：选区里的**脚本节点**，>= 2 才出现。
+     * 混选（夹着图片 / 文本）按类型筛掉 —— 关联组只对脚本生成器有意义。
+     */
+    const scriptAssetShareTargets = useMemo(() => {
+        if (!contextMenu || contextMenu.type !== "node" || selectedNodeIds.size < 2) return [];
+        const byId = new Map(nodes.map((node) => [node.id, node]));
+        const ids = Array.from(selectedNodeIds).filter((id) => byId.get(id)?.type === CanvasNodeType.Script);
+        return ids.length >= 2 ? ids : [];
+    }, [contextMenu, nodes, selectedNodeIds]);
+
     // ═════════════════════════════════════════════════════════════════════════════════════
     // 批量设置图片参数（模型 / 画幅比例 / 分辨率 / 风格）
     // ═════════════════════════════════════════════════════════════════════════════════════
@@ -9158,10 +9169,14 @@ function AtelierCanvasPage() {
         /**
          * @param payload.assetNodeIds 用户在弹窗里勾中的资产；**不传 = 全部**（04 剧集批量用这一档：
          *        同一批拆出来的集之间没有「挑几张」这回事，整批共享同一个资产池）。
+         * @param payload.onlyNames 只搬这些资产名的锁（「一键生图前自动补共用」用：本集表里没出现的名字
+         *        搬过来就是噪音，还会让「已锁定 N 个资产名」失真）。
+         * @param payload.recordSource 是否把「来源集 / 自动沿用」写回本节点。组内批量合并时传 `false`：
+         *        那一趟只是把别人的资产并进来，不该顺手把用户记着的来源集改掉。
          * @param payload.silent 不弹提示。04 是批量调用的，逐集弹两条 toast 会糊满屏幕 ——
          *        它自己用 `report()` 把进度写在反推节点上。
          */
-        (nodeId: string, payload: { sourceId: string; assetNodeIds?: string[]; options: ScriptAssetInheritOptions; auto: boolean; silent?: boolean }) => {
+        (nodeId: string, payload: { sourceId: string; assetNodeIds?: string[]; onlyNames?: string[]; options: ScriptAssetInheritOptions; auto: boolean; silent?: boolean; recordSource?: boolean }) => {
             const source = nodesRef.current.find((item) => item.id === payload.sourceId);
             const target = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || !target) return;
@@ -9171,8 +9186,11 @@ function AtelierCanvasPage() {
                 nodes: nodesRef.current,
                 connections: connectionsRef.current,
                 assetNodeIds: payload.assetNodeIds,
+                onlyNames: payload.onlyNames,
                 options: payload.options,
             });
+            // 组内合并（`recordSource: false`）什么都没搬到就整段跳过：不然每点一次生图都要白写一遍 state。
+            if (payload.recordSource === false && !plan.connections.length && !Object.keys(plan.metadata).length) return;
             /**
              * 🔴 连线与 metadata 都要**同步写 `connectionsRef` / `nodesRef`**：
              * 04 是「这一集沿用完 → 紧接着下一集出表 / 生图 → 最后统一铺视频」一口气跑完的，
@@ -9188,11 +9206,17 @@ function AtelierCanvasPage() {
                 }
             }
             // 来源 / 自动开关无论这次搬了什么都要记住：用户选了「下一集沿用这一集」，就是长期意图。
+            // 组内批量合并（`recordSource: false`）不改这两个键 —— 那趟只是在并资产。
+            const recordSource = payload.recordSource !== false;
             const patchNode = (item: CanvasNodeData): CanvasNodeData =>
                 item.id === nodeId
                     ? {
                           ...item,
-                          metadata: { ...item.metadata, ...plan.metadata, scriptAssetInheritSource: payload.sourceId, scriptAssetInheritAuto: payload.auto ? true : undefined },
+                          metadata: {
+                              ...item.metadata,
+                              ...plan.metadata,
+                              ...(recordSource ? { scriptAssetInheritSource: payload.sourceId, scriptAssetInheritAuto: payload.auto ? true : undefined } : {}),
+                          },
                       }
                     : item;
             nodesRef.current = nodesRef.current.map(patchNode);
@@ -9203,6 +9227,104 @@ function AtelierCanvasPage() {
                 return;
             }
             message.success(t("canvas.scriptNode.inheritDone", { assets: plan.assetNodeIds.length, locks: plan.lockNames.length }));
+        },
+        [message, t],
+    );
+
+    /**
+     * **点「一键生图」前先把该共用的资产补上**（用户 2026-11-18 第 01 条报障：
+     * 「点了第一集一键生图，再点第二集一键生图，第二集没有共用第一集的资产图」）。
+     *
+     * 为什么不能只靠 `runScriptGeneration` 里那段自动沿用：它只在**出表那一刻**跑。
+     * 04 的 ④-A 是「所有集同时出表」，那一刻上一集一张图都还没有 → 一条锁都搬不到；
+     * 等用户手点生图时表早就存在了，不会再走那条路 → 两集各生一套、同名资产被生成两遍。
+     *
+     * 这里补的两路来源：
+     *  ① `scriptAssetInheritAuto` 记着的来源集（04 拆集 / 弹窗勾过「下一集沿用」）；
+     *  ② **资产关联组**里的其它机器（右键「资产关联」建组，04 拆出来的集也自动同组）。
+     * 只搬「本集分镜表里真的出现过」的**名字锁**（连带这几张图的连线与分类），
+     * 不搬逐镜挂图 —— 镜号会重排。整段幂等：没有新锁就一个字节都不写。
+     *
+     * @returns 本次新锁上的资产名数量（调用方可用它提示「共用了几张图」）。
+     */
+    const inheritSharedScriptAssets = useCallback(
+        (nodeId: string): number => {
+            const self = nodesRef.current.find((item) => item.id === nodeId);
+            if (!self || self.type !== CanvasNodeType.Script) return 0;
+            const rows = self.metadata?.scriptRows;
+            if (!rows?.length) return 0;
+            const names = scriptRowAssetNames(rows, resolveStoryScriptPresetId(self.metadata?.scriptPreset), normalizeStoryScriptExtraColumns(self.metadata?.scriptExtraColumns));
+            if (!names.length) return 0;
+            const sourceIds: string[] = [];
+            const autoSource = self.metadata?.scriptAssetInheritAuto ? String(self.metadata?.scriptAssetInheritSource || "") : "";
+            if (autoSource && autoSource !== nodeId) sourceIds.push(autoSource);
+            for (const peer of collectScriptAssetGroupPeers(self, nodesRef.current)) if (!sourceIds.includes(peer.id)) sourceIds.push(peer.id);
+            if (!sourceIds.length) return 0;
+            const countLocks = (id: string) => Object.keys(nodesRef.current.find((item) => item.id === id)?.metadata?.scriptNameLocks || {}).length;
+            const before = countLocks(nodeId);
+            for (const sourceId of sourceIds) {
+                handleInheritScriptAssets(nodeId, {
+                    sourceId,
+                    onlyNames: names,
+                    // 只要锁 + 由锁带出来的那几张图（`assets: false` 不会把对方整个资产池拖进来）
+                    options: { assets: false, locks: true, columns: false, output: false },
+                    auto: false,
+                    silent: true,
+                    recordSource: false,
+                });
+            }
+            return Math.max(0, countLocks(nodeId) - before);
+        },
+        [handleInheritScriptAssets],
+    );
+
+    /**
+     * 右键「资产关联」（用户 2026-11-18 第 02 条）：把选中的多个脚本节点串成一个**共用资产池**。
+     *
+     * 与「沿用资产」的区别：沿用的是 A → B 单向搬一次（还会记下「来源集」）；关联组是**互为一体** ——
+     * 全组并集一次写进每一台机器，之后谁点生图都会先并组内其它机器已有的同名锁
+     * （见 `inheritSharedScriptAssets`）。所以「谁先生成过这个角色，别人就直接挂那一张」。
+     *
+     * 组 id 复用规则：选区里有节点已经在某个组里，就沿用那个 id（再点一次 = 把这批并进同一个组）；
+     * 都没有才新建。这样「先关联 2 个、后来再多选 1 个再关联」不会把原来那组拆成两组。
+     */
+    const handleShareScriptAssets = useCallback(
+        (ids: readonly string[]) => {
+            const picked = new Set(ids);
+            const targets = nodesRef.current.filter((item) => item.type === CanvasNodeType.Script && picked.has(item.id));
+            if (targets.length < 2) {
+                message.warning(t("canvas.scriptNode.shareNeedTwo"));
+                return;
+            }
+            const reuse = targets.map((item) => scriptAssetGroupIdOf(item.metadata)).find(Boolean) || "";
+            const plan = buildScriptAssetSharePlan({
+                targets,
+                nodes: nodesRef.current,
+                connections: connectionsRef.current,
+                groupId: reuse || nanoid(),
+            });
+            if (plan.connections.length) {
+                const keys = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
+                const added = plan.connections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`)).map((connection) => ({ id: nanoid(), ...connection }));
+                if (added.length) {
+                    connectionsRef.current = [...connectionsRef.current, ...added];
+                    setConnections(connectionsRef.current);
+                }
+            }
+            const patchNode = (item: CanvasNodeData): CanvasNodeData => {
+                const patch = plan.metadata[item.id];
+                return patch ? { ...item, metadata: { ...item.metadata, ...patch } } : item;
+            };
+            // 与 `handleInheritScriptAssets` 同一口径：ref 先写，紧接着的生图 / 铺链路读的全是 ref。
+            nodesRef.current = nodesRef.current.map(patchNode);
+            setNodes((prev) => prev.map(patchNode));
+            message.success(t("canvas.scriptNode.shareDone", { nodes: targets.length, assets: plan.assetNodeIds.length, locks: plan.lockNames.length }));
+            if (plan.conflicts.length) {
+                message.warning(t("canvas.scriptNode.shareConflict", { names: plan.conflicts.map((item) => item.name).join(" / ") }));
+            }
+            if (plan.missingNames.length) {
+                message.info(t("canvas.scriptNode.shareMissing", { names: plan.missingNames.join(" / ") }));
+            }
         },
         [message, t],
     );
@@ -9591,6 +9713,13 @@ function AtelierCanvasPage() {
          */
         (nodeId: string, options?: { model?: string; skipAssetKeys?: readonly string[] }): { created: CanvasNodeData[] } => {
             /**
+             * ⚠️ **先把该共用的资产补上**（用户 2026-11-18 第 01 条）：04 拆出来的两集各自手点
+             * 「一键生图」时，第二集必须先拿到第一集已有的**同名资产锁**，否则它会自己再生成一套 ——
+             * `runScriptGeneration` 里那段自动沿用只在出表那一刻跑，而 04 是「同时出表、图后到」，
+             * 那一刻锁还是空的。详见 `inheritSharedScriptAssets` 的注释。
+             */
+            inheritSharedScriptAssets(nodeId);
+            /**
              * ⚠️ **先对齐、再决定生什么**：连进来、名字对上的图必须先落成名字锁，
              * 否则「一键视频」会在同一轮里把它们全当「这个资产还没图」重新生成一遍
              * （= 用户报障「连了图、改了名，一键视频不认，全都重新生成」，2026-11-15）。
@@ -9633,11 +9762,17 @@ function AtelierCanvasPage() {
                 aliveImageIds,
             );
             const wanted = applyScriptAssetDirectDecorations(directLocked.items, effectiveConfig.textPrompts);
-            if (directLocked.skipped.length) message.info(t("canvas.scriptNode.directAssetLockedSkip", { count: directLocked.skipped.length }));
+            /**
+             * 全部都被名字锁跳过 ≠ 「表里没有资产」：共用/沿用上来之后第二集很常见就是这个状态。
+             * 以前两句都弹 `directAssetEmpty`（「分镜表里还没有可生成的资产」），用户会以为剧本没解析出来。
+             */
+            const lockedCount = directLocked.skipped.length;
             if (!wanted.length) {
-                message.warning(t("canvas.scriptNode.directAssetEmpty"));
+                if (lockedCount) message.success(t("canvas.scriptNode.directAssetAllShared", { count: lockedCount }));
+                else message.warning(t("canvas.scriptNode.directAssetEmpty"));
                 return { created: [] };
             }
+            if (lockedCount) message.info(t("canvas.scriptNode.directAssetLockedSkip", { count: lockedCount }));
             /**
              * 「有没有调用词库里那条版式」以前只能靠猜：匹配不上是**静默跳过**的。
              * 现在没命中就明说一句（只提示、不阻塞），用户一眼能分辨「没挂上」和「挂上了但模型没听」。
@@ -9736,7 +9871,7 @@ function AtelierCanvasPage() {
             })();
             return { created };
         },
-        [alignScriptAssetsByConnections, alignScriptVoicesByConnections, effectiveConfig.quality, effectiveConfig.textPrompts, message, revealNodes, t],
+        [alignScriptAssetsByConnections, alignScriptVoicesByConnections, effectiveConfig.quality, effectiveConfig.textPrompts, inheritSharedScriptAssets, message, revealNodes, t],
     );
 
     // ---- 逐镜「镜头图」（metadata.scriptRowAssets）----
@@ -11778,12 +11913,19 @@ function AtelierCanvasPage() {
              * 每集脚本节点的出片参数 = 02 / 03 那套，只有「成片总时长」换成**每集时长**：
              * 于是每一集的分镜表都按同一套镜数 / 台词量规划，不会出现「第一集 30 秒、第二集 3 分钟」。
              */
+            /**
+             * 同一批拆出来的集写**同一个资产关联组 id**（用户 2026-11-18 第 01 / 02 条）：
+             * 于是「谁先生成了这个角色，别人手点一键生图时就直接挂那一张」，
+             * 不用先跑一遍 04 的生图阶段、也不用再手动点「资产关联」。
+             */
+            const episodeGroupId = nanoid();
             const episodeMeta: Partial<CanvasNodeData["metadata"]> = {
                 ...(target.styleTemplateId ? { styleTemplateId: target.styleTemplateId } : {}),
                 scriptTotalSeconds: seconds,
                 scriptImageSize: resolveReverseVideoSize(target),
                 scriptVideoSize: resolveReverseVideoSize(target),
                 scriptVideoQuality: resolveReverseVideoQuality(target),
+                scriptAssetGroup: episodeGroupId,
                 ...(target.model ? { scriptVideoModel: target.model } : {}),
                 ...(isMochianiVideoEngine(target.videoEngine) ? { scriptVideoEngine: MOCHIANI_VIDEO_ENGINE } : {}),
                 ...(targetShotsPerClip ? { scriptShotsPerClip: targetShotsPerClip } : {}),
@@ -12731,6 +12873,8 @@ function AtelierCanvasPage() {
                         onVideoBatchSettings={openVideoBatch}
                         replacePrimaryCount={replacePrimaryCandidates.length}
                         onReplacePrimaryImage={openReplacePrimary}
+                        scriptAssetShareCount={scriptAssetShareTargets.length}
+                        onScriptAssetShare={() => handleShareScriptAssets(scriptAssetShareTargets)}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);

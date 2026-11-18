@@ -332,3 +332,183 @@ export function buildScriptAssetInheritPlan(params: {
         lockNames: Object.keys(locks),
     };
 }
+
+// ════════════════════════════════════════════════════════════════════════════════════════
+// 资产关联组（用户 2026-11-18 第 02 条：「多个脚本生成器执行「资产关联」后，他们的资产图
+// 共用和共同挂载」）
+//
+// 沿用讲的是「A → B 单向搬一次」；关联组讲的是「A、B、C 共用同一个资产池」：
+//   · 建组时把**全组并集**一次性写进每一台机器（锁 / 分类 / 自建列 / 连线）；
+//   · 之后任意一台点「一键生图」，会先把组内其它机器已有的同名锁搬过来
+//     （`collectScriptAssetGroupPeers` + 只搬名字锁），所以谁先生成过这个角色，别人就直接挂那一张。
+//
+// 三条与沿用**刻意相同**的规则：不搬逐镜挂图（镜号会重排）、只认仍然存在的图片节点、
+// 同名冲突要有确定赢家（否则两台机器各锁一张，用户看到的还是「没共用」）。
+// ════════════════════════════════════════════════════════════════════════════════════════
+
+/** 组内排序：先看 x、再看 y —— 04 的集是**纵向**堆叠的（x 相同），所以同 x 时按 y 升序。 */
+export function sortScriptAssetGroupNodes(targets: readonly CanvasNodeData[]): CanvasNodeData[] {
+    return targets.slice().sort((left, right) => left.position.x - right.position.x || left.position.y - right.position.y);
+}
+
+/** 本节点所属的关联组 id（没有组 = 空串）。 */
+export function scriptAssetGroupIdOf(metadata: CanvasNodeMetadata | undefined): string {
+    return String(metadata?.scriptAssetGroup || "").trim();
+}
+
+/**
+ * 同组的**其它**脚本节点（排除自己、排除被删掉的）。
+ *
+ * 只在「本节点自己也有组 id」时有结果 —— 没建组的画布一个字节都不变。
+ */
+export function collectScriptAssetGroupPeers(node: CanvasNodeData | undefined, nodes: readonly CanvasNodeData[]): CanvasNodeData[] {
+    const groupId = scriptAssetGroupIdOf(node?.metadata);
+    if (!node || !groupId) return [];
+    return sortScriptAssetGroupNodes(
+        nodes.filter((item) => item.id !== node.id && item.type === CanvasNodeType.Script && scriptAssetGroupIdOf(item.metadata) === groupId),
+    );
+}
+
+export type ScriptAssetSharePlan = {
+    groupId: string;
+    /** 要补的连线（每台机器一份，已连的不会出现）。 */
+    connections: Array<{ fromNodeId: string; toNodeId: string }>;
+    /** 每台机器要合并的 metadata 片段。组内**没有成员**时为空。 */
+    metadata: Record<string, Partial<CanvasNodeMetadata>>;
+    /** 组内并集里仍然存在的资产节点 id。 */
+    assetNodeIds: string[];
+    /** 写进资产锁的名字（并集）。 */
+    lockNames: string[];
+    /**
+     * 同一个资产名在不同机器上锁了不同图 —— 已按组内顺序（先左后右、先上后下）取**第一个**当赢家。
+     * 上层要把这些名字报给用户：静默顶掉等于丢设置。
+     */
+    conflicts: Array<{ name: string; keptNodeId: string; overriddenNodeIds: string[] }>;
+    /** 并集之后仍然缺失（被删掉）的资产名 —— 提示用，"锁着但图没了"。 */
+    missingNames: string[];
+};
+
+/**
+ * 算出「把这一组脚本节点串成共用资产池」要做的全部改动。纯函数：不读 store、不建节点。
+ *
+ * @param params.groupId 组 id（由调用方生成；同一批节点写同一个值）
+ * @param params.options 默认「资产 + 锁 + 自建列」，**不搬出片参数**（各集可以有自己的时长 / 模型）
+ */
+export function buildScriptAssetSharePlan(params: {
+    targets: readonly CanvasNodeData[];
+    nodes: readonly CanvasNodeData[];
+    connections: readonly CanvasConnection[];
+    groupId: string;
+    options?: Partial<ScriptAssetInheritOptions>;
+}): ScriptAssetSharePlan {
+    const options: ScriptAssetInheritOptions = { ...SCRIPT_ASSET_INHERIT_DEFAULT_OPTIONS, ...(params.options || {}) };
+    const byId = new Map(params.nodes.map((node) => [node.id, node]));
+    const alive = (id: string) => Boolean(byId.get(id)) && Boolean(inheritAssetKind(byId.get(id)));
+    const ordered = sortScriptAssetGroupNodes(params.targets.filter((node) => node.type === CanvasNodeType.Script));
+
+    const plan: ScriptAssetSharePlan = {
+        groupId: params.groupId,
+        connections: [],
+        metadata: {},
+        assetNodeIds: [],
+        lockNames: [],
+        conflicts: [],
+        missingNames: [],
+    };
+    if (ordered.length < 2) return plan;
+
+    // ── 1. 锁的并集：同一名字以组内**第一个**拥有它的机器为准（冲突要能说清是谁赢）──
+    const winners = new Map<string, { ids: string[]; nodeId: string }>();
+    const missing = new Map<string, string>();
+    for (const node of ordered) {
+        const locks = normalizeStoryScriptNameLockMap(node.metadata?.scriptNameLocks);
+        for (const [name, ids] of Object.entries(locks)) {
+            const kept = ids.filter(alive);
+            if (!kept.length) {
+                if (!missing.has(name)) missing.set(name, node.id);
+                continue;
+            }
+            if (!winners.has(name)) winners.set(name, { ids: kept, nodeId: node.id });
+        }
+    }
+    plan.lockNames = Array.from(winners.keys());
+    plan.missingNames = Array.from(missing.keys());
+
+    // ── 2. 分类的并集：同一张图以第一个给它分类的机器为准 ────────────────────
+    const roles: Record<string, ScriptAssetRole> = {};
+    for (const node of ordered) {
+        for (const [id, role] of Object.entries(node.metadata?.scriptAssetRoles || {})) {
+            if (!alive(id) || roles[id]) continue;
+            roles[id] = inheritAssetKind(byId.get(id)) === "audio" ? "audio" : resolveScriptAssetRole(role);
+        }
+    }
+
+    // ── 3. 资产池：所有机器的上游连线 + 所有锁指向的图 ────────────────────────
+    const pool: string[] = [];
+    const pushPool = (id: string) => {
+        if (id && alive(id) && !pool.includes(id)) pool.push(id);
+    };
+    for (const node of ordered) {
+        for (const connection of params.connections) if (connection.toNodeId === node.id) pushPool(connection.fromNodeId);
+        for (const ids of Object.values(normalizeStoryScriptNameLockMap(node.metadata?.scriptNameLocks))) for (const id of ids) pushPool(id);
+    }
+    plan.assetNodeIds = pool;
+    const poolSet = new Set(pool);
+
+    // ── 4. 自建列的并集（按 key / 列名去重，到上限就停）─────────────────────
+    const extrasUnion: StoryScriptExtraColumn[] = [];
+    const extraKeys = new Set<string>();
+    const extraLabels = new Set<string>();
+    for (const node of ordered) {
+        for (const column of normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns)) {
+            if (extrasUnion.length >= STORY_SCRIPT_MAX_EXTRA_COLUMNS) break;
+            if (extraKeys.has(column.key) || extraLabels.has(column.label.trim())) continue;
+            extraKeys.add(column.key);
+            extraLabels.add(column.label.trim());
+            extrasUnion.push(column);
+        }
+    }
+
+    // ── 5. 逐机器落 metadata / 连线 ─────────────────────────────────────────
+    ordered.forEach((node, index) => {
+        const ownLocks = normalizeStoryScriptNameLockMap(node.metadata?.scriptNameLocks);
+        const mergedLocks: StoryScriptNameLockMap = { ...ownLocks };
+        for (const [name, winner] of winners) {
+            const own = mergedLocks[name];
+            const same = own && own.filter(alive).length === winner.ids.length && winner.ids.every((id) => own.includes(id));
+            if (same) continue;
+            if (own && own.length && winner.nodeId !== node.id) {
+                const conflict = plan.conflicts.find((item) => item.name === name);
+                if (conflict) {
+                    if (!conflict.overriddenNodeIds.includes(node.id)) conflict.overriddenNodeIds.push(node.id);
+                } else {
+                    plan.conflicts.push({ name, keptNodeId: winner.nodeId, overriddenNodeIds: [node.id] });
+                }
+            }
+            mergedLocks[name] = winner.ids;
+        }
+
+        const patch: Partial<CanvasNodeMetadata> = { scriptAssetGroup: params.groupId };
+        if (options.locks && Object.keys(mergedLocks).length) patch.scriptNameLocks = mergedLocks;
+        if (options.assets && Object.keys(roles).length) patch.scriptAssetRoles = { ...(node.metadata?.scriptAssetRoles || {}), ...roles };
+        if (options.columns && extrasUnion.length) patch.scriptExtraColumns = extrasUnion;
+        /**
+         * 组内**第一个**机器当「上一集」：分镜表重生成时的自动沿用（`scriptAssetInheritAuto`）
+         * 走的就是这个来源。第一个自己不需要（它没有上游）。
+         */
+        if (index > 0) {
+            patch.scriptAssetInheritAuto = true;
+            patch.scriptAssetInheritSource = ordered[0].id;
+        }
+        plan.metadata[node.id] = patch;
+
+        if (!options.assets) return;
+        const linked = new Set(params.connections.filter((connection) => connection.toNodeId === node.id).map((connection) => connection.fromNodeId));
+        for (const id of poolSet) {
+            if (linked.has(id)) continue;
+            plan.connections.push({ fromNodeId: id, toNodeId: node.id });
+        }
+    });
+
+    return plan;
+}
