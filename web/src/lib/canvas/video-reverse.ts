@@ -146,10 +146,14 @@ export function buildDefaultVideoReverseRequirement(imageMentions: readonly stri
 export const DEFAULT_VIDEO_REVERSE_REQUIREMENT = buildDefaultVideoReverseRequirement([], 2);
 
 /**
- * 「秒数」的默认值（用户 2026-11-09 口径：默认 30 秒、可手动改）。
+ * 「秒数」的默认值（用户 2026-11-18：默认 90 秒、可手动改；此前是 30）。
  * 这个秒数是**成片总时长**：02 / 03 写剧本都按它规划镜头数与台词量（02 复刻原片时长、03 按它拆镜）。
+ * 90 = 6 个 15 秒片段，与 04 的「每段 15 秒」口径同源，所以单条链路默认就按 90 走。
+ *
+ * ⚠️ 与脚本节点的 `DEFAULT_SCRIPT_TOTAL_SECONDS` 必须取同一个值（见那边的注释）：
+ * 03 把这里的秒数搬进 `scriptTotalSeconds`，两边不一致用户就会以为同步没生效。
  */
-export const DEFAULT_REVERSE_VIDEO_SECONDS = 30;
+export const DEFAULT_REVERSE_VIDEO_SECONDS = 90;
 /** 秒数可调范围。上限放宽到 5 分钟：长视频脚本也有人用，但再长就不该用这套「分镜反推」了。 */
 export const REVERSE_VIDEO_SECONDS_MIN = 5;
 export const REVERSE_VIDEO_SECONDS_MAX = 300;

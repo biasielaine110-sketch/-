@@ -5,15 +5,52 @@ import type { CanvasNodeData } from "@/types/canvas";
  *
  * 用户原话（2026-11-07 第 3 条）：「将这些视频窗口输入链接到一个视频合并节点上。然后将该组中的
  * 视频节点逐个视频进行生成按钮的执行，执行生成按钮的生成间隔为 2 秒，执行一遍生成按钮后即执行完毕。」
+ * 2026-11-18 改口径：「一键铺链路生视频的时候，执行时，也需要是每个视频执行生成时，间隔 10 秒左右」
+ * → 2 秒的节奏在共享渠道上会把并发瞬间打满（同一个渠道并发是共享的，连着点等于自己挤自己），
+ *   所以间隔抬到 10 秒。
  *
  * 两个口径刻意写在 lib 而不是组件里，因为它们在浏览器里看着都对、错了只有用户能发现：
  *  - **顺序**：按画布上的摆放（先上后下、同一高度再左到右）——“组里的第一个”在用户眼里就是最上面那个；
- *  - **间隔**：2 秒是**两次点击之间**的间隔，不是「等上一个生成完再点下一个」。
+ *  - **间隔**：是**两次点击之间**的间隔，不是「等上一个生成完再点下一个」。
  *    视频生成动辄几分钟，等完成再下一个等于串行跑一整天；而 `执行一遍…即执行完毕` 也说明跑完就结束。
  */
 
-/** 相邻两次「点生成」之间的间隔（毫秒）。改这里等于改全局节奏。 */
-export const SCRIPT_PIPELINE_GENERATE_INTERVAL_MS = 2000;
+/**
+ * 相邻两次「点生成」之间的间隔（毫秒）。改这里等于改全局节奏。
+ *
+ * 🔴 只影响「先后两次点击之间」，不影响每段自己的生成耗时（`supervise` 是并行跑的）。
+ *    与右键批量视频生成的 `BATCH_VIDEO_GENERATE_GAP_MS`(15s) 是两条独立路径，别合并。
+ */
+export const SCRIPT_PIPELINE_GENERATE_INTERVAL_MS = 10_000;
+
+/**
+ * 上一次「点生成」的时刻（模块级，全局唯一）。
+ *
+ * 🔴 为什么要全局、而不是每个 `handleBuildScriptPipeline` 各算各的：04 是**逐集并行**铺的，
+ * 每集都会起一个自己的发射循环。各算各的话，三集的第 1 段会在同一瞬间点下去 —— 用户看到的
+ * 就是「同时开了三条」，间隔形同虚设。共享一个时间戳才是他说的「每个视频生成之间隔 10 秒」。
+ */
+let lastPipelineGenerateAt = 0;
+
+/**
+ * 等一个「点生成」的槽位：距上一次点生成不足 `intervalMs` 就补足，然后登记本次时刻。
+ *
+ * 第一发（页面刚加载 / 从没发过）不等待，与老实现「`index > 0` 才等」一致。
+ * 返回后调用方立刻 fire 生成 —— 这里只管**节奏**，不等出片。
+ */
+export async function waitScriptPipelineGenerateSlot(intervalMs: number = SCRIPT_PIPELINE_GENERATE_INTERVAL_MS): Promise<void> {
+    const gap = Math.max(0, Math.round(Number(intervalMs) || 0));
+    if (lastPipelineGenerateAt > 0 && gap > 0) {
+        const wait = lastPipelineGenerateAt + gap - Date.now();
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+    lastPipelineGenerateAt = Date.now();
+}
+
+/** 探针用：把节拍复位（等价于「刚打开页面」）。 */
+export function resetScriptPipelineGenerateSlot() {
+    lastPipelineGenerateAt = 0;
+}
 
 export type ScriptPipelineGenerateTarget = {
     nodeId: string;

@@ -83,6 +83,7 @@ import {
     SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS,
     SCRIPT_TOTAL_SECONDS_MAX,
     SCRIPT_TOTAL_SECONDS_MIN,
+    DEFAULT_SCRIPT_TOTAL_SECONDS,
     readScriptShotsPerClip,
     STORY_SCRIPT_PRESET_IDS,
     type ScriptAssetRole,
@@ -96,6 +97,8 @@ import { planScriptVoiceAlignment, shouldApplyScriptVoiceAlignment } from "@/lib
 import { buildScriptAssetBatchItems, isScriptAssetDirectRole, mergeScriptAssetBatchLockedIds, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
 import type { ScriptAssetInheritOptions, ScriptAssetInheritSource } from "@/lib/canvas/script-asset-inherit";
 import type { OneClickVideoRun } from "@/lib/canvas/one-click-video";
+// 铺链路「逐个点生成」的间隔：提示文案必须读同一个常量，否则改了节奏文案还是旧数字。
+import { SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
 import { defaultConfig, resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 
@@ -2375,7 +2378,7 @@ export function CanvasScriptNodeContent({
                     }}
                     onBlur={() => setTotalSecondsDraft(null)}
                     aria-label={t("canvas.scriptNode.totalSecondsLabel")}
-                    title={t("canvas.scriptNode.totalSecondsHint")}
+                    title={t("canvas.scriptNode.totalSecondsHint", { seconds: DEFAULT_SCRIPT_TOTAL_SECONDS })}
                 />
             </span>
             <button
@@ -2395,7 +2398,7 @@ export function CanvasScriptNodeContent({
                     event.stopPropagation();
                     patchMetadata({ scriptTotalSecondsUnlimited: totalSecondsUnlimited ? undefined : true });
                 }}
-                title={t("canvas.scriptNode.totalSecondsUnlimitedHint")}
+                title={t("canvas.scriptNode.totalSecondsUnlimitedHint", { seconds: DEFAULT_SCRIPT_TOTAL_SECONDS })}
             >
                 {t("canvas.scriptNode.totalSecondsUnlimited")}
             </button>
@@ -2821,7 +2824,7 @@ export function CanvasScriptNodeContent({
                     autoGenerate: true,
                 });
             }}
-            title={t("canvas.scriptNode.pipelineVideoGenerateTip")}
+            title={t("canvas.scriptNode.pipelineVideoGenerateTip", { seconds: SCRIPT_PIPELINE_GENERATE_INTERVAL_MS / 1000 })}
         >
             <Play className="size-3.5" />
             {t("canvas.scriptNode.pipelineVideoGenerate")}
@@ -3832,7 +3835,8 @@ export function CanvasScriptNodeContent({
                             ) : null}
                             {directAssetButton}
                             {/* 「一键铺视频链路并生成」：只铺视频窗口 + 打组 + 接进一个视频合并节点 +
-                                逐个点「生成」（间隔 2 秒，跑一遍即结束）。用户 2026-11-07 第 3 条。
+                                逐个点「生成」（间隔读 `SCRIPT_PIPELINE_GENERATE_INTERVAL_MS`，现 10 秒，
+                                跑一遍即结束）。用户 2026-11-07 第 3 条；2026-11-18 把 2 秒抬到 10 秒。
                                 这是「只铺视频」的超集，所以样式更实一点（primary 描边）以示推荐。 */}
                             {pipelineVideoGenerateButton}
                         </div>

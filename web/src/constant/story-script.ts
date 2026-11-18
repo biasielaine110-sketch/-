@@ -1967,18 +1967,20 @@ export const STORY_SCRIPT_MAX_SHOT_SECONDS = 5;
  * 脚本节点的「成片总时长」（用户 2026-11-11 第 01 条）：
  * 「脚本生成器需要设定时长的输入区域，默认 30 秒，根据输入的时长，拆成对应的总时长镜头内容」。
  *
- * 与反推节点的 `DEFAULT_REVERSE_VIDEO_SECONDS`（也是 30）取同一个默认值 —— 03 把反推窗口上的秒数
- * 搬进 `scriptTotalSeconds`，两条路进来看到的初始值必须一致，否则用户会以为同步没生效。
+ * 🔴 2026-11-18：反推窗口的默认秒数改成 **90**（用户要求），这里跟着改成 90 —— 两个默认值必须
+ * 相同。03 把反推窗口上的秒数搬进 `scriptTotalSeconds`，而反推窗口「没动过输入框」时 metadata 里
+ * 是空的，这条搬运的兜底就是本常量；两处不一致，用户会看到「反推写 90、脚本节点变 30」。
+ * 90 也正好是 6 个 15 秒片段，与 04 的分段口径同源。
  */
-export const DEFAULT_SCRIPT_TOTAL_SECONDS = 30;
+export const DEFAULT_SCRIPT_TOTAL_SECONDS = 90;
 export const SCRIPT_TOTAL_SECONDS_MIN = 5;
 export const SCRIPT_TOTAL_SECONDS_MAX = 300;
 
 /**
- * 读「成片总时长」：**没设 / 脏值一律当 30 秒**。
+ * 读「成片总时长」：**没设 / 脏值一律当默认值（现为 90 秒）**。
  *
- * 为什么不是「没设就不限制」：用户要的是「默认 30 秒，按这个时长拆镜」。留一个「空 = 想写多长写多长」
- * 的隐性状态，模型就会按自己的「一条短片」惯性铺 1~2 分钟，而界面上明明写着 30 秒 —— 又是一次
+ * 为什么不是「没设就不限制」：用户要的是「默认 N 秒，按这个时长拆镜」。留一个「空 = 想写多长写多长」
+ * 的隐性状态，模型就会按自己的「一条短片」惯性铺 1~2 分钟，而界面上明明写着默认值 —— 又是一次
  * 「设置没生效」的报障。范围卡在 5~300 秒，与反推窗口的输入框一致。
  */
 export function resolveScriptTotalSeconds(metadata?: { scriptTotalSeconds?: unknown } | null): number {

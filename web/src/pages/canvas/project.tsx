@@ -208,7 +208,7 @@ import { buildScriptAssetInheritPlan, buildScriptAssetSharePlan, collectScriptAs
 import { planScriptAssetAlignSkipChange, planScriptAssetAlignment, shouldApplyScriptAssetAlignment } from "@/lib/canvas/script-asset-align";
 import { isRowMountedAudio, planScriptVoiceAlignment, shouldApplyScriptVoiceAlignment } from "@/lib/canvas/script-voice-align";
 import { stripScriptAssetReferences } from "@/lib/canvas/script-asset-detach";
-import { planScriptPipelineGenerateOrder, readScriptPipelineVideoOutcome, resolveScriptPipelineRetryModel, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS } from "@/lib/canvas/script-pipeline-run";
+import { planScriptPipelineGenerateOrder, readScriptPipelineVideoOutcome, resolveScriptPipelineRetryModel, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS, waitScriptPipelineGenerateSlot } from "@/lib/canvas/script-pipeline-run";
 import {
     ONE_CLICK_IMAGE_FALLBACK_CHANNEL_HINTS,
     ONE_CLICK_IMAGE_FALLBACK_MODEL_NAMES,
@@ -10881,7 +10881,7 @@ function AtelierCanvasPage() {
                  *
                  * ⚠️ **不等生成完成**：`generateNodeRef.current()` 返回的 Promise 要到整段视频出片
                  * （几分钟、含轮询）才 resolve；await 它就成了「等上一个出完再点下一个」，与
-                 * 「生成间隔 2 秒 / 跑一遍就结束」完全不符。所以只 fire 不 await，间隔由 setTimeout 控。
+                 * 「生成间隔 10 秒 / 跑一遍就结束」完全不符。所以只 fire 不 await，间隔由 setTimeout 控。
                  * ⚠️ 顺序按画布摆放（上→下），见 `planScriptPipelineGenerateOrder`。
                  */
                 if (autoGenerate) {
@@ -10912,9 +10912,10 @@ function AtelierCanvasPage() {
                              * 选的（`scriptVideoModel`，铺链路时已写进每个视频节点的 `metadata.model`）。
                              *
                              * 🔴 两条老口径不能被「顺手改成串行」破坏：
-                             *  ① 2 秒间隔是**两次点生成之间**，不是「等上一段出完再点下一段」（见 `script-pipeline-run.ts`）；
+                             *  ① `SCRIPT_PIPELINE_GENERATE_INTERVAL_MS`（现 10 秒，2026-11-18 由 2 秒上调）
+                             *     是**两次点生成之间**，不是「等上一段出完再点下一段」（见 `script-pipeline-run.ts`）；
                              *  ② 视频分支自己吞掉异常（Promise 永远 resolve），成败只能读节点 `metadata.status`。
-                             * 所以「发射」与「监督」拆开：for 循环保持 2 秒节奏只负责点生成，
+                             * 所以「发射」与「监督」拆开：for 循环保持 10 秒节奏只负责点生成，
                              * 每一发的等待 / 重试 / 暂停判定放在 `supervise()` 里并行跑。
                              */
                             const preferredVideoModel = resolveModelForCapability(effectiveConfig, undefined, "video");
@@ -10963,7 +10964,11 @@ function AtelierCanvasPage() {
                             void (async () => {
                                 const jobs: Promise<void>[] = [];
                                 for (const target of targets) {
-                                    if (target.index > 0) await new Promise((resolve) => setTimeout(resolve, SCRIPT_PIPELINE_GENERATE_INTERVAL_MS));
+                                    // 判定放两次：进循环先看一眼（别白等 10 秒），等完再看一眼
+                                    // —— 这 10 秒里前一段可能刚好被判成暂停。
+                                    if (pipelinePaused) break;
+                                    // 全局节拍（跨集共享）：每个视频之间隔 10 秒左右，不是每集各起一个节拍。
+                                    await waitScriptPipelineGenerateSlot();
                                     if (pipelinePaused) break;
                                     jobs.push(superviseVideo(target));
                                 }
@@ -11402,7 +11407,7 @@ function AtelierCanvasPage() {
                 }
                 notify("pipeline", "canvas.scriptNode.oneClickStagePipeline");
                 /**
-                 * 铺链路是 fire-and-forget（2 秒一段点下去就返回），所以这里不能 await；
+                 * 铺链路是 fire-and-forget（每 10 秒点一段，点完就返回），所以这里不能 await；
                  * 「某段换模型重试仍失败 → 暂停」的消息由 `onVideoPause` 回到这条运行态上
                  * （晚于下面的 done 覆盖，于是按钮最后显示的是红色暂停原因，而不是「已完成」）。
                  */
