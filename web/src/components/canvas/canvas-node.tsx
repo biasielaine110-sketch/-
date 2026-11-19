@@ -895,15 +895,18 @@ function LoadingContent({
 }) {
     const { t } = useTranslation();
     const queueLabel = useNativeVideoQueueLabel(nodeId || "", metadata);
-    const elapsed = useElapsedSeconds(true, nodeId);
+    // 🔴 刷新后的「从本地库读字节」不是生成任务：文案、计时、取消按钮全都要区别对待，
+    // 否则用户看到「生成中 4 秒」会以为在跑付费任务（2026-11-19 反馈）。
+    const restoring = Boolean(metadata?.mediaRestoring);
+    const elapsed = useElapsedSeconds(!restoring, nodeId);
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.activeStroke }}>
             <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
-            <span className="text-xs font-semibold tracking-wide">
-                {queueLabel || t("canvas.node.generating")}
-                <span className="ml-1.5 font-medium opacity-70">{formatDuration(elapsed * 1000)}</span>
+            <span className="text-xs font-semibold tracking-wide" title={restoring ? t("canvas.mediaRecover.restoringHint") : undefined}>
+                {restoring ? t("canvas.mediaRecover.restoring") : queueLabel || t("canvas.node.generating")}
+                {restoring ? null : <span className="ml-1.5 font-medium opacity-70">{formatDuration(elapsed * 1000)}</span>}
             </span>
-            {onCancel ? (
+            {onCancel && !restoring ? (
                 <button
                     type="button"
                     className="pointer-events-auto inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
@@ -1954,9 +1957,11 @@ function ImageContent({
     const displaySrc = primaryContent || primaryThumb || "";
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const isGenerating = node.metadata?.status === "loading" || images.some((image) => image.status === "loading");
-    const canCancel = Boolean(onCancelGeneration) && isGenerating;
+    // 刷新后「从本地库读字节」复用 loading 状态，但不是生成任务：不显示秒数、不给取消按钮。
+    const restoring = Boolean(node.metadata?.mediaRestoring);
+    const canCancel = Boolean(onCancelGeneration) && isGenerating && !restoring;
     const queueLabel = useNativeVideoQueueLabel(node.id, node.metadata);
-    const elapsed = useElapsedSeconds(isGenerating, node.id);
+    const elapsed = useElapsedSeconds(isGenerating && !restoring, node.id);
 
     useEffect(() => {
         if (!batchExpanded) setSelectedIds(new Set());
@@ -2076,9 +2081,10 @@ function ImageContent({
                 <div
                     className="pointer-events-none absolute left-1/2 top-2.5 z-40 -translate-x-1/2 rounded-full border px-3 py-1 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md"
                     style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                    title={restoring ? t("canvas.mediaRecover.restoringHint") : undefined}
                 >
-                    {queueLabel || t("canvas.node.generating")}
-                    <span className="ml-1.5 font-medium opacity-70">{formatDuration(elapsed * 1000)}</span>
+                    {restoring ? t("canvas.mediaRecover.restoring") : queueLabel || t("canvas.node.generating")}
+                    {restoring ? null : <span className="ml-1.5 font-medium opacity-70">{formatDuration(elapsed * 1000)}</span>}
                 </div>
             ) : null}
             {canCancel && displaySrc ? (
@@ -2323,12 +2329,16 @@ function ImageSlotStatus({
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
     const queueLabel = useNativeVideoQueueLabel(nodeId || "", metadata);
+    // 与 LoadingContent 同一口径：恢复本地字节 ≠ 生成任务。
+    const restoring = Boolean(metadata?.mediaRestoring);
     const isLoading = image?.status === "loading";
-    const elapsed = useElapsedSeconds(isLoading, nodeId);
+    const elapsed = useElapsedSeconds(isLoading && !restoring, nodeId);
     const failed = image?.status === "error" || (!isLoading && !image?.content && !image?.thumbnailContent);
     const message = failed
         ? image?.errorDetails || (image?.status === "error" ? t("canvas.node.failed") : t("canvas.generation.mediaMissing"))
-        : queueLabel || t("canvas.node.generating");
+        : restoring
+          ? t("canvas.mediaRecover.restoring")
+          : queueLabel || t("canvas.node.generating");
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center" style={{ background: theme.node.fill, color: failed ? theme.node.text : theme.node.activeStroke }}>
             {failed ? (
@@ -2337,12 +2347,12 @@ function ImageSlotStatus({
                 <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
             )}
             {!failed ? (
-                <span className="text-xs font-semibold tracking-wide">
+                <span className="text-xs font-semibold tracking-wide" title={restoring ? t("canvas.mediaRecover.restoringHint") : undefined}>
                     {message}
-                    <span className="ml-1.5 font-medium opacity-70">{formatDuration(elapsed * 1000)}</span>
+                    {restoring ? null : <span className="ml-1.5 font-medium opacity-70">{formatDuration(elapsed * 1000)}</span>}
                 </span>
             ) : null}
-            {isLoading && onCancel ? (
+            {isLoading && onCancel && !restoring ? (
                 <button
                     type="button"
                     className="pointer-events-auto inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"

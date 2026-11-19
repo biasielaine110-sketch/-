@@ -2050,6 +2050,8 @@ export default {
             goneOk: "Regenerate (costs money)",
             goneInline: "The bytes are gone from the local library too — nothing was regenerated and nothing was billed",
             regenerateHint: "Only calls the model again when the local copy truly cannot be recovered — that costs money",
+            restoring: "Reading local file",
+            restoringHint: "Reading the file back from browser storage after a refresh — not a regeneration, no cost",
         },
         generation: {
             interrupted: "Generation was interrupted by a page refresh. Generate again.",

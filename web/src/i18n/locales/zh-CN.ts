@@ -2055,6 +2055,8 @@ export default {
             goneOk: "重新生成（会计费）",
             goneInline: "本地库里也没有这个文件的字节了，找不回来（未重新生成、未产生费用）",
             regenerateHint: "只有在本地确实找不回时，才会重新调用模型生成，会计费",
+            restoring: "正在读取本地文件",
+            restoringHint: "刷新后正在把浏览器本地库里的文件读回来：不是重新生成，不产生费用",
         },
         generation: {
             interrupted: "页面刷新后生成已中断，请重新生成。",

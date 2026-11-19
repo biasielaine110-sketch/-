@@ -264,6 +264,13 @@ export type CanvasNodeMetadata = {
     promptSyncAt?: number;
     /** 定时生成：到点（epoch ms）后自动触发一次生成；生成开始后清空。 */
     scheduledAt?: number;
+    /**
+     * 「正在从本地库读回媒体」—— 刷新后 blob URL 失效时的过渡态。
+     *
+     * 🔴 必须与「正在生成」区分开：两者都会把 `status` 置成 loading，但恢复态
+     * 不该显示「生成中 N 秒」（那会让用户以为在跑付费任务），也不该给「取消」按钮。
+     */
+    mediaRestoring?: boolean;
     status?: CanvasNodeStatus;
     errorDetails?: string;
     fontSize?: number;

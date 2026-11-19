@@ -1,8 +1,8 @@
 import { defaultConfig, resolveModelForCapability, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import i18n from "@/i18n";
 import { resolveNativeH3VideoSettingDefaults } from "@/lib/comfyui-native";
-import { ensureImageThumbnail, resolveImageUrl, uploadImage } from "@/services/image-storage";
-import { resolveMediaUrl } from "@/services/file-storage";
+import { ensureImageThumbnail, refreshImageUrl, resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { refreshMediaUrl, resolveMediaUrl } from "@/services/file-storage";
 import { isLocalMediaLibraryPermissionLost } from "@/services/local-media-library";
 import { imageMetadata, referenceUrl } from "@/lib/canvas/canvas-node-factory";
 import type { NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
@@ -109,6 +109,23 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
     // Unreadable media has two very different causes: the local folder lost its write permission
     // (recoverable — the bytes are still on disk) or the blob is genuinely gone. Tell them apart.
     const missingDetail = recoverableMediaDetail(await isLocalMediaLibraryPermissionLost());
+
+    /**
+     * 先按常规方式解析，拿不到「活 URL」就强制重读一次。
+     *
+     * 🔴 `resolveMediaUrl / resolveImageUrl` 会命中模块内的 object URL 缓存 —— 那条 URL 一旦被
+     * revoke（清理、切画布、配额回收、上一轮恢复 attempt 失败），之后每次「恢复」都会拿到同一张
+     * 死 URL，节点就永远是空白 / 「缓存已失效」，用户只能点重试 → 重新生成（花钱）。
+     * `refresh*Url` 不读缓存，直接从 IndexedDB 重建 —— 这才是「刷新后还能把视频读回来」的关键。
+     */
+    const resolveLiveMediaUrl = async (kind: "video" | "image", key?: string, current?: string): Promise<string> => {
+        if (!key) return isDeadBlobUrl(current) ? "" : current || "";
+        const first = await (kind === "video" ? resolveMediaUrl(key, current) : resolveImageUrl(key, current)).catch(() => "");
+        if (first && !isDeadBlobUrl(first)) return first;
+        const refreshed = await (kind === "video" ? refreshMediaUrl(key) : refreshImageUrl(key)).catch(() => "");
+        return refreshed || first || "";
+    };
+
     const hydrateNode = async (node: CanvasNodeData) => {
             const content = node.metadata?.content;
             if (node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) {
@@ -125,20 +142,12 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                                 content: isDeadBlobUrl(image.content) ? "" : image.content,
                             };
                         }
-                        const nextContent = image.storageKey
-                            ? await resolveMediaUrl(image.storageKey, image.content)
-                            : isDeadBlobUrl(image.content)
-                              ? ""
-                              : image.content;
+                        const nextContent = await resolveLiveMediaUrl("video", image.storageKey, image.content);
                         return { ...image, content: nextContent };
                     }),
                 );
                 const primary = images.find((image) => image.id === primaryId && image.content) || images.find((image) => image.content);
-                const nextContent = node.metadata?.storageKey
-                    ? await resolveMediaUrl(node.metadata.storageKey, content)
-                    : isDeadBlobUrl(content)
-                      ? primary?.content || ""
-                      : content;
+                const nextContent = await resolveLiveMediaUrl("video", node.metadata?.storageKey, content);
                 return {
                     ...node,
                     metadata: {
@@ -168,7 +177,7 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                         const content = isDeadBlobUrl(image.content) ? "" : image.content;
                         return markMissingMedia({ ...image, content, thumbnailContent }, missingDetail);
                     }
-                    const nextContent = image.storageKey ? await resolveImageUrl(image.storageKey, image.content) : isDeadBlobUrl(image.content) ? "" : image.content;
+                    const nextContent = await resolveLiveMediaUrl("image", image.storageKey, image.content);
                     return markMissingMedia({ ...image, content: nextContent, thumbnailContent }, missingDetail);
                 }),
             );
@@ -179,7 +188,7 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                       ? ""
                       : node.metadata.thumbnailContent;
                 // Prefer thumbnail for canvas chrome when available; still resolve full primary for crisp display.
-                const fullContent = await resolveImageUrl(node.metadata.storageKey, content);
+                const fullContent = await resolveLiveMediaUrl("image", node.metadata.storageKey, content);
                 const nextMeta = markMissingMedia(
                     {
                         status: node.metadata.status || "success",
@@ -299,7 +308,9 @@ export function markRestoringMedia(nodes: CanvasNodeData[]): CanvasNodeData[] {
                 ...(thumbDead ? { thumbnailContent } : {}),
                 ...(imagesDead ? { images: nextImages } : {}),
                 // 有 key 但读不出可见内容 = 正在恢复；没有 key 的老数据保持原状态。
-                ...(hasLocalKeys && !content && !thumbnailContent ? { status: "loading" as const } : {}),
+                // 🔴 同时打 `mediaRestoring`：这是「从本地库读字节」，不是「在跑生成任务」，
+                // UI 必须分开显示（否则用户看到「生成中 N 秒」会以为在花钱）。
+                ...(hasLocalKeys && !content && !thumbnailContent ? { status: "loading" as const, mediaRestoring: true as const } : {}),
             },
         };
     });
@@ -328,6 +339,8 @@ export function clearRestoringMedia(nodes: CanvasNodeData[]): CanvasNodeData[] {
                 ...meta,
                 status: "success" as const,
                 errorDetails: undefined,
+                // 读出来了就撤掉「恢复中」，别让节点一边显示着视频一边转圈。
+                mediaRestoring: undefined,
                 ...(imagesSettled.some((image, index) => image !== images[index]) ? { images: imagesSettled } : {}),
             },
         };
@@ -350,13 +363,15 @@ export function settleRestoringMedia(nodes: CanvasNodeData[], detail?: string): 
             image.status === "loading" && !image.content && !image.thumbnailContent ? { ...image, status: "error" as const, errorDetails: image.errorDetails || fallback } : image,
         );
         const imagesChanged = imagesSettled.some((image, index) => image !== images[index]);
-        if (visible) return imagesChanged ? { ...node, metadata: { ...meta, images: imagesSettled } } : node;
+        if (visible) return imagesChanged ? { ...node, metadata: { ...meta, mediaRestoring: undefined, images: imagesSettled } } : { ...node, metadata: { ...meta, mediaRestoring: undefined } };
         return {
             ...node,
             metadata: {
                 ...meta,
                 status: "error" as const,
                 errorDetails: meta.errorDetails || fallback,
+                // 判成 error 就不再是「恢复中」，这个标记必须撤掉，否则错误态还会显示加载文案。
+                mediaRestoring: undefined,
                 ...(images.length ? { images: imagesSettled } : {}),
             },
         };
@@ -403,17 +418,22 @@ export function applyHydratedMedia(nodes: CanvasNodeData[], hydrated: CanvasNode
                       };
                   })
                 : node.metadata?.images;
+        const mergedContent = nextMeta.content || node.metadata?.content || "";
+        const mergedThumb = nextMeta.thumbnailContent || node.metadata?.thumbnailContent;
+        const visibleAfter = Boolean(mergedContent || mergedThumb) || Boolean(mergedImages?.some((image) => image.content || image.thumbnailContent));
         return {
             ...node,
             metadata: {
                 ...node.metadata,
-                content: nextMeta.content || node.metadata?.content || "",
-                thumbnailContent: nextMeta.thumbnailContent || node.metadata?.thumbnailContent,
+                content: mergedContent,
+                thumbnailContent: mergedThumb,
                 // Only adopt keys the live node is missing — never clobber a media the user swapped out.
                 storageKey: node.metadata?.storageKey || nextMeta.storageKey,
                 thumbnailStorageKey: node.metadata?.thumbnailStorageKey || nextMeta.thumbnailStorageKey,
                 status: nextMeta.status || node.metadata?.status,
                 errorDetails: nextMeta.errorDetails,
+                // 媒体已经贴回来了，就撤掉「恢复中」标记（跟进 `clearRestoringMedia` 同一口径）。
+                ...(visibleAfter ? { mediaRestoring: undefined } : {}),
                 ...(mergedImages ? { images: mergedImages } : {}),
             },
         };
