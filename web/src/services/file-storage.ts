@@ -133,12 +133,28 @@ export async function deleteStoredMedia(keys: Iterable<string>) {
     );
 }
 
+/**
+ * 清理「没有任何项目 / 素材引用」的视频 / 音频字节。
+ *
+ * 与 `cleanupUnusedImages` 同一道闸门（原因见那里）：store 还没 hydrate 完就清理，
+ * `usedKeys` 会是空的 —— 几十个视频一次性删光就是真金白银的损失，宁可漏删也绝不误删。
+ */
+const CLEANUP_MAX_DELETE_RATIO = 0.9;
+const CLEANUP_MIN_SUSPICIOUS_COUNT = 8;
+
 export async function cleanupUnusedMedia(usedData: unknown) {
     const usedKeys = collectMediaStorageKeys(usedData);
-    const unused: string[] = [];
+    const allKeys: string[] = [];
     await store.iterate((_value, key) => {
-        if (!usedKeys.has(key)) unused.push(key);
+        allKeys.push(key);
     });
+    if (allKeys.length === 0) return;
+    const unused = allKeys.filter((key) => !usedKeys.has(key));
+    if (unused.length === 0) return;
+    if (unused.length >= CLEANUP_MIN_SUSPICIOUS_COUNT && unused.length / allKeys.length > CLEANUP_MAX_DELETE_RATIO) {
+        console.warn(`[storage] 拒绝清理媒体：本次要删 ${unused.length}/${allKeys.length} 个（疑似项目还没载入完成），已跳过以免误删`);
+        return;
+    }
     await Promise.all(unused.map((key) => store.removeItem(key)));
 }
 

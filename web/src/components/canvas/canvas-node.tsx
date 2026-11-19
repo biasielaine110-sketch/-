@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { App, Dropdown } from "antd";
-import { ChevronDown, ChevronRight, Clapperboard, Clock, Combine, Copy, Download, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, ScrollText, Square, Star, Trash2, Video, Wand2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Clapperboard, Clock, Combine, Copy, Download, FolderSearch, Grid2x2, Group, Highlighter, Image as ImageIcon, Maximize2, MessageSquareText, Minus, Music2, Pause, Play, Plus, Puzzle, RefreshCw, ScrollText, Square, Star, Trash2, Video, Wand2 } from "lucide-react";
 
 import { CanvasDisplayImage, CANVAS_DISPLAY_MAX_EDGE } from "@/lib/canvas/canvas-display-image";
 import { CanvasLazyMedia } from "@/lib/canvas/canvas-lazy-media";
@@ -17,6 +17,7 @@ import {
     subscribeNativeVideoQueue,
 } from "@/lib/canvas/native-video-job-queue";
 import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
+import { needsMediaRecovery } from "@/lib/canvas/media-recovery";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasChatContent } from "./canvas-chat-content";
@@ -88,6 +89,11 @@ type CanvasNodeProps = {
     onRetryBatchImage?: (node: CanvasNodeData, imageId: string) => void;
     onDeleteBatchImage?: (nodeId: string, imageId: string | string[]) => void;
     onRetry?: (node: CanvasNodeData) => void;
+    /**
+     * 「找回本地文件」：只读 IndexedDB 重读字节，**不调用任何生成接口**。
+     * 媒体缺失时优先给这个按钮，而不是直接走 `onRetry`（那个会花钱）。
+     */
+    onRecoverMedia?: (node: CanvasNodeData) => void | Promise<void>;
     onCancelGeneration?: (nodeId: string) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onCreateChat?: (node: CanvasNodeData) => void;
@@ -122,6 +128,11 @@ type NodeContentRendererProps = {
     onStopEditing: () => void;
     mentionReferences: CanvasResourceReference[];
     onRetry?: (node: CanvasNodeData) => void;
+    /**
+     * 「找回本地文件」：只读 IndexedDB 重读字节，**不调用任何生成接口**。
+     * 媒体缺失时优先给这个按钮，而不是直接走 `onRetry`（那个会花钱）。
+     */
+    onRecoverMedia?: (node: CanvasNodeData) => void | Promise<void>;
     onCancelGeneration?: (nodeId: string) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onCreateChat?: (node: CanvasNodeData) => void;
@@ -181,6 +192,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onRetryBatchImage,
     onDeleteBatchImage,
     onRetry,
+    onRecoverMedia,
     onCancelGeneration,
     onGenerateImage,
     onCreateChat,
@@ -572,6 +584,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onContentChange={onContentChange}
                         onStopEditing={() => setIsEditingContent(false)}
                         onRetry={onRetry}
+                        onRecoverMedia={onRecoverMedia}
                         onCancelGeneration={onCancelGeneration}
                         onGenerateImage={onGenerateImage}
                         onCreateChat={onCreateChat}
@@ -655,7 +668,7 @@ function NodeContent(props: NodeContentRendererProps) {
             />
         );
     }
-    if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
+    if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} onRecoverMedia={props.onRecoverMedia} />;
 
     const Renderer = nodeContentRenderers[props.node.type as CanvasNodeType];
     if (Renderer) return <Renderer {...props} />;
@@ -910,24 +923,63 @@ function LoadingContent({
     );
 }
 
-function ErrorContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "node" | "theme" | "onRetry">) {
+function ErrorContent({ node, theme, onRetry, onRecoverMedia }: Pick<NodeContentRendererProps, "node" | "theme" | "onRetry" | "onRecoverMedia">) {
     const { t } = useTranslation();
+    // 🔴 「媒体缺失」不是「生成失败」：本地库里可能还有字节，只是 object URL 死了。
+    // 这时候主按钮必须是「找回本地文件」（只读、免费），「重新生成」退成次要按钮并明确标价。
+    const recoverable = needsMediaRecovery(node);
+    const stop = (event: React.MouseEvent) => {
+        event.stopPropagation();
+    };
     return (
         <div className="flex max-w-[260px] flex-col items-center gap-3 px-5 text-center">
             <div className="text-xs leading-5 text-red-300">{node.metadata?.errorDetails || t("canvas.node.failed")}</div>
-            <button
-                type="button"
-                className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
-                style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
-                onClick={(event) => {
-                    event.stopPropagation();
-                    onRetry?.(node);
-                }}
-                onMouseDown={(event) => event.stopPropagation()}
-            >
-                <RefreshCw className="size-3.5" />
-                {t("canvas.node.retry")}
-            </button>
+            {recoverable ? (
+                <>
+                    <button
+                        type="button"
+                        className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
+                        style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                        onClick={(event) => {
+                            stop(event);
+                            void onRecoverMedia?.(node);
+                        }}
+                        onMouseDown={stop}
+                        title={t("canvas.mediaRecover.actionHint")}
+                    >
+                        <FolderSearch className="size-3.5" />
+                        {t("canvas.mediaRecover.action")}
+                    </button>
+                    <button
+                        type="button"
+                        className="inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-[11px] font-medium opacity-70 transition hover:opacity-100"
+                        style={{ background: "transparent", borderColor: theme.toolbar.border, color: theme.node.text }}
+                        onClick={(event) => {
+                            stop(event);
+                            onRetry?.(node);
+                        }}
+                        onMouseDown={stop}
+                        title={t("canvas.mediaRecover.regenerateHint")}
+                    >
+                        <RefreshCw className="size-3" />
+                        {t("canvas.node.retry")}
+                    </button>
+                </>
+            ) : (
+                <button
+                    type="button"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition hover:scale-[1.02]"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                    onClick={(event) => {
+                        stop(event);
+                        onRetry?.(node);
+                    }}
+                    onMouseDown={stop}
+                >
+                    <RefreshCw className="size-3.5" />
+                    {t("canvas.node.retry")}
+                </button>
+            )}
         </div>
     );
 }

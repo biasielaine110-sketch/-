@@ -299,6 +299,8 @@ import {
     settleRestoringMedia,
     videoExtension,
 } from "@/lib/canvas/canvas-generation-helpers";
+import { isMediaMissingDetail, needsMediaRecovery, recoverMissingMedia, recoverNodeMedia } from "@/lib/canvas/media-recovery";
+import { dropStaleSchedules, isScheduleDueToRun } from "@/lib/canvas/schedule-guard";
 import { buildDocxBlob, buildMarkdownBlob, isDocumentFile, readDocumentAsText, type TextExportFormat } from "@/lib/canvas/document-text";
 import { clipboardTextSnapshot, extractClipboardRemoteImage, isPasteableNodeFile, mediaFileFromClipboardText, resolveClipboardMediaKind } from "@/lib/canvas/clipboard-paste";
 import { getNodeDefinition, isBuiltinNodeType as isBuiltinType } from "@/lib/canvas/node-registry";
@@ -950,12 +952,13 @@ function AtelierCanvasPage() {
     }, [isNodeGenerating]);
 
     // 定时生成调度器：每秒扫描带 scheduledAt 的节点，到点后走与手动点击完全相同的生成入口。
-    // 页面关闭会暂停；再次打开时已过期但未执行的排期会立刻补跑。
+    // 🔴 只在「到点 + 容忍窗口内」补跑：过期太久的排期一律不生成（否则隔夜打开项目 = 批量扣费）。
+    //    判断口径见 `schedule-guard.ts`，打开项目时还会再清洗一遍陈旧排期（双保险）。
     const scheduleClaimRef = useRef<Set<string>>(new Set());
     useEffect(() => {
         const timer = window.setInterval(() => {
             const now = Date.now();
-            const due = nodesRef.current.filter((node) => typeof node.metadata?.scheduledAt === "number" && (node.metadata.scheduledAt as number) <= now);
+            const due = nodesRef.current.filter((node) => isScheduleDueToRun(node.metadata?.scheduledAt, now));
             if (!due.length) return;
             for (const node of due) {
                 if (scheduleClaimRef.current.has(node.id)) continue;
@@ -989,8 +992,15 @@ function AtelierCanvasPage() {
             // 也不能到点就把原始节点直接画出来 —— 里面的 `blob:` URL 刷新后已经死了，画出来就是满屏
             // `ERR_FILE_NOT_FOUND` + 破图。现在的口径：先画「死 blob 已清空、媒体标成恢复中」的节点，
             // 再每恢复完一个节点就贴回去（见下方 onNode）。
+            // 🔴 打开项目先丢掉过期排期：调度器的老口径是「过期就补跑」，
+            // 一个画布攒了几百条历史排期的话，隔夜打开一次画布就是几百次付费生成。
+            // 现在超过容忍窗口一律丢弃（不生成、不扣费），见 `schedule-guard.ts`。
+            const scheduleCleaned = dropStaleSchedules(resetInterruptedGeneration(project.nodes));
+            if (scheduleCleaned.dropped.length) {
+                console.warn(`[canvas] 已丢弃 ${scheduleCleaned.dropped.length} 个过期排期（不会自动生成、不产生费用）`, scheduleCleaned.dropped.slice(0, 10));
+            }
             const restoredBase = widenLegacyScriptNodes(
-                markRestoringMedia(resetInterruptedGeneration(project.nodes)).map((node) =>
+                markRestoringMedia(scheduleCleaned.nodes).map((node) =>
                     node.type === CanvasNodeType.Chat && (node.height === 520 || node.height === 1040 || node.width === 420) ? { ...node, width: 840, height: 1387 } : node.type === CanvasNodeType.Text && node.height === 240 ? { ...node, height: 480 } : node,
                 ),
             );
@@ -1055,6 +1065,23 @@ function AtelierCanvasPage() {
             if (lastHistoryRef.current) {
                 lastHistoryRef.current = { ...lastHistoryRef.current, nodes: settleRestoringMedia(clearRestoringMedia(applyHydratedMedia(lastHistoryRef.current.nodes, restoredNodes))) };
             }
+
+            // 🔴 找回（**不生成、不花钱**）：`hydrateCanvasImages` 走的是带缓存的 resolveImageUrl，
+            // 缓存里那条 object URL 一旦被 revoke，之后每次「恢复」都会拿到同一个死 URL ——
+            // 节点永远显示「缓存已失效」，用户只能点重试 → 重新生成。
+            // 这里强制重读本地字节重建一次 URL，把还能找回的全部找回来；剩下的才是真没了。
+            void (async () => {
+                if (thumbAbort.signal.aborted) return;
+                const recovery = await recoverMissingMedia(nodesRef.current).catch(() => null);
+                if (!recovery || thumbAbort.signal.aborted) return;
+                if (recovery.recovered > 0) {
+                    setNodes((prev) => applyHydratedMedia(prev, recovery.nodes));
+                }
+                if (recovery.missingIds.length) {
+                    // 只报数、不动手：绝不因为「找不到」就自动重新生成。
+                    console.warn(`[canvas] 媒体体检：本地找回 ${recovery.recovered} 个，仍有 ${recovery.missingIds.length} 个本地无字节（未发起任何生成）`, recovery.missingIds.slice(0, 20));
+                }
+            })();
 
             // Background: chat image refs + remaining video/image history versions.
             void (async () => {
@@ -6638,6 +6665,41 @@ function AtelierCanvasPage() {
 
     const handleRetryNode = useCallback(
         async (node: CanvasNodeData, imageId?: string) => {
+            // 🔴 「本地文件缺失」≠ 生成失败。
+            // 用户口径（2026-11-19）：「找不到的图你帮我找回，而不是重新生成」——
+            // 重试按钮以前一步直达生成接口，一个画布几百张图点下去就是几百次付费调用。
+            // 现在的顺序：① 强制重读本地字节（免费）；② 真没了才让用户明确确认「会重新生成、会产生费用」。
+            //
+            // 注意 `singleMissing`：批量图节点里只缺其中一张时，`needsMediaRecovery(整节点)` 是 false
+            // （因为别的图还能显示），但那张图本地也许还有字节 —— 单张重试同样要先找回。
+            const singleMissing =
+                imageId !== undefined &&
+                (() => {
+                    const target = (node.metadata?.images || []).find((image) => image.id === imageId);
+                    if (!target) return false;
+                    const hasLocal = Boolean(target.storageKey || target.thumbnailStorageKey);
+                    return hasLocal && !target.content && !target.thumbnailContent;
+                })();
+            if (isMediaMissingDetail(node.metadata?.errorDetails) || needsMediaRecovery(node) || singleMissing) {
+                const fixed = await recoverNodeMedia(node).catch(() => null);
+                const targetFixed = imageId !== undefined ? Boolean(fixed?.metadata?.images?.find((image) => image.id === imageId)?.content) : Boolean(fixed);
+                if (fixed && targetFixed) {
+                    setNodes((prev) => prev.map((item) => (item.id === node.id ? fixed : item)));
+                    message.success(t("canvas.mediaRecover.recoveredOne"));
+                    return;
+                }
+                const proceed = await new Promise<boolean>((resolve) => {
+                    modal.confirm({
+                        title: t("canvas.mediaRecover.goneTitle"),
+                        content: t("canvas.mediaRecover.goneBody"),
+                        okText: t("canvas.mediaRecover.goneOk"),
+                        cancelText: t("common.cancel"),
+                        onOk: () => resolve(true),
+                        onCancel: () => resolve(false),
+                    });
+                });
+                if (!proceed) return;
+            }
             const sourceNode = findRetrySourceNode(node.id, nodesRef.current, connectionsRef.current) || node;
             const savedImageMetadata = node.type === CanvasNodeType.Image ? node.metadata : undefined;
             const hasSavedImageMetadata = Boolean(savedImageMetadata?.generationType);
@@ -6942,7 +7004,7 @@ function AtelierCanvasPage() {
                 setRunningNodeId(null);
             }
         },
-        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isQueuedVideoConfig, message, openConfigDialog, startGenerationRequest, t],
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isQueuedVideoConfig, message, modal, openConfigDialog, startGenerationRequest, t],
     );
 
     const deleteBatchImage = useCallback((nodeId: string, imageId: string | string[]) => {
@@ -7592,6 +7654,26 @@ function AtelierCanvasPage() {
         setPreviewImageId(imageId || null);
     }, []);
     const handleNodeRetry = useCallback((node: CanvasNodeData) => void handleRetryNode(node), [handleRetryNode]);
+
+    /**
+     * 「找回本地文件」：只读 IndexedDB 强制重读字节（`refresh*Url` 绕开已经死掉的 object URL 缓存）。
+     *
+     * 🔴 这里**绝不调用任何生成接口**。用户口径（2026-11-19）：
+     * 「找不到的图你帮我找回，而不是重新生成」—— 一个画布几百张图，缺一张就重生成一次
+     * 等于几百次付费调用。找不回就如实告诉用户「本地也没有了」，把重新生成留给用户显式决定。
+     */
+    const handleRecoverNodeMedia = useCallback(
+        async (node: CanvasNodeData) => {
+            const fixed = await recoverNodeMedia(node).catch(() => null);
+            if (fixed) {
+                setNodes((prev) => prev.map((item) => (item.id === node.id ? fixed : item)));
+                message.success(t("canvas.mediaRecover.recoveredOne"));
+                return;
+            }
+            message.warning(t("canvas.mediaRecover.goneInline"));
+        },
+        [message, t],
+    );
     const handleNodeContextMenu = useCallback((event: ReactMouseEvent, nodeId: string) => {
         if (isCanvasTextInteractionTarget(event.target)) return;
         event.preventDefault();
@@ -13285,6 +13367,7 @@ function AtelierCanvasPage() {
                             onRetryBatchImage={retryBatchImage}
                             onDeleteBatchImage={deleteBatchImage}
                             onRetry={handleNodeRetry}
+                            onRecoverMedia={handleRecoverNodeMedia}
                             onCancelGeneration={stopGenerationForNode}
                             onGenerateImage={generateImageFromTextNode}
                             onCreateChat={createChatFromTextNode}

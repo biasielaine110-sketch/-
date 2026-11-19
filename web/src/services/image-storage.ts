@@ -395,12 +395,31 @@ export async function deleteStoredImages(keys: Iterable<string>) {
     );
 }
 
+/**
+ * 清理「没有任何项目 / 素材引用」的图片字节。
+ *
+ * 🔴 这里是全站**唯一会删用户图片字节**的地方，所以必须有一道数量闸门：
+ * 调用方传进来的 `usedData` 是「当前 store 里的 projects + assets」，而 store 是异步 hydrate 的 ——
+ * 只要清理在 hydrate 完成之前跑（或者拿到的 projects 是空数组），`usedKeys` 就是空的，
+ * 库里几百张图会被判成「没人用」**一次性全删**。删掉就真没了，再打开只能重新生成（花钱）。
+ * 所以：一次要删掉绝大多数、且数量不小的时候，一律拒绝并留日志 —— 宁可漏删，也绝不误删。
+ */
+const CLEANUP_MAX_DELETE_RATIO = 0.9;
+const CLEANUP_MIN_SUSPICIOUS_COUNT = 8;
+
 export async function cleanupUnusedImages(usedData: unknown) {
     const usedKeys = collectImageStorageKeys(usedData);
-    const unused: string[] = [];
+    const allKeys: string[] = [];
     await store.iterate((_value, key) => {
-        if (!usedKeys.has(key)) unused.push(key);
+        allKeys.push(key);
     });
+    if (allKeys.length === 0) return;
+    const unused = allKeys.filter((key) => !usedKeys.has(key));
+    if (unused.length === 0) return;
+    if (unused.length >= CLEANUP_MIN_SUSPICIOUS_COUNT && unused.length / allKeys.length > CLEANUP_MAX_DELETE_RATIO) {
+        console.warn(`[storage] 拒绝清理图片：本次要删 ${unused.length}/${allKeys.length} 张（疑似项目还没载入完成），已跳过以免误删`);
+        return;
+    }
     await deleteStoredImages(unused);
 }
 
