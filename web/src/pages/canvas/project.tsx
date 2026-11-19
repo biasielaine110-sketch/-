@@ -974,6 +974,15 @@ function AtelierCanvasPage() {
         return () => window.clearInterval(timer);
     }, []);
 
+    // 恢复流程只跑一次，`message` / `t` 不能进 effect 依赖数组（引用一变就会整项目重开）；
+    // 用 ref 拿最新引用，既拿到最新文案，也不会把恢复流程重新触发一遍。
+    const restoreNoticeRef = useRef<(recovered: number) => void>(() => {});
+    useEffect(() => {
+        restoreNoticeRef.current = (recovered: number) => {
+            if (recovered > 0) message.success(t("canvas.mediaRecover.recoveredMany", { count: recovered }));
+        };
+    }, [message, t]);
+
     useEffect(() => {
         if (!hydrated) return;
         setProjectLoaded(false);
@@ -1076,6 +1085,8 @@ function AtelierCanvasPage() {
                 if (!recovery || thumbAbort.signal.aborted) return;
                 if (recovery.recovered > 0) {
                     setNodes((prev) => applyHydratedMedia(prev, recovery.nodes));
+                    // 正向反馈：让用户看见「这是找回来的，不是重新生成的」。
+                    restoreNoticeRef.current(recovery.recovered);
                 }
                 if (recovery.missingIds.length) {
                     // 只报数、不动手：绝不因为「找不到」就自动重新生成。
