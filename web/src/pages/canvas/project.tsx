@@ -190,7 +190,7 @@ import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix"
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { VIDEO_REVERSE_LANGUAGE_RULE, VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cascadeReverseVideoStages, cleanVideoReverseScriptOutput, describeReverseVideoStages, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoEpisodeSeconds, readReverseVideoScript, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type ReverseVideoStages, type VideoReverseMode, type VideoReversePromptMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
-import { EPISODE_BAND_GAP_Y, EPISODE_BAND_ROW_SLACK, EPISODE_LANE_ROW_GAP_Y, EPISODE_LANE_ROW_HEIGHT, EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeDraftSeconds, resolveEpisodeSeconds, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
+import { EPISODE_BAND_COMPACT_ROWS, EPISODE_BAND_ESTIMATE_RATIO, EPISODE_BAND_GAP_Y, EPISODE_BAND_ROW_SLACK, EPISODE_LANE_ROW_GAP_Y, EPISODE_LANE_ROW_HEIGHT, EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeDraftSeconds, resolveEpisodeSeconds, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -10822,7 +10822,17 @@ function AtelierCanvasPage() {
              * `baseY` 恒取脚本节点自己的 y —— band 登记的就是这个值，用户手动拖过节点后也跟着走。
              */
             const band = episodeBandsRef.current.get(source.id);
-            const baseX = band ? Math.max(band.baseX, desiredBaseX) : findFreeColumnX({
+            /**
+             * 🔴 band 只在「预留高度真的装得下这条链路」时才吃它的列线。
+             *
+             * 04 只拆段 / 只出分镜时，集间距已经被压到 1 行（`EPISODE_BAND_COMPACT_ROWS`）——
+             * 那是为了消掉两集之间几千像素的纯空白。但同一个会话里如果接着手动点「一键生图」，
+             * 链路高度（`laneHeight`）会远大于 1 行，硬吃 band 的 `baseX` 就会从脚本节点一路往下排，
+             * 压穿下一集的文本 / 脚本节点。装不下时退回 `findFreeColumnX` 往右找空地：
+             * 宁可横向多一列，也不要把下集内容盖掉。
+             */
+            const bandFits = Boolean(band && band.height >= laneHeight);
+            const baseX = band && bandFits ? Math.max(band.baseX, desiredBaseX) : findFreeColumnX({
                 desiredX: desiredBaseX,
                 width: laneWidth,
                 top: baseY,
@@ -12411,7 +12421,17 @@ function AtelierCanvasPage() {
             };
             /** 每集的**实际**秒数（尾集不够满 → 就按实际段落数算，见 `EpisodeDraft.seconds`）。 */
             const draftSeconds = drafts.map((draft) => resolveEpisodeDraftSeconds(draft, seconds));
-            const estimatedRows = draftSeconds.map((value) => resolveStoryScriptShotCount(value) + EPISODE_BAND_ROW_SLACK);
+            /**
+             * 🔴 首趟只按预估链路高度的 **1/3** 预留（用户 2026-11-19 20:37：
+             * 「拆不同集数文本的时候，这两个间隔也太大了，缩小 3 分之 2」）。
+             *
+             * 这一刻分镜表还没出、一张图也没铺，按 90 秒 = 24 镜 + 2 行冗余整条预留 8040px，
+             * 用户看到的就是两个文本节点之间一大片纯空白。表出来后第二趟会按真实镜数重排，
+             * 而且「没勾生图 / 生视频」时第二趟还会进一步压到 1 行 —— 所以这里留 1/3 足够。
+             */
+            const estimatedRows = draftSeconds.map((value) =>
+                Math.max(1, Math.round((resolveStoryScriptShotCount(value) + EPISODE_BAND_ROW_SLACK) * EPISODE_BAND_ESTIMATE_RATIO)),
+            );
             const slots = planEpisodeStackSlots({
                 origin: { x: originX, y: originY },
                 count: drafts.length,
@@ -12584,6 +12604,8 @@ function AtelierCanvasPage() {
              * 表已经出完了，镜数就是**确定值**（`metadata.scriptRows.length`），所以这里重算一遍 band：
              *  · 只改 `position.y`（x / 列线 / baseX 一个字节都不动）—— 横向不会有任何抖动；
              *  · 高度取 `真实行数 + 1 行`（多留一行防「重出一遍表多一两镜」把下一集顶到）；
+             *    但**本批不铺图也不铺视频**时压到 1 行 —— 链路根本不会出现，留空就是纯空白
+             *    （用户 2026-11-19 20:37 要求集间距再缩 2/3）；
              *  · 这条分支必须排在**铺链路之前**：那时画布上只有文本 + 脚本两种节点，
              *    移动它们不会踩到任何已铺出来的图 / 视频；铺完之后再挪就会把链路留在原地。
              */
@@ -12593,6 +12615,12 @@ function AtelierCanvasPage() {
                 return Array.isArray(rows) ? rows.length : 0;
             });
             if (actualRows.some((rows) => rows > 0)) {
+                /**
+                 * 🔴 只有「真要铺图 / 铺视频」时才按真实镜数（+1 行冗余）预留整条链路；
+                 * 只拆段、只出分镜时链路永远不会出现，再按镜数留空就变成两集之间几千像素的纯空白
+                 * （用户 2026-11-19 20:37 那张截图就是这个场景）。这种时候压到 1 行。
+                 */
+                const reserveRows = stages.image || stages.video ? (rows: number) => Math.max(1, rows) + 1 : () => EPISODE_BAND_COMPACT_ROWS;
                 const selfIds = [...textNodes.map((node) => node.id), ...scriptNodes.map((node) => node.id)];
                 const relaid = planEpisodeStackSlots({
                     origin: { x: originX, y: originY },
@@ -12603,7 +12631,7 @@ function AtelierCanvasPage() {
                     occupied: collectCanvasOccupied(nodesRef.current, selfIds),
                     gapX: gap,
                     gapY: EPISODE_BAND_GAP_Y,
-                    band: { rowsPerEpisode: actualRows.map((rows) => Math.max(1, rows) + 1), row: laneRow },
+                    band: { rowsPerEpisode: actualRows.map(reserveRows), row: laneRow },
                 });
                 if (relaid.length === scriptNodes.length) {
                     /** 节点 id → 新的 band 顶边（`position` 是左上角，直接就是 band 顶）。 */
