@@ -189,7 +189,8 @@ export function CanvasReverseVideoNodeContent({
      */
     const target = useMemo(() => readReverseVideoTarget(node.metadata), [node.metadata]);
     /**
-     * 反推技能（用户 2026-11-12 第 02 条）：默认「视频反推-分镜提示词」，可在节点上切到「SS视频反推」。
+     * 反推技能（用户 2026-11-12 第 02 条）：默认「视频反推-分镜提示词」，可在节点上切到「SS视频反推」
+     * 或「老李-扒剧」（2026-11-20 加第三条，short-drama-teardown）。
      *
      * 读的时候一律走 `readReverseVideoSkill`：老节点 / 脏值 → 默认那条，所以升级前后**行为不变**。
      * 写的时候只写 id（`reverseVideoSkill`），文案随选项表走，别把中文名存进 metadata。
@@ -671,7 +672,8 @@ export function CanvasReverseVideoNodeContent({
                     ) : null}
                 </div>
 
-                {/* ③ 反推技能（用户 2026-11-12 第 02 条）：默认「视频反推-分镜提示词」，可手动切到「SS视频反推」。
+                {/* ③ 反推技能（用户 2026-11-12 第 02 条）：默认「视频反推-分镜提示词」，可手动切到「SS视频反推」
+                    / 「老李-扒剧」（2026-11-20 第三条）。按钮由 VIDEO_REVERSE_SKILL_OPTIONS 渲染，加一条就多一颗。
                     01 / 02 / 03 三条命令都用这里选的技能；除技能本身，三条的规则与约束完全不动。
                     ⚠️ 存 id 不存中文名：名字会改，id 是稳定的；旧节点没有这个字段 → 读的时候回落默认那条。 */}
                 <div className="rounded-md px-2.5 py-2" style={{ border: softBorder }}>

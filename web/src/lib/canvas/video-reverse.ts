@@ -58,6 +58,20 @@ export const VIDEO_REVERSE_SKILL_OPTIONS = [
         hints: ["SS视频反推"] as const,
         hint: "SS 反推技能（「SS视频反推SS」也能命中）",
     },
+    {
+        /**
+         * 用户 2026-11-20：「把老李-扒剧 short-drama-teardown 这个技能加入反推视频节点的技能选择，
+         * 就是 3 个技能选择了」。
+         *
+         * 🔴 hints 两个都要给：技能库里这条的**展示名**是「老李-扒剧」，而它的资产目录名叫
+         * `short-drama-teardown`。用户可能只改了备注名、也可能只有英文名，两个都试一遍才不至于
+         * 因为「备注名没填」就报「技能库里没找到」。两个串都不会被别的技能名包含，不会串味。
+         */
+        id: "teardown" as const,
+        label: "老李-扒剧",
+        hints: ["老李-扒剧", "short-drama-teardown"] as const,
+        hint: "老李-扒剧（short-drama-teardown）· 拆剧结构形态",
+    },
 ];
 
 export type VideoReverseSkillId = (typeof VIDEO_REVERSE_SKILL_OPTIONS)[number]["id"];
