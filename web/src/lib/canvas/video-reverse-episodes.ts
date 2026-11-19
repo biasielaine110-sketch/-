@@ -188,7 +188,34 @@ function sliceJson(text: string): string {
     return text.slice(start, end + 1);
 }
 
-export type EpisodeDraft = { title: string; script: string };
+export type EpisodeDraft = {
+    title: string;
+    script: string;
+    /**
+     * 这一集**实际**多少秒（用户 2026-11-18 第 10 轮 01 条）。
+     *
+     * 拆集是按 `【片段编号】` 数段落的：够 `segmentsPerEpisode(seconds)` 段就是标准集（90 / 120 秒），
+     * 但整份正文的段数往往不是整数倍 —— 最后一集只剩 3 段（45 秒）时，它**就是 45 秒**，
+     * 不能还按 90 秒去出分镜表（那样模型会给 24 镜，实际只有 3 段内容，后面铺视频必然空转）。
+     * 所以每集把自己的秒数带出来：`scriptTotalSeconds`、band 高度、进度文案全按这个数走。
+     */
+    seconds?: number;
+};
+
+/**
+ * 这一集的实际秒数：优先用 `seconds`（数段落数出来的），没有才退回调用方给的目标秒数。
+ *
+ * 只有 `splitByCharBudget` 那条兜底路径可能给不出精确段落数（技能没按格式输出、按字数估的），
+ * 那里已经按 15 秒取整过，所以这里不需要再算。
+ */
+export function resolveEpisodeDraftSeconds(
+    draft: { seconds?: number } | null | undefined,
+    fallback: number | string | null | undefined,
+): number {
+    const own = Number(draft?.seconds);
+    if (Number.isFinite(own) && own > 0) return Math.min(EPISODE_SECONDS_MAX, Math.max(EPISODE_SECONDS_MIN, Math.round(own)));
+    return resolveEpisodeSeconds(fallback);
+}
 
 /**
  * 一段文字大概够演多少秒（`字数 / SCRIPT_CHARS_PER_SECOND`）。
@@ -296,6 +323,10 @@ export function splitScriptSegments(text: string | null | undefined): ScriptSegm
  * 满段即断，**不看字数、也不合并尾巴** —— 用户给的是硬换算式（120 秒就是 8 段），
  * 这里再「凑整」会把 10 段拼成一集（= 150 秒），反而对不上他填的时长。
  * 片段时长由模型写在 `【片段时长】` 里，数段数比数字数可靠。
+ *
+ * 🔴 尾集（用户 2026-11-18 第 10 轮 01 条）：整份正文的段数不是每集段数的整数倍时，
+ * 最后一集就只剩几段 —— 它的 `seconds` **按实际段数算**（3 段 = 45 秒），
+ * 绝不能再按「每集 90 秒」去规划镜数，否则那 3 段内容会被摊成 24 镜的空表。
  */
 function groupSegmentsIntoEpisodes(segments: readonly ScriptSegment[], target: number): EpisodeDraft[] {
     const perEpisode = Math.max(1, Math.round(target / EPISODE_SEGMENT_SECONDS));
@@ -313,6 +344,7 @@ function groupSegmentsIntoEpisodes(segments: readonly ScriptSegment[], target: n
     return groups.map((group, index) => ({
         title: buildEpisodeTitle(index),
         script: group.map((segment) => segment.script).join("\n\n---\n\n"),
+        seconds: group.reduce((sum, segment) => sum + Math.max(1, Number(segment.seconds) || EPISODE_SEGMENT_SECONDS), 0),
     }));
 }
 
@@ -355,7 +387,19 @@ function splitByCharBudget(text: string | null | undefined, target: number): Epi
             chunks.pop();
         }
     }
-    return chunks.map((script, index) => ({ title: buildEpisodeTitle(index, markerTitleOf(script)), script }));
+    return chunks.map((script, index) => ({
+        title: buildEpisodeTitle(index, markerTitleOf(script)),
+        script,
+        /**
+         * 兜底路径没有 `【片段编号】` 可数，只能按字数估完再**取到 15 秒的整数倍**：
+         * 后面所有环节（脚本节点成片总时长、band 高度）都按「15 秒一段」理解这一集，
+         * 给个 43 秒这种数只会让镜数估算和段落数两头都不对。
+         */
+        seconds: Math.max(
+            EPISODE_SEGMENT_SECONDS,
+            Math.round(estimateScriptSeconds(script) / EPISODE_SEGMENT_SECONDS) * EPISODE_SEGMENT_SECONDS,
+        ),
+    }));
 }
 
 /** 分块：空行优先（一份剧本里场景之间本来就空行），整篇没空行才退回按行。 */
@@ -484,13 +528,21 @@ function tryParseJsonEpisodes(body: string): EpisodeDraft[] {
 
 /**
  * 拆集结果的**自检摘要**（写进进度 / 完成提示）。
- * 例：`3 集 · 每集 120 秒（8 段×15 秒）· 字数 1.2k`。
+ * 例：`3 集 · 每集 120 秒（8 段×15 秒）· 字数 1.2k`；
+ * 尾集不足时：`3 集 · 标准 120 秒，实际 120 / 120 / 45 秒（8 / 8 / 3 段，尾集按实际出表）· 字数 1.2k`。
  */
 export function describeEpisodeSplit(episodes: readonly EpisodeDraft[], seconds: number): string {
+    const target = resolveEpisodeSeconds(seconds);
     const count = episodes.length;
     const chars = episodes.reduce((sum, item) => sum + item.script.length, 0);
     const size = chars >= 1000 ? `${(chars / 1000).toFixed(1)}k` : String(chars);
-    return `${count} 集 · 每集 ${resolveEpisodeSeconds(seconds)} 秒（${segmentsPerEpisode(seconds)} 段 × ${EPISODE_SEGMENT_SECONDS} 秒）· 字数 ${size}`;
+    const perEpisode = episodes.map((item) => resolveEpisodeDraftSeconds(item, target));
+    const uniform = perEpisode.every((value) => value === perEpisode[0]);
+    if (uniform) {
+        return `${count} 集 · 每集 ${perEpisode[0]} 秒（${segmentsPerEpisode(perEpisode[0])} 段 × ${EPISODE_SEGMENT_SECONDS} 秒）· 字数 ${size}`;
+    }
+    const segments = perEpisode.map((value) => segmentsPerEpisode(value));
+    return `${count} 集 · 标准 ${target} 秒，实际 ${perEpisode.join(" / ")} 秒（${segments.join(" / ")} 段，尾集按实际段落出表）· 字数 ${size}`;
 }
 
 /** 一集的落位：文本节点（剧本）+ 脚本节点（分镜表）各一个中心点（`createCanvasNode` 的口径）。 */

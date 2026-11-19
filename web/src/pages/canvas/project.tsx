@@ -87,6 +87,9 @@ import {
     resolveStoryScriptMergeMode,
     resolveScriptPipelineMergeEvery,
     normalizeScriptShotsPerClip,
+    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP,
+    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
+    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR,
     resolveStoryScriptPresetId,
     resolveStoryScriptImageSize,
     resolveStoryScriptVideoRatio,
@@ -181,7 +184,7 @@ import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix"
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { VIDEO_REVERSE_LANGUAGE_RULE, VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cascadeReverseVideoStages, cleanVideoReverseScriptOutput, describeReverseVideoStages, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoEpisodeSeconds, readReverseVideoScript, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type ReverseVideoStages, type VideoReverseMode, type VideoReversePromptMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
-import { EPISODE_BAND_GAP_Y, EPISODE_BAND_ROW_SLACK, EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeSeconds, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
+import { EPISODE_BAND_GAP_Y, EPISODE_BAND_ROW_SLACK, EPISODE_LANE_ROW_GAP_Y, EPISODE_LANE_ROW_HEIGHT, EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeDraftSeconds, resolveEpisodeSeconds, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
@@ -12209,47 +12212,89 @@ function AtelierCanvasPage() {
              *
              * 关键差别只有三处，其他系数与 `handleBuildScriptPipeline` 逐字同源：
              *  ① `gapY` 从 36 变成 `EPISODE_BAND_GAP_Y`（240）—— 集间距不再是「文本节点高 + 36」；
-             *  ② `band` 分支按**链路真实高度**给每集预留纵向空间（90 秒 24 镜 = 7416px + 2 行冗余）；
+             *  ② `band` 分支按**链路真实高度**给每集预留纵向空间；
              *  ③ 整条带只做一次 `findColumnX` → 全批 `baseX` 相同，铺链路时不再逐节点找空地。
              *
-             * 预估镜数用 `resolveStoryScriptShotCount(每集秒数)`：这就是任务书里要求模型给的镜数，
-             * 两边同一个公式，所以 band 高度和真实链路高度不会打架。
+             * 🔴 这是**第一趟（预估）**：此刻分镜表还没出，只能按「每集秒数 → 镜数」估。
+             * 表出来之后还有第二趟（④-A 之后）按**真实行数**重排 —— 用户 2026-11-18 第 10 轮
+             * 「拆出来的分集内容相隔太远」就是估高了：90 秒按 24 镜 + 2 行冗余共 8040px 一条带，
+             * 而实际表只有 8 行（2496px），中间那 5000 多像素全是白的。
              */
-            const estimatedRows = resolveStoryScriptShotCount(seconds) + EPISODE_BAND_ROW_SLACK;
+            const originX = chatLeft + chatSpec.width + gap;
+            const originY = chatTop;
+            /**
+             * 链路「一行」的真实高度 = `max(文本 240, 镜头图高, 视频节点高)`，与
+             * `handleBuildScriptPipeline` 的 `rowHeight` 同源。9:16 之类竖画幅的镜头图比 240 高得多，
+             * 这里按 240 算会把 band 压低、后一集直接压进前一集的链路里 —— 所以必须一起算进来。
+             */
+            const episodeImageSpec =
+                nodeSizeFromRatio(
+                    resolveStoryScriptImageSize(resolveReverseVideoSize(target)),
+                    NODE_DEFAULT_SIZE[CanvasNodeType.Image].width,
+                    NODE_DEFAULT_SIZE[CanvasNodeType.Image].height,
+                ) || NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            const episodeVideoSpec = NODE_DEFAULT_SIZE[isMochianiVideoEngine(target.videoEngine) ? CanvasNodeType.Mochiani : CanvasNodeType.Video];
+            const laneRow = {
+                height: Math.max(EPISODE_LANE_ROW_HEIGHT, episodeImageSpec.height, episodeVideoSpec.height),
+                gapY: EPISODE_LANE_ROW_GAP_Y,
+            };
+            /** 每集的**实际**秒数（尾集不够满 → 就按实际段落数算，见 `EpisodeDraft.seconds`）。 */
+            const draftSeconds = drafts.map((draft) => resolveEpisodeDraftSeconds(draft, seconds));
+            const estimatedRows = draftSeconds.map((value) => resolveStoryScriptShotCount(value) + EPISODE_BAND_ROW_SLACK);
             const slots = planEpisodeStackSlots({
-                origin: { x: chatLeft + chatSpec.width + gap, y: chatTop },
+                origin: { x: originX, y: originY },
                 count: drafts.length,
                 text: textSpec,
                 script: scriptSpec,
                 occupied: collectCanvasOccupied(nodesRef.current),
                 gapX: gap,
                 gapY: EPISODE_BAND_GAP_Y,
-                band: { rowsPerEpisode: drafts.map(() => estimatedRows) },
+                band: { rowsPerEpisode: estimatedRows, row: laneRow },
             });
             const chosenScheme = asScriptSchemeId(input.scriptScheme) ?? asScriptSchemeId(target.scriptScheme);
             const scriptSchemeSeed = buildScriptSchemeSeed({ scheme: chosenScheme || undefined, explicit: Boolean(chosenScheme), textPrompts: effectiveConfig.textPrompts, skills: chatSkillPacks }) || {};
             const targetShotsPerClip = normalizeScriptShotsPerClip(input.shotsPerClip ?? target.shotsPerClip);
             /**
-             * 每集脚本节点的出片参数 = 02 / 03 那套，只有「成片总时长」换成**每集时长**：
-             * 于是每一集的分镜表都按同一套镜数 / 台词量规划，不会出现「第一集 30 秒、第二集 3 分钟」。
+             * 🔴 04 默认「每 4 镜合一镜」（用户 2026-11-18 第 10 轮 03 条：「默认使用每 4 个镜头合一镜，
+             * 即不选择每 2 个镜头合一镜合每 3 个镜头合一镜」）。
+             *
+             * 只有用户**在 04 弹窗里显式点了 2 / 3** 才听那颗；其余（没选 / 老节点 / 显式关）一律 4。
+             * 不动全局默认（`SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT = 3`）：普通脚本节点仍然是 3，
+             * 这条只对 04 现拆现建的这批集生效。
              */
+            const episodeShotsPerClip =
+                targetShotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR || targetShotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT
+                    ? targetShotsPerClip
+                    : SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP;
             /**
              * 同一批拆出来的集写**同一个资产关联组 id**（用户 2026-11-18 第 01 / 02 条）：
              * 于是「谁先生成了这个角色，别人手点一键生图时就直接挂那一张」，
              * 不用先跑一遍 04 的生图阶段、也不用再手动点「资产关联」。
              */
             const episodeGroupId = nanoid();
-            const episodeMeta: Partial<CanvasNodeData["metadata"]> = {
+            /**
+             * 每集脚本节点的出片参数 = 02 / 03 那套，只有「成片总时长」换成**这一集自己的时长**：
+             * 标准集就是 90 / 120 秒，尾集只有 3 段时是 45 秒 —— 于是分镜表也按 45 秒规划 ~12 镜，
+             * 不会拿 24 镜去套 45 秒的内容（用户 2026-11-18 第 10 轮 01 条）。
+             */
+            const episodeMetaOf = (ownSeconds: number): Partial<CanvasNodeData["metadata"]> => ({
                 ...(target.styleTemplateId ? { styleTemplateId: target.styleTemplateId } : {}),
-                scriptTotalSeconds: seconds,
+                scriptTotalSeconds: ownSeconds,
                 scriptImageSize: resolveReverseVideoSize(target),
                 scriptVideoSize: resolveReverseVideoSize(target),
                 scriptVideoQuality: resolveReverseVideoQuality(target),
                 scriptAssetGroup: episodeGroupId,
                 ...(target.model ? { scriptVideoModel: target.model } : {}),
                 ...(isMochianiVideoEngine(target.videoEngine) ? { scriptVideoEngine: MOCHIANI_VIDEO_ENGINE } : {}),
-                ...(targetShotsPerClip ? { scriptShotsPerClip: targetShotsPerClip } : {}),
-            };
+                scriptShotsPerClip: episodeShotsPerClip,
+                /**
+                 * 两颗开关都不选（= 4）时，把「视频分段」档位也钉成每 4 镜：
+                 * 铺链路读的两条路（2 / 3 开关、分段档位）于是都指向 4 —— 这样**手动**点这一集的
+                 * 「一键视频」也不会掉回单镜（那条路不传 `mergeEvery`，`resolveScriptPipelineMergeEvery`
+                 * 在「显式关闭」时会把决定权交回档位）。
+                 */
+                ...(episodeShotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP ? { scriptMergeMode: "4" as const } : {}),
+            });
             const textNodes: CanvasNodeData[] = [];
             const scriptNodes: CanvasNodeData[] = [];
             const pairs: Array<{ fromNodeId: string; toNodeId: string }> = [];
@@ -12274,7 +12319,7 @@ function AtelierCanvasPage() {
                         scriptPrompt: "",
                         scriptRows: [],
                         ...scriptSchemeSeed,
-                        ...episodeMeta,
+                        ...episodeMetaOf(draftSeconds[index] ?? seconds),
                         /**
                          * 跨集沿用（🔴 见函数头 ①）：第 2 集起把「上一集」记成本集来源，
                          * `runScriptGeneration` 出表时会自动把**本集用到的**资产名锁搬过来 →
@@ -12354,6 +12399,72 @@ function AtelierCanvasPage() {
                         scriptNodeId: scriptNodes[0]?.id,
                         error: `${drafts[0]?.title || "第 1 集"} 已暂停：${state.message || "见该集脚本节点上的提示"}（修好后可单独跑那一集）`,
                     };
+                }
+            }
+
+            /**
+             * ④-A.5 **按真实镜数把这一批集重新落一次位**（用户 2026-11-18 第 10 轮 02 条：
+             * 「拆出来的分集内容，相隔太远了」）。
+             *
+             * 第一趟（建节点时）只能按 `resolveStoryScriptShotCount(每集秒数)` 估：90 秒按 24 镜 + 2 行冗余，
+             * 一条带 8040px；而模型实际给的表往往只有 6～10 行（2496px 以内），
+             * 中间空出来的 5000 多像素就是用户截图里那片白。
+             *
+             * 表已经出完了，镜数就是**确定值**（`metadata.scriptRows.length`），所以这里重算一遍 band：
+             *  · 只改 `position.y`（x / 列线 / baseX 一个字节都不动）—— 横向不会有任何抖动；
+             *  · 高度取 `真实行数 + 1 行`（多留一行防「重出一遍表多一两镜」把下一集顶到）；
+             *  · 这条分支必须排在**铺链路之前**：那时画布上只有文本 + 脚本两种节点，
+             *    移动它们不会踩到任何已铺出来的图 / 视频；铺完之后再挪就会把链路留在原地。
+             */
+            const actualRows = scriptNodes.map((node) => {
+                const live = nodesRef.current.find((item) => item.id === node.id);
+                const rows = live?.metadata?.scriptRows;
+                return Array.isArray(rows) ? rows.length : 0;
+            });
+            if (actualRows.some((rows) => rows > 0)) {
+                const selfIds = [...textNodes.map((node) => node.id), ...scriptNodes.map((node) => node.id)];
+                const relaid = planEpisodeStackSlots({
+                    origin: { x: originX, y: originY },
+                    count: scriptNodes.length,
+                    text: textSpec,
+                    script: scriptSpec,
+                    // 本批节点从占位里剔掉：它们就是要被挪动的对象，留着会把自己当成障碍物往右推。
+                    occupied: collectCanvasOccupied(nodesRef.current, selfIds),
+                    gapX: gap,
+                    gapY: EPISODE_BAND_GAP_Y,
+                    band: { rowsPerEpisode: actualRows.map((rows) => Math.max(1, rows) + 1), row: laneRow },
+                });
+                if (relaid.length === scriptNodes.length) {
+                    /** 节点 id → 新的 band 顶边（`position` 是左上角，直接就是 band 顶）。 */
+                    const nextTop = new Map<string, number>();
+                    relaid.forEach((slot, index) => {
+                        const band = slot.band;
+                        const scriptNode = scriptNodes[index];
+                        if (!band || !scriptNode) return;
+                        const textNode = textNodes[index];
+                        if (textNode) nextTop.set(textNode.id, band.top);
+                        nextTop.set(scriptNode.id, band.top);
+                        /**
+                         * band 就地更新：`baseX` 沿用第一趟那个（列线锁死），只换纵向区间。
+                         * `textId` / `label` 是组框要用的，必须一起保住 —— 覆盖成新对象会丢集名。
+                         */
+                        const prev = episodeBandsRef.current.get(scriptNode.id);
+                        episodeBandsRef.current.set(scriptNode.id, {
+                            baseX: prev?.baseX ?? band.baseX,
+                            top: band.top,
+                            height: band.height,
+                            textId: prev?.textId ?? textNode?.id,
+                            label: prev?.label ?? drafts[index]?.title,
+                        });
+                    });
+                    const moved = nodesRef.current.map((node) => {
+                        const top = nextTop.get(node.id);
+                        if (top === undefined || Math.abs(node.position.y - top) < 0.5) return node;
+                        return { ...node, position: { ...node.position, y: top } };
+                    });
+                    nodesRef.current = moved;
+                    setNodes(moved);
+                    report(`${scriptNodes.length} 集按真实镜数压缩排布（不再按满 ${seconds} 秒预留）…`);
                 }
             }
 

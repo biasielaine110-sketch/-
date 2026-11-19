@@ -8,7 +8,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, VIDEO_REVERSE_STAGE_OPTIONS, buildDefaultVideoReverseRequirement, describeReverseVideoStages, normalizeReverseVideoTarget, readReverseVideoScript, readReverseVideoSkill, readReverseVideoStages, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, setReverseVideoStage, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult, type VideoReverseStageId } from "@/lib/canvas/video-reverse";
 import { DEFAULT_EPISODE_SECONDS, EPISODE_DEFAULT_REQUIREMENT, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, SCRIPT_CHARS_PER_SECOND, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
-import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, normalizeScriptShotsPerClip } from "@/constant/story-script";
+import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR, normalizeScriptShotsPerClip } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
 import { getStyleTemplate } from "@/constant/style-templates";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
@@ -254,6 +254,19 @@ export function CanvasReverseVideoNodeContent({
         const clip = `每 ${compactShots} 镜一个视频`;
         return `${effectiveSize} · ${qualityLabel(effectiveQuality)} · 风格：${style} · ${clip}${engine ? ` · ${engine}` : ""}`;
     }, [compactShots, effectiveQuality, effectiveSize, target.styleTemplateId, target.videoEngine]);
+    /**
+     * 04 的「每几镜合一镜」（用户 2026-11-18 第 10 轮 03 条）：**默认 4**，只有在这里显式点了 2 / 3
+     * 才按那颗。两颗开关本身是 02 / 03 的口径（默认 3 镜开启），04 不能跟着它写「每 3 镜一个视频」——
+     * 确认窗里写的数必须等于铺出来的数，否则用户只能靠数视频窗口发现「说了不算」。
+     */
+    const episodeClipShots =
+        shotsChoice === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR || shotsChoice === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT
+            ? shotsChoice
+            : SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP;
+    const episodeParamSummary = useMemo(
+        () => paramSummary.replace(/每 \d+ 镜一个视频/, `每 ${episodeClipShots} 镜一个视频`),
+        [episodeClipShots, paramSummary],
+    );
     const targetSummary = `${target.seconds || DEFAULT_REVERSE_VIDEO_SECONDS} 秒 · ${paramSummary}`;
     /**
      * 02 / 03 自动接着跑的**三颗勾**（用户 2026-11-17）：「生成分镜 / 一键生图 / 一键生视频，默认都是勾选的；
@@ -819,6 +832,9 @@ export function CanvasReverseVideoNodeContent({
                             );
                         })}
                     </div>
+                    <div className="mt-1 text-[10px] leading-relaxed opacity-45">
+                        这两颗只作用于 01 / 02 / 03 建出来的脚本节点。04 拆出来的集默认「每 {SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜合一镜」（= 两颗都不选），在这里点了 2 / 3 才按那颗。
+                    </div>
                 </div>
 
                 {/* ⑤.5 04 的输入剧本（用户 2026-11-17）：「在执行 04 的时候需要输入剧本到反推视频节点才可执行」。
@@ -1095,7 +1111,7 @@ export function CanvasReverseVideoNodeContent({
                     <div className="text-[11px] opacity-60">
                         {requirementMode === 4 ? (
                             <>
-                                每集：<span className="font-medium">{episodeSeconds} 秒</span>（= 主界面秒数） · 生图 / 生视频参数：<span className="font-medium">{paramSummary}</span>
+                                每集：<span className="font-medium">{episodeSeconds} 秒</span>（= 主界面秒数） · 生图 / 生视频参数：<span className="font-medium">{episodeParamSummary}</span>
                             </>
                         ) : (
                             <>
@@ -1143,7 +1159,7 @@ export function CanvasReverseVideoNodeContent({
                     {requirementMode === 4 ? (
                         <div className="text-[11px] leading-relaxed opacity-50">
                             {stages.script || stages.image || stages.video
-                                ? `确定后先拆集（一集一个文本节点 + 一个脚本节点），再按「${stagePlanLabel}」逐集执行 —— 每集剧本按 ${episodeSeconds} 秒写${stages.script ? `、分镜表按「${chosenSchemeLabel}」的格式出` : ""}${stages.video ? "，等这一批的资产图全齐了才开始铺视频" : ""}。`
+                                ? `确定后先拆集（一集一个文本节点 + 一个脚本节点），再按「${stagePlanLabel}」逐集执行 —— 每集剧本按 ${episodeSeconds} 秒写${stages.script ? `、分镜表按「${chosenSchemeLabel}」的格式出` : ""}${stages.video ? `，等这一批的资产图全齐了才开始铺视频（每 ${episodeClipShots} 镜合一段）` : ""}。`
                                 : `三步都没勾：只拆集、只建空的脚本节点（之后可以在各集脚本节点上手动点生成）。`}
                         </div>
                     ) : (
