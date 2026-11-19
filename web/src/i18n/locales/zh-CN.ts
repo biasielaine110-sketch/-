@@ -1603,6 +1603,11 @@ export default {
             stop: "取消",
             generate: "开始生成",
         },
+        refreshShell: {
+            loading: "正在恢复画布…（项目越大，首次打开等得越久）",
+            stuck: "画布还没恢复出来。多数是本地存储（IndexedDB）被另一个画布标签页占住了：先关掉其它画布标签页，再点下面重新载入。",
+            reload: "重新载入",
+        },
         projectPage: {
             stopTitle: "停止生成？",
             stopDescription: "当前生成请求会被中断，已经生成完成的内容会保留。",

@@ -102,8 +102,7 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
     // Unreadable media has two very different causes: the local folder lost its write permission
     // (recoverable — the bytes are still on disk) or the blob is genuinely gone. Tell them apart.
     const missingDetail = recoverableMediaDetail(await isLocalMediaLibraryPermissionLost());
-    return Promise.all(
-        nodes.map(async (node) => {
+    const hydrateNode = async (node: CanvasNodeData) => {
             const content = node.metadata?.content;
             if (node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) {
                 const list = node.metadata?.images || [];
@@ -220,7 +219,18 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                 };
             }
             return { ...node, metadata: { ...node.metadata, ...imageMetadata(await uploadImage(content)), images } };
-        }),
+    };
+
+    // 🔴 单个节点的媒体恢复失败（blob 读坏、IndexedDB 配额满、老 data: URL 解码失败…）
+    // 只能让这一个节点先按原样渲染，绝不能连坐整批 —— 否则 `hydrateCanvasImages` 整体 reject，
+    // 调用方（项目页 restore）就永远走不到 `setProjectLoaded(true)`，刷新后整块画布卡在骨架屏上。
+    return Promise.all(
+        nodes.map((node) =>
+            hydrateNode(node).catch((error) => {
+                console.warn("[canvas] 节点媒体恢复失败，先按原样渲染", node.id, error);
+                return node;
+            }),
+        ),
     );
 }
 

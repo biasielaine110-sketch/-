@@ -387,6 +387,15 @@ const MAX_IMAGE_NODE_HISTORY = 24;
 const EPISODE_ASSET_LAUNCH_GAP_MS = 600;
 
 /**
+ * 打开项目时「首屏媒体恢复」的硬上限。
+ *
+ * 刷新后要先 hydrate 所有节点的主媒体才 `setProjectLoaded(true)`，这中间页面只有刷新骨架屏。
+ * 历史上这段一旦 reject / 卡住，整块画布就永久停在骨架屏（用户看到的就是「节点全变灰空白」）。
+ * 超过这个时长先放行：节点按原始数据渲染，剩下的历史版本交给 `hydrateCanvasMediaDeferred` 后台补。
+ */
+const PROJECT_HYDRATE_TIMEOUT_MS = 12_000;
+
+/**
  * 浮层（弹窗 / 下拉 / 选择器）里的 mousedown 是否应该放行给浮层自己处理。
  *
  * React 19 的 portal 事件沿**组件树**冒泡，而不是 DOM 树：节点内部渲染的 antd Modal 会被 portal 到
@@ -967,8 +976,33 @@ function AtelierCanvasPage() {
             // Fast hydrate: primary media only âdo not block first paint on every history blob.
             // `widenLegacyScriptNodes`：老画布里的脚本节点还停在旧默认宽 760（配置态挤成三行），
             // 一次性加宽到 1520；有下游紧贴右侧时不动，避免盖住铺链路出来的视频节点。
+            // 🔴 这一段是「刷新后画布能不能出来」的唯一闸门：任何异常 / 卡死都会让
+            // `setProjectLoaded(true)` 永远不执行，页面永久停在刷新骨架屏（用户感知是「节点内容变灰/空白」）。
+            // 三重兜底：单节点失败已在 hydrate 内部隔离、整批失败退回原始节点、整体超时也先放行。
+            const baseNodes = resetInterruptedGeneration(project.nodes);
+            let hydrateTimer = 0;
+            let hydrateSettled = false;
+            const hydrateTask = hydrateCanvasImages(baseNodes, { mode: "fast" })
+                .catch((error) => {
+                    console.warn("[canvas] 项目媒体恢复失败，先用原始节点渲染", error);
+                    return baseNodes;
+                })
+                .finally(() => {
+                    hydrateSettled = true;
+                });
+            const hydrated = await Promise.race([
+                hydrateTask,
+                new Promise<CanvasNodeData[]>((resolve) => {
+                    hydrateTimer = window.setTimeout(() => {
+                        console.warn("[canvas] 媒体恢复超时，先放行画布");
+                        resolve(baseNodes);
+                    }, PROJECT_HYDRATE_TIMEOUT_MS);
+                }),
+            ]);
+            if (hydrateTimer) window.clearTimeout(hydrateTimer);
+            if (thumbAbort.signal.aborted) return;
             const restoredNodes = widenLegacyScriptNodes(
-                (await hydrateCanvasImages(resetInterruptedGeneration(project.nodes), { mode: "fast" })).map((node) =>
+                hydrated.map((node) =>
                     node.type === CanvasNodeType.Chat && (node.height === 520 || node.height === 1040 || node.width === 420) ? { ...node, width: 840, height: 1387 } : node.type === CanvasNodeType.Text && node.height === 240 ? { ...node, height: 480 } : node,
                 ),
             );
@@ -995,17 +1029,38 @@ function AtelierCanvasPage() {
             setHistoryState({ canUndo: false, canRedo: false });
             setProjectLoaded(true);
 
+            // 超时放行的情况：晚到的媒体结果不能丢，否则那一批图会一直空着。等它回来再按媒体字段合并。
+            if (!hydrateSettled) {
+                void hydrateTask
+                    .then((late) => {
+                        if (thumbAbort.signal.aborted) return;
+                        setNodes((prev) => applyHydratedMedia(prev, late));
+                        if (lastHistoryRef.current) {
+                            lastHistoryRef.current = { ...lastHistoryRef.current, nodes: applyHydratedMedia(lastHistoryRef.current.nodes, late) };
+                        }
+                    })
+                    .catch((error) => {
+                        console.warn("[canvas] 迟到的媒体恢复结果合并失败，忽略", error);
+                    });
+            }
+
             // Background: chat image refs + remaining video/image history versions.
             void (async () => {
                 if (thumbAbort.signal.aborted) return;
-                const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
+                const restoredSessions = await hydrateAssistantImages(project.chatSessions || []).catch((error) => {
+                    console.warn("[canvas] 对话图片恢复失败，先跳过", error);
+                    return project.chatSessions || [];
+                });
                 if (thumbAbort.signal.aborted) return;
                 setChatSessions(restoredSessions);
                 if (lastHistoryRef.current) {
                     lastHistoryRef.current = { ...lastHistoryRef.current, chatSessions: restoredSessions };
                 }
 
-                const fullNodes = await hydrateCanvasMediaDeferred(restoredNodes, thumbAbort.signal);
+                const fullNodes = await hydrateCanvasMediaDeferred(restoredNodes, thumbAbort.signal).catch((error) => {
+                    console.warn("[canvas] 历史版本媒体补全失败，忽略", error);
+                    return restoredNodes;
+                });
                 if (thumbAbort.signal.aborted) return;
                 setNodes((prev) => {
                     const byId = new Map(fullNodes.map((node) => [node.id, node]));
@@ -1059,9 +1114,15 @@ function AtelierCanvasPage() {
                     );
                 },
                 thumbAbort.signal,
-            );
+            ).catch((error) => {
+                console.warn("[canvas] 缩略图后台补齐失败，忽略", error);
+            });
         };
-        void restore();
+        void restore().catch((error) => {
+            // 最后一道保险：restore 自身出任何意外都必须把画布放出来，不能停在骨架屏。
+            console.error("[canvas] 项目恢复失败，强制放行画布", error);
+            setProjectLoaded(true);
+        });
         return () => thumbAbort.abort();
     }, [hydrated, navigate, openProject, projectId]);
 

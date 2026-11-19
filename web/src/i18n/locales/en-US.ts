@@ -1597,6 +1597,11 @@ export default {
             stop: "Cancel",
             generate: "Generate",
         },
+        refreshShell: {
+            loading: "Restoring the canvas… (bigger projects take longer on first open)",
+            stuck: "The canvas has not come back yet. Usually this means local storage (IndexedDB) is held by another canvas tab — close the other canvas tabs, then reload below.",
+            reload: "Reload",
+        },
         projectPage: {
             stopTitle: "Stop generation?",
             stopDescription: "The current request will be interrupted. Completed results will be kept.",
