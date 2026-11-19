@@ -1116,7 +1116,7 @@ function AtelierCanvasPage() {
                 if (thumbAbort.signal.aborted) return;
                 setNodes((prev) => {
                     const byId = new Map(fullNodes.map((node) => [node.id, node]));
-                    return prev.map((node) => {
+                    const merged = prev.map((node) => {
                         const next = byId.get(node.id);
                         if (!next?.metadata?.images?.length) return node;
                         return {
@@ -1129,6 +1129,9 @@ function AtelierCanvasPage() {
                             },
                         };
                     });
+                    // 🔴 历史版本补全也走完了：还挂着「恢复中」的单图说明字节真的读不出来，
+                    // 到点必须判 error，否则那张历史版本会永久显示「正在读取本地文件」。
+                    return settleRestoringMedia(merged);
                 });
             })();
 

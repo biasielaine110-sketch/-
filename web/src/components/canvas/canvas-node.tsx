@@ -1956,9 +1956,14 @@ function ImageContent({
     // After refresh, full blob may fail to hydrate while thumb still resolves — prefer any visible source.
     const displaySrc = primaryContent || primaryThumb || "";
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-    const isGenerating = node.metadata?.status === "loading" || images.some((image) => image.status === "loading");
+    // 🔴 `loading` 在本项目有两种含义：真在跑生成任务 / 刷新后从本地库读字节。
+    // 历史版本（`images[]`）里单张死 blob 也会被标成 loading —— 那种带 `mediaRestoring`，
+    // 不能算「生成中」，否则主图好好的老节点会一直显示「生成中 N 秒」（2026-11-19 二次反馈）。
+    const nodeLoading = node.metadata?.status === "loading";
+    const imagesGenerating = images.some((image) => image.status === "loading" && !image.mediaRestoring);
+    const isGenerating = nodeLoading || imagesGenerating;
     // 刷新后「从本地库读字节」复用 loading 状态，但不是生成任务：不显示秒数、不给取消按钮。
-    const restoring = Boolean(node.metadata?.mediaRestoring);
+    const restoring = Boolean(node.metadata?.mediaRestoring) || (!nodeLoading && !imagesGenerating && images.some((image) => image.status === "loading"));
     const canCancel = Boolean(onCancelGeneration) && isGenerating && !restoring;
     const queueLabel = useNativeVideoQueueLabel(node.id, node.metadata);
     const elapsed = useElapsedSeconds(isGenerating && !restoring, node.id);
@@ -2064,6 +2069,7 @@ function ImageContent({
                             primaryImage || {
                                 id: "__missing__",
                                 status: node.metadata?.status === "loading" ? "loading" : "error",
+                                mediaRestoring: node.metadata?.mediaRestoring,
                                 content: "",
                                 storageKey: "",
                                 naturalWidth: 0,
@@ -2077,7 +2083,7 @@ function ImageContent({
                     />
                 )}
             </div>
-            {isGenerating && (isVideo || queueLabel) ? (
+            {(isGenerating || restoring) && (isVideo || queueLabel) ? (
                 <div
                     className="pointer-events-none absolute left-1/2 top-2.5 z-40 -translate-x-1/2 rounded-full border px-3 py-1 text-xs font-semibold shadow-[0_6px_18px_rgba(28,25,23,.16)] backdrop-blur-md"
                     style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
@@ -2329,8 +2335,8 @@ function ImageSlotStatus({
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
     const queueLabel = useNativeVideoQueueLabel(nodeId || "", metadata);
-    // 与 LoadingContent 同一口径：恢复本地字节 ≠ 生成任务。
-    const restoring = Boolean(metadata?.mediaRestoring);
+    // 与 LoadingContent 同一口径：恢复本地字节 ≠ 生成任务。单图自己也带 `mediaRestoring`。
+    const restoring = Boolean(metadata?.mediaRestoring) || Boolean(image?.mediaRestoring);
     const isLoading = image?.status === "loading";
     const elapsed = useElapsedSeconds(isLoading && !restoring, nodeId);
     const failed = image?.status === "error" || (!isLoading && !image?.content && !image?.thumbnailContent);

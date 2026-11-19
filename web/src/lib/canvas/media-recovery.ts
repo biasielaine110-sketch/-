@@ -80,6 +80,8 @@ export async function recoverNodeMedia(node: CanvasNodeData): Promise<CanvasNode
                     content: url,
                     storageKey: image.storageKey || key,
                     status: "success" as const,
+                    // 字节已经读回来了，单图的「恢复中」标记必须撤掉，否则历史版本会永远转圈。
+                    mediaRestoring: undefined,
                     errorDetails: undefined,
                 };
             }),
@@ -104,6 +106,7 @@ export async function recoverNodeMedia(node: CanvasNodeData): Promise<CanvasNode
                 thumbnailStorageKey: thumbnailStorageKey || meta.thumbnailStorageKey,
                 images,
                 status: "success" as const,
+                mediaRestoring: undefined,
                 errorDetails: undefined,
             },
         };
@@ -119,6 +122,7 @@ export async function recoverNodeMedia(node: CanvasNodeData): Promise<CanvasNode
                 ...meta,
                 content: url,
                 status: "success" as const,
+                mediaRestoring: undefined,
                 errorDetails: undefined,
             },
         };

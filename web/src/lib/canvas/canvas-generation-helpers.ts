@@ -85,13 +85,16 @@ function recoverableMediaDetail(permissionLost: boolean) {
 }
 
 /** After refresh, dead blob: URLs + missing IndexedDB leave empty content — mark as error instead of fake "generating". */
-function markMissingMedia<T extends { status?: CanvasNodeImage["status"]; content?: string; thumbnailContent?: string; storageKey?: string; thumbnailStorageKey?: string; errorDetails?: string }>(image: T, detail: string): T {
+function markMissingMedia<T extends { status?: CanvasNodeImage["status"]; mediaRestoring?: boolean; content?: string; thumbnailContent?: string; storageKey?: string; thumbnailStorageKey?: string; errorDetails?: string }>(image: T, detail: string): T {
     const visible = Boolean(image.content || image.thumbnailContent);
     if (visible) {
         // Media is readable again (e.g. the local folder was re-authorized) — drop the stale error so
         // the node repaints instead of keeping the "missing media" overlay forever.
-        if (image.status === "error" && isRecoverableMediaError(image.errorDetails)) {
-            return { ...image, status: "success" as const, errorDetails: undefined };
+        const staleError = image.status === "error" && isRecoverableMediaError(image.errorDetails);
+        // 单图「恢复中」读到内容就翻回 success —— 否则它会一直挂着 loading（= 被 UI 当成生成中）。
+        const wasRestoring = image.status === "loading" && Boolean(image.mediaRestoring);
+        if (staleError || wasRestoring) {
+            return { ...image, status: "success" as const, mediaRestoring: undefined, errorDetails: undefined };
         }
         return image;
     }
@@ -295,7 +298,9 @@ export function markRestoringMedia(nodes: CanvasNodeData[]): CanvasNodeData[] {
                       ...image,
                       content: dead ? "" : image.content,
                       thumbnailContent: deadThumb ? "" : image.thumbnailContent,
-                      ...(dead && (image.storageKey || image.thumbnailStorageKey) ? { status: "loading" as const } : {}),
+                      // 🔴 单图也要带 `mediaRestoring`：只写 `loading` 的话，UI 会把这张历史版本算成
+                      // 「生成中 N 秒」，而它既不是生成任务、也没有任何地方会把它收口（2026-11-19 二次反馈）。
+                      ...(dead && (image.storageKey || image.thumbnailStorageKey) ? { status: "loading" as const, mediaRestoring: true as const } : {}),
                   };
               })
             : images;
@@ -326,13 +331,19 @@ export function markRestoringMedia(nodes: CanvasNodeData[]): CanvasNodeData[] {
 export function clearRestoringMedia(nodes: CanvasNodeData[]): CanvasNodeData[] {
     return nodes.map((node) => {
         const meta = node.metadata;
-        if (!meta || meta.status !== "loading") return node;
+        if (!meta) return node;
         const images = meta.images || [];
-        const visible = Boolean(meta.content || meta.thumbnailContent) || images.some((image) => Boolean(image.content || image.thumbnailContent));
-        if (!visible) return node;
+        // 🔴 单图收口必须先做，而且**不看节点级状态**：主图正常、只有某个历史版本的 blob 死了
+        // 这种情况，节点级根本没有 `loading`，老实现直接 return，那张图就永久转圈。
         const imagesSettled = images.map((image) =>
-            image.status === "loading" && (image.content || image.thumbnailContent) ? { ...image, status: "success" as const, errorDetails: undefined } : image,
+            image.status === "loading" && (image.content || image.thumbnailContent) ? { ...image, status: "success" as const, mediaRestoring: undefined, errorDetails: undefined } : image,
         );
+        const imagesChanged = imagesSettled.some((image, index) => image !== images[index]);
+        const withImages = (target: CanvasNodeData): CanvasNodeData =>
+            imagesChanged ? { ...target, metadata: { ...target.metadata, images: imagesSettled } } : target;
+        if (meta.status !== "loading") return withImages(node);
+        const visible = Boolean(meta.content || meta.thumbnailContent) || imagesSettled.some((image) => Boolean(image.content || image.thumbnailContent));
+        if (!visible) return withImages(node);
         return {
             ...node,
             metadata: {
@@ -341,7 +352,7 @@ export function clearRestoringMedia(nodes: CanvasNodeData[]): CanvasNodeData[] {
                 errorDetails: undefined,
                 // 读出来了就撤掉「恢复中」，别让节点一边显示着视频一边转圈。
                 mediaRestoring: undefined,
-                ...(imagesSettled.some((image, index) => image !== images[index]) ? { images: imagesSettled } : {}),
+                ...(imagesChanged ? { images: imagesSettled } : {}),
             },
         };
     });
@@ -351,19 +362,35 @@ export function clearRestoringMedia(nodes: CanvasNodeData[]): CanvasNodeData[] {
  * 收口：把「恢复中」却始终没恢复出内容的节点判成 error，避免永久转圈。
  *
  * 只在媒体恢复收尾 / 兜底计时器里调用；调用方负责把 detail 传成 mediaMissing 一类的文案。
+ * 单图（历史版本）同样在这里判死 —— 否则一张死 blob 的老版本会让节点永远显示「正在读取本地文件」。
  */
 export function settleRestoringMedia(nodes: CanvasNodeData[], detail?: string): CanvasNodeData[] {
     const fallback = detail || i18n.t("canvas.generation.mediaMissing");
     return nodes.map((node) => {
         const meta = node.metadata;
-        if (!meta || meta.status !== "loading") return node;
+        if (!meta) return node;
         const images = meta.images || [];
-        const visible = Boolean(meta.content || meta.thumbnailContent) || images.some((image) => Boolean(image.content || image.thumbnailContent));
         const imagesSettled = images.map((image) =>
-            image.status === "loading" && !image.content && !image.thumbnailContent ? { ...image, status: "error" as const, errorDetails: image.errorDetails || fallback } : image,
+            image.status === "loading" && !image.content && !image.thumbnailContent && image.mediaRestoring
+                ? { ...image, status: "error" as const, mediaRestoring: undefined, errorDetails: image.errorDetails || fallback }
+                : image,
         );
         const imagesChanged = imagesSettled.some((image, index) => image !== images[index]);
-        if (visible) return imagesChanged ? { ...node, metadata: { ...meta, mediaRestoring: undefined, images: imagesSettled } } : { ...node, metadata: { ...meta, mediaRestoring: undefined } };
+        if (meta.status !== "loading") {
+            // 节点本身不在恢复态，但历史版本里可能还有单图恢复中：到点没内容就判成 error（不生成、不扣费）。
+            return imagesChanged ? { ...node, metadata: { ...meta, images: imagesSettled } } : node;
+        }
+        const visible = Boolean(meta.content || meta.thumbnailContent) || imagesSettled.some((image) => Boolean(image.content || image.thumbnailContent));
+        if (visible) {
+            return {
+                ...node,
+                metadata: {
+                    ...meta,
+                    mediaRestoring: undefined,
+                    ...(imagesChanged ? { images: imagesSettled } : {}),
+                },
+            };
+        }
         return {
             ...node,
             metadata: {
@@ -409,12 +436,15 @@ export function applyHydratedMedia(nodes: CanvasNodeData[], hydrated: CanvasNode
                 ? node.metadata.images.map((image) => {
                       const match = images.find((item) => item.id === image.id);
                       if (!match) return image;
+                      const revived = Boolean(match.content || match.thumbnailContent);
                       return {
                           ...image,
                           content: match.content || image.content,
                           thumbnailContent: match.thumbnailContent || image.thumbnailContent,
-                          status: match.status || image.status,
-                          errorDetails: match.errorDetails,
+                          // 单图读回字节后要一并撤掉恢复态，否则这张历史版本会永远转圈。
+                          status: revived ? ("success" as const) : match.status || image.status,
+                          mediaRestoring: revived ? undefined : match.mediaRestoring ?? image.mediaRestoring,
+                          errorDetails: revived ? undefined : match.errorDetails,
                       };
                   })
                 : node.metadata?.images;
@@ -592,17 +622,23 @@ export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
         const images = node.metadata?.images;
         const hasLoadingSlot = images?.some((image) => image.status === "loading");
         const nodeLoading = node.metadata?.status === "loading";
-        if (!nodeLoading && !hasLoadingSlot) return node;
+        // 上一轮会话留下的「恢复中」标记也一并丢掉：它不是持久状态，新一轮恢复由
+        // `markRestoringMedia` 重新判。留着会让节点一打开就挂着「正在读取本地文件」。
+        const staleRestoring = Boolean(node.metadata?.mediaRestoring) || Boolean(images?.some((image) => image.mediaRestoring));
+        if (!nodeLoading && !hasLoadingSlot && !staleRestoring) return node;
         return {
             ...node,
             metadata: {
                 ...node.metadata,
                 status: nodeLoading ? ("error" as const) : node.metadata?.status,
                 errorDetails: nodeLoading ? i18n.t("canvas.generation.interrupted") : node.metadata?.errorDetails,
+                mediaRestoring: undefined,
                 images: images?.map((image) =>
                     image.status === "loading"
-                        ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") }
-                        : image,
+                        ? { ...image, status: "error" as const, mediaRestoring: undefined, errorDetails: i18n.t("canvas.generation.interrupted") }
+                        : image.mediaRestoring
+                          ? { ...image, mediaRestoring: undefined }
+                          : image,
                 ),
             },
         };

@@ -45,6 +45,15 @@ export type CanvasNodeImage = {
     id: string;
     status: CanvasNodeStatus;
     errorDetails?: string;
+    /**
+     * 单张历史版本「正在从本地库读字节」—— 刷新后 `blob:` URL 失效时的过渡态。
+     *
+     * 🔴 与节点级 `metadata.mediaRestoring` 同一口径，但作用在 `images[]` 的单张图上：
+     * 主图好好的、只是某个历史版本的 `blob:` 死了，`status` 也会被写成 `loading`；
+     * 不带这个标记的话，UI 会把它算成「生成中」（还会显示秒数），而这条路径没人收口，
+     * 于是一刷新就永久转圈（2026-11-19 第二次反馈）。
+     */
+    mediaRestoring?: boolean;
     content: string;
     storageKey: string;
     /** Optional on-canvas preview; full `content` stays for export/edit. */
