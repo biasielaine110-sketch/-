@@ -341,6 +341,11 @@ function normalizeImageApiErrorMessage(message: string, model?: string) {
     if (/model_not_found|model[^\n]{0,40}(not\s*found|does\s*not\s*exist)/i.test(message)) {
         return apiText("modelNotFoundOnProvider", { model: model || "?" });
     }
+    // APIMart / new-api 站点的计费前置校验：模型在价格表里查不到，请求根本没发出去，
+    // 一张图都没生成、不产生费用。把原始返回码说清楚，别让人以为是画布参数写错了。
+    if (isModelPriceNotConfigured(message)) {
+        return apiText("modelPriceNotConfigured", { model: model || "?" });
+    }
     return message;
 }
 
@@ -839,6 +844,17 @@ function isApimartGptImage25Model(model: string) {
 }
 
 /**
+ * APIMart GPT-Image-2（`gpt-image-2` / 别名 `gpt-image-2-ext`）：文档
+ * docs.apimart.ai/cn/api-reference/images/gpt-image-2/generation —— 文生图/图生图都是同一个
+ * 异步 JSON 任务 `POST /images/generations`，参考图走 `image_urls`（最多 15 张，URL 与
+ * base64 可混填），`size` 是比例、`resolution` 是小写 `1k/2k/4k`。
+ * 2.5（flare/sunburst）走自己的分支，别被这里吞掉。
+ */
+function isApimartGptImage2Model(model: string) {
+    return /^gpt-image-2(?:$|-)/i.test(model.trim());
+}
+
+/**
  * APIMart Nano-Banana-2-Lite (incl. relay suffixes like -ext). Maps to Gemini 3.1 Flash Lite Image,
  * served via POST /v1/images/generations (async task) — NOT /chat/completions. Fixed at 1K.
  */
@@ -872,15 +888,18 @@ async function requestApimartGptImage(config: AiConfig, prompt: string, referenc
     };
     if (references.length) {
         const urls: string[] = [];
-        for (const image of references.slice(0, 16)) {
+        // APIMart 图生图最多 15 张参考图，超过直接回 `image_urls exceeds max 15`。
+        for (const image of references.slice(0, 15)) {
             urls.push(await resolveFetchableReferenceUrl(config, image, Math.max(1, references.length), { ...options, allowProviderUpload: true }));
         }
         if (!urls.length) throw new Error(apiText("referenceImageReadFailed"));
         body.image_urls = urls;
-        // Image-to-image: omit size so the service derives dimensions from the references.
-        delete body.size;
+        // GPT-Image-2 文档写得很明确：「不传 size 时输出分辨率 = 输入图分辨率；传 size 则强制按指定
+        // 尺寸出图」——画布选了画幅就必须传 size，否则出图跟着参考图比例走。其它族（2.5 / seedream）
+        // 保持原来的「不传 size，由服务端按参考图决定」。
+        if (!isApimartGptImage2Model(config.model)) delete body.size;
     }
-    const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
+    const response = await postApimartImageJson<ImageApiResponse>(config, "/images/generations", body, options);
     return resolveImageApiResponse(config, response.data, options);
 }
 
@@ -2563,6 +2582,49 @@ async function postImageForm<T>(config: AiConfig, path: string, data: FormData, 
     );
 }
 
+/**
+ * APIMart 是 new-api 系网关：价格表按**请求里的模型字符串**精确查，别名不会自动归一。
+ * 文档（docs.apimart.ai/cn/api-reference/images/gpt-image-2/generation）写 `gpt-image-2` 与
+ * `gpt-image-2-ext` 等价、可互换，但站点往往只给其中一个配了价格，另一个直接回：
+ * `model `gpt-image-2` ratio or price is not configured … (model_price_error)`。
+ *
+ * 这条错误发生在**提交**阶段（billing 前置校验），一张图都没生成、不产生任何费用，
+ * 所以换一次等价别名重提是零成本兜底；换了还不行才把错误交给用户看。
+ */
+function isModelPriceNotConfigured(message: string) {
+    return /model_price_error|ratio\s+or\s+price\s+is\s+not\s+configured/i.test(String(message || ""));
+}
+
+/** 读上游原始报错文本（不走 `readAxiosError` 的降级文案，避免把关键词吞掉）。 */
+function readRawUpstreamMessage(error: unknown) {
+    if (!axios.isAxiosError(error)) return "";
+    const data = error.response?.data as unknown;
+    const fromBody = typeof data === "string" ? data : readApiErrorMessage(data);
+    return fromBody || error.message || "";
+}
+
+/** `gpt-image-2` ⇄ `gpt-image-2-ext`；其它模型没有等价别名，返回空串。 */
+function apimartModelAlias(model: string): string {
+    const value = String(model || "").trim();
+    if (!/^gpt-image-2(?:$|-)/i.test(value)) return "";
+    return /-ext$/i.test(value) ? value.replace(/-ext$/i, "") : `${value}-ext`;
+}
+
+/** APIMart 生图 JSON 提交：撞上「模型没配价格」时自动换等价别名重提一次。 */
+async function postApimartImageJson<T>(config: AiConfig, path: string, body: Record<string, unknown>, options?: RequestOptions) {
+    try {
+        return await postImageJson<T>(config, path, body, options);
+    } catch (error) {
+        if (!isModelPriceNotConfigured(readRawUpstreamMessage(error))) throw error;
+        const alias = apimartModelAlias(String(body.model || config.model || ""));
+        if (!alias) throw error;
+        console.warn(
+            `[image] APIMart 计费表没有 ${String(body.model)}，改用等价别名 ${alias} 重提（提交阶段被拒，未产生费用）`,
+        );
+        return await postImageJson<T>(config, path, { ...body, model: alias }, options);
+    }
+}
+
 function aiHeaders(config: AiConfig, contentType?: string) {
     return {
         Authorization: `Bearer ${config.apiKey}`,
@@ -3492,16 +3554,16 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     }
     const imageParams = resolveOpenAiImageParams(requestConfig, n);
     try {
-        const response = await postImageJson<ImageApiResponse>(
-            requestConfig,
-            "/images/generations",
-            {
-                model: requestConfig.model,
-                prompt: withSystemPrompt(requestConfig, prompt),
-                ...imageParams,
-            },
-            options,
-        );
+        const body = {
+            model: requestConfig.model,
+            prompt: withSystemPrompt(requestConfig, prompt),
+            ...imageParams,
+        };
+        // APIMart 走 `postApimartImageJson`：撞上「模型没配价格」时自动换等价别名重提一次
+        // （gpt-image-2 ⇄ gpt-image-2-ext，提交阶段被拒、不产生费用）。
+        const response = isApimartBaseUrl(requestConfig.baseUrl)
+            ? await postApimartImageJson<ImageApiResponse>(requestConfig, "/images/generations", body, options)
+            : await postImageJson<ImageApiResponse>(requestConfig, "/images/generations", body, options);
         const images = await resolveImageApiResponse(requestConfig, response.data, options);
         return images;
     } catch (error) {
@@ -3660,6 +3722,16 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     // APIMart GPT-Image-2.5 (flare/sunburst) rejects multipart /images/edits with 400 — refs go
     // as public `image_urls` on the async JSON /images/generations task instead.
     if (isApimartBaseUrl(requestConfig.baseUrl) && isApimartGptImage25Model(requestConfig.model) && !mask) {
+        try {
+            return await requestApimartGptImage(requestConfig, requestPrompt, references, n, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+    // APIMart GPT-Image-2（`gpt-image-2` / 别名 `gpt-image-2-ext`）：图生图同样是异步 JSON 任务 +
+    // `image_urls`（最多 15 张），不走 multipart /images/edits —— 那条路 APIMart 会忽略 `image`
+    // 字段（用户花了钱却拿到一张没参考过原图的图）或直接 400。
+    if (isApimartBaseUrl(requestConfig.baseUrl) && isApimartGptImage2Model(requestConfig.model) && !mask) {
         try {
             return await requestApimartGptImage(requestConfig, requestPrompt, references, n, options);
         } catch (error) {

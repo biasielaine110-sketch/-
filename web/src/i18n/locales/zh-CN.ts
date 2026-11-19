@@ -361,6 +361,8 @@ export default {
             "该模型只接受固定的几个尺寸（1024x1024 / 1024x768 / 1152x768 / 1280x720 / 720x1280 / 1344x576 等）。画布已按最接近的画幅自动换算，若仍失败请把节点的尺寸改成「自动」。当前模型：{{model}}",
         providerChannelFailed: "上游渠道暂时不可用（get_channel_failed）。请稍后重试，或换用 Gemini / GPT Image / Seedream 等模型。",
         modelNotFoundOnProvider: "当前渠道不支持该模型（model_not_found）：{{model}}。请确认模型名，或改用渠道已开通的模型。",
+        modelPriceNotConfigured:
+            "站点没给这个模型配价格（model_price_error）：{{model}} 在渠道的计费表里查不到，请求在计费校验这一步就被拒了 —— 没有生成任何图片，也不会扣费。已自动尝试过等价别名（gpt-image-2 ⇄ gpt-image-2-ext）；仍然失败请到该中转后台给模型配好价格 / 打开自用模式，或换一个渠道。",
         providerImageUploadFailed: "参考图上传到接口失败，无法进行图生图。请检查渠道是否支持 /v1/uploads/images，或稍后重试",
         providerImageUploadUnsupported: "当前渠道不支持 /v1/uploads/images（如 New API）。已尝试改用标准改图接口；若仍失败，请换支持参考图上传的渠道，或使用无参考图的文生图。",
         tempImageHostUnavailable: "临时图床（用来把本地参考图转成公网链接）当前不可用，无法提交带参考图的任务。请稍后重试，或改用已经是 https 链接的参考图。",

@@ -361,6 +361,8 @@ export default {
             "This model only accepts a fixed set of sizes (1024x1024 / 1024x768 / 1152x768 / 1280x720 / 720x1280 / 1344x576, etc.). The canvas auto-snaps to the closest aspect ratio; if it still fails, set the node size to \"auto\". Current model: {{model}}",
         providerChannelFailed: "Upstream channel is temporarily unavailable (get_channel_failed). Retry later, or switch to Gemini / GPT Image / Seedream.",
         modelNotFoundOnProvider: "This channel does not support the model (model_not_found): {{model}}. Check the model name or pick one enabled on the channel.",
+        modelPriceNotConfigured:
+            "The site has no price configured for this model (model_price_error): {{model}} is missing from the channel's billing table, so the request was rejected at the billing check — no image was generated and nothing was charged. We already retried the equivalent alias (gpt-image-2 ⇄ gpt-image-2-ext); if it still fails, configure a price for the model / enable self-use mode on that relay, or switch channels.",
         providerImageUploadFailed: "Failed to upload the reference image to the provider. Check that the channel supports /v1/uploads/images, then try again.",
         providerImageUploadUnsupported: "This channel does not support /v1/uploads/images (e.g. New API). Fell back to the standard image-edit endpoint; if it still fails, use a relay with image upload support or text-to-image without references.",
         tempImageHostUnavailable: "Temporary image hosts (used to turn local reference images into public links) are currently unavailable, so a task with reference images cannot be submitted. Try again later, or use a reference image that already has an https link.",
