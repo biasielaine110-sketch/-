@@ -60,6 +60,13 @@ export async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
 export type HydrateCanvasMediaOptions = {
     /** `fast` (default): primary + thumbs only — keeps refresh snappy. `full`: every history version. */
     mode?: "fast" | "full";
+    /**
+     * 每恢复完一个节点就回调一次（渐进首屏用）。
+     *
+     * 大项目全量 hydrate 要十几秒甚至更久，整批 `await` 会让画布一直空着；项目页因此先画出
+     * `markRestoringMedia()` 过的节点，再靠这个回调把媒体一个个贴回去。
+     */
+    onNode?: (node: CanvasNodeData) => void;
 };
 
 function isDeadBlobUrl(url?: string) {
@@ -225,13 +232,135 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
     // 只能让这一个节点先按原样渲染，绝不能连坐整批 —— 否则 `hydrateCanvasImages` 整体 reject，
     // 调用方（项目页 restore）就永远走不到 `setProjectLoaded(true)`，刷新后整块画布卡在骨架屏上。
     return Promise.all(
-        nodes.map((node) =>
-            hydrateNode(node).catch((error) => {
+        nodes.map(async (node) => {
+            const restored = await hydrateNode(node).catch((error) => {
                 console.warn("[canvas] 节点媒体恢复失败，先按原样渲染", node.id, error);
                 return node;
-            }),
-        ),
+            });
+            try {
+                options?.onNode?.(restored);
+            } catch {
+                // 回调异常绝不能影响恢复流程。
+            }
+            return restored;
+        }),
     );
+}
+
+/**
+ * 首屏放行前的「媒体待恢复」标记。
+ *
+ * 刷新后节点里存的 `blob:` URL 全部失效（`ERR_FILE_NOT_FOUND`），直接用原始数据渲染就是满屏破图 /
+ * 「媒体丢失」。所以放行前先做两件事：
+ *   ① 把失效的 `blob:` 内容清空，别让浏览器去请求一个已经死掉的 object URL；
+ *   ② 有 storageKey / thumbnailStorageKey（= 字节还在本地库，只是还没读出来）的节点标成 `loading`，
+ *      显示「恢复中」而不是「生成失败」。
+ * 真正的「字节没了」由 hydrate 里的 `markMissingMedia` 判成 error，这里不越权。
+ */
+export function markRestoringMedia(nodes: CanvasNodeData[]): CanvasNodeData[] {
+    return nodes.map((node) => {
+        const meta = node.metadata;
+        if (!meta) return node;
+        const isMediaNode =
+            node.type === CanvasNodeType.Image ||
+            node.type === CanvasNodeType.Video ||
+            node.type === CanvasNodeType.Audio ||
+            node.type === CanvasNodeType.Annotate;
+        if (!isMediaNode) return node;
+
+        const images = meta.images || [];
+        const hasLocalKeys = Boolean(meta.storageKey || meta.thumbnailStorageKey) || images.some((image) => Boolean(image.storageKey || image.thumbnailStorageKey));
+        const contentDead = isDeadBlobUrl(meta.content);
+        const thumbDead = isDeadBlobUrl(meta.thumbnailContent);
+        const imagesDead = images.some((image) => isDeadBlobUrl(image.content) || isDeadBlobUrl(image.thumbnailContent));
+        if (!contentDead && !thumbDead && !imagesDead) return node;
+
+        const content = contentDead ? "" : meta.content;
+        const thumbnailContent = thumbDead ? "" : meta.thumbnailContent;
+        const nextImages = imagesDead
+            ? images.map((image) => {
+                  const dead = isDeadBlobUrl(image.content);
+                  const deadThumb = isDeadBlobUrl(image.thumbnailContent);
+                  if (!dead && !deadThumb) return image;
+                  return {
+                      ...image,
+                      content: dead ? "" : image.content,
+                      thumbnailContent: deadThumb ? "" : image.thumbnailContent,
+                      ...(dead && (image.storageKey || image.thumbnailStorageKey) ? { status: "loading" as const } : {}),
+                  };
+              })
+            : images;
+
+        return {
+            ...node,
+            metadata: {
+                ...meta,
+                ...(contentDead ? { content } : {}),
+                ...(thumbDead ? { thumbnailContent } : {}),
+                ...(imagesDead ? { images: nextImages } : {}),
+                // 有 key 但读不出可见内容 = 正在恢复；没有 key 的老数据保持原状态。
+                ...(hasLocalKeys && !content && !thumbnailContent ? { status: "loading" as const } : {}),
+            },
+        };
+    });
+}
+
+/**
+ * 收口（正向）：媒体已经读出来了，就别再挂「恢复中」。
+ *
+ * `markRestoringMedia` 把待恢复节点标成 `loading`，但 hydrate 遇到「有内容 + status 还是 loading」
+ * 的节点会原样返回（`markMissingMedia` 只有 error 才改状态）。不在这里翻回来，节点就会一边显示着图、
+ * 一边永远转圈。
+ */
+export function clearRestoringMedia(nodes: CanvasNodeData[]): CanvasNodeData[] {
+    return nodes.map((node) => {
+        const meta = node.metadata;
+        if (!meta || meta.status !== "loading") return node;
+        const images = meta.images || [];
+        const visible = Boolean(meta.content || meta.thumbnailContent) || images.some((image) => Boolean(image.content || image.thumbnailContent));
+        if (!visible) return node;
+        const imagesSettled = images.map((image) =>
+            image.status === "loading" && (image.content || image.thumbnailContent) ? { ...image, status: "success" as const, errorDetails: undefined } : image,
+        );
+        return {
+            ...node,
+            metadata: {
+                ...meta,
+                status: "success" as const,
+                errorDetails: undefined,
+                ...(imagesSettled.some((image, index) => image !== images[index]) ? { images: imagesSettled } : {}),
+            },
+        };
+    });
+}
+
+/**
+ * 收口：把「恢复中」却始终没恢复出内容的节点判成 error，避免永久转圈。
+ *
+ * 只在媒体恢复收尾 / 兜底计时器里调用；调用方负责把 detail 传成 mediaMissing 一类的文案。
+ */
+export function settleRestoringMedia(nodes: CanvasNodeData[], detail?: string): CanvasNodeData[] {
+    const fallback = detail || i18n.t("canvas.generation.mediaMissing");
+    return nodes.map((node) => {
+        const meta = node.metadata;
+        if (!meta || meta.status !== "loading") return node;
+        const images = meta.images || [];
+        const visible = Boolean(meta.content || meta.thumbnailContent) || images.some((image) => Boolean(image.content || image.thumbnailContent));
+        const imagesSettled = images.map((image) =>
+            image.status === "loading" && !image.content && !image.thumbnailContent ? { ...image, status: "error" as const, errorDetails: image.errorDetails || fallback } : image,
+        );
+        const imagesChanged = imagesSettled.some((image, index) => image !== images[index]);
+        if (visible) return imagesChanged ? { ...node, metadata: { ...meta, images: imagesSettled } } : node;
+        return {
+            ...node,
+            metadata: {
+                ...meta,
+                status: "error" as const,
+                errorDetails: meta.errorDetails || fallback,
+                ...(images.length ? { images: imagesSettled } : {}),
+            },
+        };
+    });
 }
 
 /** Fill remaining history versions after first paint (video/audio/image batch). */

@@ -275,6 +275,7 @@ import {
     buildAngleLabel,
     buildAnglePrompt,
     buildGenerationConfig,
+    clearRestoringMedia,
     findRetrySourceNode,
     generationReferenceUrls,
     getGenerationCount,
@@ -286,8 +287,10 @@ import {
     imageExtension,
     isAudioFile,
     isGenerationCanceled,
+    markRestoringMedia,
     resetInterruptedGeneration,
     resolveMetadataReferences,
+    settleRestoringMedia,
     videoExtension,
 } from "@/lib/canvas/canvas-generation-helpers";
 import { buildDocxBlob, buildMarkdownBlob, isDocumentFile, readDocumentAsText, type TextExportFormat } from "@/lib/canvas/document-text";
@@ -387,13 +390,13 @@ const MAX_IMAGE_NODE_HISTORY = 24;
 const EPISODE_ASSET_LAUNCH_GAP_MS = 600;
 
 /**
- * 打开项目时「首屏媒体恢复」的硬上限。
+ * 打开项目时「媒体恢复」的收口上限。
  *
- * 刷新后要先 hydrate 所有节点的主媒体才 `setProjectLoaded(true)`，这中间页面只有刷新骨架屏。
- * 历史上这段一旦 reject / 卡住，整块画布就永久停在骨架屏（用户看到的就是「节点全变灰空白」）。
- * 超过这个时长先放行：节点按原始数据渲染，剩下的历史版本交给 `hydrateCanvasMediaDeferred` 后台补。
+ * 首屏已经不再等全量恢复（先画「恢复中」的节点，再逐节点贴回媒体），这个常量只决定：
+ * 一直在转圈、始终没恢复出内容的节点，多久之后收成 error。真读回来时合并会把状态改回 success，
+ * 所以这里宁长勿短 —— 短了会把只是慢的大项目误判成「媒体丢失」。
  */
-const PROJECT_HYDRATE_TIMEOUT_MS = 12_000;
+const PROJECT_MEDIA_RESTORE_SETTLE_MS = 60_000;
 
 /**
  * 浮层（弹窗 / 下拉 / 选择器）里的 mousedown 是否应该放行给浮层自己处理。
@@ -976,37 +979,16 @@ function AtelierCanvasPage() {
             // Fast hydrate: primary media only âdo not block first paint on every history blob.
             // `widenLegacyScriptNodes`：老画布里的脚本节点还停在旧默认宽 760（配置态挤成三行），
             // 一次性加宽到 1520；有下游紧贴右侧时不动，避免盖住铺链路出来的视频节点。
-            // 🔴 这一段是「刷新后画布能不能出来」的唯一闸门：任何异常 / 卡死都会让
-            // `setProjectLoaded(true)` 永远不执行，页面永久停在刷新骨架屏（用户感知是「节点内容变灰/空白」）。
-            // 三重兜底：单节点失败已在 hydrate 内部隔离、整批失败退回原始节点、整体超时也先放行。
-            const baseNodes = resetInterruptedGeneration(project.nodes);
-            let hydrateTimer = 0;
-            let hydrateSettled = false;
-            const hydrateTask = hydrateCanvasImages(baseNodes, { mode: "fast" })
-                .catch((error) => {
-                    console.warn("[canvas] 项目媒体恢复失败，先用原始节点渲染", error);
-                    return baseNodes;
-                })
-                .finally(() => {
-                    hydrateSettled = true;
-                });
-            const hydrated = await Promise.race([
-                hydrateTask,
-                new Promise<CanvasNodeData[]>((resolve) => {
-                    hydrateTimer = window.setTimeout(() => {
-                        console.warn("[canvas] 媒体恢复超时，先放行画布");
-                        resolve(baseNodes);
-                    }, PROJECT_HYDRATE_TIMEOUT_MS);
-                }),
-            ]);
-            if (hydrateTimer) window.clearTimeout(hydrateTimer);
-            if (thumbAbort.signal.aborted) return;
-            const restoredNodes = widenLegacyScriptNodes(
-                hydrated.map((node) =>
+            // 🔴 首屏**不等**全量媒体恢复：大项目那一步要十几秒以上，等它画布就一直空着（用户看到的是骨架屏）。
+            // 也不能到点就把原始节点直接画出来 —— 里面的 `blob:` URL 刷新后已经死了，画出来就是满屏
+            // `ERR_FILE_NOT_FOUND` + 破图。现在的口径：先画「死 blob 已清空、媒体标成恢复中」的节点，
+            // 再每恢复完一个节点就贴回去（见下方 onNode）。
+            const restoredBase = widenLegacyScriptNodes(
+                markRestoringMedia(resetInterruptedGeneration(project.nodes)).map((node) =>
                     node.type === CanvasNodeType.Chat && (node.height === 520 || node.height === 1040 || node.width === 420) ? { ...node, width: 840, height: 1387 } : node.type === CanvasNodeType.Text && node.height === 240 ? { ...node, height: 480 } : node,
                 ),
             );
-            setNodes(restoredNodes);
+            setNodes(restoredBase);
             setConnections(project.connections);
             setChatSessions(project.chatSessions || []);
             setActiveChatId(project.activeChatId || null);
@@ -1019,7 +1001,7 @@ function AtelierCanvasPage() {
                 historyCommitTimerRef.current = null;
             }
             lastHistoryRef.current = {
-                nodes: restoredNodes,
+                nodes: restoredBase,
                 connections: project.connections,
                 chatSessions: project.chatSessions || [],
                 activeChatId: project.activeChatId || null,
@@ -1029,19 +1011,43 @@ function AtelierCanvasPage() {
             setHistoryState({ canUndo: false, canRedo: false });
             setProjectLoaded(true);
 
-            // 超时放行的情况：晚到的媒体结果不能丢，否则那一批图会一直空着。等它回来再按媒体字段合并。
-            if (!hydrateSettled) {
-                void hydrateTask
-                    .then((late) => {
-                        if (thumbAbort.signal.aborted) return;
-                        setNodes((prev) => applyHydratedMedia(prev, late));
-                        if (lastHistoryRef.current) {
-                            lastHistoryRef.current = { ...lastHistoryRef.current, nodes: applyHydratedMedia(lastHistoryRef.current.nodes, late) };
-                        }
-                    })
-                    .catch((error) => {
-                        console.warn("[canvas] 迟到的媒体恢复结果合并失败，忽略", error);
-                    });
+            // 渐进恢复：每恢复完一个节点贴一次（120ms 合批，几百个节点也不会把 setState 打爆）。
+            let flushTimer = 0;
+            const pendingMedia = new Map<string, CanvasNodeData>();
+            const flushMedia = () => {
+                flushTimer = 0;
+                if (pendingMedia.size === 0) return;
+                const batch = [...pendingMedia.values()];
+                pendingMedia.clear();
+                if (thumbAbort.signal.aborted) return;
+                setNodes((prev) => clearRestoringMedia(applyHydratedMedia(prev, batch)));
+            };
+            // 兜底：迟迟没恢复出内容的节点到点收成 error，别让「恢复中」永久转圈；
+            // 之后真读回来时下面的合并会把状态改回 success。
+            const settleTimer = window.setTimeout(() => {
+                if (thumbAbort.signal.aborted) return;
+                setNodes((prev) => settleRestoringMedia(prev));
+            }, PROJECT_MEDIA_RESTORE_SETTLE_MS);
+
+            const restoredNodes = await hydrateCanvasImages(restoredBase, {
+                mode: "fast",
+                onNode: (node) => {
+                    if (thumbAbort.signal.aborted) return;
+                    pendingMedia.set(node.id, node);
+                    if (!flushTimer) flushTimer = window.setTimeout(flushMedia, 120);
+                },
+            }).catch((error) => {
+                console.warn("[canvas] 项目媒体恢复失败，先保留原始节点", error);
+                return restoredBase;
+            });
+            window.clearTimeout(settleTimer);
+            if (flushTimer) window.clearTimeout(flushTimer);
+            flushTimer = 0;
+            if (thumbAbort.signal.aborted) return;
+            flushMedia();
+            setNodes((prev) => settleRestoringMedia(clearRestoringMedia(applyHydratedMedia(prev, restoredNodes))));
+            if (lastHistoryRef.current) {
+                lastHistoryRef.current = { ...lastHistoryRef.current, nodes: settleRestoringMedia(clearRestoringMedia(applyHydratedMedia(lastHistoryRef.current.nodes, restoredNodes))) };
             }
 
             // Background: chat image refs + remaining video/image history versions.
