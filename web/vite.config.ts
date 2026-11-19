@@ -228,12 +228,40 @@ function readRequestBody(req: IncomingMessage): Promise<Buffer | undefined> {
     });
 }
 
+/**
+ * 拆包口径（治「空画布打开也慢」）。
+ *
+ * 之前一个 `index-*.js` 5.7MB 把 antd / pro-components / three / mediabunny / CodeMirror
+ * 和我们自己的代码全揉在一起，后果有两个：
+ *   ① 首屏必须**下完 + 解析完** 5.7MB 才能画第一帧（空项目也一样，节点多少完全不影响）；
+ *   ② 每次部署 `index` 的 hash 都变 —— 哪怕只改一行提示词，用户也得把 5.7MB 全部重下。
+ * 拆成「三方库 × 稳定 hash + 我们自己的 app chunk」后，部署只让 app chunk 换名字，
+ * 三方库走浏览器缓存；同时几个大库能并行下载。
+ *
+ * ⚠️ 只按**包名**切，不按文件切，避免把同一个库撕到两个 chunk 里造成循环依赖 / TDZ。
+ */
+function manualChunks(id: string) {
+    if (!id.includes("node_modules")) return;
+    if (/node_modules[\\/](react|react-dom|scheduler|react-router|react-router-dom)[\\/]/.test(id)) return "vendor-react";
+    if (/node_modules[\\/](antd|@ant-design|@rc-component|rc-[^\\/]+|dayjs)[\\/]/.test(id)) return "vendor-antd";
+    if (/node_modules[\\/]three[\\/]/.test(id)) return "vendor-three";
+    if (/node_modules[\\/]mediabunny[\\/]/.test(id)) return "vendor-media";
+    if (/node_modules[\\/](@codemirror|@lezer|@uiw|codemirror)[\\/]/.test(id)) return "vendor-editor";
+    if (/node_modules[\\/](streamdown|react-markdown|remark[^\\/]*|rehype[^\\/]*|micromark[^\\/]*|mdast[^\\/]*|hast[^\\/]*|unified|unist[^\\/]*)[\\/]/.test(id)) return "vendor-markdown";
+    return "vendor";
+}
+
 export default defineConfig({
     base: process.env.VITE_BASE || "/",
     plugins: [react(), apiProxyPlugin(), canvasBridgePlugin(), mioraQueuePlugin()],
     resolve: {
         alias: {
             "@": resolve(webDir, "src"),
+        },
+    },
+    build: {
+        rollupOptions: {
+            output: { manualChunks },
         },
     },
 });

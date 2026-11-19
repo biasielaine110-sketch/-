@@ -3,7 +3,7 @@ import { Dropdown, type MenuProps } from "antd";
 import { BookMarked, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { ConfigPasswordModal } from "@/components/layout/app-config-modal";
+import { ConfigPasswordModal } from "@/components/layout/config-password-modal";
 import { isTextPromptEnabled } from "@/constant/text-prompt-library";
 import { TEXT_PROMPT_GATE_ID, isGateUnlocked } from "@/lib/gate-unlock";
 import { useConfigStore, type TextPromptEntry } from "@/stores/use-config-store";

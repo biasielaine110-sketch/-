@@ -41,10 +41,18 @@ let queuedPersistState: PersistedCanvasState | null = null;
 
 const canvasStorage: PersistStorage<CanvasStore> = {
     getItem: async (name) => {
+        const startedAt = Date.now();
         const value = await localForageStorage.getItem(name);
         if (!value) return null;
         const parsed = JSON.parse(value) as StorageValue<CanvasStore>;
         queuedPersistState = parsed.state as PersistedCanvasState;
+        // 启动取证：整站第一次画出来的前置条件是「整个 projects 数组」读完 + parse 完。
+        // 这条日志只在大库时打（>1MB），用来判断「空画布也慢」到底是包大还是本地库大。
+        const mb = value.length / 1024 / 1024;
+        if (mb > 1) {
+            const projects = (parsed.state as PersistedCanvasState)?.projects?.length || 0;
+            console.info(`[canvas] 本地库载入 ${mb.toFixed(2)}MB / ${projects} 个项目 / ${Date.now() - startedAt}ms`);
+        }
         return parsed;
     },
     setItem: (name, value) => {
@@ -54,7 +62,13 @@ const canvasStorage: PersistStorage<CanvasStore> = {
         if (saveTimer) clearTimeout(saveTimer);
         saveTimer = setTimeout(() => {
             saveTimer = null;
-            void localForageStorage.setItem(name, JSON.stringify(value));
+            // 写盘是**同步 JSON.stringify 整个 projects 数组**，库大时会直接卡主线程（拖节点一顿一顿的）。
+            // 超过 150ms 打一条，方便判断要不要把存储改成「按项目分 key」。
+            const startedAt = Date.now();
+            const payload = JSON.stringify(value);
+            const cost = Date.now() - startedAt;
+            if (cost > 150) console.warn(`[canvas] 本地库写盘 ${(payload.length / 1048576).toFixed(2)}MB 耗时 ${cost}ms`);
+            void localForageStorage.setItem(name, payload);
         }, 400);
     },
     removeItem: (name) => localForageStorage.removeItem(name),

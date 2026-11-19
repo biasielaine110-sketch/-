@@ -9,6 +9,9 @@ import { ACCESS_GATE_PASSWORD } from "@/lib/access-gate";
 /** 打开配置前的固定口令（仅前端门禁，防误触/随手打开）。站点访问密码与它同源，见 `lib/access-gate.ts`。 */
 export const CONFIG_GATE_PASSWORD = ACCESS_GATE_PASSWORD;
 
+// 口令弹窗单独成模块（见 config-password-modal.tsx）——画布那侧只引它，别再被拽进整块配置面板。
+import { ConfigPasswordModal } from "@/components/layout/config-password-modal";
+
 import { ModelPicker } from "@/components/model-picker";
 import { CanvasFindReplaceTextArea } from "@/components/canvas/canvas-find-replace-textarea";
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
@@ -441,93 +444,6 @@ export function AppConfigModal() {
                 <AppConfigPanel showDoneButton initialTab={configTab} />
             </Modal>
         </>
-    );
-}
-
-export function ConfigPasswordModal({
-    open,
-    onCancel,
-    onUnlock,
-    title,
-    hint,
-    gateId,
-}: {
-    open: boolean;
-    onCancel: () => void;
-    onUnlock: () => void;
-    title?: string;
-    hint?: string;
-    /** 传了就记住这次通过：7 天内同一道门不再询问（见 lib/gate-unlock）。 */
-    gateId?: string;
-}) {
-    const { t } = useTranslation();
-    const [password, setPassword] = useState("");
-    const [wrong, setWrong] = useState(false);
-    const inputRef = useRef<HTMLInputElement>(null);
-
-    useEffect(() => {
-        if (!open) {
-            setPassword("");
-            setWrong(false);
-            return;
-        }
-        const timer = window.setTimeout(() => inputRef.current?.focus(), 50);
-        return () => window.clearTimeout(timer);
-    }, [open]);
-
-    const submit = () => {
-        if (password === CONFIG_GATE_PASSWORD) {
-            setWrong(false);
-            // 记住这次通过，7 天内同一道门不再弹密码（只记时间戳，不记密码）。
-            if (gateId) markGateUnlocked(gateId);
-            onUnlock();
-            return;
-        }
-        setWrong(true);
-        setPassword("");
-        inputRef.current?.focus();
-    };
-
-    const onFormSubmit = (event: FormEvent) => {
-        event.preventDefault();
-        submit();
-    };
-
-    return (
-        <Modal
-            title={title || t("config.passwordTitle")}
-            open={open}
-            centered
-            destroyOnHidden
-            onCancel={onCancel}
-            okText={t("config.passwordConfirm")}
-            cancelText={t("common.cancel")}
-            onOk={submit}
-        >
-            <form className="space-y-2 pt-1" onSubmit={onFormSubmit}>
-                <div className="text-xs text-stone-500">{hint || t("config.passwordHint")}</div>
-                <Input.Password
-                    ref={inputRef as never}
-                    value={password}
-                    status={wrong ? "error" : undefined}
-                    placeholder={t("config.passwordPlaceholder")}
-                    autoComplete="current-password"
-                    visibilityToggle={false}
-                    onChange={(event) => {
-                        setPassword(event.target.value);
-                        if (wrong) setWrong(false);
-                    }}
-                    onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
-                        if (event.key === "Enter") {
-                            event.preventDefault();
-                            submit();
-                        }
-                    }}
-                />
-                {wrong ? <div className="text-xs text-red-500">{t("config.passwordWrong")}</div> : null}
-                {gateId ? <div className="text-xs text-stone-400 dark:text-stone-500">{t("config.passwordRemember")}</div> : null}
-            </form>
-        </Modal>
     );
 }
 

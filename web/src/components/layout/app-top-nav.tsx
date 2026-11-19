@@ -1,18 +1,30 @@
 import { Menu } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { Suspense, lazy, useEffect, useState } from "react";
 
 import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-tools";
-import { AppConfigModal } from "@/components/layout/app-config-modal";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { cn } from "@/lib/utils";
-import { useState } from "react";
+import { useConfigStore } from "@/stores/use-config-store";
+
+/**
+ * 配置面板（含渠道编辑、CodeMirror 脚本编辑器、技能 / Agent / 备份等 tab）整整 ~1400 行，
+ * 以前是静态 import —— 顶栏每页都挂，等于**空画布打开也要先把它一起下完、解析完**。
+ * 现在第一次点开「配置」时才加载；打开过一次就常驻，避免每次开都重新挂载丢状态。
+ */
+const AppConfigModal = lazy(() => import("@/components/layout/app-config-modal").then((module) => ({ default: module.AppConfigModal })));
 
 export function AppTopNav() {
     const { t } = useTranslation();
     const { pathname } = useLocation();
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
+    const isConfigOpen = useConfigStore((state) => state.isConfigOpen);
+    const [configMounted, setConfigMounted] = useState(false);
+    useEffect(() => {
+        if (isConfigOpen) setConfigMounted(true);
+    }, [isConfigOpen]);
     const hideHeader = /^\/canvas\/[^/]+/.test(pathname);
     const slug = pathname.split("/").filter(Boolean)[0];
     const activeToolSlug = navigationTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
@@ -75,7 +87,11 @@ export function AppTopNav() {
             ) : null}
 
             <MobileNavDrawer open={mobileNavOpen} activeToolSlug={activeToolSlug} onClose={() => setMobileNavOpen(false)} />
-            <AppConfigModal />
+            {configMounted ? (
+                <Suspense fallback={null}>
+                    <AppConfigModal />
+                </Suspense>
+            ) : null}
         </>
     );
 }

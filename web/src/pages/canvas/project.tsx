@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { saveAs } from "file-saver";
@@ -125,7 +125,13 @@ import type { ImageToolHandlers } from "@/components/canvas/canvas-image-toolbar
 import { useCopyText } from "@/hooks/use-copy-text";
 import { saveBlobAs } from "@/lib/fs/save-blob";
 import { CanvasNodeAngleDialog, type CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
-import { CanvasNodePanoramaDialog, type PanoramaCapturePayload } from "@/components/canvas/canvas-node-panorama-dialog";
+import type { PanoramaCapturePayload } from "@/components/canvas/canvas-node-panorama-dialog";
+
+/**
+ * 全景看图弹窗**按需加载**：它是全站唯一静态引 `three`（540KB）的地方，
+ * 而全景查看是低频操作 —— 留在首包里等于每次打开画布都白下一遍 three。
+ */
+const CanvasNodePanoramaDialog = lazy(() => import("@/components/canvas/canvas-node-panorama-dialog").then((module) => ({ default: module.CanvasNodePanoramaDialog })));
 import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import { CanvasNodeAnnotateDialog, type CanvasAnnotateInpaintPayload, type CanvasAnnotateSavePayload } from "@/components/canvas/canvas-node-annotate-dialog";
@@ -13681,7 +13687,9 @@ function AtelierCanvasPage() {
                 {angleNode?.metadata?.content ? <CanvasNodeAngleDialog dataUrl={angleNode.metadata.content} open={Boolean(angleNode)} onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode!, params)} /> : null}
 
                 {panoramaNode?.metadata?.content ? (
-                    <CanvasNodePanoramaDialog dataUrl={panoramaNode.metadata.content} open={Boolean(panoramaNode)} onClose={() => setPanoramaNodeId(null)} onCapture={(payload) => void capturePanoramaShot(panoramaNode, payload)} />
+                    <Suspense fallback={null}>
+                        <CanvasNodePanoramaDialog dataUrl={panoramaNode.metadata.content} open={Boolean(panoramaNode)} onClose={() => setPanoramaNodeId(null)} onCapture={(payload) => void capturePanoramaShot(panoramaNode, payload)} />
+                    </Suspense>
                 ) : null}
 
                 {/* 剪映直写：首次 / 授权失效时才打开（粘一次草稿路径 + 选一次草稿文件夹）。 */}
