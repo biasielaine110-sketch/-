@@ -11568,7 +11568,7 @@ function AtelierCanvasPage() {
          *        ⚠️ 判 `!== undefined` 而不是 `?.length`：空数组是有效结论（本集资产全是共用来的），
          *        不能掉进「重新生一遍」那条老分支。
          */
-        async (nodeId: string, options?: { referenceAssets?: readonly ScriptAssetReference[]; stages?: Partial<ReverseVideoStages> | null; skipScript?: boolean; quiet?: boolean; prelaunchedImageIds?: readonly string[] }) => {
+        async (nodeId: string, options?: { referenceAssets?: readonly ScriptAssetReference[]; stages?: Partial<ReverseVideoStages> | null; skipScript?: boolean; quiet?: boolean; prelaunchedImageIds?: readonly string[]; intent?: "storyboardImages" }) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
             if (!source || source.type !== CanvasNodeType.Script) return;
             /**
@@ -11907,9 +11907,19 @@ function AtelierCanvasPage() {
                  * 铺链路是 fire-and-forget，所以这里必须**在调用之前**返回，不能靠事后 abort。
                  */
                 if (!stages.video) {
-                    patchOneClickVideoRun(nodeId, { status: "done", stage: "image", message: t("canvas.scriptNode.oneClickSkippedVideo") });
+                    /**
+                     * 两种来源都会走到这里，但话要分开说（用户 2026-11-20）：
+                     *  - 02 / 03 弹窗里**取消勾选**「一键生视频」→「已跳过…」（用户知道是自己没勾）；
+                     *  - 脚本节点上点的是「一键生表生图」→ 这一趟**本来就不要视频**，
+                     *    再说「已跳过一键生视频」会让人以为自己漏勾了，所以换成「表和图好了，想继续点一键视频」。
+                     */
+                    const skippedMessage =
+                        options?.intent === "storyboardImages"
+                            ? t("canvas.scriptNode.oneClickStoryboardImagesDone")
+                            : t("canvas.scriptNode.oneClickSkippedVideo");
+                    patchOneClickVideoRun(nodeId, { status: "done", stage: "image", message: skippedMessage });
                     // `quiet`：04 逐集调用（N 集会各弹一条），进度由 04 自己 report + 节点按钮承载。
-                    if (!options?.quiet) message.success(t("canvas.scriptNode.oneClickSkippedVideo"));
+                    if (!options?.quiet) message.success(skippedMessage);
                     return;
                 }
                 notify("pipeline", "canvas.scriptNode.oneClickStagePipeline");
@@ -13199,6 +13209,18 @@ function AtelierCanvasPage() {
                         onStop={handleStopScriptGeneration}
                         oneClickVideo={oneClickVideoRuns[contentNode.id]}
                         onOneClickVideo={(nodeId) => void handleOneClickVideo(nodeId)}
+                        /**
+                         * 「一键生表生图」（用户 2026-11-20）：只走到「分镜表 + 资产图」，视频那一段传 false。
+                         * 复用同一条 `handleOneClickVideo` 编排（分镜重试 / 生图重试 / 托底 / 暂停 / 35 分钟封顶全都在里面），
+                         * 只是把第三步 `!stages.video` 的出口用上 —— 它会 patch `status: "done"` 并提示「已跳过一键生视频」，
+                         * 用户能明确知道「表和图有了，视频还没铺」。
+                         */
+                        onOneClickStoryboardImages={(nodeId) =>
+                            void handleOneClickVideo(nodeId, {
+                                stages: { script: true, image: true, video: false },
+                                intent: "storyboardImages",
+                            })
+                        }
                         imageTaskRun={scriptTaskRuns[scriptTaskKey(contentNode.id, "image")]}
                         videoTaskRun={scriptTaskRuns[scriptTaskKey(contentNode.id, "video")]}
                         onPauseScriptTask={handlePauseScriptTask}

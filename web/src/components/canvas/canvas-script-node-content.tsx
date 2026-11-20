@@ -267,6 +267,15 @@ type CanvasScriptNodeContentProps = {
     oneClickVideo?: OneClickVideoRun;
     onOneClickVideo?: (nodeId: string) => void;
     /**
+     * 「一键生表生图」（用户 2026-11-20）：**分镜表还没出来**的时候，在「一键视频」下面那颗按钮。
+     * 点一下只做「生成分镜表 → 一键直接生图」，**不铺视频链路**。
+     *
+     * 与分镜表出来以后表体里的「一键生图」（`onDirectGenerateAssets`）**不是一回事**：
+     * 那颗的前提是表已经有了、只补资产图；这颗是从「连表都没有」一路做到资产图。
+     * 表出来之后这颗按钮就消失（换成「一键视频」继续），所以两者永远不会同时出现在一个意图上。
+     */
+    onOneClickStoryboardImages?: (nodeId: string) => void;
+    /**
      * 「一键生图」/「一键铺视频链路并生成」的运行态（用户 2026-11-18）：
      * 运行中再点一次那两颗按钮 = 暂停后续操作（`onPauseScriptTask`）。
      */
@@ -432,6 +441,7 @@ export function CanvasScriptNodeContent({
     onStop,
     oneClickVideo,
     onOneClickVideo,
+    onOneClickStoryboardImages,
     imageTaskRun,
     videoTaskRun,
     onPauseScriptTask,
@@ -794,6 +804,18 @@ export function CanvasScriptNodeContent({
         : oneClickVideo?.status === "paused"
           ? t("canvas.scriptNode.oneClickPaused")
           : t("canvas.scriptNode.oneClickVideo");
+    /**
+     * 「一键生表生图」（用户 2026-11-20）：与「一键视频」**共用同一条运行态**（同一个 `oneClickVideoRuns`）——
+     * 它本来就是同一条编排只把第三步关掉，另开一套状态会让暂停令牌 / 防连点各走一路，反而容易互掐。
+     *
+     * 所以只有文案要分开：跑起来仍显示当前阶段（用户要知道卡在哪一步），但**空闲态不能回落到
+     * 「一键视频」**（那条跑完 `stage` 是 `pipeline`），这里最多到「生成图片…」。
+     */
+    const storyboardImagesLabel = oneClickRunning
+        ? t(oneClickVideo?.stage === "script" ? "canvas.scriptNode.oneClickStageScript" : "canvas.scriptNode.oneClickStageImage")
+        : oneClickVideo?.status === "paused"
+          ? t("canvas.scriptNode.oneClickPaused")
+          : t("canvas.scriptNode.oneClickStoryboardImages");
     /**
      * 「一键生图 / 一键铺视频链路并生成」三态（用户 2026-11-18：**再点一次 = 暂停**）。
      *
@@ -1891,6 +1913,31 @@ export function CanvasScriptNodeContent({
                     >
                         {oneClickRunning ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
                         {oneClickLabel}
+                    </button>
+                ) : null}
+                {/* 「一键生表生图」（用户 2026-11-20）：就在「一键视频」**下面**那颗。
+                    🔴 只在分镜表**还没出来**时出现（`!rows.length`）—— 用户点名「是在未执行生成分镜前的界面里的」。
+                    表一出来它就消失，接着走的是表头的「一键视频」或表体里的「一键生图」，
+                    所以它跟「执行生成分镜后的一键生图」永远不会混在一起。 */}
+                {onOneClickStoryboardImages && !rows.length ? (
+                    <button
+                        type="button"
+                        className="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full border px-2.5 text-[0.923em] font-medium transition disabled:opacity-35"
+                        style={{
+                            borderColor: oneClickVideo?.status === "paused" ? "#dc2626" : theme.node.stroke,
+                            color: oneClickVideo?.status === "paused" ? "#dc2626" : theme.node.text,
+                            background: withAlpha(theme.toolbar.panel, 0.8),
+                        }}
+                        // 运行中不 disabled：与「一键视频」同一条流程，再点一次同样是「暂停后续」。
+                        disabled={!oneClickRunning && !canGenerate}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            onOneClickStoryboardImages(node.id);
+                        }}
+                        title={oneClickRunning ? t("canvas.scriptNode.taskPauseHint") : t("canvas.scriptNode.oneClickStoryboardImagesHint")}
+                    >
+                        {oneClickRunning ? <Loader2 className="size-3.5 animate-spin" /> : <Table2 className="size-3.5" />}
+                        {storyboardImagesLabel}
                     </button>
                 ) : null}
             </div>

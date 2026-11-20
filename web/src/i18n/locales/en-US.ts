@@ -895,6 +895,10 @@ export default {
             viewTemplateMissing:
                 "No library entry matched \"{{names}}\" — these images will not get the view layout. A character entry needs \"角色视图 / 角色三视图\" + \"无头\" in its title (scene: \"场景视图\" + \"宫格\") and must stay enabled; fix the title and run again",
             oneClickVideo: "One-click video",
+            oneClickStoryboardImages: "Storyboard + images",
+            oneClickStoryboardImagesHint:
+                "Build the storyboard, then generate every asset image — no video chain. Once the storyboard exists this button goes away; click One-click video above to continue",
+            oneClickStoryboardImagesDone: "Storyboard and asset images are ready (no video chain). Click One-click video above to continue",
             oneClickVideoHint:
                 "All in one: build the storyboard → generate every asset image → lay the video chain out and start generating. A failed storyboard retries once with deepseek-flash; failed images retry with your preferred model, then fall back to seedream-5.0-pro. Each stage waits at most 15 minutes and pauses the rest of the flow on timeout or a remaining failure (nodes already created are kept)",
             oneClickStageScript: "Building storyboard…",

@@ -901,6 +901,10 @@ export default {
             taskStopping: "上一趟还在收尾（最多十几秒），等它停下来再点",
             viewTemplateMissing: "词库里没找到「{{names}}」——这批图不会套视图版式。判据是标题同时含「角色视图 / 角色三视图」+「无头」（场景是「场景视图」+「宫格」），且条目没被关掉；改好标题后再点一次即可",
             oneClickVideo: "一键视频",
+            oneClickStoryboardImages: "一键生表生图",
+            oneClickStoryboardImagesHint:
+                "生成分镜表 → 一键直接生图，不铺视频链路。分镜表出来以后这颗按钮会消失，想接着铺视频就在上面点「一键视频」",
+            oneClickStoryboardImagesDone: "分镜表与资产图已完成（没铺视频链路）：想继续就在上面点「一键视频」",
             oneClickVideoHint:
                 "一条龙：生成分镜表 → 一键直接生图 → 一键铺视频链路并生成。分镜表报错会换 deepseek-flash 再生成一次，生图报错会先用偏好模型、再用 seedream-5.0-pro 托底；两个阶段各自最长等 15 分钟，超时或仍失败就暂停后续流程（已铺出来的节点都会保留）",
             oneClickStageScript: "生成分镜表…",
