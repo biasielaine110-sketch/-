@@ -269,8 +269,26 @@ function normalizeBackground(background: string | undefined) {
     return background?.trim().toLowerCase() === "transparent" ? "transparent" : undefined;
 }
 
+/**
+ * 中转站普遍在模型 id 前面加自家前缀：`ahj-gpt-image-2.6-sunburst`、`cn:gpt-image-2`、
+ * `rh-gpt-image-1.5`。挑掉这层前缀再判家族 —— 否则同一个上游模型改个名字，下面这一整串
+ * 判定会**同时**失效（都退化成「通用中转模型」）：
+ *   - `output_format`（gpt-image 家族不该收 `response_format`，会被 400 或忽略）；
+ *   - `resolveGptImageRequestSize`（1.x 固定尺寸 / 2.x 预设档位）；
+ *   - `requestEdit` 的参考图走位；
+ *   - 🔴 `isImageChannelUnavailable` 那条 **503 → chat 回退** —— `manjuapi.yunmanybcz.chat`
+ *     的图模型就是只挂 chat 端点的，名字一变就再也回退不过去，画布只会看到「服务繁忙」。
+ * 只剥一层、且必须紧跟 `gpt-image-`，`flux-`/`seedream-` 之类不受影响。
+ */
+function bareGptImageModel(model: string) {
+    return String(model || "")
+        .trim()
+        .toLowerCase()
+        .replace(/^[a-z][a-z0-9]{0,7}[-:](?=gpt-image-)/, "");
+}
+
 function isGptImageModel(model: string) {
-    return model.trim().toLowerCase().startsWith("gpt-image-");
+    return bareGptImageModel(model).startsWith("gpt-image-");
 }
 
 function isImagenModel(model: string) {
@@ -351,7 +369,7 @@ function normalizeImageApiErrorMessage(message: string, model?: string) {
 
 /** gpt-image-1 / 1.5 / mini only accept a fixed size enum. */
 function isGptImageFixedSizeModel(model: string) {
-    const value = model.trim().toLowerCase();
+    const value = bareGptImageModel(model);
     if (!value.startsWith("gpt-image-")) return false;
     if (value.startsWith("gpt-image-2")) return false;
     return true;
@@ -1662,17 +1680,22 @@ function sleep(ms: number, signal?: AbortSignal) {
     });
 }
 
+/** 轮询单条 GET 的上限：没有它时上游把连接吊住，整个轮询能无限期挂死（见 `pollAsyncImageTaskPayload`）。 */
+const IMAGE_TASK_POLL_REQUEST_TIMEOUT_MS = 20_000;
+
 async function pollAsyncImageTaskPayload(config: AiConfig, taskId: string, options?: RequestOptions) {
     const deadline = performance.now() + IMAGE_TASK_POLL_TIMEOUT_MS;
     const paths = resolveImagePollPaths(config, taskId);
     let pathIndex = 0;
     let pollPath = paths[0];
+    let transient = 0;
     while (performance.now() < deadline) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         try {
             const response = await axios.get<ImageApiResponse>(aiApiUrl(config, pollPath), {
                 headers: aiHeaders(config),
                 signal: options?.signal,
+                timeout: IMAGE_TASK_POLL_REQUEST_TIMEOUT_MS,
             });
             const payload = normalizeImageApiPayload(response.data);
             if (typeof payload.code === "number" && !isApiSuccessCode(payload.code)) {
@@ -1686,11 +1709,23 @@ async function pollAsyncImageTaskPayload(config: AiConfig, taskId: string, optio
             if (isImageTaskFailureStatus(status)) {
                 throw new Error(readApiErrorMessage(payload.error) || readApiErrorMessage(payload) || apiText("imageTaskFailed"));
             }
+            transient = 0;
         } catch (error) {
+            if (axios.isCancel(error) || options?.signal?.aborted) throw error;
             if (axios.isAxiosError(error) && error.response?.status === 404 && pathIndex < paths.length - 1) {
                 pathIndex += 1;
                 pollPath = paths[pathIndex];
                 continue;
+            }
+            // 🔴 任务已经在跑（上游按提交计费），轮询这一跳抖一下不能把等待掐掉：
+            // 一次 ECONNRESET / 20s 超时以前会直接抛错，画布上就是「后台出图了、前台报失败」，
+            // 用户重试 = 再花一笔。只有连续 3 次都拿不到任何响应才认输。
+            if (isTransportFailure(error)) {
+                transient += 1;
+                if (transient < 3) {
+                    await sleep(IMAGE_TASK_POLL_INTERVAL_MS, options?.signal);
+                    continue;
+                }
             }
             throw error;
         }
