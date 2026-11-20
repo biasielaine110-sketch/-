@@ -1161,6 +1161,38 @@ export function CanvasScriptNodeContent({
     const patchMetadata = (patch: Partial<CanvasNodeData["metadata"]>) => onConfigChange(node.id, patch);
 
     /**
+     * **「资产精简 / 资产全量」开关**（用户 2026-11-19）。
+     *
+     * 🔴 这份 JSX 必须被**三个面板同时引用**：输入视图（生成分镜表之前）、表体工具条、缩放后的收起面板。
+     * 第一版只放进了表体工具条 → 用户在还没出表 / 表已收起时**根本看不到这颗按钮**
+     * （用户 2026-11-20：「「资产精简 / 资产全量」没有看到这个开关」）。
+     * 它决定的是「生成分镜表时要不要少写资产」+「铺链路挂几张」，**生成前就要能改**，
+     * 所以输入视图那一处比表体更要紧。
+     */
+    const assetMountControl = (
+        <button
+            type="button"
+            className="inline-flex h-6 items-center gap-1 rounded-full border px-2 text-[0.923em] transition"
+            style={{
+                borderColor: assetMountMode === "strict" ? theme.toolbar.activeText : theme.node.stroke,
+                color: assetMountMode === "strict" ? theme.toolbar.activeText : theme.node.text,
+                background: assetMountMode === "strict" ? `${theme.toolbar.activeText}14` : "transparent",
+                opacity: assetMountMode === "strict" ? 1 : 0.75,
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+                event.stopPropagation();
+                patchMetadata({ scriptAssetMountMode: assetMountMode === "strict" ? "auto" : "strict" });
+            }}
+            title={assetMountMode === "strict" ? t("canvas.scriptNode.assetMountStrictHint") : t("canvas.scriptNode.assetMountAutoHint")}
+        >
+            <Layers className="size-3" />
+            {assetMountMode === "strict" ? t("canvas.scriptNode.assetMountStrict") : t("canvas.scriptNode.assetMountAuto")}
+        </button>
+    );
+
+    /**
      * 分镜表的三种显示档（同一个按钮循环，顺序就是用户口述的
      * 「点一次简化版 → 再点完整版 → 再点缩放」）：
      *
@@ -2576,6 +2608,11 @@ export function CanvasScriptNodeContent({
                 「每镜时长」「生图比例」两个选择器已按用户要求移除（2026-11-12）。 */}
             {totalSecondsSelector}
             {shotsPerClipSelector}
+            {/* 资产挂载口径：**生成前就要能改**（它同时决定「生成分镜表时写多少资产」），
+                所以输入视图这一处比表体工具条更要紧。 */}
+            <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                {assetMountControl}
+            </div>
             <div className="flex shrink-0 items-center gap-2 text-[0.923em] opacity-60" style={{ color: theme.node.text }}>
                 <span>{t("canvas.scriptNode.sourceLabel")}</span>
                 {connectedTextCount ? <span>· {t("canvas.scriptNode.connectedHint", { count: connectedTextCount })}</span> : null}
@@ -3039,6 +3076,7 @@ export function CanvasScriptNodeContent({
                 +「每 3 镜合一个这个也要放右面去」。并成一行是因为两者都是「动作」，
                 靠右叠成两行反而把节点右下角堆满了；窄节点换行时每一行仍然贴右边。 */}
             <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1.5">
+                {assetMountControl}
                 {shotsPerClipSelector}
                 {directAssetButton}
                 {buildVideoChainButton}
@@ -3636,27 +3674,9 @@ export function CanvasScriptNodeContent({
                  *   生成分镜表时同时挂上「资产精简」提示段，让模型别把群演 / 背景小物 / 备选场景写进资产列。
                  * - `auto`：老口径（信息不足时宁可多挂），给「就是要整类全连」的老表用。
                  * 状态写进 metadata，铺链路 / 单镜铺视频 / 整表生成三处都读它。
+                 * ⚠️ 按钮本身在 `assetMountControl` 里（输入视图 / 收起面板也各挂一份），别在这儿再写一遍。
                  */}
-                <button
-                    type="button"
-                    className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition"
-                    style={{
-                        borderColor: assetMountMode === "strict" ? theme.toolbar.activeText : theme.node.stroke,
-                        color: assetMountMode === "strict" ? theme.toolbar.activeText : theme.node.text,
-                        background: assetMountMode === "strict" ? `${theme.toolbar.activeText}14` : "transparent",
-                        opacity: assetMountMode === "strict" ? 1 : 0.75,
-                    }}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                        event.stopPropagation();
-                        patchMetadata({ scriptAssetMountMode: assetMountMode === "strict" ? "auto" : "strict" });
-                    }}
-                    title={assetMountMode === "strict" ? t("canvas.scriptNode.assetMountStrictHint") : t("canvas.scriptNode.assetMountAutoHint")}
-                >
-                    <Layers className="size-3" />
-                    {assetMountMode === "strict" ? t("canvas.scriptNode.assetMountStrict") : t("canvas.scriptNode.assetMountAuto")}
-                </button>
+                {assetMountControl}
                 {/* 手动添加资产列（「宠物」「车辆」…）：自建列的行为与内置资产列一致，铺链路会按分类把图连进图片节点。
                     常驻显示、到上限才禁用 —— 之前到 8 列直接消失，看起来像「这个功能没了 / 加不上」。 */}
                 <button
