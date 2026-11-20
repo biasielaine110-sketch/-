@@ -82,6 +82,7 @@ import {
     orderScriptRefIds,
     parseStoryScriptOutput,
     resolveScriptAssetRole,
+    resolveScriptAssetMountMode,
     resolveScriptSystemPrompt,
     resolveScriptTotalSeconds,
     resolveStoryScriptMergeMode,
@@ -8401,6 +8402,9 @@ function AtelierCanvasPage() {
                 shotPrompt: scriptPrompts.shot,
                 // 同名资产只在首现镜写全描述 → 输出变短，整表生成更快。
                 assetDedupe: true,
+                // 资产精简（节点级 `scriptAssetMountMode`，缺省 strict）：别把群演 / 背景小物 / 备选场景
+                // 写进资产列 —— 每写一个名字就多一张资产图，也会被铺链路挂到那一镜上。
+                assetLean: resolveScriptAssetMountMode(sourceNode.metadata?.scriptAssetMountMode) === "strict",
             });
             /**
              * 方案 = 第四套（影视分镜导演）时，任务书**末尾**再压一段「`video_motion_prompt` 只能是八段标签块」；
@@ -8861,6 +8865,8 @@ function AtelierCanvasPage() {
                         keepBlocking,
                         assetPrompt: scriptPrompts.asset,
                         shotPrompt: scriptPrompts.shot,
+                        // 与整表生成同口径：资产精简（缺省 strict）。
+                        assetLean: resolveScriptAssetMountMode(sourceNode.metadata?.scriptAssetMountMode) === "strict",
                     });
                     // 第四套：单镜任务书末尾同样压「video_motion_prompt 只能是八段标签块」。
                     const rowTask = directorFormatHint ? `${task}\n\n${directorFormatHint}` : task;
@@ -10754,6 +10760,11 @@ function AtelierCanvasPage() {
             if (!rows.length) return;
             const presetId = resolveStoryScriptPresetId(source.metadata?.scriptPreset);
             const preset = getStoryScriptPreset(presetId);
+            /**
+             * 资产挂载口径（用户 2026-11-19：「每个镜头挂载的资产有点多，很多用不上的也挂上了」）。
+             * `strict`（缺省）= 只挂这一镜文字里真的写到的 + 每类限量；`auto` = 老口径（信息不足时全连）。
+             */
+            const assetMountStrict = resolveScriptAssetMountMode(source.metadata?.scriptAssetMountMode) === "strict";
             // 手动追加的资产列（「宠物」「车辆」…）：它们的图位也要参与铺链路，所以一路带到 refs 里。
             const scriptExtras = normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns);
             const segmentSeconds = source.metadata?.scriptSegmentSeconds;
@@ -11039,6 +11050,8 @@ function AtelierCanvasPage() {
                         preset: presetId,
                         extras: scriptExtras,
                         coveredColumns: new Set(preciseRefs.map((ref) => ref.columnKey)),
+                        // 严格挂载（缺省）：没有专属列的类别不再「整类全挂」，也取消「唯一候选兜底」。
+                        strict: assetMountStrict,
                     });
                     for (const asset of barAssets) {
                         if (linkedIntoImage.has(asset.id)) continue;
@@ -13048,6 +13061,8 @@ function AtelierCanvasPage() {
                 preset: presetId,
                 extras: shotExtras,
                 coveredColumns: new Set(preciseRefs.map((ref) => ref.columnKey)),
+                // 与整条铺链路同口径：严格挂载（缺省）只挂这一镜真的写到的资产。
+                strict: resolveScriptAssetMountMode(source.metadata?.scriptAssetMountMode) === "strict",
             });
             // 音频素材只连视频节点（不参与生图），与整条铺链路一致。但**按台词挂进声音列的那些**
             // 只连它们被挂到的镜（用户 2026-11-15）：这里先剔掉，剩下的才是「整表音频」（BGM / 全局旁白）。

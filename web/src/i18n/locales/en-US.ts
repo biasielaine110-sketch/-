@@ -1079,6 +1079,12 @@ export default {
             assetFillAllHint: "{{count}} shots still miss assets; click to fill them one by one (only empty asset columns are written). To fill a single shot, use the “Fill” chip at the end of that row",
             assetFillAllDone: "Filled {{rows}} shots · {{count}} fields",
             assetFillPartialNote: "Some shots were not filled (the model may not have returned those fields); click fill again to retry",
+            assetMountStrict: "Lean assets",
+            assetMountAuto: "All assets",
+            assetMountStrictHint:
+                "Current: each shot only mounts the assets its own text actually names (recommended). When a role has no dedicated column the whole row text is scanned instead of linking every asset of that role; no single-candidate fallback; per-role caps (character 6 / scene 2 / prop 3 / blocking 1). Storyboard generation also gets a prompt telling the model not to list extras, background props or alternate scenes. Click to switch to All assets",
+            assetMountAutoHint:
+                "Current: legacy behaviour (mount more when in doubt) — if a role has no dedicated column, every upstream asset of that role is linked to every shot; a single candidate is mounted even when the name does not match. Expect over-mounting; switch back to Lean assets",
             extraColumnAdd: "Asset column",
             extraColumnAddHint: "Add a custom asset column (e.g. pet, vehicle). It can hold images and locks, and links into image nodes when building the pipeline",
             extraColumnTitle: "Add asset column",

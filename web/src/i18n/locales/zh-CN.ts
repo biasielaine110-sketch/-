@@ -1085,6 +1085,12 @@ export default {
             assetFillAllHint: "还有 {{count}} 镜缺资产；点一下逐镜补齐（只补空着的资产列，已有内容不动）。只想补某一镜，就用该镜行尾的「补资产」",
             assetFillAllDone: "已补齐 {{rows}} 镜 · {{count}} 个字段",
             assetFillPartialNote: "有几镜没补上（可能模型没返回对应字段），可以再点一次补齐",
+            assetMountStrict: "资产精简",
+            assetMountAuto: "资产全量",
+            assetMountStrictHint:
+                "当前：每镜只挂这一镜文字里真的写到的资产（推荐）。没有对应资产列时按整行文字扫名字，不再「整类全挂」；名字对不上也不再拿唯一那张兜底；每类有上限（角色 6 / 场景 2 / 道具 3 / 站位 1）。生成分镜表时还会让模型别把群演、背景小物、备选场景写进资产列。点一下切到「资产全量」",
+            assetMountAutoHint:
+                "当前：老口径（信息不足时宁可多挂）—— 某一类没有对应资产列时，上游同类素材全部挂到每一镜；名字对不上但有唯一候选也会挂上。资产容易挂多，建议切回「资产精简」",
             extraColumnAdd: "资产列",
             extraColumnAddHint: "手动添加一列资产（例：宠物、车辆），加完这一列就能挂图、能上锁，铺链路时会连进图片节点",
             extraColumnTitle: "添加资产列",

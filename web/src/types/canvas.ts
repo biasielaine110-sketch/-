@@ -386,6 +386,17 @@ export type CanvasNodeMetadata = {
      */
     scriptExtraColumns?: import("@/constant/story-script").StoryScriptExtraColumn[];
     /**
+     * 脚本生成器：**资产挂载口径**（`"strict"` 缺省 / `"auto"`）。
+     *
+     * - `strict`：每镜只挂这一镜文字里真的写到的资产（没有专属资产列时扫整行文字），
+     *   不做「唯一候选兜底」，每类有张数上限；生成分镜表时同时让模型少写群演 / 背景小物。
+     * - `auto`：老口径（信息不足时宁可多挂）。
+     *
+     * 用户 2026-11-19：「每个镜头挂载的资产有点多，很多这个镜头用不上的资产也进行了识别和挂载」。
+     * 表格右上角那颗「资产精简 / 资产全量」按钮写的就是这个键。
+     */
+    scriptAssetMountMode?: import("@/constant/story-script").ScriptAssetMountMode;
+    /**
      * 脚本生成器：**资产沿用来源**（另一个脚本节点的 id，一般就是上一集）。
      *
      * 只记录「这台机器的资产是从哪一集搬来的」，真正的搬运动作由

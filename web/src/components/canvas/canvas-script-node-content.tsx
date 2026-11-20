@@ -41,6 +41,7 @@ import {
     remapStoryScriptRowNotes,
     reorderStoryScriptRows,
     resolveScriptAssetRole,
+    resolveScriptAssetMountMode,
     resolveStoryScriptDisplayColumns,
     resolveStoryScriptFontSize,
     isMultiNameAssetColumn,
@@ -597,6 +598,11 @@ export function CanvasScriptNodeContent({
      * 格子里能挂图、能上锁，铺链路时按 `role` 连进这一镜的图片节点。
      */
     const extraColumns = useMemo(() => normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns), [node.metadata?.scriptExtraColumns]);
+    /**
+     * 资产挂载口径（`metadata.scriptAssetMountMode`）：缺省 = `strict`（只挂这一镜真的写到的资产）。
+     * 表格右上角那颗「资产精简 / 资产全量」按钮改的就是它；生成分镜表、铺链路、单镜铺视频三处都读同一个键。
+     */
+    const assetMountMode = resolveScriptAssetMountMode(node.metadata?.scriptAssetMountMode);
     // 表格实际渲染的列 = 预设列 + 自建资产列（解析 / 导出仍只按预设列走，自建列是用户手填的）。
     const columns = useMemo(() => getStoryScriptColumnsWithExtras(presetId, extraColumns), [presetId, extraColumns]);
     /**
@@ -3622,6 +3628,35 @@ export function CanvasScriptNodeContent({
                     （用户 2026-11-11 第 01 条）。 */}
                 {totalSecondsSelector}
                 {schemeSelector}
+                {/*
+                 * 资产挂载口径（用户 2026-11-19：「每个镜头挂载的资产有点多，很多用不上的也挂上了」）。
+                 *
+                 * - `strict`（缺省）：每镜只挂**这一镜文字里真的写到**的资产 —— 没有专属列时拿整行文字扫名字，
+                 *   不再「整类全挂」；也不做「只有一张候选就兜底挂」；每类还有张数上限（场景 2 / 角色 6 / 道具 3 / 站位 1）。
+                 *   生成分镜表时同时挂上「资产精简」提示段，让模型别把群演 / 背景小物 / 备选场景写进资产列。
+                 * - `auto`：老口径（信息不足时宁可多挂），给「就是要整类全连」的老表用。
+                 * 状态写进 metadata，铺链路 / 单镜铺视频 / 整表生成三处都读它。
+                 */}
+                <button
+                    type="button"
+                    className="inline-flex h-6 items-center gap-1 rounded-full border px-2 transition"
+                    style={{
+                        borderColor: assetMountMode === "strict" ? theme.toolbar.activeText : theme.node.stroke,
+                        color: assetMountMode === "strict" ? theme.toolbar.activeText : theme.node.text,
+                        background: assetMountMode === "strict" ? `${theme.toolbar.activeText}14` : "transparent",
+                        opacity: assetMountMode === "strict" ? 1 : 0.75,
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        patchMetadata({ scriptAssetMountMode: assetMountMode === "strict" ? "auto" : "strict" });
+                    }}
+                    title={assetMountMode === "strict" ? t("canvas.scriptNode.assetMountStrictHint") : t("canvas.scriptNode.assetMountAutoHint")}
+                >
+                    <Layers className="size-3" />
+                    {assetMountMode === "strict" ? t("canvas.scriptNode.assetMountStrict") : t("canvas.scriptNode.assetMountAuto")}
+                </button>
                 {/* 手动添加资产列（「宠物」「车辆」…）：自建列的行为与内置资产列一致，铺链路会按分类把图连进图片节点。
                     常驻显示、到上限才禁用 —— 之前到 8 列直接消失，看起来像「这个功能没了 / 加不上」。 */}
                 <button

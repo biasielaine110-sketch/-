@@ -105,6 +105,12 @@ export type StoryScriptRowTaskInput = {
      * 不传 / 空 = 只按预设说明写，任务书与改造前逐字一致。
      */
     shotPrompt?: unknown;
+    /**
+     * **资产精简**（`metadata.scriptAssetMountMode = strict` 时传 true）：
+     * 追加 `STORY_SCRIPT_ASSET_LEAN_HINT`，让模型别把群演 / 背景小物 / 备选场景写进资产列。
+     * 不传 = 任务书与改造前逐字一致。
+     */
+    assetLean?: boolean;
 };
 
 export type StoryScriptPreset = {
@@ -116,7 +122,7 @@ export type StoryScriptPreset = {
     /** 「发送到画布」优先取这一列的内容 */
     insertKey: string;
     /** 任务书构建器（`mergeMode` 决定「每段时长」按「每镜 N 秒」还是「多镜合计 N 秒」写） */
-    buildTask: (input: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown; assetDedupe?: boolean }) => string;
+    buildTask: (input: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown; assetDedupe?: boolean; assetLean?: boolean }) => string;
     /**
      * 单镜重生成任务书（「重生成本镜」用）：带上上一镜 / 下一镜上下文，要求模型只重写这一镜，
      * 进而保住「人物站位 / 场景 / 道具与上一镜一致」的连续性。
@@ -947,7 +953,7 @@ const STORY_SCRIPT_CUSTOM_SHOT_SYSTEM_OVERRIDE = [
 ].join("\n");
 
 /** 构建分镜脚本生成任务（classic 对应 dramaclaw 的 build_freezone_story_script_task）。 */
-function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetDedupe }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown; assetDedupe?: boolean }): string {
+function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetDedupe, assetLean }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown; assetDedupe?: boolean; assetLean?: boolean }): string {
     /**
      * 源内容自带逐镜模版 → 把公共规则里「分镜提示词和视频运动提示词都采用括号分段 + 号连接的格式」
      * 这一条**整条摘掉**。留着它，模型会照样吐 `（…）+（…）`（用户原话「不要拆解成下面这样」）——
@@ -988,6 +994,8 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
     if (segmentSection) parts.push(segmentSection);
     // 出场角色 / 场景不许漏：同样紧贴契约 —— 这一段是「群体镜头只认说话的人」报障的最后一道拦截。
     parts.push(STORY_SCRIPT_CAST_COMPLETENESS_HINT);
+    // 资产精简：必须排在「不许漏」**之后**（模型对越靠后的指令越服从），否则压不住上面那句「人在画框里就写」。
+    if (assetLean) parts.push(STORY_SCRIPT_ASSET_LEAN_HINT);
     // 拆镜密度：同样紧贴契约（2026-11-07「30 秒拆 16 镜」报障，密度必须最后再说一遍）。
     const densityRule = buildShotDensityRule(segmentSeconds, mergeMode);
     if (densityRule) parts.push(densityRule);
@@ -997,7 +1005,7 @@ function buildClassicStoryScriptTask({ sourceText, prompt, characterRefs, segmen
 }
 
 /** 构建「视频分镜脚本」任务。首句即 recipe 的 `planning_prompt` 原文（说明这一节点要产出什么）。 */
-function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetDedupe }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown; assetDedupe?: boolean }): string {
+function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetDedupe, assetLean }: { sourceText: string; prompt?: string; characterRefs?: string; segmentSeconds?: unknown; mergeMode?: StoryScriptMergeMode | string | null; assetPrompt?: unknown; shotPrompt?: unknown; assetDedupe?: boolean; assetLean?: boolean }): string {
     const parts = ["根据创意大纲直接生成含镜号、画面、运镜和转场的分镜脚本表格。", ...STORY_SCRIPT_STORYBOARD_COMMON_RULES];
     if (prompt && prompt.trim()) parts.push(`用户要求：\n${prompt.trim()}`);
     if (characterRefs && characterRefs.trim()) {
@@ -1017,6 +1025,8 @@ function buildStoryboardTask({ sourceText, prompt, characterRefs, segmentSeconds
     // 出场角色 / 场景不许漏（与 classic 同口径；storyboard 没有角色列，这条的实际作用是「画面里出现的
     // 人物在画面描述里也要写全」，同一句不影响，反而防它把群像写成「两人」）。
     parts.push(STORY_SCRIPT_CAST_COMPLETENESS_HINT);
+    // 资产精简（同 classic：必须排在「不许漏」之后才压得住）。
+    if (assetLean) parts.push(STORY_SCRIPT_ASSET_LEAN_HINT);
     // 拆镜密度（同 classic：最后再说一遍，压过前面所有暗示）。
     const densityRule = buildShotDensityRule(segmentSeconds, mergeMode);
     if (densityRule) parts.push(densityRule);
@@ -1040,7 +1050,7 @@ function describeRowForContext(row: StoryScriptRow | undefined, columns: StorySc
  * 「只重写某一镜」的任务书（经典预设）。带上上一镜 / 下一镜上下文，重点要求：
  * 人物站位、场景、道具与前后镜保持一致——这正是「重生成本镜」追回资产描述的关键。
  */
-function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: StoryScriptRowTaskInput): string {
+function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetLean }: StoryScriptRowTaskInput): string {
     const columns = STORY_SCRIPT_CLASSIC_COLUMNS;
     const templateSource = hasStoryScriptShotTemplate(sourceText);
     // 同整表任务书：模版或自定义分镜提示词在场 → 摘掉「括号分段 + 号连接」这条。
@@ -1081,6 +1091,8 @@ function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRef
     );
     // 专项要求比「参考风格要点」更具体，放在它后面（越靠后越优先）。
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
+    // 资产精简：紧贴 JSON 契约之前（整表单镜同口径，压过上面所有「写全资产」的暗示）。
+    if (assetLean) parts.push(STORY_SCRIPT_ASSET_LEAN_HINT);
     parts.push(STORY_SCRIPT_JSON_CONTRACT);
     parts.push(`只输出这一镜：JSON 的 rows 数组里只放 1 个元素，\`shot_no\` 必须是 ${row.shot_no}。`);
     if (sourceText.trim()) parts.push(`源剧本内容：\n${sourceText.trim()}`);
@@ -1088,7 +1100,7 @@ function buildClassicRowTask({ sourceText, prompt, row, prev, next, characterRef
 }
 
 /** 「只重写某一镜」的任务书（视频分镜脚本预设）。 */
-function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode, assetPrompt, shotPrompt }: StoryScriptRowTaskInput): string {
+function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, characterRefs, extraPlot, keepBlocking, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetLean }: StoryScriptRowTaskInput): string {
     const columns = STORY_SCRIPT_STORYBOARD_COLUMNS;
     const parts = [`下面是一张分镜表的第 ${row.shot_no} 镜。请只重新生成这一镜（镜号保持 ${row.shot_no} 不变），其余镜头不要输出。`, ...STORY_SCRIPT_STORYBOARD_COMMON_RULES];
     // 同 classic：单镜模式下「这一镜 = 一整段成片」，时长必须在重写时就锁死。
@@ -1111,6 +1123,8 @@ function buildStoryboardRowTask({ sourceText, prompt, row, prev, next, character
     if (characterRefs && characterRefs.trim()) parts.push(`已提供的角色参考（请在画面描述 / 关键视觉 / 主体动作里使用完全一致的角色名）：\n${characterRefs.trim()}`);
     // 与整表生成同口径：两路专项要求各管一摊（资产 / 画面与提示词写法）。
     parts.push(...buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }));
+    // 资产精简（同 classic：紧贴输出契约之前）。
+    if (assetLean) parts.push(STORY_SCRIPT_ASSET_LEAN_HINT);
     parts.push(`只输出这一镜：Markdown 表格只保留表头 + 这 1 行；若用 JSON，rows 里只放 1 个元素，\`shot_no\` 必须是 ${row.shot_no}。`);
     if (sourceText.trim()) parts.push(`创意大纲 / 源内容：\n${sourceText.trim()}`);
     return parts.join("\n\n");
@@ -1454,6 +1468,41 @@ export function isAudioScriptAssetRole(role: unknown): boolean {
 export function resolveScriptAssetRole(value: unknown): ScriptAssetRole {
     return SCRIPT_ASSET_ROLE_IDS.includes(value as ScriptAssetRole) ? (value as ScriptAssetRole) : "character";
 }
+
+/**
+ * **资产挂载口径**（节点级 `metadata.scriptAssetMountMode`）。用户 2026-11-19 报障：
+ * 「分镜表现在每个镜头挂载的资产有点多，很多这个镜头用不上的资产也进行了识别和挂载」，
+ * 并确认**生成侧（表格里写进来的资产）与铺链路侧（图片 / 视频节点挂的参考图）两处都有**。
+ *
+ *  - `strict`（默认）：**只挂这一镜文字里真的写到的资产**。
+ *      ① 某一类在预设里没有对应列时，不再「这一类全挂」，改为拿整行文字扫资产名，扫不到就不挂；
+ *      ② 名字 / 描述都对不上时**不再**「只有一张候选就兜底挂上」；
+ *      ③ 每一类最多挂 `SCRIPT_ASSET_MOUNT_LIMITS` 张（场景 2 / 角色 6 / 道具 3 / 站位 1）。
+ *  - `auto`：老口径（信息不足时宁可多挂），给「就是想让整类素材全连」的老表用。
+ *
+ * 为什么要有 `auto`：早期分镜表（尤其 storyboard 预设没有角色列）靠「全连」保证不漏图；
+ * 想让老节点维持原样时切回它就够了，不需要改表。
+ */
+export type ScriptAssetMountMode = "auto" | "strict";
+
+export const SCRIPT_ASSET_MOUNT_MODES: readonly ScriptAssetMountMode[] = ["strict", "auto"];
+
+/** 缺省口径 = 严格（用户要的就是「别乱挂」）。 */
+export const DEFAULT_SCRIPT_ASSET_MOUNT_MODE: ScriptAssetMountMode = "strict";
+
+/** 归一化：只认 `auto`，其余（含空 / 脏值）一律 `strict`。 */
+export function resolveScriptAssetMountMode(value: unknown): ScriptAssetMountMode {
+    return value === "auto" ? "auto" : "strict";
+}
+
+/** `strict` 口径下每一类资产的单镜上限（`audio` 不是图片资产，恒 0）。 */
+export const SCRIPT_ASSET_MOUNT_LIMITS: Record<ScriptAssetRole, number> = {
+    character: 6,
+    scene: 2,
+    prop: 3,
+    blocking: 1,
+    audio: 0,
+};
 
 /**
  * 这一类资产的「名字格」是不是可以一格写多个名字（`、` 分隔）→ 逐名拆开处理。
@@ -3509,6 +3558,23 @@ export function scriptRowAssetRoleTexts(
     return { names, texts };
 }
 
+/**
+ * 把一整行（所有列，除镜号）归一化成一个检索串。
+ *
+ * `strict` 挂载口径下，「预设里没有这一类列」时唯一能用的依据就是这段文字 ——
+ * 典型：storyboard 预设没有角色列（人写在「画面描述 / 主体动作」里），
+ * 老口径会把上游每一张角色图都连到每一镜。这里改成「文字里提到谁就挂谁」。
+ */
+function scriptRowAllTextHaystack(row: StoryScriptRow): string {
+    const values: string[] = [];
+    for (const [key, value] of Object.entries(row || {})) {
+        if (key === "shot_no") continue;
+        const text = storyScriptCellText(value);
+        if (text) values.push(text);
+    }
+    return normalizeScriptAssetMatchText(values.join("\n"));
+}
+
 /** 这个预设（含自建列）里到底有没有这一类资产的列 —— 没有就无从判断，只能维持「全部连」。 */
 function hasScriptAssetRoleColumn(role: ScriptAssetRole, preset?: StoryScriptPresetId | string | null, extras?: readonly StoryScriptExtraColumn[] | null): boolean {
     const available = new Set(getStoryScriptAssetColumns(preset, extras).map((column) => column.key));
@@ -3553,15 +3619,27 @@ function hasScriptAssetTitleMention(haystack: string, assetTitle: unknown): bool
  *  - 这一类列这一镜**整片为空** → 这一镜不涉及这类资产 → 一张都不连；
  *  - 这一类只有**一张**候选、而这一镜确实写了这类资产、却又没匹配上（模型改写 / 图标题被手改）
  *    → 连它（唯一解不会连错，避免「明明用了场景却一张没连」）；
- *  - 预设里压根没有这一类列 → 全部连（没有信息可判，维持老行为）；
+ *  - 预设里压根没有这一类列 → `auto` 全部连（没有信息可判，维持老行为）；`strict` 改为整行文字扫名字；
+ *  - `strict`（默认，用户 2026-11-19）：**不许「只有一张候选就兜底挂」**，且每类有张数上限，
+ *    只挂这一镜文字里真的写到的，见 `ScriptAssetMountMode`；
  *  - 已经被图位 / 资产锁精准指定过的列（`coveredColumns`）→ 不再参与，精准优先。
  */
 export function matchScriptRowAssetsByRole(
     row: StoryScriptRow,
     assets: readonly ScriptRowAssetCandidate[],
-    options?: { preset?: StoryScriptPresetId | string | null; extras?: readonly StoryScriptExtraColumn[] | null; coveredColumns?: ReadonlySet<string> },
+    options?: {
+        preset?: StoryScriptPresetId | string | null;
+        extras?: readonly StoryScriptExtraColumn[] | null;
+        coveredColumns?: ReadonlySet<string>;
+        /**
+         * 严格挂载（默认 false = 老口径，保持老调用点逐字不变）。
+         * 传 true 时：没有专属列不再「整类全挂」而是扫整行文字；取消「唯一候选兜底」；每类限量。
+         */
+        strict?: boolean;
+    },
 ): ScriptRowAssetCandidate[] {
     if (!row || !assets.length) return [];
+    const strict = options?.strict === true;
     const grouped = new Map<ScriptAssetRole, ScriptRowAssetCandidate[]>();
     for (const asset of assets) {
         const role = resolveScriptAssetRole(asset.role);
@@ -3571,13 +3649,30 @@ export function matchScriptRowAssetsByRole(
     }
     // 输出按档位排一遍：调用方拿到就是「角色 → 场景 → 道具 → 站位」的顺序。
     const orderedRoles = orderScriptRefIds([...grouped.keys()], (role) => role);
+    /** 整行文字只算一次（strict 下「没有专属列」那几类共用）。 */
+    let rowHaystack: string | null = null;
+    const wholeRowHaystack = () => {
+        if (rowHaystack === null) rowHaystack = scriptRowAllTextHaystack(row);
+        return rowHaystack;
+    };
     const out: ScriptRowAssetCandidate[] = [];
     for (const role of orderedRoles) {
         const list = grouped.get(role) || [];
         // `audio` 不是图片资产；真混进来也一句不连（音频只连视频节点，走 `audioRefs` 那条路）。
         if (role === "audio") continue;
+        const limit = strict ? Math.max(0, SCRIPT_ASSET_MOUNT_LIMITS[role] || 0) : Number.POSITIVE_INFINITY;
+        if (!limit) continue;
         if (!hasScriptAssetRoleColumn(role, options?.preset, options?.extras)) {
-            out.push(...list);
+            // 没有这一类列：auto 维持「整类全连」；strict 只能拿整行文字当依据 ——
+            // 典型就是 storyboard 预设（没有角色列，人写在「主体动作 / 画面描述」里），
+            // 老口径会把**上游每一张角色图**都连到每一镜，一镜挂十几张。
+            if (!strict) {
+                out.push(...list.slice(0, limit));
+                continue;
+            }
+            const haystack = wholeRowHaystack();
+            if (!haystack) continue;
+            out.push(...list.filter((asset) => hasScriptAssetTitleMention(haystack, asset.title)).slice(0, limit));
             continue;
         }
         const { names, texts } = scriptRowAssetRoleTexts(row, role, options);
@@ -3590,8 +3685,10 @@ export function matchScriptRowAssetsByRole(
             if (!haystack) return false;
             return hasScriptAssetTitleMention(haystack, asset.title);
         });
-        if (matched.length) out.push(...matched);
-        else if (list.length === 1) out.push(list[0]);
+        if (matched.length) out.push(...matched.slice(0, limit));
+        // 「只有一张候选就兜底挂上」只在 auto 保留：strict 下这一镜写了这类资产却没匹配上，
+        // 要么是模型改写了名字、要么是那一张根本不是这一镜的 —— 宁可不挂，也不要把不相干的图塞进去。
+        else if (!strict && list.length === 1) out.push(list[0]);
     }
     return out;
 }
@@ -4415,6 +4512,27 @@ export const STORY_SCRIPT_CAST_COMPLETENESS_HINT = [
 ].join("\n");
 
 /**
+ * 任务书里的「资产列只写这一镜真正用到的」硬规则（用户 2026-11-19 第 01 条）。
+ *
+ * 报障原话：「分镜表现在每个镜头挂载的资产有点多，很多这个镜头用不上的资产也进行了识别和挂载」。
+ * 根因是上面 `STORY_SCRIPT_CAST_COMPLETENESS_HINT` 为了「不许漏主角」把口径拉到了另一端 ——
+ * 模型于是把背景路人、群众演员、这一场可能用到的道具全写进资产列，**每写一个名字就多一张资产图**，
+ * 铺链路也照样把图挂到那一镜上。
+ *
+ * 所以这一段**必须排在「不许漏」之后**（模型对越靠后的指令越服从），并且显式写「冲突时以本条为准」。
+ * 只在节点选了「资产精简」口径（`metadata.scriptAssetMountMode = strict`，默认）时才挂。
+ */
+export const STORY_SCRIPT_ASSET_LEAN_HINT = [
+    "## 资产列只写这一镜真正用到的（最高优先级，压过上文「出场角色与场景不许漏」）",
+    "- 上一条「人在画框里就必须写进角色列」是为了**不漏主角**，这一条管的是**别多写**；两条冲突时**以本条为准**：主角 / 有台词 / 有动作 / 后面还要反复复用的角色**必须写**；纯背景群演、路过的路人、镜头里一闪而过的人群**不写角色列**，改用一句话写进「画面描述」（画面照样带得出来，但不会多生成一张资产图）。",
+    "- 🔴 角色列一格最多写 6 个名字。写进角色列的每个名字都会**单独生成一张资产图**，每多写一个就多一笔生成费用、多一张图挂到这一镜上。",
+    "- 🔴 场景列一镜只写**一个**场景名 —— 就是这一镜实际所在的那个地点。用 `/`、`、`、`或` 并列的备选场景一律不留，只留这一镜真正拍的那处。",
+    "- 道具列一镜最多 3 件，且必须是这一镜**真正被使用 / 被特写**、跨镜还要保持同一个样子的关键道具；只是「场景里摆了这么一个东西」的不写。",
+    "- 资产描述列（角色描述 / 场景描述 / 道具描述 / 人物站位）**只描述你已经写进名字列的那几个资产**，不要顺手把「这一场可能用得上」的东西也描述一遍：描述里出现完整资产名的，铺链路会当成这一镜真的用到了它。",
+    "- 只在这一镜出现、后面不再复用的东西（一次性道具、临时陈设、背景小物），一律写进「画面描述」，不占资产列。",
+].join("\n");
+
+/**
  * 把源内容里的段头声明**逐段列成任务书里的一张清单**（2026-11-08 第 17 条）。
  *
  * 为什么不能只靠 system prompt 里那句「段头要照写」：一份剧本里常常有 6~10 个 15 秒段落，每段的人不一样；
@@ -4457,6 +4575,7 @@ export function buildStoryScriptTask({
     assetPrompt,
     shotPrompt,
     assetDedupe,
+    assetLean,
 }: {
     sourceText: string;
     prompt?: string;
@@ -4470,8 +4589,10 @@ export function buildStoryScriptTask({
     shotPrompt?: unknown;
     /** 资产描述去重（同名资产只在首现镜写全）；不传 = 任务书与改造前逐字一致 */
     assetDedupe?: boolean;
+    /** 资产精简（资产列只写这一镜真正用到的）；不传 = 任务书与改造前逐字一致 */
+    assetLean?: boolean;
 }): string {
-    return getStoryScriptPreset(preset).buildTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetDedupe });
+    return getStoryScriptPreset(preset).buildTask({ sourceText, prompt, characterRefs, segmentSeconds, mergeMode, assetPrompt, shotPrompt, assetDedupe, assetLean });
 }
 
 /** 构建「只重写某一镜」的任务书；不传 preset 时保持 classic。 */
