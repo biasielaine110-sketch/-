@@ -34,7 +34,7 @@ import {
     type FisherPipelineMode,
 } from "@/lib/runninghub-workflow";
 import { isRelayMiniMaxH3Video } from "@/services/api/video";
-import { WORK_FISHER_H3_COMFYUI_RESOLUTIONS, isWorkFisherH3ComfyuiModel, isWorkFisherVideoHost, normalizeWorkFisherH3ComfyuiRatio, normalizeWorkFisherResolution } from "@/services/api/video";
+import { WORK_FISHER_H3_COMFYUI_RESOLUTIONS, isSeedanceVideoHost, isWorkFisherH3ComfyuiModel, isWorkFisherVideoHost, normalizeWorkFisherH3ComfyuiRatio, normalizeWorkFisherResolution } from "@/services/api/video";
 import { JUSUANHUB_VIDEO_RESOLUTION_OPTIONS, isJusuanhubMediaBaseUrl, normalizeJusuanhubVideoQuality } from "@/services/api/jusuanhub-media";
 import { isApimartMuseVideoModel } from "@/services/api/video";
 import {
@@ -276,11 +276,12 @@ export function resolveVideoSettingFlags(config: AiConfig): VideoSettingFlags {
     /** Work-Fisher 轻量 AI App（211550…）：只露风格 LoRA，不露 Fisher 模式/风格字段全套。 */
     const fisherLightRh = !h3Comfy && isWorkFisherLightAiAppId(model);
     /**
-     * work-fisher 的 `minimax-h3-comfyui-*`：上游只收 16:9 / 9:16 + 七档分辨率
-     * （480p / 608p / 768p / 896p / 1088p / 1280p / 1440p），且是**价格预览阶段**就校验，
-     * 面板摆 720p 或 1:1 会直接 400。必须单独认出来，别落到通用档位。
+     * MiniMax H3 ComfyUI 系（`minimax-h3-comfyui-max` 等）挂在 work-fisher / seedance.nz 上：
+     * 上游只收 16:9 / 9:16 + 七档分辨率（480p / 608p / 768p / 896p / 1088p / 1280p / 1440p），
+     * 且是**价格预览阶段**就校验，面板摆 720p 或 1:1 会直接 400。必须单独认出来，别落到通用档位。
      */
-    const fisherComfyH3 = !h3Comfy && isWorkFisherVideoHost(requestConfig.baseUrl || "") && isWorkFisherH3ComfyuiModel(model);
+    const fisherComfyH3 =
+        !h3Comfy && (isWorkFisherVideoHost(requestConfig.baseUrl || "") || isSeedanceVideoHost(requestConfig.baseUrl || "")) && isWorkFisherH3ComfyuiModel(model);
     const yzjinyuRh = !h3Comfy && isMinimaxH3YzjinyuWorkflowId(model);
     const wenxiRh = !h3Comfy && isMinimaxH3WenxiWorkflowId(model);
     /** 只有低配图挂着 `MysticXXX_MMH3-V1`，风格 LoRA 档位只对它显示。 */
@@ -869,8 +870,9 @@ export function videoSettingsSummary(config: AiConfig) {
     if (isJusuanhubMediaBaseUrl(resolveModelRequestConfig(config, model).baseUrl)) {
         return `${normalizeJusuanhubVideoQuality(config.vquality)}p · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
     }
-    // work-fisher H3 ComfyUI 系：摘要同样写「实际提交值」（720 → 768p / 1080 → 1088p）。
-    if (isWorkFisherVideoHost(resolveModelRequestConfig(config, model).baseUrl || "") && isWorkFisherH3ComfyuiModel(model)) {
+    // H3 ComfyUI 系（work-fisher / seedance.nz）：摘要同样写「实际提交值」（720 → 768p / 1080 → 1088p）。
+    const requestBaseUrl = resolveModelRequestConfig(config, model).baseUrl || "";
+    if ((isWorkFisherVideoHost(requestBaseUrl) || isSeedanceVideoHost(requestBaseUrl)) && isWorkFisherH3ComfyuiModel(model)) {
         return `${normalizeWorkFisherResolution(config.vquality, model)} · ${videoSizeLabel(normalizeWorkFisherH3ComfyuiRatio(config.size))} · ${videoSecondsLabel(config.videoSeconds)}`;
     }
     const base = `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;

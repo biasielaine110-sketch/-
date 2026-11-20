@@ -680,6 +680,13 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     if (isZhenzhenMuseVideoModel(selectedModel)) {
         return createMuseVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
     }
+    // Seedance.nz 上的 MiniMax H3 ComfyUI 系：`metadata` 契约（/v1/video/generations）。
+    // 必须排在通用 OpenAI 路径之前 —— `isRelayMiniMaxH3Video` 会命中 `minimax-h3`，
+    // 套上 CometAPI 形状后 ratio / resolution 全不对（400 Aspect ratio must be 16:9 or 9:16…）。
+    if (isSeedanceVideoHost(requestConfig.baseUrl) && isWorkFisherH3ComfyuiModel(selectedModel)) {
+        assertVideoConfig(requestConfig, requestConfig.model);
+        return createSeedanceH3ComfyuiVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
+    }
     // APIMart `muse-video-ext`：另一套契约（/videos/generations + /tasks/{id} + image_urls），
     // 落到下面的 OpenAI 形状会 404/400，所以必须在通用路径之前单独分流。
     if (isApimartMuseVideoModel(selectedModel)) {
@@ -724,6 +731,8 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     if (task.provider === "jusuanhub") return pollJusuanhubVideoTask(requestConfig, task, options);
     // muse 走自己的查询端点（`/video/generations/{id}`，结果在 `data.result_url`）。
     if (isZhenzhenMuseVideoModel(task.model)) return pollMuseVideoTask(requestConfig, task, options);
+    // Seedance H3 ComfyUI 系与 muse 同一套查询端点 / 结果字段（`data.status` → `data.result_url`）。
+    if (isSeedanceVideoHost(requestConfig.baseUrl) && isWorkFisherH3ComfyuiModel(task.model)) return pollMuseVideoTask(requestConfig, task, options);
     // APIMart muse 查的是 `/tasks/{id}`（`data.result.videos[0].url[0]`）。
     if (isApimartMuseVideoModel(task.model)) return pollApimartMuseVideoTask(requestConfig, task, options);
     return pollOpenAIVideoTask(requestConfig, task, options);
@@ -1897,6 +1906,125 @@ function workFisherSeconds(value: string) {
     return String(Math.max(1, Math.min(30, seconds)));
 }
 
+/**
+ * Seedance.nz（https://api.seedance.nz 及子域）。同一张站上挂着好几套契约（Seedance 原生 / muse /
+ * H3 ComfyUI 系），所以这个门**只判渠道**，具体分流仍由调用方按模型族再收窄。导出给探针与面板用。
+ */
+export function isSeedanceVideoHost(baseUrl: string) {
+    const hostname = videoHostname(baseUrl);
+    return hostname === "seedance.nz" || hostname.endsWith(".seedance.nz");
+}
+
+/**
+ * 🔴 Seedance.nz 上的 MiniMax H3 **ComfyUI 系**（`minimax-h3-comfyui-max` 等）。
+ *
+ * 为什么必须单独分流：模型名里的 `minimax-h3` 会被 `isRelayMiniMaxH3Video` 命中，套上
+ * CometAPI 形状（`size:1344x768` / `resolution:768P` / `aspect_ratio:21:9`）打到 /videos ——
+ * 而这一族在 seedance 上只认「`metadata.ratio` = 16:9 | 9:16 + `metadata.resolution` 七档小写」，
+ * 其余值直接 400：`Aspect ratio must be 16:9 or 9:16 and resolution one of 480p, 608p, 768p,
+ * 896p, 1088p, 1280p, 1440p`（用户 2026-11-21 实测）。
+ *
+ * 契约（https://api.seedance.nz/docs/#minimax-qwen-media，`minimax-h3-comfyui-max` 一节）：
+ *   提交 `POST /v1/video/generations` → `{ model, prompt, seconds, images?, metadata:{ resolution, ratio } }`
+ *   查询 `GET /v1/video/generations/{id}`，`data.status = SUCCESS` 后从 `data.result_url` 下载；
+ *   `seconds` 整数字符串 3–15（默认 "5"）；`images` ≤9 张 PNG/JPEG/WebP（每张 ≤20MiB，合计 ≤80MiB）；
+ *   提示词用 `<Picture n>` 引用第 n 张参考图，**不要写 `<Audio n>`**（声音/台词用文字描述）。
+ * 比例 / 清晰度归一直接复用 work-fisher H3 ComfyUI 那套（同一族、同一份白名单）。
+ */
+export type SeedanceH3ComfyuiVideoRequestBody = {
+    model: string;
+    prompt: string;
+    seconds: string;
+    metadata: { resolution: string; ratio: string };
+    images?: string[];
+};
+
+/** 纯函数：seedance H3 ComfyUI 系提交体（导出供探针断言字段面）。 */
+export function buildSeedanceH3ComfyuiPayload(
+    config: Pick<AiConfig, "size" | "vquality" | "videoSeconds">,
+    model: string,
+    prompt: string,
+    images: string[] = [],
+): SeedanceH3ComfyuiVideoRequestBody {
+    const body: SeedanceH3ComfyuiVideoRequestBody = {
+        model: modelOptionName(model).trim(),
+        prompt: String(prompt || "").trim(),
+        // 文档 3–15 秒整数字符串；空 / 脏值回落默认 "5"。
+        seconds: String(Math.min(15, Math.max(3, Math.floor(Number(config.videoSeconds) || 5)))),
+        metadata: {
+            resolution: normalizeWorkFisherH3ComfyuiResolution(config.vquality),
+            ratio: normalizeWorkFisherH3ComfyuiRatio(config.size),
+        },
+    };
+    const list = images.filter((url) => typeof url === "string" && Boolean(url.trim())).slice(0, 9);
+    if (list.length) body.images = list;
+    return body;
+}
+
+/**
+ * 参考图：公开 URL 原样用；本地图先传 `/v1/files/upload` 换临时公网 URL
+ * （文档要求「参考地址须能公网直接访问」）；上传不可用才退 data URI（同站 muse 契约接受）。
+ * 单张失败不毁整单 —— 能发几张发几张。
+ */
+async function resolveSeedanceH3ComfyuiImages(config: AiConfig, references: ReferenceImage[], options?: RequestOptions): Promise<string[]> {
+    const urls: string[] = [];
+    for (const image of references.slice(0, 9)) {
+        const existing = [image.url, image.dataUrl].map((value) => String(value || "").trim()).find((value) => isPublicHttpUrl(value) && !value.startsWith("data:"));
+        if (existing) {
+            urls.push(existing);
+            continue;
+        }
+        try {
+            const dataUrl = await imageToDataUrl(image);
+            if (!dataUrl?.startsWith("data:image/")) continue;
+            const blob = await (await fetch(dataUrl)).blob();
+            try {
+                const uploaded = await uploadProviderMediaFile(config, blob, publicImageFilename(blob), options);
+                if (isPublicHttpUrl(uploaded) && !uploaded.startsWith("data:")) {
+                    urls.push(uploaded);
+                    continue;
+                }
+            } catch {
+                // 渠道没开 /v1/files/upload → 退 data URI，让上游按内容识别。
+            }
+            urls.push(dataUrl);
+        } catch {
+            // 忽略单张失败
+        }
+    }
+    return urls;
+}
+
+async function createSeedanceH3ComfyuiVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const promptText = String(prompt || "").trim();
+    // 🔴 空提示词不下发：ComfyUI 系工作流收不到提示词会用图内示例提示词出片（见 work-fisher 分流同款拦法）。
+    if (!promptText && !references.length) throw new Error(apiText("videoPromptRequired"));
+    if (!promptText) console.warn(`[seedance-h3-comfyui] ${modelOptionName(model)} 这次没有提示词，上游可能按工作流自带的示例提示词出片`);
+    const images = await resolveSeedanceH3ComfyuiImages(config, references, options);
+    const payload = buildSeedanceH3ComfyuiPayload(config, model, promptText, images);
+    // 排查参数类 400 时最需要的就是「我们到底发了什么」——payload 里没有密钥，线上也打（提示词截断到 300 字）。
+    console.info("[seedance-h3-comfyui] create video body", {
+        model: payload.model,
+        seconds: payload.seconds,
+        metadata: payload.metadata,
+        images: payload.images?.length ?? 0,
+        promptPreview: payload.prompt.slice(0, 300),
+        promptLength: payload.prompt.length,
+    });
+    try {
+        return { id: await postMuseVideoTask(config, "/video/generations", payload as unknown as Record<string, unknown>, options), provider: "openai", model };
+    } catch (error) {
+        // 只有「端点不存在」（404/405）才换 `/videos` 重试一次（文档说两版端点请求体格式相同）；
+        // 参数错 / 鉴权错原样抛出，绝不因为 400 重复下单（那是白花钱）。
+        if (!isMissingVideoEndpoint(error)) throw new Error(readAxiosError(error, apiText("videoTaskCreateFailed")));
+        try {
+            return { id: await postMuseVideoTask(config, "/videos", payload as unknown as Record<string, unknown>, options), provider: "openai", model };
+        } catch (retryError) {
+            throw new Error(readAxiosError(retryError, apiText("videoTaskCreateFailed")));
+        }
+    }
+}
+
 async function createOpenAIVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
     if (isMetasoH3Video(config, model)) {
         return createMetasoH3VideoTask(config, model, prompt, references, options);
@@ -2457,6 +2585,9 @@ export function isRelayMiniMaxH3Video(config: AiConfig, model: string) {
     // work-fisher 挂了 RunningHub 系的 `rh-*-h3-*` 工作流模型，名字里带 `-h3-` 但不是
     // MiniMax-H3 中转：它的契约是 `/v1/videos` + `metadata`（见 createWorkFisherVideoTask）。
     if (isWorkFisherVideoHost(config.baseUrl)) return false;
+    // seedance.nz 上的 H3 ComfyUI 系同理：走自己的 `metadata` 契约（createSeedanceH3ComfyuiVideoTask），
+    // 不许被这套 CometAPI 形状抢走 —— 否则 400 Aspect ratio must be 16:9 or 9:16…
+    if (isSeedanceVideoHost(config.baseUrl) && isWorkFisherH3ComfyuiModel(model)) return false;
     const name = modelOptionName(model).toLowerCase();
     return /minimax[-_]?h3|(?:^|[-_])h3(?:$|[-_])|1ren[-_]?minimax|miora[-_]?minimax/i.test(name);
 }
