@@ -3,7 +3,7 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { buildApiUrl, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { proxyApiUrl, forceProxyMediaUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
-import { isProxiedApiUrl, isTransportFailure, withProxyFallback } from "./net-transport";
+import { isProxiedApiUrl, isTimeoutFailure, isTransportFailure, withProxyFallback } from "./net-transport";
 import { isComfyH3SingleReferenceImageWorkflow, parseComfyApiWorkflow, runNativeComfyUiJob, shouldUseNativeComfyUi, type ComfyWorkflow } from "@/lib/comfyui-native";
 import { isKrea2MjStyleWorkflowId, isMinimaxH3FourViewWorkflowId, isMinimaxH3RefTopWorkflowId, isMinimaxH3SelfLiftWorkflowId, isMinimaxH3StoryWorkflowId, isMinimaxH3VibeShortWorkflowId, isMinimaxH3YzjinyuWorkflowId, pickRunningHubWorkflowId, pollRunningHubQuery, readRunningHubTask, runningHubOrigin, runRunningHubWorkflow } from "@/lib/runninghub-workflow";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
@@ -164,7 +164,11 @@ type ImageApiResponse = {
 };
 
 const IMAGE_TASK_POLL_INTERVAL_MS = 3000;
-const IMAGE_TASK_POLL_TIMEOUT_MS = 300_000;
+/**
+ * 异步任务的整体等待上限。轮询是幂等 GET、不产生费用，所以可以比同步提交那 300s 更宽 ——
+ * `gpt-image-2` 这类慢模型排到 6–8 分钟是常态，掐在 5 分钟会让「图已经出了」变成「任务超时」。
+ */
+const IMAGE_TASK_POLL_TIMEOUT_MS = 600_000;
 type GeminiPart = {
     text?: string;
     inlineData?: { mimeType?: string; data?: string };
@@ -1659,7 +1663,10 @@ function resolveImagePollPaths(config: AiConfig, taskId: string) {
         return [`/tasks/${id}`, `/images/generations/${id}`];
     }
     // wb2api / OpenAI relays: edits tasks may only exist under /images/edits/{id}.
-    return [`/images/generations/${id}`, `/images/edits/${id}`, `/tasks/${id}`];
+    // `/images/tasks/{id}` 是 `image.codesonline.dev` 这条网关暴露的任务查询口
+    // （无 key 时它回 401 missing_api_key、而 `/images/generations/{id}` 直接 404），
+    // 放进来后上游只要返回了 task_id，这里就能接住，不必再让同步 POST 吊满 5 分钟。
+    return [`/images/generations/${id}`, `/images/edits/${id}`, `/images/tasks/${id}`, `/tasks/${id}`];
 }
 
 function sleep(ms: number, signal?: AbortSignal) {
@@ -2584,37 +2591,102 @@ function aiApiUrl(config: AiConfig, path: string) {
 
 /** Seedream / image APIs often take 1–3 minutes; keep client wait aligned with the site proxy (Hobby ≤300s). */
 const IMAGE_REQUEST_TIMEOUT_MS = 300_000;
+/**
+ * 直连那一跳没有站点代理那堵墙，给慢模型更大预算。
+ *
+ * `gpt-image-2`（尤其 `-ext` / high 档）在中转上常见 5–8 分钟才出图。300s 一到客户端先放弃，
+ * 用户看到的就是「渠道后台早出图了、画布十分钟还没有」—— 图其实丢在**客户端超时**这一环，
+ * 不是上游失败。用户随时可以暂停，所以宁可等长一点。
+ */
+const IMAGE_DIRECT_REQUEST_TIMEOUT_MS = 600_000;
+/** 慢模型走站点代理时，向代理申请的等待预算（代理侧 clamp 上限同为 540s，见 `functions/_lib/proxy.js`）。 */
+const IMAGE_SLOW_PROXY_TIMEOUT_MS = 540_000;
+/** 客户端必须比代理的 540s 更宽，否则又是「客户端先 abort、代理的 504 文案没人看」。 */
+const IMAGE_SLOW_REQUEST_TIMEOUT_MS = 560_000;
+
+/** 会排到 5 分钟以上的慢模型家族 —— 目前就是 gpt-image（含 `-ext` / 中转前缀变体）。 */
+function isSlowImageSubmitModel(model: string) {
+    return isGptImageModel(model);
+}
+
+/**
+ * 慢模型 + 代理跳：把「等多久」随请求带给站点代理。
+ * 代理默认 290s，慢模型会正好在代理侧被掐成 504；申请 540s 后图就有机会真的回来。
+ */
+function imageSubmitTarget(url: string, slow: boolean) {
+    if (!slow || !isProxiedApiUrl(url)) return url;
+    return `${url}${url.includes("?") ? "&" : "?"}timeout=${IMAGE_SLOW_PROXY_TIMEOUT_MS}`;
+}
+
+function imageSubmitTimeoutMs(url: string, slow: boolean) {
+    if (isProxiedApiUrl(url)) return slow ? IMAGE_SLOW_REQUEST_TIMEOUT_MS : IMAGE_REQUEST_TIMEOUT_MS;
+    return IMAGE_DIRECT_REQUEST_TIMEOUT_MS;
+}
+
+/**
+ * 生图超时 → 换成一句「上游可能还在算，别重复提交」的人话。
+ *
+ * 为什么不能让它落回 `readAxiosError` 的通用文案：`ECONNABORTED` 既不是 `ERR_NETWORK`
+ * 也没进 HTTP/2 那条正则，最终只会得到泛化的 `networkFailed`（「网络异常，请重试」）——
+ * 而这句「请重试」正是最贵的一句：后端大概率已经扣过费了。
+ */
+function asImageSubmitTimeout(error: unknown, timeoutMs: number) {
+    if (!isTimeoutFailure(error)) return error;
+    const timeout = new Error(apiText("imageSubmitTimedOut", { seconds: Math.round(timeoutMs / 1000) })) as Error & {
+        code?: string;
+        cause?: unknown;
+    };
+    timeout.code = "IMAGE_SUBMIT_TIMEOUT";
+    timeout.cause = error;
+    return timeout;
+}
 
 /**
  * 生图 POST。走 `withProxyFallback`：`aicost.me` 这类被刻意放进 `DIRECT_CORS_HOSTS` 的站点是
  * 浏览器直连，而直连那一跳跑在用户本机网络上（代理/加速器/边缘都可能把它掐断）。断到「一个
  * 字节都没回来」时自动换站点代理再试一次，而不是直接把传输层错误吐给用户。
+ *
+ * 🔴 超时**不**换跳（`withProxyFallback` 的默认口径）：超时代表上游接单了，重提就是重复计费。
  */
 async function postImageJson<T>(config: AiConfig, path: string, data: unknown, options?: RequestOptions) {
-    return withProxyFallback(
-        aiApiUrl(config, path),
-        (target) =>
-            axios.post<T>(target, data, {
-                headers: aiHeaders(config, "application/json"),
-                signal: options?.signal,
-                timeout: IMAGE_REQUEST_TIMEOUT_MS,
-            }),
-        data,
-    );
+    const slow = isSlowImageSubmitModel(config.model);
+    const url = imageSubmitTarget(aiApiUrl(config, path), slow);
+    const timeoutMs = imageSubmitTimeoutMs(url, slow);
+    try {
+        return await withProxyFallback(
+            url,
+            (target) =>
+                axios.post<T>(target, data, {
+                    headers: aiHeaders(config, "application/json"),
+                    signal: options?.signal,
+                    timeout: timeoutMs,
+                }),
+            data,
+        );
+    } catch (error) {
+        throw asImageSubmitTimeout(error, timeoutMs);
+    }
 }
 
 /** 同 `postImageJson`：multipart 生图/改图也吃这一跳兜底（body 过大时不换跳，见 `withProxyFallback`）。 */
 async function postImageForm<T>(config: AiConfig, path: string, data: FormData, options?: RequestOptions) {
-    return withProxyFallback(
-        aiApiUrl(config, path),
-        (target) =>
-            axios.post<T>(target, data, {
-                headers: aiHeaders(config),
-                signal: options?.signal,
-                timeout: IMAGE_REQUEST_TIMEOUT_MS,
-            }),
-        data,
-    );
+    const slow = isSlowImageSubmitModel(config.model);
+    const url = imageSubmitTarget(aiApiUrl(config, path), slow);
+    const timeoutMs = imageSubmitTimeoutMs(url, slow);
+    try {
+        return await withProxyFallback(
+            url,
+            (target) =>
+                axios.post<T>(target, data, {
+                    headers: aiHeaders(config),
+                    signal: options?.signal,
+                    timeout: timeoutMs,
+                }),
+            data,
+        );
+    } catch (error) {
+        throw asImageSubmitTimeout(error, timeoutMs);
+    }
 }
 
 /**

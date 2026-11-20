@@ -6,6 +6,27 @@
 // "线上代理最长约 5 分钟" expectation (apiErrors.proxyTimedOut).
 const PROXY_TIMEOUT_MS = 290_000;
 /**
+ * 单条请求可以申请更长的预算（`?timeout=<ms>`），给生图慢模型用。
+ *
+ * 为什么需要：`gpt-image-2`（`image.codesonline.dev` / `www.aicost.me`）在逆向网关上排到
+ * 5–9 分钟才出图是常态，290s 一到代理就回 504，画布上就是「渠道后台已经出图了、前端十分钟
+ * 还没有」。等待上游不算 CPU 时间，所以放宽是安全的；但必须有硬上限，不能让一条请求把边缘
+ * 实例吊死。上限 540s 与客户端 560s 配合：**永远让代理先给出可解释的 504**，而不是客户端
+ * 先 abort 成一句「网络异常」。
+ */
+const PROXY_TIMEOUT_MAX_MS = 540_000;
+const PROXY_TIMEOUT_MIN_MS = 10_000;
+
+/**
+ * @param {URL} requestUrl
+ * @returns {number}
+ */
+function resolveProxyTimeoutMs(requestUrl) {
+    const raw = Number(requestUrl.searchParams.get("timeout") || 0);
+    if (!Number.isFinite(raw) || raw <= 0) return PROXY_TIMEOUT_MS;
+    return Math.min(PROXY_TIMEOUT_MAX_MS, Math.max(PROXY_TIMEOUT_MIN_MS, Math.round(raw)));
+}
+/**
  * Buffered multipart ceiling.
  *
  * Streaming a multipart body from the edge to the origin is what the canvas sees as
@@ -116,9 +137,11 @@ export async function handleProxy(request) {
         });
     }
 
+    let timeoutMs = PROXY_TIMEOUT_MS;
     try {
         const requestUrl = new URL(request.url);
         const target = requestUrl.searchParams.get("target");
+        timeoutMs = resolveProxyTimeoutMs(requestUrl);
         if (!target) return corsErrorResponse("missing target", 400, request);
 
         let targetUrl;
@@ -151,7 +174,7 @@ export async function handleProxy(request) {
         const init = {
             method,
             headers,
-            signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+            signal: AbortSignal.timeout(timeoutMs),
             redirect: "follow",
         };
 
@@ -189,7 +212,7 @@ export async function handleProxy(request) {
         const message = error instanceof Error ? error.message : String(error);
         const timedOut = /aborted due to timeout|TimeoutError|timed out/i.test(message);
         const detail = timedOut
-            ? `upstream timed out after ${Math.round(PROXY_TIMEOUT_MS / 1000)}s`
+            ? `upstream timed out after ${Math.round(timeoutMs / 1000)}s`
             : `upstream unreachable (${message})`;
         // Must use corsErrorResponse — a bare 502 without ACAO is masked as CORS in the canvas.
         return corsErrorResponse(

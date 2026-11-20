@@ -62,6 +62,34 @@ export function isTransportFailure(error: unknown): boolean {
 }
 
 /**
+ * 超时 = 请求已经发出去、上游收下了，只是还没算完。
+ *
+ * 🔴 这一条必须从 `isTransportFailure()` 里单独拎出来。它俩语义不同：
+ *   - `ECONNRESET / ERR_HTTP2_PROTOCOL_ERROR / 连不上`：请求**可能根本没送达**，换一条通道
+ *     重发是安全的，这也是当初给 aicost 生图加换跳兜底的原因；
+ *   - `ECONNABORTED / ETIMEDOUT / timeout`：上游**已经接单**（`gpt-image-2` 这类慢模型常常
+ *     3–8 分钟才出图），它正在算、甚至已经算完并扣过费了。
+ *
+ * 对生图 / 配音这些**非幂等 POST**，超时后换跳重提等于：① 可能生成两遍、白花一笔；
+ * ② 两跳各自 5 分钟 —— 用户看到的就是「后端早出图了，前端十分钟还没图」
+ * （2026-11-20 `image.codesonline.dev` / `www.aicost.me` 的 `gpt-image-2` 报障）。
+ */
+export function isTimeoutFailure(error: unknown): boolean {
+    if (!axios.isAxiosError(error) || error.response) return false;
+    const code = String((error as { code?: string }).code || "");
+    if (/^(ECONNABORTED|ETIMEDOUT)$/i.test(code)) return true;
+    return /timeout|timed out/i.test(String((error as { message?: string }).message || ""));
+}
+
+export type ProxyFallbackOptions = {
+    /**
+     * 超时后是否还换跳重提。**默认 false**：超时说明请求已送达上游，重提可能就是第二笔费用。
+     * 只有确认幂等（GET / 纯查询）的调用才该打开。
+     */
+    retryOnTimeout?: boolean;
+};
+
+/**
  * 先按 `url` 发一次；若这次是「连接直接断了、没有任何响应」，再换站点代理试一次。
  *
  * 这样做的两个理由：
@@ -72,12 +100,20 @@ export function isTransportFailure(error: unknown): boolean {
  *
  * `url` 已经是代理地址时不做任何兜底（否则等于自己重试自己）。
  */
-export async function withProxyFallback<T>(url: string, run: (target: string) => Promise<T>, body?: unknown): Promise<T> {
+export async function withProxyFallback<T>(
+    url: string,
+    run: (target: string) => Promise<T>,
+    body?: unknown,
+    options?: ProxyFallbackOptions,
+): Promise<T> {
     try {
         return await run(url);
     } catch (error) {
         if (axios.isCancel(error) || !isTransportFailure(error)) throw error;
         if (isProxiedApiUrl(url)) throw error;
+        // 🔴 超时不换跳（默认）：300s 一个字节都没回来，说明上游已经收下并在算 —— 换一跳再提交
+        // 就是给同一个需求再付一次钱，还把用户的等待时间直接翻倍。
+        if (isTimeoutFailure(error) && options?.retryOnTimeout !== true) throw error;
         // body 大到代理跳一定会 413/掐流：换了只是把「连不上」换成「请求体过大」。
         if (estimateBodyBytes(body) > PROXY_BODY_SAFE_BYTES) throw error;
         const alternate = forceProxyApiUrl(url);

@@ -125,7 +125,8 @@ function apiProxyPlugin(): Plugin {
                             method: req.method,
                             headers,
                             body: body ? new Uint8Array(body) : undefined,
-                            signal: AbortSignal.timeout(500_000),
+                            // 与线上代理同口径：慢模型（gpt-image-2）客户端会给到 560s，dev 这跳不能更短。
+                            signal: AbortSignal.timeout(560_000),
                         });
                         if (upstream.status >= 400) {
                             const errorText = await upstream.clone().text().catch(() => "");

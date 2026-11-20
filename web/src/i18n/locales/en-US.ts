@@ -309,7 +309,8 @@ export default {
         endpointReset: "The API slammed the connection shut (HTTP/2 protocol error / connection reset) without a readable response. Typical causes: a failing provider edge node, a broken link to their origin, or a local proxy/VPN killing that domain — nothing to do with your model settings. The canvas already retried over the other transport; if it still fails, check the provider's status page and try again.",
         originDnsError: "The provider's own DNS is broken (Cloudflare 1016 Origin DNS error): the request reached Cloudflare, but it cannot resolve the origin for this API host. That is a provider-side outage, not a canvas setting — check their dashboard/status, or switch to another API host.",
         proxyUnreachable: "The site proxy could not reach the upstream API (often a brief blip or upstream outage). Retry first; or set API transport to Direct in Settings → Preferences to skip the proxy hop.",
-        proxyTimedOut: "Proxy timed out. Online proxy allows up to ~5 minutes; redeploy after the timeout fix. Or run npm run dev locally, or switch API transport to Direct.",
+        proxyTimedOut:
+            "Proxy timed out. Online proxy allows up to ~5 minutes; redeploy after the timeout fix. Or run npm run dev locally, or switch API transport to Direct. The upstream may still be generating — do not resubmit right away or you may be billed twice.",
         upstreamGatewayTimeout: "Upstream gateway timeout (504): the request reached the provider, but their own gateway gave up waiting for the model service (common when the submit queue is congested). This is not a canvas setting — switching API transport to Direct will not help. ⚠️ If this happened on submit, the job may already exist — check the provider's task list before retrying, to avoid a double charge.",
         payloadTooLarge: "Request body too large (HTTP 413). Reference media through the site proxy is size-limited (~4.5MB). Use fewer/smaller references, trim audio first, or set API transport to Direct in Settings → Preferences.",
         baseUrlRequired: "Configure the Base URL first",
@@ -344,6 +345,8 @@ export default {
         unknownImageResponse: "The API returned data in an unknown format (fields: {{fields}}). Check model or API compatibility.",
         noImageReturned: "The API did not return an image. The prompt may have triggered safety review or the model may not support this operation.",
         imageTimeout: "Image generation timed out (the job is still queued server-side — try again shortly).",
+        imageSubmitTimedOut:
+            "The image request was submitted but nothing came back within {{seconds}}s. The upstream is likely still generating (slow models often take 5–8 minutes): do not resubmit right away or you may be billed twice. Check the channel dashboard later, or refresh the canvas in a few minutes.",
         imageDownloadFailed: "The image was generated but the download failed: check that this channel's key is valid and still has quota.",
         imageTaskFailed: "The image generation task failed. Check the prompt, model, or try again later.",
         imageTaskPollTimeout: "The image generation task timed out. Try again later.",
