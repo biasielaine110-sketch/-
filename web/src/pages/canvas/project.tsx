@@ -12480,7 +12480,7 @@ function AtelierCanvasPage() {
              * 生出的图也全是乱放的」）。
              *
              * 关键差别只有三处，其他系数与 `handleBuildScriptPipeline` 逐字同源：
-             *  ① `gapY` 从 36 变成 `EPISODE_BAND_GAP_Y`（240）—— 集间距不再是「文本节点高 + 36」；
+             *  ① `gapY` 从 36 变成 `EPISODE_BAND_GAP_Y`（120，2026-11-20 起，原 240 减半）—— 集间距不再是「文本节点高 + 36」；
              *  ② `band` 分支按**链路真实高度**给每集预留纵向空间；
              *  ③ 整条带只做一次 `findColumnX` → 全批 `baseX` 相同，铺链路时不再逐节点找空地。
              *
@@ -12510,12 +12510,13 @@ function AtelierCanvasPage() {
             /** 每集的**实际**秒数（尾集不够满 → 就按实际段落数算，见 `EpisodeDraft.seconds`）。 */
             const draftSeconds = drafts.map((draft) => resolveEpisodeDraftSeconds(draft, seconds));
             /**
-             * 🔴 首趟只按预估链路高度的 **1/3** 预留（用户 2026-11-19 20:37：
-             * 「拆不同集数文本的时候，这两个间隔也太大了，缩小 3 分之 2」）。
+             * 🔴 首趟只按预估链路高度的 **1/6** 预留（用户 2026-11-19 20:37：
+             * 「拆不同集数文本的时候，这两个间隔也太大了，缩小 3 分之 2」；2026-11-20 20:05 再要一刀：
+             * 「拆出来的其他集数的文本节点和脚本生成器，间隔在现在基础上缩小一半」→ 1/3 减半成 1/6）。
              *
              * 这一刻分镜表还没出、一张图也没铺，按 90 秒 = 24 镜 + 2 行冗余整条预留 8040px，
              * 用户看到的就是两个文本节点之间一大片纯空白。表出来后第二趟会按真实镜数重排，
-             * 而且「没勾生图 / 生视频」时第二趟还会进一步压到 1 行 —— 所以这里留 1/3 足够。
+             * 而且「没勾生图 / 生视频」时第二趟还会进一步压到 1 行 —— 所以这里留 1/6 足够。
              */
             const estimatedRows = draftSeconds.map((value) =>
                 Math.max(1, Math.round((resolveStoryScriptShotCount(value) + EPISODE_BAND_ROW_SLACK) * EPISODE_BAND_ESTIMATE_RATIO)),
