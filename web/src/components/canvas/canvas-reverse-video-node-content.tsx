@@ -232,12 +232,20 @@ export function CanvasReverseVideoNodeContent({
      * 存在 `reverseVideoTarget.shotsPerClip`（`2` / `3` / `4`），02 / 03 建脚本节点时搬进 `scriptShotsPerClip`，
      * 之后铺链路按这颗的镜数切片。
      *
-     * 🔴 `shotsChoice` 才是**显式选择**（0 = 三颗都没点过），亮灯只认它 —— 界面不能再拿「生效档位」冒充选择：
-     * 没选时 01~03 默认每 3 镜、04 默认每 4 镜（用户 2026-11-19），两种默认并存，亮着 3 必然误导。
-     * `compactShots` 只留给 02 / 03 的摘要文案（它俩没选时就是 3）。
+     * 🔴 亮灯口径（用户 2026-11-20：「反推视频节点，默认选择 每 3 镜合一个镜头」）：
+     * **没写过 = 「每 3 镜」这颗就是亮的**，不再走「三颗都不亮」那一套。
+     * 所以这里必须把两件事分开：
+     *  - `shotsExplicit` = 数据里真正写过的档位（`2` / `3` / `4`；`0` = 没写过 / 脏值）；
+     *  - `shotsChoice` = **界面亮哪颗** = `shotsExplicit || 3`。
+     *
+     * ⚠️ 别把默认 3 冻进 metadata：04 的「每几镜合一镜」靠 `normalizeScriptShotsPerClip()` 判「有没有显式选过」，
+     * 一旦落成 `shotsPerClip: 3`，04 就会从默认的每 4 镜变成每 3 镜（用户 2026-11-19 明确要 4）。
+     * 同理 `episodeClipShots` 只认 `shotsExplicit`，不认 `shotsChoice`。
      */
-    const shotsChoice = normalizeScriptShotsPerClip(target.shotsPerClip);
-    const compactShots = shotsChoice || SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT;
+    const shotsExplicit = normalizeScriptShotsPerClip(target.shotsPerClip);
+    const shotsChoice = shotsExplicit || SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT;
+    /** 02 / 03 摘要与提示文案用的档位：默认态就是 3，与亮灯一致。 */
+    const compactShots = shotsChoice;
     /**
      * 有效出片参数（用户 2026-11-11 第 02 条）：窗口里没选过时给 16:9 / 720p。
      * 02 / 03 搬给脚本节点的是**同一份**（`project.tsx` 里也调这两个函数），所以摘要写的就是实际会用的。
@@ -261,7 +269,7 @@ export function CanvasReverseVideoNodeContent({
         // 换了引擎要写在摘要里：02 / 03 的「按这套出片」是用户最后一眼确认，不能还写着普通视频模型。
         const engine = isMochianiVideoEngine(target.videoEngine) ? "MochiAni 生视频" : "";
         // 分段口径也要写：02 / 03 都是「建脚本节点 → 立刻一键视频」，铺出来几个视频窗口取决于这一档。
-        // `compactShots` 已经是**生效档位**（默认 3、显式关闭 4），直接写，别再 `|| 4` 兜底。
+        // `compactShots` 已经是**生效档位**（默认 3，点 4 就是 4），直接写，别再 `|| 4` 兜底。
         const clip = `每 ${compactShots} 镜一个视频`;
         return `${effectiveSize} · ${qualityLabel(effectiveQuality)} · 风格：${style} · ${clip}${engine ? ` · ${engine}` : ""}`;
     }, [compactShots, effectiveQuality, effectiveSize, target.styleTemplateId, target.videoEngine]);
@@ -269,10 +277,13 @@ export function CanvasReverseVideoNodeContent({
      * 04 的「每几镜合一镜」（用户 2026-11-18 第 10 轮 03 条）：**默认 4**，只有在这里显式点了 2 / 3
      * 才按那颗。两颗开关本身是 02 / 03 的口径（默认 3 镜开启），04 不能跟着它写「每 3 镜一个视频」——
      * 确认窗里写的数必须等于铺出来的数，否则用户只能靠数视频窗口发现「说了不算」。
+     *
+     * 🔴 必须看 `shotsExplicit` 而不是 `shotsChoice`（用户 2026-11-20 把「每 3 镜」改成默认亮灯之后）：
+     * `shotsChoice` 在没写过时就是 3，拿它判断会让 04 从默认 4 悄悄变成 3。
      */
     const episodeClipShots =
-        shotsChoice === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR || shotsChoice === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT
-            ? shotsChoice
+        shotsExplicit === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR || shotsExplicit === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT
+            ? shotsExplicit
             : SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP;
     const episodeParamSummary = useMemo(
         () => paramSummary.replace(/每 \d+ 镜一个视频/, `每 ${episodeClipShots} 镜一个视频`),
@@ -833,12 +844,11 @@ export function CanvasReverseVideoNodeContent({
                         秒数 = 成片总时长：02 / 03 写剧本按它规划镜头数与台词量（默认 {DEFAULT_REVERSE_VIDEO_SECONDS} 秒），04 则是「每集时长」（默认 {DEFAULT_EPISODE_SECONDS} 秒）—— <span className="opacity-90">两个位置写的是同一个值，改哪边都一样</span>；生视频用这里的模型 / 比例 / 分辨率 / 风格（默认 16:9 · 720p，模型跟偏好里的视频模型）。
                     </div>
                     {/* 第三行：「每 2 / 3 / 4 个镜头合一个视频」（用户 2026-11-11 第 01 条，2026-11-14 加 2 镜档，
-                        2026-11-19 加 4 镜档 + 亮灯改成「只看显式选择」）。
-                        🔴 三颗都**只表示显式选择**：一颗都不亮 = 没选过 —— 这时 01 / 02 / 03 用每 3 镜、
-                        04 用每 4 镜（用户 2026-11-19：「没有选择每 2 / 每 3 时，即默认为每 4」）。
-                        原来 `compactShots = shotsChoice || 3` 让「每 3 镜」在没选时也亮着「已开」，
-                        04 明明按 4 跑、界面却写着 3 —— 说的和做的不一致；而且那时点一下 3 反而是**关闭**，
-                        想选 3 反而选不上。现在：没选就都不亮，点哪颗 = 选哪颗，再点同一颗 = 取消回默认。 */}
+                        2026-11-19 加 4 镜档，2026-11-20 改为**默认就选中「每 3 镜」**）。
+                        🔴 三颗是**单选**：默认态 = 每 3 镜亮着；点哪颗就按哪颗，再点同一颗不会「取消」——
+                        默认本来就是 3，取消回默认等于没点，只会让用户以为按钮坏了。
+                        04 仍然默认每 4 镜（用户 2026-11-19「没选 2 / 3 即默认每 4」），
+                        只有这里**显式**点了 2 / 3，04 才跟着改成那颗（判据是 `shotsExplicit`）。 */}
                     <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         {[...SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP].map((count) => {
                             const on = shotsChoice === count;
@@ -856,11 +866,11 @@ export function CanvasReverseVideoNodeContent({
                                     aria-pressed={on}
                                     onMouseDown={(event) => event.stopPropagation()}
                                     onPointerDown={(event) => event.stopPropagation()}
-                                    onClick={() => patchTarget({ shotsPerClip: on ? 0 : count })}
+                                    onClick={() => patchTarget({ shotsPerClip: count })}
                                     title={
                                         on
-                                            ? `已选：铺链路每 ${count} 个镜头合一个视频节点（再点一次取消，回到默认：01~03 每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT} 镜、04 每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜）`
-                                            : `点击选为每 ${count} 个镜头合一个视频节点（现在没选：01~03 默认每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT} 镜、04 默认每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜）`
+                                            ? `已选：铺链路每 ${count} 个镜头合一个视频节点${count === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT ? "（默认档）" : ""}`
+                                            : `点击选为每 ${count} 个镜头合一个视频节点（默认每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT} 镜；04 仍按每 ${SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜，点 2 / 3 才跟着改）`
                                     }
                                 >
                                     <Layers size={11} className="shrink-0" />
@@ -870,8 +880,8 @@ export function CanvasReverseVideoNodeContent({
                         })}
                     </div>
                     <div className="mt-1 text-[10px] leading-relaxed opacity-45">
-                        三颗都不点 = 默认：01 / 02 / 03 每 {SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT} 镜合一个视频，04 每{' '}
-                        {SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜合一个视频（用户 2026-11-19 的口径）；点哪颗就按哪颗 —— 04 现在按每{' '}
+                        默认就是每 {SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT} 镜合一个视频（已选中）；04 仍按每{' '}
+                        {SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP} 镜，只有点了 2 / 3 才跟着改 —— 04 现在按每{' '}
                         <span className="opacity-90">{episodeClipShots}</span> 镜。
                     </div>
                 </div>
