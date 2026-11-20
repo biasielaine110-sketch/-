@@ -1131,7 +1131,9 @@ function AtelierCanvasPage() {
                     });
                     // 🔴 历史版本补全也走完了：还挂着「恢复中」的单图说明字节真的读不出来，
                     // 到点必须判 error，否则那张历史版本会永久显示「正在读取本地文件」。
-                    return settleRestoringMedia(merged);
+                    // 先 clear 再 settle：full hydrate 会把「本就可见」的槽位带着旧 loading 带回来，
+                    // 只 settle 不看可见性的话，这些已经能显示的版本会被误判成 error。
+                    return settleRestoringMedia(clearRestoringMedia(merged));
                 });
             })();
 

@@ -1963,7 +1963,14 @@ function ImageContent({
     const imagesGenerating = images.some((image) => image.status === "loading" && !image.mediaRestoring);
     const isGenerating = nodeLoading || imagesGenerating;
     // 刷新后「从本地库读字节」复用 loading 状态，但不是生成任务：不显示秒数、不给取消按钮。
-    const restoring = Boolean(node.metadata?.mediaRestoring) || (!nodeLoading && !imagesGenerating && images.some((image) => image.status === "loading"));
+    // 🔴 最后一道保险：**画面已经出来了就不再算恢复中**。状态机的收口在
+    // `clearRestoringMedia / settleRestoringMedia`，但任何一个环节漏清（尤其是多版本视频节点），
+    // 用户看到的就是「视频都能放了，顶上还一直写着正在读取本地文件」（2026-11-20 反馈）。
+    const hasVisibleMedia = Boolean(displaySrc);
+    const restoring =
+        !hasVisibleMedia &&
+        (Boolean(node.metadata?.mediaRestoring) ||
+            (!nodeLoading && !imagesGenerating && images.some((image) => image.status === "loading" && !image.content && !image.thumbnailContent)));
     const canCancel = Boolean(onCancelGeneration) && isGenerating && !restoring;
     const queueLabel = useNativeVideoQueueLabel(node.id, node.metadata);
     const elapsed = useElapsedSeconds(isGenerating && !restoring, node.id);

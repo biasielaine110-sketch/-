@@ -146,18 +146,27 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[], options?: Hyd
                             };
                         }
                         const nextContent = await resolveLiveMediaUrl("video", image.storageKey, image.content);
-                        return { ...image, content: nextContent };
+                        // 有 key 的才判「真缺字节」；没有 key 的老数据保持原状，别凭空造出 error。
+                        return image.storageKey || image.thumbnailStorageKey ? markMissingMedia({ ...image, content: nextContent }, missingDetail) : { ...image, content: nextContent };
                     }),
                 );
                 const primary = images.find((image) => image.id === primaryId && image.content) || images.find((image) => image.content);
                 const nextContent = await resolveLiveMediaUrl("video", node.metadata?.storageKey, content);
+                const resolved = nextContent || primary?.content || "";
+                // 🔴 视频 / 音频分支以前只贴 `content`、完全不动状态：`markRestoringMedia` 打的
+                // `loading` + `mediaRestoring` 会一路留到合并阶段，只要合并没认定「可见」，节点顶部
+                // 就永久挂「正在读取本地文件」（2026-11-20 反馈，2/3 个版本的老视频最典型）。
+                // 字节已经读出来了就必须当场翻 success，别指望下游某个合并顺带清掉。
                 return {
                     ...node,
                     metadata: {
                         ...node.metadata,
-                        content: nextContent || primary?.content || "",
+                        content: resolved,
                         storageKey: node.metadata?.storageKey || primary?.storageKey,
                         images,
+                        ...(resolved && (node.metadata?.mediaRestoring || node.metadata?.status === "loading")
+                            ? { status: "success" as const, mediaRestoring: undefined, errorDetails: undefined }
+                            : {}),
                     },
                 };
             }
@@ -333,15 +342,20 @@ export function clearRestoringMedia(nodes: CanvasNodeData[]): CanvasNodeData[] {
         const meta = node.metadata;
         if (!meta) return node;
         const images = meta.images || [];
-        // 🔴 单图收口必须先做，而且**不看节点级状态**：主图正常、只有某个历史版本的 blob 死了
-        // 这种情况，节点级根本没有 `loading`，老实现直接 return，那张图就永久转圈。
-        const imagesSettled = images.map((image) =>
-            image.status === "loading" && (image.content || image.thumbnailContent) ? { ...image, status: "success" as const, mediaRestoring: undefined, errorDetails: undefined } : image,
-        );
+        // 🔴 收口的唯一判据是「这个槽位还带不带恢复标记 + 有没有可见字节」，**不看 status**。
+        // 恢复链路上 status 会被好几个环节改写（hydrate 的 storageKey 分支把 status 翻成 success、
+        // 视频分支原样带回 loading…），老实现拿 `status === "loading"` 当闸门，结果就是
+        // 「图/视频都显示了，顶上还一直写着正在读取本地文件」（2026-11-20 反馈）。
+        // 只看 `mediaRestoring`（只有刷新恢复才会打）也顺带保证了不会误伤真正在生成的任务槽。
+        const imagesSettled = images.map((image) => {
+            if (!image.mediaRestoring) return image;
+            if (!image.content && !image.thumbnailContent) return image;
+            return { ...image, status: "success" as const, mediaRestoring: undefined, errorDetails: undefined };
+        });
         const imagesChanged = imagesSettled.some((image, index) => image !== images[index]);
         const withImages = (target: CanvasNodeData): CanvasNodeData =>
             imagesChanged ? { ...target, metadata: { ...target.metadata, images: imagesSettled } } : target;
-        if (meta.status !== "loading") return withImages(node);
+        if (!meta.mediaRestoring) return withImages(node);
         const visible = Boolean(meta.content || meta.thumbnailContent) || imagesSettled.some((image) => Boolean(image.content || image.thumbnailContent));
         if (!visible) return withImages(node);
         return {
@@ -370,13 +384,17 @@ export function settleRestoringMedia(nodes: CanvasNodeData[], detail?: string): 
         const meta = node.metadata;
         if (!meta) return node;
         const images = meta.images || [];
-        const imagesSettled = images.map((image) =>
-            image.status === "loading" && !image.content && !image.thumbnailContent && image.mediaRestoring
-                ? { ...image, status: "error" as const, mediaRestoring: undefined, errorDetails: image.errorDetails || fallback }
-                : image,
-        );
+        const imagesSettled = images.map((image) => {
+            if (!image.mediaRestoring) return image;
+            if (image.content || image.thumbnailContent) return image;
+            // 到点还没字节一律判缺：这一步只改状态，不生成、不扣费，用户看到的是
+            // 「缺失 + 找回本地文件」而不是永久转圈。不带 `mediaRestoring` 的槽位是真在生成，绝不碰。
+            return { ...image, status: "error" as const, mediaRestoring: undefined, errorDetails: image.errorDetails || fallback };
+        });
         const imagesChanged = imagesSettled.some((image, index) => image !== images[index]);
-        if (meta.status !== "loading") {
+        // 🔴 节点级同样与 status 解耦：`mediaRestoring` 还在就算恢复中，不看 status 是否 loading。
+        // （hydrate 的 storageKey 分支会把 status 翻成 success 却留着节点级标记，老实现因此永不收口。）
+        if (!meta.mediaRestoring) {
             // 节点本身不在恢复态，但历史版本里可能还有单图恢复中：到点没内容就判成 error（不生成、不扣费）。
             return imagesChanged ? { ...node, metadata: { ...meta, images: imagesSettled } } : node;
         }
@@ -386,7 +404,11 @@ export function settleRestoringMedia(nodes: CanvasNodeData[], detail?: string): 
                 ...node,
                 metadata: {
                     ...meta,
+                    // 收尾这一步必须顺手把 status 从 loading 翻回来：只清标记不翻状态的话，
+                    // 画面明明有了、节点却会显示「生成中 0 秒」并挂着一个取消按钮。
+                    status: "success" as const,
                     mediaRestoring: undefined,
+                    errorDetails: undefined,
                     ...(imagesChanged ? { images: imagesSettled } : {}),
                 },
             };
@@ -451,6 +473,7 @@ export function applyHydratedMedia(nodes: CanvasNodeData[], hydrated: CanvasNode
         const mergedContent = nextMeta.content || node.metadata?.content || "";
         const mergedThumb = nextMeta.thumbnailContent || node.metadata?.thumbnailContent;
         const visibleAfter = Boolean(mergedContent || mergedThumb) || Boolean(mergedImages?.some((image) => image.content || image.thumbnailContent));
+        const mergedStatus = nextMeta.status || node.metadata?.status;
         return {
             ...node,
             metadata: {
@@ -460,8 +483,10 @@ export function applyHydratedMedia(nodes: CanvasNodeData[], hydrated: CanvasNode
                 // Only adopt keys the live node is missing — never clobber a media the user swapped out.
                 storageKey: node.metadata?.storageKey || nextMeta.storageKey,
                 thumbnailStorageKey: node.metadata?.thumbnailStorageKey || nextMeta.thumbnailStorageKey,
-                status: nextMeta.status || node.metadata?.status,
-                errorDetails: nextMeta.errorDetails,
+                // 🔴 有内容了就不能还挂 loading：hydrate 的视频分支 / 图片分支都会把「恢复中」的
+                // loading 原样带回来，直接用 nextMeta.status 会让节点一边显示媒体一边转圈。
+                status: visibleAfter && mergedStatus === "loading" ? ("success" as const) : mergedStatus,
+                errorDetails: visibleAfter ? undefined : nextMeta.errorDetails,
                 // 媒体已经贴回来了，就撤掉「恢复中」标记（跟进 `clearRestoringMedia` 同一口径）。
                 ...(visibleAfter ? { mediaRestoring: undefined } : {}),
                 ...(mergedImages ? { images: mergedImages } : {}),
