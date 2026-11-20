@@ -214,7 +214,7 @@ import {
     type ScriptAssetBatchItem,
     type ScriptAssetReference,
 } from "@/lib/canvas/script-asset-batch";
-import { buildScriptAssetInheritPlan, buildScriptAssetSharePlan, collectScriptAssetGroupPeers, collectScriptInheritSources, scriptAssetGroupIdOf, scriptRowAssetNames, type ScriptAssetInheritOptions } from "@/lib/canvas/script-asset-inherit";
+import { buildScriptAssetInheritPlan, buildScriptAssetSharePlan, collectScriptAssetGroupPeers, collectScriptInheritSources, isScriptAssetGroupCarrier, resolveScriptAssetGroupId, scriptAssetGroupIdOf, scriptRowAssetNames, sortScriptAssetGroupNodes, type ScriptAssetInheritOptions } from "@/lib/canvas/script-asset-inherit";
 import { planScriptAssetAlignSkipChange, planScriptAssetAlignment, shouldApplyScriptAssetAlignment } from "@/lib/canvas/script-asset-align";
 import { isRowMountedAudio, planScriptVoiceAlignment, shouldApplyScriptVoiceAlignment } from "@/lib/canvas/script-voice-align";
 import { stripScriptAssetReferences } from "@/lib/canvas/script-asset-detach";
@@ -7962,13 +7962,18 @@ function AtelierCanvasPage() {
     }, [contextMenu, nodes, selectedNodeIds]);
 
     /**
-     * 右键菜单「资产关联」作用的节点：选区里的**脚本节点**，>= 2 才出现。
-     * 混选（夹着图片 / 文本）按类型筛掉 —— 关联组只对脚本生成器有意义。
+     * 右键菜单「资产关联」作用的节点：选区里的**可承载资产池的节点**，>= 2 才出现。
+     *
+     * 用户 2026-11-20：「在文本节点的时候关联，以及反推视频节点关联，都能达到资产关联的效果；
+     * 在脚本生成器去执行周期有点偏后了，我可能会批量跑」——
+     * 所以脚本生成器、文本节点、反推视频节点都算：前者是真资产池，后两者只是**组 id 载体**，
+     * 让「先做第一集、后面继续做第二集」在拆集之前就能绑进同一个池子。
+     * 混选（夹着图片 / 视频 / 分组框）按类型筛掉 —— 它们没有下游可传，进组也没人读。
      */
     const scriptAssetShareTargets = useMemo(() => {
         if (!contextMenu || contextMenu.type !== "node" || selectedNodeIds.size < 2) return [];
         const byId = new Map(nodes.map((node) => [node.id, node]));
-        const ids = Array.from(selectedNodeIds).filter((id) => byId.get(id)?.type === CanvasNodeType.Script);
+        const ids = Array.from(selectedNodeIds).filter((id) => isScriptAssetGroupCarrier(byId.get(id)));
         return ids.length >= 2 ? ids : [];
     }, [contextMenu, nodes, selectedNodeIds]);
 
@@ -9464,7 +9469,7 @@ function AtelierCanvasPage() {
             const sourceIds: string[] = [];
             const autoSource = self.metadata?.scriptAssetInheritAuto ? String(self.metadata?.scriptAssetInheritSource || "") : "";
             if (autoSource && autoSource !== nodeId) sourceIds.push(autoSource);
-            for (const peer of collectScriptAssetGroupPeers(self, nodesRef.current)) if (!sourceIds.includes(peer.id)) sourceIds.push(peer.id);
+            for (const peer of collectScriptAssetGroupPeers(self, nodesRef.current, connectionsRef.current)) if (!sourceIds.includes(peer.id)) sourceIds.push(peer.id);
             if (!sourceIds.length) return 0;
             const countLocks = (id: string) => Object.keys(nodesRef.current.find((item) => item.id === id)?.metadata?.scriptNameLocks || {}).length;
             const before = countLocks(nodeId);
@@ -9485,30 +9490,67 @@ function AtelierCanvasPage() {
     );
 
     /**
-     * 右键「资产关联」（用户 2026-11-18 第 02 条）：把选中的多个脚本节点串成一个**共用资产池**。
+     * 右键「资产关联」（原「用户 2026-11-18 第 02 条」那条，2026-11-20 扩到文本 / 反推节点）：
+     * 把选中的节点串成一个**共用资产池**。
      *
      * 与「沿用资产」的区别：沿用的是 A → B 单向搬一次（还会记下「来源集」）；关联组是**互为一体** ——
      * 全组并集一次写进每一台机器，之后谁点生图都会先并组内其它机器已有的同名锁
      * （见 `inheritSharedScriptAssets`）。所以「谁先生成过这个角色，别人就直接挂那一张」。
      *
-     * 组 id 复用规则：选区里有节点已经在某个组里，就沿用那个 id（再点一次 = 把这批并进同一个组）；
-     * 都没有才新建。这样「先关联 2 个、后来再多选 1 个再关联」不会把原来那组拆成两组。
+     * 🔴 2026-11-20 扩到**文本节点 / 反推视频节点**（用户：「在脚本生成器去执行周期有点偏后了，
+     * 我可能会批量跑」）。这两类是纯载体：只领一个 `scriptAssetGroup`，
+     * 之后从它们拆 / 建出来的脚本生成器靠 `resolveScriptAssetGroupId()` 认到同一个组。
+     * 于是「第一集已经跑完，继续做第二集」可以在**拆集之前**就把两批绑在一起。
+     *
+     * 组 id 复用规则：选区里任何节点已经在某个组里（自己挂的，或从上游继承的），就沿用那个 id
+     * （再点一次 = 把这批并进同一个组）；都没有才新建。这样「先关联 2 个、后来再多选 1 个再关联」
+     * 不会把原来那组拆成两组。
      */
     const handleShareScriptAssets = useCallback(
         (ids: readonly string[]) => {
             const picked = new Set(ids);
-            const targets = nodesRef.current.filter((item) => item.type === CanvasNodeType.Script && picked.has(item.id));
-            if (targets.length < 2) {
+            const seeds = nodesRef.current.filter((item) => isScriptAssetGroupCarrier(item) && picked.has(item.id));
+            if (seeds.length < 2) {
                 message.warning(t("canvas.scriptNode.shareNeedTwo"));
                 return;
             }
-            const reuse = targets.map((item) => scriptAssetGroupIdOf(item.metadata)).find(Boolean) || "";
+            /**
+             * 🔴 载体关联必须**顺着连线往下把脚本生成器一起标进组**（用户 2026-11-20）。
+             *
+             * 场景：第一集已经跑完（那批脚本生成器在画布上、锁也在它们身上），用户新开一台反推节点
+             * 做第二集，然后右键把两台反推节点「资产关联」。
+             * 如果只给两台反推节点写组 id，组里**一个脚本生成器都没有** →
+             * `collectScriptAssetGroupPeers` 找不到上一集的锁 → 第二集照样全部重新生图，
+             * 用户看到的就是「我明明关联了，怎么还在花钱」。
+             *
+             * 所以：从选中的载体出发只沿「载体 / 文本 / 脚本」往下走（不跟图片 / 视频，否则一路走到镜头图和成片），
+             * 把遇到的脚本生成器一并标进这个组。**只写组 id**：真正的搬锁发生在点「一键生图」时
+             * （`inheritSharedScriptAssets`），这里不批量改别人的锁 / 连线，避免一次点击改花半张画布。
+             */
+            const seedIds = new Set(seeds.map((item) => item.id));
+            const targets = [...seeds];
+            const queue = [...seeds];
+            while (queue.length) {
+                const current = queue.shift() as CanvasNodeData;
+                for (const connection of connectionsRef.current) {
+                    if (connection.fromNodeId !== current.id) continue;
+                    const next = nodesRef.current.find((item) => item.id === connection.toNodeId);
+                    if (!next || seedIds.has(next.id) || !isScriptAssetGroupCarrier(next)) continue;
+                    seedIds.add(next.id);
+                    targets.push(next);
+                    if (next.type !== CanvasNodeType.Script) queue.push(next);
+                }
+            }
+            const expanded = targets.filter((item) => !picked.has(item.id));
+            const reuse =
+                targets.map((item) => resolveScriptAssetGroupId(item, nodesRef.current, connectionsRef.current)).find(Boolean) || "";
             const plan = buildScriptAssetSharePlan({
-                targets,
+                targets: seeds,
                 nodes: nodesRef.current,
                 connections: connectionsRef.current,
                 groupId: reuse || nanoid(),
             });
+            for (const item of expanded) plan.metadata[item.id] = { scriptAssetGroup: plan.groupId };
             if (plan.connections.length) {
                 const keys = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
                 const added = plan.connections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`)).map((connection) => ({ id: nanoid(), ...connection }));
@@ -9524,7 +9566,17 @@ function AtelierCanvasPage() {
             // 与 `handleInheritScriptAssets` 同一口径：ref 先写，紧接着的生图 / 铺链路读的全是 ref。
             nodesRef.current = nodesRef.current.map(patchNode);
             setNodes((prev) => prev.map(patchNode));
-            message.success(t("canvas.scriptNode.shareDone", { nodes: targets.length, assets: plan.assetNodeIds.length, locks: plan.lockNames.length }));
+            const scriptCount = seeds.filter((item) => item.type === CanvasNodeType.Script).length;
+            if (scriptCount >= 2) {
+                message.success(t("canvas.scriptNode.shareDone", { nodes: seeds.length, assets: plan.assetNodeIds.length, locks: plan.lockNames.length }));
+            } else {
+                /**
+                 * 只选了载体（文本 / 反推视频，或只有 1 个脚本生成器）：没有锁可搬，
+                 * 说清「这一下改的是**以后**」—— 否则用户会以为现在就共用了几张图。
+                 */
+                message.success(t("canvas.scriptNode.shareCarrierDone", { nodes: seeds.length }));
+                if (expanded.length) message.info(t("canvas.scriptNode.shareCarrierLinked", { count: expanded.length }));
+            }
             if (plan.conflicts.length) {
                 message.warning(t("canvas.scriptNode.shareConflict", { names: plan.conflicts.map((item) => item.name).join(" / ") }));
             }
@@ -12121,6 +12173,14 @@ function AtelierCanvasPage() {
 
             // ③ 结果落文本节点
             report("把反推结果写进文本节点…");
+            /**
+             * 反推节点自己挂过「资产关联组」→ 这条链（文本 + 脚本生成器）**建出来就进同一个池子**
+             * （用户 2026-11-20：「反推视频节点关联也能达到资产关联的效果」）。
+             *
+             * 必须建节点时就写：文本节点是独立建的（不连反推节点），
+             * 光靠 `resolveScriptAssetGroupId()` 往上游找是找不到这台反推节点的。
+             */
+            const reverseGroupId = resolveScriptAssetGroupId(reverseNode, nodesRef.current, connectionsRef.current);
             const textNode = {
                 ...createCanvasNode(
                     CanvasNodeType.Text,
@@ -12132,6 +12192,7 @@ function AtelierCanvasPage() {
                         promptSyncAt: Date.now(),
                         status: NODE_STATUS_SUCCESS,
                         fontSize: DEFAULT_CANVAS_FONT_SIZE,
+                        ...(reverseGroupId ? { scriptAssetGroup: reverseGroupId } : {}),
                     },
                 ),
                 // 01 = 反推出来的分镜提示词表；02 = 复刻同款剧本；03 = 由反推结果另写的同类型新剧本。
@@ -12172,6 +12233,8 @@ function AtelierCanvasPage() {
             const targetShotsPerClip = normalizeScriptShotsPerClip(input.shotsPerClip ?? target.shotsPerClip);
             const scriptTargetMeta: Partial<CanvasNodeData["metadata"]> = {
                 ...(target.styleTemplateId ? { styleTemplateId: target.styleTemplateId } : {}),
+                // 反推节点挂过资产关联组 → 脚本生成器一建出来就进同一个池子（同上，2026-11-20）。
+                ...(reverseGroupId ? { scriptAssetGroup: reverseGroupId } : {}),
                 /**
                  * **恒写**（用户 2026-11-11 第 02 条：「反推窗口设了时长，执行 03 要能同步到脚本生成器的分镜时长」）：
                  * 窗口里没改过 → 按默认 30 秒写进去。以前是「target.seconds 有值才写」，于是同一次
@@ -12461,8 +12524,44 @@ function AtelierCanvasPage() {
              * 同一批拆出来的集写**同一个资产关联组 id**（用户 2026-11-18 第 01 / 02 条）：
              * 于是「谁先生成了这个角色，别人手点一键生图时就直接挂那一张」，
              * 不用先跑一遍 04 的生图阶段、也不用再手动点「资产关联」。
+             *
+             * 🔴 2026-11-20 改：id 不再每次都现生成 —— **反推节点自己挂过组就沿用它**。
+             * 用户口径：「如果我已经做了一集的内容，我想要继续做下一集制作……在脚本生成器去执行周期有点偏后了，
+             * 我可能会批量跑」。于是同一台反推节点上第二次跑 04，新拆的集自动落进**上一批那个池子**，
+             * 上一集已经生成过的角色 / 场景 / 道具直接挂图，不再重复扣费。
+             *
+             * 反推节点自己还没挂组时：把这次新生成的 id **写回反推节点**再做后续 ——
+             * 载体就靠这一份字段跨批次传递，不写回去下一轮又会是全新的组。
              */
-            const episodeGroupId = nanoid();
+            const inheritedGroupId = resolveScriptAssetGroupId(reverseNode, nodesRef.current, connectionsRef.current);
+            const episodeGroupId = inheritedGroupId || nanoid();
+            if (reverseNode && !scriptAssetGroupIdOf(reverseNode.metadata)) {
+                const stampGroup = (item: CanvasNodeData): CanvasNodeData =>
+                    item.id === reverseNode.id ? { ...item, metadata: { ...item.metadata, scriptAssetGroup: episodeGroupId } } : item;
+                // 与其它 metadata 写入同一口径：ref 先写（后面读的全是 ref），再函数式 setState。
+                nodesRef.current = nodesRef.current.map(stampGroup);
+                setNodes((prev) => prev.map(stampGroup));
+            }
+            /**
+             * 这个池子里**上一批**的最后一个脚本生成器：本批第一集的「自动沿用来源」。
+             *
+             * 04 原本只给「本批第 2 集起」记来源（= 本批上一集）；跨批次续做时第一集没有来源，
+             * 出表那一刻就不会去搬上一批的名字锁 → 用户看到「第二集又在重新生图」。
+             * 这里补上「上一批的最后一集」，与 `scriptAssetGroup` 双保险：一个在**出表**时搬，一个在**点生图**时搬。
+             */
+            const previousGroupScriptId = ((): string => {
+                const grouped = nodesRef.current.filter(
+                    (item) => item.type === CanvasNodeType.Script && resolveScriptAssetGroupId(item, nodesRef.current, connectionsRef.current) === episodeGroupId,
+                );
+                return sortScriptAssetGroupNodes(grouped).slice(-1)[0]?.id || "";
+            })();
+            if (inheritedGroupId) {
+                report(
+                    previousGroupScriptId
+                        ? "沿用同一个资产池：上一批已生成的角色 / 场景 / 道具会直接挂图，不再重复生图…"
+                        : "沿用同一个资产池：组内已有同名资产会直接挂图，不再重复生图…",
+                );
+            }
             /**
              * 每集脚本节点的出片参数 = 02 / 03 那套，只有「成片总时长」换成**这一集自己的时长**：
              * 标准集就是 90 / 120 秒，尾集只有 3 段时是 45 秒 —— 于是分镜表也按 45 秒规划 ~12 镜，
@@ -12500,6 +12599,12 @@ function AtelierCanvasPage() {
                         promptSyncAt: Date.now(),
                         status: NODE_STATUS_SUCCESS,
                         fontSize: DEFAULT_CANVAS_FONT_SIZE,
+                        /**
+                         * 文本节点也带上组 id（用户 2026-11-20）：它才是「这一集的载体」——
+                         * 用户之后在这条文本上手动点一键视频 / 一键生图，新建的脚本生成器
+                         * 靠上游找到这个组，仍然与上一集共用同一批资产图。
+                         */
+                        scriptAssetGroup: episodeGroupId,
                     }),
                     title: draft.title,
                 };
@@ -12515,8 +12620,15 @@ function AtelierCanvasPage() {
                          * 跨集沿用（🔴 见函数头 ①）：第 2 集起把「上一集」记成本集来源，
                          * `runScriptGeneration` 出表时会自动把**本集用到的**资产名锁搬过来 →
                          * `handleDirectGenerateScriptAssets` 因此跳过这些名字，不再重复生图。
+                         *
+                         * 本批第一集没有「本批上一集」，但有**上一批的最后一集**时也记上
+                         * （用户 2026-11-20：「我已经做了一集，继续做下一集」）。
                          */
-                        ...(index > 0 && scriptNodes[index - 1] ? { scriptAssetInheritAuto: true, scriptAssetInheritSource: scriptNodes[index - 1].id } : {}),
+                        ...(index > 0 && scriptNodes[index - 1]
+                            ? { scriptAssetInheritAuto: true, scriptAssetInheritSource: scriptNodes[index - 1].id }
+                            : previousGroupScriptId
+                              ? { scriptAssetInheritAuto: true, scriptAssetInheritSource: previousGroupScriptId }
+                              : {}),
                     }),
                     title: `${draft.title} · 分镜脚本`,
                 };

@@ -351,21 +351,92 @@ export function sortScriptAssetGroupNodes(targets: readonly CanvasNodeData[]): C
     return targets.slice().sort((left, right) => left.position.x - right.position.x || left.position.y - right.position.y);
 }
 
-/** 本节点所属的关联组 id（没有组 = 空串）。 */
+/** 本节点**自己挂的**关联组 id（没有组 = 空串）。 */
 export function scriptAssetGroupIdOf(metadata: CanvasNodeMetadata | undefined): string {
     return String(metadata?.scriptAssetGroup || "").trim();
 }
 
 /**
+ * 能承载「资产关联组」的节点类型（用户 2026-11-20：
+ * 「在文本节点的时候关联，以及反推视频节点关联，都能达到资产关联的效果」）。
+ *
+ * 为什么只有这三种：
+ *  · `Script` —— 真正的资产池（有 `scriptNameLocks`，跨镜 / 跨集唯一可靠的映射）；
+ *  · `Text` / `ReverseVideo` —— **纯载体**：自己不存锁、不存资产，只把组 id 顺着连线往下游传，
+ *    于是「先做第一集、后面继续做第二集」可以在**拆集之前**就把两批绑进同一个池子，
+ *    不必等脚本生成器都建出来再右键关联（那时候用户早批量跑完了）。
+ *
+ * 其它类型（图片 / 视频 / 分组框 / 对话）不掺和：它们进组没有下游可传，只会让右键菜单到处冒出来。
+ */
+export const SCRIPT_ASSET_GROUP_CARRIER_TYPES: readonly CanvasNodeType[] = [
+    CanvasNodeType.Script,
+    CanvasNodeType.Text,
+    CanvasNodeType.ReverseVideo,
+];
+
+/** 这个节点能不能挂关联组（脚本生成器 / 文本 / 反推视频）。 */
+export function isScriptAssetGroupCarrier(node: CanvasNodeData | undefined): boolean {
+    return Boolean(node && SCRIPT_ASSET_GROUP_CARRIER_TYPES.includes(node.type as CanvasNodeType));
+}
+
+/**
+ * 本节点**生效的**组 id：自己挂的优先；自己没挂就顺着**上游**找载体。
+ *
+ * 为什么要往上游找：载体（文本 / 反推）只是把 id 传下去，脚本生成器可能是
+ *   · 04 一次建好的（那时已经写进去了）；
+ *   · 也可能是用户后来自己从文本节点「一键视频」建出来的（新节点没有字段）。
+ * 只认自己那份字段，第二条路就会漏 —— 用户看到的就是「文本节点关联了，第二集还是在重新生图」。
+ * 逐层向上找（脚本 ← 文本 ← 反推）刚好覆盖两条链路，且天然不会跨到隔壁那一集去。
+ *
+ * @param connections 不传 = 只认自己挂的那份（纯函数探针用）。
+ */
+export function resolveScriptAssetGroupId(
+    node: CanvasNodeData | undefined,
+    nodes: readonly CanvasNodeData[] = [],
+    connections: readonly CanvasConnection[] = [],
+): string {
+    if (!node) return "";
+    const own = scriptAssetGroupIdOf(node.metadata);
+    if (own) return own;
+    if (!nodes.length || !connections.length) return "";
+    const byId = new Map(nodes.map((item) => [item.id, item]));
+    const seen = new Set<string>([node.id]);
+    const queue = connections.filter((connection) => connection.toNodeId === node.id).map((connection) => connection.fromNodeId);
+    while (queue.length) {
+        const id = queue.shift() as string;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const upstream = byId.get(id);
+        if (!upstream) continue;
+        const groupId = scriptAssetGroupIdOf(upstream.metadata);
+        if (groupId) return groupId;
+        // 上游也没挂？再往上（文本节点的上游是反推 / 对话 / 另一个文本）。
+        for (const connection of connections) if (connection.toNodeId === id) queue.push(connection.fromNodeId);
+    }
+    return "";
+}
+
+/**
  * 同组的**其它**脚本节点（排除自己、排除被删掉的）。
  *
- * 只在「本节点自己也有组 id」时有结果 —— 没建组的画布一个字节都不变。
+ * 判定用 `resolveScriptAssetGroupId`：自己挂的、或从上游文本 / 反推节点继承来的，
+ * 都算同一组 —— 这样「只关联了文本节点」的那一集也能被别人的生图认出来。
+ * 没有组时返回空数组：没建组的画布一个字节都不变。
  */
-export function collectScriptAssetGroupPeers(node: CanvasNodeData | undefined, nodes: readonly CanvasNodeData[]): CanvasNodeData[] {
-    const groupId = scriptAssetGroupIdOf(node?.metadata);
+export function collectScriptAssetGroupPeers(
+    node: CanvasNodeData | undefined,
+    nodes: readonly CanvasNodeData[],
+    connections: readonly CanvasConnection[] = [],
+): CanvasNodeData[] {
+    const groupId = resolveScriptAssetGroupId(node, nodes, connections);
     if (!node || !groupId) return [];
     return sortScriptAssetGroupNodes(
-        nodes.filter((item) => item.id !== node.id && item.type === CanvasNodeType.Script && scriptAssetGroupIdOf(item.metadata) === groupId),
+        nodes.filter(
+            (item) =>
+                item.id !== node.id &&
+                item.type === CanvasNodeType.Script &&
+                resolveScriptAssetGroupId(item, nodes, connections) === groupId,
+        ),
     );
 }
 
@@ -389,7 +460,12 @@ export type ScriptAssetSharePlan = {
 };
 
 /**
- * 算出「把这一组脚本节点串成共用资产池」要做的全部改动。纯函数：不读 store、不建节点。
+ * 算出「把这一组节点串成共用资产池」要做的全部改动。纯函数：不读 store、不建节点。
+ *
+ * `targets` 可以是混选（脚本 + 文本 + 反推视频）：
+ *  · 脚本生成器之间才搬锁 / 分类 / 自建列 / 连线（只有它存得下这些东西）；
+ *  · 文本 / 反推视频只是**载体**，拿到 `scriptAssetGroup` 就够 —— 之后从它们拆出来的脚本
+ *    会靠 `resolveScriptAssetGroupId()` 认到同一个组（用户 2026-11-20 的「提前关联」）。
  *
  * @param params.groupId 组 id（由调用方生成；同一批节点写同一个值）
  * @param params.options 默认「资产 + 锁 + 自建列」，**不搬出片参数**（各集可以有自己的时长 / 模型）
@@ -404,7 +480,9 @@ export function buildScriptAssetSharePlan(params: {
     const options: ScriptAssetInheritOptions = { ...SCRIPT_ASSET_INHERIT_DEFAULT_OPTIONS, ...(params.options || {}) };
     const byId = new Map(params.nodes.map((node) => [node.id, node]));
     const alive = (id: string) => Boolean(byId.get(id)) && Boolean(inheritAssetKind(byId.get(id)));
-    const ordered = sortScriptAssetGroupNodes(params.targets.filter((node) => node.type === CanvasNodeType.Script));
+    const ordered = sortScriptAssetGroupNodes(params.targets.filter(isScriptAssetGroupCarrier));
+    /** 只有脚本生成器能存锁 / 分类 / 自建列 / 资产池；载体只吃组 id。 */
+    const scriptOrdered = ordered.filter((node) => node.type === CanvasNodeType.Script);
 
     const plan: ScriptAssetSharePlan = {
         groupId: params.groupId,
@@ -420,7 +498,7 @@ export function buildScriptAssetSharePlan(params: {
     // ── 1. 锁的并集：同一名字以组内**第一个**拥有它的机器为准（冲突要能说清是谁赢）──
     const winners = new Map<string, { ids: string[]; nodeId: string }>();
     const missing = new Map<string, string>();
-    for (const node of ordered) {
+    for (const node of scriptOrdered) {
         const locks = normalizeStoryScriptNameLockMap(node.metadata?.scriptNameLocks);
         for (const [name, ids] of Object.entries(locks)) {
             const kept = ids.filter(alive);
@@ -436,7 +514,7 @@ export function buildScriptAssetSharePlan(params: {
 
     // ── 2. 分类的并集：同一张图以第一个给它分类的机器为准 ────────────────────
     const roles: Record<string, ScriptAssetRole> = {};
-    for (const node of ordered) {
+    for (const node of scriptOrdered) {
         for (const [id, role] of Object.entries(node.metadata?.scriptAssetRoles || {})) {
             if (!alive(id) || roles[id]) continue;
             roles[id] = inheritAssetKind(byId.get(id)) === "audio" ? "audio" : resolveScriptAssetRole(role);
@@ -448,7 +526,7 @@ export function buildScriptAssetSharePlan(params: {
     const pushPool = (id: string) => {
         if (id && alive(id) && !pool.includes(id)) pool.push(id);
     };
-    for (const node of ordered) {
+    for (const node of scriptOrdered) {
         for (const connection of params.connections) if (connection.toNodeId === node.id) pushPool(connection.fromNodeId);
         for (const ids of Object.values(normalizeStoryScriptNameLockMap(node.metadata?.scriptNameLocks))) for (const id of ids) pushPool(id);
     }
@@ -459,7 +537,7 @@ export function buildScriptAssetSharePlan(params: {
     const extrasUnion: StoryScriptExtraColumn[] = [];
     const extraKeys = new Set<string>();
     const extraLabels = new Set<string>();
-    for (const node of ordered) {
+    for (const node of scriptOrdered) {
         for (const column of normalizeStoryScriptExtraColumns(node.metadata?.scriptExtraColumns)) {
             if (extrasUnion.length >= STORY_SCRIPT_MAX_EXTRA_COLUMNS) break;
             if (extraKeys.has(column.key) || extraLabels.has(column.label.trim())) continue;
@@ -470,7 +548,14 @@ export function buildScriptAssetSharePlan(params: {
     }
 
     // ── 5. 逐机器落 metadata / 连线 ─────────────────────────────────────────
-    ordered.forEach((node, index) => {
+    ordered.forEach((node) => {
+        /** 载体只写组 id：它没有锁 / 分类 / 资产池，写了也读不到，只会把 metadata 撑大。 */
+        const patch: Partial<CanvasNodeMetadata> = { scriptAssetGroup: params.groupId };
+        if (node.type !== CanvasNodeType.Script) {
+            plan.metadata[node.id] = patch;
+            return;
+        }
+
         const ownLocks = normalizeStoryScriptNameLockMap(node.metadata?.scriptNameLocks);
         const mergedLocks: StoryScriptNameLockMap = { ...ownLocks };
         for (const [name, winner] of winners) {
@@ -488,17 +573,19 @@ export function buildScriptAssetSharePlan(params: {
             mergedLocks[name] = winner.ids;
         }
 
-        const patch: Partial<CanvasNodeMetadata> = { scriptAssetGroup: params.groupId };
         if (options.locks && Object.keys(mergedLocks).length) patch.scriptNameLocks = mergedLocks;
         if (options.assets && Object.keys(roles).length) patch.scriptAssetRoles = { ...(node.metadata?.scriptAssetRoles || {}), ...roles };
         if (options.columns && extrasUnion.length) patch.scriptExtraColumns = extrasUnion;
         /**
-         * 组内**第一个**机器当「上一集」：分镜表重生成时的自动沿用（`scriptAssetInheritAuto`）
+         * 组内**第一个脚本生成器**当「上一集」：分镜表重生成时的自动沿用（`scriptAssetInheritAuto`）
          * 走的就是这个来源。第一个自己不需要（它没有上游）。
+         * 只有脚本生成器能当来源 —— 载体（文本 / 反推）身上没有 `scriptNameLocks`，
+         * 记成来源等于让自动沿用空跑一趟。
          */
-        if (index > 0) {
+        const anchor = scriptOrdered[0];
+        if (anchor && anchor.id !== node.id) {
             patch.scriptAssetInheritAuto = true;
-            patch.scriptAssetInheritSource = ordered[0].id;
+            patch.scriptAssetInheritSource = anchor.id;
         }
         plan.metadata[node.id] = patch;
 

@@ -197,6 +197,14 @@ export function CanvasReverseVideoNodeContent({
      */
     const skillOption = useMemo(() => readReverseVideoSkill(node.metadata), [node.metadata]);
     /**
+     * 本节点有没有加入「资产关联组」（用户 2026-11-20）。
+     *
+     * 只做**展示 + 移出**：组 id 由右键「资产关联」写入（可同时选文本节点 / 多台反推节点），
+     * 04 拆集时沿用它，于是续做下一集时同名资产直接挂上一集的图、不再重复扣费。
+     * 关联本身是静默的（只写 metadata），没有这个提示用户就不知道到底生效没有。
+     */
+    const scriptAssetGroup = String(node.metadata?.scriptAssetGroup || "").trim();
+    /**
      * 反推模型（用户 2026-11-12 第 05 条「反推视频的那个模型也需要能够选择」）：
      * 「跑反推那个对话节点」用哪个文本模型。
      *
@@ -671,6 +679,28 @@ export function CanvasReverseVideoNodeContent({
                         </div>
                     ) : null}
                 </div>
+
+                {/* ④ 资产池（用户 2026-11-20）：只在本节点已加入某个「资产关联组」时出现。
+                    没有这个提示的话，用户没法确认「我在文本 / 反推节点上关联到底生效了没有」——
+                    关联本身是静默的（只写 metadata），下一次跑 04 才会体现成「不再重复生图」。 */}
+                {scriptAssetGroup ? (
+                    <div className="rounded-md px-2.5 py-1.5" style={{ border: softBorder }}>
+                        <div className="flex items-start gap-1.5 text-[11px] leading-relaxed opacity-75">
+                            <Link2 size={11} className="mt-0.5 shrink-0" />
+                            <span className="min-w-0 flex-1">
+                                已加入同一个资产池：之后拆出来 / 建出来的集共用同名资产图，谁先生成过就直接挂那一张（不再重复生图）。
+                            </span>
+                            <button
+                                type="button"
+                                className="shrink-0 text-[11px] underline-offset-2 opacity-60 hover:opacity-100 hover:underline"
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onClick={() => onConfigChange(node.id, { scriptAssetGroup: undefined })}
+                            >
+                                移出
+                            </button>
+                        </div>
+                    </div>
+                ) : null}
 
                 {/* ③ 反推技能（用户 2026-11-12 第 02 条）：默认「视频反推-分镜提示词」，可手动切到「SS视频反推」
                     / 「老李-扒剧」（2026-11-20 第三条）。按钮由 VIDEO_REVERSE_SKILL_OPTIONS 渲染，加一条就多一颗。
