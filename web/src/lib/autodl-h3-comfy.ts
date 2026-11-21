@@ -27,6 +27,12 @@ const AUTODL_H3_IMAGE_AUDIO_RESOLUTIONS = ["480p竖", "480p横", "768p竖", "768
 /** minimax_h3_zm_u24 等：480/768 + 1:1，无 1080/1088/1440。 */
 const AUTODL_H3_ZM_RESOLUTIONS = ["480p竖", "480p横", "480p(1:1)", "768p竖", "768p横", "768p(1:1)"] as const;
 
+/**
+ * minimax_h3_zm_u30 / zm_nono：480/768/960 竖横，无 1:1（AutoDL input_rules 实测 2026-11-22，
+ * schema：GET /api/v1/comfyui/workflows/{id}，resolution enum 恰好这六项，默认 768p竖）。
+ */
+const AUTODL_H3_ZM960_RESOLUTIONS = ["480p竖", "480p横", "768p竖", "768p横", "960p竖", "960p横"] as const;
+
 /** minimax_h3_z0902 / z0903 — exact enum labels from AutoDL input_rules. */
 const AUTODL_H3_Z09_RESOLUTIONS = [
     "480p竖(480*864)",
@@ -40,7 +46,7 @@ const AUTODL_H3_Z09_RESOLUTIONS = [
 ] as const;
 
 export type AutodlH3Resolution = string;
-type AutodlH3Tier = "480" | "768" | "1080" | "1088" | "1440";
+type AutodlH3Tier = "480" | "768" | "960" | "1080" | "1088" | "1440";
 type AutodlH3Orientation = "竖" | "横" | "(1:1)";
 
 const DEFAULT_H3_RESOLUTION = "768p竖";
@@ -93,9 +99,17 @@ export function isAutodlH3Z09Workflow(model = ""): boolean {
     return /z09\d*/i.test(workflowId(model));
 }
 
-/** zm_* 升级画质类：仅 480/768（含 1:1）。 */
+/** zm_* 升级画质类（zm_u24 等）：仅 480/768（含 1:1）。 */
 export function isAutodlH3ZmWorkflow(model = ""): boolean {
     return /(?:^|[_-])zm(?:[_-]|$)/i.test(workflowId(model));
+}
+
+/**
+ * zm_u30 / zm_nono（2026-11-22 新增）：比老 zm 族多 960p、无 1:1。
+ * 必须排在 isAutodlH3ZmWorkflow 之前判断（`_zm_` 同样命中 zm 正则）。
+ */
+export function isAutodlH3Zm960Workflow(model = ""): boolean {
+    return /zm[_-]?(u30|nono)(?:[_-]|$)/i.test(workflowId(model));
 }
 
 function isImageAudioWorkflow(model = ""): boolean {
@@ -120,6 +134,7 @@ export const AUTODL_H3_BLANK_AUDIO_URL = "https://codewithgpu.ks3-cn-beijing.ksy
 /** Allowed resolution strings for the given workflow. */
 export function autodlH3ResolutionOptions(model = ""): readonly string[] {
     if (isAutodlH3Z09Workflow(model)) return AUTODL_H3_Z09_RESOLUTIONS;
+    if (isAutodlH3Zm960Workflow(model)) return AUTODL_H3_ZM960_RESOLUTIONS;
     if (isAutodlH3ZmWorkflow(model)) return AUTODL_H3_ZM_RESOLUTIONS;
     if (isImageAudioWorkflow(model)) return AUTODL_H3_IMAGE_AUDIO_RESOLUTIONS;
     return AUTODL_H3_RESOLUTION_OPTIONS;
@@ -141,6 +156,7 @@ function pickTier(lower: string, prefer1088: boolean): AutodlH3Tier {
     if (/1440|2k|qhd/i.test(lower)) return "1440";
     if (/1088/.test(lower)) return prefer1088 ? "1088" : "1080";
     if (/1080|full\s*hd|fhd/i.test(lower)) return prefer1088 ? "1088" : "1080";
+    if (/960/.test(lower)) return "960";
     if (/480|low/.test(lower)) return "480";
     if (/720|768|medium|high|auto/.test(lower) || /^\d+/.test(lower)) {
         const numeric = Number(lower.replace(/p$/i, "").replace(/[^\d.].*$/, ""));
@@ -148,6 +164,7 @@ function pickTier(lower: string, prefer1088: boolean): AutodlH3Tier {
             if (numeric <= 480) return "480";
             if (numeric >= 1400) return "1440";
             if (numeric >= 1080) return prefer1088 ? "1088" : "1080";
+            if (numeric >= 900) return "960";
             return "768";
         }
         return "768";
@@ -162,20 +179,22 @@ function optionPrefix(option: string): string {
 function tierFallback(tier: AutodlH3Tier, prefer1088: boolean): AutodlH3Tier[] {
     if (prefer1088) {
         const map: Record<AutodlH3Tier, AutodlH3Tier[]> = {
-            "480": ["480", "768", "1088", "1440"],
-            "768": ["768", "480", "1088", "1440"],
-            "1080": ["1088", "1440", "768", "480"],
-            "1088": ["1088", "1440", "768", "480"],
-            "1440": ["1440", "1088", "768", "480"],
+            "480": ["480", "768", "960", "1088", "1440"],
+            "768": ["768", "480", "960", "1088", "1440"],
+            "960": ["960", "768", "480", "1088", "1440"],
+            "1080": ["1088", "1440", "960", "768", "480"],
+            "1088": ["1088", "1440", "960", "768", "480"],
+            "1440": ["1440", "1088", "960", "768", "480"],
         };
         return map[tier];
     }
     const map: Record<AutodlH3Tier, AutodlH3Tier[]> = {
-        "480": ["480", "768", "1080", "1440"],
-        "768": ["768", "480", "1080", "1440"],
-        "1080": ["1080", "1440", "768", "480"],
-        "1088": ["1080", "1440", "768", "480"],
-        "1440": ["1440", "1080", "768", "480"],
+        "480": ["480", "768", "960", "1080", "1440"],
+        "768": ["768", "480", "960", "1080", "1440"],
+        "960": ["960", "768", "480", "1080", "1440"],
+        "1080": ["1080", "1440", "960", "768", "480"],
+        "1088": ["1080", "1440", "960", "768", "480"],
+        "1440": ["1440", "1080", "960", "768", "480"],
     };
     return map[tier];
 }
