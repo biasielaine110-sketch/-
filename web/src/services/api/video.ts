@@ -687,6 +687,14 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
         assertVideoConfig(requestConfig, requestConfig.model);
         return createSeedanceH3ComfyuiVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
     }
+    // 星桥（xingqiaoai.top）的 `minimaxh3`：`/v1/videos` 契约 —— 参考图走 JSON `images`（**字符串数组**，
+    // URL 或 Data URL）或 multipart 重复 `input_reference` 文件；查询响应里**没有直链**，完成后
+    // 必须下载 `/v1/videos/{id}/content`。落到下面的 relay-H3 形状参考图会被整包丢掉（`input_reference`
+    // 是个对象，文档明说不收），轮询也会因「completed 但响应里没有 URL」报错（2026-11-21 用户实测）。
+    if (isXingqiaoH3Video(requestConfig, selectedModel)) {
+        assertVideoConfig(requestConfig, requestConfig.model);
+        return createXingqiaoH3VideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
+    }
     // APIMart `muse-video-ext`：另一套契约（/videos/generations + /tasks/{id} + image_urls），
     // 落到下面的 OpenAI 形状会 404/400，所以必须在通用路径之前单独分流。
     if (isApimartMuseVideoModel(selectedModel)) {
@@ -735,6 +743,9 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     if (isSeedanceVideoHost(requestConfig.baseUrl) && isWorkFisherH3ComfyuiModel(task.model)) return pollMuseVideoTask(requestConfig, task, options);
     // APIMart muse 查的是 `/tasks/{id}`（`data.result.videos[0].url[0]`）。
     if (isApimartMuseVideoModel(task.model)) return pollApimartMuseVideoTask(requestConfig, task, options);
+    // 星桥 minimaxh3：查询响应只有状态字段（completed_at / created_at / id / model / object /
+    // progress / status），**视频直链不在响应里**，completed 后必须下载 `/videos/{id}/content`。
+    if (isXingqiaoH3Video(requestConfig, task.model)) return pollXingqiaoH3VideoTask(requestConfig, task, options);
     return pollOpenAIVideoTask(requestConfig, task, options);
 }
 
@@ -2539,6 +2550,161 @@ async function createRelayMiniMaxH3VideoTask(config: AiConfig, model: string, pr
     }
 
     throw new Error(readAxiosError(lastError, apiText("videoTaskCreateFailed")));
+}
+
+/**
+ * 星桥（https://xingqiaoai.top 及子域）：自定义 New API 分叉，视频模型 `minimaxh3` 的契约
+ * （https://xingqiaoai.top/docs「视频生成与查询」章节，2026-11-21 抓取）：
+ *   创建  POST /v1/videos —— JSON `{ model, prompt, seconds("4|6|8|15|20|30"), size(WxH,32 倍数),
+ *          aspect_ratio("16:9"|"9:16"), images?([URL | Data URL] 字符串数组) }`，或 multipart
+ *          重复 `input_reference` 文件（4/6/8 秒 ≤8 张，15/20/30 秒 ≤9 张）。
+ *   查询  GET /v1/videos/{id} —— 只有 `{id, object:"video", status(queued|in_progress|completed|failed),
+ *          progress, completed_at, created_at, model}`，**没有任何直链字段**。
+ *   下载  GET /v1/videos/{id}/content —— Bearer 同令牌，响应即视频文件。
+ * 文档明确警告：JSON 参考图必须是字符串数组，「不要传 [{"url":"..."}] 对象数组」—— 这正是
+ * 通用 relay-H3 形状（`input_reference:{image_url}` 对象）把参考图整包丢掉的现场。
+ */
+export function isXingqiaoVideoHost(baseUrl: string) {
+    const hostname = videoHostname(baseUrl);
+    return hostname === "xingqiaoai.top" || hostname.endsWith(".xingqiaoai.top");
+}
+
+/** 星桥渠道下的 MiniMax H3 系模型（`minimaxh3`、`minimax-h3…`）。 */
+function isXingqiaoH3Video(config: AiConfig, model: string) {
+    if (!isXingqiaoVideoHost(config.baseUrl)) return false;
+    return /minimax[-_ ]?h3|minimaxh3/i.test(modelOptionName(model).toLowerCase());
+}
+
+/** 星桥 minimaxh3 的时长白名单：4、6、8、15、20、30 秒。 */
+const XINGQIAO_H3_SECONDS = [4, 6, 8, 15, 20, 30] as const;
+
+/**
+ * 画幅表：宽高均为 32 的倍数、最长边 ≤1440（文档首尾帧章节给的安全口径，普通模式同样合法）。
+ * 星桥按上游「最高 768p」适配，所以不给 2K 档；`resolution` 字段省略（文档最小请求就没有它）。
+ */
+const XINGQIAO_H3_SIZE_TABLE: Record<string, string> = {
+    "21:9": "1344x576",
+    "16:9": "1344x768",
+    "4:3": "1152x864",
+    "1:1": "1152x1152",
+    "3:4": "864x1152",
+    "9:16": "768x1344",
+};
+
+export function normalizeXingqiaoH3Seconds(value: string) {
+    const seconds = Math.floor(Number(value) || 6);
+    return String(XINGQIAO_H3_SECONDS.reduce((best, current) => (Math.abs(current - seconds) < Math.abs(best - seconds) ? current : best)));
+}
+
+export function normalizeXingqiaoH3Size(size: string) {
+    return XINGQIAO_H3_SIZE_TABLE[normalizeVideoRatio(size)] || XINGQIAO_H3_SIZE_TABLE["16:9"];
+}
+
+/** 星桥参考图：公网 URL 原样；本地图先试 `/v1/files/upload`，失败退 Data URL（文档允许）。 */
+async function resolveXingqiaoH3Images(config: AiConfig, references: ReferenceImage[], options?: RequestOptions) {
+    const images: string[] = [];
+    for (const image of references) {
+        const publicUrl = [image.url, image.dataUrl]
+            .map((value) => String(value || "").trim())
+            .find((value) => isPublicHttpUrl(value) && !value.startsWith("data:") && !/^blob:/i.test(value));
+        if (publicUrl) {
+            images.push(publicUrl);
+            continue;
+        }
+        let dataUrl = "";
+        try {
+            dataUrl = await imageToDataUrl(image);
+        } catch {
+            dataUrl = "";
+        }
+        if (!dataUrl?.startsWith("data:image/")) continue;
+        try {
+            const blob = await (await fetch(dataUrl)).blob();
+            const uploaded = await uploadProviderMediaFile(config, blob, publicImageFilename(blob), options);
+            if (isPublicHttpUrl(uploaded) && !uploaded.startsWith("data:")) {
+                images.push(uploaded);
+                continue;
+            }
+        } catch {
+            // 上传端点不存在 / 不可达 → 退 Data URL，别让整单失败。
+        }
+        images.push(dataUrl);
+    }
+    return images;
+}
+
+async function createXingqiaoH3VideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const modelName = modelOptionName(model).trim() || "minimaxh3";
+    const seconds = normalizeXingqiaoH3Seconds(config.videoSeconds);
+    // 4/6/8 秒最多 8 张参考图，15/20/30 秒最多 9 张（文档「排查参考图不生效」章节）。
+    const maxRefs = Number(seconds) <= 8 ? 8 : 9;
+    const size = normalizeXingqiaoH3Size(config.size);
+    const images = await resolveXingqiaoH3Images(config, references.slice(0, maxRefs), options);
+    const payload: Record<string, unknown> = {
+        model: modelName,
+        prompt,
+        seconds,
+        size,
+        aspect_ratio: normalizeVideoRatio(config.size),
+        // 🔴 字符串数组（URL 或完整 Data URL），绝不是 `[{"url":...}]` 对象数组 —— 文档原文警告。
+        ...(images.length ? { images } : {}),
+    };
+    console.info("[xingqiao-h3] create video body", {
+        model: payload.model,
+        seconds: payload.seconds,
+        size: payload.size,
+        aspect_ratio: payload.aspect_ratio,
+        images: images.length,
+        imageKinds: images.map((item) => (item.startsWith("data:") ? "dataUrl" : "url")),
+        promptPreview: prompt.slice(0, 300),
+    });
+    const { url: postUrl, bypass } = aiUrlForBody(config, "/videos", payload);
+    try {
+        const created = unwrapVideoResponse(
+            (await retryAlternateTransport(config, "/videos", postUrl, payload, (target) => axios.post<ApiVideoResponse>(target, payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal }))).data,
+        );
+        if (!created.id) throw new Error(apiText("noVideoTaskId"));
+        return { id: created.id, provider: "openai", model };
+    } catch (error) {
+        if (axios.isCancel(error) || (error instanceof DOMException && error.name === "AbortError")) throw error;
+        // 参数错 / 鉴权错原样抛出 —— 绝不换形状重提（重复扣费）。
+        throw new Error(readAxiosError(mapOversizeUploadError(error, bypass), apiText("videoTaskCreateFailed")));
+    }
+}
+
+async function pollXingqiaoH3VideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    let rawResponse: ApiVideoResponse;
+    try {
+        rawResponse = (await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data;
+    } catch (error) {
+        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
+    }
+    const video = unwrapVideoResponse(rawResponse);
+    const status = String(video.status || "").toLowerCase();
+    if (status === "failed" || status === "cancelled") return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
+    if (status !== "completed") return { status: "pending" };
+    // 个别上游会把直链塞回响应体 —— 有就直接用（沿用通用下载梯队，含 CORS 代理兜底）。
+    const directUrl = videoResultUrl(video);
+    if (directUrl) return { status: "completed", result: await videoResultFromUrl(directUrl, options) };
+    // 星桥契约：结果只在 `/videos/{id}/content`，一次直连一次站内代理（该端点可能不带 CORS 头，
+    // 直连被浏览器拦时就走同源代理 —— 代理会透传 Authorization，见 functions/_lib/proxy.js）。
+    const contentPath = buildApiUrl(config.baseUrl, `/videos/${task.id}/content`);
+    const targets = [...new Set([aiApiUrl(config, `/videos/${task.id}/content`), forceProxyApiUrl(contentPath)].filter(Boolean))];
+    let lastError: unknown;
+    for (const target of targets) {
+        try {
+            const response = await axios.get<Blob>(target, { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
+            await assertVideoBlob(response.data);
+            return { status: "completed", result: { blob: response.data } };
+        } catch (error) {
+            if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+            lastError = error;
+        }
+    }
+    const detail = describeVideoPayload(rawResponse);
+    console.warn("[xingqiao-h3] 任务已完成但 /content 下载失败，原始响应如下", lastError, rawResponse);
+    throw new Error(`${apiText("videoResultMissing")}\n响应字段：${detail.keys.join(", ") || "（空）"}\n原始：${detail.raw}`);
 }
 
 function videoHostname(value: string) {
