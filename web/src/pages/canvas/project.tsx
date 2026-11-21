@@ -12750,9 +12750,14 @@ function AtelierCanvasPage() {
              *
              * 表已经出完了，镜数就是**确定值**（`metadata.scriptRows.length`），所以这里重算一遍 band：
              *  · 只改 `position.y`（x / 列线 / baseX 一个字节都不动）—— 横向不会有任何抖动；
-             *  · 高度取 `真实行数 + 1 行`（多留一行防「重出一遍表多一两镜」把下一集顶到）；
-             *    但**本批不铺图也不铺视频**时压到 1 行 —— 链路根本不会出现，留空就是纯空白
-             *    （用户 2026-11-19 20:37 要求集间距再缩 2/3）；
+             *  · 🔴 只有「一键生视频」勾了才按 `真实行数 + 1 行`（多留一行防「重出一遍表多一两镜」
+             *    把下一集顶到）预留整条链路 —— 链路（文本 → 图 → 视频那几列）**只会在视频阶段铺**
+             *    （`handleBuildScriptPipeline` 只在 `stages.video` 分支里调）；
+             *  · 只拆段 / 只出分镜 / **只生图**都压到 1 行 —— 这些组合链路永远不会出现，
+             *    按镜数留空就是两集之间几千像素的纯空白。用户 2026-11-21 23:39 报的就是这个：
+             *    「执行生成分镜的时候间隔合适，执行一键生图时又被自动撑得非常大」——
+             *    生图阶段只往脚本节点**左侧**铺资产图（横向，不占纵向链路高度），预留的那条
+             *    链路高度从头到尾都是空的。压回 1 行后，一键生图时的集间距与分镜时完全一致。
              *  · 这条分支必须排在**铺链路之前**：那时画布上只有文本 + 脚本两种节点，
              *    移动它们不会踩到任何已铺出来的图 / 视频；铺完之后再挪就会把链路留在原地。
              */
@@ -12763,11 +12768,11 @@ function AtelierCanvasPage() {
             });
             if (actualRows.some((rows) => rows > 0)) {
                 /**
-                 * 🔴 只有「真要铺图 / 铺视频」时才按真实镜数（+1 行冗余）预留整条链路；
-                 * 只拆段、只出分镜时链路永远不会出现，再按镜数留空就变成两集之间几千像素的纯空白
-                 * （用户 2026-11-19 20:37 那张截图就是这个场景）。这种时候压到 1 行。
+                 * 🔴 只有「真要铺链路」（= 勾了一键生视频）才按真实镜数（+1 行冗余）预留整条链路；
+                 * 只拆段、只出分镜、只生图时链路永远不会出现（链路在视频阶段才铺），再按镜数留空
+                 * 就变成两集之间几千像素的纯空白 —— 一键生图那批压到 1 行，与分镜时间距一致。
                  */
-                const reserveRows = stages.image || stages.video ? (rows: number) => Math.max(1, rows) + 1 : () => EPISODE_BAND_COMPACT_ROWS;
+                const reserveRows = stages.video ? (rows: number) => Math.max(1, rows) + 1 : () => EPISODE_BAND_COMPACT_ROWS;
                 const selfIds = [...textNodes.map((node) => node.id), ...scriptNodes.map((node) => node.id)];
                 const relaid = planEpisodeStackSlots({
                     origin: { x: originX, y: originY },
