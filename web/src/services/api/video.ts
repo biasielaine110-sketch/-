@@ -36,7 +36,7 @@ import {
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
-import { buildJusuanhubVideoRequestBody, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, orderJusuanhubApiKeys, readJusuanhubJobId, readJusuanhubJobState, resolveJusuanhubRetryDelayMs } from "./jusuanhub-media";
+import { buildJusuanhubVideoRequestBody, describeJusuanhubUpstreamError, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, orderJusuanhubApiKeys, readJusuanhubJobId, readJusuanhubJobState, resolveJusuanhubRetryDelayMs } from "./jusuanhub-media";
 import { appendJusuanhubKeyFailoverSummary, runWithJusuanhubKeyFailover, runWithJusuanhubRetry } from "./jusuanhub-retry";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -231,15 +231,16 @@ async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt:
         vquality: config.vquality,
         imageUrls,
     });
-    // 🔴 429（上游账户排队/并发额度打满）是这一家最常见的「假失败」，两层应对：
+    // 🔴 429（上游账户排队/并发额度打满）是这一家最常见的「假失败」，三层应对：
     //   ① 多 Key：随机顺序逐个试，前一个被 401/402/403/429 挡住就换下一个账户
     //      —— 别把 90 秒耗在一个已经排满的队列上，另一个账户可能还有空位；
     //   ② 全部 Key 都排满（或只有一个 Key）：回到第一个 Key 做带退避的长等，
-    //      退避 3→6→12→24→30 约 75 秒用完，再不行就把原始 429 抛给用户。
-    //   ③ 请求体带 `overflow: "idle"`（buildJusuanhubVideoRequestBody 统一加）：立即名额放不下时
-    //      转**闲时队列**（/docs/idle）而不是 429 —— 平台空闲时自动开跑，最长等 24 小时，
-    //      预扣积分冻结、到点未开始自动取消全额退回。轮询侧 `queuePhase: waiting_idle`
-    //      由 readJusuanhubJobState 认出并继续等（pending，不是失败）。
+    //      退避 3→6→12→24→30 约 75 秒用完，再不行就把原始 429 抛给用户；
+    //   ③ **闲时兜底只在 ② 里启用**：长等那一轮的请求体带 `overflow: "idle"`（/docs/idle），
+    //      立即名额放不下转闲时队列（最长 24h，预扣积分冻结、到点未开始自动取消全额退回）。
+    //      🔴 平时（①/②的普通轮）**不带** overflow —— 闲时是账号能力（`idleTier.maxWaitSeconds>0`），
+    //      未开放的账号带上疑似直接 422（2026-11-22 实证：默认带上后 429 大片变 422 大片）。
+    //      轮询侧 `queuePhase: waiting_idle` 由 readJusuanhubJobState 认出并继续等（pending，不是失败）。
     // Idempotency-Key 在环外生成一次，换 Key 复用它：每个账户幂等空间独立，不会串单。
     const idempotencyKey = newJusuanhubVideoIdempotencyKey();
     const keys = orderJusuanhubApiKeys(jusuanhubKeyCandidates(config));
@@ -247,9 +248,11 @@ async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt:
     let submittedKey = keys[0] || config.apiKey;
     const response = await runWithJusuanhubKeyFailover(
         keys,
-        (apiKey) => {
+        (apiKey, phase) => {
             submittedKey = apiKey;
-            return axios.post<unknown>(aiApiUrl(config, "/media/generations"), body, {
+            // 只有 final 兜底轮（所有 Key 的立即名额都满，长等排队腾位）才带 overflow 转闲时。
+            const payload = phase === "final" ? { ...body, overflow: "idle" as const } : body;
+            return axios.post<unknown>(aiApiUrl(config, "/media/generations"), payload, {
                 headers: { ...aiHeaders({ ...config, apiKey }, "application/json"), "Idempotency-Key": idempotencyKey },
                 signal: options?.signal,
                 timeout: JUSUANHUB_VIDEO_CREATE_TIMEOUT_MS,
@@ -3185,6 +3188,16 @@ function readAxiosError(error: unknown, fallback: string) {
         // 多 Key 全挂时把「N 把 Key 全部被拒（402×11、401×1）」接在后面 —— 让用户直接看到每把 key 的下场，
         // 而不是怀疑画布没换 Key（2026-11-22 用户报障「挂了 10 多把 Key 还总报错」）。
         if (status === 402) return appendJusuanhubKeyFailoverSummary(error, apiText("paymentRequired"));
+        // 🔴 422/401/403 的**真实原因只写在 body 里**（2026-11-22 排障）：聚算门户靠 body 的
+        // `error.code` + `details.constraint` 翻人类文案 —— moderation_blocked（内容审核未通过）、
+        // unsupported_combination（取值/组合不在开放范围）、media_overflow_invalid（overflow 参数有误）、
+        // invalid_source_url（素材链接取不到）等。此前只看状态码换 Key，原因全丢：
+        // 用户只看到「一片 422」，完全不知道该改提示词、改素材还是关 overflow。
+        const requestUrl = typeof error.config?.url === "string" ? error.config.url : "";
+        if (jusuanhubMediaRequestUrl(requestUrl)) {
+            const upstream = describeJusuanhubUpstreamError(error);
+            if (upstream) return `${appendJusuanhubKeyFailoverSummary(error, statusMessage(status, fallback))}；${upstream}`;
+        }
         // 504 要分清是谁超时：body 以 `proxy error:` 开头 = 站点代理自己（290s）等到超时，改直连 / 本机跑有用；
         // 其余 = 上游网关自己 504（他们 nginx 等不到后端模型服务），改直连也一样，只能等或换渠道。
         if (status === 504 && !isProxyErrorBody(responseData)) return apiText("upstreamGatewayTimeout");
@@ -3208,6 +3221,11 @@ function readAxiosError(error: unknown, fallback: string) {
 function isProxyErrorBody(data: unknown) {
     const text = typeof data === "string" ? data : "";
     return /^proxy error:/i.test(text.trim());
+}
+
+/** 这条请求是不是打向聚算 Hub（`*.jusuanhub.com`）—— 422 原因透传只对它开启。 */
+function jusuanhubMediaRequestUrl(url: string): boolean {
+    return /jusuanhub\.com/i.test(url);
 }
 
 function clarifyVideoEdgeError(status: number | undefined, data: unknown) {

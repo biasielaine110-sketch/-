@@ -109,7 +109,7 @@ export interface JusuanhubKeyFailoverOptions {
  */
 export async function runWithJusuanhubKeyFailover<T>(
     keys: readonly string[],
-    run: (apiKey: string) => Promise<T>,
+    run: (apiKey: string, phase?: "normal" | "final") => Promise<T>,
     options: JusuanhubKeyFailoverOptions = {},
 ): Promise<T> {
     const list = keys.map((key) => String(key || "").trim()).filter(Boolean);
@@ -147,7 +147,7 @@ export async function runWithJusuanhubKeyFailover<T>(
     const status = axios.isAxiosError(lastError) ? Number(lastError.response?.status) || 0 : 0;
     if (multi && status === 429) {
         try {
-            return await runWithJusuanhubRetry(() => run(list[0]), {
+            return await runWithJusuanhubRetry(() => run(list[0], "final"), {
                 signal: options.signal,
                 baseDelayMs: options.baseDelayMs,
                 maxAttempts: options.finalRetry?.maxAttempts,

@@ -113,6 +113,69 @@ export function summarizeJusuanhubKeyFailoverStatuses(statuses: readonly number[
     return tally.map((entry) => `${entry.code}×${entry.count}`).join("、");
 }
 
+/**
+ * 从上游 4xx/5xx 响应体里抠出「为什么被拒」的一行话。
+ *
+ * 🔴 422 的真实原因只存在于 body 里（2026-11-22 排障）：聚算门户对 422 的分类文案有一整套
+ *   `code` 体系 —— `moderation_blocked`（内容审核未通过）/ `unsupported_combination`
+ *   （取值或组合不在开放范围）/ `invalid_source_url`（素材链接取不到）/ `media_overflow_invalid`
+ *   （overflow 参数有误）等，而画布之前只看状态码就换 Key，把原因全丢了：用户只看到
+ *   「一片 422」，完全不知道该改提示词还是改素材还是等。
+ *
+ * 识别的 body 形状（宽松匹配）：`{error:{code,message,details}}`、`{code,message,details}`、
+ * `{detail:{...}}`；`details.constraint` / `details[].constraint` 是门户用来翻人类文案的字段。
+ * 纯逻辑（输入是 axios 形状的普通对象），探针直接喂假对象测。
+ */
+export type JusuanhubUpstreamErrorLike = {
+    response?: { status?: number; data?: unknown };
+};
+
+export function describeJusuanhubUpstreamError(error: unknown): string {
+    const data = (error as JusuanhubUpstreamErrorLike | undefined)?.response?.data;
+    if (!data || typeof data !== "object") return typeof data === "string" && data.trim() ? describeJusuanhubUpstreamText(data) : "";
+    const payload = data as {
+        code?: unknown; message?: unknown; msg?: unknown; detail?: unknown; details?: unknown;
+        error?: { code?: unknown; message?: unknown; details?: unknown } | string;
+    };
+    const inner = typeof payload.error === "object" && payload.error ? payload.error : payload;
+    const code = typeof inner.code === "string" || typeof inner.code === "number" ? String(inner.code) : "";
+    const message = typeof inner.message === "string" ? inner.message : typeof payload.detail === "string" ? payload.detail : "";
+    const constraints = readJusuanhubConstraintLabels(inner.details ?? (typeof payload.error === "object" ? payload.error?.details : undefined));
+    const parts = [code, message.trim()].filter(Boolean);
+    if (!parts.length && !constraints.length) {
+        return typeof payload.error === "string" && payload.error.trim() ? `上游原因：${payload.error.trim()}` : "";
+    }
+    let text = "上游原因";
+    if (parts.length) text += `：${parts.join("：")}`;
+    if (constraints) text += parts.length ? `（${constraints}）` : `：${constraints}`;
+    return text;
+}
+
+/** 把 `details` 里的 constraint 标签读成 `constraint: xxx` 片段（门户凭它翻人类文案）。 */
+function readJusuanhubConstraintLabels(details: unknown): string {
+    if (!details || typeof details !== "object") return "";
+    const source = details as { constraint?: unknown; param?: unknown; constraints?: unknown; stage?: unknown };
+    const single = typeof source.constraint === "string" && source.constraint.trim()
+        ? `constraint: ${source.constraint.trim()}${typeof source.param === "string" && source.param.trim() ? `（${source.param.trim()}）` : ""}`
+        : "";
+    if (single) return single;
+    if (Array.isArray(source.constraints)) {
+        const labels = source.constraints
+            .map((item) => (typeof item === "string" ? item : typeof (item as { constraint?: unknown })?.constraint === "string" ? String((item as { constraint?: unknown }).constraint) : ""))
+            .filter(Boolean)
+            .slice(0, 4);
+        if (labels.length) return `constraint: ${labels.join("、")}`;
+    }
+    return "";
+}
+
+/** body 是纯文本时的兜底：截断一段，别把 HTML 也当原因展示。 */
+function describeJusuanhubUpstreamText(text: string): string {
+    const trimmed = text.trim();
+    if (!trimmed || /<[a-z][\s\S]*>/i.test(trimmed)) return "";
+    return `上游原因：${trimmed.slice(0, 160)}${trimmed.length > 160 ? "…" : ""}`;
+}
+
 // ════════════════════════════════════════════════════════════════════════════════════════
 // 图片：qwen-image-2.1
 // ════════════════════════════════════════════════════════════════════════════════════════
@@ -361,12 +424,16 @@ export type JusuanhubVideoRequestBody = {
     aspectRatio: JusuanhubVideoAspect;
     resolutionTier: "544p" | "768p";
     /**
-     * 闲时队列（门户 `/docs/idle`，2026-11-22 按用户要求默认开启）。
+     * 闲时队列（门户 `/docs/idle`，2026-11-22 00:55 曾默认带上、当晚撤回）。
      *
-     * 立即名额满时上游直接 429 —— 用户 10+ 账号批量提交时控制台一片 429 就是这个。
      * `"overflow": "idle"`：立即名额放得下照常立即执行；放不下转**闲时队列**
      * （平台空闲时开始，最长等 24 小时；预扣积分是冻结不是扣费，到点未开始自动取消全额退回）。
      * 上游只认这一个值，传别的返回 `media_overflow_invalid`。
+     *
+     * 🔴 **不默认带**（2026-11-22 实证）：默认带上之后，用户控制台从「一片 429」变成
+     *    「一片 422 + 402」—— 闲时是**账号能力**（`idleTier.maxWaitSeconds > 0` 才算开放），
+     *    未开放闲时的账号/Key 带上这个字段疑似直接被 422 拒掉（契约原文「账号开放闲时额度时生效」）。
+     *    改为**兜底策略**：所有 Key 的立即名额都试完仍 429 时（finalRetry 阶段）才带上转闲时。
      *
      * 🔴 只给视频加：图片模型 qwen-image-2.1 的契约里没有 overflow 参数（2026-11-22 实测），
      *    发了会 400。轮询侧 `queuePhase: waiting_idle` 由 `readJusuanhubJobState` 认出并继续等。
@@ -383,6 +450,8 @@ export function buildJusuanhubVideoRequestBody(input: {
     size?: string;
     vquality?: string;
     imageUrls?: string[];
+    /** 仅在「所有 Key 立即名额都满、走闲时兜底」时传 "idle"；平时不带（见 JusuanhubVideoRequestBody.overflow 注释）。 */
+    overflow?: "idle";
 }): JusuanhubVideoRequestBody {
     const urls = publicHttpUrls(input.imageUrls, 9);
     const generationMode = resolveJusuanhubVideoMode(urls.length);
@@ -393,7 +462,7 @@ export function buildJusuanhubVideoRequestBody(input: {
         generationMode,
         aspectRatio: resolveJusuanhubVideoAspect(input.size || ""),
         resolutionTier: resolveJusuanhubVideoResolutionTier(input.vquality || ""),
-        overflow: "idle",
+        ...(input.overflow === "idle" ? { overflow: "idle" as const } : {}),
         ...(generationMode === "i2v" && urls[0] ? { input_image_url: urls[0] } : {}),
         ...(generationMode === "universal_reference_video"
             ? { referenceInputs: urls.map((url) => ({ role: "reference_image" as const, url })) }
