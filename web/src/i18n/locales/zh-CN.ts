@@ -1664,7 +1664,7 @@ export default {
             maskFailed: "局部修改失败",
             annotateSaved: "标记已保存到当前节点",
             annotateBaked: "标记图",
-            annotateBakedSuccess: "已在画布生成带标记的图片",
+            annotateBakedSuccess: "已复制一份带标记的图片，原图保持原样",
             scaleApplied: "已将图片缩小到 {{percent}}%（{{width}}×{{height}}）",
             scaleCopyTitle: "{{percent}}% 尺寸",
             annotateTextNodeAdded: "已添加文本节点",

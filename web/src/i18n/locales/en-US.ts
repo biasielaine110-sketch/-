@@ -1658,7 +1658,7 @@ export default {
             maskFailed: "Local edit failed",
             annotateSaved: "Annotations saved on this node",
             annotateBaked: "Annotated image",
-            annotateBakedSuccess: "Created an annotated image on the canvas",
+            annotateBakedSuccess: "Copied a marked image; the original is untouched",
             scaleApplied: "Image downscaled to {{percent}}% ({{width}}×{{height}})",
             scaleCopyTitle: "{{percent}}% size",
             annotateTextNodeAdded: "Text node added",

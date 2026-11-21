@@ -5437,29 +5437,37 @@ function AtelierCanvasPage() {
 
     const saveAnnotateNode = useCallback(
         async (node: CanvasNodeData, payload: CanvasAnnotateSavePayload) => {
-            setNodes((prev) =>
-                prev.map((item) =>
-                    item.id === node.id
-                        ? {
-                              ...item,
-                              metadata: {
-                                  ...item.metadata,
-                                  annotations: payload.annotations,
-                              },
-                          }
-                        : item,
-                ),
-            );
+            // 「仅保存标注」：只把矢量标注挂回当前节点，下次打开还能继续编辑，图像素本身不动。
             if (!payload.bakedDataUrl) {
+                setNodes((prev) =>
+                    prev.map((item) =>
+                        item.id === node.id
+                            ? {
+                                  ...item,
+                                  metadata: {
+                                      ...item.metadata,
+                                      annotations: payload.annotations,
+                                  },
+                              }
+                            : item,
+                    ),
+                );
                 setAnnotateNodeId(null);
                 message.success(t("canvas.projectPage.annotateSaved"));
                 return;
             }
+            // 🔴「确认标记」= **另存一份**（用户 2026-11-21）：烘焙后的像素只落在新复制出来的
+            // 图片节点上，原图必须保持干净 —— 既不叠 SVG 标注，也不改它的媒体内容。
+            // 早先这里把 `payload.annotations` 同时写回原节点，等于原图也被打上标记，与预期相反。
             const uploaded = await uploadImage(payload.bakedDataUrl);
             const size = fitNodeSize(uploaded.width, uploaded.height, node.width, node.height);
             const childId = nanoid();
             setNodes((prev) => [
-                ...prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, annotations: payload.annotations } } : item)),
+                ...prev.map((item) => {
+                    // 顺手清掉原图上「上次仅保存标注」留下的矢量标记，保证原图零标记。
+                    if (item.id !== node.id || !item.metadata?.annotations?.length) return item;
+                    return { ...item, metadata: { ...item.metadata, annotations: [] } };
+                }),
                 {
                     id: childId,
                     type: CanvasNodeType.Image,
