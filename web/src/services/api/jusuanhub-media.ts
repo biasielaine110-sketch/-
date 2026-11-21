@@ -360,6 +360,18 @@ export type JusuanhubVideoRequestBody = {
     generationMode: JusuanhubVideoMode;
     aspectRatio: JusuanhubVideoAspect;
     resolutionTier: "544p" | "768p";
+    /**
+     * 闲时队列（门户 `/docs/idle`，2026-11-22 按用户要求默认开启）。
+     *
+     * 立即名额满时上游直接 429 —— 用户 10+ 账号批量提交时控制台一片 429 就是这个。
+     * `"overflow": "idle"`：立即名额放得下照常立即执行；放不下转**闲时队列**
+     * （平台空闲时开始，最长等 24 小时；预扣积分是冻结不是扣费，到点未开始自动取消全额退回）。
+     * 上游只认这一个值，传别的返回 `media_overflow_invalid`。
+     *
+     * 🔴 只给视频加：图片模型 qwen-image-2.1 的契约里没有 overflow 参数（2026-11-22 实测），
+     *    发了会 400。轮询侧 `queuePhase: waiting_idle` 由 `readJusuanhubJobState` 认出并继续等。
+     */
+    overflow?: "idle";
     input_image_url?: string;
     referenceInputs?: Array<{ role: "reference_image"; url: string }>;
 };
@@ -381,6 +393,7 @@ export function buildJusuanhubVideoRequestBody(input: {
         generationMode,
         aspectRatio: resolveJusuanhubVideoAspect(input.size || ""),
         resolutionTier: resolveJusuanhubVideoResolutionTier(input.vquality || ""),
+        overflow: "idle",
         ...(generationMode === "i2v" && urls[0] ? { input_image_url: urls[0] } : {}),
         ...(generationMode === "universal_reference_video"
             ? { referenceInputs: urls.map((url) => ({ role: "reference_image" as const, url })) }
@@ -428,7 +441,7 @@ export function readJusuanhubOutputUrls(payload: unknown): string[] {
 }
 
 export type JusuanhubJobState =
-    | { status: "pending"; retryAfterSeconds?: number }
+    | { status: "pending"; retryAfterSeconds?: number; queuePhase?: string; idleWaitDeadline?: string }
     | { status: "succeeded"; urls: string[] }
     | { status: "failed"; error: string };
 
@@ -459,7 +472,16 @@ export function readJusuanhubJobState(payload: unknown): JusuanhubJobState {
             "任务失败（上游未给原因）";
         return { status: "failed", error: message };
     }
-    if (JUSUANHUB_PENDING_STATUS.has(status) || !status) return { status: "pending", retryAfterSeconds };
+    if (JUSUANHUB_PENDING_STATUS.has(status) || !status) {
+        // 闲时队列（`overflow: "idle"`，`/docs/idle`）：`queuePhase: waiting_idle` = 在闲时层等平台空闲
+        // （`idleWaitDeadline` 是最晚等待时刻，到点未开始上游自动取消并全额退回预扣）；
+        // `waiting_slot` = 已在排队层等执行资源；`preparing_prompt` = 正在自动优化提示词。
+        // 这些全是「还在跑」而不是失败 —— 必须继续轮询，别当成没见过的状态误判。
+        const queuePhase = typeof data.queuePhase === "string" && data.queuePhase.trim() ? data.queuePhase.trim() : undefined;
+        const idleWaitDeadline =
+            typeof data.idleWaitDeadline === "string" && data.idleWaitDeadline.trim() ? data.idleWaitDeadline.trim() : undefined;
+        return { status: "pending", retryAfterSeconds, ...(queuePhase ? { queuePhase } : {}), ...(idleWaitDeadline ? { idleWaitDeadline } : {}) };
+    }
     // 没见过的状态词：当排队继续等，别误判成失败。
     return { status: "pending", retryAfterSeconds };
 }

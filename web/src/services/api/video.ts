@@ -236,6 +236,10 @@ async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt:
     //      —— 别把 90 秒耗在一个已经排满的队列上，另一个账户可能还有空位；
     //   ② 全部 Key 都排满（或只有一个 Key）：回到第一个 Key 做带退避的长等，
     //      退避 3→6→12→24→30 约 75 秒用完，再不行就把原始 429 抛给用户。
+    //   ③ 请求体带 `overflow: "idle"`（buildJusuanhubVideoRequestBody 统一加）：立即名额放不下时
+    //      转**闲时队列**（/docs/idle）而不是 429 —— 平台空闲时自动开跑，最长等 24 小时，
+    //      预扣积分冻结、到点未开始自动取消全额退回。轮询侧 `queuePhase: waiting_idle`
+    //      由 readJusuanhubJobState 认出并继续等（pending，不是失败）。
     // Idempotency-Key 在环外生成一次，换 Key 复用它：每个账户幂等空间独立，不会串单。
     const idempotencyKey = newJusuanhubVideoIdempotencyKey();
     const keys = orderJusuanhubApiKeys(jusuanhubKeyCandidates(config));
