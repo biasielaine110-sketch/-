@@ -33,7 +33,7 @@ const AUTODL_H3_ZM_RESOLUTIONS = ["480p竖", "480p横", "480p(1:1)", "768p竖", 
  */
 const AUTODL_H3_ZM960_RESOLUTIONS = ["480p竖", "480p横", "768p竖", "768p横", "960p竖", "960p横"] as const;
 
-/** minimax_h3_z0902 / z0903 — exact enum labels from AutoDL input_rules. */
+/** minimax_h3_z0902 / z0903 / h3_803 — exact enum labels from AutoDL input_rules. */
 const AUTODL_H3_Z09_RESOLUTIONS = [
     "480p竖(480*864)",
     "480p横(864*480)",
@@ -94,9 +94,11 @@ export function shouldUseAutodlComfyVideoBuiltin(model: string, baseUrl = "", sc
     return /minimax|h3|comfy|lightx2v|z09|zm_/i.test(workflowId(model));
 }
 
-/** Workflows whose resolution enum embeds pixel sizes and uses 1088p (not 1080p). */
+/** Workflows whose resolution enum embeds pixel sizes and uses 1088p (not 1080p).
+ *  minimax_h3_803（2026-11-22 schema 实测）：枚举与 z09 族完全一致（带像素尾巴 8 项、默认 768p竖(768*1376)），
+ *  并入本族；正则要求 803 前后是分隔符/边界，不会误伤 z1803、803x 之类。 */
 export function isAutodlH3Z09Workflow(model = ""): boolean {
-    return /z09\d*/i.test(workflowId(model));
+    return /z09\d*|(?:^|[_-])803(?:[_-]|$)/i.test(workflowId(model));
 }
 
 /** zm_* 升级画质类（zm_u24 等）：仅 480/768（含 1:1）。 */
