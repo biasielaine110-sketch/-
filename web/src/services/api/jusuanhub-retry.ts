@@ -17,6 +17,7 @@ import {
     isJusuanhubRetryableStatus,
     readJusuanhubRetryAfterMs,
     resolveJusuanhubRetryDelayMs,
+    summarizeJusuanhubKeyFailoverStatuses,
 } from "./jusuanhub-media";
 
 export interface JusuanhubRetryInfo {
@@ -115,6 +116,9 @@ export async function runWithJusuanhubKeyFailover<T>(
     if (!list.length) throw new Error("Jusuanhub hub: no API key configured");
     const multi = list.length > 1;
     let lastError: unknown;
+    // 每把 Key 的失败状态码（触发换号的那次）。全挂时压成摘要挂在最后一个错误上，
+    // 用户就能看到「12 把 Key 全部被拒（402×11、401×1）」而不是一句笼统的 402。
+    const failoverStatuses: number[] = [];
     for (let index = 0; index < list.length; index += 1) {
         if (options.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         try {
@@ -133,21 +137,57 @@ export async function runWithJusuanhubKeyFailover<T>(
             lastError = error;
             const status = axios.isAxiosError(error) ? Number(error.response?.status) || 0 : 0;
             if (!isJusuanhubKeyFailoverStatus(status)) throw error;
+            failoverStatuses.push(status);
             if (index < list.length - 1) options.onKeyFailover?.({ fromKey: list[index], toKey: list[index + 1], status });
         }
     }
+    attachJusuanhubKeyFailoverSummary(lastError, failoverStatuses, list.length);
     // 全部 Key 都被账户级问题挡住。429 = 都排满了 → 回到第一个 Key 做一次长等（旧行为）；
     // 401/402/403/422 → 换谁都没用，直接把最后一个真实错误抛上去。
     const status = axios.isAxiosError(lastError) ? Number(lastError.response?.status) || 0 : 0;
     if (multi && status === 429) {
-        return runWithJusuanhubRetry(() => run(list[0]), {
-            signal: options.signal,
-            baseDelayMs: options.baseDelayMs,
-            maxAttempts: options.finalRetry?.maxAttempts,
-            deadlineMs: options.finalRetry?.deadlineMs,
-        });
+        try {
+            return await runWithJusuanhubRetry(() => run(list[0]), {
+                signal: options.signal,
+                baseDelayMs: options.baseDelayMs,
+                maxAttempts: options.finalRetry?.maxAttempts,
+                deadlineMs: options.finalRetry?.deadlineMs,
+            });
+        } catch (error) {
+            // 长等也没等到位：把这次的真实错误连同「N 把全挂」的摘要一起抛上去。
+            attachJusuanhubKeyFailoverSummary(error, failoverStatuses, list.length);
+            throw error;
+        }
     }
     throw lastError;
+}
+
+type JusuanhubAxiosErrorWithSummary = import("axios").AxiosError & { jusuanhubKeyFailoverSummary?: string };
+
+/**
+ * 把「N 把 Key 全部被拒（402×11、401×1）」挂到错误对象上。
+ * 文案翻译层（`appendJusuanhubKeyFailoverSummary`）负责把它接进用户可见的错误信息。
+ */
+function attachJusuanhubKeyFailoverSummary(error: unknown, statuses: readonly number[], keyCount: number): void {
+    if (!axios.isAxiosError(error)) return;
+    const summary = summarizeJusuanhubKeyFailoverStatuses(statuses);
+    if (!summary) return;
+    (error as JusuanhubAxiosErrorWithSummary).jusuanhubKeyFailoverSummary = `${keyCount} 把 Key 全部被拒（${summary}）`;
+}
+
+/** 读出换 Key 摘要；没挂过（单 Key / 中途抛出）返回空串。 */
+export function readJusuanhubKeyFailoverSummary(error: unknown): string {
+    if (axios.isAxiosError(error)) {
+        const summary = (error as JusuanhubAxiosErrorWithSummary).jusuanhubKeyFailoverSummary;
+        if (typeof summary === "string" && summary.trim()) return summary.trim();
+    }
+    return "";
+}
+
+/** 把摘要接在用户可见的错误文案后面：`上游返回 402…（12 把 Key 全部被拒（402×11、401×1））`。 */
+export function appendJusuanhubKeyFailoverSummary(error: unknown, text: string): string {
+    const summary = readJusuanhubKeyFailoverSummary(error);
+    return summary ? `${text}（${summary}）` : text;
 }
 
 function sleep(ms: number, signal?: AbortSignal) {    return new Promise<void>((resolve, reject) => {

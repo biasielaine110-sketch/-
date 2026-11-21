@@ -37,7 +37,7 @@ import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/m
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
 import { buildJusuanhubVideoRequestBody, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, orderJusuanhubApiKeys, readJusuanhubJobId, readJusuanhubJobState, resolveJusuanhubRetryDelayMs } from "./jusuanhub-media";
-import { runWithJusuanhubKeyFailover, runWithJusuanhubRetry } from "./jusuanhub-retry";
+import { appendJusuanhubKeyFailoverSummary, runWithJusuanhubKeyFailover, runWithJusuanhubRetry } from "./jusuanhub-retry";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
@@ -3178,7 +3178,9 @@ function readAxiosError(error: unknown, fallback: string) {
         // 402 = 渠道没钱 / 没开通这个模型（聚算 Hub 的 minimax-h3 就常返 402）。必须**在读正文之前**拦下：
         // 中转站常把它包成 `{error:{message:"Payment required"}}` 甚至一段 nginx HTML，照抄正文只会让人
         // 去改 Base URL / Key，永远改不好。与 `image.ts:readStatusError` 同口径。
-        if (status === 402) return apiText("paymentRequired");
+        // 多 Key 全挂时把「N 把 Key 全部被拒（402×11、401×1）」接在后面 —— 让用户直接看到每把 key 的下场，
+        // 而不是怀疑画布没换 Key（2026-11-22 用户报障「挂了 10 多把 Key 还总报错」）。
+        if (status === 402) return appendJusuanhubKeyFailoverSummary(error, apiText("paymentRequired"));
         // 504 要分清是谁超时：body 以 `proxy error:` 开头 = 站点代理自己（290s）等到超时，改直连 / 本机跑有用；
         // 其余 = 上游网关自己 504（他们 nginx 等不到后端模型服务），改直连也一样，只能等或换渠道。
         if (status === 504 && !isProxyErrorBody(responseData)) return apiText("upstreamGatewayTimeout");

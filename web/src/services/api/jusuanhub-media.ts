@@ -93,6 +93,26 @@ export function isJusuanhubKeyFailoverStatus(status: number): boolean {
     return status === 401 || status === 402 || status === 403 || status === 422 || status === 429;
 }
 
+/**
+ * 把换 Key 环记录的逐把失败状态码压成一行摘要：`[402,402,401] → "402×2、401×1"`。
+ *
+ * 为什么要这个（用户 2026-11-22 报障：挂了 10 多把 Key 还总报错）：默认文案只能说「每一把都被拒过」，
+ * 用户没法分辨是「全都没积分（402）」还是「有几把失效（401）」。摘要直接给出每类状态码的把数，
+ * 402×N 一眼看出是账户积分问题（聚算门户：余额 < 10 积分一律 402，且积分按批次到期）。
+ * 纯逻辑，探针直接测；顺序按首次出现排，重复归并计数。
+ */
+export function summarizeJusuanhubKeyFailoverStatuses(statuses: readonly number[]): string {
+    const tally: Array<{ code: number; count: number }> = [];
+    for (const raw of statuses) {
+        const code = Math.floor(Number(raw) || 0);
+        if (!code) continue;
+        const found = tally.find((entry) => entry.code === code);
+        if (found) found.count += 1;
+        else tally.push({ code, count: 1 });
+    }
+    return tally.map((entry) => `${entry.code}×${entry.count}`).join("、");
+}
+
 // ════════════════════════════════════════════════════════════════════════════════════════
 // 图片：qwen-image-2.1
 // ════════════════════════════════════════════════════════════════════════════════════════
