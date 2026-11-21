@@ -142,10 +142,12 @@ export async function runWithJusuanhubKeyFailover<T>(
         }
     }
     attachJusuanhubKeyFailoverSummary(lastError, failoverStatuses, list.length);
-    // 全部 Key 都被账户级问题挡住。429 = 都排满了 → 回到第一个 Key 做一次长等（旧行为）；
+    // 全部 Key 都被账户级问题挡住。429 = 立即名额全满 → 兜底长等（多 Key 回第一个；单 Key 本来就在等），
+    // 兜底轮以 phase="final" 调 run —— video.ts 据此带 `overflow: "idle"` 转闲时队列（/docs/idle），
+    // 等 90 秒没等到腾位，与其把 429 抛给用户，不如排进闲时（冻结积分、到点未开始自动全额退回）。
     // 401/402/403/422 → 换谁都没用，直接把最后一个真实错误抛上去。
     const status = axios.isAxiosError(lastError) ? Number(lastError.response?.status) || 0 : 0;
-    if (multi && status === 429) {
+    if (status === 429) {
         try {
             return await runWithJusuanhubRetry(() => run(list[0], "final"), {
                 signal: options.signal,
