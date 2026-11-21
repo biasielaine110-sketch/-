@@ -231,28 +231,25 @@ async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt:
         vquality: config.vquality,
         imageUrls,
     });
-    // 🔴 429（上游账户排队/并发额度打满）是这一家最常见的「假失败」，三层应对：
+    // 🔴 429（上游账户排队/并发额度打满）是这一家最常见的「假失败」，按 /docs/video 错误表三层应对：
     //   ① 多 Key：随机顺序逐个试，前一个被 401/402/403/429 挡住就换下一个账户
     //      —— 别把 90 秒耗在一个已经排满的队列上，另一个账户可能还有空位；
     //   ② 全部 Key 都排满（或只有一个 Key）：回到第一个 Key 做带退避的长等，
     //      退避 3→6→12→24→30 约 75 秒用完，再不行就把原始 429 抛给用户；
-    //   ③ **闲时兜底只在 ② 里启用**：长等那一轮的请求体带 `overflow: "idle"`（/docs/idle），
-    //      立即名额放不下转闲时队列（最长 24h，预扣积分冻结、到点未开始自动取消全额退回）。
-    //      🔴 平时（①/②的普通轮）**不带** overflow —— 闲时是账号能力（`idleTier.maxWaitSeconds>0`），
-    //      未开放的账号带上疑似直接 422（2026-11-22 实证：默认带上后 429 大片变 422 大片）。
-    //      轮询侧 `queuePhase: waiting_idle` 由 readJusuanhubJobState 认出并继续等（pending，不是失败）。
-    // Idempotency-Key 在环外生成一次，换 Key 复用它：每个账户幂等空间独立，不会串单。
+    //   ③ 文档对 429 的规定口径：「按 Retry-After 加随机抖动后，用同一 Idempotency-Key 重试」。
+    //      🔴 **不带 overflow**（2026-11-22 两次实证：默认带、兜底带都让未开放闲时额度的账号
+    //      一律 422 —— 闲时是账号能力，契约「账号开放闲时额度时生效」）。想要闲时排队，
+    //      去门户 /keys 给 Key 勾「立即名额满时自动转闲时」，上游服务端自动转，画布无需改动。
+    // Idempotency-Key 在环外生成一次，换 Key / 重试都复用它（文档明确要求同一 Idempotency-Key）。
     const idempotencyKey = newJusuanhubVideoIdempotencyKey();
     const keys = orderJusuanhubApiKeys(jusuanhubKeyCandidates(config));
     // 实际提交成功的那个 Key 要记下来 —— 轮询 `/v1/jobs/{id}` 必须用它（job 是账户级的）。
     let submittedKey = keys[0] || config.apiKey;
     const response = await runWithJusuanhubKeyFailover(
         keys,
-        (apiKey, phase) => {
+        (apiKey) => {
             submittedKey = apiKey;
-            // 只有 final 兜底轮（所有 Key 的立即名额都满，长等排队腾位）才带 overflow 转闲时。
-            const payload = phase === "final" ? { ...body, overflow: "idle" as const } : body;
-            return axios.post<unknown>(aiApiUrl(config, "/media/generations"), payload, {
+            return axios.post<unknown>(aiApiUrl(config, "/media/generations"), body, {
                 headers: { ...aiHeaders({ ...config, apiKey }, "application/json"), "Idempotency-Key": idempotencyKey },
                 signal: options?.signal,
                 timeout: JUSUANHUB_VIDEO_CREATE_TIMEOUT_MS,
@@ -260,7 +257,7 @@ async function createJusuanhubVideoTask(config: AiConfig, model: string, prompt:
         },
         // 多 Key 时每个 Key 只试一次（`perKeyAttempts` 默认 1、`perKeyDeadlineMs` 默认 0），
         // 单 Key 没得换，仍按旧的 6 次 / 90 秒等队列腾位 —— 由 `singleKey` 单独给。
-        { signal: options?.signal, singleKey: { maxAttempts: 6, deadlineMs: 90_000 }, finalRetry: { maxAttempts: 6, deadlineMs: 90_000 } },
+        { signal: options?.signal, jitter: true, singleKey: { maxAttempts: 6, deadlineMs: 90_000 }, finalRetry: { maxAttempts: 6, deadlineMs: 90_000 } },
     );
     const jobId = readJusuanhubJobId(response.data);
     if (!jobId) throw new Error(apiText("noVideoTaskId"));

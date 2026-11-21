@@ -39,6 +39,11 @@ export interface JusuanhubRetryOptions {
     deadlineMs?: number;
     /** 退避基数，默认 `JUSUANHUB_RETRY_BASE_DELAY_MS`。只有探针该改它（传 1 即毫秒级跑完）。 */
     baseDelayMs?: number;
+    /**
+     * 429 等待加随机抖动（门户 `/docs/video` 错误表：「按 Retry-After 加随机抖动后重试」）。
+     * 在算出的等待上加 0～25% 的随机量，错开同一时刻撞车的多个提交。默认 false（等待可断言）。
+     */
+    jitter?: boolean;
     onRetry?: (info: JusuanhubRetryInfo) => void;
 }
 
@@ -58,11 +63,10 @@ export async function runWithJusuanhubRetry<T>(run: () => Promise<T>, options: J
             const isAxios = axios.isAxiosError(error);
             const status = isAxios ? Number(error.response?.status) || 0 : 0;
             if (!isJusuanhubRetryableStatus(status) || attempt >= maxAttempts) break;
-            const waitMs = resolveJusuanhubRetryDelayMs(
-                attempt - 1,
-                readJusuanhubRetryAfterMs(isAxios ? error.response?.headers : undefined),
-                options.baseDelayMs,
-            );
+            const retryAfterMs = readJusuanhubRetryAfterMs(isAxios ? error.response?.headers : undefined);
+            let waitMs = resolveJusuanhubRetryDelayMs(attempt - 1, retryAfterMs, options.baseDelayMs);
+            // 文档口径：429 重试要加随机抖动（Retry-After 越长抖动窗口越大，上限 +25%）。
+            if (options.jitter && waitMs > 0) waitMs += Math.floor(Math.random() * Math.max(1, Math.floor(waitMs * 0.25)));
             // 总预算不够这一次等待了就别等：白等 24 秒再抛同一个 429 比立刻报错更糟。
             if (Number.isFinite(options.deadlineMs) && Date.now() + waitMs - startedAt > Number(options.deadlineMs)) break;
             options.onRetry?.({ attempt, status, waitMs });
@@ -91,6 +95,8 @@ export interface JusuanhubKeyFailoverOptions {
     finalRetry?: { maxAttempts?: number; deadlineMs?: number };
     /** 退避基数，只有探针该改它（传 1 即毫秒级跑完）。 */
     baseDelayMs?: number;
+    /** 429 等待加随机抖动（/docs/video 错误表口径），传给每一层重试。 */
+    jitter?: boolean;
     onKeyFailover?: (info: { fromKey: string; toKey: string; status: number }) => void;
 }
 
@@ -109,7 +115,7 @@ export interface JusuanhubKeyFailoverOptions {
  */
 export async function runWithJusuanhubKeyFailover<T>(
     keys: readonly string[],
-    run: (apiKey: string, phase?: "normal" | "final") => Promise<T>,
+    run: (apiKey: string) => Promise<T>,
     options: JusuanhubKeyFailoverOptions = {},
 ): Promise<T> {
     const list = keys.map((key) => String(key || "").trim()).filter(Boolean);
@@ -125,6 +131,7 @@ export async function runWithJusuanhubKeyFailover<T>(
             return await runWithJusuanhubRetry(() => run(list[index]), {
                 signal: options.signal,
                 baseDelayMs: options.baseDelayMs,
+                jitter: options.jitter,
                 maxAttempts: multi
                     ? options.perKeyAttempts ?? 1
                     : options.singleKey?.maxAttempts ?? options.perKeyAttempts,
@@ -142,16 +149,20 @@ export async function runWithJusuanhubKeyFailover<T>(
         }
     }
     attachJusuanhubKeyFailoverSummary(lastError, failoverStatuses, list.length);
-    // 全部 Key 都被账户级问题挡住。429 = 立即名额全满 → 兜底长等（多 Key 回第一个；单 Key 本来就在等），
-    // 兜底轮以 phase="final" 调 run —— video.ts 据此带 `overflow: "idle"` 转闲时队列（/docs/idle），
-    // 等 90 秒没等到腾位，与其把 429 抛给用户，不如排进闲时（冻结积分、到点未开始自动全额退回）。
+    // 全部 Key 都被账户级问题挡住。429 = 立即名额全满 → 兜底长等（多 Key 回第一个；单 Key 本来就在等）。
+    // 🔴 按 /docs/video 错误表的唯一规定口径处理：「按 Retry-After 加随机抖动后，用**同一 Idempotency-Key**
+    //    重试」（Idempotency-Key 由调用方环外生成一次，这里只重发）。**不带 overflow** ——
+    //    闲时是账号能力（契约：「账号开放闲时额度时生效」），未开放闲时的账号带上一律 422
+    //    （2026-11-22 两次实证：默认带、兜底带都让 429 变 422）。想要闲时排队，去门户 /keys
+    //    给 Key 勾「立即名额满时自动转闲时」，上游服务端会自动转，画布无需任何改动。
     // 401/402/403/422 → 换谁都没用，直接把最后一个真实错误抛上去。
     const status = axios.isAxiosError(lastError) ? Number(lastError.response?.status) || 0 : 0;
     if (status === 429) {
         try {
-            return await runWithJusuanhubRetry(() => run(list[0], "final"), {
+            return await runWithJusuanhubRetry(() => run(list[0]), {
                 signal: options.signal,
                 baseDelayMs: options.baseDelayMs,
+                jitter: options.jitter,
                 maxAttempts: options.finalRetry?.maxAttempts,
                 deadlineMs: options.finalRetry?.deadlineMs,
             });

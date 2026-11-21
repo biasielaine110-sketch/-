@@ -425,22 +425,6 @@ export type JusuanhubVideoRequestBody = {
     generationMode: JusuanhubVideoMode;
     aspectRatio: JusuanhubVideoAspect;
     resolutionTier: "544p" | "768p";
-    /**
-     * 闲时队列（门户 `/docs/idle`，2026-11-22 00:55 曾默认带上、当晚撤回）。
-     *
-     * `"overflow": "idle"`：立即名额放得下照常立即执行；放不下转**闲时队列**
-     * （平台空闲时开始，最长等 24 小时；预扣积分是冻结不是扣费，到点未开始自动取消全额退回）。
-     * 上游只认这一个值，传别的返回 `media_overflow_invalid`。
-     *
-     * 🔴 **不默认带**（2026-11-22 实证）：默认带上之后，用户控制台从「一片 429」变成
-     *    「一片 422 + 402」—— 闲时是**账号能力**（`idleTier.maxWaitSeconds > 0` 才算开放），
-     *    未开放闲时的账号/Key 带上这个字段疑似直接被 422 拒掉（契约原文「账号开放闲时额度时生效」）。
-     *    改为**兜底策略**：所有 Key 的立即名额都试完仍 429 时（finalRetry 阶段）才带上转闲时。
-     *
-     * 🔴 只给视频加：图片模型 qwen-image-2.1 的契约里没有 overflow 参数（2026-11-22 实测），
-     *    发了会 400。轮询侧 `queuePhase: waiting_idle` 由 `readJusuanhubJobState` 认出并继续等。
-     */
-    overflow?: "idle";
     input_image_url?: string;
     referenceInputs?: Array<{ role: "reference_image"; url: string }>;
 };
@@ -452,8 +436,6 @@ export function buildJusuanhubVideoRequestBody(input: {
     size?: string;
     vquality?: string;
     imageUrls?: string[];
-    /** 仅在「所有 Key 立即名额都满、走闲时兜底」时传 "idle"；平时不带（见 JusuanhubVideoRequestBody.overflow 注释）。 */
-    overflow?: "idle";
 }): JusuanhubVideoRequestBody {
     const urls = publicHttpUrls(input.imageUrls, 9);
     const generationMode = resolveJusuanhubVideoMode(urls.length);
@@ -464,7 +446,6 @@ export function buildJusuanhubVideoRequestBody(input: {
         generationMode,
         aspectRatio: resolveJusuanhubVideoAspect(input.size || ""),
         resolutionTier: resolveJusuanhubVideoResolutionTier(input.vquality || ""),
-        ...(input.overflow === "idle" ? { overflow: "idle" as const } : {}),
         ...(generationMode === "i2v" && urls[0] ? { input_image_url: urls[0] } : {}),
         ...(generationMode === "universal_reference_video"
             ? { referenceInputs: urls.map((url) => ({ role: "reference_image" as const, url })) }
