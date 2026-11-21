@@ -81,13 +81,16 @@ export function orderJusuanhubApiKeys(keys: readonly string[], random: () => num
  * 只有「跟这个账户/这把 Key 有关」的失败才值得换：
  *  · 401 / 403 —— Key 无效、被禁、或该账户没有这个模型的权限；
  *  · 402       —— 余额/额度不足；
+ *  · 422       —— 请求被账户级校验挡下（用户 2026-11-21 要求：撞 422 也自动换下一个 Key）。
+ *                典型是额度/配额类校验失败或该账户的内容审校拒绝 —— 同一个请求换把 Key 再发
+ *                是用户明确要的行为；400（纯参数错，换谁都会挂）仍不换。
  *  · 429       —— **这个账户的队列排满**（`queued.maxUnits:80 / unitsPerJob:8` 最多排 10 条）。
  *                这是换 Key 最值钱的场景：另一个账户可能还有空位。
  *
  * 502 / 503 / 504 是上游自己炸，400 是参数错 —— 换 Key 也一样，白白多烧一次请求。
  */
 export function isJusuanhubKeyFailoverStatus(status: number): boolean {
-    return status === 401 || status === 402 || status === 403 || status === 429;
+    return status === 401 || status === 402 || status === 403 || status === 422 || status === 429;
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════

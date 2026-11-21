@@ -95,7 +95,7 @@ export interface JusuanhubKeyFailoverOptions {
 
 /**
  * 多 Key 排队试：随机顺序（`orderJusuanhubApiKeys` 洗好的列表），
- * 一个 Key 撞上「账户级」失败（401/402/403/429）就换下一个，直到成功或全部试完。
+ * 一个 Key 撞上「账户级」失败（401/402/403/422/429）就换下一个，直到成功或全部试完。
  *
  * 两条容易写错的地方：
  *  ① **缩略每一个 Key 的 429 预算**。单 Key 时那 30s/90s 的长等是为了「等队列腾位」；
@@ -137,7 +137,7 @@ export async function runWithJusuanhubKeyFailover<T>(
         }
     }
     // 全部 Key 都被账户级问题挡住。429 = 都排满了 → 回到第一个 Key 做一次长等（旧行为）；
-    // 401/402/403 → 换谁都没用，直接把最后一个真实错误抛上去。
+    // 401/402/403/422 → 换谁都没用，直接把最后一个真实错误抛上去。
     const status = axios.isAxiosError(lastError) ? Number(lastError.response?.status) || 0 : 0;
     if (multi && status === 429) {
         return runWithJusuanhubRetry(() => run(list[0]), {
