@@ -4285,23 +4285,45 @@ function readStoryScriptAssetDescription(row: StoryScriptRow, textKeys: readonly
     return joinStoryScriptPromptParts(textKeys.map((key) => storyScriptCellText(row[key]))).trim();
 }
 
-/** 这一格的名字里有没有「这个人」：整格全等 **或** 多名字格里的其中一个（`苏晚、阿杰` 里认得出 `阿杰`）。 */
-function scriptCellHasAssetName(value: unknown, normalizedWanted: string): boolean {
-    if (!normalizedWanted) return false;
+/**
+ * 整格名字（可能一格多名字 / 群像）的「资产身份组合键」：逐名取 `scriptAssetIdentityKey`
+ * （造型感知：`叶辰（校服）` → `叶辰|校服`），去重排序拼接。
+ *
+ * 🔴 为什么不能用 `normalizeScriptAssetMatchText` 直接归一整格（2026-11-23 用户报障）：
+ * 它会把括号与 `、` 一起剥掉 —— `叶辰（校服）` 和 `叶辰（便服）` 归一后**都是 `叶辰`**，
+ * `叶辰（校服）、苏晚` 和 `叶辰（便服）、苏晚` 也是同一个键 → 描述去重层把第二套及后面
+ * 造型 / 换装后的群像描述**确定性清空**（用户看到「第二套及后面的服装没有资产提示词」）。
+ * 组合键换造型 / 换成员就变 —— 只有「名字组合与造型完全相同」的重复出现才算同一资产。
+ */
+function scriptAssetIdentityComboKey(value: unknown): string {
     const text = storyScriptCellText(value);
-    if (!text) return false;
-    if (normalizeScriptAssetMatchText(text) === normalizedWanted) return true;
-    return splitScriptAssetNames(text).some((name) => normalizeScriptAssetMatchText(name) === normalizedWanted);
+    if (!text) return "";
+    const keys = splitScriptAssetNames(text)
+        .map((name) => scriptAssetIdentityKey(name))
+        .filter(Boolean);
+    return Array.from(new Set(keys)).sort().join("\u0001");
 }
 
-/** 找同名的「首现描述」：优先这一镜之前（按镜号），没有再退到全表（顺序反了也能救回来）。 */
+/** 这一格的名字里有没有「这个身份」：逐名按造型感知的身份键比较
+ * （`叶辰（便服）` 的描述不会串到 `叶辰（校服）` 的格子上；裸名只匹配裸名 —— 与
+ * `scriptAssetVariantGate`「裸名与造型名不互通」的口径一致）。 */
+function scriptCellHasAssetName(value: unknown, identityWanted: string): boolean {
+    if (!identityWanted) return false;
+    const text = storyScriptCellText(value);
+    if (!text) return false;
+    return splitScriptAssetNames(text).some((name) => scriptAssetIdentityKey(name) === identityWanted);
+}
+
+/** 找「同一身份资产」的首现描述：优先这一镜之前（按镜号），没有再退到全表（顺序反了也能救回来）。
+ *  名字按造型感知的身份键匹配（见 `scriptAssetIdentityKey`）—— `叶辰（便服）` 查不到
+ *  `叶辰（校服）` 的描述，宁可空着也不把校服卡套到便服头上。 */
 export function findStoryScriptAssetDescription(
     rows: readonly StoryScriptRow[] | null | undefined,
     spec: { nameKey?: string; textKeys: readonly string[] },
     name: string,
     current?: StoryScriptRow | null,
 ): string {
-    const wanted = normalizeScriptAssetMatchText(name);
+    const wanted = scriptAssetIdentityKey(name);
     const nameKey = spec.nameKey;
     if (!wanted || !nameKey) return "";
     const currentShot = Number(current?.shot_no) || 0;
@@ -4334,7 +4356,8 @@ export function dedupeStoryScriptAssetDescriptions(
     if (list.length < 2) return list as StoryScriptRow[];
     const specs = scriptAssetDescriptionSpecs(preset);
     if (!specs.length) return list as StoryScriptRow[];
-    /** `列key\u0000归一化名字` → 首现镜号 */
+    /** `列key\u0000身份组合键` → 首现镜号（造型感知，见 `scriptAssetIdentityComboKey`：
+     *  `叶辰（校服）` 与 `叶辰（便服）` 是两个键，换装后的描述**绝不**被当重复清空）。 */
     const firstSeen = new Map<string, number>();
     let changed = false;
     const next = list.map((row, index) => {
@@ -4342,7 +4365,7 @@ export function dedupeStoryScriptAssetDescriptions(
         let copy: StoryScriptRow | null = null;
         for (const spec of specs) {
             const name = storyScriptCellText(row[spec.nameKey]);
-            const normalized = normalizeScriptAssetMatchText(name);
+            const normalized = scriptAssetIdentityComboKey(name);
             if (!normalized) continue;
             const key = `${spec.columnKey}\u0000${normalized}`;
             const text = readStoryScriptAssetDescription(row, spec.textKeys);
@@ -4778,7 +4801,7 @@ export function buildStoryScriptAssetDescriptionHints(
         const shotNo = Number(row.shot_no) || index + 1;
         for (const spec of specs) {
             const name = storyScriptCellText(row[spec.nameKey]);
-            const normalized = normalizeScriptAssetMatchText(name);
+            const normalized = scriptAssetIdentityComboKey(name);
             if (!normalized) continue;
             const key = `${spec.columnKey}\u0000${normalized}`;
             const meaningful = hasMeaningfulAssetDescription(readStoryScriptAssetDescription(row, spec.textKeys));
@@ -4798,6 +4821,8 @@ export function buildStoryScriptAssetDescriptionHints(
 export const STORY_SCRIPT_ASSET_DEDUPE_SYSTEM_OVERRIDE = [
     "## 资产描述去重（最高优先级，压过上文所有相反说明）",
     "- 同一个角色 / 场景 / 道具在多镜里反复出现时，**资产描述只在它第一次出现的那一镜写全**；后面再出现它的镜头，描述列（角色描述1 / 角色描述2 / 场景描述 / 场景标签 / 光影氛围 / 道具描述）**一律留空**：不要重复写、不要缩写、不要写「同上 / 同第 N 镜 / 见前」之类占位文字。",
+    "- 🔴 **判断「是不是同一个资产」按带造型的完整名字算，不按本体名**：`叶辰（校服）` / `叶辰（便服）` / `叶辰（西服）` 是**三个不同的资产**，各自第一次出现的那一镜都要写全**自己的**外观卡（这套造型的服装款式、颜色、材质，以及该造型下的发型 / 配饰差异）；不能因为本体都是叶辰，就把后面的造型当成「已写过」留空。",
+    "- 🔴 **一格多名字（群像）同理**：判断按这一格的名字组合算 —— 成员变了、或其中任何一个人的造型变了，都算**新的组合**，首现镜要按 `名字：外观｜名字：外观` 逐人分条写全；只有名字与造型**完全相同**的组合重复出现才留空。",
     "- 但**资产名字列每一镜都必须照常填写**（角色1 / 角色2 / 场景 / 道具），一个字都不许省略 —— 图位与铺链路靠名字逐镜匹配，名字空了这一镜的资产就丢了。",
     "- 这一镜确实没有某个资产时，仍按原规则把名字与描述都写「无」（「无」不算「已写过描述」）。",
     "- **分镜提示词 / 视频运动提示词不受本条限制**：这两列每一镜都要能独立当生图提示词看，角色外貌必须写全；这一镜的描述列为空时，就按该资产第一次出现时写的描述来写。",
