@@ -37,6 +37,30 @@ export function buildScriptAssetBindingPrompt(
     return i18n.t("canvas.scriptNode.assetBindingLine", { items: joined });
 }
 
+/**
+ * 第一套（内置）铺**视频**链路用的「图在前、锁名在后」绑定行（用户 2026-11-22）：
+ *
+ *     @图片1锁定为张园长。@图片2锁定为幼儿园一楼走廊。
+ *
+ * 与老的单行 `资产绑定：张园长@图片1、…` 的差别：
+ *  - **图片 chip 在前**：`@图片N` 在输入框里渲染成缩略图，用户要「具体的资产图片放在资产名的前面进行锁定」；
+ *  - 后接「锁定为<资产名>」（音频照旧走「谁的音色参考」：`@参考音频 1锁定为张曼的音色参考。`）；
+ *  - 条目之间不再用顿号，**每条以句号收尾**（自然连成一段，无分隔符）。
+ *
+ * ⚠️ `@图片N` 依旧是引用 chip 的标签原文，逐字一致才会渲染成缩略图 —— 别在这里改写编号格式。
+ * ⚠️ 只用于**视频节点**（生图窗口仍用老的单行 `资产绑定`），也只给第一套生效（第四套是「资产锁定」块、其余套老格式）。
+ */
+export function buildScriptAssetNameLockPrompt(
+    orderedAssetNodeIds: ReadonlyArray<string | undefined | null>,
+    allNodes: CanvasNodeData[],
+    assetNameOf: (assetNodeId: string) => string | undefined,
+    assetRoleOf: (assetNodeId: string) => ScriptAssetRole | null,
+) {
+    const items = collectScriptAssetPromptItems(orderedAssetNodeIds, allNodes, assetNameOf, assetRoleOf);
+    if (!items.length) return "";
+    return items.map((item) => `@${item.label}锁定为${scriptAssetBindingName(item)}。`).join("");
+}
+
 /** 一条「@图片N / @参考音频N = 什么资产」的待渲染条目（两个渲染器共用同一个收集结果）。 */
 type ScriptAssetPromptItem = { name: string; label: string; role: ScriptAssetRole | null; kind: "image" | "audio" };
 

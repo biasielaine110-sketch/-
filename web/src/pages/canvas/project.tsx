@@ -194,7 +194,7 @@ import { VIDEO_REVERSE_LANGUAGE_RULE, VIDEO_REVERSE_REWRITE_PROMPT, buildVideoRe
 import { EPISODE_BAND_COMPACT_ROWS, EPISODE_BAND_ESTIMATE_RATIO, EPISODE_BAND_GAP_Y, EPISODE_BAND_ROW_SLACK, EPISODE_LANE_ROW_GAP_Y, EPISODE_LANE_ROW_HEIGHT, EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeDraftSeconds, resolveEpisodeSeconds, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
-import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
+import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, buildScriptAssetNameLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
 import {
     applyScriptAssetDirectDecorations,
     buildScriptAssetBatchMounts,
@@ -10798,8 +10798,13 @@ function AtelierCanvasPage() {
             // 资产文案的两种写法（用户 2026-10-27 第 02 条）：
             //   第四套（影视分镜导演）→ 多行「资产锁定」块：`@图片1：李曼人物参考，锁定面容、发型、服装、体型。`
             //   其余三套 → 老的单行 `资产绑定：李曼@图片1、林舟@图片2`，一个字节不动。
-            const directorScheme = resolveScriptSchemeId(source.metadata?.scriptScheme) === "director";
+            const sourceSchemeId = resolveScriptSchemeId(source.metadata?.scriptScheme);
+            const directorScheme = sourceSchemeId === "director";
             const assetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
+            // 视频节点的资产文案（用户 2026-11-22）：第一套（内置）改「@图片N锁定为资产名。」——
+            // 图片 chip 在前（把具体的资产图片放在资产名前面锁定）、句号收尾、无顿号；
+            // 第四套仍是「资产锁定」块，其余套保持老的单行。生图窗口（上面的 assetBindingOf）不变。
+            const videoAssetBindingOf = directorScheme ? buildScriptAssetLockPrompt : sourceSchemeId === "builtin" ? buildScriptAssetNameLockPrompt : buildScriptAssetBindingPrompt;
             const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
                 .map((id) => nodesRef.current.find((node) => node.id === id))
                 .filter((node): node is CanvasNodeData => Boolean(node));
@@ -11114,7 +11119,7 @@ function AtelierCanvasPage() {
                 // 音频也要进文案（用户 2026-11-15）：整表音频在前、本段按台词挂的音色在后 ——
                 // **顺序必须与下面写连线的顺序一致**，否则 `@参考音频 N` 的编号与输入框 chip 对不上。
                 const groupAudioList = [...audioRefs.map((asset) => asset.id), ...groupAudioIds];
-                const videoBinding = assetBindingOf([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf);
+                const videoBinding = videoAssetBindingOf([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf);
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
                 // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产绑定块在前、禁止项 / 强制声明收尾。
                 const videoPrompt = withVideoComplianceSuffix(withScriptAssetBinding(baseVideoPrompt, videoBinding));
@@ -13065,8 +13070,10 @@ function AtelierCanvasPage() {
                 }
                 return undefined;
             };
-            // 第四套用多行「资产锁定」块，其余三套保持老的单行「资产绑定」（与整条铺链路同口径）。
-            const assetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
+            // 第四套用多行「资产锁定」块；第一套（内置）用「@图片N锁定为资产名。」（用户 2026-11-22，
+            // 与整条铺链路的视频节点同口径）；其余三套保持老的单行「资产绑定」。
+            const shotSchemeId = resolveScriptSchemeId(source.metadata?.scriptScheme);
+            const assetBindingOf = directorScheme ? buildScriptAssetLockPrompt : shotSchemeId === "builtin" ? buildScriptAssetNameLockPrompt : buildScriptAssetBindingPrompt;
             const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId, shotExtras);
             const cellAssetRefs = preciseRefs.flatMap((ref) => ref.ids).filter((id) => nodesRef.current.some((node) => node.id === id));
             // 与整条铺链路同口径（2026-11-08 第 13 条）：角色 / 场景 / 道具 / 站位都**按这一镜自己的列**匹配，
