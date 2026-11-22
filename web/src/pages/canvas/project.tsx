@@ -6022,6 +6022,22 @@ function AtelierCanvasPage() {
                     const retainedPrimaryId = appendImageHistory ? sourceNode?.metadata?.primaryImageId || retainedImages[0]?.id : undefined;
                     const retainedPrimary = retainedPrimaryId ? retainedImages.find((image) => image.id === retainedPrimaryId) || retainedImages[0] : undefined;
                     pendingChildIds = [rootId];
+                    /**
+                     * 🔴 资产名保护（用户 2026-11-23：「大量资产图生成后名字还是提示词」）。
+                     *
+                     * 写回自身（writeImageToSelf）时，节点标题若**不是上一轮提示词的自动名**
+                     * （即用户起的名 / 资产名），本轮不许用「提示词前 32 字」顶掉。根因：
+                     * 各生成入口（批量 / 逐镜 / 格子）虽然都有「生成完把标题改回来」的 finally 补丁，
+                     * 但**一键生图 / 一键视频的换模型重试轮（retryBatch）没有补丁**——重试过的
+                     * 资产图标题全变提示词；且补丁只改 state，任何一轮从 nodesRef 出发的写回
+                     * 都会把提示词名带回来。在管线里收口一次，所有调用点（含重试）都保住名字。
+                     *
+                     * 判据用「上一轮的提示词自动名」对比节点当前标题：普通图片节点没改过名 →
+                     * 继续跟提示词改名（老行为不变）；改过名 / 资产名 → 保住。
+                     */
+                    const prevTitle = sourceNode?.title || "";
+                    const prevAutoTitle = (sourceNode?.metadata?.prompt || "").slice(0, 32);
+                    const keepSelfTitle = Boolean(writeImageToSelf && prevTitle && prevTitle !== prevAutoTitle);
                     const rootNode: CanvasNodeData = {
                         id: rootId,
                         type: CanvasNodeType.Image,
@@ -6075,7 +6091,8 @@ function AtelierCanvasPage() {
                                             position: rootNode.position,
                                             width: rootNode.width,
                                             height: rootNode.height,
-                                            title: rootNode.title,
+                                            // 资产名保护：改过名 / 资产名的节点不跟提示词改名（见上面 keepSelfTitle 注释）。
+                                            title: keepSelfTitle ? node.title || rootNode.title : rootNode.title,
                                             metadata: appendImageHistory
                                                 ? {
                                                       ...node.metadata,
