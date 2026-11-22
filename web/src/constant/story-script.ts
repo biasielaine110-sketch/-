@@ -2020,13 +2020,15 @@ export const STORY_SCRIPT_MAX_SHOT_SECONDS = 5;
  * 相同。03 把反推窗口上的秒数搬进 `scriptTotalSeconds`，而反推窗口「没动过输入框」时 metadata 里
  * 是空的，这条搬运的兜底就是本常量；两处不一致，用户会看到「反推写 90、脚本节点变 30」。
  * 90 也正好是 6 个 15 秒片段，与 04 的分段口径同源。
+ * 🔴 2026-11-22：反推窗口默认秒数改成 **135**（用户要求「时间默认填135秒」），这里跟着改 135 ——
+ * 同步约束不变（9 个 15 秒片段）。
  */
-export const DEFAULT_SCRIPT_TOTAL_SECONDS = 90;
+export const DEFAULT_SCRIPT_TOTAL_SECONDS = 135;
 export const SCRIPT_TOTAL_SECONDS_MIN = 5;
 export const SCRIPT_TOTAL_SECONDS_MAX = 300;
 
 /**
- * 读「成片总时长」：**没设 / 脏值一律当默认值（现为 90 秒）**。
+ * 读「成片总时长」：**没设 / 脏值一律当默认值（现为 135 秒）**。
  *
  * 为什么不是「没设就不限制」：用户要的是「默认 N 秒，按这个时长拆镜」。留一个「空 = 想写多长写多长」
  * 的隐性状态，模型就会按自己的「一条短片」惯性铺 1~2 分钟，而界面上明明写着默认值 —— 又是一次
@@ -2190,28 +2192,39 @@ export type StoryScriptMergeMode = "shot" | "2" | "3" | "4" | "5" | "duration";
 export const STORY_SCRIPT_MERGE_MODES: StoryScriptMergeMode[] = ["shot", "2", "3", "4", "5", "duration"];
 
 /**
- * 「每 N 镜合一个视频」**显式关闭**时的镜数 = 4（原行为）。
+ * 「每 N 镜合一个视频」**显式关闭**时的哨兵值 = `1`（2026-11-22 起）。
  *
- * 历史：2026-11-09 用户要求「一键铺视频链路」固定每 4 镜合并成 1 段；
- * 2026-11-14 用户又要求两颗开关**默认就是「每 3 镜」开启**，于是「关闭」必须有一个显式存下来的值，
- * 否则「点 3 这颗想关掉」和「默认的 3」在数据上分不开（点了看着没反应）。
+ * 历史：2026-11-09 用户要求「一键铺视频链路」固定每 4 镜合并成 1 段；2026-11-14 两颗开关默认
+ * 「每 3 镜」开启，于是「关闭」需要一个显式存下来的值，当时借用了 `4`；2026-11-22 用户要求
+ * **默认档改成「每 4 镜」**，`4` 升级成正式档位，关闭哨兵挪到 `1`（`normalizeScriptShotsPerClip`
+ * 的白名单里，脏值依旧当「没写过」）。
  *
- * 现在的口径：`4` 写进 `scriptShotsPerClip` = 用户主动关掉开关 → 交回「视频分段」档位 /
+ * 现在的口径：`1` 写进 `scriptShotsPerClip` = 用户主动关掉开关 → 交回「视频分段」档位 /
  * 调用方写死的值（见 `resolveScriptPipelineMergeEvery`）。
+ *
+ * ⚠️ 迁移：老数据里存的 `4`（旧「关闭」哨兵）现在读作「每 4 镜」——「一键铺视频链路」行为
+ * 逐字节不变（关闭回退也是 4）；只有「一键视频」那条路从「视频分段档位」变成固定 4 镜，
+ * 与新默认一致，不算回归。
+ */
+export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OFF = 1;
+
+/**
+ * 「每 4 镜合一个视频」档位，同时是 04 剧集「每几镜合一镜」的默认口径。
  */
 export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP = 4;
 
 /**
- * 开关**默认档**（用户 2026-11-14：「反推视频节点窗口和脚本生成器默认选择为每 3 镜合一个镜头开启状态」）。
+ * 开关**默认档**（用户 2026-11-22：「反推视频节点默认选择每 4 镜合一个镜头」；
+ * 2026-11-14 曾是「每 3 镜」，本次按新要求改 4）。
  *
  * 没写过 `scriptShotsPerClip` 的老节点 / 新节点一律按这一档走，所以这是「默认开启」的唯一来源。
  */
-export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT = 3;
+export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT = SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP;
 
 /**
  * 「每 3 镜合一个视频」开关打开时的镜数（用户 2026-11-11 第 01 条）。
  *
- * 开关落在**脚本节点自己**的 `metadata.scriptShotsPerClip`（`3` = 打开，没有这个键 = 原行为 4 镜）；
+ * 开关落在**脚本节点自己**的 `metadata.scriptShotsPerClip`（`3` = 打开，没有这个键 = 默认 4 镜）；
  * 反推视频节点的同一个开关存在 `reverseVideoTarget.shotsPerClip`，03 建脚本节点时搬过来。
  */
 export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT = 3;
@@ -2219,64 +2232,73 @@ export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT = 3;
 /**
  * 「每 2 镜合一个视频」开关打开时的镜数（用户 2026-11-14）。
  *
- * 与 `..._COMPACT`（3）**完全同级**：同一个 `scriptShotsPerClip` / `reverseVideoTarget.shotsPerClip` 键，
- * 只是值换成 2；点了哪颗就是那颗，两颗都没点 = 原行为（`..._SHOTS_PER_CLIP` = 4）。
- * 两颗互斥的关系不是靠状态位，而是靠「这个键只有一个数字」天然实现的。
+ * 与 `..._COMPACT`（3）、`..._SHOTS_PER_CLIP`（4）**完全同级**：同一个
+ * `scriptShotsPerClip` / `reverseVideoTarget.shotsPerClip` 键，点了哪颗就是那颗；
+ * 都没点 = 默认 4 镜；显式关闭存 `..._OFF`（1）。
  */
 export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR = 2;
 
 /**
- * 开关的档位（从小到大）：`[2, 3]` —— 这是**按钮**清单，不含「关闭」档（4）。
+ * 开关的档位（从小到大）：`[2, 3, 4]` —— 这是**按钮**清单，不含「关闭」档（哨兵 1）。
  *
- * 🔴 UI 必须遍历这个数组渲染按钮，别再写死 `SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT`：
- * 加档/删档时要改的地方是这里 + `normalizeScriptShotsPerClip` 的白名单（它把 4 也算进去）。
+ * 🔴 UI 必须遍历这个数组渲染按钮，别再写死某一个档位常量：
+ * 加档/删档时要改的地方是这里 + `normalizeScriptShotsPerClip` 的白名单。
  * 漏一处就会出现「按钮画出来了但点了不生效」这种最难查的漂移。
  */
-export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS: readonly number[] = [SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT];
+export const SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS: readonly number[] = [
+    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR,
+    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
+    SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP,
+];
 
 /**
- * 把「每几镜合一个视频」收敛成允许的档位：`2` / `3`（两颗开关）/ `4`（显式关闭）/ `0`（没写过、脏值）。
+ * 把「每几镜合一个视频」收敛成允许的档位：`1`（显式关闭）/ `2` / `3` / `4`；`0` = 没写过、脏值。
  *
- * 🔴 只认白名单：老节点、手改的脏值（比如 1、5、`"2镜"`）一律当「没写过」，
- * 由 `readScriptShotsPerClip` 兜成默认 3 镜。反推节点的 `reverseVideoTarget.shotsPerClip` 与
+ * 🔴 只认白名单：老节点、手改的脏值（比如 5、`"2镜"`）一律当「没写过」（返回 0），
+ * 由 `readScriptShotsPerClip` 兜成默认 4 镜。反推节点的 `reverseVideoTarget.shotsPerClip` 与
  * 脚本节点的 `metadata.scriptShotsPerClip` 走**同一个**函数归一，别在两处各写一份判断。
  */
 export function normalizeScriptShotsPerClip(value: unknown): number {
     const shots = Number(value);
-    const allowed = [SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP];
+    const allowed = [
+        SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OFF,
+        SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR,
+        SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
+        SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP,
+    ];
     return allowed.includes(shots) ? shots : 0;
 }
 
 /**
- * 读「这次铺链路每几镜合一个视频节点」的**生效档位**（永远 ≥ 2）。
+ * 读「每几镜合一个视频」的**原始档位**（含关闭哨兵 `1`，铺链路别直接用它）。
  *
- * 没写过 = 默认 3 镜（用户 2026-11-14：「默认选择为每 3 镜合一个镜头开启状态」）；
- * 显式关闭 = 4 镜（交回视频分段档位 / 调用方写死的值，见 `resolveScriptPipelineMergeEvery`）。
+ * 没写过 = 默认 4 镜（用户 2026-11-22）；显式关闭 = `1`（铺链路走
+ * `resolveScriptPipelineMergeEvery` 交回视频分段档位；UI 用它点亮「关闭」态）。
  */
 export function readScriptShotsPerClip(metadata: { scriptShotsPerClip?: unknown } | null | undefined): number {
     return normalizeScriptShotsPerClip(metadata?.scriptShotsPerClip) || SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT;
 }
 
 /**
- * 开关是否被**显式关掉**（= 存了 4）。
+ * 开关是否被**显式关掉**（= 存了关闭哨兵 `1`）。
  *
- * 只给 UI 用：默认 3 镜是「开启」，所以不能拿「键存不存在」当开关状态 —— 用户点 3 那颗想关闭时，
- * 必须写进去一个 4 才能和默认态区分开。
+ * 只给 UI 用：默认 4 镜是「开启」，所以不能拿「键存不存在」当开关状态 —— 用户在已选档上再点一次
+ * 想关闭时，必须写进去一个 `1` 才能和默认态区分开。
  */
 export function isScriptShotsPerClipOff(metadata: { scriptShotsPerClip?: unknown } | null | undefined): boolean {
-    return normalizeScriptShotsPerClip(metadata?.scriptShotsPerClip) === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP;
+    return normalizeScriptShotsPerClip(metadata?.scriptShotsPerClip) === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OFF;
 }
 
 /**
  * 铺链路时真正用的 `mergeEvery`（0 = 交给「视频分段」档位）。
  *
- * 优先级：**第八套 `mashu` 的 1** > 开关的 2 / 3 > 开关显式关闭（4）时交回调用方写死的 N > 默认 3。
+ * 优先级：**第八套 `mashu` 的 1** > 开关的 2 / 3 / 4 > 开关显式关闭（哨兵 1）时交回调用方写死的 N > 默认 4。
  *
  * 🔴 第八套必须单独先判（用户 2026-11-11 第 02 条：「第八套因为是每个镜头直出的 15 秒，
- * 铺链路的时候直接一镜一视频，只针对第八套，其他方案仍按 3 镜合 / 4 镜合」）：
- * 它一「行」就是一个 15 秒分镜组、本来就是按镜头直出的，再两张并进一个视频节点会让
- * 15 秒 × 2 的脚本塞进一个节点里，时长和提示词两头对不上。所以这里直接返回 1，
- * **优先级高于用户的「每 2 / 3 镜合」开关**（那些开关是给别的方案用的）。
+ * 铺链路的时候直接一镜一视频，只针对第八套，其他方案仍按每 N 镜合」）：
+ * 它一「行」就是一个 15 秒分镜组、本来就是按镜头直出的，再几张并进一个视频节点会让
+ * 15 秒 × N 的脚本塞进一个节点里，时长和提示词两头对不上。所以这里直接返回 1，
+ * **优先级高于用户的「每 N 镜合」开关**（那些开关是给别的方案用的）。
  * 单独抽成纯函数是为了让探针能直接钉住这条优先级 —— 铺链路那条函数太大、跑不起来。
  */
 export function resolveScriptPipelineMergeEvery(
@@ -2285,9 +2307,9 @@ export function resolveScriptPipelineMergeEvery(
 ): number {
     if (metadata?.scriptScheme === "mashu") return 1;
     const explicit = normalizeScriptShotsPerClip(metadata?.scriptShotsPerClip);
-    // 显式关闭（存了 4）→ 不强制切片：交回调用方写死的值（「一键铺视频链路」传 4）或「视频分段」档位。
-    if (explicit === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP) return Math.max(0, Math.round(Number(requested) || 0));
-    // 其余（含「没写过」）都是「每 N 镜」开启：默认 3。
+    // 显式关闭（哨兵 1）→ 不强制切片：交回调用方写死的值（「一键铺视频链路」传 4）或「视频分段」档位。
+    if (explicit === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OFF) return Math.max(0, Math.round(Number(requested) || 0));
+    // 其余（含「没写过」）都是「每 N 镜」开启：默认 4。
     return explicit || SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT;
 }
 

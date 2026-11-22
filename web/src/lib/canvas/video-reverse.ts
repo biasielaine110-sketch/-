@@ -160,28 +160,28 @@ export function buildDefaultVideoReverseRequirement(imageMentions: readonly stri
 export const DEFAULT_VIDEO_REVERSE_REQUIREMENT = buildDefaultVideoReverseRequirement([], 2);
 
 /**
- * 「秒数」的默认值（用户 2026-11-18：默认 90 秒、可手动改；此前是 30）。
+ * 「秒数」的默认值（用户 2026-11-22：默认 135 秒、可手动改；此前是 90）。
  * 这个秒数是**成片总时长**：02 / 03 写剧本都按它规划镜头数与台词量（02 复刻原片时长、03 按它拆镜）。
- * 90 = 6 个 15 秒片段，与 04 的「每段 15 秒」口径同源，所以单条链路默认就按 90 走。
+ * 135 = 9 个 15 秒片段，与 04 的「每段 15 秒」口径同源，所以单条链路默认就按 135 走。
  *
  * ⚠️ 与脚本节点的 `DEFAULT_SCRIPT_TOTAL_SECONDS` 必须取同一个值（见那边的注释）：
  * 03 把这里的秒数搬进 `scriptTotalSeconds`，两边不一致用户就会以为同步没生效。
  */
-export const DEFAULT_REVERSE_VIDEO_SECONDS = 90;
+export const DEFAULT_REVERSE_VIDEO_SECONDS = 135;
 /** 秒数可调范围。上限放宽到 5 分钟：长视频脚本也有人用，但再长就不该用这套「分镜反推」了。 */
 export const REVERSE_VIDEO_SECONDS_MIN = 5;
 export const REVERSE_VIDEO_SECONDS_MAX = 300;
 
 /**
- * 反推视频窗口的**默认出片参数**（用户 2026-11-11 第 02 条）：
- * 「比例默认选 16x9，视频模型跟随偏好的视频模型，分辨率也优先 720p。」
+ * 反推视频窗口的**默认出片参数**（用户 2026-11-11 第 02 条；2026-11-22 改默认画幅）：
+ * 「比例默认选 9x16（竖屏），视频模型跟随偏好的视频模型，分辨率也优先 720p。」
  *
  * 为什么是「默认值」而不是「归一化时写死」：写进 metadata 就变成「用户已经选过」，
  * 比例 / 分辨率就再也没法表达「我不改、按默认走」，老节点也会被无端改写。
  * 所以 metadata 里空着，**读取时**由 `resolveReverseVideoSize / resolveReverseVideoQuality`
  * 给出有效值 —— UI 显示的、和 02 / 03 搬给脚本节点的是同一份。
  */
-export const DEFAULT_REVERSE_VIDEO_SIZE = "16:9";
+export const DEFAULT_REVERSE_VIDEO_SIZE = "9:16";
 export const DEFAULT_REVERSE_VIDEO_QUALITY = "720";
 
 /** 分辨率档位白名单（与 `QUALITY_OPTIONS` / 视频节点的 `vquality` 同一套）。 */
@@ -189,7 +189,7 @@ export const REVERSE_VIDEO_QUALITIES = ["480", "720", "1080", "2k"] as const;
 
 /**
  * 有效比例：窗口里选过就用它（含 `auto` 与用户手输的 `21:9` 这类自定义值），
- * 没选过 → `16:9`。
+ * 没选过 → `9:16`（用户 2026-11-22 改默认竖屏）。
  */
 export function resolveReverseVideoSize(target: Partial<CanvasReverseVideoTarget> | null | undefined): string {
     return String(target?.size ?? "").trim() || DEFAULT_REVERSE_VIDEO_SIZE;

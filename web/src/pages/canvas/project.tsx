@@ -10737,10 +10737,10 @@ function AtelierCanvasPage() {
             /**
              * 「每几镜合一个视频节点」：
              *  - 脚本节点点了「每 2 / 3 镜合一个视频」（`scriptShotsPerClip === 2 / 3`，
-             *    用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档）
+             *    用户 2026-11-11 第 01 条、2026-11-14 加 2 镜档、2026-11-22 默认档改 4）
              *    → 一律按那颗的镜数切片，**优先于**分段档位、手动合并组，以及「一键铺视频链路」写死的 4；
-             *  - 没写过 → **默认 3 镜**（用户 2026-11-14：「默认选择为每 3 镜合一个镜头开启状态」）；
-             *  - 显式关闭（存了 4）→ 交回 `options.mergeEvery`（= 视频链那 4）或「视频分段」档位。
+             *  - 没写过 → **默认 4 镜**（用户 2026-11-22：「反推视频节点默认选择每 4 镜合一个镜头」）；
+             *  - 显式关闭（哨兵 1）→ 交回 `options.mergeEvery`（= 视频链那 4）或「视频分段」档位。
              * （读的是下面那个 `source`，所以这段必须放在它之后。）
              */
             // 铺链路前先把「连进来、名字对上」的图锁进表里（同 `handleDirectGenerateScriptAssets`
@@ -12565,8 +12565,8 @@ function AtelierCanvasPage() {
              * 即不选择每 2 个镜头合一镜合每 3 个镜头合一镜」）。
              *
              * 只有用户**在 04 弹窗里显式点了 2 / 3** 才听那颗；其余（没选 / 老节点 / 显式关）一律 4。
-             * 不动全局默认（`SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT = 3`）：普通脚本节点仍然是 3，
-             * 这条只对 04 现拆现建的这批集生效。
+             * 2026-11-22 起全局默认也是 4（`SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT = 4`），
+             * 所以「显式关」与「没选」在数值上等价；这条保留是为了 2 / 3 显式选择时 04 不被带跑。
              */
             const episodeShotsPerClip =
                 targetShotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR || targetShotsPerClip === SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT
