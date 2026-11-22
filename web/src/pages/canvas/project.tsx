@@ -10801,10 +10801,10 @@ function AtelierCanvasPage() {
             const sourceSchemeId = resolveScriptSchemeId(source.metadata?.scriptScheme);
             const directorScheme = sourceSchemeId === "director";
             const assetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
-            // 视频节点的资产文案（用户 2026-11-22）：第一套（内置）改「@图片N锁定为资产名。」——
-            // 图片 chip 在前（把具体的资产图片放在资产名前面锁定）、句号收尾、无顿号；
-            // 第四套仍是「资产锁定」块，其余套保持老的单行。生图窗口（上面的 assetBindingOf）不变。
-            const videoAssetBindingOf = directorScheme ? buildScriptAssetLockPrompt : sourceSchemeId === "builtin" ? buildScriptAssetNameLockPrompt : buildScriptAssetBindingPrompt;
+            // 视频节点的资产文案（用户 2026-11-22 第 2 条）：**所有套（8 套执行方案）统一**改
+            // 「@图片N锁定为资产名。」—— 图片 chip 在前（把具体的资产图片放在资产名前面锁定）、
+            // 句号收尾、无顿号，不再按套分流。生图窗口（上面的 assetBindingOf）保持各套原格式不变。
+            const videoAssetBindingOf = buildScriptAssetNameLockPrompt;
             const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
                 .map((id) => nodesRef.current.find((node) => node.id === id))
                 .filter((node): node is CanvasNodeData => Boolean(node));
@@ -11114,7 +11114,7 @@ function AtelierCanvasPage() {
                  * 上游连线数组顺序）；③ 「资产绑定 / 资产锁定」文案里 `@图片N` 的编号。三处必须同源。
                  */
                 const orderedGroupAssetIds = orderScriptRefIds([...groupAssetIds], (assetId) => groupAssetKinds.get(assetId));
-                // 视频节点的资产文案（第四套=资产锁定块，其余=资产绑定行）：本段所有资产图都是直连视频节点的，
+                // 视频节点的资产文案（所有套统一「@图片N锁定为资产名。」）：本段所有资产图都是直连视频节点的，
                 // 顺序与写连线时一致 —— orderedGroupAssetIds → 音频（音频只连视频、但不进「图片资产」文案，拼装时按 kind 过滤掉）。
                 // 音频也要进文案（用户 2026-11-15）：整表音频在前、本段按台词挂的音色在后 ——
                 // **顺序必须与下面写连线的顺序一致**，否则 `@参考音频 N` 的编号与输入框 chip 对不上。
@@ -13070,10 +13070,9 @@ function AtelierCanvasPage() {
                 }
                 return undefined;
             };
-            // 第四套用多行「资产锁定」块；第一套（内置）用「@图片N锁定为资产名。」（用户 2026-11-22，
-            // 与整条铺链路的视频节点同口径）；其余三套保持老的单行「资产绑定」。
-            const shotSchemeId = resolveScriptSchemeId(source.metadata?.scriptScheme);
-            const assetBindingOf = directorScheme ? buildScriptAssetLockPrompt : shotSchemeId === "builtin" ? buildScriptAssetNameLockPrompt : buildScriptAssetBindingPrompt;
+            // 视频节点资产文案（用户 2026-11-22 第 2 条）：所有套统一「@图片N锁定为资产名。」，
+            // 与整条铺链路的视频节点同口径（此前按「第一套→新格式、其余→老单行」分流，已取消）。
+            const videoAssetBindingOf = buildScriptAssetNameLockPrompt;
             const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId, shotExtras);
             const cellAssetRefs = preciseRefs.flatMap((ref) => ref.ids).filter((id) => nodesRef.current.some((node) => node.id === id));
             // 与整条铺链路同口径（2026-11-08 第 13 条）：角色 / 场景 / 道具 / 站位都**按这一镜自己的列**匹配，
@@ -13106,9 +13105,9 @@ function AtelierCanvasPage() {
             for (const id of rowAudioRefs) linkKinds.set(id, "other");
             const orderedLinkIds = orderScriptRefIds(linkIds, (id) => linkKinds.get(id));
             const links = orderedLinkIds.map((id) => ({ id: nanoid(), fromNodeId: id, toNodeId: videoNode.id }));
-            // 资产文案：本镜连进视频节点的图片资产 → 第四套写多行「资产锁定」块、其余三套写「资产名@图片N」
+            // 资产文案：本镜连进视频节点的图片资产 → 所有套统一「@图片N锁定为资产名。」
             //（编号顺序 = orderedLinkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
-            const videoBinding = assetBindingOf(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
+            const videoBinding = videoAssetBindingOf(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
             // 合规后缀（用户 2026-11-11 第 02 条）：与一键铺链路同口径，拼在资产绑定之后（= 最后）。
             // MochiAni 节点的 `mochianiPrompt` 是双写过来的初值，这里一起换掉，否则窗口里显示的还是旧版。
             const boundShotPrompt = withVideoComplianceSuffix(withScriptAssetBinding(videoNode.metadata?.prompt, videoBinding));
