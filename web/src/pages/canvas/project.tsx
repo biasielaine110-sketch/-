@@ -10802,10 +10802,11 @@ function AtelierCanvasPage() {
             const sourceSchemeId = resolveScriptSchemeId(source.metadata?.scriptScheme);
             const directorScheme = sourceSchemeId === "director";
             const assetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
-            // 视频节点的资产文案（用户 2026-11-22 第 2 条；晚间第 3 条升级格式）：**所有套（8 套执行方案）统一**
+            // 视频节点的资产文案（用户 2026-11-22 深夜定稿）：**第四套（导演）恢复「资产锁定」块**
+            // （buildScriptAssetLockPrompt，= 最近统一调整之前的锁法）；其余套用
             // `@图片N锁定为XX人物/场景参考，锁定<内容>。`—— 图片 chip 在前、每个资产单独一行、
-            // 按分类写死锁定内容，不再按套分流。生图窗口（上面的 assetBindingOf）保持各套原格式不变。
-            const videoAssetBindingOf = buildScriptAssetNameLockPrompt;
+            // 按分类写死锁定内容。生图窗口（上面的 assetBindingOf）保持各套原格式不变。
+            const videoAssetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetNameLockPrompt;
             const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
                 .map((id) => nodesRef.current.find((node) => node.id === id))
                 .filter((node): node is CanvasNodeData => Boolean(node));
@@ -13082,9 +13083,9 @@ function AtelierCanvasPage() {
                 }
                 return undefined;
             };
-            // 视频节点资产文案（用户 2026-11-22）：所有套统一「@图片N锁定为XX…参考，锁定<内容>。」多行，
-            // 与整条铺链路的视频节点同口径（此前按「第一套→新格式、其余→老单行」分流，已取消）。
-            const videoAssetBindingOf = buildScriptAssetNameLockPrompt;
+            // 视频节点资产文案（用户 2026-11-22 深夜定稿）：第四套（导演）恢复「资产锁定」块（最近调整之前的锁法），
+            // 其余套统一「@图片N锁定为XX…参考，锁定<内容>。」多行。
+            const videoAssetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetNameLockPrompt;
             const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId, shotExtras);
             const cellAssetRefs = preciseRefs.flatMap((ref) => ref.ids).filter((id) => nodesRef.current.some((node) => node.id === id));
             // 与整条铺链路同口径（2026-11-08 第 13 条）：角色 / 场景 / 道具 / 站位都**按这一镜自己的列**匹配，
