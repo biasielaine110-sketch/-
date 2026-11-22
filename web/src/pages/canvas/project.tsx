@@ -103,6 +103,7 @@ import {
     scriptRowAssetIds,
     scriptRowAudioIds,
     scriptShotPreciseAssetRefs,
+    appendScriptCellAssetToSameNameRows,
     setStoryScriptCellAssetIds,
     setStoryScriptNameLock,
     setStoryScriptRowAssetIds,
@@ -10489,12 +10490,18 @@ function AtelierCanvasPage() {
                     add: removed.map(titleOf),
                     remove: addedIds.map(titleOf),
                 });
+                // 同名资产跨镜联动（用户 2026-11-23：往一格挂一张资产图，其它镜引用同一资产的格子
+                // 也要一起加上）。只把**这次新增的**图追加到同名格子里；被替换掉的旧图已经由上面的
+                // `stripScriptAssetReferences` 从这一列所有格子摘干净，两边正好对称。本格不碰（下面替换写）。
+                const propagatedCells = addedIds.length
+                    ? appendScriptCellAssetToSameNameRows(baseMetadata?.scriptCellAssets, item.metadata?.scriptRows, shotNo, columnKey, addedIds, extras)
+                    : baseMetadata?.scriptCellAssets;
                 return {
                     ...item,
                     metadata: {
                         ...baseMetadata,
                         ...skipPatch,
-                        scriptCellAssets: setStoryScriptCellAssetIds(baseMetadata?.scriptCellAssets, shotNo, columnKey, ids, extras),
+                        scriptCellAssets: setStoryScriptCellAssetIds(propagatedCells, shotNo, columnKey, ids, extras),
                         // 走统一入口而不是 `setStoryScriptNameLock(row[columnKey], ids)`：
                         // 一格多名时那一串名字当一个 key 写进去，就是一条永远命中不了的**假资产锁**，
                         // 并且会把整格图锁到「川晓遥、宁宁、明明」这个并不存在的资产上（用户 2026-11-09 第 01 条）。

@@ -2994,6 +2994,80 @@ export function scriptCellAssetIds(
 }
 
 /**
+ * **资产身份键**：`妈妈@外出`（旧写法）与 `妈妈（外出）`（新写法）归一成同一个身份；
+ * 裸名 `妈妈` 是**另一个**身份（说不清是哪套衣服，不与任何带造型的名字互通 —— 与
+ * `scriptAssetVariantGate` 的口径一致）。长注释括号（`叶辰（20岁，短发）`）不算造型，
+ * 身份就是剥掉括号后的本体。供跨格找「同一资产」用（挂图联动 / 探针）。
+ */
+export function scriptAssetIdentityKey(value: unknown): string {
+    const text = scriptNameLockName(value);
+    if (!text) return "";
+    const variant = splitScriptAssetVariant(text);
+    if (variant.explicit && variant.variant) {
+        return `${normalizeScriptAssetMatchText(variant.base)}|${normalizeScriptAssetMatchText(variant.variant)}`;
+    }
+    return normalizeScriptAssetMatchText(variant.base || text);
+}
+
+/**
+ * **手动挂图进某一格时，同名资产的其它镜格子一起追加**（用户 2026-11-23：
+ * 「我挂了一个镜头，应该其他相关挂载了该资产的格子应该添加进去」）。
+ *
+ * 背景：格子显示图 = `这一格挂的图 ∪ 名字锁落下来的图`，而名字锁只对**自己没挂图的格子**兜底
+ * （`scriptShotPreciseAssetRefs` / 表格渲染都是「格子图优先」）。逐镜生成 / 之前挂过图的格子
+ * 都各自存着 `scriptCellAssets`，于是往一格挂一张资产图，其它镜纹丝不动 —— 用户要的联动没发生。
+ *
+ * 口径：
+ *  - 只**追加** `ids`（调用方传「这次新增的那几张」），不动各格已有的图；本格（`shotNo`）不碰 ——
+ *    调用方自己用 `setStoryScriptCellAssetIds` 写（替换语义）；
+ *  - 「同一资产」按 `scriptAssetIdentityKey` 判：`妈妈@外出` ≡ `妈妈（外出）`；`妈妈（外出）` 与
+ *    `妈妈（居家）`、裸名 `妈妈` 互不相同 —— 别把 A 造型的图串进 B 造型的格子；
+ *  - 一格多值（`苏晚、阿杰`）沿用名字锁的「广播」语义：共享**任意**一个名字身份的格子都追加
+ *    （与 `addScriptNameLockForCell` 不传 `name` 时的行为一致）；
+ *  - 目标格子的名字为空 / 只有不相关的资产 → 不动。
+ */
+export function appendScriptCellAssetToSameNameRows(
+    map: unknown,
+    rows: readonly StoryScriptRow[] | null | undefined,
+    shotNo: unknown,
+    columnKey: unknown,
+    ids: readonly unknown[],
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): StoryScriptCellAssetMap {
+    const passthrough = (): StoryScriptCellAssetMap => ({ ...(map && typeof map === "object" ? (map as StoryScriptCellAssetMap) : {}) });
+    const sourceNo = Math.round(Number(shotNo));
+    const cleaned = Array.from(new Set(ids.filter((item): item is string => typeof item === "string" && Boolean(item))));
+    if (!rows?.length || !Number.isFinite(sourceNo) || sourceNo <= 0 || !cleaned.length || !isScriptAssetColumn(columnKey, extras)) return passthrough();
+    const byShot = new Map<number, StoryScriptRow>();
+    rows.forEach((row, index) => {
+        const no = Math.round(Number(row.shot_no)) || index + 1;
+        if (!byShot.has(no)) byShot.set(no, row);
+    });
+    const sourceRow = byShot.get(sourceNo);
+    if (!sourceRow) return passthrough();
+    const identityOf = (row: StoryScriptRow): string[] => {
+        const cellKey = String(columnKey);
+        const names = isMultiNameAssetColumn(cellKey, extras) ? splitScriptAssetNames(row[cellKey]) : [row[cellKey]];
+        const keys: string[] = [];
+        for (const name of names) {
+            const key = scriptAssetIdentityKey(name);
+            if (key && !keys.includes(key)) keys.push(key);
+        }
+        return keys;
+    };
+    const sourceIds = identityOf(sourceRow);
+    if (!sourceIds.length) return passthrough();
+    const next = passthrough();
+    for (const [no, row] of byShot) {
+        if (no === sourceNo) continue;
+        if (!identityOf(row).some((key) => sourceIds.includes(key))) continue;
+        const merged = Array.from(new Set([...scriptCellAssetIds(next, no, columnKey, extras), ...cleaned]));
+        if (merged.length) next[`${no}:${String(columnKey)}`] = merged;
+    }
+    return next;
+}
+
+/**
  * 写某镜某资产列绑定的图片节点 id，返回**新的 map**（纯函数，便于探针直接校验）。
  * 传空数组等价于删掉这个键——免得 metadata 里堆一堆空数组。
  */
@@ -3165,26 +3239,59 @@ export function scriptNameLockIds(map: unknown, name: unknown): string[] {
     if (!label || !map || typeof map !== "object" || Array.isArray(map)) return [];
     const record = map as Record<string, unknown>;
     const lower = label.toLowerCase();
+    let legacyHit: string[] | null = null;
     for (const [rawKey, value] of Object.entries(record)) {
         const key = scriptNameLockName(rawKey);
-        if (key !== label && key.toLowerCase() !== lower) continue;
+        if (key !== label && key.toLowerCase() !== lower) {
+            // 历史坏名键（收尾括号被老实现剥掉）兜底：修复后能对上全名也算命中。
+            if (!legacyHit && scriptNameLockName(repairLegacyMangledLockKey(key)) === label && Array.isArray(value)) {
+                legacyHit = Array.from(new Set(value.filter((id): id is string => typeof id === "string" && Boolean(id))));
+            }
+            continue;
+        }
         if (!Array.isArray(value)) return [];
         return Array.from(new Set(value.filter((id): id is string => typeof id === "string" && Boolean(id))));
     }
-    return [];
+    return legacyHit || [];
 }
 
-/** 归一化整张锁表：丢非法键 / 非数组值并去重；同名（归一化后一致）的键合并。 */
+/**
+ * 历史锁键兼容：2026-11-23 之前 `cleanScriptAssetName` 会把 `妈妈（外出）` 的收尾 `）` 剥掉，
+ * 存下坏名键 `妈妈（外出`。剥壳护栏修好后读出来的是全名，老键就差一个收尾括号 ——
+ * 这里把「左括号悬空」的键补上收尾括号，让老锁能被新读法命中（`normalizeStoryScriptNameLockMap`
+ * 归一时也用它重写键，把坏名键就地修好）。
+ */
+function repairLegacyMangledLockKey(key: string): string {
+    if (!key) return key;
+    // 只有左括号悬空（右括号被老实现剥掉）才需要补；配对完整的键原样。
+    const opens = (key.match(/[（(【\[「『]/g) || []).length;
+    const closes = (key.match(/[）)】\]」』]/g) || []).length;
+    if (closes >= opens) return key;
+    const CLOSERS: Record<string, string> = { "（": "）", "(": ")", "【": "】", "[": "]", "「": "」", "『": "』" };
+    // 从最后一个悬空的左括号取它该配的右括号补到收尾（同一层只有一个悬空位，逐对补齐）。
+    let out = key;
+    const stack: string[] = [];
+    for (const ch of out) {
+        if (CLOSERS[ch]) stack.push(ch);
+        else if ([")", "）", "]", "】", "」", "』"].includes(ch)) stack.pop();
+    }
+    while (stack.length) out += CLOSERS[stack.pop()!];
+    return out;
+}
+
+/** 归一化整张锁表：丢非法键 / 非数组值并去重；同名（归一化后一致）的键合并；坏名键（历史剥壳产物）就地修复。 */
 export function normalizeStoryScriptNameLockMap(map: unknown): StoryScriptNameLockMap {
     if (!map || typeof map !== "object" || Array.isArray(map)) return {};
     const out: StoryScriptNameLockMap = {};
     for (const [rawKey, value] of Object.entries(map as Record<string, unknown>)) {
         const name = scriptNameLockName(rawKey);
         if (!name || !Array.isArray(value)) continue;
+        const repaired = scriptNameLockName(repairLegacyMangledLockKey(name));
+        const key = repaired || name;
         const ids = value.filter((id): id is string => typeof id === "string" && Boolean(id));
         if (!ids.length) continue;
-        const merged = [...(out[name] || []), ...ids];
-        out[name] = Array.from(new Set(merged));
+        const merged = [...(out[key] || []), ...ids];
+        out[key] = Array.from(new Set(merged));
     }
     return out;
 }
@@ -3197,7 +3304,9 @@ export function setStoryScriptNameLock(map: unknown, name: unknown, ids: readonl
     const lower = label.toLowerCase();
     const next: StoryScriptNameLockMap = {};
     for (const [key, value] of Object.entries(normalized)) {
-        if (key === label || key.toLowerCase() === lower) continue;
+        // 同名键（含历史坏名键 `妈妈（外出` ≈ `妈妈（外出）`）都清掉，避免新旧两把并存的隐形锁。
+        const repaired = scriptNameLockName(repairLegacyMangledLockKey(key));
+        if (key === label || key.toLowerCase() === lower || repaired === label) continue;
         next[key] = value;
     }
     const clean = Array.from(new Set(ids.filter((id): id is string => typeof id === "string" && Boolean(id))));
@@ -3630,15 +3739,38 @@ export function splitScriptAssetNames(value: unknown): string[] {
  * 两种情形必须分开处理，不能一律「剥首尾括号」：
  *  - **前置注释**（`（同一画面）苏晚`）：括号在前、后面还有正文 → 整段括号注释丢掉；
  *  - **括号就是包装**（`【苏晚】`）：括号里是名字本身、后面没别的 → 取括号里的内容。
+ *
+ * 🔴 2026-11-23 护栏：**名字内部的配对括号不能剥**。换装命名改括号写法（`妈妈（外出）`）后，
+ * 老实现把收尾 `）` 当包装剥掉，拆出 `妈妈（外出` 这种坏名 —— 锁键、跨镜联动、名字匹配全被带歪
+ * （「同一资产」判不中）。判据：剥掉收尾闭括号后，若剩下的串里左括号比右括号多（= 有括号悬空），
+ * 这个右括号就是名字的一部分，停手不剥。
  */
 function cleanScriptAssetName(raw: string): string {
     let name = raw.trim();
     const leading = /^[（(【\[「『]([^）)】\]」』]*)[）)】\]」』]/.exec(name);
     if (leading) {
         const rest = name.slice(leading[0].length).trim();
-        name = rest || leading[1].trim();
+        const inner = leading[1].trim();
+        if (rest) name = rest;
+        else if (!hasUnmatchedOpener(inner)) name = inner;
+        // inner 自己的括号不配对（`【苏晚（20岁）】`）→ 不取内层，交给下面的收尾剥壳兜底。
     }
-    return name.replace(/^[（(【\[「『]+/, "").replace(/[）)】\]」』]+$/, "").trim();
+    // 收尾剥壳：一层层试剥，剥完左括号会悬空就停（`妈妈（外出）` 的 `）` 是配对的，保住）。
+    let out = name;
+    for (;;) {
+        if (!/[）)】\]」』]$/.test(out)) break;
+        const candidate = out.slice(0, -1);
+        if (hasUnmatchedOpener(candidate)) break;
+        out = candidate;
+    }
+    return out.trim();
+}
+
+/** 串里左括号是否比右括号多（= 有括号没闭合）。 */
+function hasUnmatchedOpener(text: string): boolean {
+    const opens = (text.match(/[（(【\[「『]/g) || []).length;
+    const closes = (text.match(/[）)】\]」』]/g) || []).length;
+    return closes < opens;
 }
 
 /**
