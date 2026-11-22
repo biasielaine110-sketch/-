@@ -423,8 +423,8 @@ const STORY_SCRIPT_STYLE_HINT_COMMON = [
     "- 单镜时长以任务里的「时长要求」为准；没特别指定时按「每 15 秒 4 个镜头」（每镜 3~4 秒），绝不写 1~2 秒的碎镜",
     "- 景别写法类似 `近景 / 特写`、`中景 / 仰视`",
     "- 角色描述尽量写成 `[角色ID: ...]` 形式",
-    "- 🔴 **同一个造型必须用完全一致的角色名；同一个人换了衣服 / 造型，就写成 `角色名@造型`**（`叶辰@便服` 家里、`叶辰@校服` 学校、`叶辰@西服` 正式场合）。角色名就是资产键 —— 同名不同造型不加 `@` 区分，后面所有镜头都会被套成同一套衣服。造型词只用两三个字（`便服` / `校服` / `西服` / `睡衣` / `礼服`），同一套造型在全表用同一个词，不要带括号、不要带描述",
-    "- `@造型` 只用来区分资产：分镜提示词 / 视频运动提示词 / 台词里提到这个人时只写 `@` 前面的名字（`叶辰`），服装交给角色描述列和参考图",
+    "- 🔴 **同一个造型必须用完全一致的角色名；同一个人换了衣服 / 造型，就写成 `角色名（造型）`**（`叶辰（便服）` 家里、`叶辰（校服）` 学校、`叶辰（西服）` 正式场合）。角色名就是资产键 —— 同名不同造型不加括号区分，后面所有镜头都会被套成同一套衣服。括号里只写造型词本身（两三个字：`便服` / `校服` / `西服` / `睡衣` / `礼服`），同一套造型在全表用同一个词，不要带描述",
+    "- `（造型）` 只用来区分资产：台词的说话人只写本体名（`叶辰`）；**视频运动提示词里提到这个人时写全名 `叶辰（校服）`**，让每一镜的画面明确用哪套服装的资产；分镜提示词里可写本体名，服装交给角色描述列与参考图",
     "- 一镜里出现两个角色时，第二个填进角色2 / 角色描述2",
 ];
 
@@ -2527,8 +2527,13 @@ function normalizeScriptAssetMatchText(value: string): string {
 /**
  * **造型变体签名**分隔符：`叶辰@校服`（全角 `＠` 也认）。
  *
- * ⚠️ 只认 `@` 这一个符号。别扩到 `-` / `｜` / `·` —— 那些符号在普通资产名里本来就会出现
- * （`奶茶店-门口`、`苏晚｜阿杰`），扩过去等于把正常名字劈成两半。
+ * 2026-11-22 起新增第二种写法：**`角色名（造型）`**（用户要求「小满@园服 改成 小满（园服）」，
+ * 不同服饰改为括号结尾）。两种写法拆出来的结果完全一致，`@` 写法继续兼容历史项目。
+ *
+ * ⚠️ `@` 之外不要随意扩分隔符 —— `-` / `｜` / `·` 在普通资产名里本来就会出现
+ * （`奶茶店-门口`、`苏晚｜阿杰`），扩过去等于把正常名字劈成两半。括号写法也**只认结尾
+ * 的一对括号**，且有护栏（见 `splitScriptTrailingParenVariant`）：普通括号注释
+ * （`叶辰（20岁，短发）`、`S-01 奶茶店门外人行道（阴天午后，主光上方偏左…）`）不是造型。
  */
 const SCRIPT_ASSET_VARIANT_SEPARATOR = /[@＠]/;
 
@@ -2538,9 +2543,35 @@ export type ScriptAssetVariantName = {
     base: string;
     /** 造型签名（`叶辰@校服` → `校服`；没写 → 空串）。 */
     variant: string;
-    /** 原文里到底有没有真的写 `@造型`。 */
+    /** 原文里到底有没有真的写 `@造型` / `（造型）`。 */
     explicit: boolean;
+    /** 造型签名是不是来自**结尾括号**写法（`叶辰（校服）`）。括号是双义的（造型 / 普通注释），闸门对它更宽容。 */
+    viaParen: boolean;
 };
+
+/** 括号造型词的长度上限：造型词只用两三个字（`园服` / `校服` / `外出`），超过就是普通括号注释。 */
+const SCRIPT_ASSET_VARIANT_PAREN_MAX = 4;
+/** 括号里出现这些就不是造型词：描述性注释（`20岁` / `20岁，短发` / `阴天午后，主光…`）。 */
+const SCRIPT_ASSET_VARIANT_PAREN_NOISE = /[0-9０-９、，,。：:；;！!？?\s]/;
+/** 结尾括号：`妈妈（外出）` / `妈妈(外出)`，只取**最后一对**且里面不再嵌套。 */
+const SCRIPT_ASSET_TRAILING_PAREN = /[（(]([^（()）]*)[）)]$/;
+
+/**
+ * 「角色名（造型）」拆分（仅在没有 `@` 时走到这里）。护栏（用户 2026-11-22 第 01 条「检查是否会有问题」）：
+ *  - 括号里超过 4 个字 → 当普通注释（模板场景名 `奶茶店门外人行道（阴天午后，主光上方偏左）` 不能被拆坏）；
+ *  - 括号里有数字 / 标点 / 空白 → 当注释（`叶辰（20岁，短发）` 不是换装）；
+ *  - 括号前没名字 / 括号里是空 → 当裸名。
+ */
+function splitScriptTrailingParenVariant(text: string): { base: string; variant: string } | null {
+    const match = text.match(SCRIPT_ASSET_TRAILING_PAREN);
+    if (!match || match.index === undefined) return null;
+    const variant = match[1].trim();
+    const base = text.slice(0, match.index).trim();
+    if (!base || !variant) return null;
+    if (Array.from(variant).length > SCRIPT_ASSET_VARIANT_PAREN_MAX) return null;
+    if (SCRIPT_ASSET_VARIANT_PAREN_NOISE.test(variant)) return null;
+    return { base, variant };
+}
 
 /**
  * 把资产名拆成「本体 + 造型签名」：`叶辰@校服` → `{ base: "叶辰", variant: "校服" }`。
@@ -2548,22 +2579,27 @@ export type ScriptAssetVariantName = {
  * 为什么需要：同一个角色在不同场合穿不同衣服（家里的便服 / 学校校服 / 正式场合西服），名字都叫
  * `叶辰`。资产池是**按名字**共享的（`scriptNameLocks` 精确键 + `storyScriptAssetNameSimilarity`
  * 模糊键），不区分的话第二集学校戏会直接复用第一集家里那套衣服 —— 用户原话「后面就都是同一套衣服」。
- * 约定写法 `角色名@造型`，`@` 后面那截就是区分不同服装的签名。
+ * 约定写法 2026-11-22 起为 `角色名（造型）`，旧写法 `角色名@造型` 继续兼容；两者拆法一致。
  *
  * 容错：
  *  - `@` 前面没名字（`@图片1` 这类误写）→ 去掉 `@` 整个当裸名，不让一个孤零零的 `@` 拆坏名字；
- *  - `@` 后面是空（`叶辰@`）→ 当裸名。
+ *  - `@` 后面是空（`叶辰@`）→ 当裸名；
+ *  - 结尾括号里是长注释 / 带数字标点（`叶辰（20岁，短发）`）→ 当裸名（括号注释语义，历史行为不变）。
  */
 export function splitScriptAssetVariant(value: unknown): ScriptAssetVariantName {
     const text = storyScriptCellText(value);
-    if (!text) return { base: "", variant: "", explicit: false };
+    if (!text) return { base: "", variant: "", explicit: false, viaParen: false };
     const at = text.search(SCRIPT_ASSET_VARIANT_SEPARATOR);
-    if (at < 0) return { base: text, variant: "", explicit: false };
+    if (at < 0) {
+        const paren = splitScriptTrailingParenVariant(text);
+        if (paren) return { base: paren.base, variant: paren.variant, explicit: true, viaParen: true };
+        return { base: text, variant: "", explicit: false, viaParen: false };
+    }
     const base = text.slice(0, at).trim();
     const variant = text.slice(at + 1).trim();
-    if (!base) return { base: text.replace(/^[@＠]+/, "").trim(), variant: "", explicit: false };
-    if (!variant) return { base, variant: "", explicit: false };
-    return { base, variant, explicit: true };
+    if (!base) return { base: text.replace(/^[@＠]+/, "").trim(), variant: "", explicit: false, viaParen: false };
+    if (!variant) return { base, variant: "", explicit: false, viaParen: false };
+    return { base, variant, explicit: true, viaParen: false };
 }
 
 /**
@@ -2574,9 +2610,11 @@ export function splitScriptAssetVariant(value: unknown): ScriptAssetVariantName 
  * 三条判定（顺序不能动）：
  *  ① 本体对不上（`叶辰` vs `苏晚`）→ 没意见，走老逻辑（`苏晚` vs `苏小晚` 那种仍然要能命中）；
  *  ② 本体相同、两边都**没写** `@` → 没意见 —— 老行为逐字不变，历史项目一个判据都不变；
- *  ③ 本体相同但造型签名不同 → `0`。**裸名对带造型的名字同样给 `0`**：裸名说不清是哪一套衣服，
- *     宁可多生一张图。唯一例外是裸名那边原文本来就把造型词写进了括号（`叶辰（校服）`）——
- *     那是同一个造型的另一种写法。
+ *  ③ 本体相同但造型签名不同 → `0`。**`@` 写法对裸名同样给 `0`**：裸名说不清是哪一套衣服，
+ *     宁可多生一张图。**括号写法是双义的**（造型 / 普通注释：`苏晚(主角)` 是角色定位注释、
+ *     `小满（园服）` 是换装），所以括号签名对裸名**不下结论**（返回 null 走老相似度）——
+ *     老模板 `P-01 苏晚（同镜头 001 造型）` vs 素材 `苏晚(主角)` 必须仍能连上；
+ *     只有**两侧都是签名**（如 `小满（园服）` vs `小满（外出）`）才硬分池。
  */
 function scriptAssetVariantGate(left: unknown, right: unknown): 0 | null {
     const l = splitScriptAssetVariant(left);
@@ -2593,6 +2631,9 @@ function scriptAssetVariantGate(left: unknown, right: unknown): 0 | null {
     const bareSide = l.explicit ? r : l;
     const variantText = explicitSide.variant.trim();
     if (!variantText) return null;
+    // 括号签名（`苏晚(主角)` / `小满（园服）`）对裸名 / 注释名**不下死手**：可能只是普通注释，
+    // 历史项目里这类名字靠「去括号归一 → 双向包含 0.9」连着，掐断会破坏老项目资产匹配。
+    if (explicitSide.viaParen) return null;
     return storyScriptCellText(bareSide.base).includes(variantText) ? null : 0;
 }
 
@@ -2653,6 +2694,70 @@ export function storyScriptAssetNameSimilarity(left: string, right: string): num
     const l = splitScriptAssetVariant(left);
     const r = splitScriptAssetVariant(right);
     return scriptAssetTextSimilarity(l.explicit ? l.base : String(left ?? ""), r.explicit ? r.base : String(right ?? ""));
+}
+
+/**
+ * 铺视频链路时把提示词里的**裸角色名**改写成带造型的全名（用户 2026-11-22 第 02 条）。
+ *
+ * 分镜表里同一角色有多套穿搭（`妈妈（外出）` / `妈妈（居家）`）时，视频运动提示词往往只写
+ * 裸名 `妈妈` —— 模型看到「妈妈走过来」 + 一堆参考图，跨镜就会把衣服串了。这里把这一镜
+ * **真的连上的**变体资产找出来，提示词里凡提到 `妈妈` 的地方都改成 `妈妈（外出）`：
+ * 每一镜的提示词自己指明用哪套服装，配合「@图片N锁定为妈妈（外出）。」双保险。
+ *
+ * 规则：
+ *  - 只改**有造型签名**的资产（`妈妈（外出）` / 旧写法 `妈妈@外出` 都算），裸名 / 长注释不动；
+ *  - 同一镜连了同一个人的**两套**衣服（`妈妈（外出）` + `妈妈（居家）`）→ 这个名字**不替**
+ *    （说不清该锁哪套，替了反而误导）；
+ *  - 名字后面已经跟着一对括号（本造型的全名、或 `妈妈（小声）：` 这种语气注释）→ **不动**，
+ *    替进去只会拼出 `妈妈（外出）（小声）` 这种坏文本；
+ *  - 最长名优先：`苏晚晴` 先于 `苏晚` 参与匹配，两个名字各替各的、互不撕坏。
+ */
+export function withScriptVariantNamesInVideoPrompt(prompt: string, assetTitles: Iterable<unknown>): string {
+    const body = storyScriptCellText(prompt);
+    if (!body) return body;
+    const displayByBase = new Map<string, string>();
+    for (const title of assetTitles) {
+        const text = storyScriptCellText(title);
+        if (!text) continue;
+        const variant = splitScriptAssetVariant(text);
+        if (!variant.explicit || !variant.variant) continue;
+        const full = `${variant.base}（${variant.variant}）`;
+        const existing = displayByBase.get(variant.base);
+        if (existing === undefined) displayByBase.set(variant.base, full);
+        else if (existing !== full) displayByBase.set(variant.base, "");
+    }
+    // 最长名优先：`苏晚晴` 要先于 `苏晚` 参与匹配，否则长名会被短名撕坏。
+    const ordered = [...displayByBase.entries()]
+        .filter(([base, full]) => base && full)
+        .map(([base]) => base)
+        .sort((a, b) => Array.from(b).length - Array.from(a).length);
+    if (!ordered.length) return body;
+    let out = "";
+    let index = 0;
+    while (index < body.length) {
+        let consumed = 0;
+        for (const base of ordered) {
+            if (!body.startsWith(base, index)) continue;
+            const rest = body.slice(index + base.length);
+            const open = rest.charAt(0);
+            // 名字后面已经跟着一对括号（不管是本造型的全名、还是 `妈妈（小声）：` 这种语气注释）
+            // → 一律不动：替进去只会拼出 `妈妈（外出）（小声）` 这种坏文本。
+            if (open === "（" || open === "(") {
+                out += base;
+                consumed = base.length;
+                break;
+            }
+            out += displayByBase.get(base)!;
+            consumed = base.length;
+            break;
+        }
+        if (!consumed) {
+            out += body.charAt(index);
+            consumed = 1;
+        }
+        index += consumed;
+    }
+    return out;
 }
 
 /** 判定「算同一个资产」的相似度门槛。0.5 = 一半字符二元组重合，够宽松又不会把苏晚对上苏晴。 */

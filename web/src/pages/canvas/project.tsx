@@ -90,6 +90,7 @@ import {
     normalizeScriptShotsPerClip,
     SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP,
     SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT,
+    withScriptVariantNamesInVideoPrompt,
     SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR,
     resolveStoryScriptPresetId,
     resolveStoryScriptImageSize,
@@ -10993,6 +10994,9 @@ function AtelierCanvasPage() {
 
                 // 每一镜仍然各自保留「文本 → 图片」（关键帧按镜给），只有视频节点才合并（运镜按段给）。
                 const imageNodes: CanvasNodeData[] = [];
+                // 每一镜连上的资产标题（含造型变体）：铺视频提示词时把裸角色名改写成 `妈妈（外出）`
+                //（用户 2026-11-22 第 02 条，按这一镜真的连上的资产改写）；与 members 按下标配对。
+                const memberVariantTitles: string[][] = [];
                 // 这一段视频用到的全部资产：角色按各镜角色名匹配，场景 / 道具 / 站位**也按各镜自己的列**匹配
                 // （2026-11-08 第 13 条：不再整类全连）。汇总后直接连到视频节点 —— 生成的「视频生成窗口」
                 // 里就能看到并引用这些资产图。
@@ -11083,6 +11087,12 @@ function AtelierCanvasPage() {
                         // 镜头图不是「资产」，排在资产之后（档位 `shot`）。
                         groupAssetKinds.set(rowAssetId, "shot");
                     }
+                    // 这一镜连上的资产标题：视频提示词改写用（裸角色名 → `妈妈（外出）`，见 shots 构建处）。
+                    memberVariantTitles.push(
+                        Array.from(linkedIntoImage)
+                            .map((id) => nodesRef.current.find((node) => node.id === id)?.title || "")
+                            .filter(Boolean),
+                    );
                     // 资产文案：第四套写多行「资产锁定」块（`@图片1：李曼人物参考，锁定…`），
                     // 其余三套写单行「资产名@图片N」。两种都在输入框里能看到每张参考图是什么资产，
                     // 且 `@图片N` 会渲染成缩略图 chip。
@@ -11101,11 +11111,13 @@ function AtelierCanvasPage() {
                 const merged = members.length > 1;
                 const shotNoFrom = first.row.shot_no || first.index + 1;
                 const shotNoTo = last.row.shot_no || last.index + 1;
-                const shots = members.map((member) => ({
+                const shots = members.map((member, memberIndex) => ({
                     shotNo: member.row.shot_no || member.index + 1,
                     // ⚠️ 只带视频段：视频节点不再拼分镜提示词（用户 2026-10-19 要求）。
                     // 分镜提示词已经在本镜的文本 / 图片节点上，视频节点拿的是它的关键帧首帧。
-                    videoPrompt: member.prompts.videoPrompt,
+                    // 裸角色名 → `妈妈（外出）`（用户 2026-11-22 第 02 条）：按这一镜真的连上的
+                    // 造型资产改写，让每一镜的提示词自己锁定哪套衣服，跨镜不再串衣。
+                    videoPrompt: withScriptVariantNamesInVideoPrompt(member.prompts.videoPrompt, memberVariantTitles[memberIndex] || []),
                 }));
                 /**
                  * 参考图**连线顺序**（用户 2026-11-08 第 13 条）：角色 → 场景 → 道具 → 站位/特效 → 镜头图。
@@ -13108,9 +13120,15 @@ function AtelierCanvasPage() {
             // 资产文案：本镜连进视频节点的图片资产 → 所有套统一「@图片N锁定为资产名。」
             //（编号顺序 = orderedLinkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
             const videoBinding = videoAssetBindingOf(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
+            // 裸角色名 → `妈妈（外出）`（用户 2026-11-22 第 02 条，与整条铺链路同口径）：按本镜
+            // 真的连上的造型资产改写视频提示词，让这一镜自己锁定哪套衣服，跨镜不再串衣。
+            const variantShotPrompt = withScriptVariantNamesInVideoPrompt(
+                videoNode.metadata?.prompt || "",
+                orderedLinkIds.map((id) => nodesRef.current.find((node) => node.id === id)?.title || "").filter(Boolean),
+            );
             // 合规后缀（用户 2026-11-11 第 02 条）：与一键铺链路同口径，拼在资产绑定之后（= 最后）。
             // MochiAni 节点的 `mochianiPrompt` 是双写过来的初值，这里一起换掉，否则窗口里显示的还是旧版。
-            const boundShotPrompt = withVideoComplianceSuffix(withScriptAssetBinding(videoNode.metadata?.prompt, videoBinding));
+            const boundShotPrompt = withVideoComplianceSuffix(withScriptAssetBinding(variantShotPrompt, videoBinding));
             videoNode.metadata = {
                 ...videoNode.metadata,
                 prompt: boundShotPrompt,
