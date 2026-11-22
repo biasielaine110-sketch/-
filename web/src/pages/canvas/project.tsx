@@ -8623,21 +8623,57 @@ function AtelierCanvasPage() {
                  * 表里一个都没出现的名字就是纯噪音，还会让「已锁定 N 个资产名」那颗开关失真。
                  * 来源节点被删了 / 关了开关就整段跳过 —— 这是兜底能力，不该打断写剧本的主流程。
                  */
-                const autoInheritSource = sourceNode.metadata?.scriptAssetInheritAuto
+                const autoInheritSources: CanvasNodeData[] = [];
+                const autoInheritDirect = sourceNode.metadata?.scriptAssetInheritAuto
                     ? nodesRef.current.find((item) => item.id === sourceNode.metadata?.scriptAssetInheritSource && item.type === CanvasNodeType.Script)
                     : undefined;
-                const autoInheritNames = autoInheritSource ? scriptRowAssetNames(finalRows, presetId, normalizeStoryScriptExtraColumns(sourceNode.metadata?.scriptExtraColumns)) : [];
-                const autoInheritPlan =
-                    autoInheritSource && autoInheritNames.length
-                        ? buildScriptAssetInheritPlan({
-                              source: autoInheritSource,
-                              target: sourceNode,
-                              nodes: nodesRef.current,
-                              connections: connectionsRef.current,
-                              options: { assets: false, locks: true, columns: false, output: false },
-                              onlyNames: autoInheritNames,
-                          })
+                if (autoInheritDirect) autoInheritSources.push(autoInheritDirect);
+                /**
+                 * **资产关联组兜底**（2026-11-23 报障：「关联了 2 个文本节点，B 文本出分镜时没延用
+                 * A 侧脚本生成器的资产图」）：组 id 常常只挂在**文本载体**上（右键「资产关联」关联的是
+                 * 文本节点），脚本生成器靠 `resolveScriptAssetGroupId` 顺上游认组 —— 但这条兜底原来
+                 * 只在「一键生图」（`inheritSharedScriptAssets`）生效，出表这条路只认
+                 * `scriptAssetInheritSource` 那份记录，组内其它机器的资产从没搬过来过。
+                 * 组的语义就是「共用同一个资产池」：谁先生成过这个角色，别人直接挂那一张，
+                 * 所以出表时同样并入组内其它脚本生成器当沿用来源（排除自己、排除重复）。
+                 */
+                for (const peer of collectScriptAssetGroupPeers(sourceNode, nodesRef.current, connectionsRef.current)) {
+                    if (!autoInheritSources.some((item) => item.id === peer.id)) autoInheritSources.push(peer);
+                }
+                const autoInheritNames = autoInheritSources.length ? scriptRowAssetNames(finalRows, presetId, normalizeStoryScriptExtraColumns(sourceNode.metadata?.scriptExtraColumns)) : [];
+                /**
+                 * 逐来源累加：每个 plan 都以「已并入前一个来源」的 target 快照为准 ——
+                 * `buildScriptAssetInheritPlan` 是合并语义（同名锁不覆盖、已有连线不重复），多来源天然并集。
+                 * `assets: true`：组内共享要把整池图都连过来（没锁过名的图靠标题自动对齐补锁），
+                 * 与 04 拆集沿用（`handleInheritScriptAssets` 的 assets: true）同一口径；幂等 —— 已连的不会重复补。
+                 */
+                const autoInheritPlan = (() => {
+                    const mergedConnections: Array<{ fromNodeId: string; toNodeId: string }> = [];
+                    const mergedLockNames: string[] = [];
+                    let mergedMetadata: Partial<CanvasNodeMetadata> = {};
+                    let workingTarget = sourceNode;
+                    for (const source of autoInheritSources) {
+                        if (!autoInheritNames.length) break;
+                        const plan = buildScriptAssetInheritPlan({
+                            source,
+                            target: workingTarget,
+                            nodes: nodesRef.current,
+                            connections: connectionsRef.current,
+                            options: { assets: true, locks: true, columns: false, output: false },
+                            onlyNames: autoInheritNames,
+                        });
+                        if (!plan.connections.length && !Object.keys(plan.metadata).length) continue;
+                        workingTarget = { ...workingTarget, metadata: { ...workingTarget.metadata, ...plan.metadata } };
+                        mergedMetadata = { ...mergedMetadata, ...plan.metadata };
+                        for (const connection of plan.connections) {
+                            if (!mergedConnections.some((item) => item.fromNodeId === connection.fromNodeId && item.toNodeId === connection.toNodeId)) mergedConnections.push(connection);
+                        }
+                        for (const name of plan.lockNames) if (!mergedLockNames.includes(name)) mergedLockNames.push(name);
+                    }
+                    return mergedConnections.length || Object.keys(mergedMetadata).length
+                        ? { connections: mergedConnections, metadata: mergedMetadata, lockNames: mergedLockNames }
                         : null;
+                })();
                 /**
                  * 把「认没认出模版」这件事**明说出来**：以前三列为空时用户只能猜
                  * （「是没识别到，还是模型没生成？」），日志和 UI 都没有证据。
@@ -8685,13 +8721,17 @@ function AtelierCanvasPage() {
                 nodesRef.current = nodesRef.current.map(applyGeneratedRows);
                 setNodes((prev) => prev.map(applyGeneratedRows));
                 // 自动沿用补的连线要在落库之后单独写一次：`applyGeneratedRows` 只碰节点，连线是另一份 state。
+                // 🔴 ref 也要同步写（与 `handleInheritScriptAssets` 同一口径）：「出表 → 紧接着一键生图 /
+                //    铺链路」读的全是 ref，只 setState 的话刚补的连线还没提交，铺出来的视频会漏共享图。
                 if (autoInheritPlan?.connections.length) {
-                    const autoConnections = autoInheritPlan.connections;
-                    setConnections((prev) => {
-                        const keys = new Set(prev.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
-                        const added = autoConnections.filter((connection) => !keys.has(`${connection.fromNodeId}\0${connection.toNodeId}`)).map((connection) => ({ id: nanoid(), ...connection }));
-                        return added.length ? [...prev, ...added] : prev;
-                    });
+                    const autoConnectionKeys = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}\0${connection.toNodeId}`));
+                    const addedAutoConnections = autoInheritPlan.connections
+                        .filter((connection) => !autoConnectionKeys.has(`${connection.fromNodeId}\0${connection.toNodeId}`))
+                        .map((connection) => ({ id: nanoid(), ...connection }));
+                    if (addedAutoConnections.length) {
+                        connectionsRef.current = [...connectionsRef.current, ...addedAutoConnections];
+                        setConnections(connectionsRef.current);
+                    }
                     if (autoInheritPlan.lockNames.length) message.info(t("canvas.scriptNode.inheritAutoApplied", { count: autoInheritPlan.lockNames.length }));
                 }
                 message.success(t("canvas.scriptNode.generated", { count: parsedRows.length }));
