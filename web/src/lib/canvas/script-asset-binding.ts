@@ -1,5 +1,5 @@
 import i18n from "@/i18n";
-import { collectScriptAssetBindings, type ScriptAssetRole } from "@/constant/story-script";
+import { collectScriptAssetBindings, formatScriptAssetDisplayName, type ScriptAssetRole } from "@/constant/story-script";
 import { labelResourceNodeIds } from "@/lib/canvas/canvas-resource-references";
 import type { CanvasNodeData } from "@/types/canvas";
 
@@ -116,7 +116,10 @@ function collectScriptAssetPromptItems(
     const refById = new Map(refs.map((reference) => [reference.nodeId, reference]));
     return bindings
         .map((binding) => ({
-            name: binding.name,
+            // 🔴 名字**只在这一层**归一成显示写法（`小满@园服` / `小满(园服)` → `小满（园服）`）：
+            // 三个渲染器（视频锁定行 / 生图绑定行 / 导演锁定块）都从这里取名字，
+            // 免得左侧 chip 是 `小满（园服）`、右侧写成 `小满@园服`，模型当成两套衣服。
+            name: formatScriptAssetDisplayName(binding.name),
             label: refById.get(binding.nodeId)?.label || "",
             role: binding.role,
             kind: refById.get(binding.nodeId)?.kind === "audio" ? ("audio" as const) : ("image" as const),

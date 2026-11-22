@@ -2603,6 +2603,25 @@ export function splitScriptAssetVariant(value: unknown): ScriptAssetVariantName 
 }
 
 /**
+ * 资产名**写进提示词时的显示写法**：有造型签名就一律写成 `本体（造型）`。
+ *
+ * 为什么需要（用户 2026-11-22 第 03 条）：分镜表 / 资产池里可能还留着旧写法 `小满@园服`，
+ * 而铺链路时左侧 chip 显示的是**图片节点标题**（`小满（园服）`）、右侧却写 `小满@园服`，
+ * 两个写法不一致，模型会当成两个人 / 两套衣服。这里统一成 `小满（园服）`：
+ *  - `小满@园服`（旧写法）/ `小满(园服)`（半角）→ `小满（园服）`；
+ *  - 裸名（`小满`）、长注释括号（`叶辰（20岁，短发）`）→ 原文不动。
+ *
+ * ⚠️ 只用于**显示**。资产键（`scriptNameLocks` / 匹配）必须继续用原文，否则历史项目全部断链。
+ */
+export function formatScriptAssetDisplayName(value: unknown): string {
+    const text = storyScriptCellText(value);
+    if (!text) return "";
+    const variant = splitScriptAssetVariant(text);
+    if (!variant.explicit || !variant.variant) return text;
+    return `${variant.base}（${variant.variant}）`;
+}
+
+/**
  * 造型签名闸门：`叶辰@校服` vs `叶辰@便服` 必须判成**两个资产**。
  *
  * 返回 `null` = 这一层没有意见（交给后面的字符相似度）；返回 `0` = 明确不是同一个资产。
