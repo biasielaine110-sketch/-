@@ -10802,9 +10802,9 @@ function AtelierCanvasPage() {
             const sourceSchemeId = resolveScriptSchemeId(source.metadata?.scriptScheme);
             const directorScheme = sourceSchemeId === "director";
             const assetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetBindingPrompt;
-            // 视频节点的资产文案（用户 2026-11-22 第 2 条）：**所有套（8 套执行方案）统一**改
-            // 「@图片N锁定为资产名。」—— 图片 chip 在前（把具体的资产图片放在资产名前面锁定）、
-            // 句号收尾、无顿号，不再按套分流。生图窗口（上面的 assetBindingOf）保持各套原格式不变。
+            // 视频节点的资产文案（用户 2026-11-22 第 2 条；晚间第 3 条升级格式）：**所有套（8 套执行方案）统一**
+            // `@图片N锁定为XX人物/场景参考，锁定<内容>。`—— 图片 chip 在前、每个资产单独一行、
+            // 按分类写死锁定内容，不再按套分流。生图窗口（上面的 assetBindingOf）保持各套原格式不变。
             const videoAssetBindingOf = buildScriptAssetNameLockPrompt;
             const upstreamNodes = Array.from(new Set(connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId)))
                 .map((id) => nodesRef.current.find((node) => node.id === id))
@@ -11126,7 +11126,7 @@ function AtelierCanvasPage() {
                  * 上游连线数组顺序）；③ 「资产绑定 / 资产锁定」文案里 `@图片N` 的编号。三处必须同源。
                  */
                 const orderedGroupAssetIds = orderScriptRefIds([...groupAssetIds], (assetId) => groupAssetKinds.get(assetId));
-                // 视频节点的资产文案（所有套统一「@图片N锁定为资产名。」）：本段所有资产图都是直连视频节点的，
+                // 视频节点的资产文案（所有套统一「@图片N锁定为XX…参考，锁定<内容>。」多行）：本段所有资产图都是直连视频节点的，
                 // 顺序与写连线时一致 —— orderedGroupAssetIds → 音频（音频只连视频、但不进「图片资产」文案，拼装时按 kind 过滤掉）。
                 // 音频也要进文案（用户 2026-11-15）：整表音频在前、本段按台词挂的音色在后 ——
                 // **顺序必须与下面写连线的顺序一致**，否则 `@参考音频 N` 的编号与输入框 chip 对不上。
@@ -13082,7 +13082,7 @@ function AtelierCanvasPage() {
                 }
                 return undefined;
             };
-            // 视频节点资产文案（用户 2026-11-22 第 2 条）：所有套统一「@图片N锁定为资产名。」，
+            // 视频节点资产文案（用户 2026-11-22）：所有套统一「@图片N锁定为XX…参考，锁定<内容>。」多行，
             // 与整条铺链路的视频节点同口径（此前按「第一套→新格式、其余→老单行」分流，已取消）。
             const videoAssetBindingOf = buildScriptAssetNameLockPrompt;
             const preciseRefs = scriptShotPreciseAssetRefs(source.metadata?.scriptCellAssets, nameLocks, shotNo, row, presetId, shotExtras);
@@ -13117,7 +13117,7 @@ function AtelierCanvasPage() {
             for (const id of rowAudioRefs) linkKinds.set(id, "other");
             const orderedLinkIds = orderScriptRefIds(linkIds, (id) => linkKinds.get(id));
             const links = orderedLinkIds.map((id) => ({ id: nanoid(), fromNodeId: id, toNodeId: videoNode.id }));
-            // 资产文案：本镜连进视频节点的图片资产 → 所有套统一「@图片N锁定为资产名。」
+            // 资产文案：本镜连进视频节点的图片资产 → 所有套统一「@图片N锁定为XX…参考，锁定<内容>。」多行
             //（编号顺序 = orderedLinkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
             const videoBinding = videoAssetBindingOf(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
             // 裸角色名 → `妈妈（外出）`（用户 2026-11-22 第 02 条，与整条铺链路同口径）：按本镜
