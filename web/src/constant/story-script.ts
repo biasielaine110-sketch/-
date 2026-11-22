@@ -2554,7 +2554,7 @@ function normalizeScriptAssetMatchText(value: string): string {
  *
  * ⚠️ `@` 之外不要随意扩分隔符 —— `-` / `｜` / `·` 在普通资产名里本来就会出现
  * （`奶茶店-门口`、`苏晚｜阿杰`），扩过去等于把正常名字劈成两半。括号写法也**只认结尾
- * 的一对括号**，且有护栏（见 `splitScriptTrailingParenVariant`）：普通括号注释
+ * 的括号**（闭合或缺右括号都认，护栏见 `splitScriptTrailingParenVariant`）：普通括号注释
  * （`叶辰（20岁，短发）`、`S-01 奶茶店门外人行道（阴天午后，主光上方偏左…）`）不是造型。
  */
 const SCRIPT_ASSET_VARIANT_SEPARATOR = /[@＠]/;
@@ -2575,17 +2575,28 @@ export type ScriptAssetVariantName = {
 const SCRIPT_ASSET_VARIANT_PAREN_MAX = 4;
 /** 括号里出现这些就不是造型词：描述性注释（`20岁` / `20岁，短发` / `阴天午后，主光…`）。 */
 const SCRIPT_ASSET_VARIANT_PAREN_NOISE = /[0-9０-９、，,。：:；;！!？?\s]/;
-/** 结尾括号：`妈妈（外出）` / `妈妈(外出)`，只取**最后一对**且里面不再嵌套。 */
+/** 结尾括号（**闭合**）：`妈妈（外出）` / `妈妈(外出)`，只取**最后一对**且里面不再嵌套。 */
 const SCRIPT_ASSET_TRAILING_PAREN = /[（(]([^（()）]*)[）)]$/;
+/**
+ * 结尾括号（**缺右括号**容错）：`叶辰（校服`。
+ *
+ * 用户 2026-11-23：`叶辰（校服）` 和 `叶辰（校服` 被判成两个资产——手滑少打半个括号太常见
+ * （输入法全角/半角切换、复制粘贴截断都会丢右括号），不能因为缺半个括号就拆成另一个身份。
+ * 护栏与闭合版**完全一致**（≤4 字、无数字标点空白），长注释 / 描述性内容照旧不算造型。
+ */
+const SCRIPT_ASSET_TRAILING_PAREN_UNCLOSED = /[（(]([^（()）]*)$/;
 
 /**
  * 「角色名（造型）」拆分（仅在没有 `@` 时走到这里）。护栏（用户 2026-11-22 第 01 条「检查是否会有问题」）：
  *  - 括号里超过 4 个字 → 当普通注释（模板场景名 `奶茶店门外人行道（阴天午后，主光上方偏左）` 不能被拆坏）；
  *  - 括号里有数字 / 标点 / 空白 → 当注释（`叶辰（20岁，短发）` 不是换装）；
- *  - 括号前没名字 / 括号里是空 → 当裸名。
+ *  - 括号前没名字 / 括号里是空 → 当裸名；
+ *  - 缺右括号（`叶辰（校服`）→ 按同一条护栏判造型，与闭合写法 `叶辰（校服）` 同一身份
+ *    （用户 2026-11-23「这明明是一个资产」；半角右括号 `叶辰（家居服)` 之前就能对上，这次补齐缺括号）。
  */
 function splitScriptTrailingParenVariant(text: string): { base: string; variant: string } | null {
-    const match = text.match(SCRIPT_ASSET_TRAILING_PAREN);
+    // 优先按「闭合括号」拆（只取最后一对）；没有闭合对再按「缺右括号」兜底。
+    const match = text.match(SCRIPT_ASSET_TRAILING_PAREN) ?? text.match(SCRIPT_ASSET_TRAILING_PAREN_UNCLOSED);
     if (!match || match.index === undefined) return null;
     const variant = match[1].trim();
     const base = text.slice(0, match.index).trim();
@@ -2606,7 +2617,8 @@ function splitScriptTrailingParenVariant(text: string): { base: string; variant:
  * 容错：
  *  - `@` 前面没名字（`@图片1` 这类误写）→ 去掉 `@` 整个当裸名，不让一个孤零零的 `@` 拆坏名字；
  *  - `@` 后面是空（`叶辰@`）→ 当裸名；
- *  - 结尾括号里是长注释 / 带数字标点（`叶辰（20岁，短发）`）→ 当裸名（括号注释语义，历史行为不变）。
+ *  - 结尾括号里是长注释 / 带数字标点（`叶辰（20岁，短发）`）→ 当裸名（括号注释语义，历史行为不变）；
+ *  - **缺右括号**（`叶辰（校服`）→ 按同一条护栏判造型，与 `叶辰（校服）` 同一身份（用户 2026-11-23）。
  */
 export function splitScriptAssetVariant(value: unknown): ScriptAssetVariantName {
     const text = storyScriptCellText(value);
@@ -2998,6 +3010,9 @@ export function scriptCellAssetIds(
  * 裸名 `妈妈` 是**另一个**身份（说不清是哪套衣服，不与任何带造型的名字互通 —— 与
  * `scriptAssetVariantGate` 的口径一致）。长注释括号（`叶辰（20岁，短发）`）不算造型，
  * 身份就是剥掉括号后的本体。供跨格找「同一资产」用（挂图联动 / 探针）。
+ *
+ * 缺右括号同样归一：`叶辰（校服` ≡ `叶辰（校服）`（护栏与闭合版一致，见
+ * `splitScriptTrailingParenVariant`）；半角右括号 `叶辰（家居服)` 本来就归一。
  */
 export function scriptAssetIdentityKey(value: unknown): string {
     const text = scriptNameLockName(value);
@@ -3233,26 +3248,43 @@ export function scriptNameLockName(value: unknown): string {
     return text;
 }
 
+/**
+ * 两个资产名是否为「**带造型的同一个身份**」：两侧都显式写了造型（`@` / 括号 / 缺右括号）
+ * 且身份键一致（`叶辰（校服` ≡ `叶辰（校服）` ≡ `叶辰(校服)` ≡ `叶辰@校服`）。
+ *
+ * 只在**两侧都显式**时判同（用户 2026-11-23：缺半个括号不能算两个资产）；裸名 / 注释名
+ * 不参与（保持老行为，注释名 `叶辰（20岁，短发）` 与裸名 `叶辰` 的锁互不吞并）。
+ */
+function sameScriptVariantLockIdentity(left: string, right: string): boolean {
+    const l = splitScriptAssetVariant(left);
+    const r = splitScriptAssetVariant(right);
+    if (!l.explicit || !r.explicit) return false;
+    const identity = scriptAssetIdentityKey(left);
+    return Boolean(identity) && identity === scriptAssetIdentityKey(right);
+}
+
 /** 读某个资产名锁定的图片 id（没有 / 非法 → 空数组）。名字大小写不敏感（兼容手写数据）。 */
 export function scriptNameLockIds(map: unknown, name: unknown): string[] {
     const label = scriptNameLockName(name);
     if (!label || !map || typeof map !== "object" || Array.isArray(map)) return [];
     const record = map as Record<string, unknown>;
     const lower = label.toLowerCase();
-    let legacyHit: string[] | null = null;
     for (const [rawKey, value] of Object.entries(record)) {
         const key = scriptNameLockName(rawKey);
-        if (key !== label && key.toLowerCase() !== lower) {
-            // 历史坏名键（收尾括号被老实现剥掉）兜底：修复后能对上全名也算命中。
-            if (!legacyHit && scriptNameLockName(repairLegacyMangledLockKey(key)) === label && Array.isArray(value)) {
-                legacyHit = Array.from(new Set(value.filter((id): id is string => typeof id === "string" && Boolean(id))));
-            }
-            continue;
-        }
+        const repaired = scriptNameLockName(repairLegacyMangledLockKey(key));
+        // 命中三层：精确（含大小写）→ 历史坏名键修复 → 造型身份同一（缺右括号 / 全半角 / `@` 写法互通）。
+        const hit =
+            key === label ||
+            key.toLowerCase() === lower ||
+            repaired === label ||
+            repaired.toLowerCase() === lower ||
+            sameScriptVariantLockIdentity(label, key) ||
+            sameScriptVariantLockIdentity(label, repaired);
+        if (!hit) continue;
         if (!Array.isArray(value)) return [];
         return Array.from(new Set(value.filter((id): id is string => typeof id === "string" && Boolean(id))));
     }
-    return legacyHit || [];
+    return [];
 }
 
 /**
@@ -3304,9 +3336,16 @@ export function setStoryScriptNameLock(map: unknown, name: unknown, ids: readonl
     const lower = label.toLowerCase();
     const next: StoryScriptNameLockMap = {};
     for (const [key, value] of Object.entries(normalized)) {
-        // 同名键（含历史坏名键 `妈妈（外出` ≈ `妈妈（外出）`）都清掉，避免新旧两把并存的隐形锁。
+        // 同名键（含历史坏名键 `妈妈（外出` ≈ `妈妈（外出）`、以及造型同一身份的 `妈妈@外出` /
+        // `妈妈(外出)` / `妈妈（外出`）都清掉，避免新旧两把并存的隐形锁。
         const repaired = scriptNameLockName(repairLegacyMangledLockKey(key));
-        if (key === label || key.toLowerCase() === lower || repaired === label) continue;
+        const same =
+            key === label ||
+            key.toLowerCase() === lower ||
+            repaired === label ||
+            sameScriptVariantLockIdentity(label, key) ||
+            sameScriptVariantLockIdentity(label, repaired);
+        if (same) continue;
         next[key] = value;
     }
     const clean = Array.from(new Set(ids.filter((id): id is string => typeof id === "string" && Boolean(id))));
