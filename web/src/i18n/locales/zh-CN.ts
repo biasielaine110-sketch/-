@@ -1895,6 +1895,12 @@ export default {
             promptEditPlaceholder: "写下想怎么改，例如：把镜头 2 的动作改成摔倒；结尾语气更冷；删掉最后一句",
             promptEditHint: "只改你提到的部分，结构 / 编号 / 标签 / 占位符都保持原样，不会加说明或备注",
             promptEditCollapsedHint: "点「编辑提示词」填修改意见，再点「执行」",
+            changanFormat: "《长安异闻录》格式",
+            changanFormatStop: "停止",
+            changanFormatTitle: "把当前内容整体转成《长安异闻录》14 章节视频提示词标准模板",
+            changanFormatModel: "文本模型",
+            changanFormatModelEmpty: "未指定（用偏好默认文本模型）",
+            changanFormatSource: "提示词：内置模板《长安异闻录》（14 章节，{{Mixed 1-5}} 占位符原样保留）",
         },
         h3Optimize: {
             title: "h3 提示词优化",

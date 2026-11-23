@@ -2,10 +2,11 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ClipboardEvent 
 import { createPortal } from "react-dom";
 import { Button, Input, Modal } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
-import { LoaderCircle, Minus, Plus, ShieldCheck, SquarePen, WandSparkles } from "lucide-react";
+import { LoaderCircle, Minus, Plus, ScrollText, ShieldCheck, SquarePen, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { insertTextIntoInputElement, readClipboardEventText } from "@/lib/canvas/clipboard-paste";
+import { CHANGAN_FORMAT_SYSTEM, finalizeChanganPrompt } from "@/lib/canvas/changan-prompt-format";
 import { EDIT_PROMPT_SYSTEM, buildEditPromptUserMessage, finalizeEditedPrompt } from "@/lib/canvas/edit-prompt";
 import { getH3OptimizeQueueState, startH3OptimizeQueue, stopH3OptimizeQueue, subscribeH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import type { AiConfig } from "@/stores/use-config-store";
@@ -81,6 +82,25 @@ export type CanvasTextEditDialogPromptEdit = {
     applyOptimized: (text: string) => void;
 };
 
+/**
+ * 「《长安异闻录》格式」入口配置 —— 只在生图 / 生视频的提示词弹窗里出现（用户 2026-11-23）。
+ *
+ * 与「编辑提示词」同构：
+ *  - 指令是**内置**的（`CHANGAN_FORMAT_SYSTEM`，用户点名的固定 14 章节模板），不走技能库也不走词库；
+ *  - 模型不给选，**恒跟随偏好里的文本模型**（`config.textModel`）；
+ *  - 点一下就转，输出清洗走 `finalizeChanganPrompt`（剥围栏 + 锚定模板标题行）。
+ *
+ * 同样跑后台队列（`kind: "changan"`），关掉弹窗也会把结果写回节点。
+ */
+export type CanvasTextEditDialogChanganFormat = {
+    /** capability=text 的配置（模型已经带好 = 偏好里的文本模型） */
+    config: AiConfig;
+    /** 只读展示用：偏好里的文本模型名 */
+    modelName: string;
+    job: { id: string; title: string; field: "prompt" | "composerContent" };
+    applyOptimized: (text: string) => void;
+};
+
 type CanvasTextEditDialogProps = {
     open: boolean;
     value: string;
@@ -95,11 +115,13 @@ type CanvasTextEditDialogProps = {
     violationOptimize?: CanvasTextEditDialogViolationOptimize | null;
     /** 传了才显示「编辑提示词」那一行（按用户反馈增量改，模型固定跟随偏好里的文本模型）。 */
     promptEdit?: CanvasTextEditDialogPromptEdit | null;
+    /** 传了才显示「长安异闻录格式」那一行（转 14 章节模板，模型固定跟随偏好里的文本模型）。 */
+    changanFormat?: CanvasTextEditDialogChanganFormat | null;
     onClose: () => void;
     onSave?: (content: string) => void;
 };
 
-export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize, readOnly = false, onFontSizeChange, h3Optimize = null, violationOptimize = null, promptEdit = null, onClose, onSave }: CanvasTextEditDialogProps) {
+export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize, readOnly = false, onFontSizeChange, h3Optimize = null, violationOptimize = null, promptEdit = null, changanFormat = null, onClose, onSave }: CanvasTextEditDialogProps) {
     const { t } = useTranslation();
     const textAreaRef = useRef<TextAreaRef>(null);
     const draftRef = useRef(value);
@@ -139,8 +161,16 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
     const promptEditError = promptEditRunning ? queue.currentError : "";
     const [promptEditOpen, setPromptEditOpen] = useState(false);
     const [promptEditFeedback, setPromptEditFeedback] = useState("");
+
+    // 「长安异闻录格式」：指令内置（14 章节模板），模型不给选（恒跟偏好里的文本模型）。
+    const canChanganFormat = Boolean(changanFormat && !readOnly);
+    const changanJobId = changanFormat?.job.id || "";
+    const changanRunning = queue.running && queue.currentKind === "changan" && queue.currentId === changanJobId;
+    const changanBusyElsewhere = queue.running && !changanRunning;
+    const changanError = changanRunning ? queue.currentError : "";
+    const changanModel = String(changanFormat?.config.textModel || changanFormat?.config.model || "").trim();
     /** 任意一条优化正在转**这个**节点 —— 流式正文都要同步进编辑区。 */
-    const anyRunningHere = h3Running || violationRunning || promptEditRunning;
+    const anyRunningHere = h3Running || violationRunning || promptEditRunning || changanRunning;
 
     draftRef.current = draft;
 
@@ -233,6 +263,33 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
             buildUserMessage: (job) => buildEditPromptUserMessage(job.text, String(job.feedback || "")),
             transform: finalizeEditedPrompt,
             onApply: (_target, text) => promptEdit.applyOptimized(text),
+        });
+    };
+
+    /**
+     * 「《长安异闻录》格式」：把当前内容整体转成 14 章节模板。
+     *
+     * 与「编辑提示词」同口径的三条约束：
+     *  - 模型恒跟偏好里的文本模型 → 不给 `ModelPicker`，`config.model` 已经在面板侧换成 `textModel`；
+     *  - 指令是内置的 `CHANGAN_FORMAT_SYSTEM`（模板正文一字不改 + 只输出正文）；
+     *  - 输出再走 `finalizeChanganPrompt`（剥围栏 + 锚定模板标题行，不做「原文查重」裁剪 ——
+     *    格式转换的输出骨架几乎都不在原文里，照 edit 那套会删掉模板）。
+     */
+    const runChanganFormat = () => {
+        if (!changanFormat || !canChanganFormat) return;
+        if (changanRunning) {
+            stopH3OptimizeQueue();
+            return;
+        }
+        const original = draftRef.current;
+        if (!original.trim()) return;
+        void startH3OptimizeQueue({
+            jobs: [{ ...changanFormat.job, text: original }],
+            config: changanFormat.config,
+            systemPrompt: CHANGAN_FORMAT_SYSTEM,
+            kind: "changan",
+            transform: finalizeChanganPrompt,
+            onApply: (_target, text) => changanFormat.applyOptimized(text),
         });
     };
 
@@ -518,6 +575,35 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                                 </div>
                             </div>
                         ) : null}
+                    </div>
+                ) : null}
+
+                {/* 长安异闻录格式（用户 2026-11-23）：点一下就把当前内容转成 14 章节模板。
+                    指令内置、模型恒跟偏好里的文本模型；同 h3 / 违规优化 / 编辑提示词一样跑后台队列，
+                    关掉弹窗也会把结果写回节点。 */}
+                {canChanganFormat && changanFormat ? (
+                    <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-stone-200 px-2 py-1.5 dark:border-stone-700" data-canvas-changan-format>
+                        <Button
+                            size="small"
+                            type="primary"
+                            ghost
+                            className="!h-7 !shrink-0 !rounded-full !px-2.5"
+                            icon={changanRunning ? <LoaderCircle className="size-3.5 animate-spin" /> : <ScrollText className="size-3.5" />}
+                            disabled={changanBusyElsewhere || (!changanRunning && !draft.trim())}
+                            onClick={runChanganFormat}
+                            title={t("canvas.textEditDialog.changanFormatTitle")}
+                        >
+                            <span className="text-xs">{changanRunning ? t("canvas.textEditDialog.changanFormatStop") : t("canvas.textEditDialog.changanFormat")}</span>
+                        </Button>
+                        <span className="shrink-0 text-[11px] text-stone-500">{t("canvas.textEditDialog.changanFormatModel")}</span>
+                        <span className="shrink-0 text-[11px] tabular-nums text-stone-600 dark:text-stone-300">
+                            {changanModel || t("canvas.textEditDialog.changanFormatModelEmpty")}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-[11px] text-stone-400">
+                            {t("canvas.textEditDialog.changanFormatSource")}
+                        </span>
+                        {changanRunning ? <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400">{t("canvas.textEditDialog.h3OptimizeBackground")}</span> : null}
+                        {changanError ? <span className="max-w-full truncate text-[11px] text-red-500">{changanError}</span> : null}
                     </div>
                 ) : null}
 

@@ -23,12 +23,13 @@ import type { AiConfig } from "@/stores/use-config-store";
 /**
  * 这一次跑的是哪条优化。
  *
- * 三条优化（`h3` = 转 h3 提示词、`violation` = 违规优化、`edit` = 按反馈编辑提示词）
+ * 四条优化（`h3` = 转 h3 提示词、`violation` = 违规优化、`edit` = 按反馈编辑提示词、
+ * `changan` = 转《长安异闻录》格式）
  * **共用这一个队列**：同一时间只跑一批，天然互斥，不会两条流水同时写同一个节点。
- * 但编辑器里的按钮要能分辨「在跑的是我这条还是隔壁那条」（同一个节点三种按钮，
+ * 但编辑器里的按钮要能分辨「在跑的是我这条还是隔壁那条」（同一个节点四种按钮，
  * 只看 `currentId` 会几边一起显示「停止」），所以连同 kind 一起广播出去。
  */
-export type H3OptimizeKind = "h3" | "violation" | "edit";
+export type H3OptimizeKind = "h3" | "violation" | "edit" | "changan";
 
 export type H3OptimizeQueueState = {
     running: boolean;
@@ -139,13 +140,14 @@ export async function startH3OptimizeQueue(options: H3OptimizeQueueOptions): Pro
                 onStream: (text) => {
                     if (jobController.signal.aborted) return;
                     /**
-                     * 编辑提示词：流式阶段**只进预览、不写节点**。
+                     * 编辑提示词 / 长安异闻录格式：流式阶段**只进预览、不写节点**。
                      *
-                     * 它要求「保持原架构、不要多余注解」，而模型在流式过程中往往先吐一句
-                     * 「好的，以下是修改后的提示词：」——边流边写会把这类文字留在输入框里，
-                     * 中途点停止更是直接留下半截。所以跟违规优化同口径：等最终结果（已清洗）再落盘。
+                     * edit 要求「保持原架构、不要多余注解」，changan 是整模板转换 ——
+                     * 两者在流式过程中模型都常先吐一句「好的，以下是…：」——边流边写会把
+                     * 这类文字留在输入框里，中途点停止更是直接留下半截。
+                     * 所以同口径：等最终结果（已清洗）再落盘。
                      */
-                    if (kind === "edit") {
+                    if (kind === "edit" || kind === "changan") {
                         patch({ currentText: text });
                         return;
                     }

@@ -1890,6 +1890,12 @@ export default {
             promptEditPlaceholder: "Tell it what to change, e.g. shot 2 should fall over; colder tone at the end; drop the last line",
             promptEditHint: "Only the parts you mention change — structure, numbering, tags and placeholders stay as they are, no notes added",
             promptEditCollapsedHint: "Click \"Edit prompt\", type the feedback, then Run",
+            changanFormat: "Chang'an format",
+            changanFormatStop: "Stop",
+            changanFormatTitle: "Convert the current content into the 14-section \"Chang'an Tales\" video prompt template",
+            changanFormatModel: "Text model",
+            changanFormatModelEmpty: "Unspecified (use preferred default text model)",
+            changanFormatSource: "Prompt: built-in \"Chang'an Tales\" template (14 sections, {{Mixed 1-5}} placeholders kept as-is)",
         },
         h3Optimize: {
             title: "h3 prompt optimize",

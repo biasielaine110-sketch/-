@@ -206,6 +206,22 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
               }
             : null;
 
+    /**
+     * 放大编辑弹窗里的「长安异闻录格式」配置（用户 2026-11-23）。
+     *
+     * 与「编辑提示词」同构：模型恒跟偏好里的文本模型（`model` 显式覆回 `textModel`，
+     * 防止节点 `metadata.model` 把它顶掉），指令内置在 `lib/canvas/changan-prompt-format.ts`。
+     */
+    const changanFormatOption =
+        mode === "image" || mode === "video"
+            ? {
+                  config: { ...h3TextConfig, model: promptEditModel || h3TextConfig.model },
+                  modelName: promptEditModel,
+                  job: { id: node.id, title: String(node.title || node.id), field: resolveNodePromptField(node) },
+                  applyOptimized: updatePrompt,
+              }
+            : null;
+
     const textEdit = useCanvasTextEditDialog({
         value: prompt,
         onChange: updatePrompt,
@@ -214,6 +230,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         h3Optimize: h3OptimizeOption,
         violationOptimize: violationOptimizeOption,
         promptEdit: promptEditOption,
+        changanFormat: changanFormatOption,
     });
 
     const activeReferences = mentionReferences.filter((reference) => reference.active && reference.nodeId !== node.id);
