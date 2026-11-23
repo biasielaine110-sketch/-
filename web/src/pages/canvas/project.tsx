@@ -7900,17 +7900,23 @@ function AtelierCanvasPage() {
     );
 
     /** 右键菜单顶部「《长安异闻录》格式」作用的节点（用户 2026-11-23 晚间第 03 条）：
-     * 与 h3 优化同一批目标（选区里的图片 / 视频节点、提示词非空），>=1 就出现。 */
+     * 与 h3 优化同一批目标（选区里的图片 / 视频节点、提示词非空），>=1 就出现。
+     * 🔴 再筛掉「只有资产锁定内容、没有正文」的节点 —— 它们没有可转换的东西；不筛的话
+     * `buildUserMessage` 会返回空串、队列回落到整段原文，反而把锁定行发去转换。 */
     const [changanFormatOpen, setChanganFormatOpen] = useState(false);
     /** 打开弹窗时**冻结**目标列表（同 h3 那个坑：菜单一关 memo 就清空）。 */
     const [changanFormatSnapshot, setChanganFormatSnapshot] = useState<H3OptimizeTarget[]>([]);
     const changanFormatTargets = useMemo(() => {
         if (!contextMenu || contextMenu.type !== "node") return [];
-        return collectH3OptimizeTargets(nodes, Array.from(selectedNodeIds));
+        return collectH3OptimizeTargets(nodes, Array.from(selectedNodeIds)).filter((target) => Boolean(splitChanganAssetLockBlock(target.text).rest.trim()));
     }, [contextMenu, nodes, selectedNodeIds]);
     const openChanganFormat = useCallback(() => {
         if (isH3OptimizeQueueRunning()) {
             message.warning(t("canvas.h3Optimize.busy"));
+            return;
+        }
+        if (!changanFormatTargets.length) {
+            message.warning(t("canvas.changanFormat.empty"));
             return;
         }
         setChanganFormatSnapshot(changanFormatTargets);

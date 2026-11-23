@@ -8,9 +8,10 @@
  * 模型恒跟偏好里的文本模型；跑在 `h3-optimize-runner` 的后台队列里（`kind: "changan"`），
  * 关掉弹窗也会按 `field` 写回节点。
  *
- * 用户 2026-11-23 晚间补充（第 02 条）：视频节点提示词开头的**「【资产锁定】」块**
- * （`@图片N锁定为…` / `@图片N：…` 那几行）**不参与格式转换** —— 发送前摘出来、
- * 转完原样接回最前面（`splitChanganAssetLockBlock` + `finalizeChanganPrompt`）。
+ * 用户 2026-11-23 晚间补充（第 02 条）：视频节点提示词里的**资产锁定内容**
+ * （`@图片N锁定为…` / `@图片N：…` 那几行，无论有没有「【资产锁定】」标题、在开头还是中间）
+ * **不参与格式转换** —— 发送前摘出来、转完原样接回最前面（`splitChanganAssetLockBlock` +
+ * `finalizeChanganPrompt`）。
  */
 
 const CHANGAN_TEMPLATE = `# 《长安异闻录》视频提示词标准模板 /sd25-pe
@@ -147,20 +148,20 @@ G01-S02｜00–00
  * 「只输出模板正文」写得这么死是有原因的：这条链路的输出要直接回填节点输入框，
  * 模型多一句「好的，以下是转换结果：」就会污染提示词。
  *
- * 第 4 条是兜底：正常链路里「【资产锁定】」块在发送前就被摘掉了（见
- * `splitChanganAssetLockBlock`），模型根本看不到；万一哪条入口忘了摘，
- * 这条规则保证模型至少不会把它转掉、删掉。
+ * 第 3 条是兜底：正常链路里锁定内容在发送前就被摘掉了（见
+ * `splitChanganAssetLockBlock`），模型看不到；万一哪条入口漏摘，这条规则保证模型
+ * 至少不会把锁定行转成模板字段，`finalizeChanganPrompt` 也会再把它们删干净。
  */
 export const CHANGAN_FORMAT_SYSTEM = `你是视频提示词格式化器。把用户给出的文本内容（剧情描述、分镜脚本、草稿提示词等）完整转换为下方《长安异闻录》视频提示词标准模板的格式。
 
 规则：
 1. 严格按模板的 13 个章节（【01】～【13】）与字段顺序输出，章节标题与字段名一字不改、一个不落。
 2. 各字段的冒号后填写从用户文本中提取的内容；用户文本未提及的项按剧情合理补全，完全无法确定的填「无」。
-3. 用户文本若以「【资产锁定】」块开头（各行以 @图片N / @参考音频N 开头的锁定行），该块**原样保留**在输出最前面，一字不改、一行不删、不转成模板字段；格式转换只针对它之外的正文内容。
+3. **资产锁定内容一概不进输出**：输入里若仍出现「【资产锁定】」标题、@图片N锁定为… / @图片N：… 这类锁定行、或 @image#N 这类附件引用，一律不要写进任何章节字段、也不要用它填写字段；程序会另行把锁定内容原样保留在模板最前面。格式转换只针对锁定内容之外的正文。
 4. 【04】对白总账：从用户文本提取对白填入 L1/L2，没有对白时明确填写“无对白”；每句对白执行一次。
 5. 【06】镜头时间轴：按用户文本的镜头数量输出对应小节（G01-S01、G01-S02……），并补上每个镜头的时间码。
 6. 只输出转换后的模板正文本身：不要输出任何解释、说明、修改备注、开场白或代码围栏。
-7. 正文第一行必须是模板标题行「# 《长安异闻录》视频提示词标准模板 /sd25-pe」（【资产锁定】块若保留则在其之前），最后一行是「最终目标」的完整描述。
+7. 正文第一行必须是模板标题行「# 《长安异闻录》视频提示词标准模板 /sd25-pe」，最后一行是「最终目标」的完整描述。输出里**不得出现任何以 @ 开头的引用行**。
 
 模板：
 ${CHANGAN_TEMPLATE}`;
@@ -173,14 +174,28 @@ export const ASSET_LOCK_TITLE = "【资产锁定】";
 /** 兼容旧节点：第四套（导演）早先把标题写成 `- **资产锁定：**`。 */
 const LEGACY_ASSET_LOCK_TITLE = "- **资产锁定：**";
 
+/** 认得的全部标题写法（`withVideoAssetLockBinding` 会把新节点归一到 `ASSET_LOCK_TITLE`，这里兜旧节点）。 */
+const ASSET_LOCK_TITLE_LINES = new Set([ASSET_LOCK_TITLE, LEGACY_ASSET_LOCK_TITLE, "**资产锁定：**", "资产锁定："]);
+
+function isAssetLockTitleLine(line: string) {
+    return ASSET_LOCK_TITLE_LINES.has(line.trim());
+}
+
 /**
- * 一条锁定条目行：`@图片N` / `@参考音频 N` 开头（ chip 标签原文，带不带空格都认）。
+ * 一条资产锁定条目行。三种写法全部实测出现过：
  *
- * 🔴 显式块内的条目**只认这个开头**、不要求行里有「锁定」—— 第四套（导演）的道具行
- * 是「@图片5：奥迪轿车参考。」，压根没有「锁定」二字，按「锁定」筛会把道具漏进 rest
- * 让模型把它转成模板字段。
+ *  1. `@图片1锁定为张园长人物参考，锁定角色面容…` —— 第一套起所有方案铺视频链路的标准写法；
+ *  2. `@图片1：李曼人物参考，锁定面容…` / `@图片5：奥迪轿车参考。` —— 第四套（导演）的写法。
+ *     🔴 道具行**没有「锁定」二字**，别按「锁定」筛，否则漏收、被模型当成正文转进模板字段；
+ *  3. `@日历锁定为日历参考。` —— 模型把资产名当标签写出来的变体（用户 2026-11-23 截图实样）。
+ *
+ * 正文里普通的 `@图片1 描述…`（编号后直接跟空格 + 描述）**不算**条目。
  */
-const ASSET_LOCK_ENTRY = /^\s*@(图片\s*\d|参考音频\s*\d)/;
+const ASSET_LOCK_ENTRY = /^\s*@(?:(?:图片|参考音频)\s*\d+\s*(?:锁定|[：:])|[^\s@]{1,40}锁定为)/;
+
+function isAssetLockEntryLine(line: string) {
+    return ASSET_LOCK_ENTRY.test(line);
+}
 
 export type ChanganAssetLockSplit = {
     /** 「【资产锁定】」块原文（含标题行）；没有锁定块时为空串 */
@@ -190,69 +205,81 @@ export type ChanganAssetLockSplit = {
 };
 
 /**
- * 把文本拆成「【资产锁定】」块与其余正文（用户 2026-11-23 晚间第 02 条）。
+ * 把文本拆成「资产锁定」内容与其余正文（用户 2026-11-23 晚间第 02 条，11-23 深夜二次收紧）。
  *
- * 「长安异闻录格式」按钮**只转换锁定块之外的正文**：锁定块发送前摘出来、
+ * 「长安异闻录格式」按钮**只转换锁定内容之外的正文**：锁定内容发送前摘出来、
  * 转完原样接回最前面。这样模型既不会把 `@图片N锁定为…` 那几行转成模板字段，
  * 也不会把引用 chip 的标签（`@图片N` 逐字对应缩略图 chip）改写坏。
  *
- * 识别口径：
- *  1. 显式标题：首行是「【资产锁定】」（或旧写法 `- **资产锁定：**`），其后**连续**的
- *     `@xxx…锁定…` 行都算块内容；遇到空行或第一个非 `@…锁定` 行即止。
- *  2. 隐式兜底：没有标题行、但**开头**就是连续的 `@…锁定…` 行（加了标题之前的旧视频节点）
- *     —— 同样整块摘出，免得旧节点的锁定行被转掉。
- *  3. 其余情况（正文里零散出现的 @ 引用、没有锁定语义）一律不动，整段算 rest。
+ * 识别口径（**全篇扫描**，不再只认开头一块 —— 模型自己写进分镜正文的锁定行常常在中间）：
+ *  1. 有标题（`【资产锁定】` / 旧写法 `- **资产锁定：**` 等）：标题 + 其后**连续**的
+ *     `@图片N…` 条目行整块算锁定内容；条目之间的空行一起吞掉；
+ *  2. 没有标题但出现 `@图片N锁定为…` / `@图片N：…` / `@资产名锁定为…` 这类行：
+ *     从这一行起连续（允许中间空行）的条目行整段算锁定内容；
+ *  3. 其余行原文进 rest（保留段落间空行）。
+ *
+ * 多处锁定块（例如程序铺的块 + 模型又抄了一遍）会按出现顺序全部收集，一次摘干净。
  */
 export function splitChanganAssetLockBlock(text: string): ChanganAssetLockSplit {
     const source = String(text ?? "");
     const lines = source.split("\n");
+    const lockLines: string[] = [];
+    const restLines: string[] = [];
 
-    const isTitleLine = (line: string) => {
-        const trimmed = line.trim();
-        return trimmed === ASSET_LOCK_TITLE || trimmed === LEGACY_ASSET_LOCK_TITLE || trimmed === "资产锁定：" || trimmed === "**资产锁定：**";
-    };
-
-    let headerIndex = -1;
-    let implicit = false;
-    for (let index = 0; index < lines.length; index += 1) {
-        const trimmed = lines[index].trim();
-        if (!trimmed) {
-            // 标题之前的空行无所谓；没找到标题就继续找
-            continue;
-        }
-        if (isTitleLine(lines[index])) {
-            headerIndex = index;
-            break;
-        }
-        if (ASSET_LOCK_ENTRY.test(lines[index]) && lines[index].includes("锁定")) {
-            // 开头直接是锁定行（加了标题之前的旧视频节点没有标题行）——
-            // 隐式兜底要求行里带「锁定」，免得正文第一行恰好是 @图片N 的普通引用被误摘。
-            headerIndex = index;
-            implicit = true;
-            break;
-        }
-        // 第一个既不是标题也不是锁定行的非空行 → 后面不用再找
-        break;
-    }
-    if (headerIndex === -1) return { lock: "", rest: source.trim() };
-
-    // 从标题（或首个锁定行）往下收连续的锁定条目行；标题与条目之间允许空行
-    let end = headerIndex;
-    for (let index = headerIndex + (implicit ? 0 : 1); index < lines.length; index += 1) {
+    let index = 0;
+    while (index < lines.length) {
         const line = lines[index];
-        if (ASSET_LOCK_ENTRY.test(line)) {
-            end = index;
+        if (isAssetLockTitleLine(line)) {
+            lockLines.push(line.trim());
+            index += 1;
+            // 标题之后：连续的条目行（允许空行）都算块内容；遇到第一个别的非空行即止
+            while (index < lines.length) {
+                const next = lines[index];
+                if (isAssetLockEntryLine(next)) {
+                    lockLines.push(next.trim());
+                    index += 1;
+                    continue;
+                }
+                if (!next.trim()) {
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
             continue;
         }
-        if (!line.trim() && index < lines.length - 1) {
-            // 空行先记着：后面紧跟锁定行则吞掉，否则到块尾为止
+        if (isAssetLockEntryLine(line)) {
+            // 无标题的旧节点：从这一行起，连续的条目行（允许中间空行）整段摘出
+            lockLines.push(line.trim());
+            index += 1;
+            while (index < lines.length) {
+                const next = lines[index];
+                if (isAssetLockEntryLine(next)) {
+                    lockLines.push(next.trim());
+                    index += 1;
+                    continue;
+                }
+                if (!next.trim()) {
+                    let look = index;
+                    while (look < lines.length && !lines[look].trim()) look += 1;
+                    if (look < lines.length && isAssetLockEntryLine(lines[look])) {
+                        index = look;
+                        continue;
+                    }
+                }
+                break;
+            }
             continue;
         }
-        break;
+        restLines.push(line);
+        index += 1;
     }
-    const lock = lines.slice(headerIndex, end + 1).join("\n").trim();
-    const rest = lines.slice(end + 1).join("\n").trim();
-    return { lock, rest };
+
+    // 只去 rest 首尾空行：段落之间的空行要留着，否则正文会被挤成一坨
+    while (restLines.length && !restLines[0].trim()) restLines.shift();
+    while (restLines.length && !restLines[restLines.length - 1].trim()) restLines.pop();
+
+    return { lock: lockLines.join("\n").trim(), rest: restLines.join("\n").trim() };
 }
 
 /**
@@ -268,9 +295,13 @@ export function splitChanganAssetLockBlock(text: string): ChanganAssetLockSplit 
  * 尾部不做激进裁剪：模板末行是「最终目标」的一段话，没有可靠的机器边界，
  * 靠 system 指令约束（模型多吐尾巴比误删正文好补救）。
  *
- * 接回锁定块：从 `original`（发送前的完整原文）里摘出「【资产锁定】」块，
+ * 接回锁定块：从 `original`（发送前的完整原文）里摘出锁定内容，
  * 原样拼在转换结果最前面 —— 单节点弹窗与多选批量两条入口都走这里，
  * 所以两条入口都必须把**完整原文**作为第二个参数传进来。
+ *
+ * 🔴 除了「接回」，这里还会**正向清洗**：模型输出里若又冒出「【资产锁定】」标题或
+ * `@图片N锁定为…` 锁定行（模型凭上下文补写），先整块删掉再锚定标题行 ——
+ * 锁定内容只能有原文那一份，绝不能混进转换结果。
  */
 export function finalizeChanganPrompt(raw: string, original: string): string {
     const { lock } = splitChanganAssetLockBlock(original);
@@ -279,6 +310,11 @@ export function finalizeChanganPrompt(raw: string, original: string): string {
     const fenced = text.match(/^\s*```[^\n]*\n([\s\S]*?)\n?\s*```\s*$/);
     if (fenced) text = fenced[1];
     text = text.trim();
+    if (!text) return lock;
+
+    // 模型若把锁定块 / 锁定行复述进正文（哪怕发送前已经摘掉，模型也可能凭上下文补写），
+    // 一律先删干净：锁定内容只认原文那一份、由程序原样接回，**绝不允许出现在转换结果里**。
+    text = splitChanganAssetLockBlock(text).rest;
     if (!text) return lock;
 
     // 锚到模板标题行（从该行行首截起，丢掉前面的开场白）。

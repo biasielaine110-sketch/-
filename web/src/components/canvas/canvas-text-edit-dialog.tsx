@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ClipboardEvent as ReactClipboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { Button, Input, Modal } from "antd";
+import { App, Button, Input, Modal } from "antd";
 import type { TextAreaRef } from "antd/es/input/TextArea";
 import { LoaderCircle, Minus, Plus, ScrollText, ShieldCheck, SquarePen, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -123,6 +123,7 @@ type CanvasTextEditDialogProps = {
 
 export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize, readOnly = false, onFontSizeChange, h3Optimize = null, violationOptimize = null, promptEdit = null, changanFormat = null, onClose, onSave }: CanvasTextEditDialogProps) {
     const { t } = useTranslation();
+    const { message } = App.useApp();
     const textAreaRef = useRef<TextAreaRef>(null);
     const draftRef = useRef(value);
     const [draft, setDraft] = useState(value);
@@ -288,7 +289,12 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
         }
         const original = draftRef.current;
         const { rest } = splitChanganAssetLockBlock(original);
-        if (!original.trim() || !rest.trim()) return;
+        if (!original.trim()) return;
+        // 整段只有资产锁定内容 → 没有可转换的正文；别让队列回落到原文把锁定行发去转换。
+        if (!rest.trim()) {
+            message.warning(t("canvas.textEditDialog.changanFormatEmptyBody"));
+            return;
+        }
         void startH3OptimizeQueue({
             jobs: [{ ...changanFormat.job, text: original }],
             config: changanFormat.config,
@@ -586,7 +592,7 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                 ) : null}
 
                 {/* 长安异闻录格式（用户 2026-11-23）：点一下就把当前内容转成 13 章节模板；
-                    开头的「【资产锁定】」块原样保留、不参与转换。指令内置、模型恒跟偏好里的文本模型；
+                    @图片N 资产锁定行（含【资产锁定】标题）整段摘出、不参与转换。指令内置、模型恒跟偏好里的文本模型；
                     同 h3 / 违规优化 / 编辑提示词一样跑后台队列，关掉弹窗也会把结果写回节点。 */}
                 {canChanganFormat && changanFormat ? (
                     <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-stone-200 px-2 py-1.5 dark:border-stone-700" data-canvas-changan-format>
