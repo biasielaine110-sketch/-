@@ -2542,7 +2542,10 @@ function normalizeScriptAssetMatchText(value: string): string {
     return String(value || "")
         .replace(STORY_SCRIPT_ASSET_CODE_PREFIX, "")
         .replace(/[（(][^）)]*[）)]/g, "")
-        .replace(/[\s_\-－·、,，。.：:；;/\\|"'“”‘’「」『』【】\[\]（）()]/g, "")
+        // 🔴 书名号也剥（2026-11-23 用户报障）：模型写道具爱带 `《五年高考三年模拟》`，
+        // 资产条 / 资产图标题却是裸名 `五年高考三年模拟` —— 书名号不剥就被判成两个资产，
+        // 同一件日历道具出两条锁定、两张参考图。与「」『』【】同层处理。
+        .replace(/[\s_\-－·、,，。.：:；;/\\|"'“”‘’「」『』【】《》〈〉\[\]（）()]/g, "")
         .toLowerCase();
 }
 
@@ -3522,7 +3525,13 @@ export function scriptCellNameLockIds(locks: unknown, columnKey: unknown, value:
         return union.slice(0, names.length);
     }
     const label = scriptNameLockName(value);
-    return label ? scriptNameLockIds(locks, label) : [];
+    // 🔴 单名字也**截到 1 张**（2026-11-23 用户报障「一个资产挂载 4 张图」）：锁的语义是
+    // 「表里凡是出现这个名字的镜头都用**这张图**」（锁定按钮的原文就是单数）—— 同一个名字
+    // 反复链接 / 反复生成会往锁里攒好几张（`addScriptNameLockForCell` 并集、生成不撤旧锁），
+    // 不截的话每一格兜底都把整坨锁全落下来（截图实样：一格 4 张日历）。取**先锁的那张**
+    // （最早的 = 用户当初点名要的），后攒进来的重复生成不向后传染。
+    // 格子自己挂的图不受影响（`cellIds` 优先、几张算几张）；一格多名仍按上面 N = 名字数截。
+    return label ? scriptNameLockIds(locks, label).slice(0, 1) : [];
 }
 
 /**
@@ -5218,9 +5227,18 @@ export function buildVideoNodePrompt(videoPrompt: unknown): string {
     return storyScriptCellText(videoPrompt);
 }
 
+/**
+ * 模型幻觉出来的「附件引用」杂质（用户 2026-11-23 报障：分镜表 / 视频提示词里混进
+ * `@image#1:Clipboard_Screenshot.png`、`@image#2:Clipboard_Screenshot-1.png`）：
+ * 画布自己的引用语法只有 `@图片N`（i18n `imageReferences.label`），`@image#N[:文件名]`
+ * 是模型把对话附件的文件名当引用语法抄进了正文 —— 对下游生图 / 生视频毫无意义，
+ * 还会被铺链路原样带进视频节点提示词。解析行时一律剥掉（token 前的空格一并吃掉）。
+ */
+const STORY_SCRIPT_ATTACHMENT_TOKEN = /\s*@image\s*#\s*\d+(?:\s*[:：]\s*\S+)?/g;
+
 function toText(value: unknown): string {
     if (value === null || value === undefined) return "";
-    if (typeof value === "string") return value.trim();
+    if (typeof value === "string") return value.replace(STORY_SCRIPT_ATTACHMENT_TOKEN, "").trim();
     if (typeof value === "number" || typeof value === "boolean") return String(value);
     if (Array.isArray(value)) return value.map(toText).filter(Boolean).join("、");
     if (typeof value === "object") return Object.values(value as Record<string, unknown>).map(toText).filter(Boolean).join("、");
