@@ -199,6 +199,7 @@ import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { CHANGAN_FORMAT_SYSTEM, finalizeChanganPrompt, splitChanganAssetLockBlock } from "@/lib/canvas/changan-prompt-format";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, buildScriptAssetNameLockPrompt, withScriptAssetBinding, withVideoAssetLockBinding } from "@/lib/canvas/script-asset-binding";
+import { buildScriptBlockingPrompt, withScriptBlockingBlock } from "@/lib/canvas/script-blocking";
 import {
     applyScriptAssetDirectDecorations,
     buildScriptAssetBatchMounts,
@@ -11266,10 +11267,14 @@ function AtelierCanvasPage() {
                 // 用**全体成员**的格子（合并段里每一镜的音色都要能查到），拼资产锁定时追加到人物行。
                 const voiceOf = createStoryScriptVoiceLookup(members.map((member) => member.row), presetId, scriptExtras);
                 const videoBinding = videoAssetBindingOf([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf, voiceOf);
+                // 人物站位描述（用户 2026-11-23 第 06 条）：本段各镜的「人物站位描述」整合成一块，
+                // 放在**镜头内容上面**。合并镜头在这里做句级去重（空间底子只留一份、只追加真的改了走位的句子），
+                // 免得三镜站位原样拼三遍把运镜指令淹掉。
+                const blockingBlock = buildScriptBlockingPrompt(members.map((member) => member.row.blocking_detail));
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
                 // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产锁定块（带「【资产锁定】」标题，
-                // 用户 2026-11-23 晚间第 01 条）在前、禁止项 / 强制声明收尾。
-                const videoPrompt = withVideoComplianceSuffix(withVideoAssetLockBinding(baseVideoPrompt, videoBinding));
+                // 用户 2026-11-23 晚间第 01 条）在最上、人物站位块其次、镜头内容其后、禁止项 / 强制声明收尾。
+                const videoPrompt = withVideoComplianceSuffix(withVideoAssetLockBinding(withScriptBlockingBlock(baseVideoPrompt, blockingBlock), videoBinding));
                 // 单镜模式：10/15 秒 = 锁定成片秒数（不抄表里旧值，否则「选了 10 秒铺出来还是 3 秒」）；
                 // 5 秒 = 上限（表里更短就按表里）。合并模式仍按本段各镜 duration 累加。
                 // ⚠️ 判据是 `merged`（本段真的有多镜）而**不是**档位：手动合并组在「单镜」档位下也是多镜，
@@ -13264,10 +13269,13 @@ function AtelierCanvasPage() {
                 videoNode.metadata?.prompt || "",
                 orderedLinkIds.map((id) => nodesRef.current.find((node) => node.id === id)?.title || "").filter(Boolean),
             );
+            // 人物站位描述（用户 2026-11-23 第 06 条）：这一镜的站位块写在镜头内容上面，
+            // 资产锁定块再叠到它上面（顺序与整条铺链路一致）。
+            const blockingBlock = buildScriptBlockingPrompt([row.blocking_detail]);
             // 合规后缀（用户 2026-11-11 第 02 条）：与一键铺链路同口径，拼在资产锁定块之后（= 最后）。
             // 资产锁定块最前面带「【资产锁定】」标题（用户 2026-11-23 晚间第 01 条，与整条铺链路同口径）。
             // MochiAni 节点的 `mochianiPrompt` 是双写过来的初值，这里一起换掉，否则窗口里显示的还是旧版。
-            const boundShotPrompt = withVideoComplianceSuffix(withVideoAssetLockBinding(variantShotPrompt, videoBinding));
+            const boundShotPrompt = withVideoComplianceSuffix(withVideoAssetLockBinding(withScriptBlockingBlock(variantShotPrompt, blockingBlock), videoBinding));
             videoNode.metadata = {
                 ...videoNode.metadata,
                 prompt: boundShotPrompt,

@@ -184,6 +184,12 @@ export const STORY_SCRIPT_CLASSIC_COLUMNS: StoryScriptColumn[] = [
     { key: "shot", label: "景别", width: 120 },
     { key: "character_action", label: "角色动作", width: 190 },
     { key: "blocking", label: "人物站位", width: 230 },
+    // 人物站位描述（用户 2026-11-23 第 06 条）：`blocking` 是「谁在画面哪侧」的短句（还要拿去匹配站位图资产），
+    // 这一列是同一件事的**完整展开**：空间底子 → 每个人在哪、朝哪、手里拿什么 → 机位轴线 → 门窗方位。
+    // 铺视频链路时整段写进视频节点提示词的「【人物站位】」块（在镜头内容上面，合并镜头会先整合去重）。
+    // ⚠️ `blocking` 会生成「站位图」资产；这一列**不是资产列**（不在 `SCRIPT_ASSET_COLUMN_SPECS` 里）：
+    // 它只当文本用，不出图、不挂图位、不参与按名匹配。
+    { key: "blocking_detail", label: "人物站位描述", width: 330 },
     { key: "emotion", label: "情绪", width: 150 },
     { key: "scene_tags", label: "场景标签", width: 150 },
     { key: "lighting_mood", label: "光影氛围", width: 170 },
@@ -221,6 +227,8 @@ export const STORY_SCRIPT_STORYBOARD_COLUMNS: StoryScriptColumn[] = [
     { key: "prop_description", label: "道具描述", width: 200 },
     { key: "character_action", label: "主体动作", width: 200 },
     { key: "blocking", label: "人物站位", width: 210 },
+    // 与 classic 同义：人物站位的完整展开（空间底子 + 每个人位置朝向 + 机位轴线）。
+    { key: "blocking_detail", label: "人物站位描述", width: 330 },
     // 与 classic 同义：这一镜每个角色的音色（`角色名：音色描述`）。storyboard 没有角色列，
     // 所以这一格**必须带名字**，铺视频链路才查得到是谁的声音。
     { key: "character_voice", label: "角色音色描述", width: 240 },
@@ -265,6 +273,33 @@ export const STORY_SCRIPT_VOICE_REFERENCE_BULLETS = STORY_SCRIPT_VOICE_REFERENCE
 export const STORY_SCRIPT_VOICE_REFERENCE_BLOCK = `格式骨架：${STORY_SCRIPT_VOICE_FORMAT_SKELETON}。下面三条是**写法范例**（🔴 只示范结构与颗粒度，**禁止照抄原句**；每个角色必须按他/她自己的年龄、性别、身份、身体状况、口音重新写）：
 ${STORY_SCRIPT_VOICE_REFERENCE_BULLETS}
 🔴 严禁把上面任何一条范例的整句或半句原样搬进表格；所有角色都用同一段范例文字 = 不合格。同一个角色的写法可以在全表复用，但不同角色之间必须听得出差别。`;
+
+/**
+ * 「人物站位描述」的**写法骨架**（用户 2026-11-23 第 06 条）。
+ *
+ * 这一列是 `blocking`（人物站位，短句，还要拿去匹配站位图资产）的**完整展开**：
+ * 空间底子 → 固定物件 → 每个角色在哪朝哪拿什么 → 机位轴线 → 门窗方位。
+ * 🔴 与音色那份同理：骨架管「怎么写」，范例只示范「写到多细」，**禁止照抄范例里的人和场地**。
+ */
+export const STORY_SCRIPT_BLOCKING_FORMAT_SKELETON =
+    "`<场景类型>，<日/夜>，<主要家具与朝向、贴哪面墙>；<光源从哪来、落在哪>。<人物A>：画面<左/右/中>、<前/中/后景>，<身体朝向>，<脸朝哪>，<衣着/外观状态>，<手里拿什么>。<人物B>：同上。<机位轴线方向>，始终 <谁在画面左 / 谁在画面右>；<越肩/反打方向>；<门、窗在哪面墙>。`（写成一整段连贯文字，不要拆成 5 行清单）";
+
+/** 一条**写法**范例（用户 2026-11-23 原话）。🔴 只示范颗粒度，禁止照抄其中的人名 / 场地。 */
+export const STORY_SCRIPT_BLOCKING_REFERENCE_EXAMPLES = [
+    "病房内景，日，病床横置，床头在画面左、紧靠窗，窗外厚密的树冠把碎金阳光漏在被面和床尾地板上；床头柜贴着床头左侧，柜面放着水杯、抽纸和台灯。姜稚雅半靠在枕头上，头在画面左，上身朝右，脸转向画面左，光头，薄被盖到胸口。约翰医生站在床头柜与床之间的画面左侧，白大褂敞着，浅蓝衬衫配深藏青领带，右手攥着检查报告，面朝她，视线向下。机位轴线沿病床横轴，始终医生在画面左、姜稚雅在画面右；越她右肩拍医生，反打从医生身后拍她；门在画面左后方的墙上。",
+];
+
+export const STORY_SCRIPT_BLOCKING_REFERENCE_BULLETS = STORY_SCRIPT_BLOCKING_REFERENCE_EXAMPLES.map((line) => `  - ${line}`).join("\n");
+
+/**
+ * 范例块的统一说明（先骨架、再范例、末尾再钉一次禁令）。
+ *
+ * 🔴 结尾那句同样不能省：只写开头时模型会把范例当候选文案整段搬走（音色那份踩过同一个坑）。
+ */
+export const STORY_SCRIPT_BLOCKING_REFERENCE_BLOCK = `格式骨架：${STORY_SCRIPT_BLOCKING_FORMAT_SKELETON}
+下面是一条**写法范例**（🔴 只示范颗粒度与信息量，**禁止照抄原句**；场景、家具、人物一律换成本镜自己的）：
+${STORY_SCRIPT_BLOCKING_REFERENCE_BULLETS}
+🔴 严禁把范例里的「病房 / 病床 / 姜稚雅 / 约翰医生」等具体内容搬进无关镜头；范例只用来看「要写到多细」。同一个场景在相邻几镜里，空间底子（家具朝向、光源、门窗、机位轴线）要重复写、保持一致，变化的只是人物的位置与动作。`;
 
 /**
  * 表格横向宽度的放大倍数（用户 2026-10-19 要求「分镜表的横向宽度增宽 1 倍」）。
@@ -409,7 +444,11 @@ Example style for \`video_motion_prompt\`:
 ## Blocking continuity (人物站位)
 - Keep the previous row's \`blocking\` (人物站位) unless this shot's action explicitly moves a character.
 - When a character moves, describe the change from the previous position, e.g. \`从右侧沙发起身，走向画面左侧窗边\`.
-- Never silently teleport a character to a new position between two consecutive shots of the same scene.`;
+- Never silently teleport a character to a new position between two consecutive shots of the same scene.
+- \`blocking_detail\` (人物站位描述) is the long-form version of \`blocking\`, used as the video prompt's staging block: room type + day/night + main furniture and which wall it hugs + where the light falls; then **each character**: frame side / depth (foreground-midground-background) / body facing / face direction / look and clothing state / what they hold; then the **camera axis** (who always stays screen-left vs screen-right), over-the-shoulder and reverse angles, and where the doors and windows are. One flowing paragraph of ~150-260 Chinese characters, **not** a bullet list. Skeleton: ${STORY_SCRIPT_BLOCKING_FORMAT_SKELETON}
+  The line below is a **style sample**: 🔴 learn only its granularity, **never copy its room, furniture or names** — write this shot's own staging at the same level of detail:
+${STORY_SCRIPT_BLOCKING_REFERENCE_BULLETS}
+  🔴 Keep the spatial base (furniture orientation, light, doors/windows, camera axis) identical across shots of the same scene; only the characters' positions and actions change.`;
 
 /** JSON 输出契约（本仓无 pydantic 结构化输出，改用显式 JSON 约定 + 客户端解析）。 */
 export const STORY_SCRIPT_JSON_CONTRACT = `## Output format (strict)
@@ -433,6 +472,7 @@ Output one JSON object and nothing else — no markdown fence, no explanation:
       "shot": "…",
       "character_action": "…",
       "blocking": "…",
+      "blocking_detail": "…",
       "emotion": "…",
       "scene_tags": "…",
       "lighting_mood": "…",
@@ -448,7 +488,7 @@ Output one JSON object and nothing else — no markdown fence, no explanation:
 如果源稿与要求不完全一致（镜数 / 镜号对不上、缺少某些字段）：**不要反问、不要返回空 \`rows\`** —— 按源稿实际镜数生成完整表格，\`shot_no\` 从 1 起连续递增，把这一句疑问写进 \`title\` 尾部（例如 \`（按源稿 31 镜生成）\`）。`;
 
 const STORY_SCRIPT_COMMON_RULES = [
-    "输出字段必须覆盖：镜号、时长、画面描述、角色1、角色描述1、角色2、角色描述2、角色音色描述、场景、场景描述、道具、道具描述、景别、角色动作、人物站位、情绪、场景标签、光影氛围、音效、对白、风格提示词、分镜提示词、视频运动提示词。",
+    "输出字段必须覆盖：镜号、时长、画面描述、角色1、角色描述1、角色2、角色描述2、角色音色描述、场景、场景描述、道具、道具描述、景别、角色动作、人物站位、人物站位描述、情绪、场景标签、光影氛围、音效、对白、风格提示词、分镜提示词、视频运动提示词。",
     "如果用户给了额外要求，也必须一起遵守。",
     "请严格按照影视制片表格思路输出，不要输出散文摘要。",
     "请让分镜提示词和视频运动提示词都采用括号分段 + 号连接的格式。",
@@ -471,6 +511,7 @@ const STORY_SCRIPT_STYLE_HINT_COMMON = [
     "- 角色描述尽量写成 `[角色ID: ...]` 形式",
     "- 「角色音色描述」写这一镜每个角色**听起来是什么声音**（性别年龄感、音高、语速、音色质感、口音、情绪色彩），写成 `角色名：音色描述`（多个用 `｜` 分隔，格式即 `角色名：<音色描述>｜角色名：<音色描述>`）；同一个角色的音色用词在多镜里保持一致；这一镜没人说话就写 `无`",
     `- 🔴 「角色音色描述」要写到「**情绪变化时声音怎么变**」这一层（年龄声线 + 音色质感 + 语速节奏 + 情绪下的具体发声变化），不要只写一句「温和中年女声，语速偏慢」。${STORY_SCRIPT_VOICE_REFERENCE_BLOCK}`,
+    `- 🔴 「人物站位描述」是「人物站位」那一格的**完整展开**（「人物站位」仍要写一句短的，它还要拿去匹配站位图资产）：场景类型 + 日/夜 + 主要家具与朝向 + 光源 → 每个角色的画面位置 / 前后景 / 身体朝向 / 脸朝哪 / 衣着外观 / 手里拿什么 → 机位轴线与越肩、反打方向 → 门窗在哪面墙。写成一整段连贯文字（约 150～260 字），不要拆成清单。${STORY_SCRIPT_BLOCKING_REFERENCE_BLOCK}`,
     "- 🔴 **同一个造型必须用完全一致的角色名；同一个人换了衣服 / 造型，就写成 `角色名（造型）`**（`叶辰（便服）` 家里、`叶辰（校服）` 学校、`叶辰（西服）` 正式场合）。角色名就是资产键 —— 同名不同造型不加括号区分，后面所有镜头都会被套成同一套衣服。括号里只写造型词本身（两三个字：`便服` / `校服` / `西服` / `睡衣` / `礼服`），同一套造型在全表用同一个词，不要带描述",
     "- `（造型）` 只用来区分资产：台词的说话人只写本体名（`叶辰`）；**视频运动提示词里提到这个人时写全名 `叶辰（校服）`**，让每一镜的画面明确用哪套服装的资产；分镜提示词里可写本体名，服装交给角色描述列与参考图",
     "- 一镜里出现两个角色时，第二个填进角色2 / 角色描述2",
@@ -516,10 +557,11 @@ export const STORY_SCRIPT_STORYBOARD_SYSTEM_PROMPT = `你是一名资深分镜�
 -【质量标准】画面描述必须精确具体，包含主体/背景/道具/光线方向/色调氛围，禁止模糊笼统；完整参照创意大纲的核心信息和情绪弧线
 
 ## 本仓输出约定（必须遵守）
-- 表头必须使用下列中文列名，且顺序一致：镜号、时长、景别、画面描述、关键视觉、风格提示词、场景、场景描述、道具、道具描述、主体动作、人物站位、角色音色描述、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词
-- 输出 Markdown 表格；也可以改输出一个 JSON 对象：{"title":"标题","rows":[{…}]}，键名用上表列名对应的英文（shot_no / duration / shot / visual_description / key_visual / style_prompt / scene / scene_description / prop / prop_description / character_action / blocking / character_voice / camera_movement / dialogue / sound / transition / emotion）
+- 表头必须使用下列中文列名，且顺序一致：镜号、时长、景别、画面描述、关键视觉、风格提示词、场景、场景描述、道具、道具描述、主体动作、人物站位、人物站位描述、角色音色描述、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词
+- 输出 Markdown 表格；也可以改输出一个 JSON 对象：{"title":"标题","rows":[{…}]}，键名用上表列名对应的英文（shot_no / duration / shot / visual_description / key_visual / style_prompt / scene / scene_description / prop / prop_description / character_action / blocking / blocking_detail / character_voice / camera_movement / dialogue / sound / transition / emotion）
 - 镜号用 1、2、3 这样的整数（不要写 S01）；时长用整数秒（不要写 3.5秒）
 - 同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位（blocking）写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）
+- 🔴 **人物站位描述**（blocking_detail）是「人物站位」的完整展开（那一格仍写一句短的，它还要匹配站位图资产）：场景类型 + 日/夜 + 主要家具与朝向 + 光源 → 每个角色的画面位置 / 前后景 / 身体朝向 / 脸朝哪 / 衣着外观 / 手里拿什么 → 机位轴线与越肩、反打方向 → 门窗在哪面墙。写成一整段连贯文字（约 150～260 字），不要拆成清单。${STORY_SCRIPT_BLOCKING_REFERENCE_BLOCK}
 - 🔴 **角色音色描述**（character_voice）写这一镜每个角色「听起来是什么声音」（性别年龄感、音高、语速、音色质感、口音、情绪色彩），必须写成 \`角色名：音色描述\`（多个用 \`｜\` 分隔，格式即 \`角色名：<音色描述>｜角色名：<音色描述>\`）；同一个角色的音色用词在全表保持一致；这一镜没人说话写 \`无\`
 - 🔴 **角色音色描述**要写到「情绪变化时声音怎么变」这一层（年龄声线 + 音色质感 + 语速节奏 + 情绪下的具体发声变化），不要只写一句「温和中年女声，语速偏慢」。${STORY_SCRIPT_VOICE_REFERENCE_BLOCK}
 - 🔴 道具列**只写这一镜真正依赖、且需要跨镜保持一致的关键道具**，**一镜最多 3 件**（多件用 \`、\` 分隔），没有就写 \`无\`；**每写一件就会单独生成一张资产图** —— 餐具、摆件、纸巾、包装、背景小物这类次要道具不写进道具列，改用一句话写进「画面描述」（这一列会进分镜提示词，画面才带得出来），「道具描述」只补材质与状态
@@ -528,13 +570,14 @@ export const STORY_SCRIPT_STORYBOARD_SYSTEM_PROMPT = `你是一名资深分镜�
 - 某一格没有内容时写 \`无\``;
 
 const STORY_SCRIPT_STORYBOARD_COMMON_RULES = [
-    "输出必须是一张表格，一镜一行，列名与顺序严格按：镜号、时长、景别、画面描述、关键视觉、风格提示词、场景、场景描述、道具、道具描述、主体动作、人物站位、角色音色描述、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词。",
+    "输出必须是一张表格，一镜一行，列名与顺序严格按：镜号、时长、景别、画面描述、关键视觉、风格提示词、场景、场景描述、道具、道具描述、主体动作、人物站位、人物站位描述、角色音色描述、镜头运动、台词/旁白、音效/配乐、转场方式、情绪关键词。",
     "如果用户给了额外要求，也必须一起遵守。",
     "总时长须与创意大纲一致；景别遵循「远→近→远」呼吸节奏，避免连续 3 个以上相同景别。",
     "镜头运动要静动交替，并写清推/拉/摇/移/跟/升/降/固定/手持以及速度。",
     "画面连贯衔接，无割裂感。",
     "画面描述必须精确具体，包含主体/背景/道具/光线方向/色调氛围，且要精确到可直接作为图片生成 prompt。",
     "同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位要写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）。",
+    `人物站位描述（blocking_detail）写到「整个空间能照着摆出来」这一层：场景类型 + 日/夜 + 主要家具与朝向 + 光源 → 每个角色的画面位置 / 前后景 / 身体朝向 / 脸朝哪 / 手里拿什么 → 机位轴线与越肩、反打方向 → 门窗在哪面墙；写成一整段（约 150～260 字），不要拆成清单。${STORY_SCRIPT_BLOCKING_REFERENCE_BLOCK}`,
     "道具写完整器物：一个物体连同它的零件 / 配件算一件（`手机、手机壳、屏幕` 只写 `手机`），不要把同一个整体的零件拆成多件。",
     "场景列按地点写、不按房间拆：同一栋房子 / 同一间公寓 / 同一家店里的客厅、餐厅、卧室、玄关、门口、走廊都算同一个场景，统一写这处空间的名字；场景列每多一个名字就多生成一张场景图，不大的空间一张空镜就够用，具体拍哪一块写进「画面描述」。只有真的换了地点才另起场景名。",
     "风格提示词写这一镜的影像风格（影调、质感、颗粒、参考片种/导演），同一场戏保持一致；不需要时写 `无`。",
