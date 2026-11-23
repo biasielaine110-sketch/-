@@ -234,6 +234,39 @@ export const STORY_SCRIPT_STORYBOARD_COLUMNS: StoryScriptColumn[] = [
 export const DEFAULT_STORY_SCRIPT_PROMPT = "根据我上传的剧本生成一个完整的故事脚本";
 
 /**
+ * 「角色音色描述」的**写法骨架**（用户 2026-11-23 第 05 条）。
+ *
+ * 🔴 这是**格式**，不是文案：三段范例只示范「怎么写」，描述文字必须按该角色在这部戏里的
+ * 年龄 / 性别 / 身份 / 健康状况 / 口音现写，**禁止照抄范例原句**。照抄的结果是全剧所有角色
+ * 共用同一把嗓子 —— 比不写还糟（用户 2026-11-23 晚点名：「仅参考其模板格式，别照抄文字内容」）。
+ *
+ * 骨架 = 年龄与声线 → 基础音色质感 → 语速节奏 ；（情绪 / 情境一变）声音具体怎么变。
+ * 分号前定「常态声音」，分号后定「情绪层」—— 用户要的正是后半段那个颗粒度。
+ */
+export const STORY_SCRIPT_VOICE_FORMAT_SKELETON =
+    "`<年龄><性别>声线，音色<质感>；语速<节奏>，<情境A>时<声音具体怎么变>，<情境B>时<声音具体怎么变>`（一句话，分号前后各一段）";
+
+/** 三段**写法**范例（用户 2026-11-23 给的原话）。🔴 只示范颗粒度与结构，禁止原句照抄。 */
+export const STORY_SCRIPT_VOICE_REFERENCE_EXAMPLES = [
+    "二十多岁的年轻男声，音色清亮温润，咬字圆润带一点唱歌式的共鸣；语速中等偏快，哄人时尾音上扬带笑意，认真时会把声音压低、放慢半拍。",
+    "二十出头的清软女声，中低音区略带气声，音色干净偏薄；病中语速慢、句尾轻而略上扬，力气不足时气息会断在字与字之间，压住情绪时声音发紧、接近气音。",
+    "四十岁上下的低沉男声，音色温厚，语速偏慢，说中文带轻微美式英语口音，重音落在句首；传达坏消息时会先停顿半拍再放轻音量，句尾自然下沉。",
+];
+
+/** 上面三段范例的缩进列表形态（多套提示词共用，避免各自 map 一遍）。 */
+export const STORY_SCRIPT_VOICE_REFERENCE_BULLETS = STORY_SCRIPT_VOICE_REFERENCE_EXAMPLES.map((line) => `  - ${line}`).join("\n");
+
+/**
+ * 范例块的**统一说明行**：先说清「这是格式」，再贴三条范例，末尾再钉一遍禁令。
+ *
+ * 🔴 两处「禁止照抄」不能省：只在开头提一句，模型很容易把范例当候选文案挑一条填进去
+ * （实测复现）；前后各钉一次才稳。所有插入点都用这一份，别各写各的。
+ */
+export const STORY_SCRIPT_VOICE_REFERENCE_BLOCK = `格式骨架：${STORY_SCRIPT_VOICE_FORMAT_SKELETON}。下面三条是**写法范例**（🔴 只示范结构与颗粒度，**禁止照抄原句**；每个角色必须按他/她自己的年龄、性别、身份、身体状况、口音重新写）：
+${STORY_SCRIPT_VOICE_REFERENCE_BULLETS}
+🔴 严禁把上面任何一条范例的整句或半句原样搬进表格；所有角色都用同一段范例文字 = 不合格。同一个角色的写法可以在全表复用，但不同角色之间必须听得出差别。`;
+
+/**
  * 表格横向宽度的放大倍数（用户 2026-10-19 要求「分镜表的横向宽度增宽 1 倍」）。
  *
  * 为什么是「放大每一列」而不是「把节点拉宽」：节点的自动适配有 2200px 封顶
@@ -297,7 +330,10 @@ You generate a structured story-script table from an uploaded script excerpt.
 - \`scene_tags\`, \`lighting_mood\`, \`sound\` should all be concrete and film-facing.
 - \`character_1\` should prefer a stable role identifier if inferable, such as \`沈昭昭_现代\` or \`沈昭昭_古装\`.
 - \`character_description_1\` should prefer bracketed character-card format, e.g. \`[沈昭昭_现代: 28岁女性，面色苍白，神情疲惫，身穿现代简约职业装……]\`.
-- \`character_voice\` (角色音色描述) describes **how each character in this shot sounds**: gender / age timbre, pitch, pace, texture, accent, emotional colour — written as \`角色名：音色描述\`, several characters joined by \`｜\` (e.g. \`张园长：温和中年女声，语速偏慢｜宁宁：清亮童声，语速偏快\`). Keep one character's voice words **identical across rows**; write \`无\` when nobody speaks in this shot.
+- \`character_voice\` (角色音色描述) describes **how each character in this shot sounds**: gender / age timbre, pitch, pace, texture, accent, emotional colour — written as \`角色名：音色描述\`, several characters joined by \`｜\` (format only: \`角色名：<voice description>｜角色名：<voice description>\`). Keep one character's voice words **identical across rows**; write \`无\` when nobody speaks in this shot.
+- Match the depth of a professional voice brief: age + timbre + texture + pace, **plus how the voice changes with emotion**. Format skeleton: \`<age><gender> voice, timbre <texture>; pace <rhythm>, when <situation A> the voice <how it changes>, when <situation B> ...\`. The three lines below are **style samples**: 🔴 learn only their structure and granularity, **never copy their wording** — write every character's description from scratch from that character's own age, gender, role, health and accent ("哄人时尾音上扬带笑意" style clauses are what to imitate, not the words themselves):
+${STORY_SCRIPT_VOICE_REFERENCE_BULLETS}
+🔴 Copying any sample sentence (or half of one) into the table is a failure; two different characters must never end up with the same voice wording.
 - \`scene\` should be a short, stable location name (e.g. \`深夜办公室\`, \`盛唐宫殿·内\`), reused verbatim wherever the same place appears.
 - \`scene_description\` should describe the location concretely enough to be used directly as an image-generation prompt.
 - \`prop\` should name **only the key object(s) this shot really depends on**, at most **3 per shot**, joined by \`、\` when several; \`prop_description\` describes their look, material and state.
@@ -433,7 +469,8 @@ const STORY_SCRIPT_STYLE_HINT_COMMON = [
     "- 单镜时长以任务里的「时长要求」为准；没特别指定时按「每 15 秒 4 个镜头」（每镜 3~4 秒），绝不写 1~2 秒的碎镜",
     "- 景别写法类似 `近景 / 特写`、`中景 / 仰视`",
     "- 角色描述尽量写成 `[角色ID: ...]` 形式",
-    "- 「角色音色描述」写这一镜每个角色**听起来是什么声音**（性别年龄感、音高、语速、音色质感、口音、情绪色彩），写成 `角色名：音色描述`（多个用 `｜` 分隔，如 `张园长：温和中年女声，语速偏慢｜宁宁：清亮童声，语速偏快`）；同一个角色的音色用词在多镜里保持一致；这一镜没人说话就写 `无`",
+    "- 「角色音色描述」写这一镜每个角色**听起来是什么声音**（性别年龄感、音高、语速、音色质感、口音、情绪色彩），写成 `角色名：音色描述`（多个用 `｜` 分隔，格式即 `角色名：<音色描述>｜角色名：<音色描述>`）；同一个角色的音色用词在多镜里保持一致；这一镜没人说话就写 `无`",
+    `- 🔴 「角色音色描述」要写到「**情绪变化时声音怎么变**」这一层（年龄声线 + 音色质感 + 语速节奏 + 情绪下的具体发声变化），不要只写一句「温和中年女声，语速偏慢」。${STORY_SCRIPT_VOICE_REFERENCE_BLOCK}`,
     "- 🔴 **同一个造型必须用完全一致的角色名；同一个人换了衣服 / 造型，就写成 `角色名（造型）`**（`叶辰（便服）` 家里、`叶辰（校服）` 学校、`叶辰（西服）` 正式场合）。角色名就是资产键 —— 同名不同造型不加括号区分，后面所有镜头都会被套成同一套衣服。括号里只写造型词本身（两三个字：`便服` / `校服` / `西服` / `睡衣` / `礼服`），同一套造型在全表用同一个词，不要带描述",
     "- `（造型）` 只用来区分资产：台词的说话人只写本体名（`叶辰`）；**视频运动提示词里提到这个人时写全名 `叶辰（校服）`**，让每一镜的画面明确用哪套服装的资产；分镜提示词里可写本体名，服装交给角色描述列与参考图",
     "- 一镜里出现两个角色时，第二个填进角色2 / 角色描述2",
@@ -483,7 +520,8 @@ export const STORY_SCRIPT_STORYBOARD_SYSTEM_PROMPT = `你是一名资深分镜�
 - 输出 Markdown 表格；也可以改输出一个 JSON 对象：{"title":"标题","rows":[{…}]}，键名用上表列名对应的英文（shot_no / duration / shot / visual_description / key_visual / style_prompt / scene / scene_description / prop / prop_description / character_action / blocking / character_voice / camera_movement / dialogue / sound / transition / emotion）
 - 镜号用 1、2、3 这样的整数（不要写 S01）；时长用整数秒（不要写 3.5秒）
 - 同一场景 / 同一道具在多镜里复用完全一致的名字；人物站位（blocking）写清谁在画面左 / 右 / 前 / 后景、朝向与彼此远近，并保持与上一镜一致（人物确实移动时才改）
-- 🔴 **角色音色描述**（character_voice）写这一镜每个角色「听起来是什么声音」（性别年龄感、音高、语速、音色质感、口音、情绪色彩），必须写成 \`角色名：音色描述\`（多个用 \`｜\` 分隔，如 \`张园长：温和中年女声，语速偏慢｜宁宁：清亮童声，语速偏快\`）；同一个角色的音色用词在全表保持一致；这一镜没人说话写 \`无\`
+- 🔴 **角色音色描述**（character_voice）写这一镜每个角色「听起来是什么声音」（性别年龄感、音高、语速、音色质感、口音、情绪色彩），必须写成 \`角色名：音色描述\`（多个用 \`｜\` 分隔，格式即 \`角色名：<音色描述>｜角色名：<音色描述>\`）；同一个角色的音色用词在全表保持一致；这一镜没人说话写 \`无\`
+- 🔴 **角色音色描述**要写到「情绪变化时声音怎么变」这一层（年龄声线 + 音色质感 + 语速节奏 + 情绪下的具体发声变化），不要只写一句「温和中年女声，语速偏慢」。${STORY_SCRIPT_VOICE_REFERENCE_BLOCK}
 - 🔴 道具列**只写这一镜真正依赖、且需要跨镜保持一致的关键道具**，**一镜最多 3 件**（多件用 \`、\` 分隔），没有就写 \`无\`；**每写一件就会单独生成一张资产图** —— 餐具、摆件、纸巾、包装、背景小物这类次要道具不写进道具列，改用一句话写进「画面描述」（这一列会进分镜提示词，画面才带得出来），「道具描述」只补材质与状态
 - 🔴 道具写**完整器物**：一个物体连同它的零件、配件、内部小件算**一件**（\`手机、手机壳、屏幕\` → 只写 \`手机\`；\`自行车、车把、车座、车轮\` → 只写 \`自行车\`），不要把同一个整体的零件拆成多件、也不要给零件单独起名
 - 🔴 场景列**按地点写、不按房间拆**：同一栋房子 / 同一间公寓 / 同一家店里的客厅、餐厅、卧室、厨房、玄关、门口、走廊、阳台，都属于同一个场景，统一写这处空间的名字（\`林家老宅\`），不要写成 \`林家客厅\` / \`林家餐厅\` / \`林家玄关\`。**场景列每多一个名字就多生成一张场景图**，不大的空间一张空镜就够用；具体拍这个空间的哪一块写在「画面描述 / 分镜提示词」里。只有真的换了地点（换住宅、换街区、室内转室外）才另起场景名
@@ -500,6 +538,7 @@ const STORY_SCRIPT_STORYBOARD_COMMON_RULES = [
     "道具写完整器物：一个物体连同它的零件 / 配件算一件（`手机、手机壳、屏幕` 只写 `手机`），不要把同一个整体的零件拆成多件。",
     "场景列按地点写、不按房间拆：同一栋房子 / 同一间公寓 / 同一家店里的客厅、餐厅、卧室、玄关、门口、走廊都算同一个场景，统一写这处空间的名字；场景列每多一个名字就多生成一张场景图，不大的空间一张空镜就够用，具体拍哪一块写进「画面描述」。只有真的换了地点才另起场景名。",
     "风格提示词写这一镜的影像风格（影调、质感、颗粒、参考片种/导演），同一场戏保持一致；不需要时写 `无`。",
+    `角色音色描述写到「情绪变化时声音怎么变」这一层（年龄声线 + 音色质感 + 语速节奏 + 情绪下的具体发声变化），不要只写一句「温和中年女声，语速偏慢」。${STORY_SCRIPT_VOICE_REFERENCE_BLOCK}`,
     "缺失内容写 `无`。",
 ];
 
