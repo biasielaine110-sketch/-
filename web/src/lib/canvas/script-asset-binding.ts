@@ -58,14 +58,30 @@ export function buildScriptAssetNameLockPrompt(
     allNodes: CanvasNodeData[],
     assetNameOf: (assetNodeId: string) => string | undefined,
     assetRoleOf: (assetNodeId: string) => ScriptAssetRole | null,
+    voiceOf?: ScriptAssetVoiceLookup,
 ) {
     const items = collectScriptAssetPromptItems(orderedAssetNodeIds, allNodes, assetNameOf, assetRoleOf);
     if (!items.length) return "";
-    return items.map((item) => `@${item.label}锁定为${scriptAssetNameLockText(item)}`).join("\n");
+    return items.map((item) => `@${item.label}锁定为${scriptAssetNameLockText(item, voiceOf)}`).join("\n");
+}
+
+/**
+ * 角色音色查表（用户 2026-11-23 第 04 条）：给一个资产名，返回这一镜「角色音色描述」格里的文字。
+ * 查不到返回空串 / undefined —— 一律不追加任何文字（老表铺出来的提示词逐字不变）。
+ */
+export type ScriptAssetVoiceLookup = (name: string) => string | undefined;
+
+/** 把音色描述拼进人物锁定行：`…与温和神态` → `…与温和神态，音色：中年女声，语速偏慢。` */
+function withVoiceText(text: string, voice: string | undefined | null) {
+    const spoken = String(voice || "")
+        .replace(/[。.；;]+$/, "")
+        .trim();
+    if (!spoken) return text;
+    return `${text.replace(/[。.]+$/, "")}，音色：${spoken}。`;
 }
 
 /** 一行「@图片N锁定为<什么>」的文案：按资产分类写死锁定内容（用户 2026-11-22 晚间给的两行模版）。 */
-function scriptAssetNameLockText(item: ScriptAssetPromptItem) {
+function scriptAssetNameLockText(item: ScriptAssetPromptItem, voiceOf?: ScriptAssetVoiceLookup) {
     const name = item.name;
     switch (item.role) {
         case "audio":
@@ -74,9 +90,13 @@ function scriptAssetNameLockText(item: ScriptAssetPromptItem) {
         case "character":
             // `张园长人物参考，锁定角色面容、发型、服装、体型与温和神态。`
             // 名字本身已带「人物 / 角色」→ 不再叠一层，否则「李曼人物人物参考」。
-            return /(人物|角色)$/.test(name)
-                ? `${name}参考，锁定角色面容、发型、服装、体型与温和神态。`
-                : `${name}人物参考，锁定角色面容、发型、服装、体型与温和神态。`;
+            // 2026-11-23 起再接一句角色音色（表里「角色音色描述」那一格，按角色名查）。
+            return withVoiceText(
+                /(人物|角色)$/.test(name)
+                    ? `${name}参考，锁定角色面容、发型、服装、体型与温和神态。`
+                    : `${name}人物参考，锁定角色面容、发型、服装、体型与温和神态。`,
+                voiceOf?.(name),
+            );
         case "scene":
             // `幼儿园一楼走廊场景参考，锁定场景布局，空间，光影氛围。`
             return /场景$/.test(name)
@@ -181,14 +201,15 @@ export function buildScriptAssetLockPrompt(
     allNodes: CanvasNodeData[],
     assetNameOf: (assetNodeId: string) => string | undefined,
     assetRoleOf: (assetNodeId: string) => ScriptAssetRole | null,
+    voiceOf?: ScriptAssetVoiceLookup,
 ) {
     const items = collectScriptAssetPromptItems(orderedAssetNodeIds, allNodes, assetNameOf, assetRoleOf);
     if (!items.length) return "";
-    return ["- **资产锁定：**", ...items.map((item) => `@${item.label}：${scriptAssetLockText(item)}`)].join("\n");
+    return ["- **资产锁定：**", ...items.map((item) => `@${item.label}：${scriptAssetLockText(item, voiceOf)}`)].join("\n");
 }
 
 /** 一行「锁什么」的文案：按资产分类写死，用户 2026-10-27 拍的五种写法（+ 2026-11-15 的音色）。 */
-function scriptAssetLockText(item: ScriptAssetPromptItem) {
+function scriptAssetLockText(item: ScriptAssetPromptItem, voiceOf?: ScriptAssetVoiceLookup) {
     const name = item.name;
     switch (item.role) {
         case "audio":
@@ -196,7 +217,11 @@ function scriptAssetLockText(item: ScriptAssetPromptItem) {
             return `${scriptAssetBindingName(item)}。`;
         case "character":
             // 名字本身已经带「人物 / 角色」（「李曼人物」）→ 不再叠一层，否则「李曼人物人物参考」。
-            return /(人物|角色)$/.test(name) ? `${name}参考，锁定面容、发型、服装、体型。` : `${name}人物参考，锁定面容、发型、服装、体型。`;
+            // 2026-11-23 起再接一句角色音色（与 `buildScriptAssetNameLockPrompt` 同口径）。
+            return withVoiceText(
+                /(人物|角色)$/.test(name) ? `${name}参考，锁定面容、发型、服装、体型。` : `${name}人物参考，锁定面容、发型、服装、体型。`,
+                voiceOf?.(name),
+            );
         case "scene":
             return /场景$/.test(name) ? `${name}参考，锁定空间结构、陈设与光线。` : `${name}场景参考，锁定空间结构、陈设与光线。`;
         case "blocking":

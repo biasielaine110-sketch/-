@@ -63,6 +63,7 @@ import {
     buildVideoNodePrompt,
     collectStoryScriptAssetFillTargets,
     countStoryScriptTemplateShots,
+    createStoryScriptVoiceLookup,
     dedupeStoryScriptAssetDescriptions,
     getStoryScriptColumns,
     getStoryScriptColumnsWithExtras,
@@ -11254,7 +11255,10 @@ function AtelierCanvasPage() {
                 // 音频也要进文案（用户 2026-11-15）：整表音频在前、本段按台词挂的音色在后 ——
                 // **顺序必须与下面写连线的顺序一致**，否则 `@参考音频 N` 的编号与输入框 chip 对不上。
                 const groupAudioList = [...audioRefs.map((asset) => asset.id), ...groupAudioIds];
-                const videoBinding = videoAssetBindingOf([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf);
+                // 角色音色（用户 2026-11-23 第 04 条）：本段各镜「角色音色描述」格 → 角色名查表。
+                // 用**全体成员**的格子（合并段里每一镜的音色都要能查到），拼资产锁定时追加到人物行。
+                const voiceOf = createStoryScriptVoiceLookup(members.map((member) => member.row), presetId, scriptExtras);
+                const videoBinding = videoAssetBindingOf([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf, voiceOf);
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
                 // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产锁定块（带「【资产锁定】」标题，
                 // 用户 2026-11-23 晚间第 01 条）在前、禁止项 / 强制声明收尾。
@@ -13243,7 +13247,10 @@ function AtelierCanvasPage() {
             const links = orderedLinkIds.map((id) => ({ id: nanoid(), fromNodeId: id, toNodeId: videoNode.id }));
             // 资产文案：本镜连进视频节点的图片资产 → 所有套统一「@图片N锁定为XX…参考，锁定<内容>。」多行
             //（编号顺序 = orderedLinkIds 顺序 = 实际写连线的顺序，与视频节点输入框里的 chip 对得上）。
-            const videoBinding = videoAssetBindingOf(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
+            // 角色音色（用户 2026-11-23 第 04 条）：这一镜「角色音色描述」格 → 角色名查表，
+            // 拼资产锁定时追加到人物行（与整条铺链路同口径）。
+            const voiceOf = createStoryScriptVoiceLookup([row], presetId, shotExtras);
+            const videoBinding = videoAssetBindingOf(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf, voiceOf);
             // 裸角色名 → `妈妈（外出）`（用户 2026-11-22 第 02 条，与整条铺链路同口径）：按本镜
             // 真的连上的造型资产改写视频提示词，让这一镜自己锁定哪套衣服，跨镜不再串衣。
             const variantShotPrompt = withScriptVariantNamesInVideoPrompt(
