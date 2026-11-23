@@ -235,6 +235,25 @@ function isApimartBaseUrl(baseUrl: string) {
 }
 
 /**
+ * 通联平台（`online.apipath.top` 等 `*.apipath.top`）：图片分类全是**异步任务** ——
+ * `POST /v1/images/generations`（OpenAI 兼容字段）提交后立刻返回
+ * `{ task_no, status:"processing", progress }`，轮询走平台通用口 `GET /v1/tasks/{task_no}`，
+ * 终态 `succeeded` / `failed`（文档 /app/api-docs「异步任务标准链路」）。
+ * 站点前面的 CDN 对同步响应有 **120 秒读取超时**，gpt-image-2-4k 这类 4K 慢模型同步必超时
+ * （图其实已经生成、费用照扣，前台却拿到 CDN 超时错误页），必须走异步链。
+ */
+function isApipathApiBaseUrl(baseUrl: string) {
+    const value = baseUrl.trim();
+    if (!value) return false;
+    try {
+        const host = new URL(value).host.toLowerCase();
+        return host === "online.apipath.top" || host.endsWith(".apipath.top");
+    } catch {
+        return /(^|\.)(?:apipath\.top)$/i.test(value.replace(/^https?:\/\//i, "").replace(/\/.*$/, ""));
+    }
+}
+
+/**
  * Seedance.nz sells text-to-image and image-edit as separate model ids (zhenzhen-image-g2-t2i vs
  * -i2i, wan-2.7-global-t2i vs -i2i; zhenzhen-image-gk-v15 is t2i-only with a separate -edit model).
  * A t2i model silently ignores the `images` param — the user pays for a generation that never
@@ -925,6 +944,45 @@ async function requestApimartGptImage(config: AiConfig, prompt: string, referenc
     return resolveImageApiResponse(config, response.data, options);
 }
 
+/**
+ * 通联平台（`*.apipath.top`）gpt-image 家族：`POST /v1/images/generations` 提交
+ * （OpenAI 兼容 model / prompt / n / size + 平台标准 `aspect_ratio` / `quality`），
+ * 返回 `{ task_no, status }` 后由 `resolveImageApiResponse` 的异步链接管
+ * （轮询 `/v1/tasks/{task_no}`，见 `resolveImagePollPaths` 的 apipath 分支）。
+ * 参考图按平台标准字段 `reference_images`（公网 URL 字符串数组，模型目录上限 4 张）：
+ * 公网 URL 优先 → provider 上传 → 临时公共图床，全失败兜底 data URL（服务端吃不下会明确报错，
+ * 绝不静默丢参考图随机出图）。
+ */
+async function requestApipathGptImage(config: AiConfig, prompt: string, references: ReferenceImage[], count: number, options?: RequestOptions) {
+    const n = Math.max(1, Math.min(count, 4));
+    const quality = normalizeQuality(config.quality);
+    const body: Record<string, unknown> = {
+        model: config.model,
+        prompt: withSystemPrompt(config, prompt),
+        n,
+        size: resolveGptImageRequestSize(config.model, quality, config.size),
+        aspect_ratio: resolveApimartSize("gpt-image-2", config.size),
+    };
+    if (quality) body.quality = quality;
+    if (references.length) {
+        const refs = references.slice(0, 4);
+        const dataUrls = await Promise.all(refs.map((image) => prepareReferenceDataUrl(image, refs.length)));
+        try {
+            const urls: string[] = [];
+            for (const image of refs) {
+                urls.push(await resolveFetchableReferenceUrl(config, image, refs.length, { ...options, allowProviderUpload: true }));
+            }
+            if (!urls.length) throw new Error(apiText("referenceImageReadFailed"));
+            body.reference_images = urls;
+        } catch (error) {
+            if (options?.signal?.aborted || axios.isCancel(error)) throw error;
+            body.reference_images = dataUrls;
+        }
+    }
+    const response = await postImageJson<ImageApiResponse>(config, "/images/generations", body, options);
+    return resolveImageApiResponse(config, response.data, options);
+}
+
 /** ToAPIs GPT-Image-2.5 (flare/sunburst, incl. -official suffixes). */
 function isToapisGptImage25Model(model: string) {
     return /^gpt-image-2\.5-(flare|sunburst)/i.test(model.trim());
@@ -1556,7 +1614,10 @@ function collectImageList(payload: ImageApiResponse) {
         topOutput,
         typeof dataObject?.result === "string" ? dataObject.result : undefined,
     ].filter((value): value is string => typeof value === "string" && Boolean(value));
-    return [...singles, ...fromLists].map((value) => coerceRawBase64DataUrl(value)).filter(Boolean);
+    const all = [...singles, ...fromLists].map((value) => coerceRawBase64DataUrl(value)).filter(Boolean);
+    // 归一化后的载荷可能把同一份结果同时挂在 payload.result 与 data.result（{code,data:{result:{images}}} 信封），
+    // 两条列表各收一次 → 同一张图出两份。按 URL 去重，保序。
+    return all.filter((value, index) => all.indexOf(value) === index);
 }
 
 /** Make relative result paths (`/files/x.png`) absolute against the channel Base URL origin. */
@@ -1578,6 +1639,7 @@ function absoluteizeImageUrl(url: string, baseUrl?: string) {
 function normalizeImageApiPayload(payload: ImageApiResponse): ImageApiResponse {
     const record = payload as ImageApiResponse & {
         task_id?: string;
+        task_no?: string;
         image_urls?: unknown;
         grid_image_url?: unknown;
         result_url?: unknown;
@@ -1641,7 +1703,13 @@ function normalizeImageApiPayload(payload: ImageApiResponse): ImageApiResponse {
               payload.images;
         return {
             ...payload,
-            id: typeof data.id === "string" ? data.id : typeof data.task_id === "string" ? data.task_id : payload.id,
+            id: typeof data.id === "string"
+                ? data.id
+                : typeof data.task_id === "string"
+                  ? data.task_id
+                  : typeof (data as { task_no?: unknown }).task_no === "string"
+                    ? (data as { task_no: string }).task_no
+                    : payload.id,
             status: typeof data.status === "string" ? data.status : payload.status,
             progress: typeof data.progress === "number" ? data.progress : payload.progress,
             result: nestedResult,
@@ -1651,8 +1719,10 @@ function normalizeImageApiPayload(payload: ImageApiResponse): ImageApiResponse {
     }
 
     // Seedance image submit: { id, task_id, status:"queued" }
-    if (!payload.id && typeof record.task_id === "string" && record.task_id) {
-        payload = { ...payload, id: record.task_id };
+    // 通联平台（*.apipath.top）用 `task_no`：{ task_no, status:"processing", progress }（提交与轮询同形）。
+    if (!payload.id) {
+        const nestedTaskId = typeof record.task_id === "string" ? record.task_id : typeof record.task_no === "string" ? record.task_no : "";
+        if (nestedTaskId) payload = { ...payload, id: nestedTaskId };
     }
 
     // Midjourney / Seedance SUCCESS at top level: image_urls / grid_image_url / result_url
@@ -1721,6 +1791,11 @@ function resolveImagePollPaths(config: AiConfig, taskId: string) {
     }
     if (isApimartBaseUrl(config.baseUrl)) {
         return [`/tasks/${id}`, `/images/generations/${id}`];
+    }
+    // 通联平台（*.apipath.top）：平台通用任务查询口 GET /v1/tasks/{task_no}
+    // （文档 /app/api-docs：图片/视频/音频共用，终态 succeeded / failed）。
+    if (isApipathApiBaseUrl(config.baseUrl)) {
+        return [`/tasks/${id}`];
     }
     // wb2api / OpenAI relays: edits tasks may only exist under /images/edits/{id}.
     // `/images/tasks/{id}` 是 `image.codesonline.dev` 这条网关暴露的任务查询口
@@ -3712,6 +3787,16 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
     }
+    // 通联平台（*.apipath.top）：图片分类全是异步任务，站点 CDN 对同步响应有 120 秒读取超时 ——
+    // gpt-image 家族走通用同步路径必挂（图已生成、费用照扣，前台拿到 CDN 超时错误页）。
+    // 提交拿 task_no 后由异步链接管（/v1/tasks/{task_no} 轮询）。
+    if (isApipathApiBaseUrl(requestConfig.baseUrl) && isGptImageModel(requestConfig.model)) {
+        try {
+            return await requestApipathGptImage(requestConfig, prompt, [], n, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
     // Midjourney relays (Seedance / APIMart): POST /v1/midjourney/generations
     if (isMidjourneyModel(requestConfig.model)) {
         try {
@@ -3928,6 +4013,16 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     if (isToapisBaseUrl(requestConfig.baseUrl) && isToapisGptImage2Model(requestConfig.model) && !mask) {
         try {
             return await requestToapisGptImage2(requestConfig, requestPrompt, references, n, options);
+        } catch (error) {
+            throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
+        }
+    }
+    // 通联平台（*.apipath.top）：图生图同样走异步 JSON 任务 + 平台标准 `reference_images`
+    // （公网 URL 字符串数组），没有 multipart /images/edits 分类。
+    if (isApipathApiBaseUrl(requestConfig.baseUrl) && isGptImageModel(requestConfig.model)) {
+        if (mask) throw new Error(apiText("geminiMaskUnsupported"));
+        try {
+            return await requestApipathGptImage(requestConfig, requestPrompt, references, n, options);
         } catch (error) {
             throw new Error(normalizeImageApiErrorMessage(readAxiosError(error, apiText("requestFailed")), requestConfig.model));
         }
