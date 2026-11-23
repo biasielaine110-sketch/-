@@ -1,6 +1,6 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Link2, Maximize2, Plus, Copy, Replace, Scissors, Settings2, SlidersHorizontal, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
+import { Clapperboard, Combine, Download, FolderPlus, GripVertical, Group as GroupIcon, Image as ImageIcon, Info, Link2, Maximize2, Plus, Copy, Replace, Scissors, ScrollText, Settings2, SlidersHorizontal, Sparkles, Trash2, Unlink2, Video, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { useOrderDrag } from "@/hooks/use-order-drag";
@@ -59,6 +59,9 @@ export function CanvasNodeContextMenu({
     onGroupSelected,
     h3OptimizeCount = 0,
     onH3OptimizeSelected,
+    /** 选区里可批量转《长安异闻录》格式的节点数（图片 / 视频且提示词非空）。>=1 就出现。 */
+    changanFormatCount = 0,
+    onChanganFormatSelected,
     /** 选区里可批量改图片参数的节点数（图片节点、且不在生成中）。>=2 才在菜单顶部出现。 */
     imageBatchCount = 0,
     onImageBatchSettings,
@@ -101,6 +104,9 @@ export function CanvasNodeContextMenu({
     /** 选区里可做「h3 提示词优化」的节点数（图片 / 视频且提示词非空）。>=1 就出现。 */
     h3OptimizeCount?: number;
     onH3OptimizeSelected?: () => void;
+    /** 选区里可批量转《长安异闻录》格式的节点数（图片 / 视频且提示词非空）。>=1 就出现。 */
+    changanFormatCount?: number;
+    onChanganFormatSelected?: () => void;
     /** 选区里可批量改视频参数的节点数（视频节点、且不在生成中）。>=2 才在菜单顶部出现。 */
     videoBatchCount?: number;
     onVideoBatchSettings?: () => void;
@@ -131,6 +137,8 @@ export function CanvasNodeContextMenu({
     const showGroup = menu.type === "node" && Boolean(node) && groupCount > 1 && Boolean(onGroupSelected);
     // h3 提示词优化作用在**选区**上（点一次逐个转格式），所以哪怕只选了 1 个也出现。
     const showH3Optimize = menu.type === "node" && Boolean(node) && h3OptimizeCount > 0 && Boolean(onH3OptimizeSelected);
+    // 「《长安异闻录》格式」同样作用在选区上（多选右键批量转，用户 2026-11-23 晚间第 03 条）：>=1 就出现。
+    const showChanganFormat = menu.type === "node" && Boolean(node) && changanFormatCount > 0 && Boolean(onChanganFormatSelected);
     // 批量改图片参数作用在选区里的**图片节点**上：>=2 才叫批量（1 个直接用节点自己的设置面板）。
     // 与视频批量同一条门槛：只认目标类型、跳过生成中的节点，数字由调用方算好传进来。
     const showImageBatch = menu.type === "node" && Boolean(node) && imageBatchCount > 1 && Boolean(onImageBatchSettings);
@@ -138,7 +146,7 @@ export function CanvasNodeContextMenu({
     const showVideoBatch = menu.type === "node" && Boolean(node) && videoBatchCount > 1 && Boolean(onVideoBatchSettings);
     // 「资产关联」只对脚本节点有意义（多集 / 多分场共用一套角色场景图）：>=2 个脚本节点才出现。
     const showScriptAssetShare = menu.type === "node" && Boolean(node) && (scriptAssetShareCount ?? 0) > 1 && Boolean(onScriptAssetShare);
-    const showSelectionActions = showBatchGenerate || showGroup || showH3Optimize || showImageBatch || showVideoBatch || showScriptAssetShare;
+    const showSelectionActions = showBatchGenerate || showGroup || showH3Optimize || showChanganFormat || showImageBatch || showVideoBatch || showScriptAssetShare;
 
     const quickImageToolIds = useMemo(() => {
         const normalized = normalizeImageQuickToolIds(imageQuickTools?.ids || []);
@@ -411,6 +419,19 @@ export function CanvasNodeContextMenu({
                             onClick={() => {
                                 onBeforeAction?.();
                                 onH3OptimizeSelected?.();
+                                onClose();
+                            }}
+                        />
+                    ) : null}
+                    {/* 《长安异闻录》格式（用户 2026-11-23 晚间第 03 条）：紧跟 h3 优化 —— 同是「整批提示词格式转换」类动作。
+                        「【资产锁定】」块不参与转换（发送前摘出、转完接回）。 */}
+                    {showChanganFormat ? (
+                        <MenuButton
+                            icon={<ScrollText className="size-4" />}
+                            label={t("canvas.contextMenu.changanFormat", { count: changanFormatCount })}
+                            onClick={() => {
+                                onBeforeAction?.();
+                                onChanganFormatSelected?.();
                                 onClose();
                             }}
                         />

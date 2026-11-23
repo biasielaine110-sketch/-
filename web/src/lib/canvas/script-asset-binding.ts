@@ -219,3 +219,31 @@ export function withScriptAssetBinding(prompt: string | undefined, bindingLine: 
     if (!bindingLine) return base;
     return base ? `${bindingLine}\n\n${base}` : bindingLine;
 }
+
+/**
+ * 视频节点专用的装配（用户 2026-11-23 晚间第 01 条）：铺视频链路时，资产锁定块**最前面
+ * 单独一行加标题「【资产锁定】」**：
+ *
+ * ```
+ * 【资产锁定】
+ * @图片1锁定为张园长人物参考，锁定角色面容、发型、服装、体型与温和神态。
+ * @图片2锁定为幼儿园一楼走廊场景参考，锁定场景布局，空间，光影氛围。
+ *
+ * （正文提示词……）
+ * ```
+ *
+ * 两个原因让它必须与 `withScriptAssetBinding` 分开：
+ *  1. **只用于视频节点** —— 生图窗口的 `资产绑定：…` 单行不加这个标题；
+ *  2. 第四套（导演）的锁定块自带旧标题行 `- **资产锁定：**`，这里把它**替换**成
+ *     「【资产锁定】」，否则视频窗口会出现两行标题。「长安异闻录格式」按钮靠
+ *     「【资产锁定】」这个标题识别不参与转换的块（`splitChanganAssetLockBlock`），
+ *     两种写法归一之后识别口径只有一个。
+ */
+export function withVideoAssetLockBinding(prompt: string | undefined, bindingLine: string) {
+    const base = (prompt || "").trim();
+    if (!bindingLine) return base;
+    const lines = bindingLine.split("\n");
+    if (lines[0]?.trim() === "- **资产锁定：**") lines[0] = "【资产锁定】";
+    const block = lines[0]?.trim() === "【资产锁定】" ? lines.join("\n") : ["【资产锁定】", ...lines].join("\n");
+    return base ? `${block}\n\n${base}` : block;
+}

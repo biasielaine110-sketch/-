@@ -196,7 +196,8 @@ import { VIDEO_REVERSE_LANGUAGE_RULE, VIDEO_REVERSE_REWRITE_PROMPT, buildVideoRe
 import { EPISODE_BAND_COMPACT_ROWS, EPISODE_BAND_ESTIMATE_RATIO, EPISODE_BAND_GAP_Y, EPISODE_BAND_ROW_SLACK, EPISODE_LANE_ROW_GAP_Y, EPISODE_LANE_ROW_HEIGHT, EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeDraftSeconds, resolveEpisodeSeconds, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
-import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, buildScriptAssetNameLockPrompt, withScriptAssetBinding } from "@/lib/canvas/script-asset-binding";
+import { CHANGAN_FORMAT_SYSTEM, finalizeChanganPrompt, splitChanganAssetLockBlock } from "@/lib/canvas/changan-prompt-format";
+import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, buildScriptAssetNameLockPrompt, withScriptAssetBinding, withVideoAssetLockBinding } from "@/lib/canvas/script-asset-binding";
 import {
     applyScriptAssetDirectDecorations,
     buildScriptAssetBatchMounts,
@@ -7898,6 +7899,57 @@ function AtelierCanvasPage() {
         [handleH3OptimizeApply, h3OptimizeConfig, h3OptimizeSnapshot, message, t],
     );
 
+    /** 右键菜单顶部「《长安异闻录》格式」作用的节点（用户 2026-11-23 晚间第 03 条）：
+     * 与 h3 优化同一批目标（选区里的图片 / 视频节点、提示词非空），>=1 就出现。 */
+    const [changanFormatOpen, setChanganFormatOpen] = useState(false);
+    /** 打开弹窗时**冻结**目标列表（同 h3 那个坑：菜单一关 memo 就清空）。 */
+    const [changanFormatSnapshot, setChanganFormatSnapshot] = useState<H3OptimizeTarget[]>([]);
+    const changanFormatTargets = useMemo(() => {
+        if (!contextMenu || contextMenu.type !== "node") return [];
+        return collectH3OptimizeTargets(nodes, Array.from(selectedNodeIds));
+    }, [contextMenu, nodes, selectedNodeIds]);
+    const openChanganFormat = useCallback(() => {
+        if (isH3OptimizeQueueRunning()) {
+            message.warning(t("canvas.h3Optimize.busy"));
+            return;
+        }
+        setChanganFormatSnapshot(changanFormatTargets);
+        setChanganFormatOpen(true);
+    }, [changanFormatTargets, message, t]);
+    /**
+     * 批量转《长安异闻录》格式：指令**内置**（`CHANGAN_FORMAT_SYSTEM`）、模型恒跟偏好里的文本模型。
+     *
+     * 「【资产锁定】」块不参与转换（用户 2026-11-23 晚间第 02 条）：发送前用
+     * `splitChanganAssetLockBlock` 把块摘出来，转完由 `finalizeChanganPrompt`
+     * 从原文（transform 的第二个参数 = job.text 完整原文）原样接回最前面。
+     */
+    const runChanganFormatBatch = useCallback(
+        (options: { model: string; systemPrompt: string }) => {
+            const targets = changanFormatSnapshot;
+            setChanganFormatOpen(false);
+            if (!targets.length) return;
+            const config: AiConfig = { ...h3OptimizeConfig, model: options.model.trim() || h3OptimizeConfig.textModel || h3OptimizeConfig.model };
+            void startH3OptimizeQueue({
+                jobs: targets,
+                config,
+                systemPrompt: options.systemPrompt || CHANGAN_FORMAT_SYSTEM,
+                kind: "changan",
+                buildUserMessage: (job) => splitChanganAssetLockBlock(job.text).rest,
+                transform: finalizeChanganPrompt,
+                onApply: handleH3OptimizeApply,
+            }).then((result) => {
+                if (!result.started) {
+                    if (result.reason === "busy") message.warning(t("canvas.h3Optimize.busy"));
+                    return;
+                }
+                if (result.cancelled) message.info(t("canvas.changanFormat.cancelled", { count: result.done }));
+                else if (result.failed > 0) message.warning(t("canvas.changanFormat.doneWithFailed", { count: result.done, failed: result.failed }));
+                else message.success(t("canvas.changanFormat.done", { count: result.done }));
+            });
+        },
+        [changanFormatSnapshot, handleH3OptimizeApply, h3OptimizeConfig, message, t],
+    );
+
     /** 右键菜单顶部「一键生成」作用的节点：选区里至少 2 个图片 / 视频节点才算数。 */
     const batchGenerateNodeIds = useMemo(() => {
         if (!contextMenu || contextMenu.type !== "node" || selectedNodeIds.size < 2) return [];
@@ -11198,8 +11250,9 @@ function AtelierCanvasPage() {
                 const groupAudioList = [...audioRefs.map((asset) => asset.id), ...groupAudioIds];
                 const videoBinding = videoAssetBindingOf([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf);
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
-                // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产绑定块在前、禁止项 / 强制声明收尾。
-                const videoPrompt = withVideoComplianceSuffix(withScriptAssetBinding(baseVideoPrompt, videoBinding));
+                // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产锁定块（带「【资产锁定】」标题，
+                // 用户 2026-11-23 晚间第 01 条）在前、禁止项 / 强制声明收尾。
+                const videoPrompt = withVideoComplianceSuffix(withVideoAssetLockBinding(baseVideoPrompt, videoBinding));
                 // 单镜模式：10/15 秒 = 锁定成片秒数（不抄表里旧值，否则「选了 10 秒铺出来还是 3 秒」）；
                 // 5 秒 = 上限（表里更短就按表里）。合并模式仍按本段各镜 duration 累加。
                 // ⚠️ 判据是 `merged`（本段真的有多镜）而**不是**档位：手动合并组在「单镜」档位下也是多镜，
@@ -13191,9 +13244,10 @@ function AtelierCanvasPage() {
                 videoNode.metadata?.prompt || "",
                 orderedLinkIds.map((id) => nodesRef.current.find((node) => node.id === id)?.title || "").filter(Boolean),
             );
-            // 合规后缀（用户 2026-11-11 第 02 条）：与一键铺链路同口径，拼在资产绑定之后（= 最后）。
+            // 合规后缀（用户 2026-11-11 第 02 条）：与一键铺链路同口径，拼在资产锁定块之后（= 最后）。
+            // 资产锁定块最前面带「【资产锁定】」标题（用户 2026-11-23 晚间第 01 条，与整条铺链路同口径）。
             // MochiAni 节点的 `mochianiPrompt` 是双写过来的初值，这里一起换掉，否则窗口里显示的还是旧版。
-            const boundShotPrompt = withVideoComplianceSuffix(withScriptAssetBinding(variantShotPrompt, videoBinding));
+            const boundShotPrompt = withVideoComplianceSuffix(withVideoAssetLockBinding(variantShotPrompt, videoBinding));
             videoNode.metadata = {
                 ...videoNode.metadata,
                 prompt: boundShotPrompt,
@@ -13823,6 +13877,8 @@ function AtelierCanvasPage() {
                         onGroupSelected={() => handleGroupSelected(groupableNodeIds)}
                         h3OptimizeCount={h3OptimizeTargets.length}
                         onH3OptimizeSelected={openH3Optimize}
+                        changanFormatCount={changanFormatTargets.length}
+                        onChanganFormatSelected={openChanganFormat}
                         imageBatchCount={imageBatchTargets.ids.length}
                         onImageBatchSettings={openImageBatch}
                         videoBatchCount={videoBatchTargets.ids.length}
@@ -13853,6 +13909,10 @@ function AtelierCanvasPage() {
                 ) : null}
 
                 {h3OptimizeOpen ? <CanvasH3OptimizeDialog open targets={h3OptimizeSnapshot} config={h3OptimizeConfig} onStart={runH3OptimizeBatch} onClose={() => setH3OptimizeOpen(false)} /> : null}
+
+                {/* 右键「《长安异闻录》格式」（用户 2026-11-23 晚间第 03 条）：与 h3 批量同一个确认弹窗（mode=changan），
+                    指令内置、模型恒跟偏好里的文本模型；「【资产锁定】」块不参与转换。 */}
+                {changanFormatOpen ? <CanvasH3OptimizeDialog mode="changan" open targets={changanFormatSnapshot} config={h3OptimizeConfig} onStart={runChanganFormatBatch} onClose={() => setChanganFormatOpen(false)} /> : null}
 
                 {/* 右键「批量设置图片参数」：只在打开时渲染。档位与节点自己的设置面板同一份来源，
                     弹窗里的「不变」= 空串 = 不写该字段。 */}

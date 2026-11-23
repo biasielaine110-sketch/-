@@ -6,7 +6,7 @@ import { LoaderCircle, Minus, Plus, ScrollText, ShieldCheck, SquarePen, WandSpar
 import { useTranslation } from "react-i18next";
 
 import { insertTextIntoInputElement, readClipboardEventText } from "@/lib/canvas/clipboard-paste";
-import { CHANGAN_FORMAT_SYSTEM, finalizeChanganPrompt } from "@/lib/canvas/changan-prompt-format";
+import { CHANGAN_FORMAT_SYSTEM, finalizeChanganPrompt, splitChanganAssetLockBlock } from "@/lib/canvas/changan-prompt-format";
 import { EDIT_PROMPT_SYSTEM, buildEditPromptUserMessage, finalizeEditedPrompt } from "@/lib/canvas/edit-prompt";
 import { getH3OptimizeQueueState, startH3OptimizeQueue, stopH3OptimizeQueue, subscribeH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import type { AiConfig } from "@/stores/use-config-store";
@@ -267,13 +267,18 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
     };
 
     /**
-     * 「《长安异闻录》格式」：把当前内容整体转成 14 章节模板。
+     * 「《长安异闻录》格式」：把当前内容整体转成 13 章节模板。
      *
      * 与「编辑提示词」同口径的三条约束：
      *  - 模型恒跟偏好里的文本模型 → 不给 `ModelPicker`，`config.model` 已经在面板侧换成 `textModel`；
      *  - 指令是内置的 `CHANGAN_FORMAT_SYSTEM`（模板正文一字不改 + 只输出正文）；
      *  - 输出再走 `finalizeChanganPrompt`（剥围栏 + 锚定模板标题行，不做「原文查重」裁剪 ——
      *    格式转换的输出骨架几乎都不在原文里，照 edit 那套会删掉模板）。
+     *
+     * 「【资产锁定】」块不参与转换（用户 2026-11-23 晚间第 02 条）：发送前用
+     * `splitChanganAssetLockBlock` 把块摘出来（模型看不到，就不会把 `@图片N锁定为…`
+     * 那几行转成模板字段或改写坏引用 chip 的标签）；转完 `finalizeChanganPrompt`
+     * 从原文（transform 的第二个参数 = 完整原文）里把块原样接回最前面。
      */
     const runChanganFormat = () => {
         if (!changanFormat || !canChanganFormat) return;
@@ -282,12 +287,14 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
             return;
         }
         const original = draftRef.current;
-        if (!original.trim()) return;
+        const { rest } = splitChanganAssetLockBlock(original);
+        if (!original.trim() || !rest.trim()) return;
         void startH3OptimizeQueue({
             jobs: [{ ...changanFormat.job, text: original }],
             config: changanFormat.config,
             systemPrompt: CHANGAN_FORMAT_SYSTEM,
             kind: "changan",
+            buildUserMessage: () => rest,
             transform: finalizeChanganPrompt,
             onApply: (_target, text) => changanFormat.applyOptimized(text),
         });
@@ -578,9 +585,9 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                     </div>
                 ) : null}
 
-                {/* 长安异闻录格式（用户 2026-11-23）：点一下就把当前内容转成 14 章节模板。
-                    指令内置、模型恒跟偏好里的文本模型；同 h3 / 违规优化 / 编辑提示词一样跑后台队列，
-                    关掉弹窗也会把结果写回节点。 */}
+                {/* 长安异闻录格式（用户 2026-11-23）：点一下就把当前内容转成 13 章节模板；
+                    开头的「【资产锁定】」块原样保留、不参与转换。指令内置、模型恒跟偏好里的文本模型；
+                    同 h3 / 违规优化 / 编辑提示词一样跑后台队列，关掉弹窗也会把结果写回节点。 */}
                 {canChanganFormat && changanFormat ? (
                     <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-stone-200 px-2 py-1.5 dark:border-stone-700" data-canvas-changan-format>
                         <Button
