@@ -1864,6 +1864,8 @@ export default {
             scheduleCancel: "Cancel schedule",
         },
         textEditDialog: {
+            charCount: "{{count}} chars",
+            charCountTitle: "Character count of the editor (live)",
             h3Optimize: "h3 prompt optimize",
             h3OptimizeStop: "Stop optimizing",
             h3OptimizeModel: "Model",

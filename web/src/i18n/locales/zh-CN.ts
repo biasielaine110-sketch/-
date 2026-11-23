@@ -1869,6 +1869,8 @@ export default {
             scheduleCancel: "取消排期",
         },
         textEditDialog: {
+            charCount: "{{count}} 字",
+            charCountTitle: "当前编辑区文字数量（实时）",
             h3Optimize: "h3 提示词优化",
             h3OptimizeStop: "停止优化",
             h3OptimizeModel: "优化模型",

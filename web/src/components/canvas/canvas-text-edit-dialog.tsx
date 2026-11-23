@@ -437,6 +437,14 @@ export function CanvasTextEditDialog({ open, value, title, placeholder, fontSize
                         {readOnly ? t("canvas.chat.viewMessageHint") : t("canvas.textPromptLibrary.hint")}
                     </span>
                     <div className="flex items-center gap-2">
+                        {/* 字数统计（用户 2026-11-24）：双击最大化弹窗实时显示编辑区文字数量。
+                            `draft` 随输入 / 粘贴 / 优化流式回写一起更新，包括只读查看模式。 */}
+                        <span
+                            className="shrink-0 rounded-full border border-stone-200 px-2.5 py-0.5 text-[11px] font-medium tabular-nums text-stone-500 dark:border-stone-700 dark:text-stone-400"
+                            title={t("canvas.textEditDialog.charCountTitle")}
+                        >
+                            {t("canvas.textEditDialog.charCount", { count: draft.length })}
+                        </span>
                         {findReplace.toggle}
                         <div className="inline-flex items-center gap-0.5 rounded-full border border-stone-200 px-1 py-0.5 dark:border-stone-700">
                             <button
