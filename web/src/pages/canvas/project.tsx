@@ -99,7 +99,7 @@ import {
     resolveStoryScriptShotSeconds,
     resolveStoryScriptShotCount,
     scriptAssetColumnRole,
-    scriptRowCharacterNames,
+    scriptNodeLockName,
     scriptCellAssetIds,
     scriptNameLockIds,
     scriptRowAssetIds,
@@ -10915,13 +10915,10 @@ function AtelierCanvasPage() {
             // 都用同一张图。已有锁保留（并集），不会因为没有格子链接就被抹掉。
             const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows, scriptExtras);
             // 「资产名」查表：表里的资产名优先（名字锁就是按资产名记的），查不到就交给绑定拼装回落图片节点标题。
-            const assetNameOf = (assetNodeId: string) => {
-                const locks = source.metadata?.scriptNameLocks;
-                for (const [name, ids] of Object.entries(locks || {})) {
-                    if (Array.isArray(ids) && ids.includes(assetNodeId)) return name;
-                }
-                return undefined;
-            };
+            // 🔴 广播锁消歧（用户 2026-11-24 第 01 条）：一格多名字手动挂图时每个名字的锁里都有全部几张图，
+            // 直接取第一个命中会让两张图拿到同一个名字、锁定文案只锁一个资产 —— 用图片节点标题挑最像的名字。
+            const assetNameOf = (assetNodeId: string) =>
+                scriptNodeLockName(source.metadata?.scriptNameLocks, assetNodeId, (id) => nodesRef.current.find((node) => node.id === id)?.title);
             // 现存节点 id：过滤掉已被删、但还留在 metadata.scriptRowAssets 里的镜头图，免得连出悬空线。
             const existingNodeIds = new Set(nodesRef.current.map((node) => node.id));
             // 上游图片节点 = 角色 / 场景 / 道具 / 站位图素材。分类决定它连到哪些镜：
@@ -11251,6 +11248,9 @@ function AtelierCanvasPage() {
                     // 裸角色名 → `妈妈（外出）`（用户 2026-11-22 第 02 条）：按这一镜真的连上的
                     // 造型资产改写，让每一镜的提示词自己锁定哪套衣服，跨镜不再串衣。
                     videoPrompt: withScriptVariantNamesInVideoPrompt(member.prompts.videoPrompt, memberVariantTitles[memberIndex] || []),
+                    // 人物站位随各镜走（用户 2026-11-24 第 02 条）：合并段不再抽成顶上一组，
+                    // `buildMergedVideoNodePrompt` 把站位原文接在每镜块尾（`人物站位，`），原样不合并。
+                    blocking: member.row.blocking_detail,
                 }));
                 /**
                  * 参考图**连线顺序**（用户 2026-11-08 第 13 条）：角色 → 场景 → 道具 → 站位/特效 → 镜头图。
@@ -11268,14 +11268,10 @@ function AtelierCanvasPage() {
                 // 用**全体成员**的格子（合并段里每一镜的音色都要能查到），拼资产锁定时追加到人物行。
                 const voiceOf = createStoryScriptVoiceLookup(members.map((member) => member.row), presetId, scriptExtras);
                 const videoBinding = videoAssetBindingOf([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf, voiceOf);
-                // 人物站位描述（用户 2026-11-23 第 06 条）：本段各镜的「人物站位描述」整合成一块，
-                // 放在**镜头内容上面**。合并镜头在这里做句级去重（空间底子只留一份、只追加真的改了走位的句子），
-                // 免得三镜站位原样拼三遍把运镜指令淹掉。
-                // 角色名（用户 2026-11-24 第 02 条）：传给合并器区分「人物句 / 环境句」——
-                // 人物句（走位）只做普通去重；环境句（空间底子）换措辞重写也按底子覆盖率丢掉。
-                const blockingBlock = buildScriptBlockingPrompt(members.map((member) => member.row.blocking_detail), {
-                    characterNames: Array.from(new Set(members.flatMap((member) => scriptRowCharacterNames(member.row, presetId, scriptExtras)))),
-                });
+                // 人物站位（用户 2026-11-24 第 02 条改版式）：合并段**不再抽成顶上一组**（整段去重后依旧拥挤），
+                // 站位原文随 `shots[].blocking` 进各镜自己的块（`buildMergedVideoNodePrompt`，块尾 `人物站位，`）；
+                // 只有单镜节点保留「【人物站位】」块（垫在镜头内容上面，老口径）。
+                const blockingBlock = merged ? "" : buildScriptBlockingPrompt([first.row.blocking_detail]);
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
                 // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产锁定块（带「【资产锁定】」标题，
                 // 用户 2026-11-23 晚间第 01 条）在最上、人物站位块其次、镜头内容其后、禁止项 / 强制声明收尾。
@@ -13220,13 +13216,10 @@ function AtelierCanvasPage() {
             // 它们精准指定过的那几个分类，让资产条不再对同一镜重复分派。
             const nameLocks = syncStoryScriptNameLocks(source.metadata?.scriptNameLocks, source.metadata?.scriptCellAssets, rows, shotExtras);
             // 「资产名」查表：与整条铺链路同口径 —— 表里的资产名优先，查不到回落到图片节点标题。
-            const assetNameOf = (assetNodeId: string) => {
-                const locks = source.metadata?.scriptNameLocks;
-                for (const [name, ids] of Object.entries(locks || {})) {
-                    if (Array.isArray(ids) && ids.includes(assetNodeId)) return name;
-                }
-                return undefined;
-            };
+            // 🔴 广播锁消歧（用户 2026-11-24 第 01 条）：一格多名字手动挂图时每个名字的锁里都有全部几张图，
+            // 直接取第一个命中会让两张图拿到同一个名字、锁定文案只锁一个资产 —— 用图片节点标题挑最像的名字。
+            const assetNameOf = (assetNodeId: string) =>
+                scriptNodeLockName(source.metadata?.scriptNameLocks, assetNodeId, (id) => nodesRef.current.find((node) => node.id === id)?.title);
             // 视频节点资产文案（用户 2026-11-22 深夜定稿）：第四套（导演）恢复「资产锁定」块（最近调整之前的锁法），
             // 其余套统一「@图片N锁定为XX…参考，锁定<内容>。」多行。
             const videoAssetBindingOf = directorScheme ? buildScriptAssetLockPrompt : buildScriptAssetNameLockPrompt;

@@ -2577,18 +2577,24 @@ export function storyScriptGroupDuration(group: StoryScriptRowGroup): number {
  * 多镜时按「第N镜」分块列出，且**镜与镜之间不做去重**——不同镜头合法地复用同一句动作描述时，
  * 去重会丢掉先后顺序。只剩一个镜有内容时等价于 `buildVideoNodePrompt`（不加抬头，也不挂镜号）。
  *
+ * 2026-11-24 第 02 条：带「人物站位描述」（`blocking`）的合并段，站位**回到各自镜头里**——
+ * 不再抽成顶上一组（整段去重后依旧拥挤），每镜块尾接 `人物站位，` + 该镜自己的站位原文
+ * （原样、不合并），镜与镜之间用 `-------------` 分隔（用户给的版式）；没有站位的镜不接。
+ * 整段一个站位都没写 → 排版与老版逐字节一致。
+ *
  * ⚠️ 这里**不再收 `imagePrompt`**（2026-10-19 用户要求：铺链路出的视频节点里不要塞分镜表中的
  * 「分镜提示词」）。分镜提示词已经在本镜的文本节点 / 图片节点上，关键帧就是按它生成的；视频节点
  * 再抄一遍，只会让长段画面描述把运镜指令淹掉，模型反而抓不到「怎么动」。
  */
-export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; videoPrompt?: unknown }>): string {
+export function buildMergedVideoNodePrompt(shots: Array<{ shotNo?: number; videoPrompt?: unknown; blocking?: unknown }>): string {
     const kept = shots
-        .map((shot, index) => ({ no: shot.shotNo || index + 1, body: buildVideoNodePrompt(shot.videoPrompt) }))
+        .map((shot, index) => ({ no: shot.shotNo || index + 1, body: buildVideoNodePrompt(shot.videoPrompt), blocking: storyScriptCellText(shot.blocking) }))
         .filter((item) => Boolean(item.body));
     if (!kept.length) return "";
     if (kept.length === 1) return kept[0].body;
     // 每镜的抬头也走同一种排版：`- **第N镜**`（用户 2026-10-27：`第一镜` 这类行也要带 `- **`）。
-    const merged = [`多镜头连续片段（共 ${kept.length} 镜）：`, ...kept.map((item) => `- **第${item.no}镜**\n${item.body}`)].join("\n\n");
+    const blocks = kept.map((item) => (item.blocking ? `- **第${item.no}镜**\n${item.body}\n人物站位，\n${item.blocking}` : `- **第${item.no}镜**\n${item.body}`));
+    const merged = [`多镜头连续片段（共 ${kept.length} 镜）：`, ...blocks].join(kept.some((item) => item.blocking) ? "\n\n-------------\n\n" : "\n\n");
     // 第四套每镜的提示词末尾都带一块尾巴（【禁止项】/【强制声明】四行）：4 镜合并会重复 4 遍。
     // 它是**整段**的总要求，所以只留一条、放到最末（没有这句时原样返回，其它套不受影响）。
     const collapsed = collapseDirectorSoundNotes(merged);
@@ -3978,6 +3984,37 @@ export function splitScriptAssetNames(value: unknown): string[] {
         out.push(name);
     }
     return out.length ? out : [text];
+}
+
+/**
+ * 一个图片节点在锁表里对应的资产名；查不到 → undefined（调用方回落图片节点标题）。
+ *
+ * 🔴 广播锁消歧（用户 2026-11-24 第 01 条）：一格多名字（`日历、《五年高考三年模拟》`）里
+ * 手动挂图走「整格广播」（`addScriptNameLockForCell` 不带 name），**每个名字的锁里都有全部几张图**
+ * —— 直接取第一个命中的名字，两张图会拿到同一个名字，资产锁定文案就只锁出一个资产
+ * （同名合并还会把两张图并成一行）。多命中时用**图片节点标题**挑最像的那个名字
+ * （标题通常就是资产名 / 生图候选的 title），挑不出再回落第一个命中。
+ */
+export function scriptNodeLockName(map: unknown, nodeId: unknown, titleOf?: (id: string) => unknown): string | undefined {
+    if (typeof nodeId !== "string" || !nodeId) return undefined;
+    const source = map && typeof map === "object" && !Array.isArray(map) ? (map as Record<string, unknown>) : {};
+    const hits: string[] = [];
+    for (const [name, ids] of Object.entries(source)) {
+        if (Array.isArray(ids) && ids.includes(nodeId)) hits.push(name);
+    }
+    if (hits.length <= 1) return hits[0];
+    const title = scriptNameLockName(titleOf?.(nodeId));
+    if (title) {
+        const lowerTitle = title.toLowerCase();
+        const hit = hits.find((raw) => {
+            const name = scriptNameLockName(raw);
+            if (!name) return false;
+            const lower = name.toLowerCase();
+            return lower === lowerTitle || (lower.length >= 2 && lowerTitle.includes(lower)) || (lowerTitle.length >= 2 && lower.includes(lowerTitle));
+        });
+        if (hit) return hit;
+    }
+    return hits[0];
 }
 
 /**
