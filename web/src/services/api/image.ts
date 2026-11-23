@@ -807,7 +807,9 @@ function isReferenceUrlRequired(message: string) {
  * when it does not, re-host fresh local bytes (IndexedDB survives restarts) on a temporary
  * public host instead.
  */
-async function resolveFetchableReferenceUrl(config: AiConfig, image: ReferenceImage, referenceCount: number, options?: RequestOptions & { allowProviderUpload?: boolean }) {
+/** 把参考图解析成「可被上游 GET 到」的 URL：公网直链原样用；本地图走
+ *  provider 上传 → 临时公共图床 → data URL 的兜底链（视频侧 apipath 也复用这条链）。 */
+export async function resolveFetchableReferenceUrl(config: AiConfig, image: ReferenceImage, referenceCount: number, options?: RequestOptions & { allowProviderUpload?: boolean }) {
     const remoteUrl = [image.url, image.dataUrl].find((value) => value && isPublicHttpUrl(value) && !value.startsWith("data:"))?.trim();
     if (remoteUrl && (await fetchRemoteImageBlob(remoteUrl))) return remoteUrl;
     if (!remoteUrl && options?.allowProviderUpload && !isHfsyApiBaseUrl(config.baseUrl)) {

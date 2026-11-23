@@ -33,7 +33,7 @@ import {
     normalizeFisherPipelineMode,
     type FisherPipelineMode,
 } from "@/lib/runninghub-workflow";
-import { isRelayMiniMaxH3Video } from "@/services/api/video";
+import { apipathH3DurationValue, apipathH3RatioValue, apipathH3Resolution, apipathH3SecondOptions, apipathH3SecondsMax, isApipathH3VideoModel, isApipathVideoHost, isRelayMiniMaxH3Video } from "@/services/api/video";
 import { WORK_FISHER_H3_COMFYUI_RESOLUTIONS, isSeedanceVideoHost, isWorkFisherH3ComfyuiModel, isWorkFisherVideoHost, normalizeWorkFisherH3ComfyuiRatio, normalizeWorkFisherResolution } from "@/services/api/video";
 import { JUSUANHUB_VIDEO_RESOLUTION_OPTIONS, isJusuanhubMediaBaseUrl, normalizeJusuanhubVideoQuality } from "@/services/api/jusuanhub-media";
 import { isApimartMuseVideoModel } from "@/services/api/video";
@@ -242,6 +242,8 @@ export type VideoSettingFlags = {
     h3Comfy: boolean;
     jusuanhubH3: boolean;
     relayH3: boolean;
+    /** 通联平台（*.apipath.top）本次适配的三个 MiniMax-H3：ratio/duration 白名单口径。 */
+    apipathH3: boolean;
     singularityRh: boolean;
     singularityLightRh: boolean;
     hdDynamicRh: boolean;
@@ -267,7 +269,12 @@ export function resolveVideoSettingFlags(config: AiConfig): VideoSettingFlags {
      * 而这三个值在提交时全被收成 768p（用户点 1080p 拿到的还是 768p）。
      */
     const jusuanhubH3 = !h3Comfy && isJusuanhubMediaBaseUrl(requestConfig.baseUrl);
-    const relayH3 = !h3Comfy && !jusuanhubH3 && isRelayMiniMaxH3Video(requestConfig, model);
+    /**
+     * 通联平台（*.apipath.top）的三个 MiniMax-H3（武庚纪 2K / 15S / 30S）：平台异步任务契约，
+     * 时长 / 画幅是各模型自己的白名单，不认 relay H3 那套 WxH 尺寸表，必须先认出来。
+     */
+    const apipathH3 = !h3Comfy && !jusuanhubH3 && isApipathVideoHost(requestConfig.baseUrl) && isApipathH3VideoModel(model);
+    const relayH3 = !h3Comfy && !jusuanhubH3 && !apipathH3 && isRelayMiniMaxH3Video(requestConfig, model);
     const singularityRh = !h3Comfy && isMinimaxH3SingularityWorkflowId(model);
     /** Singularity 形轻量 AI App（211575… MiniMax H3生成视频）。 */
     const singularityLightRh = !h3Comfy && isMinimaxH3SingularityLightAiAppId(model);
@@ -288,7 +295,7 @@ export function resolveVideoSettingFlags(config: AiConfig): VideoSettingFlags {
     const wenxiLoraRh = !h3Comfy && isMinimaxH3WenxiLowWorkflowId(model);
     const nativeComfy = shouldUseNativeComfyUi(requestConfig.baseUrl, model, resolveModelScript(config, model));
     const nativeFamily: NativeVideoFamily = nativeComfy && !h3Comfy ? detectNativeVideoFamily(config) : "other";
-    return { h3Comfy, jusuanhubH3, relayH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, fisherComfyH3, yzjinyuRh, wenxiRh, wenxiLoraRh, nativeComfy, nativeFamily };
+    return { h3Comfy, jusuanhubH3, relayH3, apipathH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, fisherComfyH3, yzjinyuRh, wenxiRh, wenxiLoraRh, nativeComfy, nativeFamily };
 }
 
 /** 某一族的可选清晰度档位（AutoDL H3 单列，它的值是 workflow 自己的枚举）。 */
@@ -296,6 +303,9 @@ export function resolutionChoicesForFlags(flags: VideoSettingFlags, model = ""):
     if (flags.h3Comfy) return autodlH3ResolutionOptions(model).map((value) => ({ value, label: autodlH3ResolutionDisplay(value) }));
     if (flags.nativeComfy) return resolutionOptionsForFamily(flags.nativeFamily);
     if (flags.jusuanhubH3) return JUSUANHUB_VIDEO_RESOLUTION_OPTIONS.map((item) => ({ value: item.value, label: item.label }));
+    // 通联 apipath H3：分辨率由模型写死（武庚纪固定 2K；15S / 30S 不收 resolution）——
+    // 面板只露实际会提交的那一档，别让用户点一个会被忽略的值。
+    if (flags.apipathH3) return [{ value: apipathH3Resolution(model), label: apipathH3Resolution(model) === "2k" ? "2K" : "720p" }];
     // H3 ComfyUI 系：值就是提交字符串（带 p），面板 / 提交 / 摘要共用这一套。
     if (flags.fisherComfyH3) return WORK_FISHER_H3_COMFYUI_RESOLUTIONS.map((value) => ({ value, label: value }));
     if (flags.fisherRh || flags.fisherLightRh) return fisherResolutionOptions;
@@ -308,8 +318,17 @@ export function resolutionChoicesForFlags(flags: VideoSettingFlags, model = ""):
 export type VideoSizeChoice = { value: string; labelKey: string; width: number; height: number };
 
 /** 某一族的画面比例档位。 */
-export function sizeChoicesForFlags(flags: VideoSettingFlags): VideoSizeChoice[] {
+/** 通联 apipath H3 的画幅白名单：武庚纪 9:16 / 16:9 / 1:1；15S / 30S 只有 16:9。 */
+const apipathH3SizeOptionsFull = [
+    { value: "16:9", labelKey: "landscape", width: 1280, height: 720 },
+    { value: "9:16", labelKey: "portrait", width: 720, height: 1280 },
+    { value: "1:1", labelKey: "square", width: 1024, height: 1024 },
+];
+
+export function sizeChoicesForFlags(flags: VideoSettingFlags, model = ""): VideoSizeChoice[] {
     if (flags.fisherComfyH3) return fisherComfySizeOptions;
+    // 通联 apipath H3：摆出白名单外的档位只会被参数校验 400（素材被静默丢弃还照常扣费）。
+    if (flags.apipathH3) return /武庚纪/i.test(model) ? apipathH3SizeOptionsFull : [apipathH3SizeOptionsFull[0]];
     if (flags.nativeComfy && !flags.h3Comfy) return sizeOptionsForFamily(flags.nativeFamily);
     return sizeOptions;
 }
@@ -321,7 +340,7 @@ export function videoResolutionChoicesFor(config: AiConfig): Array<{ value: stri
 
 /** 给外部（批量设置）用：某个视频配置下可选的画面比例。 */
 export function videoSizeChoicesFor(config: AiConfig): VideoSizeChoice[] {
-    return sizeChoicesForFlags(resolveVideoSettingFlags(config));
+    return sizeChoicesForFlags(resolveVideoSettingFlags(config), config.model || config.videoModel || "");
 }
 
 /**
@@ -333,6 +352,8 @@ export function videoSizeChoicesFor(config: AiConfig): VideoSizeChoice[] {
  */
 export function secondsChoicesForFlags(flags: VideoSettingFlags, model = ""): number[] {
     if (flags.h3Comfy) return autodlH3DurationOptions(model);
+    // 通联 apipath H3：武庚纪 5–28 全区间（给常用六档），15S 只认 [4,6,8,12,15]，30S 固定 30。
+    if (flags.apipathH3) return apipathH3SecondOptions(model);
     if (flags.fisherRh || flags.fisherLightRh) return fisherSecondOptions;
     if (flags.singularityLightRh) return singularitySecondOptions;
     if (flags.wenxiRh) return wenxiSecondOptions;
@@ -340,10 +361,12 @@ export function secondsChoicesForFlags(flags: VideoSettingFlags, model = ""): nu
 }
 
 /** 某一族自定义时长输入框的上限（面板 `NumberInput` 的 max 用这份，别在两处各写一串三元）。 */
-export function secondsMaxForFlags(flags: VideoSettingFlags): number {
+export function secondsMaxForFlags(flags: VideoSettingFlags, model = ""): number {
     if (flags.fisherRh || flags.fisherLightRh) return 12;
     if (flags.singularityLightRh) return 30;
     if (flags.wenxiRh) return 15;
+    // 通联 apipath H3：武庚纪 28；15S / 30S 用白名单末档。
+    if (flags.apipathH3) return apipathH3SecondsMax(model);
     // 默认档位现在顶到 30s（2026-11-14），自定义输入的上限必须跟着放开，否则点得了 30s 却填不了 30。
     return 30;
 }
@@ -372,7 +395,7 @@ export function videoSecondsMaxFor(config: AiConfig): number {
     if (isZhenzhenMuseVideoModel(model) || isApimartMuseVideoModel(model)) return 0;
     const flags = resolveVideoSettingFlags(config);
     if (flags.h3Comfy) return autodlH3DurationMax(model);
-    return secondsMaxForFlags(flags);
+    return secondsMaxForFlags(flags, model);
 }
 
 export const videoSecondOptions = secondOptions.map((value) => String(value));
@@ -410,7 +433,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const model = config.model || config.videoModel || "";
     // 族判定统一走 `resolveVideoSettingFlags`（与右键批量设置共用，见文件上半部分）。
     const flags = useMemo(() => resolveVideoSettingFlags(config), [config]);
-    const { h3Comfy, jusuanhubH3, relayH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, fisherComfyH3, yzjinyuRh, wenxiRh, wenxiLoraRh, nativeComfy, nativeFamily } = flags;
+    const { h3Comfy, jusuanhubH3, relayH3, apipathH3, singularityRh, singularityLightRh, hdDynamicRh, fisherRh, fisherLightRh, fisherComfyH3, yzjinyuRh, wenxiRh, wenxiLoraRh, nativeComfy, nativeFamily } = flags;
     const fisherMode = normalizeFisherPipelineMode(config.videoFisherMode);
     const fisherLoraStrength = normalizeFisherLoraStrength(config.videoFisherLoraStrength);
     /** 「提交视觉风格字段」：只有显式 `on` 才算打开（默认 off = 整行不发，见 `H3_SCAFFOLD_STYLE_LABELS`）。 */
@@ -425,7 +448,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
         { value: "scene", labelKey: "scene" },
         { value: "multiview", labelKey: "multiview" },
     ];
-    const aspectChoices = useMemo(() => sizeChoicesForFlags(flags), [flags]);
+    const aspectChoices = useMemo(() => sizeChoicesForFlags(flags, model), [flags, model]);
     const showSeedControls = useMemo(
         () => nativeComfy && !h3Comfy && supportsVideoSeedControls(config, nativeFamily),
         [config, nativeComfy, h3Comfy, nativeFamily],
@@ -485,15 +508,23 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const seconds = config.videoSeconds || "6";
     // H3 ComfyUI 系只收横/竖：`auto` 与 1:1 之类也在提交时被收敛，面板就按收敛后的值显示，
     // 免得出现「一个 pill 都不亮、实际却按 16:9 出片」。
-    const size = fisherComfyH3 ? normalizeWorkFisherH3ComfyuiRatio(config.size) : normalizeVideoSizeValue(config.size);
+    // 通联 apipath H3 同理：老配置里的 9:16 / 1:1 在 15S / 30S 上会被收成 16:9，按收敛值显示。
+    const size = apipathH3
+        ? apipathH3RatioValue(model, config.size)
+        : fisherComfyH3
+          ? normalizeWorkFisherH3ComfyuiRatio(config.size)
+          : normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
     // 聚算 Hub 只有 544p / 768p：老配置里的 480/720/1080/2k 都要收敛，否则两个 pill 都不亮。
     // H3 ComfyUI 系同理：老配置里的 720/1080 要收敛到七档白名单，否则一个 pill 都不亮、提交还会 400。
-    const resolution = jusuanhubH3
-        ? normalizeJusuanhubVideoQuality(config.vquality)
-        : fisherComfyH3
-          ? normalizeWorkFisherResolution(config.vquality, model)
-          : normalizeVideoResolutionValue(config.vquality);
+    // 通联 apipath H3：分辨率由模型写死（武庚纪 2k；15S / 30S 不收 resolution）。
+    const resolution = apipathH3
+        ? apipathH3Resolution(model)
+        : jusuanhubH3
+          ? normalizeJusuanhubVideoQuality(config.vquality)
+          : fisherComfyH3
+            ? normalizeWorkFisherResolution(config.vquality, model)
+            : normalizeVideoResolutionValue(config.vquality);
     const steps = config.videoSteps || "40";
     const refImageSize = (config.videoRefImageSize || "max") === "max" ? "max" : "match";
     const samplerName = config.videoSamplerName || "dpmpp_2m";
@@ -749,7 +780,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <NumberInput
                             value={seconds}
                             min={1}
-                            max={secondsMaxForFlags(flags)}
+                            max={secondsMaxForFlags(flags, model)}
                             theme={theme}
                             onChange={(value) =>
                                 onConfigChange(
@@ -866,6 +897,11 @@ export function videoSettingsSummary(config: AiConfig) {
     }
     // muse 的时长 / 清晰度是服务端写死的，别把画布上的旋钮值写进摘要（会骗人）。
     if (isZhenzhenMuseVideoModel(model) || isApimartMuseVideoModel(model)) return `720p · 10s`;
+    // 通联 apipath H3：摘要按「实际提交值」写（分辨率由模型写死、画幅/时长按白名单收敛）。
+    if (isApipathVideoHost(resolveModelRequestConfig(config, model).baseUrl) && isApipathH3VideoModel(model)) {
+        const resolution = apipathH3Resolution(model);
+        return `${resolution === "2k" ? "2K" : "720p"} · ${videoSizeLabel(apipathH3RatioValue(model, config.size))} · ${apipathH3DurationValue(model, config.videoSeconds)}s`;
+    }
     // 聚算 Hub 只有 544p / 768p 两档，摘要必须按「实际会被提交的档位」写。
     if (isJusuanhubMediaBaseUrl(resolveModelRequestConfig(config, model).baseUrl)) {
         return `${normalizeJusuanhubVideoQuality(config.vquality)}p · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;

@@ -34,6 +34,7 @@ import {
     runRunningHubWorkflow,
 } from "@/lib/runninghub-workflow";
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
+import { resolveFetchableReferenceUrl } from "./image";
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
 import { buildJusuanhubVideoRequestBody, describeJusuanhubUpstreamError, inspectJusuanhubMp4, isJusuanhubMediaBaseUrl, looksLikeTextPayload, orderJusuanhubApiKeys, readJusuanhubJobId, readJusuanhubJobState, resolveJusuanhubRetryDelayMs } from "./jusuanhub-media";
@@ -64,7 +65,7 @@ const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiE
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string; extraImages?: string[] };
 export type VideoGenerationTask = {
     id: string;
-    provider: "openai" | "plugin" | "jusuanhub";
+    provider: "openai" | "plugin" | "jusuanhub" | "apipath";
     model: string;
     /**
      * 聚算 Hub 专用：本次任务随机选中的 Key。
@@ -674,6 +675,14 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
         assertVideoConfig(requestConfig, requestConfig.model);
         return createJusuanhubVideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
     }
+    // 通联平台（*.apipath.top）的 MiniMax-H3 系列：平台异步视频任务契约（POST /v1/video/generations
+    // 提交回 { task_no }，轮询 GET /v1/tasks/{task_no}）。`MiniMax-H3-…` 名字会被
+    // isRelayMiniMaxH3Video 命中套上 CometAPI 形状（WxH size / metadata.content），字段全不对，
+    // 所以必须像聚算 / work-fisher 一样按 host 先分流。
+    if (isApipathH3Video(requestConfig, selectedModel)) {
+        assertVideoConfig(requestConfig, requestConfig.model);
+        return createApipathH3VideoTask(requestConfig, selectedModel, prompt, safeReferences, options);
+    }
     // Metaso MiniMax-H3 must use OpenAI /videos before any AutoDL ComfyUI heuristic.
     if (isMetasoH3Video(requestConfig, selectedModel)) {
         assertVideoConfig(requestConfig, requestConfig.model);
@@ -741,6 +750,8 @@ export async function pollVideoGenerationTask(config: AiConfig, task: VideoGener
     assertVideoConfig(requestConfig, requestConfig.model);
     // 聚算 Hub：查询端点是 `/v1/jobs/{id}`，不是 `/videos/{id}`（后者只会 404）。
     if (task.provider === "jusuanhub") return pollJusuanhubVideoTask(requestConfig, task, options);
+    // 通联平台 apipath：查平台通用口 `/v1/tasks/{task_no}`（完成态是 succeeded，不是 completed）。
+    if (task.provider === "apipath") return pollApipathVideoTask(requestConfig, task, options);
     // muse 走自己的查询端点（`/video/generations/{id}`，结果在 `data.result_url`）。
     if (isZhenzhenMuseVideoModel(task.model)) return pollMuseVideoTask(requestConfig, task, options);
     // Seedance H3 ComfyUI 系与 muse 同一套查询端点 / 结果字段（`data.status` → `data.result_url`）。
@@ -2739,6 +2750,217 @@ export function isAicostJsonVideoHost(baseUrl: string) {
 export function isWorkFisherVideoHost(baseUrl: string) {
     const hostname = videoHostname(baseUrl);
     return hostname === "work-fisher.com" || hostname.endsWith(".work-fisher.com");
+}
+
+// ── 通联平台（*.apipath.top）MiniMax-H3 系列：平台异步视频任务契约（2026-11-23）────────
+//
+// /app/api-docs + /docs/tonglian-api-video.md：这一族全是 async-video-task ——
+//   提交 POST /v1/video/generations（JSON：model / prompt / ratio / duration / resolution /
+//   reference_images 公网 URL 数组）→ 立刻返回 { task_no, status:"processing", progress }；
+//   轮询 GET /v1/tasks/{task_no}（平台通用口，终态 succeeded / failed / cancelled，error 带
+//   {code,message}）；Sora 兼容口（/v1/videos/{task_no}）的完成态是 completed —— 两套终态值
+//   不同，别混用判断。成片直链在返回体 url / output 字段（文档 result_field = "output / url"）。
+// 每个模型的能力矩阵（/api/models 的 runtime_rule + input_schema）差异极大，按模型名收口：
+//   · MiniMax-H3-2K-武庚纪：时长 5–28 整数；ratio 9:16 / 16:9 / 1:1；resolution 固定 "2k"（大小写敏感）；
+//     支持首尾帧 + 参考图 ≤9；
+//   · MiniMax-H3-15S：时长只在 [4,6,8,12,15]；ratio 只有 16:9（1344×768）；
+//   · MiniMax-H3-30S：时长固定 30；ratio 只有 16:9（1184×672）。
+// generation_mode 一律不发（服务端按 mode_param 自己定默认）；15S / 30S 的 schema 没有
+// resolution 字段，也不发。🔴 本族只认 apipath host + 上述三个模型名 —— 同站的
+// Minimax-H3-720P-将军 / 官K质量 / 特惠 等其它 H3 变体保持原状，别家渠道更不受影响。
+
+/** 通联平台（apipath.top 及其子域）。host 精确判，防 `apipath.top.evil.com` 误认。导出给面板 / 探针用。 */
+export function isApipathVideoHost(baseUrl: string) {
+    const hostname = videoHostname(baseUrl);
+    return hostname === "apipath.top" || hostname.endsWith(".apipath.top");
+}
+
+/** 本次适配的三个 MiniMax-H3 视频模型（同站其它 H3 变体不在此列）。导出给面板 / 探针用。 */
+export function isApipathH3VideoModel(model: string) {
+    const name = modelOptionName(model).toLowerCase();
+    return name.includes("武庚纪") || /h3[-_ ]?15s$/i.test(name) || /h3[-_ ]?30s$/i.test(name);
+}
+
+function isApipathH3Video(config: AiConfig, model: string) {
+    return isApipathVideoHost(config.baseUrl || "") && isApipathH3VideoModel(model);
+}
+
+/** 每个模型的时长白名单：`options` 是固定档位（就近吸附），`min/max` 是连续区间（夹住）。 */
+function apipathH3DurationSpec(model: string) {
+    const name = modelOptionName(model).toLowerCase();
+    if (name.includes("武庚纪")) return { options: null as number[] | null, min: 5, max: 28, fallback: 5 };
+    if (/h3[-_ ]?15s$/i.test(name)) return { options: [4, 6, 8, 12, 15] as number[] | null, min: null, max: null, fallback: 4 };
+    return { options: [30] as number[] | null, min: null, max: null, fallback: 30 };
+}
+
+/** 每个模型的画幅白名单（写死，别听画布旋钮乱发）。 */
+function apipathH3RatioSpec(model: string) {
+    const name = modelOptionName(model).toLowerCase();
+    if (name.includes("武庚纪")) return ["16:9", "9:16", "1:1"];
+    return ["16:9"];
+}
+
+/** 画布 size（WxH / 比例 / auto）→ 模型白名单里的最近档（对数距离，并列取靠前的）。 */
+const APIPATH_RATIO_ASPECT: Record<string, number> = { "21:9": 21 / 9, "16:9": 16 / 9, "4:3": 4 / 3, "1:1": 1, "3:4": 3 / 4, "9:16": 9 / 16, "3:2": 3 / 2, "2:3": 2 / 3 };
+export function apipathH3RatioValue(model: string, size: string) {
+    const spec = apipathH3RatioSpec(model);
+    const ratio = normalizeVideoRatio(size);
+    if (spec.includes(ratio)) return ratio;
+    const aspect = APIPATH_RATIO_ASPECT[ratio];
+    if (!aspect) return spec[0];
+    return spec.reduce((best, item) =>
+        Math.abs(Math.log(APIPATH_RATIO_ASPECT[item] / aspect)) < Math.abs(Math.log(APIPATH_RATIO_ASPECT[best] / aspect)) ? item : best,
+    );
+}
+
+/** 画布秒数 → 模型白名单：固定档位就近吸附，连续区间夹住。空 / 非法值落模型默认档。 */
+export function apipathH3DurationValue(model: string, seconds: string) {
+    const spec = apipathH3DurationSpec(model);
+    const raw = Math.floor(Number(seconds) || spec.fallback);
+    if (spec.options) return spec.options.reduce((best, item) => (Math.abs(item - raw) < Math.abs(best - raw) ? item : best));
+    return Math.max(spec.min ?? 4, Math.min(spec.max ?? 15, raw));
+}
+
+/** 该模型的分辨率档（武庚纪固定 "2k"；15S / 30S 不收 resolution，面板用 "720" 占位显示）。 */
+export function apipathH3Resolution(model: string) {
+    return modelOptionName(model).toLowerCase().includes("武庚纪") ? "2k" : "720";
+}
+
+/** 面板时长档位：武庚纪全区间 5–28 → 给 6/10/12/15/20/28 六档；固定档位模型照抄白名单。 */
+export function apipathH3SecondOptions(model: string) {
+    const spec = apipathH3DurationSpec(model);
+    if (spec.options) return spec.options;
+    return [6, 10, 12, 15, 20, 28].filter((value) => value >= (spec.min ?? 4) && value <= (spec.max ?? 15));
+}
+
+/** 面板自定义秒数上限（与 `videoSecondsMaxFor` 配对）。 */
+export function apipathH3SecondsMax(model: string) {
+    const spec = apipathH3DurationSpec(model);
+    return spec.max ?? spec.options?.[spec.options.length - 1] ?? 15;
+}
+
+/** 提交体。只发该模型白名单里的字段 —— 不发 generation_mode / count / 素材时长。导出供探针断言。 */
+export function buildApipathH3VideoPayload(config: AiConfig, model: string, prompt: string, images: string[] = []) {
+    const name = modelOptionName(model);
+    const duration = apipathH3DurationValue(name, config.videoSeconds || "");
+    const ratio = apipathH3RatioValue(name, config.size || "");
+    const resolution = apipathH3Resolution(name);
+    return {
+        model: name,
+        prompt,
+        duration,
+        ratio,
+        ...(resolution === "2k" ? { resolution } : {}),
+        ...(images.length ? { reference_images: images.slice(0, 9) } : {}),
+    } as Record<string, unknown>;
+}
+
+/** 提交响应取 task_no：裸 `{task_no}` 与 `{code,data:{task_no}}` 信封都接住。导出供探针复用。 */
+export function apipathVideoTaskId(payload: unknown) {
+    const root = readObject(payload);
+    if (!root) return "";
+    const data = readObject(root.data) || root;
+    const candidates = [data.task_no, root.task_no, data.task_id, root.task_id, data.id, root.id];
+    for (const value of candidates) {
+        if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
+}
+
+function apipathUrlFrom(value: unknown): string {
+    if (typeof value === "string" && /^https?:\/\//i.test(value.trim())) return value.trim();
+    const obj = readObject(value);
+    if (obj) {
+        for (const key of ["url", "video_url", "output"]) {
+            const hit = apipathUrlFrom(obj[key]);
+            if (hit) return hit;
+        }
+    }
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const hit = apipathUrlFrom(item);
+            if (hit) return hit;
+        }
+    }
+    return "";
+}
+
+/** 成片直链：文档 result_field = "output / url"，实际形状可能是 url / output 字符串 /
+ *  output 对象 {url} / 数组，或挂在 result 下。逐形状兜底。导出供探针复用。 */
+export function apipathVideoResultUrl(payload: unknown) {
+    const root = readObject(payload);
+    if (!root) return "";
+    const data = readObject(root.data) || root;
+    const holders = [root, data, readObject(data.result), readObject(root.result)];
+    for (const holder of holders) {
+        if (!holder) continue;
+        // "videos" 是 APIMart 系 result.videos[{url}] 的习惯形状，顺带兜住。
+        for (const key of ["url", "video_url", "result_url", "output", "videos"]) {
+            const hit = apipathUrlFrom(holder[key]);
+            if (hit) return hit;
+        }
+    }
+    return "";
+}
+
+/** 通联平台参考图：公网直链原样用，本地图走四级兜底拿公网 URL（≤9 张，平台各模型上限）。 */
+async function resolveApipathReferenceImages(config: AiConfig, references: ReferenceImage[], options?: RequestOptions) {
+    const list = references.slice(0, 9);
+    if (!list.length) return [] as string[];
+    const urls: string[] = [];
+    for (const image of list) {
+        urls.push(await resolveFetchableReferenceUrl(config, image, list.length, { ...options, allowProviderUpload: true }));
+    }
+    return urls.map((url) => String(url || "").trim()).filter(Boolean);
+}
+
+async function createApipathH3VideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const modelName = modelOptionName(model);
+    assertVideoConfig(config, modelName);
+    if (!prompt.trim()) throw new Error(apiText("videoTaskCreateFailed"));
+    // 平台明确要求「公网可 GET 200 直链」——data URL 会被拒或静默丢弃。复用 apipath 生图
+    // 同一条四级兜底（公网 URL → provider 上传 → 临时公共图床 → data URL），绝不静默丢参考图。
+    const images = await resolveApipathReferenceImages(config, references, options);
+    const payload = buildApipathH3VideoPayload(config, modelName, prompt, images);
+    const path = "/video/generations";
+    const { url: postUrl, bypass } = aiUrlForBody(config, path, payload);
+    try {
+        const response = await retryAlternateTransport(config, path, postUrl, payload, (url) => axios.post<unknown>(url, payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal }));
+        const id = apipathVideoTaskId(response.data);
+        if (!id) throw new Error(apiText("noVideoTaskId"));
+        return { id, provider: "apipath", model };
+    } catch (error) {
+        throw new Error(readAxiosError(mapOversizeUploadError(error, bypass), apiText("videoTaskCreateFailed")));
+    }
+}
+
+async function pollApipathVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    try {
+        const payload = (await axios.get<unknown>(aiApiUrl(config, `/tasks/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data;
+        const root = readObject(payload) || {};
+        const inner = readObject(root.data) || root;
+        const url = apipathVideoResultUrl(payload);
+        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        const status = String(inner.status || root.status || "").toLowerCase();
+        if (/succeeded|success/.test(status)) {
+            // succeeded 但响应里没解析出直链：照 pollOpenAIVideoTask 的口径给能定位的报错，
+            // 完整响应留在控制台 —— 绝不静默失败，也不假装完成。
+            const detail = describeVideoPayload(payload);
+            console.warn("[apipath] 任务已完成但没有解析出视频直链，原始响应如下（把这行内容贴给开发者即可定位）", payload);
+            throw new Error(`${apiText("videoResultMissing")}\n响应字段：${detail.keys.join(", ") || "（空）"}\n原始：${detail.raw}`);
+        }
+        if (/fail|cancel|error/.test(status)) {
+            const errObj = readObject(inner.error) || readObject(root.error);
+            const message = [errObj?.message, inner.error_message, inner.error, inner.msg, inner.message, root.msg, root.message].find(
+                (value): value is string => typeof value === "string" && Boolean(value.trim()),
+            );
+            return { status: "failed", error: readApiErrorMessage(message) || apiText("videoGenerationFailed") };
+        }
+        return { status: "pending" };
+    } catch (error) {
+        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
+    }
 }
 
 function isMetasoH3Video(config: AiConfig, _model: string) {
