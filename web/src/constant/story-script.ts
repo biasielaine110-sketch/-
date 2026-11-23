@@ -3981,6 +3981,29 @@ export function splitScriptAssetNames(value: unknown): string[] {
 }
 
 /**
+ * 一行分镜里出现过的**角色名**（含造型原串，如 `叶辰（校服）`），供站位合并区分
+ * 「人物句 / 环境句」用（`mergeScriptBlockingTexts` 的 `characterNames`）。
+ *
+ * 只认角色分类的资产列（`character_1` / `character_2` + 角色类自建列），一格多名逐名拆
+ * （`splitScriptAssetNames`）；场景 / 道具 / 站位列的名字**不算**人物。纯函数，探针可直接钉。
+ */
+export function scriptRowCharacterNames(
+    row: StoryScriptRow | undefined | null,
+    preset?: StoryScriptPresetId | string | null,
+    extras?: readonly StoryScriptExtraColumn[] | null,
+): string[] {
+    if (!row) return [];
+    const out: string[] = [];
+    for (const column of getStoryScriptAssetColumns(preset, extras)) {
+        if (scriptAssetColumnRole(column.key, extras) !== "character") continue;
+        for (const name of splitScriptAssetNames(row[column.key])) {
+            if (!out.includes(name)) out.push(name);
+        }
+    }
+    return out;
+}
+
+/**
  * 清理一个名字外面的包装：`（同一画面）苏晚` → `苏晚`、`【苏晚】` → `苏晚`、`「苏晚」` → `苏晚`。
  *
  * 两种情形必须分开处理，不能一律「剥首尾括号」：

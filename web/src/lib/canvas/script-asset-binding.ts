@@ -33,7 +33,12 @@ export function buildScriptAssetBindingPrompt(
 ) {
     const items = collectScriptAssetPromptItems(orderedAssetNodeIds, allNodes, assetNameOf, assetRoleOf);
     if (!items.length) return "";
-    const joined = items.map((item) => `${scriptAssetBindingName(item)}@${item.label}`).join(i18n.t("imageReferences.separator"));
+    const joined = items
+        .map((item) => {
+            const labels = item.labels.map((label, index) => (index ? `@${label}` : label)).join(i18n.t("imageReferences.separator"));
+            return `${scriptAssetBindingName(item)}@${labels}`;
+        })
+        .join(i18n.t("imageReferences.separator"));
     return i18n.t("canvas.scriptNode.assetBindingLine", { items: joined });
 }
 
@@ -62,7 +67,7 @@ export function buildScriptAssetNameLockPrompt(
 ) {
     const items = collectScriptAssetPromptItems(orderedAssetNodeIds, allNodes, assetNameOf, assetRoleOf);
     if (!items.length) return "";
-    return items.map((item) => `@${item.label}锁定为${scriptAssetNameLockText(item, voiceOf)}`).join("\n");
+    return items.map((item) => `${item.labels.map((label) => `@${label}`).join("、")}锁定为${scriptAssetNameLockText(item, voiceOf)}`).join("\n");
 }
 
 /**
@@ -111,8 +116,16 @@ function scriptAssetNameLockText(item: ScriptAssetPromptItem, voiceOf?: ScriptAs
     }
 }
 
-/** 一条「@图片N / @参考音频N = 什么资产」的待渲染条目（两个渲染器共用同一个收集结果）。 */
-type ScriptAssetPromptItem = { name: string; label: string; role: ScriptAssetRole | null; kind: "image" | "audio" };
+/**
+ * 一条「锁定为<什么>」的待渲染条目（三个渲染器共用同一个收集结果）。
+ *
+ * `labels` 是这一条名下的**所有** `@图片N` 标签（保序）：同一个资产名挂了多张图时它们会合成
+ * 一条（用户 2026-11-24 第 01 条：一格 3 张《五年高考三年模拟》铺出 3 行一字不差的
+ * 「@图片N锁定为《五年高考三年模拟》参考」，看着像 3 个资产，其实同一个）——
+ * 渲染成 `@图片1、@图片2、@图片3锁定为《五年高考三年模拟》参考。`，一图一 chip 都还在，
+ * 但模型能看出这几张是**同一个资产**的参考，而不是三件东西。
+ */
+type ScriptAssetPromptItem = { name: string; labels: string[]; role: ScriptAssetRole | null; kind: "image" | "audio" };
 
 /**
  * 绑定文案里「资产那一半」怎么写：
@@ -164,17 +177,29 @@ function collectScriptAssetPromptItems(
         })),
     );
     const refById = new Map(refs.map((reference) => [reference.nodeId, reference]));
-    return bindings
-        .map((binding) => ({
-            // 🔴 名字**只在这一层**归一成显示写法（`小满@园服` / `小满(园服)` → `小满（园服）`）：
-            // 三个渲染器（视频锁定行 / 生图绑定行 / 导演锁定块）都从这里取名字，
-            // 免得左侧 chip 是 `小满（园服）`、右侧写成 `小满@园服`，模型当成两套衣服。
-            name: formatScriptAssetDisplayName(binding.name),
-            label: refById.get(binding.nodeId)?.label || "",
-            role: binding.role,
-            kind: refById.get(binding.nodeId)?.kind === "audio" ? ("audio" as const) : ("image" as const),
-        }))
-        .filter((item) => Boolean(item.label));
+    const items: ScriptAssetPromptItem[] = [];
+    const itemByKey = new Map<string, ScriptAssetPromptItem>();
+    for (const binding of bindings) {
+        const reference = refById.get(binding.nodeId);
+        if (!reference?.label) continue;
+        // 🔴 名字**只在这一层**归一成显示写法（`小满@园服` / `小满(园服)` → `小满（园服）`）：
+        // 三个渲染器（视频锁定行 / 生图绑定行 / 导演锁定块）都从这里取名字，
+        // 免得左侧 chip 是 `小满（园服）`、右侧写成 `小满@园服`，模型当成两套衣服。
+        const name = formatScriptAssetDisplayName(binding.name);
+        const kind = reference.kind === "audio" ? ("audio" as const) : ("image" as const);
+        // 同名同分类同媒介的多张图合成一条（见 ScriptAssetPromptItem 的注释）：
+        // 「同一资产重复生成 / 一格挂了好几张同资产图」不再铺成 N 行一模一样的锁定句。
+        const key = `${kind}|${binding.role ?? ""}|${name}`;
+        const existing = itemByKey.get(key);
+        if (existing) {
+            if (!existing.labels.includes(reference.label)) existing.labels.push(reference.label);
+            continue;
+        }
+        const item: ScriptAssetPromptItem = { name, labels: [reference.label], role: binding.role, kind };
+        itemByKey.set(key, item);
+        items.push(item);
+    }
+    return items;
 }
 
 /**
@@ -205,7 +230,7 @@ export function buildScriptAssetLockPrompt(
 ) {
     const items = collectScriptAssetPromptItems(orderedAssetNodeIds, allNodes, assetNameOf, assetRoleOf);
     if (!items.length) return "";
-    return ["- **资产锁定：**", ...items.map((item) => `@${item.label}：${scriptAssetLockText(item, voiceOf)}`)].join("\n");
+    return ["- **资产锁定：**", ...items.map((item) => `@${item.labels.join("、@")}：${scriptAssetLockText(item, voiceOf)}`)].join("\n");
 }
 
 /** 一行「锁什么」的文案：按资产分类写死，用户 2026-10-27 拍的五种写法（+ 2026-11-15 的音色）。 */

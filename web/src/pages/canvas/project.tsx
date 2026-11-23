@@ -99,6 +99,7 @@ import {
     resolveStoryScriptShotSeconds,
     resolveStoryScriptShotCount,
     scriptAssetColumnRole,
+    scriptRowCharacterNames,
     scriptCellAssetIds,
     scriptNameLockIds,
     scriptRowAssetIds,
@@ -11270,7 +11271,11 @@ function AtelierCanvasPage() {
                 // 人物站位描述（用户 2026-11-23 第 06 条）：本段各镜的「人物站位描述」整合成一块，
                 // 放在**镜头内容上面**。合并镜头在这里做句级去重（空间底子只留一份、只追加真的改了走位的句子），
                 // 免得三镜站位原样拼三遍把运镜指令淹掉。
-                const blockingBlock = buildScriptBlockingPrompt(members.map((member) => member.row.blocking_detail));
+                // 角色名（用户 2026-11-24 第 02 条）：传给合并器区分「人物句 / 环境句」——
+                // 人物句（走位）只做普通去重；环境句（空间底子）换措辞重写也按底子覆盖率丢掉。
+                const blockingBlock = buildScriptBlockingPrompt(members.map((member) => member.row.blocking_detail), {
+                    characterNames: Array.from(new Set(members.flatMap((member) => scriptRowCharacterNames(member.row, presetId, scriptExtras)))),
+                });
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
                 // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产锁定块（带「【资产锁定】」标题，
                 // 用户 2026-11-23 晚间第 01 条）在最上、人物站位块其次、镜头内容其后、禁止项 / 强制声明收尾。
