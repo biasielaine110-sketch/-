@@ -6509,24 +6509,61 @@ function extractMomanPlainScriptRecords(text: string): Record<string, unknown>[]
  * 源稿 → storyboard 记录（JSON 三级抽取 → 纯文本时间码段落兜底）。
  * 含 `"prompt":` 却抽不出对象时**不再**退到纯文本通道：那种源稿是坏掉的 JSON，
  * 硬抓会把 `{"id":…}` 一起当正文塞进视频列。
+ *
+ * 🔴 抽取前先剥聊天附件标记（`@image#1:Clipboard_Screenshot.png`，2026-11-23 晚间报障）：
+ * 对话层噪声混进源稿时，不该影响第七套的源稿识别，更不该被 overlay 逐字搬进视频列
+ * （画布自己的引用语法只有 `@图片N`，见 `STORY_SCRIPT_ATTACHMENT_TOKEN`）。
  */
 function resolveMomanSourceRecords(sourceText: string): Record<string, unknown>[] {
-    const text = String(sourceText ?? "");
+    const text = stripStoryScriptAttachmentTokens(sourceText);
     const records = extractMomanStoryboardRecords(text);
     if (records.length) return records;
     if (/["']prompt["']\s*:/.test(text)) return [];
     return extractMomanPlainScriptRecords(text);
 }
 
+/** 聊天附件标记剥离（`@image#N[:文件名]` → 空格）：与解析侧 `toText` 同一判据，token 前的空白一并吃掉。 */
+function stripStoryScriptAttachmentTokens(text: string): string {
+    return String(text ?? "").replace(STORY_SCRIPT_ATTACHMENT_TOKEN, " ");
+}
+
+/**
+ * 「源内容里贴过 storyboard」的意图判据（2026-11-23 晚间报障）。
+ *
+ * ⚠️ 第七套从**普通剧本**生成时，视频列由模型按格式写 —— 这是正常路径，不该报
+ * 「没找到 storyboard」吓得用户以为出错了。只有源稿里**确实带 storyboard 痕迹**、
+ * 却一条都没识别到时才值得提醒：
+ *  ① 有 `"prompt":` 键（坏掉的 JSON —— 抽取通道已明确放弃）；
+ *  ② 有 `storyboard` 字样（魔漫技能输出的标志）；
+ *  ③ ≥2 个「时间码—时间码：」段头（与 `extractMomanPlainScriptRecords` ② 同一口径，
+ *     少于 2 个本来就不会接管，报了也是噪音）。
+ * 故意**不含**「镜头 N」标记：分镜式剧本里到处是它，但抽取通道 ① 还要求块以时间码开头，
+ * 没有 `镜头 标记 + 时间码` 双保险就报，只会回到「普通剧本也报错」的老毛病。
+ */
+function hasMomanStoryboardIntent(text: string): boolean {
+    if (/["']prompt["']\s*:/.test(text)) return true;
+    if (/storyboard/i.test(text)) return true;
+    let count = 0;
+    for (const _match of text.matchAll(MOMAN_TIMECODE_HEADER_PATTERN)) {
+        count += 1;
+        if (count >= 2) return true;
+    }
+    return false;
+}
+
+/** 「时间码—时间码：」段头（供意图判据复用，与 `extractMomanPlainScriptRecords` ② 的 pattern 一致）。 */
+const MOMAN_TIMECODE_HEADER_PATTERN = /(\d{1,2}(?::\d{2}){1,2}|\d+(?:\.\d+)?)\s*[—–\-~～至]\s*(\d{1,2}(?::\d{2}){1,2}|\d+(?:\.\d+)?)\s*(?:秒|s)?\s*[：:]/gi;
+
 /** 诊断用：源内容里的第七套源稿到底是什么形态、有几条（生成完给用户一句明说，别再静默空转）。 */
-export function describeMomanSourceOverlay(sourceText: string): { kind: "json" | "plain" | "none"; records: number } {
-    const text = String(sourceText ?? "");
-    if (!text.trim()) return { kind: "none", records: 0 };
+export function describeMomanSourceOverlay(sourceText: string): { kind: "json" | "plain" | "none"; records: number; intent: boolean } {
+    const text = stripStoryScriptAttachmentTokens(String(sourceText ?? ""));
+    if (!text.trim()) return { kind: "none", records: 0, intent: false };
     const json = extractMomanStoryboardRecords(text);
-    if (json.length) return { kind: "json", records: json.length };
-    if (/["']prompt["']\s*:/.test(text)) return { kind: "none", records: 0 };
+    if (json.length) return { kind: "json", records: json.length, intent: true };
+    if (/["']prompt["']\s*:/.test(text)) return { kind: "none", records: 0, intent: true };
     const plain = extractMomanPlainScriptRecords(text);
-    return plain.length ? { kind: "plain", records: plain.length } : { kind: "none", records: 0 };
+    if (plain.length) return { kind: "plain", records: plain.length, intent: true };
+    return { kind: "none", records: 0, intent: hasMomanStoryboardIntent(text) };
 }
 
 /**

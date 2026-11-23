@@ -8834,9 +8834,16 @@ function AtelierCanvasPage() {
                  */
                 if (momanScheme) {
                     const momanInfo = describeMomanSourceOverlay(sourceText);
-                    if (momanInfo.kind === "none") {
+                    /**
+                     * 🔴 只在「源稿里确实贴过 storyboard 痕迹却一条没识别到」时才警告（2026-11-23 晚间报障）：
+                     * 从普通剧本生成是第七套的正常路径，视频列本来就是模型按格式写的 ——
+                     * 那时弹「请把 storyboard 贴进源内容」会被当成报错（黄底 ⚠️ 顶着一行长文案）。
+                     * 意图判据见 `hasMomanStoryboardIntent`：`"prompt":` 键 / `storyboard` 字样 /
+                     * ≥2 个时间码段头，三占其一才提醒。
+                     */
+                    if (momanInfo.kind === "none" && momanInfo.intent) {
                         message.warning(t("canvas.scriptNode.momanSourceMissing"));
-                    } else if (momanInfo.records < finalRows.length) {
+                    } else if (momanInfo.kind !== "none" && momanInfo.records < finalRows.length) {
                         message.info(
                             t("canvas.scriptNode.momanSourcePartial", {
                                 count: momanInfo.records,
