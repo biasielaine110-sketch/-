@@ -2196,7 +2196,7 @@ export default {
             rebindForFolderSave: "当前草稿未绑定文件夹，请用 Ctrl/Cmd+S 重新选择草稿文件夹后，即可直接保存到该路径",
         },
         video: {
-            playbackFailed: "视频无法播放。请重新生成；若刚跑完请确认已返回最终 MP4（VHS 格式需为 video/h264-mp4）。",
+            playbackFailed: "视频无法播放。若刚跑完，多半是成片还没回完或下载被截断 —— 重新取一次成片即可，不必重新生成。",
         },
     },
     navigation: {

@@ -2,6 +2,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 
 import { proxyMediaUrl } from "@/lib/api-proxy";
+import { describeVideoContainer, readVideoContainer, videoMimeForContainer, type VideoContainerInfo } from "@/lib/media-container";
 import { deleteLocalMediaBlob, isLocalMediaLibraryReady, readLocalMediaBlob, writeLocalMediaBlob } from "@/services/local-media-library";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
@@ -42,16 +43,32 @@ async function assertNotTextPayload(blob: Blob) {
 export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
     const raw = typeof input === "string" ? await (await fetch(proxyRemoteMediaUrl(input))).blob() : input;
     if (prefix === "video" || prefix === "audio") await assertNotTextPayload(raw);
+    /**
+     * 视频：**按字节认容器**，不信 content-type、也不信文件名。
+     *
+     * 这是「画布看着好了、点播放才炸」的最后一道闸。上游把 GIF 预览叫 `.mp4`、把 MPEG-TS 流
+     * 回成 `application/octet-stream`、把半截文件回成 200 —— 以前一律被下面「没有视频类型就贴
+     * video/mp4」的规则收下，Chrome 打开就只给一句 `DEMUXER_ERROR_COULD_NOT_OPEN`。
+     * 现在：容器不是浏览器能开的 → 当场抛错说明白；是 WebM 就按 WebM 存，别再冒充 MP4。
+     */
+    let videoContainer: VideoContainerInfo | null = null;
+    if (prefix === "video") {
+        videoContainer = await readVideoContainer(raw);
+        const problem = describeVideoContainer(videoContainer);
+        if (problem) throw new Error(`视频保存失败：${problem}`);
+    }
     // ComfyUI /view often lands as application/octet-stream; without a video/* type, Chrome
     // may refuse to decode the blob URL even when the bytes are a valid mp4.
+    const containerType = videoContainer ? videoMimeForContainer(videoContainer) : "";
     const desiredType =
-        raw.type.startsWith("video/") || raw.type.startsWith("audio/") || raw.type.startsWith("image/")
+        containerType ||
+        (raw.type.startsWith("video/") || raw.type.startsWith("audio/") || raw.type.startsWith("image/")
             ? raw.type
             : prefix === "video"
               ? "video/mp4"
               : prefix === "audio"
                 ? "audio/mpeg"
-                : raw.type || "application/octet-stream";
+                : raw.type || "application/octet-stream");
     const blob = raw.type === desiredType ? raw : raw.slice(0, raw.size, desiredType);
     const storageKey = `${prefix}:${nanoid()}`;
     // Publish the object URL immediately so callers can paint the canvas while IndexedDB / disk

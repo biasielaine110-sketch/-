@@ -2191,7 +2191,7 @@ export default {
             rebindForFolderSave: "This draft is not bound to a folder. Press Ctrl/Cmd+S to choose a draft folder, then downloads can save there directly.",
         },
         video: {
-            playbackFailed: "This video cannot be played. Regenerate and confirm the final MP4 was returned (VHS format should be video/h264-mp4).",
+            playbackFailed: "This video cannot be played. If it just finished, the file was most likely cut off during download — fetch the clip again, there is no need to regenerate.",
         },
     },
     navigation: {

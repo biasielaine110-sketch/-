@@ -34,6 +34,7 @@ import {
     runRunningHubWorkflow,
 } from "@/lib/runninghub-workflow";
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
+import { assertBrowserPlayableVideo } from "@/lib/media-container";
 import { resolveFetchableReferenceUrl } from "./image";
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
@@ -1284,6 +1285,22 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
                   ? result.blob.type
                   : "video/mp4";
         const blob = result.blob.type === desired ? result.blob : result.blob.slice(0, result.blob.size, desired);
+        /**
+         * 入库前先认容器（用户 2026-11-25 报「生成完点播放 → DEMUXER_ERROR_COULD_NOT_OPEN」）。
+         *
+         * 以前这里对字节零校验，一律重贴 `video/mp4` 后落库：上游回了半截 MP4（缺 moov）、
+         * GIF 预览、MPEG-TS 流，画布都显示「已生成」，用户点播放才炸，而且提示只会说
+         * 「请重新生成」—— 其实任务已经成功、钱已经花了，重新生成是纯损失。
+         * 现在：不可播当场抛错说清原因；成片 URL 还在的话先按 URL 重取一次（多半只是下载被截断）。
+         */
+        try {
+            await assertBrowserPlayableVideo(blob, "成片");
+        } catch (error) {
+            if (result.url && /^https?:\/\//i.test(result.url)) {
+                return storeGeneratedVideo({ url: result.url, mimeType: result.mimeType });
+            }
+            throw error instanceof Error ? error : new Error(String(error));
+        }
         return uploadMediaFile(blob, "video");
     }
     if (result.url) {

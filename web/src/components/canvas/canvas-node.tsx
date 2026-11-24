@@ -16,6 +16,7 @@ import {
     pickNativeVideoQueueEntryForNode,
     subscribeNativeVideoQueue,
 } from "@/lib/canvas/native-video-job-queue";
+import { describeVideoContainer, readVideoContainer } from "@/lib/media-container";
 import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
 import { needsMediaRecovery } from "@/lib/canvas/media-recovery";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
@@ -1388,6 +1389,23 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
     // forever. Rebuild a fresh object URL from the stored blob and retry a few times. After the
     // retries are exhausted, surface a toast — silent play() rejection used to look like a dead
     // Play button when the stored bytes were a non-video (e.g. a VHS preview gif mislabeled mp4).
+    /**
+     * 读库里那条 blob 认容器，把 Chrome 那句 `DEMUXER_ERROR_COULD_NOT_OPEN` 翻成人话。
+     *
+     * 截断的 MP4、GIF 预览、MPEG-TS 流、HEVC 编码的处置方式完全不同，一律回一句「请重新生成」
+     * 是最差的建议 —— 上游任务其实已经成功、钱已经花了，多数情况只需要重新取一次成片。
+     * 读不到库就返回空串，退回原始 media error。
+     */
+    const describeStoredVideoProblem = async () => {
+        if (!storageKey) return "";
+        try {
+            const blob = await getMediaBlob(storageKey);
+            return blob ? describeVideoContainer(await readVideoContainer(blob)) : "";
+        } catch {
+            return "";
+        }
+    };
+
     const handleVideoError = () => {
         if (!playableSrc) return;
         if (storageKey && retriesRef.current < 2) {
@@ -1397,9 +1415,13 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
             });
             return;
         }
-        const mediaErr = videoRef.current?.error;
-        const detail = mediaErr?.message || (mediaErr ? `code ${mediaErr.code}` : "");
-        message.error(detail ? `${t("canvas.video.playbackFailed")} (${detail})` : t("canvas.video.playbackFailed"));
+        void (async () => {
+            const mediaErr = videoRef.current?.error;
+            const base = mediaErr?.message || (mediaErr ? `code ${mediaErr.code}` : "");
+            const reason = await describeStoredVideoProblem();
+            const detail = [base, reason].filter(Boolean).join(" · ");
+            message.error(detail ? `${t("canvas.video.playbackFailed")} (${detail})` : t("canvas.video.playbackFailed"));
+        })();
     };
 
     const reportPlayFailure = (reason?: unknown) => {
@@ -1408,11 +1430,16 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
             reason && typeof reason === "object" && "name" in reason
                 ? String((reason as { name?: string }).name || "")
                 : "";
-        const detail =
-            mediaErr?.message ||
-            (mediaErr ? `code ${mediaErr.code}` : "") ||
-            (dom && dom !== "AbortError" ? dom : "");
-        message.error(detail ? `${t("canvas.video.playbackFailed")} (${detail})` : t("canvas.video.playbackFailed"));
+        void (async () => {
+            const container = await describeStoredVideoProblem();
+            const detail =
+                mediaErr?.message ||
+                (mediaErr ? `code ${mediaErr.code}` : "") ||
+                (dom && dom !== "AbortError" ? dom : "") ||
+                container;
+            const combined = [detail, detail === container ? "" : container].filter(Boolean).join(" · ");
+            message.error(combined ? `${t("canvas.video.playbackFailed")} (${combined})` : t("canvas.video.playbackFailed"));
+        })();
     };
 
     const runPlay = (video: HTMLVideoElement) => {
