@@ -11,7 +11,7 @@ import type { CanvasReverseVideoTarget } from "@/types/canvas";
 import { SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { normalizeScriptShotsPerClip } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
-import { DEFAULT_EPISODE_SECONDS, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
+import { DEFAULT_EPISODE_SECONDS, resolveEpisodeSeconds, resolveEpisodeSourceType } from "@/lib/canvas/video-reverse-episodes";
 /** 三条命令 + 04「剧集批量生成」。数字即用户看到的 01 / 02 / 03 / 04。 */
 export type VideoReverseMode = 1 | 2 | 3 | 4;
 
@@ -343,6 +343,18 @@ export function normalizeReverseVideoTarget(raw: Partial<CanvasReverseVideoTarge
      */
     const episodeSeconds = resolveEpisodeSeconds(source.episodeSeconds);
     if (episodeSeconds !== DEFAULT_EPISODE_SECONDS) target.episodeSeconds = String(episodeSeconds);
+    /**
+     * 04 的输入类型（用户 2026-11-24）：只认 `"script"`（小说是默认，写进去等于把默认冻死，
+     * 以后改默认对老节点不生效 —— 同 `size` / `quality` / `autoStages` 那个口径）。
+     */
+    if (resolveEpisodeSourceType(source.episodeSourceType) === "script") target.episodeSourceType = "script";
+    /**
+     * 04 小说模式的「每集字数」（用户 2026-11-24）：合法正数才保留。
+     * UI 侧在「值 == 按每集秒数换算的值」时会把这个键丢掉（默认不落盘），所以
+     * metadata 里有值 = 用户显式改过，改每集秒数时字数不再自动跟着换。
+     */
+    const novelChars = Number(String(source.episodeNovelChars ?? "").trim());
+    if (Number.isFinite(novelChars) && novelChars > 0) target.episodeNovelChars = String(Math.round(novelChars));
     return target;
 }
 

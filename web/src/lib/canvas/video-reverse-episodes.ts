@@ -55,6 +55,47 @@ export function segmentsPerEpisode(seconds: number | string | null | undefined):
 }
 
 /**
+ * 04 的输入类型（用户 2026-11-24）：
+ *  - `novel`（**默认**）：输入是小说 / 故事（叙述文体）→ 第一步调用按**字数密度**展开，
+ *    「每 N 字原文 = 一集的秒数」，原文情节全部保留、不许压缩；
+ *  - `script`：输入是成形的剧本 → 第一步调用把原文**压缩或扩写**到每集秒数
+ *    （填 120 秒就整份压 / 扩成 8 段 × 15 秒），不按字数密度。
+ */
+export type EpisodeSourceType = "novel" | "script";
+export const DEFAULT_EPISODE_SOURCE_TYPE: EpisodeSourceType = "novel";
+
+/** 只认 `"script"`，其余（空 / 脏值 / `"novel"`）一律回落默认 `novel`。 */
+export function resolveEpisodeSourceType(raw: unknown): EpisodeSourceType {
+    return String(raw ?? "").trim() === "script" ? "script" : "novel";
+}
+
+/**
+ * 小说模式的**字数密度基准**（用户 2026-11-24）：「强制每输入 2500 字的文本输出为
+ * 8 段每段 15 秒的内容」—— 即 **2500 字 = 120 秒 = 8 个片段**。
+ *
+ * 与每集秒数**等比换算**：每集 180 秒对应 3750 字（2500 × 180 / 120）。
+ * 这个数喂给第一步提示词当「换算口径」，`novelCharsForEpisodeSeconds` 是唯一换算点。
+ */
+export const DEFAULT_NOVEL_CHARS_PER_EPISODE = 2500;
+export const NOVEL_CHARS_BASE_SECONDS = 120;
+
+/** 每集秒数对应的小说字数（等比换算，四舍五入取整）：120 秒 → 2500、180 秒 → 3750。 */
+export function novelCharsForEpisodeSeconds(seconds: number | string | null | undefined): number {
+    return Math.max(1, Math.round((resolveEpisodeSeconds(seconds) * DEFAULT_NOVEL_CHARS_PER_EPISODE) / NOVEL_CHARS_BASE_SECONDS));
+}
+
+/**
+ * 小说模式「每集字数」的有效值：用户显式填过（> 0）就用它的取整；
+ * 没填 / 脏值 → 按每集秒数等比换算（`novelCharsForEpisodeSeconds`）。
+ * UI 在「值 == 换算值」时把 metadata 键丢掉（默认不落盘），所以缺省即跟随每集秒数。
+ */
+export function resolveEpisodeNovelChars(raw: number | string | null | undefined, seconds: number | string | null | undefined): number {
+    const value = Number(String(raw ?? "").trim());
+    if (Number.isFinite(value) && value > 0) return Math.max(50, Math.round(value));
+    return novelCharsForEpisodeSeconds(seconds);
+}
+
+/**
  * 拆集用的技能（唯一来源）。
  *
  * 🔴 只给这一个精确名，不加宽松变体：`pickVideoReverseSkill` 是双向包含匹配（见 `video-reverse.ts`
@@ -150,18 +191,44 @@ export const EPISODE_SPLIT_OUTPUT_RULE =
  * 结构：语言规则 → 用哪个技能 → 干什么 → 每集时长 → 特殊要求 → 原文剧本 → 输出格式 → 语言规则（收口）。
  * 语言规则首尾各钉一次，与 01 / 02 / 03 同规格。
  */
-export function buildEpisodeSplitPrompt(params: { script: string; episodeSeconds?: number | string; requirement?: string; skillLabel?: string; languageRule?: string }): string {
+export function buildEpisodeSplitPrompt(params: { script: string; episodeSeconds?: number | string; requirement?: string; skillLabel?: string; languageRule?: string; sourceType?: string; novelChars?: number | string }): string {
     const seconds = resolveEpisodeSeconds(params.episodeSeconds);
     const skill = String(params.skillLabel ?? "").trim() || EPISODE_SPLIT_SKILL_LABEL;
     const languageRule = String(params.languageRule ?? "").trim();
+    /** 输入类型（用户 2026-11-24）：novel = 按字数密度展开（默认），script = 压/扩到每集秒数。 */
+    const sourceType = resolveEpisodeSourceType(params.sourceType);
+    const novelChars = resolveEpisodeNovelChars(params.novelChars, seconds);
+    const perEpisode = segmentsPerEpisode(seconds);
     const lines: string[] = [];
     if (languageRule) lines.push(languageRule);
     lines.push(`请用「${skill}」技能，把我下面这份剧本改写、续写成**可以直接开拍的连续片段正文**：把叙述文字改写成片段（场景、镜头、画面、台词），剧情按原文顺序推进，不跳段、不漏内容。`);
     lines.push(episodeSecondsRule(seconds));
-    lines.push(
-        `篇幅控制：这份正文会被我按每集 ${seconds} 秒自动切集 = **${segmentsPerEpisode(seconds)} 个片段 / 集**（每个片段 ${EPISODE_SEGMENT_SECONDS} 秒）。` +
-            `所以请按 ${EPISODE_SEGMENT_SECONDS} 秒一个片段均匀往下铺，不要写出需要好几集才演完的超长片段，也不要一个片段里只有一句台词。`,
-    );
+    if (sourceType === "novel") {
+        /**
+         * 小说模式（用户 2026-11-24）：第一步调用**强制按字数密度展开** ——
+         * 「每 2500 字文本输出为 8 段每段 15 秒」；2500 与 120 秒等比（180 秒 = 3750 字）。
+         * 原文约多少字 → 应产出约多少片段，给模型一个可对账的总数。
+         */
+        const totalChars = Array.from(String(params.script ?? "")).length;
+        const expectedEpisodes = Math.max(1, Math.ceil(totalChars / novelChars));
+        lines.push(
+            `换算口径（最高优先级）：输入是**小说 / 故事**（叙述文体）。请按「**每 ${novelChars} 字原文 = ${seconds} 秒（${perEpisode} 个片段 × ${EPISODE_SEGMENT_SECONDS} 秒）**」的密度把原文**完整展开**成片段正文：不要压缩、不要概括、不要跳过情节，原文里每一场戏都要落到片段里。` +
+                `这份原文约 ${totalChars} 字，按换算口径应产出约 ${expectedEpisodes * perEpisode} 个片段（约 ${expectedEpisodes} 集 × ${perEpisode} 段）。`,
+        );
+        lines.push(
+            `篇幅控制：这份正文会被我按每集 ${seconds} 秒自动切集 = **${perEpisode} 个片段 / 集**（每个片段 ${EPISODE_SEGMENT_SECONDS} 秒）。` +
+                `所以请按 ${EPISODE_SEGMENT_SECONDS} 秒一个片段均匀往下铺，不要写出需要好几集才演完的超长片段，也不要一个片段里只有一句台词。`,
+        );
+    } else {
+        /**
+         * 剧本模式（用户 2026-11-24）：不管原文多长，压缩 / 扩写到填写的秒数 ——
+         * 「我填写 120 秒，就给我将输入的内容压缩或者扩成 120 秒的，即 8 段 15 秒」。
+         */
+        lines.push(
+            `篇幅控制（最高优先级）：输入是**成形的剧本**——请把原文**压缩或扩写**到总计 ${seconds} 秒（${perEpisode} 个片段 × ${EPISODE_SEGMENT_SECONDS} 秒）的正文：` +
+                `原文长就压缩（合并过场与次要情节、保留主线），原文短就扩写（补足镜头、台词与细节），最终正好铺满 ${perEpisode} 个片段，不多不少。`,
+        );
+    }
     const extra = String(params.requirement ?? "").trim();
     if (extra) lines.push(`特殊要求：${extra}`);
     lines.push(`原文剧本（可能很长，务必全部覆盖，不要只处理开头一段）：\n<<<\n${String(params.script ?? "").trim()}\n>>>`);

@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, VIDEO_REVERSE_STAGE_OPTIONS, buildDefaultVideoReverseRequirement, describeReverseVideoStages, normalizeReverseVideoTarget, readReverseVideoScript, readReverseVideoSkill, readReverseVideoStages, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, setReverseVideoStage, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult, type VideoReverseStageId } from "@/lib/canvas/video-reverse";
-import { DEFAULT_EPISODE_SECONDS, EPISODE_DEFAULT_REQUIREMENT, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, SCRIPT_CHARS_PER_SECOND, resolveEpisodeSeconds } from "@/lib/canvas/video-reverse-episodes";
+import { DEFAULT_EPISODE_SECONDS, DEFAULT_EPISODE_SOURCE_TYPE, DEFAULT_NOVEL_CHARS_PER_EPISODE, EPISODE_DEFAULT_REQUIREMENT, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, NOVEL_CHARS_BASE_SECONDS, novelCharsForEpisodeSeconds, resolveEpisodeNovelChars, resolveEpisodeSeconds, resolveEpisodeSourceType, segmentsPerEpisode, type EpisodeSourceType } from "@/lib/canvas/video-reverse-episodes";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR, normalizeScriptShotsPerClip } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
@@ -106,6 +106,13 @@ type CanvasReverseVideoNodeContentProps = {
             script?: string;
             /** 04 的每集时长（秒）。不传 = 按节点 metadata / 默认 120。 */
             episodeSeconds?: number;
+            /**
+             * 04 的输入类型（用户 2026-11-24）：`"novel"` = 小说（按字数密度展开，默认）、
+             * `"script"` = 剧本（压缩 / 扩写到每集秒数）。不传 = 按节点 metadata / 默认小说。
+             */
+            sourceType?: string;
+            /** 04 小说模式的每集字数（不传 = 按每集秒数等比换算，默认 2500）。 */
+            novelChars?: number;
         },
         report: (stage: string) => void,
     ) => Promise<VideoReverseResult>;
@@ -330,6 +337,30 @@ export function CanvasReverseVideoNodeContent({
         },
         [patchTarget],
     );
+    /**
+     * 04 的输入类型（用户 2026-11-24）：小说（默认，按字数密度展开）/ 剧本（压 / 扩到每集秒数）。
+     * 与秒数同口径：**默认值不落盘**——选回「小说」就把键丢掉，以后改默认对老节点生效。
+     */
+    const episodeSourceType = resolveEpisodeSourceType(target.episodeSourceType);
+    const applySourceType = useCallback(
+        (next: EpisodeSourceType) => {
+            patchTarget({ episodeSourceType: next === DEFAULT_EPISODE_SOURCE_TYPE ? undefined : next });
+        },
+        [patchTarget],
+    );
+    /**
+     * 小说模式的「每集字数」（用户 2026-11-24）：默认 2500 字 = 120 秒一集，与每集秒数等比
+     * （180 秒 → 3750）。显示值 = 用户显式改过的值 || 按当前每集秒数换算的值；
+     * 用户改回换算值时把键丢掉（恢复「跟随每集秒数」）。
+     */
+    const novelChars = resolveEpisodeNovelChars(target.episodeNovelChars, episodeSeconds);
+    const applyNovelChars = useCallback(
+        (value: number | string | null | undefined) => {
+            const next = resolveEpisodeNovelChars(value, episodeSeconds);
+            patchTarget({ episodeNovelChars: next === novelCharsForEpisodeSeconds(episodeSeconds) ? undefined : String(next) });
+        },
+        [episodeSeconds, patchTarget],
+    );
     const commitScript = useCallback(
         (value: string) => {
             setScriptDraft(value);
@@ -498,7 +529,7 @@ export function CanvasReverseVideoNodeContent({
     }, [attach, message, onCreateVideoFromUrl, urlDraft]);
 
     const runMode = useCallback(
-        async (mode: VideoReverseMode, requirement?: string, extra?: { script?: string; episodeSeconds?: number }) => {
+        async (mode: VideoReverseMode, requirement?: string, extra?: { script?: string; episodeSeconds?: number; sourceType?: string; novelChars?: number }) => {
             /**
              * 01 / 02 / 03 的前提是「接入了一条视频」；**04 不是** —— 它的输入是文字剧本，
              * 所以门禁只在 1~3 上生效（下面 `attached` 的取值也对应放宽）。
@@ -528,7 +559,7 @@ export function CanvasReverseVideoNodeContent({
                         chatModel: effectiveReverseModel || undefined,
                         // 三颗勾只对 02 / 03 / 04 有意义（01 只反推、不碰脚本生成器），01 不带。
                         stages: mode === 1 ? undefined : stages,
-                        ...(mode === 4 ? { script: extra?.script ?? scriptDraft, episodeSeconds: extra?.episodeSeconds ?? episodeSeconds } : {}),
+                        ...(mode === 4 ? { script: extra?.script ?? scriptDraft, episodeSeconds: extra?.episodeSeconds ?? episodeSeconds, sourceType: extra?.sourceType ?? episodeSourceType, novelChars: extra?.novelChars ?? novelChars } : {}),
                     },
                     (text) => patchRun({ status: "running", mode, stage: text, at: Date.now() }),
                 );
@@ -550,7 +581,7 @@ export function CanvasReverseVideoNodeContent({
                 message.error(detail);
             }
         },
-        [attached, effectiveReverseModel, episodeSeconds, message, node.id, onRun, patchRun, scriptDraft, skillOption.id, stages, target.scriptScheme, target.shotsPerClip],
+        [attached, effectiveReverseModel, episodeSeconds, episodeSourceType, message, node.id, novelChars, onRun, patchRun, scriptDraft, skillOption.id, stages, target.scriptScheme, target.shotsPerClip],
     );
 
     const handleCommand = useCallback(
@@ -603,12 +634,12 @@ export function CanvasReverseVideoNodeContent({
                 return;
             }
             setRequirementMode(null);
-            void runMode(4, requirementText.trim() || undefined, { script: scriptDraft.trim(), episodeSeconds });
+            void runMode(4, requirementText.trim() || undefined, { script: scriptDraft.trim(), episodeSeconds, sourceType: episodeSourceType, novelChars });
             return;
         }
         setRequirementMode(null);
         void runMode(mode, requirementText.trim());
-    }, [episodeSeconds, message, requirementMode, requirementText, runMode, scriptDraft]);
+    }, [episodeSeconds, episodeSourceType, message, novelChars, requirementMode, requirementText, runMode, scriptDraft]);
 
     const softBorder = `1px solid ${theme.node.stroke}`;
 
@@ -1051,7 +1082,7 @@ export function CanvasReverseVideoNodeContent({
                     {requirementMode === 4 ? (
                         <>
                             <div className="text-xs leading-relaxed opacity-60">
-                                这次<span className="font-medium">不接视频</span>：输入是下面这段<span className="font-medium">文字剧本</span>（可手打 / 粘贴，也可以连一个文本节点后点「写入剧本框」）。执行时先用「{EPISODE_SPLIT_SKILL_LABEL}」技能把原文改写成<span className="font-medium">连续剧本正文</span>，<span className="font-medium">拿到对话结果后</span>再按每集 <span className="font-medium">{episodeSeconds} 秒</span>自动切段（约 {Math.round(episodeSeconds * SCRIPT_CHARS_PER_SECOND)} 字 / 集），切出几集就建几个文本节点（纵向排开），每集右边接一个脚本节点，再按勾选逐集跑分镜 / 生图 / 生视频。
+                                这次<span className="font-medium">不接视频</span>：输入是下面这段<span className="font-medium">文字剧本</span>（可手打 / 粘贴，也可以连一个文本节点后点「写入剧本框」）。执行时先用「{EPISODE_SPLIT_SKILL_LABEL}」技能把原文改写成<span className="font-medium">连续剧本正文</span>，<span className="font-medium">拿到对话结果后</span>再按每集 <span className="font-medium">{episodeSeconds} 秒</span>自动切段（{episodeSourceType === "novel" ? <>小说模式：每 <span className="font-medium">{novelChars}</span> 字原文 = 一集</> : <>剧本模式：整份压 / 扩成 <span className="font-medium">{episodeSeconds} 秒</span></>}），切出几集就建几个文本节点（纵向排开），每集右边接一个脚本节点，再按勾选逐集跑分镜 / 生图 / 生视频。
                                 <span className="mt-1 block opacity-80">
                                     同一批拆出来的多集<span className="font-medium">共享资产图</span>：上一集已经生成（或正在生成）的角色 / 场景 / 道具，下一集直接挂同一张图，不会重复生成；等这一批的图全齐了，才开始铺视频。
                                 </span>
@@ -1095,6 +1126,47 @@ export function CanvasReverseVideoNodeContent({
                                 />
                                 <span className="text-[11px] opacity-50">与主界面「生成设置 · 秒数」是同一个值（默认 {DEFAULT_EPISODE_SECONDS} 秒一集）；也就是每集脚本节点的「成片总时长」，改这里会一起改掉分镜表的镜头与台词量。</span>
                             </div>
+                            {/* 输入类型（用户 2026-11-24）：小说（默认，按字数密度展开）/ 剧本（压 / 扩到每集秒数）。
+                                这决定第一步「15秒-小说转剧本分镜」调用时的篇幅口径 —— 两套提示词在
+                                `buildEpisodeSplitPrompt` 里分叉。 */}
+                            <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs opacity-70">输入类型</span>
+                                <Select
+                                    size="small"
+                                    className="!w-[110px]"
+                                    value={episodeSourceType}
+                                    onChange={applySourceType}
+                                    options={[
+                                        { value: "novel", label: "小说" },
+                                        { value: "script", label: "剧本" },
+                                    ]}
+                                    aria-label="04 输入类型"
+                                />
+                                <span className="text-[11px] opacity-50">
+                                    {episodeSourceType === "novel"
+                                        ? `小说 / 故事：按「每 ${novelChars} 字原文 = ${episodeSeconds} 秒（${segmentsPerEpisode(episodeSeconds)} 段 × 15 秒）一集」的密度展开，原文情节全部保留、不压缩。`
+                                        : `成形剧本：不管原文多长，压缩 / 扩写成 ${episodeSeconds} 秒（${segmentsPerEpisode(episodeSeconds)} 段 × 15 秒）的正文。`}
+                                </span>
+                            </div>
+                            {episodeSourceType === "novel" ? (
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className="text-xs opacity-70">每集字数</span>
+                                    <InputNumber
+                                        size="small"
+                                        className="!w-[128px]"
+                                        min={50}
+                                        step={50}
+                                        precision={0}
+                                        value={novelChars}
+                                        addonAfter="字"
+                                        onChange={applyNovelChars}
+                                        aria-label="每集字数"
+                                    />
+                                    <span className="text-[11px] opacity-50">
+                                        默认 {DEFAULT_NOVEL_CHARS_PER_EPISODE} 字 = {NOVEL_CHARS_BASE_SECONDS} 秒一集，与「每集时长」等比换算（{episodeSeconds} 秒 → {novelCharsForEpisodeSeconds(episodeSeconds)} 字）；手动改过的数会保留，改回换算值就恢复自动跟随。
+                                    </span>
+                                </div>
+                            ) : null}
                             {/* 生成设置（用户 2026-11-18 第 8 轮）：「同时风格，画幅比例，生成视频模型，对话模型，
                                 也按照主界面的选择执行」。这四个控件与主界面**写的是同一份 metadata**
                                 （`reverseVideoTarget.*` / `reverseVideoChatModel`），所以是真正「相通」而不是各存一份：

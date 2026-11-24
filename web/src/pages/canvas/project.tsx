@@ -195,7 +195,7 @@ import { withVideoComplianceSuffix } from "@/lib/canvas/video-compliance-suffix"
 import { reorderConnectionsForTargets } from "@/lib/canvas/canvas-reference-order";
 import { collectH3OptimizeTargets, type H3OptimizeTarget } from "@/lib/canvas/h3-prompt-optimize";
 import { VIDEO_REVERSE_LANGUAGE_RULE, VIDEO_REVERSE_REWRITE_PROMPT, buildVideoReversePrompt, cascadeReverseVideoStages, cleanVideoReverseScriptOutput, describeReverseVideoStages, needsChineseRewrite, pickVideoReverseSkill, readReverseVideoChatModel, readReverseVideoEpisodeSeconds, readReverseVideoScript, readReverseVideoSkill, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, type ReverseVideoStages, type VideoReverseMode, type VideoReversePromptMode, type VideoReverseResult } from "@/lib/canvas/video-reverse";
-import { EPISODE_BAND_COMPACT_ROWS, EPISODE_BAND_ESTIMATE_RATIO, EPISODE_BAND_GAP_Y, EPISODE_BAND_ROW_SLACK, EPISODE_LANE_ROW_GAP_Y, EPISODE_LANE_ROW_HEIGHT, EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeDraftSeconds, resolveEpisodeSeconds, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
+import { EPISODE_BAND_COMPACT_ROWS, EPISODE_BAND_ESTIMATE_RATIO, EPISODE_BAND_GAP_Y, EPISODE_BAND_ROW_SLACK, EPISODE_LANE_ROW_GAP_Y, EPISODE_LANE_ROW_HEIGHT, EPISODE_SEGMENT_SECONDS, EPISODE_SPLIT_SKILL_HINTS, EPISODE_SPLIT_SKILL_LABEL, buildEpisodeSplitPrompt, describeEpisodeSplit, estimateScriptSeconds, planEpisodeStackSlots, resolveEpisodeDraftSeconds, resolveEpisodeNovelChars, resolveEpisodeSeconds, resolveEpisodeSourceType, segmentsPerEpisode, splitScriptByDuration, splitScriptSegments } from "@/lib/canvas/video-reverse-episodes";
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { CHANGAN_FORMAT_SYSTEM, finalizeChanganPrompt, splitChanganAssetLockBlock } from "@/lib/canvas/changan-prompt-format";
@@ -12534,6 +12534,13 @@ function AtelierCanvasPage() {
                 script?: string;
                 /** 每集时长（秒）；不传 = 读节点 / 默认 120 */
                 episodeSeconds?: number | string;
+                /**
+                 * 04 输入类型（用户 2026-11-24）：`"novel"` = 小说（按字数密度展开，默认）、
+                 * `"script"` = 剧本（压 / 扩到每集秒数）。不传 = 读节点 metadata / 默认小说。
+                 */
+                sourceType?: string;
+                /** 小说模式的每集字数；不传 = 读节点 metadata / 按每集秒数等比换算（120 秒 → 2500）。 */
+                novelChars?: number | string;
                 requirement?: string;
                 scriptScheme?: string;
                 shotsPerClip?: number;
@@ -12551,6 +12558,12 @@ function AtelierCanvasPage() {
                 return { ok: false, error: "04 需要先把剧本填进反推视频节点（节点上的「04 · 剧集剧本」输入框），没有剧本就没有可拆的内容" };
             }
             const seconds = resolveEpisodeSeconds(input.episodeSeconds ?? readReverseVideoEpisodeSeconds(reverseNode?.metadata));
+            /**
+             * 输入类型与小说字数（用户 2026-11-24）：弹窗里刚选的优先，其次节点 metadata，
+             * 最后默认（小说 / 按每集秒数等比换算的字数）。
+             */
+            const sourceType = resolveEpisodeSourceType(input.sourceType ?? target.episodeSourceType);
+            const novelChars = resolveEpisodeNovelChars(input.novelChars ?? target.episodeNovelChars, seconds);
             /** 拆集技能：04 固定用「15秒-小说转剧本分镜」，与 01 / 02 / 03 那个可切换的反推技能是两回事。 */
             const splitSkill = pickVideoReverseSkill(listChatSkills(), EPISODE_SPLIT_SKILL_HINTS);
             if (!splitSkill) {
@@ -12581,7 +12594,7 @@ function AtelierCanvasPage() {
             };
 
             // ① 拆集用的对话节点（不连视频：04 的输入是下面这段文字）
-            report(`创建拆集对话节点（技能「${splitSkill.name || EPISODE_SPLIT_SKILL_LABEL}」）…`);
+            report(`创建拆集对话节点（技能「${splitSkill.name || EPISODE_SPLIT_SKILL_LABEL}」，${sourceType === "novel" ? `小说：每 ${novelChars} 字 = ${seconds} 秒一集` : `剧本：整份压 / 扩成 ${seconds} 秒`}）…`);
             const chatNode = createCanvasNode(CanvasNodeType.Chat, chatSlot, {
                 status: NODE_STATUS_IDLE,
                 messages: [],
@@ -12604,6 +12617,8 @@ function AtelierCanvasPage() {
                         requirement: input.requirement,
                         skillLabel: splitSkill.name || EPISODE_SPLIT_SKILL_LABEL,
                         languageRule: VIDEO_REVERSE_LANGUAGE_RULE,
+                        sourceType,
+                        novelChars,
                     }),
                     { text: true, image: false },
                 )
@@ -13133,7 +13148,7 @@ function AtelierCanvasPage() {
      * `useCallback(..., [runVideoReverseEpisodes])` 那一行时它还在 TDZ 里，直接白屏。
      */
     const handleReverseVideoRun = useCallback(
-        (input: Parameters<typeof runVideoReverse>[0] & { script?: string; episodeSeconds?: number }, report: (stage: string) => void) =>
+        (input: Parameters<typeof runVideoReverse>[0] & { script?: string; episodeSeconds?: number; sourceType?: string; novelChars?: number }, report: (stage: string) => void) =>
             input.mode === 4 ? runVideoReverseEpisodes(input, report) : runVideoReverse(input, report),
         [runVideoReverse, runVideoReverseEpisodes],
     );

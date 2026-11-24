@@ -240,6 +240,18 @@ export type CanvasReverseVideoTarget = {
      * 空 = 用默认 120（`resolveEpisodeSeconds` 在读取时给，不写死进 metadata）。
      */
     episodeSeconds?: string;
+    /**
+     * 04「剧集批量生成」：**输入类型**（用户 2026-11-24）——
+     * `"novel"` = 小说 / 故事（默认，按字数密度展开）、`"script"` = 成形剧本（压缩 / 扩写到每集秒数）。
+     * 空 = 默认小说（`resolveEpisodeSourceType` 在读取时给，默认值不落盘）。
+     */
+    episodeSourceType?: string;
+    /**
+     * 04 小说模式的「**每集字数**」（用户 2026-11-24）：默认 2500 字 = 120 秒一集，
+     * 与每集秒数等比（180 秒 → 3750）。**只在用户显式改过且 ≠ 按秒数换算的值时才写**——
+     * 缺省即跟随每集秒数自动换算（`novelCharsForEpisodeSeconds` 唯一换算点）。
+     */
+    episodeNovelChars?: string;
 };
 
 /**
