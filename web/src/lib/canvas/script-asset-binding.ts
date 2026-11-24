@@ -1,5 +1,5 @@
 import i18n from "@/i18n";
-import { collectScriptAssetBindings, formatScriptAssetDisplayName, type ScriptAssetRole } from "@/constant/story-script";
+import { collectScriptAssetBindings, formatScriptAssetDisplayName, splitScriptAssetVariant, type ScriptAssetRole } from "@/constant/story-script";
 import { labelResourceNodeIds } from "@/lib/canvas/canvas-resource-references";
 import type { CanvasNodeData } from "@/types/canvas";
 
@@ -296,4 +296,119 @@ export function withVideoAssetLockBinding(prompt: string | undefined, bindingLin
     if (lines[0]?.trim() === "- **资产锁定：**") lines[0] = "【资产锁定】";
     const block = lines[0]?.trim() === "【资产锁定】" ? lines.join("\n") : ["【资产锁定】", ...lines].join("\n");
     return base ? `${block}\n\n${base}` : block;
+}
+
+/**
+ * 正文内联角色锁定表：`角色名 → 图片N`（用户 2026-11-25 第 01 条）。
+ *
+ * 诉求原话：「多镜头连续片段」里的内容，具体的角色后面要**再次锁定资产图**，锁的是图片几，
+ * 要参考顶部「资产锁定」单元里这个角色锁的图片几 ——
+ * 把「男青年（便服） 席地坐在茶几前」写成「男青年（便服）（锁定@图片1 ）席地坐在茶几前」。
+ *
+ * 为什么顶部已经有锁定块还要在正文里再锁一次：合并段一条提示词动辄几百字，模型写
+ * 「男青年席地坐在茶几前」时离顶上的锁定块已经隔了好几镜，「这个男青年是哪张图」得自己往回找。
+ * 贴着名字标一次，人物和参考图的对应关系就是局部可见的。
+ *
+ * 🔴 编号必须与锁定块**同源**：这里直接复用锁定块的收集器 `collectScriptAssetPromptItems`，
+ * 所以 `@图片N`、输入框 chip 顺序、锁定块文案三处永远是同一套编号（不要另算一次计数器）。
+ *
+ * 只收 `role === "character"`：场景（`客厅`）/ 道具（`《五年高考三年模拟》`）名字在正文里
+ * 出现得更随意，贴着名字塞锁定号只会把句子撑乱；它们本来就在锁定块里有一行。
+ */
+export function buildScriptCharacterLockMap(
+    orderedAssetNodeIds: ReadonlyArray<string | undefined | null>,
+    allNodes: CanvasNodeData[],
+    assetNameOf: (assetNodeId: string) => string | undefined,
+    assetRoleOf: (assetNodeId: string) => ScriptAssetRole | null,
+): Map<string, string> {
+    const items = collectScriptAssetPromptItems(orderedAssetNodeIds, allNodes, assetNameOf, assetRoleOf);
+    const locks = new Map<string, string>();
+    for (const item of items) {
+        if (item.kind !== "image" || item.role !== "character") continue;
+        const label = item.labels[0];
+        if (!item.name || !label) continue;
+        // 同名挂了多张图时正文里只标第一张 —— 与锁定块那一行 `@图片1、@图片2…` 的第一个编号一致。
+        if (!locks.has(item.name)) locks.set(item.name, label);
+    }
+    return locks;
+}
+
+/**
+ * 把角色名改成「名字 + `（锁定@图片N）`」（用户 2026-11-25 第 01 条，见 `buildScriptCharacterLockMap`）。
+ *
+ * 匹配规则（都是为了不把提示词改坏）：
+ *  - **全名优先**：`男青年（便服）` 先于本名 `男青年` 参与匹配，否则会拼出
+ *    `男青年（锁定@图片1）（便服）` 这种把造型和锁定挤在一起的写法；
+ *  - **本名兜底**：正文里只写了 `男青年`（站位描述常这样）而资产名是 `男青年（便服）` 时，
+ *    按本名补一个 `（锁定@图片1）`；但同一个本名对应**多个造型**（便服 / 校服）时不补 ——
+ *    分不清该锁哪套衣服，宁可只标到全名出现的那些地方；
+ *  - **名字后面已经是括号 / 冒号就不动**：`妈妈（小声）：…`、`张三：台词` 这类是语气注释与说话人标记，
+ *    插进去会变成 `妈妈（锁定@图片3）（小声）`；已经写过 `（锁定@图片N）` 的自然也被这条挡住（不重复注入）；
+ *  - **同一行同一个角色只标一次**：一句话里提三次不必标三次；换行重新计数，
+ *    这样「镜头内容」和紧跟其后的「人物站位」各标一次，正文和站位都不丢锁定。
+ *
+ * 空锁定表 / 空提示词 → **原样返回**（一个字节不变），老链路（没连角色资产）不受影响。
+ */
+export function withScriptCharacterAssetLocks(prompt: string | undefined, locks: ReadonlyMap<string, string>): string {
+    const body = prompt || "";
+    if (!body || !locks.size) return body;
+    // 一个「匹配名」如果对应了两个不同的编号（两个角色同名、或全名正好是别人的本名），
+    // 说明这个名字分不清是谁 → 整条丢掉，不猜。
+    const labelByName = new Map<string, string | null>();
+    const addName = (name: string, label: string) => {
+        const existing = labelByName.get(name);
+        if (existing === undefined) labelByName.set(name, label);
+        else if (existing !== label) labelByName.set(name, null);
+    };
+    const baseCount = new Map<string, number>();
+    const baseOf = new Map<string, string>();
+    for (const [name, label] of locks) {
+        addName(name, label);
+        const variant = splitScriptAssetVariant(name);
+        const base = variant.variant ? variant.base : "";
+        if (base && base !== name) {
+            baseCount.set(base, (baseCount.get(base) || 0) + 1);
+            baseOf.set(name, base);
+        }
+    }
+    for (const [name, label] of locks) {
+        const base = baseOf.get(name);
+        if (base && baseCount.get(base) === 1) addName(base, label);
+    }
+    // 最长名优先：`苏晚晴` 必须先于 `苏晚` 参与匹配，否则长名会被短名撕成两截。
+    const ordered = [...labelByName.entries()]
+        .filter((entry): entry is [string, string] => Boolean(entry[0]) && typeof entry[1] === "string")
+        .map(([name, label]) => ({ name, label }))
+        .sort((a, b) => Array.from(b.name).length - Array.from(a.name).length);
+    if (!ordered.length) return body;
+    let out = "";
+    let index = 0;
+    // 当前行已经标过的编号（换行清空）：同一行同一个角色只标一次。
+    let markedInLine = new Set<string>();
+    while (index < body.length) {
+        const char = body.charAt(index);
+        if (char === "\n") {
+            markedInLine = new Set<string>();
+            out += char;
+            index += 1;
+            continue;
+        }
+        const hit = ordered.find((candidate) => body.startsWith(candidate.name, index));
+        if (!hit) {
+            out += char;
+            index += 1;
+            continue;
+        }
+        const next = body.charAt(index + hit.name.length);
+        const isLabelPosition = next === "（" || next === "(" || next === "：" || next === ":";
+        if (isLabelPosition || markedInLine.has(hit.label)) {
+            out += hit.name;
+            index += hit.name.length;
+            continue;
+        }
+        out += `${hit.name}（锁定@${hit.label}）`;
+        markedInLine.add(hit.label);
+        index += hit.name.length;
+    }
+    return out;
 }

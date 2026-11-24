@@ -199,7 +199,7 @@ import { EPISODE_BAND_COMPACT_ROWS, EPISODE_BAND_ESTIMATE_RATIO, EPISODE_BAND_GA
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { CHANGAN_FORMAT_SYSTEM, finalizeChanganPrompt, splitChanganAssetLockBlock } from "@/lib/canvas/changan-prompt-format";
-import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, buildScriptAssetNameLockPrompt, withScriptAssetBinding, withVideoAssetLockBinding } from "@/lib/canvas/script-asset-binding";
+import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, buildScriptAssetNameLockPrompt, buildScriptCharacterLockMap, withScriptAssetBinding, withScriptCharacterAssetLocks, withVideoAssetLockBinding } from "@/lib/canvas/script-asset-binding";
 import { buildScriptBlockingPrompt, stripScriptBlockingAppearance, withScriptBlockingBlock } from "@/lib/canvas/script-blocking";
 import {
     applyScriptAssetDirectDecorations,
@@ -11307,9 +11307,16 @@ function AtelierCanvasPage() {
                 // 只有单镜节点保留「【人物站位】」块（垫在镜头内容上面，老口径）。
                 const blockingBlock = merged ? "" : buildScriptBlockingPrompt([first.row.blocking_detail]);
                 const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
+                // 正文内联角色锁定（用户 2026-11-25 第 01 条）：多镜头连续片段里每提到一个角色，
+                // 就在名字后面再标一次 `（锁定@图片N）`，编号与顶部资产锁定单元同一份（同一个收集器）。
+                // ⚠️ 必须排在这一步：`shots[].videoPrompt` 已经过 `withScriptVariantNamesInVideoPrompt`
+                // （裸名 → `男青年（便服）`），站位块也已拼好 —— 注入要覆盖镜头正文 + 人物站位两处，
+                // 而且要在资产锁定块垫到最上面之前做（否则会给锁定块里的角色名再套一层）。
+                const characterLocks = buildScriptCharacterLockMap([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf);
+                const lockedVideoBody = withScriptCharacterAssetLocks(withScriptBlockingBlock(baseVideoPrompt, blockingBlock), characterLocks);
                 // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产锁定块（带「【资产锁定】」标题，
                 // 用户 2026-11-23 晚间第 01 条）在最上、人物站位块其次、镜头内容其后、禁止项 / 强制声明收尾。
-                const videoPrompt = withVideoComplianceSuffix(withVideoAssetLockBinding(withScriptBlockingBlock(baseVideoPrompt, blockingBlock), videoBinding));
+                const videoPrompt = withVideoComplianceSuffix(withVideoAssetLockBinding(lockedVideoBody, videoBinding));
                 // 单镜模式：10/15 秒 = 锁定成片秒数（不抄表里旧值，否则「选了 10 秒铺出来还是 3 秒」）；
                 // 5 秒 = 上限（表里更短就按表里）。合并模式仍按本段各镜 duration 累加。
                 // ⚠️ 判据是 `merged`（本段真的有多镜）而**不是**档位：手动合并组在「单镜」档位下也是多镜，
@@ -13319,10 +13326,14 @@ function AtelierCanvasPage() {
             // 人物站位描述（用户 2026-11-23 第 06 条）：这一镜的站位块写在镜头内容上面，
             // 资产锁定块再叠到它上面（顺序与整条铺链路一致）。
             const blockingBlock = buildScriptBlockingPrompt([row.blocking_detail]);
+            // 正文内联角色锁定（用户 2026-11-25 第 01 条，与整条铺链路同口径）：单镜节点同样在
+            // 角色名后标 `（锁定@图片N）`，编号来自同一份资产锁定收集器 → 与顶部锁定块一致。
+            const characterLocks = buildScriptCharacterLockMap(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
+            const lockedShotBody = withScriptCharacterAssetLocks(withScriptBlockingBlock(variantShotPrompt, blockingBlock), characterLocks);
             // 合规后缀（用户 2026-11-11 第 02 条）：与一键铺链路同口径，拼在资产锁定块之后（= 最后）。
             // 资产锁定块最前面带「【资产锁定】」标题（用户 2026-11-23 晚间第 01 条，与整条铺链路同口径）。
             // MochiAni 节点的 `mochianiPrompt` 是双写过来的初值，这里一起换掉，否则窗口里显示的还是旧版。
-            const boundShotPrompt = withVideoComplianceSuffix(withVideoAssetLockBinding(withScriptBlockingBlock(variantShotPrompt, blockingBlock), videoBinding));
+            const boundShotPrompt = withVideoComplianceSuffix(withVideoAssetLockBinding(lockedShotBody, videoBinding));
             videoNode.metadata = {
                 ...videoNode.metadata,
                 prompt: boundShotPrompt,
