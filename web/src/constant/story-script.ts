@@ -1525,9 +1525,61 @@ export function buildScriptShotPromptSection(override?: unknown): string {
     ].join("\n");
 }
 
-/** 两段专项要求按「资产 → 分镜提示词」顺序拼成数组（空的自动跳过），任务书直接 spread。 */
+/**
+ * 内置「角色外貌差异化」段的标题。**恒出现**（不依赖词库），探针靠它断言 8 套方案都带上了。
+ *
+ * 用户原话：「生成分镜表中的资产提示词，出来的角色总是千篇一律……多个剧本出来的角色基本上都长一个样」。
+ * 根因在**生成分镜表这一步**：模型拿到的只有「角色描述：外貌 + 服装」这种写法说明，没有任何
+ * 「角色之间必须拉开」的约束，于是每个角色都退回同一套平均脸（大眼、高鼻、薄唇、白皙）。
+ *
+ * 这一段是**任务书级**的底线要求（不读也不改用户词库），与词库里的资产模板同时生效：
+ * 格式按用户那套，五官按这里的分化要求。配合 `script-character-look.ts`（生图期的确定性外貌锚点）
+ * 形成两层：模型先写出不同的脸 → 生图再按角色名钉死，不让模型临场改写。
+ */
+export const SCRIPT_CHARACTER_DIVERSITY_MARKER = "## 角色外貌差异化（内置硬约束）";
+
+/** 自定义要求里已经自带外貌分配规则时（用户把建议的段落贴进词库了），只补两条底线，别再叠一遍长文。 */
+function hasCharacterDiversityRule(text: string): boolean {
+    return /外貌分配表|外貌差异化|五官不重复|角色外貌/.test(text);
+}
+
+/**
+ * 内置「角色外貌差异化」硬约束段；**永远返回非空字符串**。
+ *
+ * 位置：紧跟「资产部分自定义要求」之后、分镜提示词要求之前 —— 资产类列的两段要求贴在一起读，
+ * 模型才不会把它当成「和资产无关的额外说明」。
+ */
+export function buildScriptCharacterDiversitySection(assetPrompt?: unknown): string {
+    const custom = typeof assetPrompt === "string" ? assetPrompt : "";
+    if (hasCharacterDiversityRule(custom)) {
+        return [
+            SCRIPT_CHARACTER_DIVERSITY_MARKER,
+            "- 上文的自定义要求已经给了外貌分配规则，**按它执行**；本段只补两条底线：任意两个角色的六项特征里至少四项不同；同一角色跨造型（校服 / 便服 / 礼服）不换脸。",
+        ].join("\n");
+    }
+    return [
+        SCRIPT_CHARACTER_DIVERSITY_MARKER,
+        "- 这一段是**角色类列的底线要求**，与词库 / 模板 / 其他自定义要求同时生效：**格式按上文的，五官按这里的**。上文若已给外貌写法示例，只保留它的字段顺序与句式，把示例里的具体五官换掉；两组要求冲突时，以「角色之间不许撞脸」为先。",
+        "- 落笔前先在内部列一张**外貌分配表**：每个出场角色一行，固定 6 项 —— ①脸型轮廓 ②眼睛（形状 + 眼距） ③鼻子 ④嘴唇 ⑤体型（身高 + 肩宽 + 胖瘦） ⑥一个辨识特征（痣 / 疤 / 断眉 / 卷发 / 眼镜 / 单眼皮 / 虎牙……）。",
+        "- **任意两个角色在这 6 项里至少 4 项不同**；不许出现「人人都是大眼、高鼻、薄唇、锥子脸」这种集体重合。年龄、骨相、肤色冷暖、胖瘦、气质（憨厚 / 精明 / 阴鸷 / 温润）也要跟着拉开。",
+        "- 6 项必须写成**能画出来的形状**，不许只堆形容词：写「窄长脸、颧骨偏高、内双细长眼、鼻梁细直、薄唇、一米八偏瘦」；不要写「五官精致、长相俊美、气质出众、皮肤白皙」—— 这类词写了等于没写，生图会退回平均脸。",
+        "- 同一角色（按名字认：`叶辰`、`叶辰（校服）`、`叶辰（便服）` 是同一个人）**永远同一张脸**：括号里的造型只改服装、发型、妆面，不许改脸型、眼型和鼻唇；年龄跨度不同（少年 / 中年）才算另一个人，另起一行。",
+        "- 一个角色的 6 项**只写一次**：按上文的资产去重规则，只在它第一次出现的那一镜写全，后面该留空就留空；再次出现时一个字都不改，不要换一套五官复述。",
+        "- 配角、反派、群像同样要有五官：不许用「普通长相 / 大众脸」糊过去，写「圆脸、塌鼻、细长眯眼、嘴角下垂」这种能直接画的。",
+        "- 角色描述里**不要出现**这些词（写进去生图就会照着画）：网感网红脸、锥子脸、韩式半永久眉、过度磨皮、AI 平均脸、整容模板脸。",
+        "- 这张外貌分配表**只在内部推演**：不要输出、不要新增列或 JSON 键，输出严格按本任务里的 JSON 契约。",
+        "- 上文若限定了角色描述字数，以 6 项写全优先，可略超几个字；宁可多写两个形状词，也不要退回形容词。",
+    ].join("\n");
+}
+
+/**
+ * 任务书里的三段要求按「资产自定义 → 外貌差异化（内置，恒有）→ 分镜提示词自定义」顺序拼成数组。
+ *
+ * ⚠️ 外貌段**不受 assetPrompt 是否为空影响**（以前「都没设 → 空数组」，现在最后一项恒存在）：
+ * 这是 8 套方案共同的任务书入口，放在这里才能保证一套都不漏。
+ */
 export function buildScriptGenerationPromptSections({ assetPrompt, shotPrompt }: { assetPrompt?: unknown; shotPrompt?: unknown }): string[] {
-    return [buildScriptAssetPromptSection(assetPrompt), buildScriptShotPromptSection(shotPrompt)].filter((section) => section.length > 0);
+    return [buildScriptAssetPromptSection(assetPrompt), buildScriptCharacterDiversitySection(assetPrompt), buildScriptShotPromptSection(shotPrompt)].filter((section) => section.length > 0);
 }
 
 /** 铺链路时可挂到某一镜上的素材（只需要 id + 标题）。 */
@@ -5408,6 +5460,8 @@ export function buildStoryScriptAssetFillTask({
         `输出字段（只允许这些键）：\n${wanted.map((key) => `- \`${key}\`（${columns.find((column) => column.key === key)?.label || key}）`).join("\n")}`,
         `JSON 形状示例：${JSON.stringify(Object.fromEntries(wanted.map((key) => [key, ""])))}`,
         buildScriptAssetPromptSection(assetPrompt),
+        // 补资产也是写角色描述 → 同样吃外貌差异化底线（否则二次识别会给同一个角色换一张脸）。
+        buildScriptCharacterDiversitySection(assetPrompt),
         `这一镜当前的内容：\n${describeRowForContext(row, columns) || "（整行几乎都是空的）"}`,
     ].filter((part) => part.length > 0);
     // 上一镜只作为「名字 / 站位要能接上」的参考，不要求重写。
