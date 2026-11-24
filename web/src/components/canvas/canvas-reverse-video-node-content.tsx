@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { ModelPicker } from "@/components/model-picker";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { DEFAULT_REVERSE_VIDEO_SECONDS, DEFAULT_VIDEO_REVERSE_REQUIREMENT, REVERSE_VIDEO_SECONDS_MAX, VIDEO_REVERSE_MODES, VIDEO_REVERSE_SKILL_OPTIONS, VIDEO_REVERSE_STAGE_OPTIONS, buildDefaultVideoReverseRequirement, describeReverseVideoStages, normalizeReverseVideoTarget, readReverseVideoScript, readReverseVideoSkill, readReverseVideoStages, readReverseVideoTarget, resolveReverseVideoQuality, resolveReverseVideoSize, setReverseVideoStage, type ReverseVideoStages, type VideoReverseMode, type VideoReverseResult, type VideoReverseStageId } from "@/lib/canvas/video-reverse";
-import { DEFAULT_EPISODE_SECONDS, DEFAULT_EPISODE_SOURCE_TYPE, DEFAULT_NOVEL_CHARS_PER_EPISODE, EPISODE_DEFAULT_REQUIREMENT, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, NOVEL_CHARS_BASE_SECONDS, novelCharsForEpisodeSeconds, resolveEpisodeNovelChars, resolveEpisodeSeconds, resolveEpisodeSourceType, segmentsPerEpisode, type EpisodeSourceType } from "@/lib/canvas/video-reverse-episodes";
+import { DEFAULT_EPISODE_SECONDS, DEFAULT_EPISODE_SOURCE_TYPE, DEFAULT_NOVEL_CHARS_PER_EPISODE, EPISODE_DEFAULT_REQUIREMENT, EPISODE_SECONDS_MAX, EPISODE_SECONDS_MIN, EPISODE_SPLIT_SKILL_LABEL, NOVEL_CHARS_BASE_SECONDS, novelCharsForEpisodeSeconds, planNovelSplit, resolveEpisodeNovelChars, resolveEpisodeSeconds, resolveEpisodeSourceType, segmentsPerEpisode, type EpisodeSourceType } from "@/lib/canvas/video-reverse-episodes";
 import { asScriptSchemeId, SCRIPT_SCHEME_IDS, type ScriptSchemeId } from "@/constant/script-scheme";
 import { SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_COMPACT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_DEFAULT, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_OPTIONS, SCRIPT_VIDEO_CHAIN_SHOTS_PER_CLIP_PAIR, normalizeScriptShotsPerClip } from "@/constant/story-script";
 import { isMochianiVideoEngine, MOCHIANI_VIDEO_ENGINE } from "@/constant/mochiani-video";
@@ -361,6 +361,12 @@ export function CanvasReverseVideoNodeContent({
         },
         [episodeSeconds, patchTarget],
     );
+    /**
+     * 小说模式的**实时预告**（用户 2026-11-24 第 02 轮：「4500 字第二个文本该是多少秒多少段？」）：
+     * 用正在编辑的剧本字数走 `planNovelSplit`，直接告诉用户会切成几个文本、每个多少秒几段。
+     * 与执行链完全同源（提示词也是这个函数），所以预告里写的段数就是模型收到的段数。
+     */
+    const novelPlan = planNovelSplit(scriptDraft.length, novelChars, episodeSeconds);
     const commitScript = useCallback(
         (value: string) => {
             setScriptDraft(value);
@@ -1165,6 +1171,28 @@ export function CanvasReverseVideoNodeContent({
                                     <span className="text-[11px] opacity-50">
                                         默认 {DEFAULT_NOVEL_CHARS_PER_EPISODE} 字 = {NOVEL_CHARS_BASE_SECONDS} 秒一集，与「每集时长」等比换算（{episodeSeconds} 秒 → {novelCharsForEpisodeSeconds(episodeSeconds)} 字）；手动改过的数会保留，改回换算值就恢复自动跟随。
                                     </span>
+                                </div>
+                            ) : null}
+                            {/* 🔴 实时预告（用户 2026-11-24 第 02 轮）：按当前剧本字数等比算「切几个文本、每个几段几秒」。
+                                4500 字 / 2500 字一集 → 约 216 秒 → 14 段 → `120 秒（8 段）+ 90 秒（6 段）`；
+                                最后一个文本不足一集是正常结果（提示词里明令不许注水凑满）。 */}
+                            {episodeSourceType === "novel" && scriptDraft.trim() ? (
+                                <div className="rounded-md px-2 py-1.5 text-[11px] leading-relaxed" style={{ border: `1px solid ${theme.node.stroke}`, opacity: 0.75 }}>
+                                    当前剧本 <span className="font-medium">{novelPlan.chars}</span> 字 → 按密度约{" "}
+                                    <span className="font-medium">{novelPlan.rawSeconds}</span> 秒，取 15 秒整数倍 ={" "}
+                                    <span className="font-medium">
+                                        {novelPlan.segments} 段（{novelPlan.seconds} 秒）
+                                    </span>
+                                    ，会切成 <span className="font-medium">{novelPlan.perText.length}</span> 个文本：
+                                    {novelPlan.perText.map((count, index) => (
+                                        <span key={index}>
+                                            {index ? " + " : " "}
+                                            <span className="font-medium">
+                                                {count * 15} 秒（{count} 段）
+                                            </span>
+                                        </span>
+                                    ))}
+                                    。最后一个文本按剩余字数可能不足一集，属正常（不会为了凑满而注水）。
                                 </div>
                             ) : null}
                             {/* 生成设置（用户 2026-11-18 第 8 轮）：「同时风格，画幅比例，生成视频模型，对话模型，

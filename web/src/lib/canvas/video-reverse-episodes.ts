@@ -96,6 +96,52 @@ export function resolveEpisodeNovelChars(raw: number | string | null | undefined
 }
 
 /**
+ * 🔴 小说模式的「文本分配计划」：**原文总字数 → 切成几个文本、每个文本多少段（15 秒/段）**。
+ *
+ * 用户 2026-11-24 第 02 轮问的就是这件事：「2500 字 = 2 分钟 8 段，那 4500 字第二个文本该是多少秒多少段？」
+ * 老口径错在两头：
+ *  ① 提示词用 `ceil(字数 / 每集字数) × 每集段数`（4500 → 2 × 8 = **16 段** = 240 秒），
+ *     把 216 秒的原文硬说成 240 秒 → 模型为了凑满 8 段给第二个文本注水；
+ *  ② 本地切集只知道「每 8 段一集」，没人告诉它尾集该多长。
+ *
+ * 现在统一按**密度等比**算总段数再按集切：
+ * `总段数 = round(字数 / 每集字数 × 每集段数)` —— 4500 / 2500 × 8 = 14.4 → **14 段**
+ * → `[8, 6]` = 第 1 个文本 120 秒、第 2 个文本 90 秒（合计 210 秒，比 216 秒少的 6 秒是
+ * 15 秒颗粒度的取整代价，向上取到 225 秒反而偏得更多）。
+ *
+ * 这个函数是**唯一换算点**：提示词（要写死每个文本几段）、弹窗（实时预告切几个文本）、
+ * 以及切集后的自检文案都从这里取，别各自再算一遍。
+ */
+export type NovelSplitPlan = {
+    /** 原文总字数（按调用方传入的字数，UI 用 `length`、提示词用码点数，差几位不影响分集） */
+    chars: number;
+    /** 按密度等比算出来的**理论**秒数（4500 / 2500 × 120 = 216），只用于文案对账 */
+    rawSeconds: number;
+    /** 按 15 秒颗粒度取整后的总段数（至少 1） */
+    segments: number;
+    /** 实际总时长 = `segments × 15` 秒 */
+    seconds: number;
+    /** 每个文本分几段：`[8, 6]` = 120 秒 + 90 秒；最后一个不满 `perEpisode` 是正常的 */
+    perText: number[];
+};
+
+export function planNovelSplit(
+    totalChars: number | string | null | undefined,
+    novelChars: number | string | null | undefined,
+    episodeSeconds?: number | string | null,
+): NovelSplitPlan {
+    const seconds = resolveEpisodeSeconds(episodeSeconds);
+    const perEpisode = segmentsPerEpisode(seconds);
+    const chars = Math.max(0, Math.round(Number(totalChars) || 0));
+    const budget = resolveEpisodeNovelChars(novelChars, seconds);
+    const rawSeconds = chars > 0 ? (chars / budget) * seconds : 0;
+    const segments = Math.max(1, Math.round(chars > 0 ? (chars / budget) * perEpisode : 0));
+    const perText: number[] = [];
+    for (let left = segments; left > 0; left -= Math.min(perEpisode, left)) perText.push(Math.min(perEpisode, left));
+    return { chars, rawSeconds: Math.round(rawSeconds), segments, seconds: segments * EPISODE_SEGMENT_SECONDS, perText };
+}
+
+/**
  * 拆集用的技能（唯一来源）。
  *
  * 🔴 只给这一个精确名，不加宽松变体：`pickVideoReverseSkill` 是双向包含匹配（见 `video-reverse.ts`
@@ -207,13 +253,27 @@ export function buildEpisodeSplitPrompt(params: { script: string; episodeSeconds
         /**
          * 小说模式（用户 2026-11-24）：第一步调用**强制按字数密度展开** ——
          * 「每 2500 字文本输出为 8 段每段 15 秒」；2500 与 120 秒等比（180 秒 = 3750 字）。
-         * 原文约多少字 → 应产出约多少片段，给模型一个可对账的总数。
+         * 总段数与每个文本的段数由 `planNovelSplit` 等比算出，提示词逐文本写死。
          */
         const totalChars = Array.from(String(params.script ?? "")).length;
-        const expectedEpisodes = Math.max(1, Math.ceil(totalChars / novelChars));
+        /**
+         * 🔴 2026-11-24 第二轮修：老口径 `ceil(字数 / 每集字数) × 每集段数` 会把 4500 字说成
+         * 「2 集 × 8 段 = 16 段（240 秒）」，而密度换算只有 216 秒 —— 多出来的 24 秒逼着模型把
+         * 第二个文本也凑满 8 段（注水 / 拖镜头）。改走 `planNovelSplit`（等比算总段数）
+         * 并把**每个文本几段几秒**写死：4500 字 → 8 段 120 秒 + 6 段 90 秒。
+         */
+        const plan = planNovelSplit(totalChars, novelChars, seconds);
+        const distribution = plan.perText
+            .map((count, index) => `第 ${index + 1} 个文本 ${count} 个片段（${count * EPISODE_SEGMENT_SECONDS} 秒）`)
+            .join("，");
+        const tailCount = plan.perText[plan.perText.length - 1] || 0;
+        const tailRule =
+            plan.perText.length > 1 && tailCount < perEpisode
+                ? `最后一个文本只有 ${tailCount} 个片段是**正常结果**（原文剩余情节只够这么多），不要为了凑满 ${perEpisode} 段注水、拖长镜头或补无信息量的过场，也不要把后面文本的情节提前塞进前面的文本。`
+                : `请严格按这个段数铺，不多不少。`;
         lines.push(
             `换算口径（最高优先级）：输入是**小说 / 故事**（叙述文体）。请按「**每 ${novelChars} 字原文 = ${seconds} 秒（${perEpisode} 个片段 × ${EPISODE_SEGMENT_SECONDS} 秒）**」的密度把原文**完整展开**成片段正文：不要压缩、不要概括、不要跳过情节，原文里每一场戏都要落到片段里。` +
-                `这份原文约 ${totalChars} 字，按换算口径应产出约 ${expectedEpisodes * perEpisode} 个片段（约 ${expectedEpisodes} 集 × ${perEpisode} 段）。`,
+                `这份原文约 ${plan.chars} 字，按换算口径约 ${plan.rawSeconds} 秒，取 ${EPISODE_SEGMENT_SECONDS} 秒的整数倍 = **${plan.segments} 个片段（${plan.seconds} 秒）**，我会切成 ${plan.perText.length} 个文本：${distribution}。${tailRule}`,
         );
         lines.push(
             `篇幅控制：这份正文会被我按每集 ${seconds} 秒自动切集 = **${perEpisode} 个片段 / 集**（每个片段 ${EPISODE_SEGMENT_SECONDS} 秒）。` +
