@@ -99,6 +99,7 @@ import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-refer
 import { isSameScriptAssetByName, isScriptAssetAlignSkipped, planScriptAssetAlignment, shouldApplyScriptAssetAlignment, type ScriptAssetAlignCandidate } from "@/lib/canvas/script-asset-align";
 import { planScriptVoiceAlignment, shouldApplyScriptVoiceAlignment } from "@/lib/canvas/script-voice-align";
 import { buildScriptAssetBatchItems, isScriptAssetDirectRole, mergeScriptAssetBatchLockedIds, type ScriptAssetBatchItem } from "@/lib/canvas/script-asset-batch";
+import { normalizeScriptCharacterLookLevel, nextScriptCharacterLookLevel } from "@/lib/canvas/script-character-look";
 import type { ScriptAssetInheritOptions, ScriptAssetInheritSource } from "@/lib/canvas/script-asset-inherit";
 import type { OneClickVideoRun } from "@/lib/canvas/one-click-video";
 /**
@@ -1807,6 +1808,34 @@ export function CanvasScriptNodeContent({
         </button>
     );
 
+    /**
+     * 角色外貌差异化（用户 2026-11-24）：**只影响角色资产图**的生图提示词 ——
+     * 点一下切一档（关闭 → 轻度 → 标准 → 强制），写进 `metadata.scriptAssetLookLevel`。
+     *
+     * 为什么放在节点标题栏、而不是某个生图弹窗里：「一键直接生图」根本不走弹窗，
+     * 挂在这里三个入口（一键直接生图 / 批量生成 / 单格生成）读到的才是同一个值，
+     * 用户也一眼能看到现在是哪一档（空 / 脏值 = 轻度，见 `normalizeScriptCharacterLookLevel`）。
+     */
+    const scriptCharacterLookLevel = normalizeScriptCharacterLookLevel(node.metadata?.scriptAssetLookLevel);
+    const characterLookSelector = (
+        <button
+            type="button"
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-2.5 transition"
+            style={{ borderColor: theme.node.stroke, background: withAlpha(theme.toolbar.panel, 0.67), color: theme.node.text }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+                event.stopPropagation();
+                patchMetadata({ scriptAssetLookLevel: nextScriptCharacterLookLevel(node.metadata?.scriptAssetLookLevel) });
+            }}
+            title={t("canvas.scriptNode.characterLookHint", { level: t(`canvas.scriptNode.characterLook_${scriptCharacterLookLevel}`) })}
+        >
+            <User className="size-3.5" />
+            <span className="opacity-60">{t("canvas.scriptNode.characterLookLabel")}</span>
+            <span className="font-medium">{t(`canvas.scriptNode.characterLook_${scriptCharacterLookLevel}`)}</span>
+        </button>
+    );
+
     const header = (
         <div
             className="flex flex-wrap items-center gap-1.5 px-2 pb-1.5 pt-2"
@@ -1882,6 +1911,9 @@ export function CanvasScriptNodeContent({
                 面板朝下开：这个控件在节点标题栏，朝上开会顶出画布顶部。 */}
             {videoRatioSelector}
             {styleTemplatePicker}
+            {/* 角色外貌差异化：排在风格之后 —— 「视频画幅紧挨风格选项左边」是既有排版约定
+                （`script-video-ratio-probe` 守着），新人别插在它俩中间。 */}
+            {characterLookSelector}
 
             {/* 生视频引擎（用户 2026-11-10 第 01 条）：「铺视频链路 / 一键视频」每一段要建哪种窗口。
                 默认 = 跟随偏好里的默认视频模型（空值 = 不写 model，视频节点自己跟随全局）；

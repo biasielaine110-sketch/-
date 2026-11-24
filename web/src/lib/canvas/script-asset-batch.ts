@@ -16,6 +16,7 @@ import {
     type StoryScriptRow,
 } from "@/constant/story-script";
 import { resolveScriptAssetExistingNodeIds } from "@/lib/canvas/script-asset-align";
+import { applyScriptCharacterLook, type ScriptCharacterLookOptions } from "@/lib/canvas/script-character-look";
 import type { CanvasNodeData } from "@/types/canvas";
 
 /**
@@ -514,23 +515,30 @@ export function buildScriptAssetFrameSuffix(role: ScriptAssetRole, size?: string
  *
  *  1. 画幅声明（短前缀，先把画幅立在最前面）；
  *  2. 资产描述（分镜表里那一格）；
- *  3. 词库视图版式（角色 / 场景各一条，见 `SCRIPT_ASSET_VIEW_TEMPLATE_RULES`）；
- *  4. 场景 / 道具 → 空景尾缀（`SCRIPT_ASSET_EMPTY_PLATE_ROLES`）；
- *  5. 画幅收口 —— **永远最后一行**，压过前面版式里可能写死的画幅。
+ *  3. **角色外貌锚点**（只有 `character`，见 `script-character-look.ts`）——
+ *     夹在「描述」与「版式」之间：它补的是描述里没写的五官参数，不能落到版式后面
+ *     （版式里那段长文会把注意力吃掉，模型就不看锚点了）；
+ *  4. 词库视图版式（角色 / 场景各一条，见 `SCRIPT_ASSET_VIEW_TEMPLATE_RULES`）；
+ *  5. 场景 / 道具 → 空景尾缀（`SCRIPT_ASSET_EMPTY_PLATE_ROLES`）；
+ *  6. 画幅收口 —— **永远最后一行**，压过前面版式里可能写死的画幅。
  *
  * 每一步都幂等：同一批重算、或用户手动把尾缀粘进提示词后再点，都不会出现两份。
  *
  * @param resolveSize 这一批怎么定画幅；默认 =「一键直接生图」的硬规则（角色 9:16、场景/道具 16:9）。
  *                    「一键批量生成」传 `resolveScriptAssetSizeForRole` 的柯里化版本 —— 两条路**必须**共用
  *                    这一份整形逻辑，否则用户看到的还是「一键生图有版式、批量生图没版式」（2026-11-08 第 16 条）。
+ * @param lookOptions 角色外貌差异化（2026-11-24）：`lookLevel` 档位（空 = 轻度）、`lookSalt` 稳定盐。
+ *                    ⚠️ 盐必须由**所有入口共用同一个值**（传脚本节点 id），否则同一个角色在
+ *                    「一键直接生图」和「一键批量生成」里会抽到两组锚点 = 同一张脸变了两次。
  */
 export function applyScriptAssetDirectDecorations(
     items: readonly ScriptAssetBatchItem[],
     textPrompts?: readonly ViewTemplatePromptEntry[] | null,
     resolveSize: (role: ScriptAssetRole) => string = resolveScriptAssetDirectSize,
+    lookOptions?: ScriptCharacterLookOptions,
 ): ScriptAssetBatchItem[] {
     if (!items.length) return [];
-    return applyScriptAssetViewTemplates(items, textPrompts).map((item) => {
+    return applyScriptAssetViewTemplates(applyScriptCharacterLook(items, lookOptions), textPrompts).map((item) => {
         const size = resolveSize(item.role);
         let prompt = prependScriptAssetPromptPrefix(item.prompt, buildScriptAssetFramePrefix(item.role, size));
         const plate = resolveScriptAssetEmptyPlateSuffix(item.role);

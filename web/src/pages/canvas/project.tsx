@@ -221,6 +221,7 @@ import {
     type ScriptAssetBatchItem,
     type ScriptAssetReference,
 } from "@/lib/canvas/script-asset-batch";
+import { applyScriptCharacterLook } from "@/lib/canvas/script-character-look";
 import { buildScriptAssetInheritPlan, buildScriptAssetSharePlan, collectScriptAssetGroupPeers, collectScriptInheritSources, isScriptAssetGroupCarrier, resolveScriptAssetGroupId, scriptAssetGroupIdOf, scriptRowAssetNames, sortScriptAssetGroupNodes, type ScriptAssetInheritOptions } from "@/lib/canvas/script-asset-inherit";
 import { planScriptAssetAlignSkipChange, planScriptAssetAlignment, shouldApplyScriptAssetAlignment } from "@/lib/canvas/script-asset-align";
 import { isRowMountedAudio, planScriptVoiceAlignment, shouldApplyScriptVoiceAlignment } from "@/lib/canvas/script-voice-align";
@@ -9914,8 +9915,19 @@ function AtelierCanvasPage() {
     const handleGenerateScriptAsset = useCallback(
         (nodeId: string, role: ScriptAssetRole, prompt: string, title: string, styleTemplateId?: string, size?: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
-            const scene = prompt.trim();
-            if (!source || !scene) return;
+            const rawScene = prompt.trim();
+            if (!source || !rawScene) return;
+            /**
+             * 角色外貌差异化（2026-11-24）：**单格生成也要和批量生成是同一张脸**。
+             *
+             * 档位读脚本节点、盐固定用脚本节点 id —— 与 `handleBatchGenerateScriptAssets` /
+             * `handleDirectGenerateScriptAssets` 同源。不同源的话，用户在「按镜按资产」里逐格生成的角色
+             * 会长成另一张脸（同一部片里同一个人换了两次脸）。非角色分类原样返回。
+             */
+            const scene = applyScriptCharacterLook([{ role, title: title.trim() || rawScene.slice(0, 24), prompt: rawScene }], {
+                lookLevel: source.metadata?.scriptAssetLookLevel,
+                lookSalt: nodeId,
+            })[0].prompt.trim();
             const assetTitle = title.trim() || scene.slice(0, 24);
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             // 生图比例（弹窗里选的 9:16 / 16:9…）：写进 `metadata.size`（生图链路读它），
@@ -10059,7 +10071,12 @@ function AtelierCanvasPage() {
             // 画幅：角色 9:16 硬规则；场景 / 道具用弹窗里选的比例（没选 = 16:9）。见 `resolveScriptAssetSizeForRole`。
             const preferredSize = options?.size || source.metadata?.scriptImageSize;
             const resolveSize = (role: ScriptAssetRole) => resolveScriptAssetSizeForRole(role, preferredSize);
-            const wanted = applyScriptAssetDirectDecorations(raw, effectiveConfig.textPrompts, resolveSize);
+            const wanted = applyScriptAssetDirectDecorations(raw, effectiveConfig.textPrompts, resolveSize, {
+                // 角色外貌差异化（2026-11-24）：档位读脚本节点，盐固定用**脚本节点 id** ——
+                // 「一键直接生图」与「一键批量生成」必须共用同一个盐，否则同一角色会抽到两组锚点。
+                lookLevel: source.metadata?.scriptAssetLookLevel,
+                lookSalt: source.id,
+            });
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             // 画质保底：全局没选具体档位（空 / auto）时这一批按 2K 出（见 `resolveScriptImageQuality`）。
             const batchQualityFallback = resolveScriptImageQuality(effectiveConfig.quality);
@@ -10258,7 +10275,11 @@ function AtelierCanvasPage() {
                 source.metadata?.scriptNameLocks,
                 aliveImageIds,
             );
-            const wanted = applyScriptAssetDirectDecorations(directLocked.items, effectiveConfig.textPrompts);
+            const wanted = applyScriptAssetDirectDecorations(directLocked.items, effectiveConfig.textPrompts, undefined, {
+                // 与「一键批量生成」同一个盐（脚本节点 id）—— 两条路出来的角色必须是同一张脸。
+                lookLevel: source.metadata?.scriptAssetLookLevel,
+                lookSalt: source.id,
+            });
             /**
              * 全部都被名字锁跳过 ≠ 「表里没有资产」：共用/沿用上来之后第二集很常见就是这个状态。
              * 以前两句都弹 `directAssetEmpty`（「分镜表里还没有可生成的资产」），用户会以为剧本没解析出来。
@@ -10784,8 +10805,21 @@ function AtelierCanvasPage() {
     const handleCellAssetGenerate = useCallback(
         (nodeId: string, shotNo: number, columnKey: string, prompt: string, title: string, model?: string, styleTemplateId?: string, size?: string) => {
             const source = nodesRef.current.find((item) => item.id === nodeId);
-            const scene = prompt.trim();
-            if (!source || !scene) return;
+            const rawScene = prompt.trim();
+            if (!source || !rawScene) return;
+            /**
+             * 角色外貌差异化（2026-11-24）：这里也必须是**同一个盐**（脚本节点 id），
+             * 否则「按镜按资产」逐格生成出来的角色和批量生成的不是同一张脸。
+             * 只在分类明确是 `character` 时注入 —— 自建列 / 认不出的列不猜。
+             */
+            const lookRole = scriptAssetColumnRole(columnKey, normalizeStoryScriptExtraColumns(source.metadata?.scriptExtraColumns));
+            const scene =
+                lookRole === "character"
+                    ? applyScriptCharacterLook([{ role: lookRole, title: title.trim() || rawScene.slice(0, 24), prompt: rawScene }], {
+                          lookLevel: source.metadata?.scriptAssetLookLevel,
+                          lookSalt: nodeId,
+                      })[0].prompt.trim()
+                    : rawScene;
             const assetTitle = title.trim() || scene.slice(0, 24);
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
             const imageSize = resolveStoryScriptImageSize(size) || resolveStoryScriptImageSize(source.metadata?.scriptImageSize);
