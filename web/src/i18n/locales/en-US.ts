@@ -994,7 +994,7 @@ export default {
             videoRatioLabel: "Video ratio",
             videoRatioHint: "Video ratio {{ratio}} (click to cycle 16:9 / 9:16 / 1:1 / 4:3 / 3:4). Only constrains video nodes created by the pipeline; the image size is configured separately and unaffected.",
             characterLookLabel: "Look",
-            characterLookHint: "Character look variation: {{level}} (click to cycle). Adds fixed facial anchors (face shape / eyes / nose & lips / build / distinguishing mark) to character asset prompts only — the same character keeps one face across shots, episodes and regenerations. Choose off to restore the old behaviour.",
+            characterLookHint: "Character look variation: {{level}} (click to cycle). Adds fixed facial anchors (face shape / eye shape / brows / nose / mouth / hair / build / distinguishing mark) to character asset prompts only. Each level uses a different dimension set and a different batch of shapes: Light = contour + eyes (softest wording), Standard = the full face and hair, Strong = all eight plus it overrides vague praise words. The same character keeps one face across shots, episodes and regenerations. Choose off to restore the old behaviour.",
             characterLook_off: "Off",
             characterLook_light: "Light",
             characterLook_standard: "Standard",
