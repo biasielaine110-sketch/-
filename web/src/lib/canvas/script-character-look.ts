@@ -29,10 +29,10 @@ import { resolveScriptAssetRole, splitScriptAssetVariant } from "@/constant/stor
  *    同一个角色重新生图、跨镜头、跨集都是同一张脸；不同角色才会不同。
  * ② **哈希键是「基础名」**：`叶辰@校服` 与 `叶辰@便服` 必须共用一张脸，所以喂进去的是
  *    `splitScriptAssetVariant(title).base`，不是完整标题（造型不换脸）。
- * ③ **不覆盖用户写的描述**：描述里已经写了某个维度（「圆脸」「厚唇」）就跳过那个维度，
+ * ③ **轻度 / 标准不覆盖用户写的描述**：描述里已经写了某个维度（「圆脸」「厚唇」）就跳过那个维度，
  *    锚点只补空缺。这条和 `withScriptAssetVariantHint`（造型词已写就不动）是同一个哲学。
- *    只有 `strong` 档才会清掉描述里的**笼统审美形容词**（「五官精致」「长相俊美」），
- *    因为它们不是可画参数、只会把所有人都拉回同一张平均脸。
+ *    **强制 / 极端相反**：它们八项全给、并清掉描述里的**笼统审美形容词**（「五官精致」「长相俊美」），
+ *    因为那些词不是可画参数、只会把所有人都拉回同一张平均脸；只有疤 / 痣这类剧情设定仍然尊重原文。
  *
  * ## 幂等
  *
@@ -40,10 +40,15 @@ import { resolveScriptAssetRole, splitScriptAssetVariant } from "@/constant/stor
  * `appendScriptAssetPromptSuffix` 的「含整段尾缀」判断（锚点每张图都不一样，永远不命中）。
  */
 
-export type ScriptCharacterLookLevel = "off" | "light" | "standard" | "strong";
+export type ScriptCharacterLookLevel = "off" | "light" | "standard" | "strong" | "extreme";
 
-/** 档位顺序（工具栏那颗按钮点一下切下一档，走这个顺序）。 */
-export const SCRIPT_CHARACTER_LOOK_LEVELS: ScriptCharacterLookLevel[] = ["off", "light", "standard", "strong"];
+/**
+ * 档位顺序（工具栏那颗按钮点一下切下一档，走这个顺序）。
+ *
+ * 「强制」与「极端」是两档不同的东西：强制 = 八项都给、语气最硬，形状仍在**正常人**的范围；
+ * 极端 = 形状本身走向类型片（不对称、极端骨相、强记忆点），是给反派 / 怪咖 / 强设定角色用的。
+ */
+export const SCRIPT_CHARACTER_LOOK_LEVELS: ScriptCharacterLookLevel[] = ["off", "light", "standard", "strong", "extreme"];
 
 /**
  * 默认档位 = **轻度**（用户 2026-11-24 口径）。
@@ -80,33 +85,36 @@ const LOOK_DIMENSION_LABEL: Record<LookDimension, string> = {
     mark: "辨识特征",
 };
 
-/** 素材池的三档措辞强度。 */
-type LookPoolTier = "soft" | "normal" | "bold";
+/** 素材池的四档措辞强度。 */
+type LookPoolTier = "soft" | "normal" | "bold" | "extreme";
 
 /**
  * 档位 → 补哪几个维度（顺序即写入顺序，也是「补满」时的优先顺序）。
  *
- * 轻度 2 项 / 标准 6 项 / 强制 8 项，**不是简单的包含关系**：轻度是「轮廓 + 眼睛」，
+ * 轻度 2 项 / 标准 6 项 / 强制 8 项 / 极端 8 项，**不是简单的包含关系**：轻度是「轮廓 + 眼睛」，
  * 标准直接跳到「五官 + 发型」全给（用户 2026-11-24 晚点名：眼型 / 眉型 / 嘴型 / 鼻型 / 发型），
- * 强制再把体型与辨识特征叠上。维度组合不同 → 出来的脸不是同一张「加了几笔」的脸。
+ * 强制与极端把体型与辨识特征叠上 —— 两者的差别在**形状本身**（bold vs extreme 池），不在条数。
  */
 const LOOK_LEVEL_DIMENSIONS: Record<Exclude<ScriptCharacterLookLevel, "off">, LookDimension[]> = {
     light: ["faceShape", "eyes"],
     standard: ["faceShape", "eyes", "brow", "nose", "mouth", "hair"],
     strong: ["faceShape", "eyes", "brow", "nose", "mouth", "hair", "build", "mark"],
+    extreme: ["faceShape", "eyes", "brow", "nose", "mouth", "hair", "build", "mark"],
 };
 
 /**
  * 档位 → 素材池。
  *
- * 🔴 这条是「区分度」的第二个开关：三档**不共用同一批形状**。
+ * 🔴 这条是「区分度」的第二个开关：四档**不共用同一批形状**。
  * soft 只给倾向（「脸型略方」），normal 给明确形态（「方脸，下颌角明显」），
- * bold 给鲜明骨相（「短宽脸，面宽大于脸长，下颌角接近直角」）。
+ * bold 给鲜明骨相（「短宽脸，面宽大于脸长，下颌角接近直角」），
+ * extreme 直接走向类型片（不对称、极端比例、强记忆点）。
  */
 const LOOK_LEVEL_POOL: Record<Exclude<ScriptCharacterLookLevel, "off">, LookPoolTier> = {
     light: "soft",
     standard: "normal",
     strong: "bold",
+    extreme: "extreme",
 };
 
 /**
@@ -116,7 +124,7 @@ const LOOK_LEVEL_POOL: Record<Exclude<ScriptCharacterLookLevel, "off">, LookPool
  * 「鼻梁高挺」比「鼻子好看」有用，「下颌偏方、咬肌明显」比「轮廓硬朗」有用。
  * 每池 6~12 项，够一部剧的角色大概率不撞同一项（真撞了还有其它维度兜着）。
  */
-const LOOK_POOLS: Record<LookDimension, { soft?: string[]; normal: string[]; bold?: string[] }> = {
+const LOOK_POOLS: Record<LookDimension, { soft?: string[]; normal: string[]; bold?: string[]; extreme?: string[] }> = {
     faceShape: {
         soft: [
             "脸型略偏鹅蛋形，线条柔和",
@@ -145,6 +153,14 @@ const LOOK_POOLS: Record<LookDimension, { soft?: string[]; normal: string[]; bol
             "下宽上窄，腮部外扩、额头偏窄，正面呈梯形",
             "圆钝脸，面颊厚、下颌线几乎看不出棱角",
             "方中带圆，下颌方正但面颊有肉、两颊横向偏宽",
+        ],
+        extreme: [
+            "方形短脸，面宽与脸长接近，下颌角方正外扩，正面像一块砖",
+            "极长窄脸，面颊与太阳穴都凹进去、颧骨横向凸出，脸长接近脸宽两倍",
+            "左右不对称，左脸比右脸略宽，下颌一侧明显偏方",
+            "上极宽下极窄，额头宽平外扩、下巴尖细到只剩一个点",
+            "骨相粗重，眉骨、颧骨、下颌三处都突出，正面棱角割裂",
+            "圆肿脸，面颊厚重下垂，下颌线与脖子连成一片",
         ],
     },
     eyes: {
@@ -176,6 +192,14 @@ const LOOK_POOLS: Record<LookDimension, { soft?: string[]; normal: string[]; bol
             "眼距极宽，两眼间距超过一只眼的宽度，山根低平",
             "眼距极窄，内眼角几乎连在一起，目光锐利",
         ],
+        extreme: [
+            "极细眯眼，眼裂窄成两条缝，睁到最大也只见一线眼白",
+            "左右明显不对称，左眼比右眼圆一圈、双眼皮宽度差一倍",
+            "三角眼且外眼角狠向下垂，眼尾压在颧骨上",
+            "眼窝极深、眼球内陷，眉骨与颧骨的投影把眼睛埋进阴影",
+            "眼距近到内眼角几乎相触，鼻根压在两眼之间",
+            "眼白偏黄、上眼睑厚而下垂，常年像没睡醒",
+        ],
     },
     brow: {
         normal: [
@@ -197,6 +221,14 @@ const LOOK_POOLS: Record<LookDimension, { soft?: string[]; normal: string[]; bol
             "眉间距极宽，两眉之间空出大半只眼的宽度",
             "眉间距极窄，眉头几乎连成一条，眉压眼",
             "野眉，眉形完全没修、眉毛横向外扩",
+        ],
+        extreme: [
+            "两条眉几乎连成一条（连心眉），眉心没有空隙",
+            "左右极不对称，一侧有眉、一侧几乎无眉",
+            "眉毛极粗极黑，压到眼皮上，眉骨被压出深沟",
+            "眉尾上扬成锐角，几乎与鬓角相接",
+            "倒八字，眉头高耸、眉尾直落，天生凶相",
+            "眉形杂乱横生，眉毛竖起外扎，从没修过",
         ],
     },
     nose: {
@@ -220,6 +252,14 @@ const LOOK_POOLS: Record<LookDimension, { soft?: string[]; normal: string[]; bol
             "短翘鼻，鼻子短、鼻尖上翘露出鼻孔",
             "多节鼻，鼻背有两处明显骨节，侧面起伏",
         ],
+        extreme: [
+            "鼻梁断崖式塌陷，山根凹成坑，正面只剩一个鼻头",
+            "巨大蒜头鼻，鼻头球状外凸、宽过两倍眼距，鼻翼厚实外翻",
+            "鹰钩鼻且鼻尖下垂过人中，侧面像鸟喙",
+            "鼻骨严重歪斜，鼻梁从中间折向一侧，鼻尖偏离中线",
+            "极短上翘鼻，鼻孔正面完全外露，鼻尖几乎贴到上唇",
+            "鼻梁过高过窄，鼻背像刀背，鼻头尖削无肉",
+        ],
     },
     mouth: {
         normal: [
@@ -241,6 +281,14 @@ const LOOK_POOLS: Record<LookDimension, { soft?: string[]; normal: string[]; bol
             "小嘴，嘴宽不到鼻翼两倍，唇形聚拢",
             "上唇极薄、下唇极厚，比例悬殊，说话时下唇外翻",
             "唇形不对称，一侧嘴角偏高、一侧偏低",
+        ],
+        extreme: [
+            "巨口，嘴角几乎拉到下颌角，笑时露出整排后牙与牙龈",
+            "极薄小嘴，嘴宽不到鼻宽，唇线绷成一条细线、没有唇珠",
+            "一侧嘴角上扬一侧下垂，说话时嘴明显歪向一边",
+            "厚唇外翻下垂，上下唇都合不拢、常态露齿",
+            "人中极长，嘴唇被推到下巴附近，上唇薄而紧",
+            "唇形歪斜，唇峰偏向一侧，牙齿参差外凸",
         ],
     },
     hair: {
@@ -264,6 +312,14 @@ const LOOK_POOLS: Record<LookDimension, { soft?: string[]; normal: string[]; bol
             "背头，发丝全部向后贴，露出完整额头与发际线",
             "中分长直发，头发垂到胸前、发缝笔直",
         ],
+        extreme: [
+            "近乎光头，只剩薄薄一层贴着头皮，头骨的形状完全露出",
+            "发量爆炸式蓬起，横向比脸还宽（爆炸头）",
+            "长及腰背、干枯分叉，几缕头发垂下来遮住半张脸",
+            "两侧推光、顶部一撮高高竖起（莫西干），发际线剃出锐角",
+            "花白的乱发，蓬松不修，像很久没打理过",
+            "紧贴头皮的油头，发缝笔直分到脑后，一丝不乱",
+        ],
     },
     build: {
         normal: [
@@ -285,6 +341,14 @@ const LOOK_POOLS: Record<LookDimension, { soft?: string[]; normal: string[]; bol
             "瘦削，脸颊与手腕都能看出骨形",
             "微胖，腰腹明显、下颌有肉",
             "匀称偏瘦，肩平背直、体型轻",
+        ],
+        extreme: [
+            "病态消瘦，颧骨与锁骨尖出，衣服挂在身上晃",
+            "极高极瘦，身高远超常人，四肢过长、颈细头小",
+            "矮胖墩实，身高不足一米六、腰腹浑圆，走路上身晃",
+            "虎背熊腰，肩宽接近两个头宽，脖子粗短、手臂粗过常人大腿",
+            "两肩一高一低，站姿明显歪斜（旧伤留下的体态）",
+            "体格粗壮但极度含胸驼背，头前伸、背拱起",
         ],
     },
     mark: {
@@ -312,6 +376,14 @@ const LOOK_POOLS: Record<LookDimension, { soft?: string[]; normal: string[]; bol
             "左眼下方一颗泪痣",
             "脖子左侧一块浅色胎记",
         ],
+        extreme: [
+            "右脸从眼角到下颌一道长疤，缝合痕迹很明显",
+            "眉心正中一颗凸起的黑痣，痣上有短毛",
+            "颈侧到下颌一整片深色胎记，边缘不规则",
+            "缺了两颗门牙，笑时缺口一眼可见",
+            "左耳缺了上半截（旧伤），右耳正常",
+            "满脸痘坑，皮肤质地粗糙不均匀",
+        ],
     },
 };
 
@@ -333,7 +405,7 @@ const LOOK_DIMENSION_HINTS: Record<LookDimension, string[]> = {
 };
 
 /**
- * 笼统审美形容词 —— 只有 `strong` 档会从描述里清掉。
+ * 笼统审美形容词 —— `strong` / `extreme` 两档会从描述里清掉。
  *
  * 这些词不是「错」，而是**没有信息量且高度趋同**：生图模型看到「五官精致」就画同一张脸，
  * 写十个角色就有十个一样的人。清掉之后剩下来的（身份、年龄、穿着）才是真正该保留的设定。
@@ -395,7 +467,7 @@ export function normalizeScriptCharacterLookLevel(value: unknown): ScriptCharact
     return (SCRIPT_CHARACTER_LOOK_LEVELS as string[]).includes(text) ? (text as ScriptCharacterLookLevel) : DEFAULT_SCRIPT_CHARACTER_LOOK_LEVEL;
 }
 
-/** 工具栏那颗按钮点一下的下一档（关闭 → 轻度 → 标准 → 强制 → 关闭）。 */
+/** 工具栏那颗按钮点一下的下一档（关闭 → 轻度 → 标准 → 强制 → 极端 → 关闭）。 */
 export function nextScriptCharacterLookLevel(value: unknown): ScriptCharacterLookLevel {
     const current = normalizeScriptCharacterLookLevel(value);
     const index = SCRIPT_CHARACTER_LOOK_LEVELS.indexOf(current);
@@ -446,7 +518,7 @@ function escapeRegExp(text: string): string {
 }
 
 /**
- * 清掉描述里的笼统审美词（`strong` 档专用）。
+ * 清掉描述里的笼统审美词（`strong` / `extreme` 档专用）。
  *
  * 删干净但**不删坏句子**：词后可能跟一个「的」一起删；连续标点归一成一个「，」；
  * 首尾标点（以及删完留下的孤零零的「的」）一起去掉。删到只剩标点或一两个字时，
@@ -485,14 +557,16 @@ function resolveCoveredDimensions(description: string): Set<LookDimension> {
 }
 
 /**
- * 档位 → 引导句。三档的**语气强度**也不同：
- * 轻度是「补充」、标准是「固定不变的五官与发型」、强制是「硬性参数、冲突以本节为准」。
- * 模型对提示词里语气的反应很明显：同一批形状，用「补充」写出来会画得比「硬性」淡。
+ * 档位 → 引导句。四档的**语气强度**也不同：
+ * 轻度是「补充」、标准是「固定不变的五官与发型」、强制是「硬性参数、冲突以本节为准」、
+ * 极端是「刻意夸张、不要往标准脸修正」。模型对提示词里语气的反应很明显：
+ * 同一批形状，用「补充」写出来会画得比「硬性」淡。
  */
 const LOOK_LEVEL_INTRO: Record<Exclude<ScriptCharacterLookLevel, "off">, string> = {
     light: "以下为该角色的固定外貌参数（在上文基础上补充，不覆盖已写内容）：",
     standard: "以下为该角色固定不变的五官与发型参数，同一角色跨镜头、跨集、换装都不得改写：",
     strong: "以下为该角色的硬性外貌参数，八项都要画出来；与上文任何笼统的外貌形容冲突时以本节为准，年龄、身份、服装以及疤 / 痣等剧情设定仍以描述为准：",
+    extreme: "以下是该角色**刻意夸张**的外貌参数（类型片质感）：八项都要画出来，允许不对称、允许不完美，不要自动美化、不要往标准脸修正；与上文任何外貌形容冲突时以本节为准，年龄、身份、服装以及疤 / 痣等剧情设定仍以描述为准：",
 };
 
 /** 档位 → 收尾句（解释这一档的边界，顺便再强调一次不能简化）。 */
@@ -500,13 +574,14 @@ const LOOK_LEVEL_OUTRO: Record<Exclude<ScriptCharacterLookLevel, "off">, string>
     light: "年龄、身份、造型、服装仍以角色描述为准，本节不得改动这些设定。",
     standard: "同一角色换装（校服 / 便服 / 礼服）时只改服装与打理方式，眼型、眉型、鼻型、嘴型与发质发量不得变。",
     strong: "以上各项为硬性参数：不得简化、不得替换成笼统的审美说法，也不得与同片其它角色共用同一套形状组合。",
+    extreme: "以上特征是该角色的记忆点，每一镜都必须一模一样地出现：不许为了好看而削成普通长相，也不许与同片其它角色共用同一套形状组合。",
 };
 
 /**
  * 生成某个角色的「外貌锚点」段；不该生成时返回空串。
  *
  * @param title       资产标题（可以带 `@造型`，内部只取基础名做哈希）。
- * @param description 分镜表里那一格的原文（用来判断哪些维度已经有了、以及 `strong` 档的清理范围）。
+ * @param description 分镜表里那一格的原文（用来判断哪些维度已经有了、以及 `strong` / `extreme` 档的清理范围）。
  * @param salt        稳定盐（调用方传**脚本节点 id**：同一条链路的所有入口共用一个盐，
  *                    否则「一键直接生图」和「一键批量生成」会给同一角色抽出两张脸）。
  * @param level       档位，`off` → 空串。
@@ -528,11 +603,11 @@ export function buildScriptCharacterLookBlock(input: {
     const tier = LOOK_LEVEL_POOL[level];
     const primary = LOOK_LEVEL_DIMENSIONS[level];
     /**
-     * 强制档**不跳过**已写维度：它是「覆盖上文的审美形容」这一档，跳过就等于什么也没做
+     * 强制 / 极端两档**不跳过**已写维度：它们是「覆盖上文的审美形容」这两档，跳过就等于什么也没做
      * （用户词库里的模板句几乎每句都带「眉」「唇」，一跳过就只剩两三项）。
      * 唯一例外是「辨识特征」—— 疤 / 痣是剧情设定，覆盖会穿帮。
      */
-    const skipCovered = level !== "strong";
+    const skipCovered = level === "light" || level === "standard";
     // 轻度 / 标准档被用户原文占掉的维度，用后面的维度补满，保证档位之间的「信息量」稳定。
     const order = [...primary, ...LOOK_DIMENSION_ORDER.filter((dimension) => !primary.includes(dimension))];
     const lines: string[] = [];
@@ -576,7 +651,7 @@ export function applyScriptCharacterLook<T extends LookableAsset>(items: readonl
         if (resolveScriptAssetRole(item.role) !== "character") return item;
         const body = String(item.prompt ?? "");
         if (!body.trim() || body.includes(SCRIPT_CHARACTER_LOOK_MARKER)) return item;
-        const description = level === "strong" ? stripVagueBeautyWords(body) : body;
+        const description = level === "strong" || level === "extreme" ? stripVagueBeautyWords(body) : body;
         const block = buildScriptCharacterLookBlock({ title: item.title, description, salt, level });
         if (!block) return item;
         return { ...item, prompt: `${description.trim()}\n\n${block}` };
