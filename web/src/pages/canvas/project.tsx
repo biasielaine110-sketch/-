@@ -200,7 +200,7 @@ import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { CHANGAN_FORMAT_SYSTEM, finalizeChanganPrompt, splitChanganAssetLockBlock } from "@/lib/canvas/changan-prompt-format";
 import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, buildScriptAssetNameLockPrompt, withScriptAssetBinding, withVideoAssetLockBinding } from "@/lib/canvas/script-asset-binding";
-import { buildScriptBlockingPrompt, withScriptBlockingBlock } from "@/lib/canvas/script-blocking";
+import { buildScriptBlockingPrompt, stripScriptBlockingAppearance, withScriptBlockingBlock } from "@/lib/canvas/script-blocking";
 import {
     applyScriptAssetDirectDecorations,
     buildScriptAssetBatchMounts,
@@ -11283,7 +11283,8 @@ function AtelierCanvasPage() {
                     videoPrompt: withScriptVariantNamesInVideoPrompt(member.prompts.videoPrompt, memberVariantTitles[memberIndex] || []),
                     // 人物站位随各镜走（用户 2026-11-24 第 02 条）：合并段不再抽成顶上一组，
                     // `buildMergedVideoNodePrompt` 把站位原文接在每镜块尾（`人物站位，`），原样不合并。
-                    blocking: member.row.blocking_detail,
+                    // 用户 2026-11-25：站位里不要再出现长相与穿着（资产图已锁定），合并段同样要过一遍清洗。
+                    blocking: stripScriptBlockingAppearance(member.row.blocking_detail),
                 }));
                 /**
                  * 参考图**连线顺序**（用户 2026-11-08 第 13 条）：角色 → 场景 → 道具 → 站位/特效 → 镜头图。

@@ -151,7 +151,11 @@ export function mergeScriptBlockingTexts(
     texts: ReadonlyArray<unknown>,
     options?: ScriptBlockingMergeOptions,
 ): { text: string; shots: number } {
-    const cleaned = texts.map(cellText).map((text) => text.trim()).filter((text) => Boolean(text) && text !== "无" && text !== "无。");
+    // 先剥长相 / 穿着（用户 2026-11-25）：铺视频时的站位只讲位置与走位，长相衣服归资产图。
+    const cleaned = texts
+        .map(cellText)
+        .map((text) => stripScriptBlockingAppearance(text))
+        .filter((text) => Boolean(text) && text !== "无" && text !== "无。");
     if (!cleaned.length) return { text: "", shots: 0 };
     if (cleaned.length === 1) return { text: clampBlockingText(cleaned[0]), shots: 1 };
 
@@ -185,6 +189,83 @@ export function mergeScriptBlockingTexts(
     }
     if (!kept.length) return { text: "", shots: cleaned.length };
     return { text: clampBlockingText(`${kept.join("。")}。`), shots: cleaned.length };
+}
+
+/**
+ * 服饰 / 配饰词 —— 判断「这一句是不是在讲穿搭」。
+ *
+ * 用户 2026-11-25：人物站位里**不要再写长相和穿着**，因为视频提示词开头已经用
+ * 「@图片N 锁定为XX」把角色资产图锁进去了；站位里再描述一遍，模型会两边各信一半
+ * （资产图是黑西装、站位写白大褂），生成出来就是打架。
+ */
+const BLOCKING_CLOTHING_WORDS =
+    /白大褂|大褂|白袍|长袍|道袍|袈裟|西装|西服|衬衫|衬衣|T恤|t恤|卫衣|毛衣|针织衫|毛衫|外套|夹克|风衣|大衣|棉袄|羽绒服|马甲|背心|吊带|连衣裙|半身裙|长裙|短裙|裙|长裤|短裤|牛仔裤|工装裤|运动裤|校服|便服|礼服|婚纱|旗袍|汉服|古装|制服|警服|军装|护士服|手术服|工作服|睡衣|浴袍|围裙|斗篷|披风|盔甲|皮衣|皮草|腰带|皮带|领带|领结|围巾|丝巾|披肩|手套|头盔|鸭舌帽|棒球帽|礼帽|帽子|帽|发带|发箍|发簪|发饰|头饰|耳环|耳钉|项链|吊坠|手链|手镯|戒指|手表|腕表|眼镜|墨镜|口罩|背包|书包|挎包|手提包|手袋|高跟鞋|皮鞋|靴|凉鞋|拖鞋|运动鞋|布鞋|衣服|衣物|着装|穿搭|打扮|妆容|浓妆|素颜/;
+
+/** 外貌词 —— 只在「这句没有位置/动作」时才整句丢掉，避免误删「眼睛看向门口」这种走位。 */
+const BLOCKING_APPEARANCE_WORDS =
+    /头发|发型|长发|短发|寸头|板寸|光头|马尾|辫子|刘海|发际线|鬓角|卷发|直发|染发|银发|白发|花白|脸型|圆脸|方脸|长脸|鹅蛋脸|瓜子脸|国字脸|菱形脸|心形脸|下颌|颧骨|眼型|眼睛|双眼皮|单眼皮|内双|杏眼|丹凤眼|桃花眼|下垂眼|眼距|眼窝|浓眉|剑眉|柳叶眉|一字眉|断眉|眉毛|鼻梁|鼻头|鼻翼|鹰钩鼻|嘴型|薄唇|厚唇|唇形|嘴唇|肤色|皮肤|肤质|白皙|小麦色|古铜色|雀斑|痣|疤痕|酒窝|皱纹|鱼尾纹|身材|体型|身高|高挑|瘦高|矮胖|魁梧|纤细|清瘦|微胖|壮实|俊美|俊朗|清秀|秀气|美貌|漂亮|帅气|五官|长相|容貌|颜值/;
+
+/** 位置 / 动作 / 空间词 —— 有它们就说明这句在讲走位，不能因为夹了个「眼镜」就整句删掉。 */
+const BLOCKING_STAGING_WORDS =
+    /站在|坐在|靠在|立在|蹲在|躺在|跪在|倚在|趴在|半靠|位于|处在|走|跑|转身|回头|抬头|低头|侧身|侧对|背对|正对|面向|朝向|手中|手里|右手|左手|双手|举|握|攥|扶|推|拉|抱|拎|提|按|撑|搭在|抬|垂|前倾|后仰|并排|一左一右|左前方|右后方|前景|后景|中景|画面左|画面右|画面中|门口|窗边|床头|桌边|墙角|床上|沙发上|门外|门内|走廊|机位|轴线|越肩|反打|景别|看|望|盯|笑|哭|听|说|问|递|接过|伸手/;
+
+/**
+ * 带触发词的穿搭短语：`穿深灰西装站在窗边` → 剥掉「穿深灰西装」。
+ *
+ * 右边界落在标点或位置/动作词上 —— 这样剥掉的是「衣服那一段」，后面「站在窗边」原样留下。
+ * 🔴 右边界**不能只写裸「在」**：`穿着旧T恤仰躺在木架床上` 会在「仰躺**在**」处断开，
+ * 把「仰躺」这个动作一起吃掉（实样里变成「在木架床上」）。所以姿态动词连单字也列上
+ * （躺/坐/站/靠/蹲/跪/趴/倚/立），「在」只认「在门口 / 在窗边 …」这类位置短语。
+ * `穿(?!过|越|梭|透|插|行|入)` 是为了不误伤「穿过人群」这种走位动作。
+ */
+const BLOCKING_CLOTHING_PHRASE =
+    /(?:穿着|穿了|身穿|身着|换上|换着|套着|披着|裹着|一身|头戴|戴着|脚踩|脚蹬|穿(?!过|越|梭|透|插|行|入))[^，。；、]{0,26}?(?=[，。；、]|仰躺|平躺|斜躺|半躺|端坐|正坐|站在|坐在|靠在|立在|蹲在|躺在|跪在|倚在|趴在|位于|处在|走|跑|转身|回头|抬头|低头|侧身|侧对|背对|正对|面向|朝向|手里|手中|右手|左手|双手|举|握|攥|扶|推|拉|抱|拎|提|按|撑|搭|抬|垂|看|望|躺|坐|站|靠|蹲|跪|趴|倚|立|在(?:门口|窗边|门框|床边|桌边|墙边|走廊|画面|沙发|床上|床沿|地面|门外|门内|台上|车边)|$)/g;
+
+/**
+ * 从「人物站位描述」里剥掉**长相**与**穿着**（用户 2026-11-25）。
+ *
+ * 为什么要做这一层而不是只改提示词：① 存量分镜表已经生成好了，改提示词不会改历史内容；
+ * ② 模型不一定 100% 遵守禁令。铺视频前统一过一遍，才保证「资产锁定 + 站位」不会同一个人两套衣服。
+ *
+ * 两步，都是为了**不误删走位**：
+ * ① 有触发词的穿搭短语定向剥离（只剥衣服那一段，位置动作留下）；
+ * ② 余下按分句判定：同时含「外貌/服饰词 + 位置动作词」的保留，只有外貌没有走位的整句丢弃。
+ *
+ * 洗完为空（整格都在讲长相衣服）→ 返回空串，调用方按「这一镜没写站位」处理。
+ */
+export function stripScriptBlockingAppearance(text: unknown): string {
+    const source = String(text ?? "").trim();
+    if (!source) return "";
+    // ① 定向剥掉「穿XX / 一身XX / 戴着XX」这类短语。
+    const body = source.replace(BLOCKING_CLOTHING_PHRASE, "");
+    // ② 按分句丢「纯外观句」，保留分隔符，尽量不改原文版式。
+    const tokens = body.split(/([，。；、])/);
+    const kept: string[] = [];
+    for (let index = 0; index < tokens.length; index += 2) {
+        const segment = tokens[index].trim();
+        if (!segment) continue;
+        const separator = tokens[index + 1] || "";
+        const mentionsAppearance = BLOCKING_CLOTHING_WORDS.test(segment) || BLOCKING_APPEARANCE_WORDS.test(segment);
+        if (!mentionsAppearance) {
+            kept.push(segment + separator);
+            continue;
+        }
+        // 含外观词但同时在讲走位 → 再剥一次短语，剥不动就整句留着（位置信息比去掉一件衣服重要）。
+        const trimmed = segment.replace(BLOCKING_CLOTHING_PHRASE, "").trim();
+        if (trimmed && trimmed !== segment && !BLOCKING_APPEARANCE_WORDS.test(trimmed)) {
+            kept.push(trimmed + separator);
+            continue;
+        }
+        if (BLOCKING_STAGING_WORDS.test(segment)) kept.push(segment + separator);
+    }
+    const merged = kept
+        .join("")
+        .replace(/^[，。；、\s]+/, "")
+        .replace(/[，、]\s*[，、]/g, "，")
+        .replace(/([，、])\s*([。；])/g, "$2")
+        .replace(/[，、]$/, "")
+        .trim();
+    return merged === "。" ? "" : merged;
 }
 
 /**
