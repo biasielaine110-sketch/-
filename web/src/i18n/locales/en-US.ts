@@ -2162,7 +2162,7 @@ export default {
         },
         draft: {
             title: "Set up draft save",
-            description: "On the first save, set a draft name and choose a local draft folder. The draft zip, image downloads, and config exports all go into that folder.",
+            description: "On the first save, set a draft name and choose a local draft folder. The draft zip goes into that folder; image / video downloads use the browser's default download location.",
             nameLabel: "Draft name",
             namePlaceholder: "Enter draft file name",
             filePreview: "Will save as {{name}}",
@@ -2170,7 +2170,7 @@ export default {
             pickPath: "Choose draft folder",
             pathUnset: "No draft folder selected",
             fallbackHint: "This browser cannot bind a local folder. The draft will be downloaded as a ZIP file.",
-            autoSaveHint: "After binding a draft folder, the same zip is overwritten every 10 minutes; downloads and config exports also write into that folder.",
+            autoSaveHint: "After binding a draft folder, the same zip is overwritten every 10 minutes; image / video / config downloads still go to the browser's default download location.",
             save: "Save draft",
             saving: "Saving draft…",
             saved: "Draft overwritten: {{name}}",

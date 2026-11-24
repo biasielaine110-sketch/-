@@ -2167,7 +2167,7 @@ export default {
         },
         draft: {
             title: "设置草稿保存",
-            description: "首次保存请设置草稿名称并选择本地草稿文件夹。草稿 zip、下载图片和导出配置都会写入该文件夹。",
+            description: "首次保存请设置草稿名称并选择本地草稿文件夹。草稿 zip 会写入该文件夹；图片 / 视频等「下载」按钮走浏览器默认下载目录。",
             nameLabel: "草稿名称",
             namePlaceholder: "输入草稿文件名",
             filePreview: "将保存为 {{name}}",
@@ -2175,7 +2175,7 @@ export default {
             pickPath: "选择草稿文件夹",
             pathUnset: "尚未选择草稿文件夹",
             fallbackHint: "当前浏览器不支持指定本地文件夹，将下载为 ZIP 草稿文件。",
-            autoSaveHint: "绑定草稿文件夹后，每 10 分钟会自动覆盖同名 zip；下载图片与导出配置也会直接写入该文件夹。",
+            autoSaveHint: "绑定草稿文件夹后，每 10 分钟会自动覆盖同名 zip；图片 / 视频 / 导出配置等下载仍按浏览器默认下载目录保存。",
             save: "保存草稿",
             saving: "正在保存草稿…",
             saved: "草稿已覆盖保存：{{name}}",

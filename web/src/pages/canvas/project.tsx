@@ -4627,8 +4627,8 @@ function AtelierCanvasPage() {
                     if (result.method === "draft") {
                         message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
                     } else {
+                        // 🔴 默认走浏览器下载（用户 2026-11-24）：落在浏览器默认下载目录，不再劝用户去绑草稿文件夹。
                         message.success(t("canvas.nodeToolbar.exportDocumentDone", { name: result.fileName }));
-                        if (draftMeta && !draftMeta.hasDirectory) message.warning(t("canvas.draft.rebindForFolderSave"));
                     }
                     return;
                 }
@@ -4651,16 +4651,15 @@ function AtelierCanvasPage() {
                 });
                 if (result.method === "draft") {
                     message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));
-                } else if (result.method === "download" && draftMeta && !draftMeta.hasDirectory) {
-                    message.warning(t("canvas.draft.rebindForFolderSave"));
                 }
+                // 默认是浏览器下载（落到浏览器默认下载目录），浏览器自己会弹下载条，这里不再多弹提示。
             } catch (error) {
                 // A dead blob URL, a lost folder permission or a CORS-blocked remote URL used to
                 // escape as an unhandled rejection and the click appeared to do nothing.
                 message.error(`${t("common.downloadFailed")}: ${error instanceof Error ? error.message : String(error)}`);
             }
         },
-        [draftMeta, message, projectId, t],
+        [message, projectId, t],
     );
 
     const saveNodeAsset = useCallback(

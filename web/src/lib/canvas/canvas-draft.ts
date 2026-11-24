@@ -79,7 +79,7 @@ async function ensureWritePermission(handle: FileSystemFileHandle | FileSystemDi
     return next === "granted";
 }
 
-/** Ask the user to choose a folder used as draft storage (zip + downloads/exports). */
+/** Ask the user to choose a folder used as draft storage (the draft zip only — downloads stay in the browser). */
 export async function pickCanvasDraftDirectory() {
     if (!supportsDirectoryPicker() || !window.showDirectoryPicker) {
         throw new Error("FILE_SYSTEM_ACCESS_UNSUPPORTED");

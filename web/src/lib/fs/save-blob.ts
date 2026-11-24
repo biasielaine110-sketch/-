@@ -5,13 +5,22 @@ import { supportsFileSystemAccess, writeBlobToDraftDirectory } from "@/lib/canva
 import { getMediaBlob } from "@/services/file-storage";
 
 export type SaveBlobOptions = {
-    /** When set, try writing into this project's bound draft folder first. */
+    /** When set, can write into this project's bound draft folder — **only** if `preferDraftFolder` is on. */
     projectId?: string | null;
     /**
      * 节点自己的 IndexedDB 副本键（`metadata.storageKey`）。远程直链过期、`blob:` 地址随刷新作废时，
      * 这条是唯一能救回来的路 —— 见 `resolveBlobSource` 的第 ③ 步。
      */
     storageKey?: string | null;
+    /**
+     * 显式要求「写进绑定的草稿文件夹」而不是走浏览器下载。
+     *
+     * 🔴 默认 **false**（用户 2026-11-24：「点击下载的图片和视频等，默认存放在跟浏览器的下载路径下」）：
+     * 以前只要项目绑过草稿文件夹，下载就被静默塞进那个文件夹 —— 用户在系统「下载」目录里翻不到文件，
+     * 还以为下载失败了。草稿文件夹现在只留给草稿 zip 自动保存（`canvas-draft.ts`），
+     * 所有「下载」按钮一律走浏览器默认下载目录；真需要落进文件夹的入口得自己显式开启这个开关。
+     */
+    preferDraftFolder?: boolean;
 };
 
 export type SaveBlobResult =
@@ -88,8 +97,10 @@ export function resolveCanvasProjectIdFromLocation() {
 }
 
 /**
- * Save a blob/url into the bound draft folder when available (no picker).
- * Falls back to browser download when draft folder is unavailable.
+ * Save a blob/url.
+ *
+ * 🔴 默认走**浏览器下载**（落到浏览器的默认下载目录，与用户点网页里任何「下载」一致）；
+ * 只有显式传 `preferDraftFolder: true` 时才尝试写进绑定的草稿文件夹（写作失败再回落浏览器下载）。
  */
 export async function saveBlobAs(source: Blob | string, suggestedName: string, options?: SaveBlobOptions): Promise<SaveBlobResult> {
     const fileName = suggestedName.trim() || "download.bin";
@@ -114,7 +125,7 @@ export async function saveBlobAs(source: Blob | string, suggestedName: string, o
     }
     const projectId = options?.projectId || resolveCanvasProjectIdFromLocation();
 
-    if (projectId && supportsFileSystemAccess()) {
+    if (options?.preferDraftFolder && projectId && supportsFileSystemAccess()) {
         try {
             const saved = await writeBlobToDraftDirectory(projectId, fileName, blob);
             if (saved) return { method: "draft", fileName: saved.fileName, folderName: saved.folderName };
