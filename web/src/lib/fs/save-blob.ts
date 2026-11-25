@@ -2,6 +2,7 @@ import { saveAs } from "file-saver";
 
 import { forceProxyMediaUrl, isLocalNetworkUrl, proxyMediaUrl } from "@/lib/api-proxy";
 import { supportsFileSystemAccess, writeBlobToDraftDirectory } from "@/lib/canvas/canvas-draft";
+import { portableMediaUrls } from "@/lib/media-portable";
 import { getMediaBlob } from "@/services/file-storage";
 
 export type SaveBlobOptions = {
@@ -12,6 +13,12 @@ export type SaveBlobOptions = {
      * 这条是唯一能救回来的路 —— 见 `resolveBlobSource` 的第 ③ 步。
      */
     storageKey?: string | null;
+    /**
+     * 该媒体是由哪个模型生成的（`channelId::model`）。只用于**存量本机地址**的救回：
+     * 按它找到真正的渠道，把 `127.0.0.1:17800/v1/files/x.mp4` 重拼成公开地址再取一次
+     * （见 `lib/media-portable.ts`）。不传就退化成「按配置里的全部渠道逐个试」。
+     */
+    model?: string | null;
     /**
      * 显式要求「写进绑定的草稿文件夹」而不是走浏览器下载。
      *
@@ -42,7 +49,7 @@ export type SaveBlobResult =
  * `fetch` 只会抛一句 `Failed to fetch` —— 而字节好端端躺在本地库里。用户看到的
  * 「下载失败: Failed to fetch」绝大多数就是这一种，别再去猜 CORS 或代理挂了。
  */
-export async function resolveBlobSource(source: Blob | string, options?: { storageKey?: string | null }): Promise<Blob> {
+export async function resolveBlobSource(source: Blob | string, options?: { storageKey?: string | null; model?: string | null }): Promise<Blob> {
     if (typeof source !== "string") return source;
     const raw = String(source || "").trim();
     const isObjectUrl = raw.startsWith("blob:") || raw.startsWith("data:");
@@ -62,6 +69,18 @@ export async function resolveBlobSource(source: Blob | string, options?: { stora
             if (key) {
                 const stored = await getMediaBlob(key).catch(() => null);
                 if (stored && stored.size) return stored;
+            }
+            /**
+             * 存量节点：`127.0.0.1:17800/v1/files/<id>.mp4` 直连不上，但同一份字节经渠道的公开
+             * 域名（Funnel）仍能取到 —— 按当前配置重拼出公开地址再试一轮。这样「播不了也下载不了」
+             * 的老成片不用重新生成，也不用用户自己改地址。
+             */
+            for (const candidate of portableMediaUrls(raw, options?.model)) {
+                try {
+                    return await fetchBlobOrThrow(candidate);
+                } catch {
+                    // 下一个候选；全失败才按「本机网关连不上」报错。
+                }
             }
             const host = (raw.match(/^https?:\/\/([^/?#]+)/i) || [])[1] || "本机网关";
             const reason = error instanceof Error ? error.message : String(error ?? "");
@@ -121,7 +140,7 @@ export function resolveCanvasProjectIdFromLocation() {
  */
 export async function saveBlobAs(source: Blob | string, suggestedName: string, options?: SaveBlobOptions): Promise<SaveBlobResult> {
     const fileName = suggestedName.trim() || "download.bin";
-    let blob = await resolveBlobSource(source, { storageKey: options?.storageKey });
+    let blob = await resolveBlobSource(source, { storageKey: options?.storageKey, model: options?.model });
     // file-saver falls back to inferring the name from the URL when a Blob has an empty or
     // generic ("application/octet-stream") type; a blob: URL has no path, so downloads lose
     // their extension (e.g. "canvas-video" instead of "canvas-video.mp4"). Upstream servers

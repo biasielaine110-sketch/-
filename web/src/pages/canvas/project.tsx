@@ -4649,6 +4649,8 @@ function AtelierCanvasPage() {
                 const result = await saveBlobAs(node.metadata.content, `canvas-${node.type}-${node.id}.${extension}`, {
                     projectId,
                     storageKey: primaryImageKey || node.metadata.storageKey,
+                    // 存量本机网关成片（`127.0.0.1:17800/v1/files/x.mp4`）靠它找回公开地址再取一次。
+                    model: node.metadata.model,
                 });
                 if (result.method === "draft") {
                     message.success(t("canvas.draft.savedToFolder", { name: result.fileName, folder: result.folderName || "" }));

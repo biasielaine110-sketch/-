@@ -15,7 +15,7 @@ import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/l
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, forceProxyApiUrl, isKnownDirectCorsUrl, isLocalNetworkUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
+import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, forceProxyApiUrl, isKnownDirectCorsUrl, isLocalNetworkUrl, isTunnelCorsUrl, rewriteLocalMediaUrl } from "@/lib/api-proxy";
 // 传输层判定与请求体估算抽到 `net-transport`，与生图/音频共用同一口径（唯一咽喉）。
 import { PROXY_BODY_SAFE_BYTES, estimateBodyBytes, isProxiedApiUrl, isTransportFailure } from "./net-transport";
 import { uploadTemporaryPublicImage, uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
@@ -1624,7 +1624,7 @@ async function pollMuseVideoTask(config: AiConfig, task: VideoGenerationTask, op
         const root = readObject(payload) || {};
         const inner = readObject(root.data) || root;
         const url = museResultUrl(payload);
-        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        if (url) return { status: "completed", result: await videoResultFromUrl(url, options, config) };
         const status = String(inner.status || root.status || "").toLowerCase();
         if (/fail|cancel|error/.test(status)) {
             const message = [readObject(inner.error)?.message, inner.error, inner.msg, inner.message, inner.fail_reason, root.msg, root.message].find(
@@ -1755,7 +1755,7 @@ async function pollApimartMuseVideoTask(config: AiConfig, task: VideoGenerationT
         return { status: "failed", error: readApiErrorMessage(message) || apiText("videoGenerationFailed") };
     }
     const url = apimartMuseResultUrl(payload);
-    if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+    if (url) return { status: "completed", result: await videoResultFromUrl(url, options, config) };
     // `completed` 但这一轮还没写结果 URL、以及 `unknown` 这种暂不明确的状态，都继续轮 —— 别提前判死。
     return { status: "pending" };
 }
@@ -2738,7 +2738,7 @@ async function pollXingqiaoH3VideoTask(config: AiConfig, task: VideoGenerationTa
     if (status !== "completed") return { status: "pending" };
     // 个别上游会把直链塞回响应体 —— 有就直接用（沿用通用下载梯队，含 CORS 代理兜底）。
     const directUrl = videoResultUrl(video);
-    if (directUrl) return { status: "completed", result: await videoResultFromUrl(directUrl, options) };
+    if (directUrl) return { status: "completed", result: await videoResultFromUrl(directUrl, options, config) };
     // 星桥契约：结果只在 `/videos/{id}/content`，一次直连一次站内代理（该端点可能不带 CORS 头，
     // 直连被浏览器拦时就走同源代理 —— 代理会透传 Authorization，见 functions/_lib/proxy.js）。
     const contentPath = buildApiUrl(config.baseUrl, `/videos/${task.id}/content`);
@@ -2977,7 +2977,7 @@ async function pollApipathVideoTask(config: AiConfig, task: VideoGenerationTask,
         const root = readObject(payload) || {};
         const inner = readObject(root.data) || root;
         const url = apipathVideoResultUrl(payload);
-        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        if (url) return { status: "completed", result: await videoResultFromUrl(url, options, config) };
         const status = String(inner.status || root.status || "").toLowerCase();
         if (/succeeded|success/.test(status)) {
             // succeeded 但响应里没解析出直链：照 pollOpenAIVideoTask 的口径给能定位的报错，
@@ -3109,7 +3109,7 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
         const rawResponse = (await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data;
         const video = unwrapVideoResponse(rawResponse);
         const url = videoResultUrl(video);
-        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        if (url) return { status: "completed", result: await videoResultFromUrl(url, options, config) };
         if (video.status === "completed") {
             // `/videos/{id}/content` 是 **OpenAI 原生 video 契约**才有的一次性下载端点。
             // work-fisher / New API 系中转没有它，直链只在响应体里（上面 `videoResultUrl` 深度扫描过）。
@@ -3134,15 +3134,26 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
     }
 }
 
-async function videoResultFromUrl(url: string, options?: RequestOptions): Promise<VideoGenerationResult> {
+async function videoResultFromUrl(url: string, options?: RequestOptions, config?: AiConfig): Promise<VideoGenerationResult> {
     const direct = String(url || "").trim();
+    /**
+     * 🔴 上游回报的是「它自己眼里的本机地址」时（quota-flow `127.0.0.1:17800/v1/files/x.mp4`），
+     * 先在**解析阶段**换成渠道公开地址：`https://<channel-base>/v1/files/x.mp4`。
+     *
+     * 为什么必须在这里改而不是到播放时再兜：节点 `metadata.content` 一旦存成 `127.0.0.1`，
+     * 这条成片就永远只对「网关那台机器的这个进程」有效 —— 刷新、换设备、网关重启之后全是
+     * `ERR_CONNECTION_REFUSED`，而字节其实一直躺在能公网取到的位置（用户 2026-11-25 第 05 条）。
+     */
+    const portable = config ? rewriteLocalMediaUrl(direct, config.baseUrl) : direct;
     if (!/^https?:\/\//i.test(direct)) return { url: direct, mimeType: "video/mp4" };
     // Result buckets often omit Access-Control-Allow-Origin (Tencent COS / ByteDance TOS), so the
     // direct XHR is blocked by CORS even though the file itself is fine. A remote-URL fallback
     // keeps playback working, but then nothing lands in IndexedDB: no thumbnail, no export, and
     // the node breaks once the signed URL expires. Retry through the same-origin media proxy
     // (which sets ACAO) so we still get a real blob — same ladder as image-storage/save-blob.
-    const targets = [...new Set([direct, proxyMediaUrl(direct), forceProxyMediaUrl(direct)].filter(Boolean))];
+    // 本机地址多一跳：先按原地址取（同机浏览器最快），再按公开地址取（换设备也能拿到）。
+    const seeds = [...new Set([direct, portable].filter(Boolean))];
+    const targets = [...new Set(seeds.flatMap((seed) => [seed, proxyMediaUrl(seed), forceProxyMediaUrl(seed)]).filter(Boolean))];
     for (const target of targets) {
         try {
             const response = await axios.get<Blob>(target, { responseType: "blob", signal: options?.signal });
@@ -3152,7 +3163,8 @@ async function videoResultFromUrl(url: string, options?: RequestOptions): Promis
             if (axios.isCancel(error) || options?.signal?.aborted) throw error;
         }
     }
-    return { url: direct, mimeType: "video/mp4" };
+    // 取不到字节时**保留可移植的那条**（公开地址），绝不再把 `127.0.0.1` 写进节点。
+    return { url: portable || direct, mimeType: "video/mp4" };
 }
 
 function assertVideoConfig(config: AiConfig, model: string) {

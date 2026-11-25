@@ -10,6 +10,7 @@ import {
 } from "mediabunny";
 
 import { proxyMediaUrl } from "@/lib/api-proxy";
+import { portableMediaUrls } from "@/lib/media-portable";
 import { getMediaBlob } from "@/services/file-storage";
 
 export const VIDEO_UPSCALE_RESOLUTIONS = [
@@ -92,7 +93,12 @@ export async function loadVideoBlob(url: string, storageKey?: string): Promise<B
         if (local && local.size) return local;
     }
     if (!url) throw new Error("视频地址是空的（节点没有内容）");
-    const targets = Array.from(new Set([proxyMediaUrl(url), url].filter(Boolean)));
+    /**
+     * 存量节点里的本机网关成片（`127.0.0.1:17800/v1/files/x.mp4`）：直连打不通时按渠道公开地址
+     * 再试一轮 —— 同一份字节经 Funnel 取得到，合并 / 超分 / 转录这些「读字节」的入口才不会因为
+     * 地址不可移植而把老成片判死。候选见 `lib/media-portable.ts`。
+     */
+    const targets = Array.from(new Set([proxyMediaUrl(url), url, ...portableMediaUrls(url)].filter(Boolean)));
     let lastError = "";
     for (const target of targets) {
         try {

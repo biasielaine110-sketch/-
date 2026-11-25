@@ -6,7 +6,7 @@
 // (Ark CORS allow-headers also omit Authorization, so browser Direct usually fails).
 // Users can switch to "direct" in preferences when the provider allows CORS.
 
-import { CONFIG_STORE_KEY, type ApiTransport } from "@/stores/use-config-store";
+import { CONFIG_STORE_KEY, buildApiUrl, type ApiTransport } from "@/stores/use-config-store";
 
 /**
  * Hosts that are known to send permissive CORS headers (Access-Control-Allow-Origin: *
@@ -182,6 +182,44 @@ export function forceProxyMediaUrl(directUrl: string): string {
         return buildProxyUrl(normalized);
     } catch {
         return "";
+    }
+}
+
+/**
+ * 🔴 把「上游眼里的本机地址」换成**当前渠道的公开地址**。
+ *
+ * quota-flow 这类跑在用户机器上的网关，回给上游的成片地址永远是它自己的视角：
+ * `http://127.0.0.1:17800/v1/files/<id>.mp4`。这个地址**只对网关所在那台机器有效**：
+ *  - 浏览器开在另一台设备 / 另一个上下文 → `ERR_CONNECTION_REFUSED`（2026-11-25 第 05 条贴的就是这条）；
+ *  - 站点代理 `/api/proxy` 跑在 Cloudflare 边缘 → 403，永远到不了用户自己的机器。
+ *
+ * 同一份字节其实**经渠道的公开域名就能取到**（qf 实测：`https://wb2api.*.ts.net/qf/v1/files/<id>.mp4`
+ * 与本机直连拿到完全相同的字节数）。所以这里按 baseUrl 的版本根重拼：
+ * `baseUrl(/qf)` + `/v1` + `/files/<id>.mp4`。
+ *
+ * 只改 `/v1/...` 形状的路径 —— ComfyUI 的 `/view?filename=…`、各类 `/outputs/…` 不在 OpenAI
+ * 兼容契约里，硬拼 `baseUrl/v1/...` 只会造出一个不存在的地址，宁可原样返回。
+ *
+ * 渠道 baseUrl 自己也是本机地址时（用户就配了 `http://127.0.0.1:17800`）没有更公开的地址可换，
+ * 同样原样返回，避免把可用地址改成不可用地址。
+ */
+export function rewriteLocalMediaUrl(url: string, baseUrl?: string | null): string {
+    const raw = String(url || "").trim();
+    if (!raw || !/^https?:\/\//i.test(raw)) return raw;
+    if (!isLocalNetworkUrl(raw)) return raw;
+    const base = String(baseUrl || "").trim();
+    if (!base || !/^https?:\/\//i.test(base)) return raw;
+    // 渠道本身也在本机：换成它只会得到同一个地址（或缺版本根），直接放弃改写。
+    if (isLocalNetworkUrl(base)) return raw;
+    try {
+        const target = new URL(normalizeProxyTarget(raw));
+        // 只认 OpenAI 兼容的文件路径（本机网关回报的一律是 `/v1/files/...`）。
+        if (!/^\/v1\//i.test(target.pathname)) return raw;
+        const relative = `${target.pathname.replace(/^\/v1(?=\/)/i, "")}${target.search}`;
+        const next = buildApiUrl(base, relative);
+        return next && next !== raw ? next : raw;
+    } catch {
+        return raw;
     }
 }
 

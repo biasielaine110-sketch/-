@@ -19,6 +19,7 @@ import {
 import { describeVideoContainer, describeVideoSummary, readVideoContainer } from "@/lib/media-container";
 import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
 import { isLocalNetworkUrl } from "@/lib/api-proxy";
+import { portableMediaUrls } from "@/lib/media-portable";
 import { needsMediaRecovery } from "@/lib/canvas/media-recovery";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -1342,7 +1343,7 @@ function formatClock(seconds: number) {
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey: memoryKeyProp }: { src: string; posterSrc?: string; storageKey?: string; mimeType?: string; memoryKey?: string }) {
+function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, memoryKey: memoryKeyProp }: { src: string; posterSrc?: string; storageKey?: string; mimeType?: string; model?: string; memoryKey?: string }) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -1353,6 +1354,15 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
     const [playing, setPlaying] = useState(false);
     const [playableSrc, setPlayableSrc] = useState(src);
     const retriesRef = useRef(0);
+    /**
+     * 存量节点里的**本机网关成片地址**（`http://127.0.0.1:17800/v1/files/<id>.mp4`）。
+     *
+     * 新生成的成片在解析阶段就换成了渠道公开地址（`services/api/video.ts`），但这些节点的
+     * `metadata.content` 已经写死了 `127.0.0.1` —— 换设备 / 网关重启之后必定 `ERR_CONNECTION_REFUSED`，
+     * 而字节经公开域名其实取得到。这里按当前配置重拼出公开地址，播放失败时逐个换过去自愈。
+     */
+    const portableRef = useRef<string[]>([]);
+    const portableIndexRef = useRef(0);
     // Saved position from a previous mount, consumed as the seek target on activation.
     const restoredRef = useRef<{ time: number } | null>(videoPlaybackMemory.get(memoryKey) ?? null);
     const pendingSeekRef = useRef<number | null>(null);
@@ -1377,6 +1387,9 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
         setPrevSource({ src, storageKey });
         setPlayableSrc(src);
         retriesRef.current = 0;
+        // 换视频才重算「公开地址候选」；同一条视频的 blob 刷新不该把已试过的候选清零。
+        portableRef.current = portableMediaUrls(src, model);
+        portableIndexRef.current = 0;
         restoredRef.current = null;
         pendingSeekRef.current = null;
         wantPlayRef.current = false;
@@ -1412,7 +1425,10 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
         if (isLocalNetworkUrl(src)) {
             const host = (String(src).match(/^https?:\/\/([^/?#]+)/i) || [])[1] || "本机网关";
             if (!storageKey) {
-                return `这条成片只存在本机网关（${host}），没有存进画布 —— 先启动该网关再试；网关里的文件被清理了就只能重新生成`;
+                const triedPublic = portableRef.current.length > 0 && portableIndexRef.current >= portableRef.current.length;
+                return triedPublic
+                    ? `这条成片只存在本机网关（${host}），直连和渠道公开地址都取不到 —— 先启动该网关再试；网关里的文件被清理了就只能重新生成`
+                    : `这条成片只存在本机网关（${host}），没有存进画布 —— 先启动该网关再试；网关里的文件被清理了就只能重新生成`;
             }
         }
         if (!storageKey) return "";
@@ -1437,6 +1453,18 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
                 if (next && next !== playableSrc) setPlayableSrc(next);
             });
             return;
+        }
+        /**
+         * 本机网关地址：同一份字节经渠道公开域名（Funnel）也能取到 —— 换一次公开地址再试。
+         * 这条专治存量节点（`metadata.content` 已写死 `127.0.0.1:17800`），新成片不会再走到这里。
+         */
+        if (portableIndexRef.current < portableRef.current.length) {
+            const next = portableRef.current[portableIndexRef.current];
+            portableIndexRef.current += 1;
+            if (next && next !== playableSrc) {
+                setPlayableSrc(next);
+                return;
+            }
         }
         void (async () => {
             const mediaErr = videoRef.current?.error;
@@ -1590,7 +1618,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
             const stored = storageKey ? await getMediaBlob(storageKey).catch(() => null) : null;
             // 远程直链过期 / `blob:` 被回收时，`resolveBlobSource` 里还有一次「本地副本」兜底
             // （同一套顺序见 `lib/fs/save-blob.ts`），所以这里把 storageKey 一并带下去。
-            const blob = stored && stored.size > 0 ? stored : await resolveBlobSource(playableSrc, { storageKey });
+            const blob = stored && stored.size > 0 ? stored : await resolveBlobSource(playableSrc, { storageKey, model });
             if (!blob.size) throw new Error("no media bytes");
             // Name the file after the real container. Calling WebM bytes ".mp4" is not cosmetic:
             // save-blob re-types the blob to match the extension, so the file would not play.
@@ -1916,7 +1944,7 @@ function VideoNodeContent({ node, theme, onDeleteBatchImage }: NodeContentRender
     return (
         <div className="relative h-full w-full overflow-hidden rounded-[inherit]">
             <CanvasLazyMedia>
-                <CanvasNodeVideoPlayer src={node.metadata.content} posterSrc={node.metadata?.thumbnailContent} storageKey={node.metadata?.storageKey} mimeType={node.metadata?.mimeType} memoryKey={node.id} />
+                <CanvasNodeVideoPlayer src={node.metadata.content} posterSrc={node.metadata?.thumbnailContent} storageKey={node.metadata?.storageKey} mimeType={node.metadata?.mimeType} model={node.metadata?.model} memoryKey={node.id} />
             </CanvasLazyMedia>
             <button
                 type="button"
@@ -2071,7 +2099,7 @@ function ImageContent({
                 {displaySrc ? (
                     isVideo ? (
                         <CanvasLazyMedia>
-                            <CanvasNodeVideoPlayer src={displaySrc} posterSrc={primaryThumb} storageKey={primaryImage?.storageKey || node.metadata?.storageKey} mimeType={primaryImage?.mimeType || node.metadata?.mimeType} memoryKey={`${node.id}:${primaryImageId || "primary"}`} />
+                            <CanvasNodeVideoPlayer src={displaySrc} posterSrc={primaryThumb} storageKey={primaryImage?.storageKey || node.metadata?.storageKey} mimeType={primaryImage?.mimeType || node.metadata?.mimeType} model={node.metadata?.model} memoryKey={`${node.id}:${primaryImageId || "primary"}`} />
                         </CanvasLazyMedia>
                     ) : (
                         <>
@@ -2283,7 +2311,7 @@ function ExpandedImageCard({
             {image.content || image.thumbnailContent ? (
                 isVideo ? (
                     <CanvasLazyMedia className="h-full w-full">
-                        <CanvasNodeVideoPlayer src={image.content || image.thumbnailContent || ""} posterSrc={image.thumbnailContent} storageKey={image.storageKey} mimeType={image.mimeType} memoryKey={`${node.id}:${image.id}`} />
+                        <CanvasNodeVideoPlayer src={image.content || image.thumbnailContent || ""} posterSrc={image.thumbnailContent} storageKey={image.storageKey} mimeType={image.mimeType} model={node.metadata?.model} memoryKey={`${node.id}:${image.id}`} />
                     </CanvasLazyMedia>
                 ) : (
                     <CanvasLazyMedia className="h-full w-full">
