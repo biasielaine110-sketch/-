@@ -34,7 +34,7 @@ import {
     runRunningHubWorkflow,
 } from "@/lib/runninghub-workflow";
 import { isMioraQueueBaseUrl, mediaUrlToBlob, runMioraGeneration } from "@/lib/miora-queue";
-import { assertBrowserPlayableVideo } from "@/lib/media-container";
+import { assertBrowserPlayableVideo, isRetryableVideoProblem, readVideoContainer } from "@/lib/media-container";
 import { resolveFetchableReferenceUrl } from "./image";
 import { cropVideoBottomBand, normalizeSubtitleCropMode } from "@/lib/video-subtitle-crop";
 import { runModelPlugin } from "./model-plugin";
@@ -1296,7 +1296,15 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
         try {
             await assertBrowserPlayableVideo(blob, "成片");
         } catch (error) {
-            if (result.url && /^https?:\/\//i.test(result.url)) {
+            /**
+             * 只有**传输层**问题值得按 URL 重取：截断 / 缺 moov / HTML 错误页 / JSON 报错体 / 0 字节。
+             *
+             * 🔴 编码问题（H.265、ProRes、AC-3 音轨、High 10 profile）重取一百次都是同一份字节，
+             * 徒劳重取只会把「生成已经成功」拖成「又等一轮」，还把真正的结论藏起来。这类问题
+             * 直接把容器诊断抛给用户，让他改生成参数（见 media-container 的 describeVideoContainer）。
+             */
+            const info = await readVideoContainer(blob);
+            if (isRetryableVideoProblem(info) && result.url && /^https?:\/\//i.test(result.url)) {
                 return storeGeneratedVideo({ url: result.url, mimeType: result.mimeType });
             }
             throw error instanceof Error ? error : new Error(String(error));

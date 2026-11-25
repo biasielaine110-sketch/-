@@ -117,11 +117,40 @@ function usableMediaFallback(fallback = "") {
     return value;
 }
 
+/**
+ * 🔴 从**本地媒体库**读回来的 blob 必须补回 MIME。
+ *
+ * 本地库的文件名是 `video__<id>` / `image__<id>`（见 local-media-library 的 resolveLibraryPath），
+ * **没有扩展名**；`FileSystemFileHandle.getFile()` 返回的 `File.type` 因此是空串。拿空 MIME 去
+ * `URL.createObjectURL()` 建 blob URL，Chrome 会把它当成 `application/octet-stream`，
+ * `<video>` 连解复用都不试就直接 `MEDIA_ELEMENT_ERROR: Format error`（黑屏）——
+ * 字节明明是好片子（用户 2026-11-25 第 03 条：qf 渠道 Seedance 2.0 Fast 成片黑屏）。
+ *
+ * 判据顺序：已有 media/* 类型就信任 → 否则按 storageKey 前缀 + 头 4 字节魔数（WebM/EBML vs 其它）。
+ * 图片不改（`<img>` 自己嗅内容，硬贴一个错的 image/* 反而会增加风险）。
+ */
+async function withMediaType(blob: Blob, storageKey: string): Promise<Blob> {
+    const type = (blob.type || "").toLowerCase();
+    if (type.startsWith("video/") || type.startsWith("audio/") || type.startsWith("image/")) return blob;
+    const prefix = storageKey.split(":")[0];
+    try {
+        if (prefix === "video") {
+            const head = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+            const webm = head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3;
+            return blob.slice(0, blob.size, webm ? "video/webm" : "video/mp4");
+        }
+        if (prefix === "audio") return blob.slice(0, blob.size, "audio/mpeg");
+    } catch {
+        // 补类型失败就别动它，宁可让上层按原样处理。
+    }
+    return blob;
+}
+
 export async function getMediaBlob(storageKey: string) {
     const local = await readLocalMediaBlob(storageKey);
-    if (local) return local;
+    if (local) return withMediaType(local, storageKey);
     const stored = await store.getItem<Blob>(storageKey);
-    if (stored) return stored;
+    if (stored) return withMediaType(stored, storageKey);
     const cached = objectUrls.get(storageKey);
     if (!cached) return null;
     try {

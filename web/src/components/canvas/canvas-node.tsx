@@ -16,7 +16,7 @@ import {
     pickNativeVideoQueueEntryForNode,
     subscribeNativeVideoQueue,
 } from "@/lib/canvas/native-video-job-queue";
-import { describeVideoContainer, readVideoContainer } from "@/lib/media-container";
+import { describeVideoContainer, describeVideoSummary, readVideoContainer } from "@/lib/media-container";
 import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
 import { needsMediaRecovery } from "@/lib/canvas/media-recovery";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
@@ -1390,17 +1390,27 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
     // retries are exhausted, surface a toast — silent play() rejection used to look like a dead
     // Play button when the stored bytes were a non-video (e.g. a VHS preview gif mislabeled mp4).
     /**
-     * 读库里那条 blob 认容器，把 Chrome 那句 `DEMUXER_ERROR_COULD_NOT_OPEN` 翻成人话。
+     * 读库里那条 blob 认容器，把 Chrome 那句含糊报错翻成人话。
      *
      * 截断的 MP4、GIF 预览、MPEG-TS 流、HEVC 编码的处置方式完全不同，一律回一句「请重新生成」
      * 是最差的建议 —— 上游任务其实已经成功、钱已经花了，多数情况只需要重新取一次成片。
+     *
+     * 🔴 两句分工：`describeVideoContainer` 说「哪儿不对」，`describeVideoSummary` 说「实际拿到了
+     * 什么」（容器 / 视频编码 / 音轨 / profile / 大小）。只报一句 `MEDIA_ELEMENT_ERROR: Format
+     * error` 谁也修不了；而 HEVC / AC-3 音轨这类问题重取一百次都是同一份字节，必须让用户看见
+     * 真实编码，才知道要改的是「生成参数」而不是「再取一次」。
      * 读不到库就返回空串，退回原始 media error。
      */
     const describeStoredVideoProblem = async () => {
         if (!storageKey) return "";
         try {
             const blob = await getMediaBlob(storageKey);
-            return blob ? describeVideoContainer(await readVideoContainer(blob)) : "";
+            if (!blob) return "";
+            const info = await readVideoContainer(blob);
+            const problem = describeVideoContainer(info);
+            const summary = describeVideoSummary(info);
+            if (problem) return summary ? `${problem}（实际拿到 ${summary}）` : problem;
+            return summary ? `实际拿到 ${summary}` : "";
         } catch {
             return "";
         }
