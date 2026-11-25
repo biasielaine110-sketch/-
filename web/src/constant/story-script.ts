@@ -4039,6 +4039,32 @@ export function splitScriptAssetNames(value: unknown): string[] {
 }
 
 /**
+ * 锁表里的名字是**裸名**、而图片节点标题带造型（`母亲` vs `母亲（连衣裙）`）时，以标题为准。
+ *
+ * 用户 2026-11-25 第 03 条：分镜表的角色列经常只写 `母亲` / `男青年` / `女子`，资产图却按造型
+ * 命名（`母亲（连衣裙）` / `男青年（便服）` / `女子（开衫）`）。铺视频时锁行就成了
+ * `@图片1锁定为母亲人物参考` —— 括号被吃掉，多镜头正文里的 `母亲（连衣裙）` 也就锁不到这张图，
+ * 一本名多造型时还会串到另一套衣服上。
+ *
+ * 只在「锁名**没有**造型签名 + 标题有显式造型签名 + 本体一致」时升级：
+ *  - 裸名 vs `母亲（连衣裙）` → `母亲（连衣裙）`；
+ *  - 标题是长注释（`叶辰（20岁，短发）`）→ 不算造型签名，不升级（`splitScriptAssetVariant` 已判掉）；
+ *  - 两侧都显式但不同（表里 `母亲（开衫）` / 图 `母亲（连衣裙）`）→ 不猜，保留表里的写法；
+ *  - 本体不同（`母亲` vs `保姆`）→ 不升级。
+ */
+function variantNameForBareLock(name: string, title: string): string {
+    if (!name) return "";
+    const lock = splitScriptAssetVariant(name);
+    if (lock.explicit) return "";
+    const node = splitScriptAssetVariant(title);
+    if (!node.explicit || !node.variant) return "";
+    const lockBase = normalizeScriptAssetMatchText(lock.base);
+    const nodeBase = normalizeScriptAssetMatchText(node.base);
+    if (!lockBase || lockBase !== nodeBase) return "";
+    return formatScriptAssetDisplayName(title);
+}
+
+/**
  * 一个图片节点在锁表里对应的资产名；查不到 → undefined（调用方回落图片节点标题）。
  *
  * 🔴 广播锁消歧（用户 2026-11-24 第 01 条）：一格多名字（`日历、《五年高考三年模拟》`）里
@@ -4046,6 +4072,9 @@ export function splitScriptAssetNames(value: unknown): string[] {
  * —— 直接取第一个命中的名字，两张图会拿到同一个名字，资产锁定文案就只锁出一个资产
  * （同名合并还会把两张图并成一行）。多命中时用**图片节点标题**挑最像的那个名字
  * （标题通常就是资产名 / 生图候选的 title），挑不出再回落第一个命中。
+ *
+ * 🔴 造型签名补全（用户 2026-11-25 第 03 条）：单命中也不能直接返回裸名 —— 表里写 `母亲`、
+ * 图叫 `母亲（连衣裙）` 时，锁行必须写带括号的全名（见 `variantNameForBareLock`）。
  */
 export function scriptNodeLockName(map: unknown, nodeId: unknown, titleOf?: (id: string) => unknown): string | undefined {
     if (typeof nodeId !== "string" || !nodeId) return undefined;
@@ -4054,17 +4083,32 @@ export function scriptNodeLockName(map: unknown, nodeId: unknown, titleOf?: (id:
     for (const [name, ids] of Object.entries(source)) {
         if (Array.isArray(ids) && ids.includes(nodeId)) hits.push(name);
     }
-    if (hits.length <= 1) return hits[0];
     const title = scriptNameLockName(titleOf?.(nodeId));
+    if (hits.length <= 1) {
+        const only = hits[0];
+        if (!only) return only;
+        return (title && variantNameForBareLock(scriptNameLockName(only), title)) || only;
+    }
     if (title) {
+        const named = hits.map((raw) => ({ raw, name: scriptNameLockName(raw) })).filter((item) => item.name);
+        // ① 身份键逐字相同最优先（`母亲（连衣裙）` / `母亲(连衣裙)` 视为同一个）
+        const titleKey = scriptAssetIdentityKey(title);
+        const exact = titleKey ? named.find((item) => scriptAssetIdentityKey(item.name) === titleKey) : undefined;
+        if (exact) return exact.raw;
+        // ② 表里是裸名、标题带造型 → 用标题的全名。
+        //    必须排在 ③ 前面：hits = [`母亲`, `母亲（连衣裙）`] 时，③ 的「包含」判定会让 `母亲`
+        //    抢先命中（`母亲（连衣裙）`.includes(`母亲`)），括号照样丢。
+        for (const item of named) {
+            const upgraded = variantNameForBareLock(item.name, title);
+            if (upgraded) return upgraded;
+        }
+        // ③ 老口径：互相包含（`日历` / `《五年高考三年模拟》` 这类广播脏数据靠它挑）
         const lowerTitle = title.toLowerCase();
-        const hit = hits.find((raw) => {
-            const name = scriptNameLockName(raw);
-            if (!name) return false;
-            const lower = name.toLowerCase();
-            return lower === lowerTitle || (lower.length >= 2 && lowerTitle.includes(lower)) || (lowerTitle.length >= 2 && lower.includes(lowerTitle));
+        const partial = named.find((item) => {
+            const lower = item.name.toLowerCase();
+            return (lower.length >= 2 && lowerTitle.includes(lower)) || (lowerTitle.length >= 2 && lower.includes(lowerTitle));
         });
-        if (hit) return hit;
+        if (partial) return partial.raw;
     }
     return hits[0];
 }
