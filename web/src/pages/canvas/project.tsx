@@ -199,7 +199,7 @@ import { EPISODE_BAND_COMPACT_ROWS, EPISODE_BAND_ESTIMATE_RATIO, EPISODE_BAND_GA
 import { listChatSkills } from "@/lib/chat-skills";
 import { isH3OptimizeQueueRunning, startH3OptimizeQueue } from "@/lib/canvas/h3-optimize-runner";
 import { CHANGAN_FORMAT_SYSTEM, finalizeChanganPrompt, splitChanganAssetLockBlock } from "@/lib/canvas/changan-prompt-format";
-import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, buildScriptAssetNameLockPrompt, buildScriptCharacterLockMap, withScriptAssetBinding, withScriptCharacterAssetLocks, withVideoAssetLockBinding } from "@/lib/canvas/script-asset-binding";
+import { buildScriptAssetBindingPrompt, buildScriptAssetLockPrompt, buildScriptAssetNameLockPrompt, buildScriptCharacterLockMap, buildScriptSceneLockMap, withScriptAssetBinding, withScriptCharacterAssetLocks, withScriptSceneAssetLock, withVideoAssetLockBinding } from "@/lib/canvas/script-asset-binding";
 import { buildScriptBlockingPrompt, stripScriptBlockingAppearance, withScriptBlockingBlock } from "@/lib/canvas/script-blocking";
 import {
     applyScriptAssetDirectDecorations,
@@ -11311,17 +11311,30 @@ function AtelierCanvasPage() {
                 // 用**全体成员**的格子（合并段里每一镜的音色都要能查到），拼资产锁定时追加到人物行。
                 const voiceOf = createStoryScriptVoiceLookup(members.map((member) => member.row), presetId, scriptExtras);
                 const videoBinding = videoAssetBindingOf([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf, voiceOf);
+                // 正文内联锁定表（用户 2026-11-25 第 01 / 04 条）：角色与场景各一份，编号都来自顶部
+                // 「资产锁定」单元同一个收集器。⚠️ 必须在拼 `baseVideoPrompt` **之前**算好 —— 站位正文
+                // 要靠它把场景名统一成资产名并补 `（锁定@图片N）`，角色表同时提供「哪些名字是人名」
+                // 用于保护站位首句（人物句绝不拿场景名去替换）。
+                const characterLocks = buildScriptCharacterLockMap([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf);
+                const sceneLocks = buildScriptSceneLockMap([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf);
+                const characterNames = [...characterLocks.keys()];
+                // 站位首句场景名统一（用户 2026-11-25 第 04 条）：资产锁定写「男主公寓客厅」、
+                // 站位写「现代公寓客厅」→ 画面会和资产图打架。这里按资产名改写并紧跟锁定标记：
+                // `男主公寓客厅（锁定@图片3），日，…`。只动第一分句，家具 / 光线 / 走位原样。
+                const sceneLockedShots = shots.map((shot) => ({
+                    ...shot,
+                    blocking: withScriptSceneAssetLock(shot.blocking, sceneLocks, characterNames),
+                }));
                 // 人物站位（用户 2026-11-24 第 02 条改版式）：合并段**不再抽成顶上一组**（整段去重后依旧拥挤），
                 // 站位原文随 `shots[].blocking` 进各镜自己的块（`buildMergedVideoNodePrompt`，块尾 `人物站位，`）；
                 // 只有单镜节点保留「【人物站位】」块（垫在镜头内容上面，老口径）。
-                const blockingBlock = merged ? "" : buildScriptBlockingPrompt([first.row.blocking_detail]);
-                const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(shots) : buildVideoNodePrompt(shots[0].videoPrompt);
+                const blockingBlock = merged ? "" : withScriptSceneAssetLock(buildScriptBlockingPrompt([first.row.blocking_detail]), sceneLocks, characterNames);
+                const baseVideoPrompt = merged ? buildMergedVideoNodePrompt(sceneLockedShots) : buildVideoNodePrompt(sceneLockedShots[0].videoPrompt);
                 // 正文内联角色锁定（用户 2026-11-25 第 01 条）：多镜头连续片段里每提到一个角色，
                 // 就在名字后面再标一次 `（锁定@图片N）`，编号与顶部资产锁定单元同一份（同一个收集器）。
                 // ⚠️ 必须排在这一步：`shots[].videoPrompt` 已经过 `withScriptVariantNamesInVideoPrompt`
                 // （裸名 → `男青年（便服）`），站位块也已拼好 —— 注入要覆盖镜头正文 + 人物站位两处，
                 // 而且要在资产锁定块垫到最上面之前做（否则会给锁定块里的角色名再套一层）。
-                const characterLocks = buildScriptCharacterLockMap([...orderedGroupAssetIds, ...groupAudioList], nodesRef.current, assetNameOf, assetRoleOf);
                 const lockedVideoBody = withScriptCharacterAssetLocks(withScriptBlockingBlock(baseVideoPrompt, blockingBlock), characterLocks);
                 // 合规后缀（用户 2026-11-11 第 02 条）必须**最后**拼：资产锁定块（带「【资产锁定】」标题，
                 // 用户 2026-11-23 晚间第 01 条）在最上、人物站位块其次、镜头内容其后、禁止项 / 强制声明收尾。
@@ -13335,10 +13348,19 @@ function AtelierCanvasPage() {
             // 资产锁定块再叠到它上面（顺序与整条铺链路一致）。
             // 站位里的角色名与镜头正文同一写法（用户 2026-11-25 第 02 条）：`男青年` → `男青年（便服）`。
             // 改写放在 `buildScriptBlockingPrompt` **之后** —— 它内部会先剥长相/穿着，别把造型名喂给那一步。
-            const blockingBlock = withScriptVariantNamesInVideoPrompt(buildScriptBlockingPrompt([row.blocking_detail]), shotVariantTitles);
-            // 正文内联角色锁定（用户 2026-11-25 第 01 条，与整条铺链路同口径）：单镜节点同样在
-            // 角色名后标 `（锁定@图片N）`，编号来自同一份资产锁定收集器 → 与顶部锁定块一致。
+            // 内联锁定表（用户 2026-11-25 第 01 / 04 条，与整条铺链路同口径）：角色 + 场景，
+            // 编号来自同一份资产锁定收集器 → 与顶部锁定块逐字一致。
             const characterLocks = buildScriptCharacterLockMap(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
+            const sceneLocks = buildScriptSceneLockMap(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
+            const characterNames = [...characterLocks.keys()];
+            // 站位首句场景名统一成资产名并补 `（锁定@图片N）`（用户 2026-11-25 第 04 条）：
+            // 放在 `buildScriptBlockingPrompt` **之后**（它内部会先剥长相/穿着，场景名不受影响，
+            // 但顺序固定下来后面加清洗规则时不容易踩错）。
+            const blockingBlock = withScriptSceneAssetLock(
+                withScriptVariantNamesInVideoPrompt(buildScriptBlockingPrompt([row.blocking_detail]), shotVariantTitles),
+                sceneLocks,
+                characterNames,
+            );
             const lockedShotBody = withScriptCharacterAssetLocks(withScriptBlockingBlock(variantShotPrompt, blockingBlock), characterLocks);
             // 合规后缀（用户 2026-11-11 第 02 条）：与一键铺链路同口径，拼在资产锁定块之后（= 最后）。
             // 资产锁定块最前面带「【资产锁定】」标题（用户 2026-11-23 晚间第 01 条，与整条铺链路同口径）。

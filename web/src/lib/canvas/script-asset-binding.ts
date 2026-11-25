@@ -412,3 +412,138 @@ export function withScriptCharacterAssetLocks(prompt: string | undefined, locks:
     }
     return out;
 }
+
+/** 场景名比对用的归一：抹掉空白与标点（`男主公寓客厅` ≡ `男主公寓·客厅`），只比字面。 */
+const SCENE_TEXT_NOISE = /[\s，,。．.；;：:、！!？?（）()［］[\]【】《》〈〉“”"'‘’\-—－·]/g;
+
+function normalizeSceneText(value: string): string {
+    return value.replace(SCENE_TEXT_NOISE, "").toLowerCase();
+}
+
+/**
+ * 站位开头「不像场景短语」的信号（用户 2026-11-25 第 04 条）：
+ * 有冒号 = 人物句（`叶辰：画面左`）；有走位动词 = 已经写成动作句（`叶辰站在门口`）。
+ * 这类开头**绝不**拿场景名去替换，否则会把人物和位置一起吃掉。
+ */
+const SCENE_HEAD_UNSAFE =
+    /：|:|站在|坐在|靠在|立在|蹲在|躺在|跪在|倚在|趴在|走到|走向|转身|回头|抬头|低头|侧身|背向|面向|手里|手中|双手/;
+
+/** `【人物站位】` 抬头行（站位块可能整块传进来，只处理抬头下面的正文）。 */
+const SCENE_HEADER_LINE = /^(\s*【人物站位】[^\n]*\n)/;
+
+/**
+ * 正文（人物站位）内联场景锁定表：`场景名 → 图片N`（用户 2026-11-25 第 04 条）。
+ *
+ * 诉求原话：「人物站位里关于场景名的内容，要按资产锁定里的场景名统一 —— 资产锁定写的是
+ * 男主公寓客厅，站位写的是现代公寓客厅，冲突了会让画面跟资产图对不上」，并且站位里也要锁图：
+ * `男主公寓客厅（锁定@图片3）`。
+ *
+ * 与 `buildScriptCharacterLockMap` **同源**：同一个收集器 `collectScriptAssetPromptItems`，
+ * 所以编号和顶部「资产锁定」单元逐字一致。
+ *
+ * 🔴 只收 `role === "scene"`：资产没标分类时 `resolveScriptAssetRole` 会回落成 `character`，
+ * 这时候**不动站位**（宁可保持原样，也不猜哪张图是场景）。
+ */
+export function buildScriptSceneLockMap(
+    orderedAssetNodeIds: ReadonlyArray<string | undefined | null>,
+    allNodes: CanvasNodeData[],
+    assetNameOf: (assetNodeId: string) => string | undefined,
+    assetRoleOf: (assetNodeId: string) => ScriptAssetRole | null,
+): Map<string, string> {
+    const items = collectScriptAssetPromptItems(orderedAssetNodeIds, allNodes, assetNameOf, assetRoleOf);
+    const locks = new Map<string, string>();
+    for (const item of items) {
+        if (item.kind !== "image" || item.role !== "scene") continue;
+        const label = item.labels[0];
+        if (!item.name || !label) continue;
+        // 同名挂了多张场景图 → 只标第一张，与锁定块那一行的第一个编号一致。
+        if (!locks.has(item.name)) locks.set(item.name, label);
+    }
+    return locks;
+}
+
+/**
+ * 给站位开头的场景名挑一个场景资产（本段可能连了客厅 + 卧室两间）。
+ *
+ * 顺序：① 开头**逐字包含**某个场景名 → 就是它（长名优先，`男主公寓客厅` 先于 `公寓`）；
+ * ② 否则按「共享字数」最多的那个（`现代公寓客厅` vs `男主公寓客厅` 共享 4 字）；
+ * ③ 共享不到 2 个字（或只有一张场景图）→ 用连线顺序里的第一张。
+ */
+function pickSceneLock(headText: string, sceneLocks: ReadonlyMap<string, string>): { name: string; label: string } | null {
+    const entries = [...sceneLocks.entries()].filter(([name, label]) => Boolean(name) && Boolean(label));
+    if (!entries.length) return null;
+    const normalizedHead = normalizeSceneText(headText);
+    const byLength = [...entries].sort((a, b) => Array.from(b[0]).length - Array.from(a[0]).length);
+    for (const [name, label] of byLength) {
+        const normalizedName = normalizeSceneText(name);
+        if (normalizedName && normalizedHead.includes(normalizedName)) return { name, label };
+    }
+    let best: { name: string; label: string; score: number } | null = null;
+    for (const [name, label] of entries) {
+        const normalizedName = normalizeSceneText(name);
+        if (!normalizedName) continue;
+        let score = 0;
+        for (const char of new Set(Array.from(normalizedName))) {
+            if (normalizedHead.includes(char)) score += 1;
+        }
+        if (!best || score > best.score) best = { name, label, score };
+    }
+    if (best && best.score >= 2) return { name: best.name, label: best.label };
+    return { name: entries[0][0], label: entries[0][1] };
+}
+
+/**
+ * 把站位正文开头的场景名统一成**资产锁定的场景名**，并紧跟一个 `（锁定@图片N）`
+ * （用户 2026-11-25 第 04 条，见 `buildScriptSceneLockMap`）。
+ *
+ * 只改**第一分句**（第一个逗号/句号/分号之前那一段）—— 格式骨架就是
+ * `<场景类型>，<日/夜>，<家具与朝向>；<光源>。`，场景名固定在开头；后面的家具、光线、走位一个字不动。
+ *
+ * 判定与保命规则：
+ *  - 开头已经包含资产场景名 → 保留原文（`男主公寓客厅内景` 只补锁，不把「内景」吃掉）；
+ *  - 开头是**别的**场景名（`现代公寓客厅`）→ 整段换成资产名 + 锁定标记；
+ *  - 开头有冒号 / 走位动词 / 角色名 / 超过 30 字 → 说明这一格没按骨架写（直接是人物句），**不动**；
+ *  - 开头已经是 `（锁定@图片N）` → 不重复注入。
+ *  - 正文后面再出现同一个旧场景名（`回到现代公寓客厅`）→ 统一成资产名，但不再标锁。
+ *
+ * 空锁定表 / 空站位的 → **原样返回**（一个字节不变），没连场景资产的链路完全不受影响。
+ */
+export function withScriptSceneAssetLock(
+    text: string | undefined,
+    sceneLocks: ReadonlyMap<string, string>,
+    characterNames?: ReadonlyArray<string>,
+): string {
+    const body = text || "";
+    if (!body || !sceneLocks.size) return body;
+    // 整块传进来时（`【人物站位】\n…`）抬头原样保留，只处理下面的正文。
+    const headerMatch = body.match(SCENE_HEADER_LINE);
+    const header = headerMatch ? headerMatch[1] : "";
+    const content = header ? body.slice(header.length) : body;
+    const locked = lockSceneInBlocking(content, sceneLocks, characterNames);
+    return header + locked;
+}
+
+function lockSceneInBlocking(
+    content: string,
+    sceneLocks: ReadonlyMap<string, string>,
+    characterNames?: ReadonlyArray<string>,
+): string {
+    // 第一分句：到第一个逗号 / 句号 / 分号 / 换行。
+    const headMatch = content.match(/^[^，,。；;\n]+/);
+    if (!headMatch) return content;
+    const headText = headMatch[0].trim();
+    if (!headText || headText.length > 30) return content;
+    if (/（锁定@/.test(headText)) return content;
+    if (SCENE_HEAD_UNSAFE.test(headText)) return content;
+    if (characterNames?.some((name) => Boolean(name) && headText.includes(name))) return content;
+    const chosen = pickSceneLock(headText, sceneLocks);
+    if (!chosen) return content;
+    const { name, label } = chosen;
+    // 开头已经写了资产场景名：保留原文里的其它信息（`男主公寓客厅内景`），只在名字后补锁。
+    const first = headText.includes(name)
+        ? headText.replace(name, `${name}（锁定@${label}）`)
+        : `${name}（锁定@${label}）`;
+    // 后面再出现旧场景名（换了措辞的那句）→ 统一成资产名，不再重复标锁。
+    const rest = content.slice(headMatch[0].length).split(headText).join(name);
+    return first + rest;
+}
