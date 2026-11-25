@@ -11284,7 +11284,14 @@ function AtelierCanvasPage() {
                     // 人物站位随各镜走（用户 2026-11-24 第 02 条）：合并段不再抽成顶上一组，
                     // `buildMergedVideoNodePrompt` 把站位原文接在每镜块尾（`人物站位，`），原样不合并。
                     // 用户 2026-11-25：站位里不要再出现长相与穿着（资产图已锁定），合并段同样要过一遍清洗。
-                    blocking: stripScriptBlockingAppearance(member.row.blocking_detail),
+                    // 用户 2026-11-25 第 02 条：站位里的角色名必须跟镜头正文**同一个写法** —— 资产名是
+                    // `男青年（便服）` 而站位只写 `男青年` 时补成 `男青年（便服）`（同一个改写器、同一份
+                    // 本镜资产标题），否则正文锁的是全名、站位写的本名，模型会当成两个人 / 不知道该套哪件衣服。
+                    // 顺序：先剥长相穿着（否则 `（便服）` 会被当成穿搭词判掉），再补造型名。
+                    blocking: withScriptVariantNamesInVideoPrompt(
+                        stripScriptBlockingAppearance(member.row.blocking_detail),
+                        memberVariantTitles[memberIndex] || [],
+                    ),
                 }));
                 /**
                  * 参考图**连线顺序**（用户 2026-11-08 第 13 条）：角色 → 场景 → 道具 → 站位/特效 → 镜头图。
@@ -13319,13 +13326,14 @@ function AtelierCanvasPage() {
             const videoBinding = videoAssetBindingOf(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf, voiceOf);
             // 裸角色名 → `妈妈（外出）`（用户 2026-11-22 第 02 条，与整条铺链路同口径）：按本镜
             // 真的连上的造型资产改写视频提示词，让这一镜自己锁定哪套衣服，跨镜不再串衣。
-            const variantShotPrompt = withScriptVariantNamesInVideoPrompt(
-                videoNode.metadata?.prompt || "",
-                orderedLinkIds.map((id) => nodesRef.current.find((node) => node.id === id)?.title || "").filter(Boolean),
-            );
+            // 本镜连上的资产标题（正文与人物站位共用同一份，见下面站位块的改写）。
+            const shotVariantTitles = orderedLinkIds.map((id) => nodesRef.current.find((node) => node.id === id)?.title || "").filter(Boolean);
+            const variantShotPrompt = withScriptVariantNamesInVideoPrompt(videoNode.metadata?.prompt || "", shotVariantTitles);
             // 人物站位描述（用户 2026-11-23 第 06 条）：这一镜的站位块写在镜头内容上面，
             // 资产锁定块再叠到它上面（顺序与整条铺链路一致）。
-            const blockingBlock = buildScriptBlockingPrompt([row.blocking_detail]);
+            // 站位里的角色名与镜头正文同一写法（用户 2026-11-25 第 02 条）：`男青年` → `男青年（便服）`。
+            // 改写放在 `buildScriptBlockingPrompt` **之后** —— 它内部会先剥长相/穿着，别把造型名喂给那一步。
+            const blockingBlock = withScriptVariantNamesInVideoPrompt(buildScriptBlockingPrompt([row.blocking_detail]), shotVariantTitles);
             // 正文内联角色锁定（用户 2026-11-25 第 01 条，与整条铺链路同口径）：单镜节点同样在
             // 角色名后标 `（锁定@图片N）`，编号来自同一份资产锁定收集器 → 与顶部锁定块一致。
             const characterLocks = buildScriptCharacterLockMap(orderedLinkIds, nodesRef.current, assetNameOf, assetRoleOf);
