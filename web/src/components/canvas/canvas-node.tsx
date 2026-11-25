@@ -1445,27 +1445,63 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
         }
     };
 
+    /**
+     * 换到下一个公开地址候选（`portableMediaUrls` 推出的 Funnel 地址），没有可换的返回 false。
+     *
+     * 🔴 换电脑全靠这条路：节点 `metadata.content` 存的是 `127.0.0.1:17800`，而 `storageKey`
+     * 指向的是**那台机器自己的本地库** —— 换一台电脑 / 清过缓存 / 无痕窗口里根本读不到 blob。
+     * 旧写法在 `refreshMediaUrl` 返回空时就 `return` 了，`src` 一直不变，`onError` 再也不会
+     * 触发，播放器永久停在错误态，公开地址一次都不会试（用户 2026-11-25 第 07 条：
+     * 「能在别的电脑网络下载读取吗」）。
+     */
+    /**
+     * 候选表按需补算。
+     *
+     * 🔴 首次渲染**不会**进上面那段「换视频才重算」的分支（`prevSource` 的初值就等于当前的
+     * `src` / `storageKey`），所以 `portableRef` 一直是空的。换一台电脑打开存量画布时，
+     * `tryPortableCandidate()` 会直接返回 false —— 公开地址一次都不会试，白修。另外配置里的
+     * 渠道是异步加载的，挂载那一刻算出来的候选可能不全，回到「真要用的时候再算」最稳。
+     */
+    const ensurePortableCandidates = () => {
+        if (!portableRef.current.length) {
+            portableRef.current = portableMediaUrls(src, model);
+        }
+        return portableRef.current;
+    };
+
+    const tryPortableCandidate = () => {
+        const candidates = ensurePortableCandidates();
+        if (portableIndexRef.current >= candidates.length) return false;
+        const next = candidates[portableIndexRef.current];
+        portableIndexRef.current += 1;
+        if (!next) return false;
+        // 函数式更新：异步回调里闭包里的 `playableSrc` 是旧值，比较它会漏判。
+        setPlayableSrc((prev) => (next === prev ? prev : next));
+        return true;
+    };
+
     const handleVideoError = () => {
         if (!playableSrc) return;
         if (storageKey && retriesRef.current < 2) {
             retriesRef.current += 1;
-            void refreshMediaUrl(storageKey).then((next) => {
-                if (next && next !== playableSrc) setPlayableSrc(next);
-            });
+            void refreshMediaUrl(storageKey)
+                .then((next) => {
+                    if (next) {
+                        setPlayableSrc((prev) => (next === prev ? prev : next));
+                        return;
+                    }
+                    // 本地库没有这条 blob（换电脑 / 清过缓存）→ 别停在错上，继续试公开地址。
+                    tryPortableCandidate();
+                })
+                // 读本地库直接抛（无权限 / 库不存在）同样别停在错上。
+                .catch(() => tryPortableCandidate());
             return;
         }
         /**
          * 本机网关地址：同一份字节经渠道公开域名（Funnel）也能取到 —— 换一次公开地址再试。
          * 这条专治存量节点（`metadata.content` 已写死 `127.0.0.1:17800`），新成片不会再走到这里。
          */
-        if (portableIndexRef.current < portableRef.current.length) {
-            const next = portableRef.current[portableIndexRef.current];
-            portableIndexRef.current += 1;
-            if (next && next !== playableSrc) {
-                setPlayableSrc(next);
-                return;
-            }
-        }
+        if (tryPortableCandidate()) return;
         void (async () => {
             const mediaErr = videoRef.current?.error;
             const base = mediaErr?.message || (mediaErr ? `code ${mediaErr.code}` : "");
@@ -1476,6 +1512,14 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
     };
 
     const reportPlayFailure = (reason?: unknown) => {
+        /**
+         * 还有没试过的公开地址 → 先换源再试，别把「本机地址连不上」报给用户。
+         *
+         * 换电脑打开存量画布时，`127.0.0.1:17800` 的 `play()` 会以 `NotSupportedError` 立刻
+         * 拒绝（同时 `<video>` 也会 `onError`）。两条路都会走到这里 / `handleVideoError`，
+         * 谁先到谁换源；候选试完才弹错误提示。
+         */
+        if (tryPortableCandidate()) return;
         const mediaErr = videoRef.current?.error;
         const dom =
             reason && typeof reason === "object" && "name" in reason
