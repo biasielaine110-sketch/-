@@ -2196,7 +2196,7 @@ export default {
             rebindForFolderSave: "当前草稿未绑定文件夹，请用 Ctrl/Cmd+S 重新选择草稿文件夹后，即可直接保存到该路径",
         },
         video: {
-            playbackFailed: "视频无法播放。具体原因见括号里的成片诊断。",
+            playbackFailed: "视频无法播放，具体原因见括号里的成片诊断",
         },
     },
     navigation: {

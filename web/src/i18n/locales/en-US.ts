@@ -2191,7 +2191,7 @@ export default {
             rebindForFolderSave: "This draft is not bound to a folder. Press Ctrl/Cmd+S to choose a draft folder, then downloads can save there directly.",
         },
         video: {
-            playbackFailed: "This video cannot be played. The clip diagnosis is in the parentheses.",
+            playbackFailed: "This video cannot be played — the clip diagnosis is in the parentheses",
         },
     },
     navigation: {
