@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { CanvasFindReplaceTextArea } from "@/components/canvas/canvas-find-replace-textarea";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
+import { preferPublicMediaUrl } from "@/lib/media-portable";
 import { uploadImage } from "@/services/image-storage";
 import { cn } from "@/lib/utils";
 import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
@@ -329,7 +330,7 @@ export default function AssetsPage() {
                                     </Button>
                                     {imageDraft ? (
                                         <Typography.Text type="secondary" className="ml-3 text-xs">
-                                            {imageDraft.width}x{imageDraft.height} · {formatBytes(imageDraft.bytes)}
+                                            {imageDraft.width}x{imageDraft.height} ï¿½ {formatBytes(imageDraft.bytes)}
                                         </Typography.Text>
                                     ) : (
                                         <Typography.Text type="secondary" className="ml-3 text-xs">
@@ -500,10 +501,10 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
                         {asset.kind === "text" ? (
                             <Typography.Paragraph className="mt-2 whitespace-pre-wrap">{asset.data.content}</Typography.Paragraph>
                         ) : asset.kind === "video" ? (
-                            <video src={asset.data.url} controls className="mt-2 aspect-video w-full rounded-lg bg-black" />
+                            <video src={preferPublicMediaUrl(asset.data.url)} controls className="mt-2 aspect-video w-full rounded-lg bg-black" />
                         ) : (
                             <Typography.Text className="mt-2 block">
-                                {asset.data.width}x{asset.data.height} · {formatBytes(asset.data.bytes)} · {asset.data.mimeType}
+                                {asset.data.width}x{asset.data.height} ï¿½ {formatBytes(asset.data.bytes)} ï¿½ {asset.data.mimeType}
                             </Typography.Text>
                         )}
                     </div>
@@ -533,7 +534,7 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload }: { asset: Asset | nu
 
 function assetSummary(asset: Asset) {
     if (asset.kind === "text") return asset.data.content;
-    return `${asset.data.width}x${asset.data.height} · ${formatBytes(asset.data.bytes)} · ${asset.data.mimeType}`;
+    return `${asset.data.width}x${asset.data.height} ï¿½ ${formatBytes(asset.data.bytes)} ï¿½ ${asset.data.mimeType}`;
 }
 
 function assetSearchText(asset: Asset) {

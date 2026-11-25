@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { preferPublicMediaUrl } from "@/lib/media-portable";
 import { cn } from "@/lib/utils";
 import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
@@ -500,7 +501,8 @@ function AssetCover({ asset }: { asset: Asset }) {
     if (asset.kind === "text") return <div className="size-full overflow-hidden whitespace-pre-wrap break-words p-2.5 text-[11px] leading-snug opacity-80">{asset.data.content}</div>;
     if (asset.kind === "video") {
         if (src && !src.includes("#") && asset.coverUrl) return <img src={src} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
-        if (src) return <video src={`${src}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+        // 缩略图也会真的发请求：本机网关地址在公网页面里必 `ERR_CONNECTION_REFUSED`，先换公开地址。
+        if (src) return <video src={`${preferPublicMediaUrl(src)}#t=0.1`} muted playsInline preload="metadata" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
         return <div className="size-full animate-pulse bg-black/10 dark:bg-white/10" />;
     }
     if (src) return <img src={src} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;

@@ -19,7 +19,7 @@ import {
 import { describeVideoContainer, describeVideoSummary, readVideoContainer } from "@/lib/media-container";
 import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
 import { isLocalNetworkUrl } from "@/lib/api-proxy";
-import { portableMediaUrls } from "@/lib/media-portable";
+import { portableMediaUrls, preferPublicMediaUrl } from "@/lib/media-portable";
 import { needsMediaRecovery } from "@/lib/canvas/media-recovery";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -1352,7 +1352,13 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
     const memoryKey = memoryKeyProp || storageKey || src;
     const [activated, setActivated] = useState(false);
     const [playing, setPlaying] = useState(false);
-    const [playableSrc, setPlayableSrc] = useState(src);
+    /**
+     * 🔴 首帧就用「该用的那条地址」：线上页面里的 `127.0.0.1:17800` 必定 `ERR_CONNECTION_REFUSED`
+     * （换设备 / 网关没起 / 本机被代理接管），等到 `onError` 再换只是补救 —— 控制台那一屏红字
+     * 用户已经看见了。这里直接把能推出的公开地址拿来当初始 src（`preferPublicMediaUrl`，
+     * 推不出来就原样返回，绝不猜）。
+     */
+    const [playableSrc, setPlayableSrc] = useState(() => preferPublicMediaUrl(src));
     const retriesRef = useRef(0);
     /**
      * 存量节点里的**本机网关成片地址**（`http://127.0.0.1:17800/v1/files/<id>.mp4`）。
@@ -1363,6 +1369,13 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
      */
     const portableRef = useRef<string[]>([]);
     const portableIndexRef = useRef(0);
+    /**
+     * 已经用过的地址（含首帧那条）。`tryPortableCandidate` 必须跳过它 ——
+     * 首帧已经按 `preferPublicMediaUrl` 用上公开地址时，候选表的第一条往往就是同一个地址，
+     * 失败后「换」到同一地址既不会触发重新加载，又让调用方以为换源成功而把错误吞掉，
+     * 用户最后看到一个没有任何提示的黑框。
+     */
+    const triedRef = useRef<Set<string>>(new Set(playableSrc ? [playableSrc] : []));
     // Saved position from a previous mount, consumed as the seek target on activation.
     const restoredRef = useRef<{ time: number } | null>(videoPlaybackMemory.get(memoryKey) ?? null);
     const pendingSeekRef = useRef<number | null>(null);
@@ -1385,7 +1398,10 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
     const [prevSource, setPrevSource] = useState({ src, storageKey });
     if (prevSource.src !== src || prevSource.storageKey !== storageKey) {
         setPrevSource({ src, storageKey });
-        setPlayableSrc(src);
+        // 换视频也要走「该用哪条地址」的判定：新视频若还是本机网关地址，首帧就该是公开地址。
+        const preferred = preferPublicMediaUrl(src);
+        setPlayableSrc(preferred);
+        triedRef.current = new Set(preferred ? [preferred] : []);
         retriesRef.current = 0;
         // 换视频才重算「公开地址候选」；同一条视频的 blob 刷新不该把已试过的候选清零。
         portableRef.current = portableMediaUrls(src, model);
@@ -1425,7 +1441,8 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
         if (isLocalNetworkUrl(src)) {
             const host = (String(src).match(/^https?:\/\/([^/?#]+)/i) || [])[1] || "本机网关";
             if (!storageKey) {
-                const triedPublic = portableRef.current.length > 0 && portableIndexRef.current >= portableRef.current.length;
+                const candidates = ensurePortableCandidates();
+                const triedPublic = candidates.length > 0 && candidates.every((candidate) => triedRef.current.has(candidate));
                 return triedPublic
                     ? `这条成片只存在本机网关（${host}），直连和渠道公开地址都取不到 —— 先启动该网关再试；网关里的文件被清理了就只能重新生成`
                     : `这条成片只存在本机网关（${host}），没有存进画布 —— 先启动该网关再试；网关里的文件被清理了就只能重新生成`;
@@ -1471,13 +1488,16 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
 
     const tryPortableCandidate = () => {
         const candidates = ensurePortableCandidates();
-        if (portableIndexRef.current >= candidates.length) return false;
-        const next = candidates[portableIndexRef.current];
-        portableIndexRef.current += 1;
-        if (!next) return false;
-        // 函数式更新：异步回调里闭包里的 `playableSrc` 是旧值，比较它会漏判。
-        setPlayableSrc((prev) => (next === prev ? prev : next));
-        return true;
+        while (portableIndexRef.current < candidates.length) {
+            const next = candidates[portableIndexRef.current];
+            portableIndexRef.current += 1;
+            if (!next || triedRef.current.has(next)) continue;
+            triedRef.current.add(next);
+            // 函数式更新：异步回调里闭包里的 `playableSrc` 是旧值，比较它会漏判。
+            setPlayableSrc((prev) => (next === prev ? prev : next));
+            return true;
+        }
+        return false;
     };
 
     const handleVideoError = () => {

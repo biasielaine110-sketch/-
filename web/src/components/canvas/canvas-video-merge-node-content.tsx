@@ -24,6 +24,7 @@ import {
     VIDEO_MERGE_ASPECTS,
     type ResolvedVideoMergeClip,
 } from "@/lib/canvas/video-merge";
+import { preferPublicMediaUrl } from "@/lib/media-portable";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasNodeData, CanvasNodeMetadata, CanvasVideoMergeClip } from "@/types/canvas";
 
@@ -460,7 +461,7 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
                                                     /* 换段就换 key：旧的立刻卸载停声，新的从「段内偏移」接着演 */
                                                     key={`play-all-${playIndexSafe}-${playClip.clip.nodeId}`}
                                                     ref={playStageRef}
-                                                    src={playClip.url}
+                                                    src={preferPublicMediaUrl(playClip.url)}
                                                     className="h-full w-full object-contain"
                                                     playsInline
                                                     preload="auto"
@@ -497,7 +498,7 @@ export function CanvasVideoMergeNodeContent({ node, clips, isExporting, isRender
                                             </div>
                                         )
                                     ) : selected.clip.kind === "video" && selected.url ? (
-                                        <video ref={videoRef} key={`${selected.clip.nodeId}-preview`} src={selected.url} className="h-full w-full object-contain" controls playsInline preload="metadata" />
+                                        <video ref={videoRef} key={`${selected.clip.nodeId}-preview`} src={preferPublicMediaUrl(selected.url)} className="h-full w-full object-contain" controls playsInline preload="metadata" />
                                     ) : selected.url ? (
                                         <img src={selected.url} alt={selected.clip.title} className="h-full w-full object-contain" />
                                     ) : (

@@ -75,3 +75,39 @@ export function portableMediaUrls(url: string, model?: string | null): string[] 
     }
     return out;
 }
+
+/**
+ * 播放器 / 缩略图该用的地址：**页面在公网上时，本机网关地址一律先换成公开地址**。
+ *
+ * 🔴 为什么不能等 `onError` 再换（2026-11-26 实况）：线上画布是 `https://….pages.dev`，
+ * 而节点里存的是 `http://127.0.0.1:17800/v1/files/<id>.mp4`。这条 loopback 请求在浏览器里
+ * 直接 `ERR_CONNECTION_REFUSED`（网关可能根本没起、或被代理软件接管、或用户不在这台机器上），
+ * 但 `<video>` 首帧就已经把请求发出去了 —— 控制台一屏红字，用户看到的是「全坏了」。
+ * 等到 `error` 回调再换地址只是补救，第一跳的噪音和延迟都已经发生。
+ *
+ * 所以把「该用哪条地址」提前到**取 src 的那一刻**：能推出公开地址就直接用它，
+ * 推不出来（不认识这个端口 / 已经是公网地址）就原样返回，绝不猜。
+ *
+ * 🔴 这里**只认内置的「本机网关 → 公网入口」映射**，不走 `portableMediaUrls` 那条
+ * 「拿渠道 baseUrl 去拼」的路。因为后者对任何本机地址都会拼一个候选出来（默认配置里就有
+ * `https://api.openai.com`），把本机端口瞎换成别的域名，首帧就变成一次莫名其妙的失败请求，
+ * 而且原地址再也没机会被试 —— 首帧必须宁可不换，也不能换成错的。
+ * 兜底试错留给 `portableMediaUrls`：那时候失败了可以往下一个候选走。
+ *
+ * 页面自己就跑在本机（`http://127.0.0.1:5173` 之类的 dev / 本地部署）时保持直连：
+ * 那条路最快，也不该为了「线上」牺牲本地开发体验。
+ */
+export function preferPublicMediaUrl(url: string): string {
+    const raw = String(url || "").trim();
+    if (!raw || !isLocalNetworkUrl(raw)) return raw;
+    try {
+        if (typeof window !== "undefined" && isLocalNetworkUrl(window.location.origin)) return raw;
+    } catch {
+        // 拿不到 location（SSR / 测试环境）→ 按线上处理，宁可走公网也别打 loopback。
+    }
+    for (const base of publicBasesForLocalHost(raw)) {
+        const next = rewriteLocalMediaUrl(raw, base);
+        if (next && next !== raw) return next;
+    }
+    return raw;
+}
