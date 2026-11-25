@@ -236,6 +236,7 @@ export default {
     },
     modelPlugin: {
         pollTimeout: "插件轮询超时，请检查调用脚本或稍后重试",
+        submitNotDelivered: "提交没有送达网关：请求体在链路上丢失了（网关只收到请求头）。这次没有入队、不会扣次数，直接再点一次生成即可。",
         executionFailed: "模型调用脚本执行失败：{{message}}",
         noImages: "模型调用脚本没有返回图片",
         variables: {

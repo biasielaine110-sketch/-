@@ -236,6 +236,7 @@ export default {
     },
     modelPlugin: {
         pollTimeout: "Plugin polling timed out. Check the request script or try again later.",
+        submitNotDelivered: "The submission never reached the gateway: its body was lost in transit (the gateway only received the headers). Nothing was queued and no quota was used — just click Generate again.",
         executionFailed: "Model request script failed: {{message}}",
         noImages: "The model request script did not return any images",
         variables: {

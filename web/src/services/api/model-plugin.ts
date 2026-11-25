@@ -2,7 +2,7 @@ import axios, { type AxiosRequestConfig } from "axios";
 
 import i18n from "@/i18n";
 import { buildApiUrl, modelOptionName, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
-import { proxyApiUrl } from "@/lib/api-proxy";
+import { isLocalNetworkUrl, proxyApiUrl } from "@/lib/api-proxy";
 
 type RequestOptions = { signal?: AbortSignal };
 
@@ -43,18 +43,81 @@ function pluginUrl(config: AiConfig, path: string) {
     return proxyApiUrl(buildApiUrl(config.baseUrl, path.startsWith("/") ? path : `/${path}`), config.apiTransport);
 }
 
+/**
+ * 「请求体在链路上丢了」的识别。
+ *
+ * 🔴 实况（2026-11-26，qf 渠道 Seedance 2.0 Fast）：6 个视频节点逐个点生成，网关
+ * `local-api-requests.jsonl` 里 8 条 `POST /v1/videos` 全是 `body_keys:null`，而
+ * `readBody()` 只有在**一个字节都没收到**时才返回 null —— 请求头到了、请求体没到。
+ * 这些连接在 16s / 107s / 145s 后被关闭，此后 `readBody` 才拿到空值，于是网关回
+ * 400「prompt 不能为空」，用户看到的是「没发到模型」。
+ *
+ * 所以这个 400 不是提示词的问题，是传输的问题。判据必须同时满足，避免把真正的空提示词
+ * 当成链路故障反复重提：
+ *   ① 状态码 400/422；
+ *   ② **我们确实发了非空 prompt**；
+ *   ③ 响应文案点名 prompt 且说它为空（中英都算）。
+ *
+ * 满足就换一条传输重提一次：直连 → 边缘代理（`/api/proxy` 会先把 body 缓冲再转发，
+ * 不会出现「头到了、体没到」）。重提**不会重复扣费**：网关是「body 为空 → 直接 400 返回」，
+ * 压根没入队，也没有建任务。绝不因为网络错误/5xx 重提，那种情况任务可能已经建好了。
+ */
+function sentNonEmptyPrompt(data: unknown): boolean {
+    if (!data || typeof data !== "object") return false;
+    const prompt = (data as { prompt?: unknown }).prompt;
+    return typeof prompt === "string" && prompt.trim().length > 0;
+}
+
+function isEmptyBodyRejection(error: unknown, data: unknown): boolean {
+    if (!axios.isAxiosError(error)) return false;
+    const status = error.response?.status;
+    if (status !== 400 && status !== 422) return false;
+    if (!sentNonEmptyPrompt(data)) return false;
+    const payload = error.response?.data;
+    const text = typeof payload === "string" ? payload : JSON.stringify(payload ?? "");
+    // 网关（quota-flow）新版会明确回 code=body_not_delivered：请求头到了、请求体 EPIPE 丢了。
+    // 这个信号比猜文案准得多，先认它。
+    const code = (payload as { error?: { code?: unknown } } | null | undefined)?.error?.code;
+    if (code === "body_not_delivered") return true;
+    if (!/prompt/i.test(text)) return false;
+    return /(不能为空|不允许为空|为空|链路上丢失|missing|required|empty)/i.test(text);
+}
+
+/**
+ * 所有插件请求的唯一出口（`http.get/post` 和脚本里的 `request()` 都走它）：
+ * 正常只发一次；命中「body 丢失」才换传输重提一次，仍失败就给一句能指导用户的话。
+ */
+async function pluginRequest(config: AiConfig, requestConfig: AxiosRequestConfig & { url: string }, options?: RequestOptions) {
+    try {
+        return await axios.request({ ...requestConfig, signal: options?.signal });
+    } catch (error) {
+        if (!isEmptyBodyRejection(error, requestConfig.data)) throw error;
+        const direct = String(requestConfig.url || "");
+        const proxied = proxyApiUrl(direct, "proxy");
+        // 本机/内网网关塞进边缘代理只会 403（边缘到不了本机），这种情况没有第二条路可换。
+        if (!proxied || proxied === direct || isLocalNetworkUrl(direct)) throw error;
+        console.warn("[model-plugin] 提交体在直连链路上丢失（网关只收到请求头），已改走边缘代理重提一次");
+        try {
+            return await axios.request({ ...requestConfig, url: proxied, signal: options?.signal });
+        } catch (retryError) {
+            // 换了传输还是「prompt 为空」→ 确实没送达。给一句准确的话，别让用户以为提示词写错了。
+            if (isEmptyBodyRejection(retryError, requestConfig.data)) throw new Error(i18n.t("modelPlugin.submitNotDelivered"));
+            throw retryError;
+        }
+    }
+}
+
 function createPluginHttp(config: AiConfig, options?: RequestOptions): PluginHttp {
     const run = async (method: "get" | "post", path: string, body: unknown, opts?: PluginHttpOptions) => {
         const isForm = typeof FormData !== "undefined" && body instanceof FormData;
-        const response = await axios.request({
+        const response = await pluginRequest(config, {
             method,
             url: pluginUrl(config, path),
             data: method === "post" ? body : undefined,
             params: opts?.params,
             headers: pluginHeaders({ Authorization: `Bearer ${config.apiKey}`, ...opts?.headers }, method === "post" && !isForm && body !== undefined),
             responseType: opts?.responseType || "json",
-            signal: options?.signal,
-        });
+        }, options);
         return response.data;
     };
     return {
@@ -67,7 +130,7 @@ function createPluginHttp(config: AiConfig, options?: RequestOptions): PluginHtt
 /** Raw request with no automatic auth header — the script controls method, url, headers, body entirely. */
 function createPluginRequest(config: AiConfig, options?: RequestOptions) {
     return async (requestConfig: AxiosRequestConfig & { url: string }) => {
-        const response = await axios.request({ ...requestConfig, url: pluginUrl(config, requestConfig.url), signal: options?.signal });
+        const response = await pluginRequest(config, { ...requestConfig, url: pluginUrl(config, requestConfig.url) }, options);
         return response.data;
     };
 }
