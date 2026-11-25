@@ -15,7 +15,7 @@ import { dataUrlToFile, compressReferenceDataUrl, getDataUrlByteSize } from "@/l
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
-import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, forceProxyApiUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
+import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, forceProxyApiUrl, isKnownDirectCorsUrl, isLocalNetworkUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
 // 传输层判定与请求体估算抽到 `net-transport`，与生图/音频共用同一口径（唯一咽喉）。
 import { PROXY_BODY_SAFE_BYTES, estimateBodyBytes, isProxiedApiUrl, isTransportFailure } from "./net-transport";
 import { uploadTemporaryPublicImage, uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
@@ -1315,6 +1315,18 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
         try {
             return await uploadMediaFile(result.url, "video");
         } catch (error) {
+            /**
+             * 🔴 本机网关（quota-flow `:17800` / ComfyUI / 本机 relay）返回的成片**只在这台机器上、
+             * 只在该进程活着时有效**。取不到字节时**仍然保留这条地址**——一次 fetch 打嗝不该把已经
+             * 花钱生成的成片整个丢掉——但要留一条最精确的日志，并在播放/下载失败时把
+             * 「地址在本机、网关没起来」说给用户（用户 2026-11-25 第 04 条）。
+             */
+            if (isLocalNetworkUrl(result.url)) {
+                const reason = error instanceof Error ? error.message : String(error);
+                const host = (result.url.match(/^https?:\/\/([^/?#]+)/i) || [])[1] || "127.0.0.1";
+                console.warn(`[video] 成片只存在本机网关（${host}），未能落库：${reason}`);
+                return { url: result.url, storageKey: "", bytes: 0, mimeType: result.mimeType || "video/mp4" };
+            }
             // Keep remote https URLs as a temporary fallback, but never persist empty storageKey + dead blob.
             if (/^https?:\/\//i.test(result.url)) {
                 return { url: result.url, storageKey: "", bytes: 0, mimeType: result.mimeType || "video/mp4" };

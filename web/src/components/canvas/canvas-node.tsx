@@ -18,6 +18,7 @@ import {
 } from "@/lib/canvas/native-video-job-queue";
 import { describeVideoContainer, describeVideoSummary, readVideoContainer } from "@/lib/media-container";
 import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
+import { isLocalNetworkUrl } from "@/lib/api-proxy";
 import { needsMediaRecovery } from "@/lib/canvas/media-recovery";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -1402,6 +1403,18 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, memoryKey
      * 读不到库就返回空串，退回原始 media error。
      */
     const describeStoredVideoProblem = async () => {
+        /**
+         * 🔴 本机网关地址（quota-flow `:17800` / ComfyUI / 本机 relay）**根本没有落库副本**：
+         * `storageKey` 是空的，成片只躺在那个进程的磁盘上。直连失败就只有一个原因 ——
+         * 网关没起来或文件已过期（用户 2026-11-25 第 04 条：既播不了也下载不了）。
+         * 这种情况再去读库、再报 `Format error` 都是误导。
+         */
+        if (isLocalNetworkUrl(src)) {
+            const host = (String(src).match(/^https?:\/\/([^/?#]+)/i) || [])[1] || "本机网关";
+            if (!storageKey) {
+                return `这条成片只存在本机网关（${host}），没有存进画布 —— 先启动该网关再试；网关里的文件被清理了就只能重新生成`;
+            }
+        }
         if (!storageKey) return "";
         try {
             const blob = await getMediaBlob(storageKey);

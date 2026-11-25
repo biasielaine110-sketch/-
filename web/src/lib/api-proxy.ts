@@ -50,6 +50,46 @@ const DIRECT_CORS_HOSTS = [
     // canvas origin, so browser-direct fails. They must stay on /api/proxy (+ allow_custom_ports).
 ];
 
+/**
+ * 本机 / 内网地址（loopback、RFC1918、link-local、`.local`）。
+ *
+ * 🔴 站点代理 `/api/proxy` 跑在 Cloudflare 边缘，**永远到不了用户自己的机器**：
+ * `http://127.0.0.1:17800/v1/files/x.mp4` 在边缘只会被 SSRF 规则挡成 403。
+ * 所以「本机网关返回的成片地址」必须由**浏览器直连**读取（HTTPS 页面访问
+ * `http://127.0.0.1` 属于 loopback 豁免，Chrome 不会按混合内容拦）。
+ *
+ * 用户 2026-11-25 第 04 条：qf 渠道（本机 quota-flow 网关 :17800）生成的视频
+ * 既播不了也下载不了，控制台就是「直连 ERR_CONNECTION_REFUSED + /api/proxy 403」两条。
+ */
+export function isLocalNetworkHost(host: string): boolean {
+    const name = String(host || "")
+        .toLowerCase()
+        .replace(/:\d+$/, "")
+        .replace(/^\[/, "")
+        .replace(/\]$/, "");
+    if (!name) return false;
+    if (name === "localhost" || name.endsWith(".localhost") || name.endsWith(".local")) return true;
+    if (name === "::1" || name === "0.0.0.0" || name === "::") return true;
+    if (/^127\./.test(name)) return true;
+    if (/^10\./.test(name)) return true;
+    if (/^192\.168\./.test(name)) return true;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(name)) return true;
+    // link-local（含云厂商 metadata 地址段）——同样只有本机浏览器能到。
+    if (/^169\.254\./.test(name)) return true;
+    return false;
+}
+
+/** 同上，入参是完整 URL。解析失败按「不是内网」处理，保持旧行为。 */
+export function isLocalNetworkUrl(url: string): boolean {
+    try {
+        if (!url) return false;
+        const target = new URL(normalizeProxyTarget(url), typeof window !== "undefined" ? window.location.origin : "http://localhost");
+        return isLocalNetworkHost(target.host);
+    } catch {
+        return false;
+    }
+}
+
 function isDirectCorsHost(origin: string): boolean {
     const host = origin.replace(/:\d+$/, "").toLowerCase();
     return DIRECT_CORS_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
@@ -113,6 +153,8 @@ export function proxyMediaUrl(directUrl: string): string {
         const target = new URL(normalized);
         if (typeof window !== "undefined" && target.origin === window.location.origin) return normalized;
         if (target.protocol !== "http:" && target.protocol !== "https:") return normalized;
+        // 本机/内网地址：边缘代理打不到，硬塞进去只会得到 403。必须浏览器直连。
+        if (isLocalNetworkHost(target.host)) return normalized;
         // CORS-open CN hosts are unreachable from the serverless edge — go direct.
         if (isDirectCorsHost(target.host)) return normalized;
         return buildProxyUrl(normalized);
@@ -134,6 +176,9 @@ export function forceProxyMediaUrl(directUrl: string): string {
         const target = new URL(normalized);
         if (typeof window !== "undefined" && target.origin === window.location.origin) return "";
         if (target.protocol !== "http:" && target.protocol !== "https:") return "";
+        // 本机网关：交给 /api/proxy 只会换来一个 403，还盖掉真正的原因（网关没起来）。
+        // 返回 "" 让调用方保留原始错误 / 直接落到本地副本兜底。
+        if (isLocalNetworkHost(target.host)) return "";
         return buildProxyUrl(normalized);
     } catch {
         return "";

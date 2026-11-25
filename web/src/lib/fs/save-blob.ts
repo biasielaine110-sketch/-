@@ -1,6 +1,6 @@
 import { saveAs } from "file-saver";
 
-import { forceProxyMediaUrl, proxyMediaUrl } from "@/lib/api-proxy";
+import { forceProxyMediaUrl, isLocalNetworkUrl, proxyMediaUrl } from "@/lib/api-proxy";
 import { supportsFileSystemAccess, writeBlobToDraftDirectory } from "@/lib/canvas/canvas-draft";
 import { getMediaBlob } from "@/services/file-storage";
 
@@ -52,6 +52,23 @@ export async function resolveBlobSource(source: Blob | string, options?: { stora
     } catch (error) {
         // 对象 URL / data URL：代理对非 http(s) 无能为力，直接交给本地副本兜底。
         if (isObjectUrl) return await storedMediaOrThrow(options?.storageKey, error);
+        /**
+         * 🔴 本机网关（`http://127.0.0.1:17800/v1/files/x.mp4`）：站点代理跑在 Cloudflare 边缘，
+         * 永远打不到用户自己的机器（只会 403）。直连失败就是**网关没起来 / 文件已过期**，
+         * 别再往「跨域拦截」上引，也别去试代理（用户 2026-11-25 第 04 条：既播不了也下载不了）。
+         */
+        if (isLocalNetworkUrl(raw)) {
+            const key = String(options?.storageKey || "").trim();
+            if (key) {
+                const stored = await getMediaBlob(key).catch(() => null);
+                if (stored && stored.size) return stored;
+            }
+            const host = (raw.match(/^https?:\/\/([^/?#]+)/i) || [])[1] || "本机网关";
+            const reason = error instanceof Error ? error.message : String(error ?? "");
+            throw new Error(
+                `这条成片只存在本机网关（${host}），现在连不上 —— 先启动该网关再试；若网关里的文件已被清理，只能重新生成${reason ? `（${reason}）` : ""}`,
+            );
+        }
         // proxyMediaUrl declines to rewrite "known CORS-open" hosts, but that list is about API
         // POSTs with Authorization — not media GETs — so force the proxy as a last resort.
         const proxied = forceProxyMediaUrl(raw) || proxyMediaUrl(raw);
