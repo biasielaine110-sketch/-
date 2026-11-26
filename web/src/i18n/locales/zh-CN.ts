@@ -37,6 +37,7 @@ export default {
         view: "查看",
         download: "下载",
         downloadFailed: "下载失败",
+        downloadPreparing: "正在读取文件，稍候…",
         upload: "上传",
         requestCanceled: "请求已取消",
         durationMinutes: "{{minutes}}分{{seconds}}秒",

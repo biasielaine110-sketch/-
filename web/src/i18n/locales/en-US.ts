@@ -37,6 +37,7 @@ export default {
         view: "View",
         download: "Download",
         downloadFailed: "Download failed",
+        downloadPreparing: "Reading the file, please wait…",
         upload: "Upload",
         requestCanceled: "Request canceled",
         durationMinutes: "{{minutes}}m {{seconds}}s",

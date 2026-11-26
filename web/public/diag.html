@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>画布网络自检</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 24px; font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 18px; opacity: .65; font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 18px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid rgba(128,128,128,.25); vertical-align: top; }
+  th { font-weight: 600; font-size: 12px; opacity: .7; }
+  td.name { white-space: nowrap; }
+  .ok { color: #16a34a; font-weight: 600; }
+  .bad { color: #dc2626; font-weight: 600; }
+  .warn { color: #d97706; font-weight: 600; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+  button { padding: 7px 14px; border-radius: 8px; border: 1px solid rgba(128,128,128,.4); background: transparent; cursor: pointer; font: inherit; }
+  textarea { width: 100%; height: 180px; margin-top: 12px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .hint { font-size: 12px; opacity: .7; margin-top: 8px; }
+</style>
+</head>
+<body>
+<h1>画布网络自检</h1>
+<p class="sub">在<b>出问题的那台浏览器</b>里打开本页，等全部跑完，点「复制结果」把文本发我。</p>
+
+<table id="rows">
+  <thead><tr><th>项目</th><th>结果</th><th>耗时</th><th>详情</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<button id="copy">复制结果</button>
+<textarea id="dump" readonly></textarea>
+<div class="hint">说明：<b>超时</b>通常是浏览器在等你授权访问本地网络（Chrome 142+），或中间有代理软件在吞请求；<b>HTTP 401/403</b> 属于正常（说明通道通了、只是没带有效 key）。</div>
+
+<script>
+(function () {
+  const tbody = document.querySelector("#rows tbody");
+  const dump = document.getElementById("dump");
+  const lines = [];
+
+  function chromeVersion() {
+    const m = navigator.userAgent.match(/Chrome\/(\d+)/);
+    return m ? Number(m[1]) : 0;
+  }
+
+  function row(name, state, cls, ms, detail) {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      '<td class="name">' + name + "</td>" +
+      '<td class="' + cls + '">' + state + "</td>" +
+      '<td class="mono">' + (ms == null ? "-" : Math.round(ms) + "ms") + "</td>" +
+      '<td class="mono">' + (detail || "") + "</td>";
+    tbody.appendChild(tr);
+    lines.push(name + "\t" + state + "\t" + (ms == null ? "-" : Math.round(ms) + "ms") + "\t" + (detail || ""));
+  }
+
+  // 不是 2xx 但拿到响应，也算「通道可用」—— 401/403 说明请求确实到了服务端。
+  async function probe(name, url, timeoutMs, headers) {
+    const started = performance.now();
+    let signal;
+    try { signal = AbortSignal.timeout(timeoutMs); } catch (e) { signal = undefined; }
+    try {
+      const res = await fetch(url, { method: "GET", headers: headers || {}, signal, mode: "cors", cache: "no-store" });
+      const ms = performance.now() - started;
+      const cls = res.status < 500 ? "ok" : "warn";
+      row(name, "HTTP " + res.status, cls, ms, url);
+      return { ok: true, status: res.status };
+    } catch (error) {
+      const ms = performance.now() - started;
+      const msg = (error && (error.name + ": " + error.message)) || String(error);
+      const timedOut = /timeout|abort/i.test(msg);
+      row(name, timedOut ? "超时/挂起" : "网络失败", "bad", ms, msg);
+      return { ok: false, error: msg, timedOut: timedOut };
+    }
+  }
+
+  function readChannels() {
+    try {
+      const raw = localStorage.getItem("infinite-canvas:ai_config_store");
+      if (!raw) return { error: "localStorage 里没有画布配置（不在同一个域名下？）", channels: [] };
+      const parsed = JSON.parse(raw);
+      const config = parsed && parsed.state && parsed.state.config;
+      const channels = (config && config.channels) || [];
+      return {
+        transport: (config && config.apiTransport) || "proxy(默认)",
+        channels: channels.map(function (c) {
+          return {
+            name: c.name || "(未命名)",
+            baseUrl: c.baseUrl || "",
+            models: (c.models || []).map(function (m) { return m.name; }).filter(Boolean).slice(0, 6),
+            modelCount: (c.models || []).length,
+            key: (c.apiKey || "").trim(),
+          };
+        }),
+      };
+    } catch (error) {
+      return { error: "读配置失败：" + String(error), channels: [] };
+    }
+  }
+
+  async function permissionState() {
+    const out = {};
+    for (const name of ["local-network", "loopback-network"]) {
+      try {
+        if (!navigator.permissions || !navigator.permissions.query) { out[name] = "不支持"; continue; }
+        const s = await navigator.permissions.query({ name: name });
+        out[name] = s.state;
+      } catch (error) {
+        out[name] = "不认这个权限名";
+      }
+    }
+    return out;
+  }
+
+  (async function run() {
+    row("页面地址", location.origin, "mono", null, "");
+    row("浏览器", "Chrome " + (chromeVersion() || "未知"), "mono", null, navigator.userAgent);
+
+    const perms = await permissionState();
+    for (const key of Object.keys(perms)) {
+      const state = perms[key];
+      const cls = state === "granted" ? "ok" : state === "denied" ? "bad" : "warn";
+      row("本地网络权限 " + key, state, cls, null, state === "prompt" ? "从没授权过，请求会挂起等提示" : "");
+    }
+
+    const cfg = readChannels();
+    if (cfg.error) {
+      row("渠道配置", "读不到", "bad", null, cfg.error);
+    } else {
+      row("渠道数量 / 请求方式", cfg.channels.length + " 个 / " + cfg.transport, "mono", null, "");
+      cfg.channels.forEach(function (c, i) { lines.push("渠道[" + i + "] " + c.name + " " + c.baseUrl + " 模型 " + c.modelCount + " 个: " + c.models.join(", ")); });
+      for (const c of cfg.channels) {
+        if (!c.baseUrl) continue;
+        const base = c.baseUrl.replace(/\/+$/, "");
+        if (/^https?:/i.test(base)) {
+          await probe("渠道 " + c.name, base + "/v1/models", 8000, c.key ? { Authorization: "Bearer " + c.key } : {});
+        } else {
+          row("渠道 " + c.name, "地址不认识", "warn", null, base);
+        }
+      }
+    }
+
+    await probe("本机网关 127.0.0.1:17800", "http://127.0.0.1:17800/v1/models", 4000);
+    await probe("Tailscale Funnel", "https://wb2api.tailb5bc86.ts.net/qf/v1/models", 10000);
+    await probe("站点代理 /api/proxy", "/api/proxy?target=" + encodeURIComponent("https://api.seedance.nz/v1/models"), 10000, { Authorization: "Bearer sk-test" });
+
+    dump.value = lines.join("\n");
+  })();
+
+  document.getElementById("copy").addEventListener("click", async function () {
+    try {
+      await navigator.clipboard.writeText(dump.value || lines.join("\n"));
+      this.textContent = "已复制";
+    } catch (e) {
+      dump.select();
+      this.textContent = "请手动复制下方文本";
+    }
+  });
+})();
+</script>
+</body>
+</html>

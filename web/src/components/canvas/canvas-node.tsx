@@ -1676,6 +1676,9 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
         event.preventDefault();
         if (downloadingRef.current) return;
         downloadingRef.current = true;
+        // 🔴 先给反馈再干活：远程视频要经代理重下，慢的时候几十秒到两分钟，期间界面毫无反应
+        // 就是用户眼里的「按钮点了没作用」（2026-11-26 报障）。0 = 不自动关，由 finally 收。
+        const hideLoading = message.loading(t("common.downloadPreparing"), 0);
         try {
             // Prefer the stored bytes: they are the ones on screen, need no network and cannot be
             // refused by CORS. Only re-fetch the source URL when the stored blob is gone.
@@ -1699,6 +1702,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
             // dead blob URL or a lost permission all failed silently.
             message.error(`${t("common.downloadFailed")}: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
+            hideLoading();
             downloadingRef.current = false;
         }
     };

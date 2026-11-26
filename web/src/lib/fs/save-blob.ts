@@ -2,7 +2,7 @@ import { saveAs } from "file-saver";
 
 import { forceProxyMediaUrl, isLocalNetworkUrl, proxyMediaUrl } from "@/lib/api-proxy";
 import { supportsFileSystemAccess, writeBlobToDraftDirectory } from "@/lib/canvas/canvas-draft";
-import { portableMediaUrls } from "@/lib/media-portable";
+import { portableMediaUrls, preferPublicMediaUrl } from "@/lib/media-portable";
 import { getMediaBlob } from "@/services/file-storage";
 
 export type SaveBlobOptions = {
@@ -51,9 +51,19 @@ export type SaveBlobResult =
  */
 export async function resolveBlobSource(source: Blob | string, options?: { storageKey?: string | null; model?: string | null }): Promise<Blob> {
     if (typeof source !== "string") return source;
-    const raw = String(source || "").trim();
-    const isObjectUrl = raw.startsWith("blob:") || raw.startsWith("data:");
-    if (!raw) return await storedMediaOrThrow(options?.storageKey, new Error("没有可下载的地址"));
+    const input = String(source || "").trim();
+    const isObjectUrl = input.startsWith("blob:") || input.startsWith("data:");
+    if (!input) return await storedMediaOrThrow(options?.storageKey, new Error("没有可下载的地址"));
+    /**
+     * 🔴 公网页面 + 本机网关地址：**先换成公开入口再取字节**（2026-11-26 用户报障「点下载没反应」）。
+     *
+     * `metadata.content` 常是 `http://127.0.0.1:17800/v1/files/x.mp4`。Chrome 142+ 的 LNA 会让
+     * 公网页面直连 loopback 的 `fetch` **静默挂起**：既不 resolve 也不 reject，于是
+     * `saveBlobAs` 的 await 永远不返回 —— 界面表现就是「按钮点了没作用」，连报错都没有。
+     * 播放器早就改成取 src 时先换公开地址（`preferPublicMediaUrl`），下载入口漏了这一步。
+     * 页面自己在本机时它原样返回，dev 行为不变。
+     */
+    const raw = isObjectUrl ? input : preferPublicMediaUrl(input);
     try {
         return await fetchBlobOrThrow(raw);
     } catch (error) {
@@ -64,7 +74,7 @@ export async function resolveBlobSource(source: Blob | string, options?: { stora
          * 永远打不到用户自己的机器（只会 403）。直连失败就是**网关没起来 / 文件已过期**，
          * 别再往「跨域拦截」上引，也别去试代理（用户 2026-11-25 第 04 条：既播不了也下载不了）。
          */
-        if (isLocalNetworkUrl(raw)) {
+        if (isLocalNetworkUrl(input)) {
             const key = String(options?.storageKey || "").trim();
             if (key) {
                 const stored = await getMediaBlob(key).catch(() => null);
@@ -74,15 +84,17 @@ export async function resolveBlobSource(source: Blob | string, options?: { stora
              * 存量节点：`127.0.0.1:17800/v1/files/<id>.mp4` 直连不上，但同一份字节经渠道的公开
              * 域名（Funnel）仍能取到 —— 按当前配置重拼出公开地址再试一轮。这样「播不了也下载不了」
              * 的老成片不用重新生成，也不用用户自己改地址。
+             * 上面已经按公开入口试过一次（`raw !== input`），这时不必重复试同一批候选。
              */
-            for (const candidate of portableMediaUrls(raw, options?.model)) {
+            const candidates = raw === input ? portableMediaUrls(input, options?.model) : [];
+            for (const candidate of candidates) {
                 try {
                     return await fetchBlobOrThrow(candidate);
                 } catch {
                     // 下一个候选；全失败才按「本机网关连不上」报错。
                 }
             }
-            const host = (raw.match(/^https?:\/\/([^/?#]+)/i) || [])[1] || "本机网关";
+            const host = (input.match(/^https?:\/\/([^/?#]+)/i) || [])[1] || "本机网关";
             const reason = error instanceof Error ? error.message : String(error ?? "");
             throw new Error(
                 `这条成片只存在本机网关（${host}），现在连不上 —— 先启动该网关再试；若网关里的文件已被清理，只能重新生成${reason ? `（${reason}）` : ""}`,
@@ -111,14 +123,30 @@ async function storedMediaOrThrow(storageKey: string | null | undefined, reason:
         if (stored && stored.size) return stored;
     }
     const message = reason instanceof Error ? reason.message : String(reason ?? "");
-    if (/failed to fetch|networkerror|load failed|net::/i.test(message)) {
+    // `timed out` 也要算进来：取字节有 120s 上限，超时同样是「浏览器说不清原因」的那一类。
+    if (/failed to fetch|networkerror|load failed|net::|timed out|timeout/i.test(message)) {
         throw new Error(`链接已失效或被跨域拦截（${message}），这个节点本地也没有可用的副本`);
     }
     throw reason instanceof Error ? reason : new Error(message || "无法读取媒体数据");
 }
 
+/**
+ * 单次取字节的上限。没有上限时，一条**永远不会回话**的连接（Chrome LNA 挂起、死 Funnel、
+ * 被代理软件吞掉的 loopback）会让 `saveBlobAs` 的 await 永不返回 —— 用户看到的就是
+ * 「点了下载没作用」。超时后至少能走下一跳 / 报出原因。
+ */
+const MEDIA_FETCH_TIMEOUT_MS = 120_000;
+
 async function fetchBlobOrThrow(url: string) {
-    const response = await fetch(url);
+    let signal: AbortSignal | undefined;
+    try {
+        if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+            signal = AbortSignal.timeout(MEDIA_FETCH_TIMEOUT_MS);
+        }
+    } catch {
+        signal = undefined;
+    }
+    const response = await fetch(url, signal ? { signal } : undefined);
     // A refused or dead proxy hop answers with an HTML error body; without this check that body
     // would be saved as the media file, turning a visible failure into a corrupt download.
     if (!response.ok) throw new Error(`HTTP ${response.status}`);

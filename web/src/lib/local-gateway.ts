@@ -20,6 +20,8 @@
 // 🔴 换 tailnet 域名 / 换网关端口只改这张表。`host` 匹配含端口的 host，
 // `local` 是反查（公网入口不通时回退直连）用的本机根。
 
+import { shouldDetourLocalNetwork } from "@/lib/local-network-access";
+
 type LocalGatewayEntry = {
     /** 本机 host（含端口），用于识别。 */
     host: RegExp;
@@ -89,6 +91,10 @@ export function upgradeLocalGatewayUrl(url: string): string {
     const target = parse(raw);
     if (!target) return raw;
     if (pageRunsLocally()) return raw;
+    // 🔴 只有在 Chrome 明确拒绝了本地网络访问时才绕公网：那一跳要过 Funnel，
+    // 中间反代常把慢模型掐成 504（用户看到「120 秒代理读取超时」）。
+    // 授权正常（granted / 未知 / 非 Chromium）时一律直连本机 —— 最快，也最不容易坏。
+    if (!shouldDetourLocalNetwork()) return raw;
     const entry = entryForLocalHost(target.host);
     if (!entry) return raw;
     const suffix = target.pathname === "/" ? "" : target.pathname.replace(/\/+$/, "");
