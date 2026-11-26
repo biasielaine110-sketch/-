@@ -1,32 +1,22 @@
 import { isLocalNetworkUrl, rewriteLocalMediaUrl } from "@/lib/api-proxy";
+import { publicBaseForLocalGateway } from "@/lib/local-gateway";
 import { resolveModelRequestConfig, useConfigStore } from "@/stores/use-config-store";
 
 /**
- * 已知「本机网关 → 公网入口」映射（用户 2026-11-25 第 06 条）。
+ * 已知「本机网关 → 公网入口」映射。
  *
- * 为什么需要这张表：`portableMediaUrls` 原本只从**渠道配置**里推公开地址，可 qf 渠道的
+ * 为什么需要：`portableMediaUrls` 原本只从**渠道配置**里推公开地址，可 qf 渠道的
  * `baseUrl` 本身就是 `http://127.0.0.1:17800`（本机 quota-flow / WorkBuddy2API 网关）——
  * `rewriteLocalMediaUrl` 对「base 也在本机」直接放弃改写，于是候选表恒空，
  * 浏览器一遇到 loopback 连不上就只剩 `ERR_CONNECTION_REFUSED`，而同一份字节经 Tailscale
  * Funnel 完全能取到（实测 1,444,676 B / `video/mp4`）。
  *
- * `base` 只要写到「API 根」即可：`rewriteLocalMediaUrl` 会剥掉源地址的 `/v1`，
- * 再由 `buildApiUrl` 把 `/v1` 补回去（`.../qf` → `.../qf/v1/files/<id>.mp4`）。
- *
- * 🔴 换 tailnet 域名 / 换网关端口时改这里。匹配的是 `host`（含端口）。
+ * 🔴 表已搬到 `lib/local-gateway.ts` 作为**单一来源**（API 提交层也要用它，原因见那里的
+ * 长注释：Chrome 142+ 的 LNA 会拦公网页面 → loopback 的请求）。这里只做「取一条公网根」。
  */
-const LOCAL_GATEWAY_PUBLIC_BASES: ReadonlyArray<{ host: RegExp; base: string }> = [
-    { host: /^(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\]):17800$/i, base: "https://wb2api.tailb5bc86.ts.net/qf" },
-];
-
-/** 这个本机地址属于哪个已知网关 → 它的公网 API 根（没有则空数组）。 */
 function publicBasesForLocalHost(url: string): string[] {
-    try {
-        const host = new URL(url).host.toLowerCase();
-        return LOCAL_GATEWAY_PUBLIC_BASES.filter((entry) => entry.host.test(host)).map((entry) => entry.base);
-    } catch {
-        return [];
-    }
+    const base = publicBaseForLocalGateway(url);
+    return base ? [base] : [];
 }
 
 /**

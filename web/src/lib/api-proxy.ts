@@ -6,6 +6,7 @@
 // (Ark CORS allow-headers also omit Authorization, so browser Direct usually fails).
 // Users can switch to "direct" in preferences when the provider allows CORS.
 
+import { upgradeLocalGatewayUrl } from "@/lib/local-gateway";
 import { CONFIG_STORE_KEY, buildApiUrl, type ApiTransport } from "@/stores/use-config-store";
 
 /**
@@ -137,6 +138,15 @@ export function proxyApiUrl(directUrl: string, transport?: ApiTransport | null):
         const target = new URL(normalized);
         if (typeof window !== "undefined" && target.origin === window.location.origin) return normalized;
         if (target.protocol !== "http:" && target.protocol !== "https:") return normalized;
+        // 🔴 本机网关的**公网入口**优先（2026-11-26 Chrome 142+ LNA）：
+        // 公网页面（`*.pages.dev`）直连 `127.0.0.1` 要用户授权，未授权时请求静默挂起，
+        // 画布上就是「一直读秒」。有公开入口就直接用它，根本不发 loopback 请求。
+        // 页面自己在本机时 `upgradeLocalGatewayUrl` 原样返回，dev 体验不受影响。
+        const publicUrl = upgradeLocalGatewayUrl(normalized);
+        if (publicUrl !== normalized) return publicUrl;
+        // 没登记过公开入口的本机/内网地址：必须浏览器直连。塞进 `/api/proxy` 只会得到 403
+        // （边缘节点在云端，永远到不了用户自己的机器）。
+        if (isLocalNetworkHost(target.host)) return normalized;
         if (resolveApiTransport(transport) === "direct") return normalized;
         // CORS-open CN hosts are unreachable from the serverless edge — go direct.
         if (isDirectCorsHost(target.host)) return normalized;
@@ -239,6 +249,9 @@ export function forceProxyApiUrl(directUrl: string): string {
         const target = new URL(normalized);
         if (typeof window !== "undefined" && target.origin === window.location.origin) return "";
         if (target.protocol !== "http:" && target.protocol !== "https:") return "";
+        // 本机网关有公开入口时，那一跳才是**真正能用的第二跳**（边缘代理到不了本机）。
+        const publicUrl = upgradeLocalGatewayUrl(normalized);
+        if (publicUrl !== normalized) return publicUrl;
         // 本机 / 内网地址：直连失败时代理也够不着（边缘节点在云端），换一跳只会换个错误。
         if (isEdgeUnreachableHost(target.hostname)) return "";
         return buildProxyUrl(normalized);

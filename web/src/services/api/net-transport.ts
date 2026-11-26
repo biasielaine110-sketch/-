@@ -14,6 +14,7 @@
 import axios from "axios";
 
 import { forceProxyApiUrl } from "@/lib/api-proxy";
+import { downgradePublicGatewayUrl, isLocalGatewayPublicUrl } from "@/lib/local-gateway";
 
 /** 站点代理（Vercel / CF Function）会掐掉过大的请求体：超限的 body 别往代理那条跳送。 */
 export const PROXY_BODY_SAFE_BYTES = 3_400_000;
@@ -114,6 +115,15 @@ export async function withProxyFallback<T>(
         // 🔴 超时不换跳（默认）：300s 一个字节都没回来，说明上游已经收下并在算 —— 换一跳再提交
         // 就是给同一个需求再付一次钱，还把用户的等待时间直接翻倍。
         if (isTimeoutFailure(error) && options?.retryOnTimeout !== true) throw error;
+        // 本机网关的**公网入口**（Tailscale Funnel）连不上 → 退回 loopback 再试一次。
+        // 只在「连接根本没建立」时走这里（上面已把超时挡掉）：上游一个字节都没收到，
+        // 不存在重复计费。反过来的方向（loopback 失败 → 公网入口）在 `proxyApiUrl` 里
+        // 已经是默认路径了，不需要再兜。
+        const localUrl = isLocalGatewayPublicUrl(url) ? downgradePublicGatewayUrl(url) : "";
+        if (localUrl) {
+            console.warn("[api] public gateway entry unreachable; retrying the loopback once");
+            return run(localUrl);
+        }
         // body 大到代理跳一定会 413/掐流：换了只是把「连不上」换成「请求体过大」。
         if (estimateBodyBytes(body) > PROXY_BODY_SAFE_BYTES) throw error;
         const alternate = forceProxyApiUrl(url);
