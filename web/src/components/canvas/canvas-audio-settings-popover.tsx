@@ -4,7 +4,7 @@ import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 
 import { AudioSettingsPanel, type AudioSettingKey } from "@/components/audio-settings-panel";
-import { audioFormatLabel, audioSpeedLabel, audioVoiceLabel, isSeedAudioModel, isSunoAudioModel, resolveAudioFormatForModel, seedAudioSettingsSummary, sunoSettingsSummary } from "@/lib/audio-generation";
+import { audioFormatLabel, audioSpeedLabel, audioVoiceLabel, geminiTtsVoiceLabel, isSeedanceGeminiTtsModel, isSeedAudioModel, isSunoAudioModel, resolveAudioFormatForModel, seedAudioSettingsSummary, sunoSettingsSummary } from "@/lib/audio-generation";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { AiConfig } from "@/stores/use-config-store";
@@ -26,6 +26,7 @@ export function CanvasAudioSettingsPopover({ config, onConfigChange, buttonClass
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
     const model = config.model || config.audioModel || "";
     const suno = isSunoAudioModel(model);
+    const geminiTts = !suno && isSeedanceGeminiTtsModel(model);
     const seedAudio = !suno && isSeedAudioModel(model);
 
     useEffect(() => {
@@ -49,13 +50,13 @@ export function CanvasAudioSettingsPopover({ config, onConfigChange, buttonClass
         };
     }, [open]);
 
-    const panel = open && buttonRect ? <AudioSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} wide={suno || seedAudio} /> : null;
+    const panel = open && buttonRect ? <AudioSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} wide={suno || seedAudio || geminiTts} /> : null;
     const summary = suno
         ? `${sunoSettingsSummary({ version: config.sunoVersion, custom: config.sunoCustom, instrumental: config.sunoInstrumental, vocalGender: config.sunoVocalGender })} · ${(config.audioFormat || "mp3").toUpperCase()}`
         : seedAudio
           ? seedAudioSettingsSummary({ voice: config.audioVoice, format: config.audioFormat, speed: config.audioSpeed })
-          : // wav-only 模型（zhenzhen/gm-2.5-pro-tts）实际发的是 wav，摘要不能照抄用户选的 mp3。
-            `${audioVoiceLabel(config.audioVoice)} · ${audioFormatLabel(resolveAudioFormatForModel(model, config.audioFormat))} · ${audioSpeedLabel(config.audioSpeed)}`;
+          : // wav-only 模型实际发的是 wav、Gemini TTS 用的是它自己的音色名且没有语速，摘要按「真正发出去的东西」写。
+            `${geminiTts ? geminiTtsVoiceLabel(config.audioVoice) : audioVoiceLabel(config.audioVoice)} · ${audioFormatLabel(resolveAudioFormatForModel(model, config.audioFormat))}${geminiTts ? "" : ` · ${audioSpeedLabel(config.audioSpeed)}`}`;
 
     return (
         <>

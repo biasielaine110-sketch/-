@@ -79,16 +79,82 @@ export function isSeedAudioModel(model: string) {
 }
 
 /**
- * seedance.nz 上只收 WAV 的语音模型：`zhenzhen/gm-2.5-pro-tts`（Gemini 2.5 Pro TTS）。
+ * seedance.nz 上只收 WAV 的语音模型（`/docs#gemini-tts` 与 `/docs#qwen3-tts` 的 `metadata.format` 只有 wav）。
  *
  * 传 mp3/pcm/opus 时上游先做价格预检，直接 400 打回：
  *   `price preview returned status 400: {"error":{"code":"invalid_parameter","message":"format must be wav"}}`
  * 任务压根没入队（所以也不扣额度）。这类模型的格式要**钉死 wav**，不看用户选了什么。
  */
-const SEEDANCE_WAV_ONLY_AUDIO_MODEL = /gm[-_.]?2[-_.]?5[-_.]?pro[-_.]?tts/i;
+const SEEDANCE_WAV_ONLY_AUDIO_MODEL = /gm[-_.]?2[-_.]?5[-_.]?(pro|flash)[-_.]?tts|qwen[-_.]?3[-_.]?tts/i;
 
 export function isSeedanceWavOnlyAudioModel(model: string) {
     return SEEDANCE_WAV_ONLY_AUDIO_MODEL.test(model.trim());
+}
+
+/**
+ * Gemini 2.5 TTS：`zhenzhen/gm-2.5-pro-tts` / `zhenzhen/gm-2.5-flash-tts`。
+ * 契约（`/docs#gemini-tts`）与 Seed Audio **不是同一套**：
+ *   - 音色走 `metadata.voice`（30 个 Gemini 音色名，默认 Kore），不是 `metadata.speaker`；
+ *   - 表达指令走 `metadata.instructions`（≤1000 字）；
+ *   - 只有 `metadata.format = wav`，**没有** `sample_rate` / `speech_rate`，也**不收参考音频**；
+ *   - prompt 1–5000 字符，短句不需要像 Seed Audio 那样补到 5 个字。
+ */
+const SEEDANCE_GEMINI_TTS_MODEL = /gm[-_.]?2[-_.]?5[-_.]?(pro|flash)[-_.]?tts/i;
+
+export function isSeedanceGeminiTtsModel(model: string) {
+    return SEEDANCE_GEMINI_TTS_MODEL.test(model.trim());
+}
+
+/** 30 个 Gemini 2.5 TTS 音色（大小写不敏感，默认 Kore）。desc 只用于界面提示。 */
+export const geminiTtsVoiceOptions = [
+    { value: "Zephyr", label: "Zephyr", desc: "女 · 明亮" },
+    { value: "Puck", label: "Puck", desc: "男 · 轻快" },
+    { value: "Charon", label: "Charon", desc: "男 · 沉稳、适合讲解" },
+    { value: "Kore", label: "Kore", desc: "女 · 坚定" },
+    { value: "Fenrir", label: "Fenrir", desc: "男 · 兴奋" },
+    { value: "Leda", label: "Leda", desc: "女 · 年轻" },
+    { value: "Orus", label: "Orus", desc: "男 · 坚定" },
+    { value: "Aoede", label: "Aoede", desc: "女 · 轻松" },
+    { value: "Callirrhoe", label: "Callirrhoe", desc: "女 · 随和" },
+    { value: "Autonoe", label: "Autonoe", desc: "女 · 明亮" },
+    { value: "Enceladus", label: "Enceladus", desc: "男 · 气声" },
+    { value: "Iapetus", label: "Iapetus", desc: "男 · 清晰" },
+    { value: "Umbriel", label: "Umbriel", desc: "男 · 随和" },
+    { value: "Algieba", label: "Algieba", desc: "男 · 圆润" },
+    { value: "Despina", label: "Despina", desc: "女 · 圆润" },
+    { value: "Erinome", label: "Erinome", desc: "女 · 清晰" },
+    { value: "Algenib", label: "Algenib", desc: "男 · 沙哑" },
+    { value: "Rasalgethi", label: "Rasalgethi", desc: "男 · 沉稳、适合讲解" },
+    { value: "Laomedeia", label: "Laomedeia", desc: "女 · 轻快" },
+    { value: "Achernar", label: "Achernar", desc: "女 · 柔和" },
+    { value: "Alnilam", label: "Alnilam", desc: "男 · 坚定" },
+    { value: "Schedar", label: "Schedar", desc: "男 · 平稳" },
+    { value: "Gacrux", label: "Gacrux", desc: "女 · 成熟" },
+    { value: "Pulcherrima", label: "Pulcherrima", desc: "女 · 直率" },
+    { value: "Achird", label: "Achird", desc: "男 · 友好" },
+    { value: "Zubenelgenubi", label: "Zubenelgenubi", desc: "男 · 随性" },
+    { value: "Vindemiatrix", label: "Vindemiatrix", desc: "女 · 温柔" },
+    { value: "Sadachbia", label: "Sadachbia", desc: "男 · 活泼" },
+    { value: "Sadaltager", label: "Sadaltager", desc: "男 · 博学" },
+    { value: "Sulafat", label: "Sulafat", desc: "女 · 温暖" },
+];
+
+export const GEMINI_TTS_DEFAULT_VOICE = "Kore";
+
+/** 只认 30 个音色名（大小写不敏感）；OpenAI 那套 alloy/nova… 一律落回 Kore。 */
+export function normalizeGeminiTtsVoice(value: string) {
+    const trimmed = String(value || "").trim();
+    const hit = geminiTtsVoiceOptions.find((item) => item.value.toLowerCase() === trimmed.toLowerCase());
+    return hit ? hit.value : GEMINI_TTS_DEFAULT_VOICE;
+}
+
+export function geminiTtsVoiceLabel(value: string) {
+    return normalizeGeminiTtsVoice(value);
+}
+
+export function geminiTtsVoiceDesc(value: string) {
+    const voice = normalizeGeminiTtsVoice(value);
+    return geminiTtsVoiceOptions.find((item) => item.value === voice)?.desc || "";
 }
 
 /** 实际会发出去的音频格式：wav-only 的模型无视用户选择。 */
@@ -99,6 +165,62 @@ export function resolveAudioFormatForModel(model: string, value: string) {
 /** 上游文案点名「format must be wav」——说明这条链路只收 wav，换格式重提一次是安全的（没入队、没扣次数）。 */
 export function isAudioFormatMustBeWavError(message: string) {
     return /format\s+must\s+be\s+wav/i.test(String(message || ""));
+}
+
+/** 界面倍速 → Seed Audio 的 speech_rate（-50~100，0 = 原速）。Gemini TTS 不吃这个字段。 */
+function mapSeedanceSpeechRate(speed: number) {
+    if (!Number.isFinite(speed)) return 0;
+    return Math.max(-50, Math.min(100, Math.round((speed - 1) * 50)));
+}
+
+function resolveSeedanceSpeaker(voice: string, instructions: string) {
+    const hint = instructions.trim();
+    if (hint && (/^(zh_|en_|multi_|saturn_|ICL_)/i.test(hint) || /_bigtts|_tob|_uranus|_moon|_mars/i.test(hint))) return hint;
+    const normalized = normalizeSeedAudioSpeakerValue(voice);
+    if (/^(auto|none)$/i.test(normalized)) return "";
+    return normalized;
+}
+
+export type SeedanceAudioMetadataInput = {
+    model: string;
+    /** 已归一过的容器（gemini 家族会被强制成 wav）。 */
+    format: string;
+    voice: string;
+    speed: number;
+    instructions: string;
+    referenceUrls: string[];
+};
+
+/**
+ * `/v1/audio/generations` 的 `metadata` —— 唯一来源。
+ * 两套契约在这里分流，别在调用方拼字段（拼错一个 `speaker`/`voice` 就是 400）。
+ */
+export function buildSeedanceAudioMetadata(input: SeedanceAudioMetadataInput): Record<string, unknown> {
+    const instructions = String(input.instructions || "").trim();
+    if (isSeedanceGeminiTtsModel(input.model)) {
+        const metadata: Record<string, unknown> = { format: "wav", voice: normalizeGeminiTtsVoice(input.voice) };
+        if (instructions) metadata.instructions = instructions.slice(0, 1000);
+        return metadata;
+    }
+    if (isSeedanceWavOnlyAudioModel(input.model)) {
+        // 其它只收 wav 的「简单 TTS」（如 qwen/qwen3-tts-1.7b）：文档只有 prompt / metadata.voice / metadata.format，
+        // 发 speaker / sample_rate / speech_rate 是自找 400。音色暂用它的默认值，别硬塞 OpenAI 音色名。
+        return { format: "wav" };
+    }
+    // Docs: speaker / audio_url / images 三者互斥；只把「其它节点连进来的音频」当 audio_url。
+    const metadata: Record<string, unknown> = {
+        format: input.format,
+        sample_rate: "24000",
+        speech_rate: mapSeedanceSpeechRate(input.speed),
+    };
+    if (input.referenceUrls.length) {
+        metadata.audio_url = input.referenceUrls.length === 1 ? input.referenceUrls[0] : input.referenceUrls;
+    } else {
+        const speaker = resolveSeedanceSpeaker(normalizeSeedAudioSpeakerValue(input.voice || ""), instructions);
+        // Omit speaker for prompt-described / multi-character Seed Audio scenes.
+        if (speaker && !/^(auto|none)$/i.test(speaker)) metadata.speaker = speaker;
+    }
+    return metadata;
 }
 
 export function normalizeAudioVoiceValue(value: string) {

@@ -9,7 +9,9 @@ import {
 } from "@/lib/autodl-comfy-audio";
 import {
     audioMimeType,
+    buildSeedanceAudioMetadata,
     isAudioFormatMustBeWavError,
+    isSeedanceGeminiTtsModel,
     isSeedanceWavOnlyAudioModel,
     isSeedAudioModel,
     isSunoAudioModel,
@@ -17,7 +19,6 @@ import {
     normalizeAudioSpeedValue,
     normalizeAudioVoiceValue,
     normalizeSeedAudioFormatValue,
-    normalizeSeedAudioSpeakerValue,
     normalizeSunoFlagValue,
     normalizeSunoFormatValue,
     normalizeSunoVersionValue,
@@ -308,28 +309,27 @@ const SEEDANCE_AUDIO_MAX_WAIT_MS = 10 * 60_000;
 
 /** Seedance: POST /v1/audio/generations + poll (not OpenAI /audio/speech). */
 async function requestSeedanceAudioGenerations(config: AiConfig, prompt: string, options?: RequestOptions): Promise<Blob> {
-    const text = ensureSeedAudioPrompt(prompt);
     const model = resolveSeedanceAudioModel(config.model);
-    // wav-only 模型（zhenzhen/gm-2.5-pro-tts）必须发 wav：上游价格预检对 mp3/pcm/opus 直接
-    // 400 `format must be wav`，任务根本没入队。用户选了什么都不改它的格式。
+    // Gemini 2.5 TTS 收 1–5000 字符，而且短句不需要补「。」；Seed Audio 是 5–2048。
+    const geminiTts = isSeedanceGeminiTtsModel(model);
+    const text = geminiTts ? ensureGeminiTtsPrompt(prompt) : ensureSeedAudioPrompt(prompt);
+    // wav-only 模型（zhenzhen/gm-2.5-pro-tts / gm-2.5-flash-tts / qwen3-tts）必须发 wav：
+    // 上游价格预检对 mp3/pcm/opus 直接 400 `format must be wav`，任务根本没入队。
     let format = isSeedanceWavOnlyAudioModel(model) ? "wav" : mapSeedanceAudioFormat(normalizeSeedAudioFormatValue(config.audioFormat));
-    const speechRate = mapSeedanceSpeechRate(Number(normalizeAudioSpeedValue(config.audioSpeed)));
-    const referenceAudios = (options?.referenceAudios || []).slice(0, 3);
+    // Gemini TTS 契约里没有参考音频字段（只有 voice / instructions / format），别白上传一遍。
+    const referenceAudios = geminiTts ? [] : (options?.referenceAudios || []).slice(0, 3);
     const referenceUrls = referenceAudios.length ? await resolveSeedanceReferenceAudioUrls(config, referenceAudios, options) : [];
 
-    // Docs: speaker / audio_url / images are mutually exclusive. Only use other-node refs as audio_url.
-    const metadata: Record<string, unknown> = {
+    // 两套契约的字段分流全在 buildSeedanceAudioMetadata 里（gemini 用 voice/instructions；
+    // seed audio 用 speaker/audio_url/sample_rate/speech_rate），这里不再手拼字段。
+    const metadata = buildSeedanceAudioMetadata({
+        model,
         format,
-        sample_rate: "24000",
-        speech_rate: speechRate,
-    };
-    if (referenceUrls.length) {
-        metadata.audio_url = referenceUrls.length === 1 ? referenceUrls[0] : referenceUrls;
-    } else {
-        const speaker = resolveSeedanceSpeaker(normalizeSeedAudioSpeakerValue(config.audioVoice || ""), config.audioInstructions || "");
-        // Omit speaker for prompt-described / multi-character Seed Audio scenes.
-        if (speaker && !/^(auto|none)$/i.test(speaker)) metadata.speaker = speaker;
-    }
+        voice: config.audioVoice || "",
+        speed: Number(normalizeAudioSpeedValue(config.audioSpeed)),
+        instructions: config.audioInstructions || "",
+        referenceUrls,
+    });
 
     const body: Record<string, unknown> = {
         model,
@@ -466,6 +466,13 @@ function ensureSeedAudioPrompt(prompt: string) {
     return `${trimmed}${"。".repeat(5 - trimmed.length)}`.slice(0, 2048);
 }
 
+/** Gemini 2.5 TTS 收 1–5000 字符（`/docs#gemini-tts`）：短句不补字，长文别按 Seed Audio 的 2048 截断。 */
+function ensureGeminiTtsPrompt(prompt: string) {
+    const trimmed = prompt.trim();
+    if (!trimmed) throw new Error(apiText("invalidRequest"));
+    return trimmed.slice(0, 5000);
+}
+
 function resolveSeedanceAudioModel(model: string) {
     const trimmed = model.trim();
     // Seedance has no OpenAI-compatible /audio/speech; map common OpenAI TTS ids to Seed Audio.
@@ -476,23 +483,10 @@ function resolveSeedanceAudioModel(model: string) {
     return trimmed;
 }
 
-function resolveSeedanceSpeaker(voice: string, instructions: string) {
-    const hint = instructions.trim();
-    if (hint && (/^(zh_|en_|multi_|saturn_|ICL_)/i.test(hint) || /_bigtts|_tob|_uranus|_moon|_mars/i.test(hint))) return hint;
-    const normalized = normalizeSeedAudioSpeakerValue(voice);
-    if (/^(auto|none)$/i.test(normalized)) return "";
-    return normalized;
-}
-
 function mapSeedanceAudioFormat(format: string) {
     if (format === "opus") return "ogg_opus";
     if (format === "wav" || format === "mp3" || format === "pcm") return format;
     return "mp3";
-}
-
-function mapSeedanceSpeechRate(speed: number) {
-    if (!Number.isFinite(speed)) return 0;
-    return Math.max(-50, Math.min(100, Math.round((speed - 1) * 50)));
 }
 
 function readSeedanceAudioUrl(payload: Record<string, unknown>): string {

@@ -7,12 +7,16 @@ import {
     audioFormatOptions,
     audioSpeedLabel,
     audioVoiceOptions,
+    geminiTtsVoiceDesc,
+    geminiTtsVoiceOptions,
+    isSeedanceGeminiTtsModel,
     isSeedanceWavOnlyAudioModel,
     isSeedAudioModel,
     isSunoAudioModel,
     normalizeAudioFormatValue,
     normalizeAudioSpeedValue,
     normalizeAudioVoiceValue,
+    normalizeGeminiTtsVoice,
     normalizeSeedAudioFormatValue,
     normalizeSeedAudioSpeakerValue,
     normalizeSunoFlagValue,
@@ -54,6 +58,7 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const { t } = useTranslation();
     const model = config.model || config.audioModel || "";
     const suno = isSunoAudioModel(model);
+    const geminiTts = !suno && isSeedanceGeminiTtsModel(model);
     const seedAudio = !suno && isSeedAudioModel(model);
 
     if (suno) {
@@ -144,6 +149,54 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     ) : null}
                     <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
                         {custom ? t("settingsPanels.audio.sunoCustomHint") : t("settingsPanels.audio.sunoInspoHint")}
+                    </div>
+                </div>
+            </ImageSettingsTheme>
+        );
+    }
+
+    if (geminiTts) {
+        // Gemini 2.5 TTS（/docs#gemini-tts）：音色走 metadata.voice（30 个），表达指令走 metadata.instructions，
+        // 只有 wav；没有语速/采样率，也不收参考音频。
+        const voice = normalizeGeminiTtsVoice(config.audioVoice || "");
+        return (
+            <ImageSettingsTheme theme={theme}>
+                <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+                    {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.audio.geminiTitle")}</div> : null}
+                    <SettingGroup title={t("settingsPanels.audio.seedSpeaker")} color={theme.node.muted}>
+                        <div className="thin-scrollbar grid max-h-44 grid-cols-2 gap-2.5 overflow-y-auto pr-1">
+                            {geminiTtsVoiceOptions.map((item) => (
+                                <OptionPill key={item.value} selected={voice === item.value} theme={theme} onClick={() => onConfigChange("audioVoice", item.value)}>
+                                    {item.label}
+                                </OptionPill>
+                            ))}
+                        </div>
+                        <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
+                            {voice}
+                            {geminiTtsVoiceDesc(voice) ? ` · ${geminiTtsVoiceDesc(voice)}` : ""}
+                        </div>
+                    </SettingGroup>
+                    <SettingGroup title={t("settingsPanels.audio.format")} color={theme.node.muted}>
+                        <OptionPill selected theme={theme} onClick={() => onConfigChange("audioFormat", "wav")}>
+                            WAV
+                        </OptionPill>
+                        <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
+                            {t("settingsPanels.audio.formatWavOnly")}
+                        </div>
+                    </SettingGroup>
+                    <SettingGroup title={t("settingsPanels.audio.instructions")} color={theme.node.muted}>
+                        <CanvasExpandableTextarea
+                            value={config.audioInstructions || ""}
+                            maxLength={1000}
+                            editTitle={t("settingsPanels.audio.instructions")}
+                            placeholder={t("settingsPanels.audio.geminiInstructionsPlaceholder")}
+                            className="thin-scrollbar h-20 w-full resize-none rounded-xl border bg-transparent px-3 py-2 text-sm leading-5 outline-none"
+                            style={{ borderColor: theme.node.stroke, color: theme.node.text }}
+                            onChange={(value) => onConfigChange("audioInstructions", value)}
+                        />
+                    </SettingGroup>
+                    <div className="text-xs leading-5" style={{ color: theme.node.muted }}>
+                        {t("settingsPanels.audio.geminiHint")}
                     </div>
                 </div>
             </ImageSettingsTheme>
