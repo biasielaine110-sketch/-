@@ -172,6 +172,7 @@ export default {
             title: "音频设置",
             voice: "声音",
             format: "格式",
+            formatWavOnly: "该模型只输出 WAV（上游强制），换其它格式会被价格预检直接打回。",
             speed: "语速",
             instructions: "声音指令",
             instructionsPlaceholder: "例如：自然、温暖、适合旁白。",

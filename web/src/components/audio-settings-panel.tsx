@@ -7,6 +7,7 @@ import {
     audioFormatOptions,
     audioSpeedLabel,
     audioVoiceOptions,
+    isSeedanceWavOnlyAudioModel,
     isSeedAudioModel,
     isSunoAudioModel,
     normalizeAudioFormatValue,
@@ -221,7 +222,10 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
     }
 
     const voice = normalizeAudioVoiceValue(config.audioVoice);
-    const format = normalizeAudioFormatValue(config.audioFormat);
+    // wav-only 模型（zhenzhen/gm-2.5-pro-tts）上游只收 wav，选项钉死一个，别让用户以为能选 mp3。
+    const wavOnly = isSeedanceWavOnlyAudioModel(model);
+    const format = wavOnly ? "wav" : normalizeAudioFormatValue(config.audioFormat);
+    const formatOptions = wavOnly ? audioFormatOptions.filter((item) => item.value === "wav") : audioFormatOptions;
     const speed = normalizeAudioSpeedValue(config.audioSpeed);
 
     return (
@@ -239,12 +243,13 @@ export function AudioSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.audio.format")} color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-2.5">
-                        {audioFormatOptions.map((item) => (
+                        {formatOptions.map((item) => (
                             <OptionPill key={item.value} selected={format === item.value} theme={theme} onClick={() => onConfigChange("audioFormat", item.value)}>
                                 {item.label}
                             </OptionPill>
                         ))}
                     </div>
+                    {wavOnly ? <div className="text-xs leading-5" style={{ color: theme.node.muted }}>{t("settingsPanels.audio.formatWavOnly")}</div> : null}
                 </SettingGroup>
                 <SettingGroup title={t("settingsPanels.audio.speed")} color={theme.node.muted}>
                     <div className="grid grid-cols-4 gap-2.5">

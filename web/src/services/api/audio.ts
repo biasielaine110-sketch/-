@@ -9,6 +9,8 @@ import {
 } from "@/lib/autodl-comfy-audio";
 import {
     audioMimeType,
+    isAudioFormatMustBeWavError,
+    isSeedanceWavOnlyAudioModel,
     isSeedAudioModel,
     isSunoAudioModel,
     normalizeAudioFormatValue,
@@ -308,7 +310,9 @@ const SEEDANCE_AUDIO_MAX_WAIT_MS = 10 * 60_000;
 async function requestSeedanceAudioGenerations(config: AiConfig, prompt: string, options?: RequestOptions): Promise<Blob> {
     const text = ensureSeedAudioPrompt(prompt);
     const model = resolveSeedanceAudioModel(config.model);
-    const format = mapSeedanceAudioFormat(normalizeSeedAudioFormatValue(config.audioFormat));
+    // wav-only 模型（zhenzhen/gm-2.5-pro-tts）必须发 wav：上游价格预检对 mp3/pcm/opus 直接
+    // 400 `format must be wav`，任务根本没入队。用户选了什么都不改它的格式。
+    let format = isSeedanceWavOnlyAudioModel(model) ? "wav" : mapSeedanceAudioFormat(normalizeSeedAudioFormatValue(config.audioFormat));
     const speechRate = mapSeedanceSpeechRate(Number(normalizeAudioSpeedValue(config.audioSpeed)));
     const referenceAudios = (options?.referenceAudios || []).slice(0, 3);
     const referenceUrls = referenceAudios.length ? await resolveSeedanceReferenceAudioUrls(config, referenceAudios, options) : [];
@@ -333,10 +337,9 @@ async function requestSeedanceAudioGenerations(config: AiConfig, prompt: string,
         metadata,
     };
 
-    let submit;
-    try {
-        // 直连那条跳被掐断（无任何响应）时自动换站点代理再试一次，与生图/视频同口径。
-        submit = await withProxyFallback(
+    // 直连那条跳被掐断（无任何响应）时自动换站点代理再试一次，与生图/视频同口径。
+    const submitAudioTask = () =>
+        withProxyFallback(
             aiApiUrl(config, "/audio/generations"),
             (target) =>
                 axios.post(target, body, {
@@ -346,8 +349,26 @@ async function requestSeedanceAudioGenerations(config: AiConfig, prompt: string,
                 }),
             body,
         );
+
+    let submit;
+    try {
+        submit = await submitAudioTask();
     } catch (error) {
-        throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+        // 上游（seedance.nz）价格预检回「format must be wav」：这条链路只收 wav。
+        // 此时任务没入队、没扣次数 ⇒ 换 wav 重提一次是安全的；只重提一次，不做循环。
+        // 已知 wav-only 模型走不到这里（上面已经钉死 wav），这条是给未知模型的兜底。
+        const message = readAxiosError(error, "");
+        if (format !== "wav" && isAudioFormatMustBeWavError(message)) {
+            format = "wav";
+            metadata.format = format;
+            try {
+                submit = await submitAudioTask();
+            } catch (retryError) {
+                throw new Error(readAxiosError(retryError, apiText("audioGenerationFailed")));
+            }
+        } else {
+            throw new Error(readAxiosError(error, apiText("audioGenerationFailed")));
+        }
     }
 
     const submitPayload = coerceJsonPayload(submit.data);

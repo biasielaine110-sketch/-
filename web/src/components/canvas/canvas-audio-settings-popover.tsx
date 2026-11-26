@@ -4,7 +4,7 @@ import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 
 import { AudioSettingsPanel, type AudioSettingKey } from "@/components/audio-settings-panel";
-import { audioFormatLabel, audioSpeedLabel, audioVoiceLabel, isSeedAudioModel, isSunoAudioModel, seedAudioSettingsSummary, sunoSettingsSummary } from "@/lib/audio-generation";
+import { audioFormatLabel, audioSpeedLabel, audioVoiceLabel, isSeedAudioModel, isSunoAudioModel, resolveAudioFormatForModel, seedAudioSettingsSummary, sunoSettingsSummary } from "@/lib/audio-generation";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { AiConfig } from "@/stores/use-config-store";
@@ -54,7 +54,8 @@ export function CanvasAudioSettingsPopover({ config, onConfigChange, buttonClass
         ? `${sunoSettingsSummary({ version: config.sunoVersion, custom: config.sunoCustom, instrumental: config.sunoInstrumental, vocalGender: config.sunoVocalGender })} · ${(config.audioFormat || "mp3").toUpperCase()}`
         : seedAudio
           ? seedAudioSettingsSummary({ voice: config.audioVoice, format: config.audioFormat, speed: config.audioSpeed })
-          : `${audioVoiceLabel(config.audioVoice)} · ${audioFormatLabel(config.audioFormat)} · ${audioSpeedLabel(config.audioSpeed)}`;
+          : // wav-only 模型（zhenzhen/gm-2.5-pro-tts）实际发的是 wav，摘要不能照抄用户选的 mp3。
+            `${audioVoiceLabel(config.audioVoice)} · ${audioFormatLabel(resolveAudioFormatForModel(model, config.audioFormat))} · ${audioSpeedLabel(config.audioSpeed)}`;
 
     return (
         <>

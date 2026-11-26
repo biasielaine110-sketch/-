@@ -78,6 +78,29 @@ export function isSeedAudioModel(model: string) {
     return /doubao[-_]?seed[-_]?audio|seed[-_]?audio[-_]?\d/i.test(model.trim());
 }
 
+/**
+ * seedance.nz 上只收 WAV 的语音模型：`zhenzhen/gm-2.5-pro-tts`（Gemini 2.5 Pro TTS）。
+ *
+ * 传 mp3/pcm/opus 时上游先做价格预检，直接 400 打回：
+ *   `price preview returned status 400: {"error":{"code":"invalid_parameter","message":"format must be wav"}}`
+ * 任务压根没入队（所以也不扣额度）。这类模型的格式要**钉死 wav**，不看用户选了什么。
+ */
+const SEEDANCE_WAV_ONLY_AUDIO_MODEL = /gm[-_.]?2[-_.]?5[-_.]?pro[-_.]?tts/i;
+
+export function isSeedanceWavOnlyAudioModel(model: string) {
+    return SEEDANCE_WAV_ONLY_AUDIO_MODEL.test(model.trim());
+}
+
+/** 实际会发出去的音频格式：wav-only 的模型无视用户选择。 */
+export function resolveAudioFormatForModel(model: string, value: string) {
+    return isSeedanceWavOnlyAudioModel(model) ? "wav" : value;
+}
+
+/** 上游文案点名「format must be wav」——说明这条链路只收 wav，换格式重提一次是安全的（没入队、没扣次数）。 */
+export function isAudioFormatMustBeWavError(message: string) {
+    return /format\s+must\s+be\s+wav/i.test(String(message || ""));
+}
+
 export function normalizeAudioVoiceValue(value: string) {
     return audioVoiceOptions.some((item) => item.value === value) ? value : "alloy";
 }

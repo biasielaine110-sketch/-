@@ -172,6 +172,7 @@ export default {
             title: "Audio settings",
             voice: "Voice",
             format: "Format",
+            formatWavOnly: "This model only outputs WAV (upstream requires it). Any other format is rejected at price preview.",
             speed: "Speed",
             instructions: "Voice instructions",
             instructionsPlaceholder: "For example: natural, warm, and suitable for narration.",
