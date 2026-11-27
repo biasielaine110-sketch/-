@@ -50,6 +50,35 @@ export function shouldDetourLocalNetwork(): boolean {
     return state === "denied";
 }
 
+/**
+ * 现在能不能放心地直连 loopback（给「媒体地址怎么选」用，必须同步）。
+ *
+ * 🔴 为什么媒体要单开一条判据（2026-11-26 用户报障「qf 成片读取和下载非常缓慢」）：
+ * `preferPublicMediaUrl()` 以前只要页面不在本机，就把 `127.0.0.1:17800/v1/files/x.mp4`
+ * 无条件换成 Tailscale Funnel 的公开入口。实测同一份 1,852,855 B 的成片：
+ *
+ *   loopback  http://127.0.0.1:17800/v1/files/x.mp4   → 0.010 s（≈185 MB/s）
+ *   Funnel    https://…/qf/v1/files/x.mp4             → 40.9 s（≈45 KB/s）
+ *
+ * 也就是说：**授权正常的 Chrome 反而被我们自己降速了 4000 倍**。Funnel 是 DERP 中继，
+ * 单连接实测只有 ~45 KB/s（四路并发聚合 ~130 KB/s），画布一次挂十几个节点就是几十秒黑屏。
+ *
+ * 判据只认两种「确定能直连」的状态：
+ *   granted     → 用户已授权公网页面访问本机。
+ *   unsupported → 非 Chromium（Firefox / Safari / 旧内核），本来就没有这道闸门。
+ *
+ * `unknown`（预热还没回来）与 `prompt`（气泡还没被处理）继续走公开入口：
+ * 那两种状态下直接打 loopback 可能**静默挂起**，宁可慢也不能让 `<video>` 卡死。
+ */
+export function canUseLocalNetworkDirectly(): boolean {
+    return state === "granted" || state === "unsupported";
+}
+
+/** 媒体是不是正被「降级」到公网中继 —— 只用于给用户提示，不参与选路。 */
+export function localNetworkIsRelayed(): boolean {
+    return state === "prompt" || state === "denied";
+}
+
 function queryDescriptor(name: string): PermissionDescriptor {
     return { name } as unknown as PermissionDescriptor;
 }

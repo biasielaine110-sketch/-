@@ -38,6 +38,7 @@ export default {
         download: "下载",
         downloadFailed: "下载失败",
         downloadPreparing: "正在读取文件，稍候…",
+        downloadProgress: "正在读取文件 {{percent}}%",
         upload: "上传",
         requestCanceled: "请求已取消",
         durationMinutes: "{{minutes}}分{{seconds}}秒",
@@ -526,6 +527,8 @@ export default {
         defaultTitle: "创作画布 {{count}}",
         library: "画布库",
         title: "Nww-无限画布",
+        relaySlowHint:
+            "这个成片正在经公网中继读取（单连接约 45 KB/s）。在 Chrome 地址栏左侧的站点设置里把「本地网络访问」改成允许，就能直连本机网关，同一条视频从几十秒变成秒开、秒下。",
         imported: "已导入 {{count}} 个画布",
         importFailed: "导入失败，请选择有效的画布压缩包",
         importingLarge: "正在导入较大的画布（约 {{size}}MB），请稍候…",

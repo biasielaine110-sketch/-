@@ -1,4 +1,5 @@
 import { isLocalNetworkUrl, rewriteLocalMediaUrl } from "@/lib/api-proxy";
+import { canUseLocalNetworkDirectly } from "@/lib/local-network-access";
 import { publicBaseForLocalGateway } from "@/lib/local-gateway";
 import { resolveModelRequestConfig, useConfigStore } from "@/stores/use-config-store";
 
@@ -95,6 +96,20 @@ export function preferPublicMediaUrl(url: string): string {
     } catch {
         // 拿不到 location（SSR / 测试环境）→ 按线上处理，宁可走公网也别打 loopback。
     }
+    /**
+     * 🔴 授权正常的 Chrome 必须**留在本机**（2026-11-26 第二轮报障：qf 成片读取/下载极慢）。
+     *
+     * 上面那段「公网页面一律换公开地址」只对「loopback 打不通」的浏览器成立。Chrome 142+
+     * 在用户授权 Local Network Access 之后，公网页面直连 127.0.0.1 是完全通的，
+     * 而换成 Funnel 反而是把流量绕进 DERP 中继 —— 同一份 1.85 MB 成片实测：
+     * 本机 0.010 s，Funnel 40.9 s（~45 KB/s）。用户点开一个视频节点等半分钟，
+     * 下载按钮更是「转圈转到没脾气」，根因就是这里多绕了一跳。
+     *
+     * 所以选路跟着授权状态走（`canUseLocalNetworkDirectly`）：
+     *   granted / 非 Chromium → 原样返回 loopback（最快）
+     *   prompt / denied / 预热未完成 → 换公开入口（至少能播放、能下载）
+     */
+    if (canUseLocalNetworkDirectly()) return raw;
     for (const base of publicBasesForLocalHost(raw)) {
         const next = rewriteLocalMediaUrl(raw, base);
         if (next && next !== raw) return next;

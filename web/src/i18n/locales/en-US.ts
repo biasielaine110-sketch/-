@@ -38,6 +38,7 @@ export default {
         download: "Download",
         downloadFailed: "Download failed",
         downloadPreparing: "Reading the file, please wait…",
+        downloadProgress: "Reading the file {{percent}}%",
         upload: "Upload",
         requestCanceled: "Request canceled",
         durationMinutes: "{{minutes}}m {{seconds}}s",
@@ -526,6 +527,8 @@ export default {
         defaultTitle: "Creative Canvas {{count}}",
         library: "Canvas library",
         title: "Nww-无限画布",
+        relaySlowHint:
+            "This clip is being read through the public relay (~45 KB/s per connection). Allow \"Local network access\" for this site in Chrome's site settings to read straight from the local gateway — the same file goes from tens of seconds to instant.",
         imported: "Imported {{count}} canvases",
         importFailed: "Import failed. Select a valid canvas package.",
         importingLarge: "Importing a large canvas (~{{size}}MB), please wait…",

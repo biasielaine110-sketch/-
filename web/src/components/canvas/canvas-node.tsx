@@ -19,6 +19,8 @@ import {
 import { describeVideoContainer, describeVideoSummary, readVideoContainer } from "@/lib/media-container";
 import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
 import { isLocalNetworkUrl } from "@/lib/api-proxy";
+import { isLocalGatewayPublicUrl } from "@/lib/local-gateway";
+import { localNetworkIsRelayed } from "@/lib/local-network-access";
 import { portableMediaUrls, preferPublicMediaUrl } from "@/lib/media-portable";
 import { needsMediaRecovery } from "@/lib/canvas/media-recovery";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
@@ -1343,6 +1345,29 @@ function formatClock(seconds: number) {
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
+/**
+ * 「这条成片正走公网中继」的提示，**每个标签页只弹一次**。
+ *
+ * 为什么要弹（2026-11-26 报障「qf 成片读取/下载非常缓慢」）：Funnel 是 DERP 中继，
+ * 单连接实测 ~45 KB/s，一个 15 s 成片就是 40 s 的等待；而 Chrome 里允许「本地网络访问」之后
+ * 同一个文件只要 10 ms。用户不知道这层差别的存在，只会觉得「画布坏了 / 这个模型很慢」。
+ *
+ * 只在真的被降级时提示（`localNetworkIsRelayed()`），且只提示一次 —— 每挂一个节点弹一次
+ * 就成了新的噪音。用 sessionStorage 而不是 localStorage：下次开浏览器、授权状态可能已变。
+ */
+const RELAY_HINT_KEY = "canvas:local-relay-hint-shown";
+
+function takeRelayHintSlot(): boolean {
+    try {
+        if (sessionStorage.getItem(RELAY_HINT_KEY)) return false;
+        sessionStorage.setItem(RELAY_HINT_KEY, "1");
+        return true;
+    } catch {
+        // 无痕 / 存储被禁：宁可不提示，也别每次渲染都弹。
+        return false;
+    }
+}
+
 function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, memoryKey: memoryKeyProp }: { src: string; posterSrc?: string; storageKey?: string; mimeType?: string; model?: string; memoryKey?: string }) {
     const { t } = useTranslation();
     const { message } = App.useApp();
@@ -1677,15 +1702,34 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
         if (downloadingRef.current) return;
         downloadingRef.current = true;
         // 🔴 先给反馈再干活：远程视频要经代理重下，慢的时候几十秒到两分钟，期间界面毫无反应
-        // 就是用户眼里的「按钮点了没作用」（2026-11-26 报障）。0 = 不自动关，由 finally 收。
-        const hideLoading = message.loading(t("common.downloadPreparing"), 0);
+        // 就是用户眼里的「按钮点了没作用」（2026-11-26 报障）。同 key 复用一条 message 才能原地
+        // 把文案从「正在读取文件」改成「正在读取 62%」，`message.loading()` 只能关掉再新开（会闪）。
+        const progressKey = `canvas-video-download:${memoryKey}`;
+        let lastTick = 0;
+        const showProgress = (content: string, force = false) => {
+            const now = Date.now();
+            if (!force && now - lastTick < 250) return;
+            lastTick = now;
+            message.open({ key: progressKey, type: "loading", content, duration: 0 });
+        };
+        showProgress(t("common.downloadPreparing"), true);
         try {
             // Prefer the stored bytes: they are the ones on screen, need no network and cannot be
             // refused by CORS. Only re-fetch the source URL when the stored blob is gone.
             const stored = storageKey ? await getMediaBlob(storageKey).catch(() => null) : null;
             // 远程直链过期 / `blob:` 被回收时，`resolveBlobSource` 里还有一次「本地副本」兜底
             // （同一套顺序见 `lib/fs/save-blob.ts`），所以这里把 storageKey 一并带下去。
-            const blob = stored && stored.size > 0 ? stored : await resolveBlobSource(playableSrc, { storageKey, model });
+            /**
+             * 走网络取字节时给百分比（本机直连 10 ms 读完，基本看不到；公网中继要几十秒，
+             * 一个静止的「正在读取文件」和卡死没区别）。节流放在 showProgress 里。
+             */
+            const onProgress = (percent: number | null) => {
+                showProgress(
+                    percent == null ? t("common.downloadPreparing") : t("common.downloadProgress", { percent }),
+                    percent === 100,
+                );
+            };
+            const blob = stored && stored.size > 0 ? stored : await resolveBlobSource(playableSrc, { storageKey, model, onProgress });
             if (!blob.size) throw new Error("no media bytes");
             // Name the file after the real container. Calling WebM bytes ".mp4" is not cosmetic:
             // save-blob re-types the blob to match the extension, so the file would not play.
@@ -1702,7 +1746,7 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
             // dead blob URL or a lost permission all failed silently.
             message.error(`${t("common.downloadFailed")}: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
-            hideLoading();
+            message.destroy(progressKey);
             downloadingRef.current = false;
         }
     };
@@ -1848,6 +1892,11 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
                 preload="metadata"
                 data-canvas-no-zoom
                 onLoadedMetadata={() => {
+                    // 元数据回来了但字节还要慢慢爬 → 说明这条走的是公网中继（本机直连不会慢）。
+                    // 只提示一次，且只在真的被降级时提示，见 `takeRelayHintSlot`。
+                    if (isLocalGatewayPublicUrl(playableSrc) && localNetworkIsRelayed() && takeRelayHintSlot()) {
+                        message.info({ content: t("canvas.relaySlowHint"), duration: 12 });
+                    }
                     const video = videoRef.current;
                     if (!video) return;
                     const known = typeof video.duration === "number" && Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;

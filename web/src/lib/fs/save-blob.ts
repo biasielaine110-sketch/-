@@ -20,6 +20,14 @@ export type SaveBlobOptions = {
      */
     model?: string | null;
     /**
+     * 取字节进度（0–100，未知总长时为 `null`）。
+     *
+     * 🔴 为什么要这个（2026-11-26「下载按钮点了像没反应」的第二层）：走公网中继时
+     * 1.85 MB 的成片要 40 s，期间只有一个静止的 loading 文案，用户完全看不出是在传输还是死了。
+     * 有了字节数就能显示「正在读取 62%」，至少是「活着并且在动」。
+     */
+    onProgress?: (percent: number | null) => void;
+    /**
      * 显式要求「写进绑定的草稿文件夹」而不是走浏览器下载。
      *
      * 🔴 默认 **false**（用户 2026-11-24：「点击下载的图片和视频等，默认存放在跟浏览器的下载路径下」）：
@@ -49,10 +57,14 @@ export type SaveBlobResult =
  * `fetch` 只会抛一句 `Failed to fetch` —— 而字节好端端躺在本地库里。用户看到的
  * 「下载失败: Failed to fetch」绝大多数就是这一种，别再去猜 CORS 或代理挂了。
  */
-export async function resolveBlobSource(source: Blob | string, options?: { storageKey?: string | null; model?: string | null }): Promise<Blob> {
+export async function resolveBlobSource(
+    source: Blob | string,
+    options?: { storageKey?: string | null; model?: string | null; onProgress?: (percent: number | null) => void },
+): Promise<Blob> {
     if (typeof source !== "string") return source;
     const input = String(source || "").trim();
     const isObjectUrl = input.startsWith("blob:") || input.startsWith("data:");
+    const onProgress = options?.onProgress;
     if (!input) return await storedMediaOrThrow(options?.storageKey, new Error("没有可下载的地址"));
     /**
      * 🔴 公网页面 + 本机网关地址：**先换成公开入口再取字节**（2026-11-26 用户报障「点下载没反应」）。
@@ -65,7 +77,7 @@ export async function resolveBlobSource(source: Blob | string, options?: { stora
      */
     const raw = isObjectUrl ? input : preferPublicMediaUrl(input);
     try {
-        return await fetchBlobOrThrow(raw);
+        return await fetchBlobOrThrow(raw, onProgress);
     } catch (error) {
         // 对象 URL / data URL：代理对非 http(s) 无能为力，直接交给本地副本兜底。
         if (isObjectUrl) return await storedMediaOrThrow(options?.storageKey, error);
@@ -137,7 +149,7 @@ async function storedMediaOrThrow(storageKey: string | null | undefined, reason:
  */
 const MEDIA_FETCH_TIMEOUT_MS = 120_000;
 
-async function fetchBlobOrThrow(url: string) {
+async function fetchBlobOrThrow(url: string, onProgress?: (percent: number | null) => void) {
     let signal: AbortSignal | undefined;
     try {
         if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
@@ -150,7 +162,33 @@ async function fetchBlobOrThrow(url: string) {
     // A refused or dead proxy hop answers with an HTML error body; without this check that body
     // would be saved as the media file, turning a visible failure into a corrupt download.
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.blob();
+    if (!onProgress || !response.body) return await response.blob();
+    return await readStreamWithProgress(response, onProgress);
+}
+
+/**
+ * 边读边报进度。只在**没有本地副本、必须走网络**时才用得上（本机直连 10 ms 读完，进度没意义；
+ * 公网中继 40 s 才有意义）。
+ *
+ * 拿不到 `Content-Length`（分块传输 / 代理改写了头部）时回 `null`，调用方显示「正在读取文件…」
+ * 而不是一个假的 0%。
+ */
+async function readStreamWithProgress(response: Response, onProgress: (percent: number | null) => void): Promise<Blob> {
+    const total = Number(response.headers.get("content-length") || 0);
+    const type = response.headers.get("content-type") || "";
+    const reader = response.body!.getReader();
+    const chunks: BlobPart[] = [];
+    let loaded = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        chunks.push(value);
+        loaded += value.byteLength;
+        onProgress(total > 0 ? Math.min(99, Math.floor((loaded / total) * 100)) : null);
+    }
+    onProgress(100);
+    return new Blob(chunks, type ? { type } : undefined);
 }
 
 /** Current canvas project id from `/canvas/:id` when available. */
