@@ -103,7 +103,11 @@
 
   async function permissionState() {
     const out = {};
-    for (const name of ["local-network", "loopback-network"]) {
+    // 🔴 三个名字都要问：Chrome 里 loopback 走的是 `loopback-network`，文档口径是
+    // `local-network`，还有些实现认 `local-network-access`。只问一个名字、抛错就当成
+    // 「浏览器不支持」，会把公网入口误降级成 127.0.0.1 —— 结果就是成片报
+    // `MEDIA_ELEMENT_ERROR: Network error`（2026-11-26 实况）。
+    for (const name of ["loopback-network", "local-network", "local-network-access"]) {
       try {
         if (!navigator.permissions || !navigator.permissions.query) { out[name] = "不支持"; continue; }
         const s = await navigator.permissions.query({ name: name });
@@ -113,6 +117,30 @@
       }
     }
     return out;
+  }
+
+  /**
+   * 真实可达性探测（和权限 API 是两条独立证据）。
+   * `mode: "no-cors"` 是关键：本机网关的 `/v1/files/*` 是给 `<video>` 用的，不一定带
+   * `Access-Control-Allow-Origin`，用 cors 模式探测会因为拿不到头而误报失败。
+   * 只要能拿到响应（哪怕 opaque / 404）就说明浏览器把请求发出去了。
+   */
+  async function noCorsProbe(name, url, timeoutMs) {
+    const started = performance.now();
+    let signal;
+    try { signal = AbortSignal.timeout(timeoutMs); } catch (e) { signal = undefined; }
+    try {
+      await fetch(url, { method: "GET", mode: "no-cors", cache: "no-store", credentials: "omit", signal });
+      const ms = performance.now() - started;
+      row(name, "可达", "ok", ms, url + "（只验证网络层）");
+      return true;
+    } catch (error) {
+      const ms = performance.now() - started;
+      const msg = (error && (error.name + ": " + error.message)) || String(error);
+      const timedOut = /timeout|abort/i.test(msg);
+      row(name, timedOut ? "挂起/超时（多半在等授权）" : "被拦/不可达", "bad", ms, msg);
+      return false;
+    }
   }
 
   (async function run() {
@@ -144,7 +172,9 @@
     }
 
     await probe("本机网关 127.0.0.1:17800", "http://127.0.0.1:17800/v1/models", 4000);
+    await noCorsProbe("本机网关可达性（no-cors）", "http://127.0.0.1:17800/v1/health", 4000);
     await probe("Tailscale Funnel", "https://wb2api.tailb5bc86.ts.net/qf/v1/models", 10000);
+    await noCorsProbe("Funnel 可达性（no-cors）", "https://wb2api.tailb5bc86.ts.net/qf/v1/health", 10000);
     await probe("站点代理 /api/proxy", "/api/proxy?target=" + encodeURIComponent("https://api.seedance.nz/v1/models"), 10000, { Authorization: "Bearer sk-test" });
 
     dump.value = lines.join("\n");

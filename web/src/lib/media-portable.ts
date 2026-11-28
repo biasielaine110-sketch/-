@@ -50,10 +50,16 @@ export function portableMediaUrls(url: string, model?: string | null): string[] 
      * 直连失败（网关没起）还要能回公网入口，所以两条都进候选，由调用方的 `tried` 集合去重。
      */
     if (isLocalGatewayPublicUrl(raw)) {
-        // 没授权就别降级（打 loopback 只会静默挂起），也没有别的候选可给。
-        if (!canUseLocalNetworkDirectly()) return [];
         const local = downgradePublicGatewayUrl(raw);
         if (!local || local === raw) return [];
+        /**
+         * 🔴 判据必须带上**这个 loopback 地址本身**（2026-11-26 第三次报障）。
+         * 只问 `canUseLocalNetworkDirectly()` 时，Chrome 的 LNA 权限名一个都问不出来
+         * 就会被当成 `unsupported` → 返回 true → 把公网地址降成 `127.0.0.1` →
+         * 浏览器其实没授权 → `<video>` 报 `MEDIA_ELEMENT_ERROR: Network error`。
+         * 传 `local` 进去，就会以「真实探测这个 origin 通不通」为最终一票。
+         */
+        if (!canUseLocalNetworkDirectly(local)) return [];
         // 首帧会用它；它失败（网关没起）就回原来的公网入口。
         return [local, raw];
     }
@@ -118,9 +124,11 @@ export function preferPublicMediaUrl(url: string): string {
      * 降级只走内置映射表（`downgradePublicGatewayUrl`），推不出来就原样返回，绝不猜。
      */
     if (isLocalGatewayPublicUrl(raw)) {
-        if (!canUseLocalNetworkDirectly()) return raw;
         const local = downgradePublicGatewayUrl(raw);
-        return local || raw;
+        if (!local || local === raw) return raw;
+        // 同 `portableMediaUrls`：降级前必须确认这个 loopback origin 真的通。
+        if (!canUseLocalNetworkDirectly(local)) return raw;
+        return local;
     }
     if (!isLocalNetworkUrl(raw)) return raw;
     try {
@@ -140,8 +148,12 @@ export function preferPublicMediaUrl(url: string): string {
      * 所以选路跟着授权状态走（`canUseLocalNetworkDirectly`）：
      *   granted / 非 Chromium → 原样返回 loopback（最快）
      *   prompt / denied / 预热未完成 → 换公开入口（至少能播放、能下载）
+     *
+     * 🔴 必须把 `raw` 传进去（2026-11-26 第三次报障）：不传就只能靠权限 API 一个证据，
+     * 权限名读不出来时会被判成 `unsupported` → 直连 → 浏览器实际没授权 → Network error。
+     * 传了地址，`unsupported` 分支才会去查这个 origin 的真实探测结论。
      */
-    if (canUseLocalNetworkDirectly()) return raw;
+    if (canUseLocalNetworkDirectly(raw)) return raw;
     for (const base of publicBasesForLocalHost(raw)) {
         const next = rewriteLocalMediaUrl(raw, base);
         if (next && next !== raw) return next;

@@ -2,7 +2,8 @@ import { saveAs } from "file-saver";
 
 import { forceProxyMediaUrl, isLocalNetworkUrl, proxyMediaUrl } from "@/lib/api-proxy";
 import { supportsFileSystemAccess, writeBlobToDraftDirectory } from "@/lib/canvas/canvas-draft";
-import { isLocalGatewayPublicUrl } from "@/lib/local-gateway";
+import { isLocalGatewayPublicUrl, downgradePublicGatewayUrl } from "@/lib/local-gateway";
+import { localNetworkAccessState, probeLoopbackReachability } from "@/lib/local-network-access";
 import { portableMediaUrls, preferPublicMediaUrl } from "@/lib/media-portable";
 import { getMediaBlob } from "@/services/file-storage";
 
@@ -76,7 +77,7 @@ export async function resolveBlobSource(
      * 播放器早就改成取 src 时先换公开地址（`preferPublicMediaUrl`），下载入口漏了这一步。
      * 页面自己在本机时它原样返回，dev 行为不变。
      */
-    const raw = isObjectUrl ? input : preferPublicMediaUrl(input);
+    const raw = isObjectUrl ? input : await preferVerifiedMediaUrl(input);
     try {
         return await fetchBlobOrThrow(raw, onProgress);
     } catch (error) {
@@ -109,8 +110,9 @@ export async function resolveBlobSource(
             }
             const host = (input.match(/^https?:\/\/([^/?#]+)/i) || [])[1] || "本机网关";
             const reason = error instanceof Error ? error.message : String(error ?? "");
+            const triedPublic = raw !== input;
             throw new Error(
-                `这条成片只存在本机网关（${host}），现在连不上 —— 先启动该网关再试；若网关里的文件已被清理，只能重新生成${reason ? `（${reason}）` : ""}`,
+                `这条成片只存在本机网关（${host}），${triedPublic ? "本机直连和公开入口都取不到" : "本机直连取不到，也没有可用的公开入口"} —— 先启动该网关再试；若网关里的文件已被清理，只能重新生成${reason ? `（${reason}）` : ""}`,
             );
         }
         /**
@@ -136,6 +138,28 @@ export async function resolveBlobSource(
             return await storedMediaOrThrow(options?.storageKey, proxyError);
         }
     }
+}
+
+/**
+ * 下载入口的地址选路：**先确认真实可达性，再决定要不要绕公网**。
+ *
+ * 🔴 为什么下载可以多等一小会儿（2026-11-26 第三次报障）：播放器首帧必须同步出地址，
+ * 只能靠权限 API 的结论。下载是一次用户点击后的异步操作，多花最多 2.5 s 探一次
+ * `/v1/health` 完全划算 —— 换来的可能是 40 s 中继变成 10 ms 直连。
+ *
+ * 只在「结论还可能变」时探：权限已 granted 时直连是确定的，不必再花时间；
+ * 目标不是本机地址（普通公网直链）更不必探。
+ */
+async function preferVerifiedMediaUrl(url: string) {
+    const local = isLocalNetworkUrl(url)
+        ? url
+        : isLocalGatewayPublicUrl(url)
+          ? downgradePublicGatewayUrl(url)
+          : "";
+    if (local && localNetworkAccessState() !== "granted") {
+        await probeLoopbackReachability(local);
+    }
+    return preferPublicMediaUrl(url);
 }
 
 /**

@@ -19,8 +19,8 @@ import {
 import { describeVideoContainer, describeVideoSummary, readVideoContainer } from "@/lib/media-container";
 import { getMediaBlob, refreshMediaUrl, resolveMediaUrl } from "@/services/file-storage";
 import { isLocalNetworkUrl } from "@/lib/api-proxy";
-import { isLocalGatewayPublicUrl } from "@/lib/local-gateway";
-import { localNetworkIsRelayed } from "@/lib/local-network-access";
+import { downgradePublicGatewayUrl, isLocalGatewayPublicUrl } from "@/lib/local-gateway";
+import { canUseLocalNetworkDirectly, localNetworkIsRelayed, subscribeLoopbackReachability } from "@/lib/local-network-access";
 import { portableMediaUrls, preferPublicMediaUrl } from "@/lib/media-portable";
 import { needsMediaRecovery } from "@/lib/canvas/media-recovery";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
@@ -1470,6 +1470,36 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
             cancelled = true;
         };
     }, [storageKey]);
+
+    /**
+     * 🔴 探测结论晚到也要「换回直连」（2026-11-26 第三次报障「成片无法播放」的收尾）。
+     *
+     * 首帧必须保守：LNA 授权还没探明时先给公网地址（loopback 可能静默挂起）。但一旦真实探测
+     * 确认这个 origin 通，还留在 Funnel 上就是白等 —— 同一份 1.85 MB 成片 10 ms 对 40 s。
+     *
+     * 只在**还没开播**时换（`activated` / `wantPlayRef` 都是 false）：正在播的视频换 src 会
+     * 直接黑一下再从头缓冲，比慢更糟。已经换过的地址记进 `triedRef`，避免失败后被反复换回。
+     */
+    useEffect(() => {
+        if (activated || wantPlayRef.current) return;
+        const swap = () => {
+            if (wantPlayRef.current) return;
+            const local = (() => {
+                const current = String(playableSrc || "");
+                if (!current || !isLocalGatewayPublicUrl(current)) return "";
+                const next = downgradePublicGatewayUrl(current);
+                if (!next || next === current) return "";
+                // 这里必须把 loopback 地址本身传进去：权限名读不出来时靠真实探测定夺。
+                if (!canUseLocalNetworkDirectly(next)) return "";
+                return next;
+            })();
+            if (!local || triedRef.current.has(local)) return;
+            triedRef.current.add(local);
+            setPlayableSrc((prev) => (prev === local ? prev : local));
+        };
+        swap();
+        return subscribeLoopbackReachability(() => swap());
+    }, [activated, playableSrc]);
 
     // A dead blob: URL (revoked mid-session / failed hydration) leaves a plain <video> black
     // forever. Rebuild a fresh object URL from the stored blob and retry a few times. After the

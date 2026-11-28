@@ -13,18 +13,54 @@
 //   prompt      → 先主动打一次 loopback 把授权气泡顶出来（Chrome 官方推荐的引导方式），
 //                 同时按「可能挂起」处理：这一次请求允许走公网入口兜底。
 //   denied      → 用户拒绝过。只能走公网入口，并提示去站点设置里改回来。
-//   unsupported → 不是 Chromium / 没有这个权限项（Firefox、Safari、旧内核）→ 直连。
+//   unsupported → 权限项读不出来。**不再等于「可以直接连」**（见下面第 3 条）。
 //
 // 状态在启动时预热一次（`primeLocalNetworkAccess()`），之后同步可读 —— 因为
 // `proxyApiUrl()` 这类拼 URL 的函数不能 await。
+//
+// 🔴 三条血泪判据（2026-11-26 第三次报障「qf 成片无法播放」逼出来的）：
+//
+// ① **权限名不是唯一的**。Chrome 官方文档写的是 `local-network`，但实现里 loopback 走的是
+//    另一个规范名 `loopback-network`，社区代码里还见过 `local-network-access`。旧实现只查
+//    `local-network`，名字一对不上就 `query()` 抛 TypeError → 被当成「浏览器不支持」，
+//    于是 `canUseLocalNetworkDirectly()` 返回 true → 媒体地址从公网入口**降级**成 loopback
+//    → 浏览器其实没授权 → `<video>` 直接 `MEDIA_ELEMENT_ERROR: Network error`。
+//    现在三个名字都试，只要有一个 granted 就算 granted。
+//
+// ② **读不出来 ≠ 没限制**。`unsupported` 现在只表示「权限 API 问不出来」，
+//    直连与否还要看 ③ 的真实探测结果。老实现把 `unsupported` 当「随便连」，
+//    这在 Firefox 上侥幸成立，在 Chrome 上就是上面那个黑屏。
+//
+// ③ **权限 API 说 granted 也可能连不上，说 unsupported 也可能连得上**。所以补一层
+//    真实可达性探测（`probeLoopbackReachability()`）：发一条请求到目标 origin 的
+//    `/v1/health`，能拿到任何响应（含 401 / 404）就算 reachable，网络层被拒 / 超时算 blocked。
+//    结果按 origin 缓存并广播，选路函数据此决定「公网入口要不要降回 loopback」。
 
 export type LocalNetworkAccessState = "unknown" | "granted" | "prompt" | "denied" | "unsupported";
 
+/** 本机 origin 的真实可达性（和权限 API 是两条独立证据）。 */
+export type LoopbackReachability = "unknown" | "reachable" | "blocked";
+
+/**
+ * Chrome 里可能出现的 LNA 权限名。顺序有讲究：
+ * `loopback-network` 专管 `127.0.0.1` / `localhost`（我们最关心的一种），先问它；
+ * `local-network` 是文档口径；`local-network-access` 是部分实现/草案里的名字。
+ */
+const LNA_PERMISSION_NAMES = ["loopback-network", "local-network", "local-network-access"] as const;
+
 let state: LocalNetworkAccessState = "unknown";
 let primed: Promise<LocalNetworkAccessState> | null = null;
+/** 命中的权限名 —— 出问题时好定位（/diag 会一起打出来）。 */
+let grantedPermissionName: string | null = null;
 
 type LocalNetworkAccessListener = (next: LocalNetworkAccessState) => void;
 const listeners = new Set<LocalNetworkAccessListener>();
+
+/** origin → 可达性。key 统一用 `new URL(...).origin`，含端口。 */
+const reachability = new Map<string, LoopbackReachability>();
+const reachabilityInflight = new Map<string, Promise<LoopbackReachability>>();
+type ReachabilityListener = (origin: string, next: LoopbackReachability) => void;
+const reachabilityListeners = new Set<ReachabilityListener>();
 
 /**
  * 状态变了就广播 —— 画布上那个「允许直连」提示靠它自动消失/出现，
@@ -50,9 +86,22 @@ export function subscribeLocalNetworkAccess(listener: LocalNetworkAccessListener
     };
 }
 
+/** 订阅「可达性」变化（探测完成 / 重新探测结果不同）。返回退订函数。 */
+export function subscribeLoopbackReachability(listener: ReachabilityListener): () => void {
+    reachabilityListeners.add(listener);
+    return () => {
+        reachabilityListeners.delete(listener);
+    };
+}
+
 /** 同步读当前状态。`unknown` 表示还没预热完。 */
 export function localNetworkAccessState(): LocalNetworkAccessState {
     return state;
+}
+
+/** 命中的权限名（`/diag` 用）。 */
+export function localNetworkPermissionName(): string | null {
+    return grantedPermissionName;
 }
 
 /**
@@ -68,6 +117,16 @@ export function __setLocalNetworkAccessStateForProbe(next: LocalNetworkAccessSta
 }
 
 /**
+ * 仅供探针：注入可达性结论，跳过真实网络请求。`null` 表示清空回到 unknown。
+ */
+export function __setLoopbackReachabilityForProbe(url: string, next: LoopbackReachability | null) {
+    const key = originKey(url);
+    if (!key) return;
+    if (next === null) reachability.delete(key);
+    else reachability.set(key, next);
+}
+
+/**
  * 是否应该把本机网关地址改走公网入口。
  *
  * 只有**明确被拒**（denied）时才绕公网。`prompt` 不绕：那时 Chrome 会弹气泡，
@@ -75,6 +134,89 @@ export function __setLocalNetworkAccessStateForProbe(next: LocalNetworkAccessSta
  */
 export function shouldDetourLocalNetwork(): boolean {
     return state === "denied";
+}
+
+function originKey(url: string): string {
+    try {
+        return new URL(String(url || "")).origin.toLowerCase();
+    } catch {
+        return "";
+    }
+}
+
+/** 读某个地址楼层的可达性结论（同步）。 */
+export function loopbackReachability(url: string): LoopbackReachability {
+    const key = originKey(url);
+    if (!key) return "unknown";
+    return reachability.get(key) ?? "unknown";
+}
+
+/**
+ * 真实探测一次 loopback 可达性。
+ *
+ * 判定口径：**只要能拿到 HTTP 响应就算通**（401 / 403 / 404 都算），因为我们要确认的是
+ * 「浏览器把请求发出去了」，不是「业务成功」。所以：
+ *   fetch resolve（哪怕 status 4xx / 5xx，甚至 opaque response） → reachable
+ *   fetch reject（TypeError 网络层被拒 / AbortError 挂起超时）      → blocked
+ *
+ * 🔴 必须用 `mode: "no-cors"`。本机网关只在自家 `pages.dev` origin 开了 CORS？未必 ——
+ * qf 网关对 `/v1/files/*` 是给 `<video>` 用的（no-cors 就能拉），没带
+ * `Access-Control-Allow-Origin`。用 cors 模式探测会因为我们拿不到头而 reject，
+ * 把「其实完全能播放」误判成 blocked。opaque response 在这里就是最好的信号。
+ *
+ * `127.0.0.1` 属于 potentially-trustworthy origin，https 页面请求它不会被 mixed content 拦，
+ * 所以这条探测在线上页面也能跑。
+ */
+export function probeLoopbackReachability(
+    url: string,
+    timeoutMs = 2500,
+): Promise<LoopbackReachability> {
+    const key = originKey(url);
+    if (!key) return Promise.resolve("unknown");
+    const inflight = reachabilityInflight.get(key);
+    if (inflight) return inflight;
+
+    const run = (async (): Promise<LoopbackReachability> => {
+        let next: LoopbackReachability = "blocked";
+        try {
+            if (typeof fetch !== "function") return "unknown";
+            let signal: AbortSignal | undefined;
+            try {
+                signal = AbortSignal.timeout(timeoutMs);
+            } catch {
+                signal = undefined;
+            }
+            await fetch(`${key}/v1/health`, {
+                method: "GET",
+                mode: "no-cors",
+                cache: "no-store",
+                credentials: "omit",
+                signal,
+            });
+            next = "reachable";
+        } catch {
+            next = "blocked";
+        }
+        const prev = reachability.get(key);
+        reachability.set(key, next);
+        if (prev !== next) {
+            for (const listener of reachabilityListeners) {
+                try {
+                    listener(key, next);
+                } catch {
+                    // 同上：监听器自己的问题
+                }
+            }
+        }
+        return next;
+    })();
+
+    reachabilityInflight.set(key, run);
+    void run.finally(() => {
+        // 只清自己这一次，别把后来者的 in-flight 抹掉。
+        if (reachabilityInflight.get(key) === run) reachabilityInflight.delete(key);
+    });
+    return run;
 }
 
 /**
@@ -90,15 +232,29 @@ export function shouldDetourLocalNetwork(): boolean {
  * 也就是说：**授权正常的 Chrome 反而被我们自己降速了 4000 倍**。Funnel 是 DERP 中继，
  * 单连接实测只有 ~45 KB/s（四路并发聚合 ~130 KB/s），画布一次挂十几个节点就是几十秒黑屏。
  *
- * 判据只认两种「确定能直连」的状态：
- *   granted     → 用户已授权公网页面访问本机。
- *   unsupported → 非 Chromium（Firefox / Safari / 旧内核），本来就没有这道闸门。
+ * 判定分两层，**权限只是第一层，真实可达性才是最终一票**：
  *
- * `unknown`（预热还没回来）与 `prompt`（气泡还没被处理）继续走公开入口：
- * 那两种状态下直接打 loopback 可能**静默挂起**，宁可慢也不能让 `<video>` 卡死。
+ *   granted              → 直连（权限已明确，直接给最快的那条）。
+ *   prompt / denied      → 不直连（前者可能静默挂起，后者明确被拒）。
+ *   unsupported / unknown → 看真实探测：reachable 才直连，blocked 绝不直连，
+ *                          还没探过就先发起一次探测、本次按「不直连」保守处理。
+ *
+ * 传入 `url` 是目标本机地址（`http://127.0.0.1:17800/...`）；不传就看不了探测结论，
+ * 只按权限判（`granted` 才 true）。这样「公网入口要不要降回 loopback」这种需要落到
+ * 具体 origin 的决定，可以稳稳拿到探测这一票。
  */
-export function canUseLocalNetworkDirectly(): boolean {
-    return state === "granted" || state === "unsupported";
+export function canUseLocalNetworkDirectly(url?: string): boolean {
+    if (state === "granted") return true;
+    if (state !== "unsupported") return false;
+    if (!url) return false;
+    const reach = loopbackReachability(url);
+    if (reach === "reachable") return true;
+    if (reach === "unknown") {
+        // 还没探过：这次保守走公网，同时把探测排出去，下一次渲染就能拿到结论。
+        void probeLoopbackReachability(url);
+        return false;
+    }
+    return false;
 }
 
 /** 媒体是不是正被「降级」到公网中继 —— 只用于给用户提示，不参与选路。 */
@@ -110,24 +266,77 @@ function queryDescriptor(name: string): PermissionDescriptor {
     return { name } as unknown as PermissionDescriptor;
 }
 
+function watchPermissionStatus(status: PermissionStatus) {
+    status.onchange = () => {
+        const next = status.state;
+        // 授权状态变了 → 之前探到的可达性结论就过期了，清掉重探。
+        reachability.clear();
+        if (next === "granted") {
+            commitState("granted");
+            return;
+        }
+        if (next === "prompt" || next === "denied") {
+            commitState(next);
+            return;
+        }
+        void readPermission().then((value) => {
+            if (value) commitState(value);
+        });
+    };
+}
+
+/**
+ * 读权限状态，**逐个尝试所有可能的权限名**。
+ *
+ * 返回 `null` 只表示「所有权限名都问不出来」——那才可能是真的不支持。
+ * 🔴 只要有一个名字能被 `query()` 认出来，就不再是 unsupported，
+ * 哪怕它返回 prompt（说明这个浏览器确实有这道闸门）。
+ */
 async function readPermission(): Promise<LocalNetworkAccessState | null> {
+    if (typeof navigator === "undefined" || !navigator.permissions?.query) return null;
+    let sawSupportedName = false;
+    let sawPrompt = false;
+    let sawDenied = false;
+
+    for (const name of LNA_PERMISSION_NAMES) {
+        try {
+            const status = await navigator.permissions.query(queryDescriptor(name));
+            sawSupportedName = true;
+            watchPermissionStatus(status);
+            const value = status.state;
+            if (value === "granted") {
+                // 只要有一个名字已授权就够了 —— 别再被别的名字的 prompt 拉回去。
+                grantedPermissionName = name;
+                return "granted";
+            }
+            if (value === "denied") sawDenied = true;
+            if (value === "prompt") sawPrompt = true;
+        } catch {
+            // 这个名字不认识：继续试下一个，绝不能直接当成「浏览器不支持」。
+        }
+    }
+
+    if (sawPrompt) return "prompt";
+    if (sawDenied) return "denied";
+    if (sawSupportedName) return "prompt";
+    return null;
+}
+
+/** 页面自己就在本机时不需要授权（同源 / 已是 loopback），别去打扰用户。 */
+function pageIsOnLocalNetwork(): boolean {
     try {
-        if (typeof navigator === "undefined" || !navigator.permissions?.query) return null;
-        const status = await navigator.permissions.query(queryDescriptor("local-network"));
-        status.onchange = () => {
-            const next = status.state as LocalNetworkAccessState;
-            if (next === "granted" || next === "prompt" || next === "denied") commitState(next);
-        };
-        const value = status.state as LocalNetworkAccessState;
-        return value === "granted" || value === "prompt" || value === "denied" ? value : "prompt";
+        const host = window.location.hostname.toLowerCase();
+        return (
+            /^(127\.|localhost$|0\.0\.0\.0$|\[?::1\]?$)/.test(host) || host.endsWith(".localhost")
+        );
     } catch {
-        // 不认这个权限名（Firefox / Safari / 老内核）→ 按「没有限制」处理。
-        return null;
+        return false;
     }
 }
 
 /**
- * 预热：读一次权限状态；`prompt` 时主动发一条 loopback 请求把授权气泡顶出来。
+ * 预热：读一次权限状态；`prompt` 时主动发一条 loopback 请求把授权气泡顶出来，
+ * 最后无论权限怎么说，都探一次真实可达性（那是 `unsupported` 分支唯一的判据）。
  *
  * 这条探针请求本身可能一直挂着（等用户点气泡），所以给 6 秒上限 —— 气泡已经弹出，
  * 挂不挂都不影响后续判断。请求失败（401 / CORS / 超时）都正常，这里只看权限有没有变。
@@ -136,41 +345,37 @@ export async function primeLocalNetworkAccess(): Promise<LocalNetworkAccessState
     if (primed) return primed;
     primed = (async () => {
         const initial = await readPermission();
-        if (initial === null) {
-            commitState("unsupported");
+        commitState(initial === null ? "unsupported" : initial);
+
+        if (pageIsOnLocalNetwork()) {
+            // 页面本身就在本机：同源直连，不存在 LNA 闸门，也不必走公网。
+            commitState("granted");
             return state;
         }
-        commitState(initial);
-        if (initial !== "prompt") return state;
 
-        // 页面自己就在本机时不需要授权（同源 / 已是 loopback），别去打扰用户。
-        try {
-            const host = window.location.hostname.toLowerCase();
-            if (/^(127\.|localhost$|0\.0\.0\.0$|\[?::1\]?$)/.test(host) || host.endsWith(".localhost")) {
-                commitState("granted");
-                return state;
-            }
-        } catch {
-            // ignore
-        }
-
-        try {
-            let signal: AbortSignal | undefined;
+        if (state === "prompt") {
             try {
-                signal = AbortSignal.timeout(6000);
+                let signal: AbortSignal | undefined;
+                try {
+                    signal = AbortSignal.timeout(6000);
+                } catch {
+                    signal = undefined;
+                }
+                await fetch("http://127.0.0.1:17800/v1/models", {
+                    mode: "cors",
+                    cache: "no-store",
+                    signal,
+                });
             } catch {
-                signal = undefined;
+                // 401 / 403 / CORS / 超时都无所谓：目的是让 Chrome 把授权气泡显示出来。
             }
-            await fetch("http://127.0.0.1:17800/v1/models", {
-                mode: "cors",
-                cache: "no-store",
-                signal,
-            });
-        } catch {
-            // 401 / 403 / CORS / 超时都无所谓：目的是让 Chrome 把授权气泡显示出来。
+            const after = await readPermission();
+            if (after) commitState(after);
         }
-        const after = await readPermission();
-        if (after) commitState(after);
+
+        // 不管权限是什么，都探一次 —— unsupported 时要靠它决定能不能直连。
+        // granted 也探：否则「权限给了但网关没起」会把所有节点降级成必然失败的首帧。
+        void probeLoopbackReachability("http://127.0.0.1:17800");
         return state;
     })();
     return primed;
@@ -189,12 +394,8 @@ export async function primeLocalNetworkAccess(): Promise<LocalNetworkAccessState
  */
 export async function requestLocalNetworkAccess(): Promise<LocalNetworkAccessState> {
     const before = await readPermission();
-    if (before === null) {
-        commitState("unsupported");
-        return state;
-    }
-    commitState(before);
-    if (state === "granted" || state === "unsupported") return state;
+    commitState(before === null ? "unsupported" : before);
+    if (state === "granted") return state;
 
     try {
         let signal: AbortSignal | undefined;
@@ -210,10 +411,13 @@ export async function requestLocalNetworkAccess(): Promise<LocalNetworkAccessSta
             signal,
         });
     } catch {
-        // 气泡还没点 / 被拒 / 网关没起，都以 Permissions API 的结果为准。
+        // 气泡还没点 / 被拒 / 网关没起，都以 Permissions API + 真实探测的结果为准。
     }
 
     const after = await readPermission();
     if (after) commitState(after);
+    // 用户点完「允许」后必须重新探一次：之前缓存的多半是 blocked。
+    reachability.delete(originKey("http://127.0.0.1:17800"));
+    await probeLoopbackReachability("http://127.0.0.1:17800");
     return state;
 }
