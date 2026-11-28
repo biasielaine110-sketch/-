@@ -1,6 +1,6 @@
 import { isLocalNetworkUrl, rewriteLocalMediaUrl } from "@/lib/api-proxy";
 import { canUseLocalNetworkDirectly } from "@/lib/local-network-access";
-import { publicBaseForLocalGateway } from "@/lib/local-gateway";
+import { downgradePublicGatewayUrl, isLocalGatewayPublicUrl, publicBaseForLocalGateway } from "@/lib/local-gateway";
 import { resolveModelRequestConfig, useConfigStore } from "@/stores/use-config-store";
 
 /**
@@ -39,7 +39,25 @@ function publicBasesForLocalHost(url: string): string[] {
 export function portableMediaUrls(url: string, model?: string | null): string[] {
     const raw = String(url || "").trim();
     if (!raw || !/^https?:\/\//i.test(raw)) return [];
-    // 只有本机/内网地址才需要换；公网地址原样就能用，别多造一跳。
+    /**
+     * 反向候选：节点内容是**本网关的公网入口**（`https://…ts.net/qf/v1/files/x.mp4`）。
+     *
+     * 🔴 为什么要有这一支（2026-11-28 用户第三次报障「qf 成片预览和下载非常慢」）：
+     * `videoResultFromUrl` 在生成时取不到字节，会把节点内容兜底写成**公开地址**。
+     * 那种节点以前是死结 —— `preferPublicMediaUrl` 只认「本机 → 公网」，公开地址原样返回，
+     * 于是**授权允许直连的浏览器也照样走 Funnel 中继**，预览和下载永远几百 KB/s。
+     * 现在授权正常时把它降回 loopback（同一台机器、同一份字节，实测 53 MB/s）。
+     * 直连失败（网关没起）还要能回公网入口，所以两条都进候选，由调用方的 `tried` 集合去重。
+     */
+    if (isLocalGatewayPublicUrl(raw)) {
+        // 没授权就别降级（打 loopback 只会静默挂起），也没有别的候选可给。
+        if (!canUseLocalNetworkDirectly()) return [];
+        const local = downgradePublicGatewayUrl(raw);
+        if (!local || local === raw) return [];
+        // 首帧会用它；它失败（网关没起）就回原来的公网入口。
+        return [local, raw];
+    }
+    // 只有本机/内网地址才需要换；其它公网地址原样就能用，别多造一跳。
     if (!isLocalNetworkUrl(raw)) return [];
     const bases: string[] = [];
     const addBase = (value?: string | null) => {
@@ -90,7 +108,21 @@ export function portableMediaUrls(url: string, model?: string | null): string[] 
  */
 export function preferPublicMediaUrl(url: string): string {
     const raw = String(url || "").trim();
-    if (!raw || !isLocalNetworkUrl(raw)) return raw;
+    if (!raw) return raw;
+    /**
+     * ① 已经在**本网关的公网入口**上：授权允许直连就降回 loopback。
+     *
+     * 🔴 这是「换掉中继」的另一半（2026-11-28）：上一轮只做了「本机 → 公网」，
+     * 于是节点内容一旦是 `https://…ts.net/qf/v1/files/x.mp4`（生成时取字节失败的兜底写法），
+     * 就算用户在 Chrome 里授权了本地网络访问，预览和下载也一辈子困在 Funnel 上。
+     * 降级只走内置映射表（`downgradePublicGatewayUrl`），推不出来就原样返回，绝不猜。
+     */
+    if (isLocalGatewayPublicUrl(raw)) {
+        if (!canUseLocalNetworkDirectly()) return raw;
+        const local = downgradePublicGatewayUrl(raw);
+        return local || raw;
+    }
+    if (!isLocalNetworkUrl(raw)) return raw;
     try {
         if (typeof window !== "undefined" && isLocalNetworkUrl(window.location.origin)) return raw;
     } catch {

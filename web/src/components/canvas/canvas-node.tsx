@@ -17,7 +17,7 @@ import {
     subscribeNativeVideoQueue,
 } from "@/lib/canvas/native-video-job-queue";
 import { describeVideoContainer, describeVideoSummary, readVideoContainer } from "@/lib/media-container";
-import { getMediaBlob, refreshMediaUrl } from "@/services/file-storage";
+import { getMediaBlob, refreshMediaUrl, resolveMediaUrl } from "@/services/file-storage";
 import { isLocalNetworkUrl } from "@/lib/api-proxy";
 import { isLocalGatewayPublicUrl } from "@/lib/local-gateway";
 import { localNetworkIsRelayed } from "@/lib/local-network-access";
@@ -1439,6 +1439,37 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
         setCurrentTime(0);
         setDuration(0);
     }
+
+    /**
+     * 🔴 有本地副本就**先放本地**（2026-11-28 用户第三次报障「qf 成片预览和下载非常慢」）。
+     *
+     * 以前 `getMediaBlob(storageKey)` 只在「下载」和「播放出错后修复」时被用到，**预览永远从
+     * `src` 那个网址流式播放** —— 哪怕成片字节已经好好躺在 IndexedDB 里。结果是：中继慢、LNA 没
+     * 授权、网关重启，任何一个都足以让预览卡住，而其实本机就有字节。
+     *
+     * 现在挂载后先试着读本地副本（`resolveMediaUrl` 复用 `file-storage` 的 object URL 缓存，
+     * 不重复建），读到就换成 `blob:` —— 预览零网络、零授权依赖。读不到（换电脑 / 清过缓存）
+     * 就保持原来的网址，由 `handleVideoError` 的候选表继续兜。
+     */
+    const localBlobKeyRef = useRef<string>("");
+    useEffect(() => {
+        const key = String(storageKey || "").trim();
+        if (!key) return;
+        localBlobKeyRef.current = key;
+        let cancelled = false;
+        void resolveMediaUrl(key)
+            .then((url) => {
+                if (cancelled || localBlobKeyRef.current !== key) return;
+                if (!url || !url.startsWith("blob:")) return;
+                setPlayableSrc((prev) => (prev === url ? prev : url));
+            })
+            .catch(() => {
+                // 读不到本地库不影响预览：继续用原来的网址。
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [storageKey]);
 
     // A dead blob: URL (revoked mid-session / failed hydration) leaves a plain <video> black
     // forever. Rebuild a fresh object URL from the stored blob and retry a few times. After the

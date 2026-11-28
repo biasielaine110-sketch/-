@@ -2,6 +2,7 @@ import { saveAs } from "file-saver";
 
 import { forceProxyMediaUrl, isLocalNetworkUrl, proxyMediaUrl } from "@/lib/api-proxy";
 import { supportsFileSystemAccess, writeBlobToDraftDirectory } from "@/lib/canvas/canvas-draft";
+import { isLocalGatewayPublicUrl } from "@/lib/local-gateway";
 import { portableMediaUrls, preferPublicMediaUrl } from "@/lib/media-portable";
 import { getMediaBlob } from "@/services/file-storage";
 
@@ -111,6 +112,19 @@ export async function resolveBlobSource(
             throw new Error(
                 `这条成片只存在本机网关（${host}），现在连不上 —— 先启动该网关再试；若网关里的文件已被清理，只能重新生成${reason ? `（${reason}）` : ""}`,
             );
+        }
+        /**
+         * 🔴 公网入口地址（节点内容是 `https://…ts.net/qf/v1/files/x.mp4`）：
+         * 授权允许直连时 `preferPublicMediaUrl` 已经把它降成 loopback 了（`raw !== input`）。
+         * loopback 这一跳失败（网关没起 / 文件过期）就回公网入口再取一次 ——
+         * 那条路虽然慢，但比直接掉进「站点代理」靠谱（代理在 CF 边缘，绕一大圈还可能 403）。
+         */
+        if (raw !== input && isLocalGatewayPublicUrl(input)) {
+            try {
+                return await fetchBlobOrThrow(input, onProgress);
+            } catch {
+                // 两条都失败 → 交给本地副本兜底。
+            }
         }
         // proxyMediaUrl declines to rewrite "known CORS-open" hosts, but that list is about API
         // POSTs with Authorization — not media GETs — so force the proxy as a last resort.
