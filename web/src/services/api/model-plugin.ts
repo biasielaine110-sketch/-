@@ -190,11 +190,14 @@ async function recoverSubmittedVideoTask(
     if (options?.signal?.aborted) return none;
     const body = requestConfig.data;
     if (!body || typeof body !== "object") return none;
-    const prompt = String((body as { prompt?: unknown }).prompt || "").trim();
+    // JSON 和 multipart 两种提交都要能认（有的中转 `/v1/videos` 收表单）。
+    const form = typeof FormData !== "undefined" && body instanceof FormData;
+    const readField = (name: string) => (form ? String(body.get(name) ?? "") : String((body as Record<string, unknown>)[name] ?? "")).trim();
+    const prompt = readField("prompt");
     if (!prompt) return none;
     const createUrl = directApiUrl(String(requestConfig.url || ""));
     if (!isVideoCreateUrl(createUrl)) return none;
-    const model = String((body as { model?: unknown }).model || "").trim();
+    const model = readField("model");
 
     const { task, lookedUp } = await recoverVideoTaskFromList({
         createUrl,
