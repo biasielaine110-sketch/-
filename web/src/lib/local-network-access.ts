@@ -23,6 +23,33 @@ export type LocalNetworkAccessState = "unknown" | "granted" | "prompt" | "denied
 let state: LocalNetworkAccessState = "unknown";
 let primed: Promise<LocalNetworkAccessState> | null = null;
 
+type LocalNetworkAccessListener = (next: LocalNetworkAccessState) => void;
+const listeners = new Set<LocalNetworkAccessListener>();
+
+/**
+ * 状态变了就广播 —— 画布上那个「允许直连」提示靠它自动消失/出现，
+ * 不需要用户手动刷新。监听器抛错不能影响权限状态机，所以逐个 try。
+ */
+function commitState(next: LocalNetworkAccessState) {
+    if (state === next) return;
+    state = next;
+    for (const listener of listeners) {
+        try {
+            listener(next);
+        } catch {
+            // 监听器自己的问题，不要污染权限判定
+        }
+    }
+}
+
+/** 订阅状态变化（授权气泡被点、用户去设置里改回来都会触发）。返回退订函数。 */
+export function subscribeLocalNetworkAccess(listener: LocalNetworkAccessListener): () => void {
+    listeners.add(listener);
+    return () => {
+        listeners.delete(listener);
+    };
+}
+
 /** 同步读当前状态。`unknown` 表示还没预热完。 */
 export function localNetworkAccessState(): LocalNetworkAccessState {
     return state;
@@ -36,8 +63,8 @@ export function localNetworkAccessState(): LocalNetworkAccessState {
  * `navigator.permissions`，只能从这里注入。
  */
 export function __setLocalNetworkAccessStateForProbe(next: LocalNetworkAccessState) {
-    state = next;
     primed = Promise.resolve(next);
+    commitState(next);
 }
 
 /**
@@ -89,7 +116,7 @@ async function readPermission(): Promise<LocalNetworkAccessState | null> {
         const status = await navigator.permissions.query(queryDescriptor("local-network"));
         status.onchange = () => {
             const next = status.state as LocalNetworkAccessState;
-            if (next === "granted" || next === "prompt" || next === "denied") state = next;
+            if (next === "granted" || next === "prompt" || next === "denied") commitState(next);
         };
         const value = status.state as LocalNetworkAccessState;
         return value === "granted" || value === "prompt" || value === "denied" ? value : "prompt";
@@ -110,17 +137,17 @@ export async function primeLocalNetworkAccess(): Promise<LocalNetworkAccessState
     primed = (async () => {
         const initial = await readPermission();
         if (initial === null) {
-            state = "unsupported";
+            commitState("unsupported");
             return state;
         }
-        state = initial;
+        commitState(initial);
         if (initial !== "prompt") return state;
 
         // 页面自己就在本机时不需要授权（同源 / 已是 loopback），别去打扰用户。
         try {
             const host = window.location.hostname.toLowerCase();
             if (/^(127\.|localhost$|0\.0\.0\.0$|\[?::1\]?$)/.test(host) || host.endsWith(".localhost")) {
-                state = "granted";
+                commitState("granted");
                 return state;
             }
         } catch {
@@ -143,8 +170,50 @@ export async function primeLocalNetworkAccess(): Promise<LocalNetworkAccessState
             // 401 / 403 / CORS / 超时都无所谓：目的是让 Chrome 把授权气泡显示出来。
         }
         const after = await readPermission();
-        if (after) state = after;
+        if (after) commitState(after);
         return state;
     })();
     return primed;
+}
+
+/**
+ * 在**用户手势**里主动重试一次授权（画布上那个「允许直连」按钮调它）。
+ *
+ * 为什么必须有这个入口：`primeLocalNetworkAccess()` 在页面启动时跑，那一刻没有用户激活，
+ * Chrome 常常**不弹** LNA 气泡，用户就卡在「一直读秒 / 走公网中继」里，不知道去哪点。
+ * 从 click 里发一次 loopback 请求，气泡才会出现；点完「允许」后 Permissions API 的
+ * `onchange` 会把状态推回 `granted`，播放器/下载入口下一次取址就会回到直连。
+ *
+ * 返回重试后的状态。`granted` 说明搞定；`prompt` 说明气泡弹出但还没点；
+ * `denied` 说明被拒（只能去站点设置里改）。
+ */
+export async function requestLocalNetworkAccess(): Promise<LocalNetworkAccessState> {
+    const before = await readPermission();
+    if (before === null) {
+        commitState("unsupported");
+        return state;
+    }
+    commitState(before);
+    if (state === "granted" || state === "unsupported") return state;
+
+    try {
+        let signal: AbortSignal | undefined;
+        try {
+            signal = AbortSignal.timeout(30_000);
+        } catch {
+            signal = undefined;
+        }
+        // 探 /v1/health：不落业务、不需要额度，只为了让浏览器把授权气泡顶出来。
+        await fetch("http://127.0.0.1:17800/v1/health", {
+            mode: "cors",
+            cache: "no-store",
+            signal,
+        });
+    } catch {
+        // 气泡还没点 / 被拒 / 网关没起，都以 Permissions API 的结果为准。
+    }
+
+    const after = await readPermission();
+    if (after) commitState(after);
+    return state;
 }

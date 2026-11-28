@@ -316,6 +316,7 @@ import { convertNodeType, convertedNodeKeptMedia, nodeConversionTargets } from "
 import { registerBuiltinNodes } from "@/components/canvas/nodes/builtin-nodes";
 import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
 import { CanvasMediaLibraryNotice } from "@/components/canvas/canvas-media-library-notice";
+import { CanvasLocalNetworkNotice } from "@/components/canvas/canvas-local-network-notice";
 import { CanvasTopBar } from "@/components/canvas/canvas-top-bar";
 import { ConnectionCreateMenu, NodeCreateMenu, type PendingConnectionCreate } from "@/components/canvas/canvas-create-menus";
 import {
@@ -13748,6 +13749,7 @@ function AtelierCanvasPage() {
                 />
 
                 <CanvasMediaLibraryNotice />
+                <CanvasLocalNetworkNotice />
 
                 <AtelierCanvas
                     containerRef={containerRef}
