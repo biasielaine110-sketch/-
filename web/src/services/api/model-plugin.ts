@@ -1,10 +1,11 @@
-import axios, { type AxiosRequestConfig } from "axios";
+import axios, { type AxiosRequestConfig, type AxiosResponse } from "axios";
 
 import i18n from "@/i18n";
 import { buildApiUrl, modelOptionName, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
-import { isLocalNetworkUrl, proxyApiUrl } from "@/lib/api-proxy";
+import { directApiUrl, isLocalNetworkUrl, proxyApiUrl } from "@/lib/api-proxy";
 import { assertModelQuotaAvailable, describeQuotaLock, noteModelQuotaFailure } from "@/lib/model-quota-lockout";
 import { isTransientRequestError } from "@/lib/transient-request-error";
+import { isVideoCreateUrl, recoverVideoTaskFromList, videoListUrlFor } from "@/lib/video-task-recovery";
 
 type RequestOptions = { signal?: AbortSignal };
 
@@ -117,15 +118,39 @@ function isEmptyBodyRejection(error: unknown, data: unknown): boolean {
 
 /**
  * 所有插件请求的唯一出口（`http.get/post` 和脚本里的 `request()` 都走它）：
- * 正常只发一次；命中「body 丢失」才换传输重提一次，仍失败就给一句能指导用户的话。
+ * 正常只发一次；命中「body 丢失」才换传输重提一次；**提交没拿到回包**则先去网关的
+ * 任务列表把任务查回来（见 `lib/video-task-recovery.ts`）。
  */
 async function pluginRequest(config: AiConfig, requestConfig: AxiosRequestConfig & { url: string }, options?: RequestOptions) {
     // 调用方（脚本作者）显式给了 timeout 就尊重它，否则按目标地址补一个，别让挂起的连接拖成无限读秒。
     const timeout = requestConfig.timeout ?? pluginTimeoutMs(String(requestConfig.url || ""), requestConfig.responseType);
+    // 记下「这次提交是什么时候开始的」，查回任务时用它把窗口卡死，避免认回上一次的成片。
+    const startedAt = Date.now();
     try {
         return await axios.request({ ...requestConfig, timeout, signal: options?.signal });
     } catch (error) {
-        if (!isEmptyBodyRejection(error, requestConfig.data)) throw error;
+        /**
+         * 「回包在链路上丢了」才去查任务列表。
+         *
+         * 判据必须严格：**没有任何 response** 且属于可重试类（超时 / 连接重置 / 无回包）。
+         * 4xx 是网关给出了明确答复（参数错、鉴权错），5xx 也是答复 —— 这两种情况任务基本没
+         * 建起来，再去列表里捞只会捞到别人的任务，反过来把上一次的成片贴到这次的节点上。
+         */
+        const responseLost = axios.isAxiosError(error) && !error.response && isTransientRequestError(error);
+        if (!isEmptyBodyRejection(error, requestConfig.data)) {
+            if (responseLost) {
+                /**
+                 * 🔴 提交阶段的「无回包 / 超时」不等于没提交（2026-11-28 qf 实况）：
+                 * 网关日志里 `POST /v1/videos → 200（11s）`、`task-created` 全都在，前端却只收到
+                 * 「没有拿到任何回包」—— 响应丢在 Tailscale Funnel 那一跳，任务已经建好了。
+                 * 这里先用网关的任务列表把它认回来；认到了就当作提交成功，脚本照常轮询。
+                 */
+                const recovery = await recoverSubmittedVideoTask(config, { ...requestConfig, url: String(requestConfig.url || "") }, startedAt, options);
+                if (recovery.response) return recovery.response;
+                if (recovery.lookedUp) (error as { taskLookupMissed?: boolean }).taskLookupMissed = true;
+            }
+            throw error;
+        }
         const direct = String(requestConfig.url || "");
         const proxied = proxyApiUrl(direct, "proxy");
         // 本机/内网网关塞进边缘代理只会 403（边缘到不了本机），这种情况没有第二条路可换。
@@ -144,6 +169,48 @@ async function pluginRequest(config: AiConfig, requestConfig: AxiosRequestConfig
             throw retryError;
         }
     }
+}
+
+/**
+ * 提交没拿到回包时，用网关的任务列表把任务认回来。
+ *
+ * 只对「带 prompt 的 `POST .../v1/videos`」生效：别的接口（ComfyUI 工作流、自建
+ * `/v1/media/generations`）没有统一的列表契约，硬猜只会认错任务，所以一律跳过。
+ * 认回来时伪造一个 `AxiosResponse` 形状 `{ data: {id, status, ...} }` —— 脚本只读 `.data`
+ * （构造出来的任务和真回包同形状，脚本无需任何改动）。
+ */
+async function recoverSubmittedVideoTask(
+    config: AiConfig,
+    requestConfig: AxiosRequestConfig & { url: string },
+    startedAt: number,
+    options?: RequestOptions,
+): Promise<{ response: AxiosResponse | null; lookedUp: boolean }> {
+    const none = { response: null, lookedUp: false };
+    if (String(requestConfig.method || "").toLowerCase() !== "post") return none;
+    if (options?.signal?.aborted) return none;
+    const body = requestConfig.data;
+    if (!body || typeof body !== "object") return none;
+    const prompt = String((body as { prompt?: unknown }).prompt || "").trim();
+    if (!prompt) return none;
+    const createUrl = directApiUrl(String(requestConfig.url || ""));
+    if (!isVideoCreateUrl(createUrl)) return none;
+    const model = String((body as { model?: unknown }).model || "").trim();
+
+    const { task, lookedUp } = await recoverVideoTaskFromList({
+        createUrl,
+        // 任务列表走和提交同一条传输（qf：直接走 Funnel 公网入口；普通中转：走 /api/proxy）。
+        listUrl: proxyApiUrl(videoListUrlFor(createUrl), config.apiTransport),
+        headers: requestConfig.headers as Record<string, string> | undefined,
+        model,
+        prompt,
+        startedAt,
+        signal: options?.signal,
+    });
+    if (!task) return { response: null, lookedUp };
+    return {
+        response: { data: task, status: 200, statusText: "OK", headers: {}, config: requestConfig } as unknown as AxiosResponse,
+        lookedUp: true,
+    };
 }
 
 function createPluginHttp(config: AiConfig, options?: RequestOptions): PluginHttp {
@@ -303,7 +370,9 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
             } else if (!status && !bodyMessage) {
                 // 没有 response 时 axios 只会给一句 "Network Error"，用户拿它什么都判断不了。
                 // 说清两件事：这是链路没回包；后端可能已经收下了，别急着重复提交。
-                message = i18n.t("modelPlugin.networkNoResponse");
+                // 如果已经查过网关任务列表还是没找到，就可以确定「这次没送达」，文案要更硬气。
+                const lookedUp = Boolean((error as { taskLookupMissed?: boolean }).taskLookupMissed);
+                message = i18n.t(lookedUp ? "modelPlugin.networkNoResponseUnrecovered" : "modelPlugin.networkNoResponse");
             }
         }
         /**

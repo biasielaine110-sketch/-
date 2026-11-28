@@ -255,6 +255,7 @@ export default {
         submitNotDelivered: "The submission never reached the gateway: its body was lost in transit (the gateway only received the headers). Nothing was queued and no quota was used — just click Generate again.",
         executionFailed: "Model request script failed: {{message}}",
         networkNoResponse: "The request never got any response (usually a flaky public entry or a timeout — not a prompt problem). The gateway may already have accepted the task — wait a moment, refresh the node, and only resubmit if it really stayed empty, so you don't burn quota twice.",
+        networkNoResponseUnrecovered: "The request never got any response (flaky public entry or timeout). The gateway's task list was checked and this submission is not there — so it really did not arrive. You can safely click Generate again; no quota was used.",
         noImages: "The model request script did not return any images",
         variables: {
             prompt: "User prompt with the system prompt already included",

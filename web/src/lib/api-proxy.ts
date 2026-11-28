@@ -132,6 +132,17 @@ export function resolveApiTransport(override?: ApiTransport | null): ApiTranspor
     return "proxy";
 }
 
+/**
+ * 把「我们实际发出去的地址」还原成上游直连地址。
+ *
+ * 用途只有一个：判断这次请求打到的是哪个上游接口。`proxyApiUrl()` 会把不 CORS 的
+ * 上游包成 `/api/proxy?target=...`，在里面认 `/v1/videos` 这种形状是认不出来的，所以
+ * 需要先剥掉代理壳（也顺手剥掉调色板式的 `http://…https://…` 重复拼接）。
+ */
+export function directApiUrl(url: string): string {
+    return normalizeProxyTarget(url);
+}
+
 export function proxyApiUrl(directUrl: string, transport?: ApiTransport | null): string {
     const normalized = normalizeProxyTarget(directUrl);
     try {
