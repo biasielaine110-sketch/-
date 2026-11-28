@@ -256,6 +256,7 @@ export default {
         executionFailed: "Model request script failed: {{message}}",
         networkNoResponse: "The request never got any response (usually a flaky public entry or a timeout — not a prompt problem). The gateway may already have accepted the task — wait a moment, refresh the node, and only resubmit if it really stayed empty, so you don't burn quota twice.",
         networkNoResponseUnrecovered: "The request never got any response (flaky public entry or timeout). The gateway's task list was checked and this submission is not there — so it really did not arrive. You can safely click Generate again; no quota was used.",
+        networkNoResponseLargeBody: "This request body is {{size}} (the reference images), and requests this large often only get halfway through the public entry. Click \"Allow direct\" at the bottom-left of the canvas so requests use the local loopback (about 100x faster), or retry with fewer reference images.",
         noImages: "The model request script did not return any images",
         variables: {
             prompt: "User prompt with the system prompt already included",

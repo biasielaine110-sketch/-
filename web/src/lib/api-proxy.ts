@@ -7,6 +7,7 @@
 // Users can switch to "direct" in preferences when the provider allows CORS.
 
 import { upgradeLocalGatewayUrl } from "@/lib/local-gateway";
+import { canUseLocalNetworkDirectly } from "@/lib/local-network-access";
 import { CONFIG_STORE_KEY, buildApiUrl, type ApiTransport } from "@/stores/use-config-store";
 
 /**
@@ -149,12 +150,22 @@ export function proxyApiUrl(directUrl: string, transport?: ApiTransport | null):
         const target = new URL(normalized);
         if (typeof window !== "undefined" && target.origin === window.location.origin) return normalized;
         if (target.protocol !== "http:" && target.protocol !== "https:") return normalized;
-        // 🔴 本机网关的**公网入口**优先（2026-11-26 Chrome 142+ LNA）：
-        // 公网页面（`*.pages.dev`）直连 `127.0.0.1` 要用户授权，未授权时请求静默挂起，
-        // 画布上就是「一直读秒」。有公开入口就直接用它，根本不发 loopback 请求。
-        // 页面自己在本机时 `upgradeLocalGatewayUrl` 原样返回，dev 体验不受影响。
+        // 🔴 本机网关：**先看 loopback 能不能直连，能就连，不能才绕公网入口**。
+        //
+        // 2026-11-26 之前这里无条件升级公网入口，是因为 Chrome 142+ 的 LNA 未授权时
+        // fetch 会静默挂起（「一直读秒」比绕路更难查）。但现在有了真实探测
+        // （`probeLoopbackReachability`：no-cors 打本机 `/v1/health`，拿到响应就算通），
+        // 「能不能直连」是可判定的，而不是只能一刀切绕路。
+        //
+        // 🔴 为什么必须直连（2026-11-28 qf 图生视频实测）：Funnel 那一跳对**大请求体**
+        // 极不稳定 —— 648 KB 的图生视频提交呢，一次 40s 走完、下一次 60s 连 body 都没读完
+        // （网关日志 `body-lost content_length:647984`），客户端 60s 超时、任务压根没建。
+        // 同一个请求走 loopback 是毫秒级。所以「有公开入口」不再等于「必须用公开入口」。
         const publicUrl = upgradeLocalGatewayUrl(normalized);
-        if (publicUrl !== normalized) return publicUrl;
+        if (publicUrl !== normalized) {
+            if (isLocalNetworkHost(target.host) && canUseLocalNetworkDirectly(normalized)) return normalized;
+            return publicUrl;
+        }
         // 没登记过公开入口的本机/内网地址：必须浏览器直连。塞进 `/api/proxy` 只会得到 403
         // （边缘节点在云端，永远到不了用户自己的机器）。
         if (isLocalNetworkHost(target.host)) return normalized;

@@ -22,9 +22,55 @@ type RequestOptions = { signal?: AbortSignal };
 const PLUGIN_REQUEST_TIMEOUT_LOCAL_MS = 20_000;
 const PLUGIN_REQUEST_TIMEOUT_REMOTE_MS = 60_000;
 
-function pluginTimeoutMs(url: string, responseType?: string): number {
+/**
+ * 🔴 提交（POST）不能按「查询」的预算走（2026-11-28 qf 实测）。
+ *
+ * 网关收下 `POST /v1/videos` 后要开 WebView、选账号、注入 cookie、填模型/时长/比例、
+ * 提交，**实测 11s / 12s / 40s 才回包**。所以提交的本机预算必须 ≥90s ——
+ * 直连 loopback 只省掉传输（毫秒级），网关那段处理时间一分不少。
+ * 查询（GET 状态）本来就是秒回，20s 足够，别让真挂起的查询拖成无限读秒。
+ */
+const PLUGIN_SUBMIT_TIMEOUT_LOCAL_MS = 90_000;
+const PLUGIN_SUBMIT_TIMEOUT_REMOTE_MS = 60_000;
+
+/**
+ * 大请求体再额外加预算。
+ *
+ * 6 张参考图的图生视频请求体 **648 KB**，经 Tailscale Funnel：同样的请求一次 40s 走完
+ * （`task-created` 同时落库），下一次 60s 时**连 body 都没读完** —— 网关日志
+ * `body-lost content_length:647984`，客户端 60s 超时先撤、任务没建，用户看到的是
+ * 「请求没有拿到任何回包」。每 100 KB 加 30s，上限 180s（再多就该改走路回环了）。
+ */
+const PLUGIN_UPLOAD_STEP_BYTES = 100_000;
+const PLUGIN_UPLOAD_STEP_MS = 30_000;
+const PLUGIN_REQUEST_TIMEOUT_MAX_MS = 180_000;
+
+/** 只有 JSON / 字符串能估；FormData 算不出（浏览器自己会分块编码），按 0 处理。 */
+function requestBodyBytes(data: unknown): number {
+    if (data == null) return 0;
+    if (typeof data === "string") return data.length;
+    if (typeof FormData !== "undefined" && data instanceof FormData) return 0;
+    try {
+        return JSON.stringify(data)?.length || 0;
+    } catch {
+        return 0;
+    }
+}
+
+function pluginTimeoutMs(url: string, responseType?: string, bodyBytes = 0, method = "get"): number {
     if (responseType === "blob" || responseType === "arraybuffer") return 0;
-    return isLocalNetworkUrl(url) ? PLUGIN_REQUEST_TIMEOUT_LOCAL_MS : PLUGIN_REQUEST_TIMEOUT_REMOTE_MS;
+    const local = isLocalNetworkUrl(url);
+    const submit = /^(post|put|patch)$/i.test(method);
+    const base = local
+        ? submit
+            ? PLUGIN_SUBMIT_TIMEOUT_LOCAL_MS
+            : PLUGIN_REQUEST_TIMEOUT_LOCAL_MS
+        : submit
+          ? PLUGIN_SUBMIT_TIMEOUT_REMOTE_MS
+          : PLUGIN_REQUEST_TIMEOUT_REMOTE_MS;
+    if (bodyBytes <= PLUGIN_UPLOAD_STEP_BYTES) return base;
+    const extra = Math.ceil(bodyBytes / PLUGIN_UPLOAD_STEP_BYTES) * PLUGIN_UPLOAD_STEP_MS;
+    return Math.min(base + extra, PLUGIN_REQUEST_TIMEOUT_MAX_MS);
 }
 
 /**
@@ -122,8 +168,11 @@ function isEmptyBodyRejection(error: unknown, data: unknown): boolean {
  * 任务列表把任务查回来（见 `lib/video-task-recovery.ts`）。
  */
 async function pluginRequest(config: AiConfig, requestConfig: AxiosRequestConfig & { url: string }, options?: RequestOptions) {
-    // 调用方（脚本作者）显式给了 timeout 就尊重它，否则按目标地址补一个，别让挂起的连接拖成无限读秒。
-    const timeout = requestConfig.timeout ?? pluginTimeoutMs(String(requestConfig.url || ""), requestConfig.responseType);
+    // 调用方（脚本作者）显式给了 timeout 就尊重它，否则按目标地址 + 请求类型 + 请求体大小补一个：
+    // 状态查询秒回，提交要等网关开 WebView 建任务，648 KB 的图生视频再多留上传时间。
+    const bodyBytes = requestBodyBytes(requestConfig.data);
+    const method = String(requestConfig.method || "get").toLowerCase();
+    const timeout = requestConfig.timeout ?? pluginTimeoutMs(String(requestConfig.url || ""), requestConfig.responseType, bodyBytes, method);
     // 记下「这次提交是什么时候开始的」，查回任务时用它把窗口卡死，避免认回上一次的成片。
     const startedAt = Date.now();
     try {
@@ -148,6 +197,8 @@ async function pluginRequest(config: AiConfig, requestConfig: AxiosRequestConfig
                 const recovery = await recoverSubmittedVideoTask(config, { ...requestConfig, url: String(requestConfig.url || "") }, startedAt, options);
                 if (recovery.response) return recovery.response;
                 if (recovery.lookedUp) (error as { taskLookupMissed?: boolean }).taskLookupMissed = true;
+                // 大请求体 + 查不到任务 ⇒ 基本都是「请求体没读完」。留给上层说清体积与出路。
+                if (bodyBytes) (error as { submitBodyBytes?: number }).submitBodyBytes = bodyBytes;
             }
             throw error;
         }
@@ -160,7 +211,7 @@ async function pluginRequest(config: AiConfig, requestConfig: AxiosRequestConfig
             return await axios.request({
                 ...requestConfig,
                 url: proxied,
-                timeout: requestConfig.timeout ?? pluginTimeoutMs(proxied, requestConfig.responseType),
+                timeout: requestConfig.timeout ?? pluginTimeoutMs(proxied, requestConfig.responseType, bodyBytes, "post"),
                 signal: options?.signal,
             });
         } catch (retryError) {
@@ -375,7 +426,14 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
                 // 说清两件事：这是链路没回包；后端可能已经收下了，别急着重复提交。
                 // 如果已经查过网关任务列表还是没找到，就可以确定「这次没送达」，文案要更硬气。
                 const lookedUp = Boolean((error as { taskLookupMissed?: boolean }).taskLookupMissed);
+                const bodyRaw = Number((error as { submitBodyBytes?: number }).submitBodyBytes || 0);
                 message = i18n.t(lookedUp ? "modelPlugin.networkNoResponseUnrecovered" : "modelPlugin.networkNoResponse");
+                if (bodyRaw > PLUGIN_UPLOAD_STEP_BYTES) {
+                    // 图生视频这种大请求体，经公网入口最常见的死法就是「只传了请求头」：
+                    // 网关日志会留一条 `body-lost content_length:…`。结论（没送达 / 可能已收下）
+                    // 已经在上面那句里了，这里补的是**唯一有效的出路**：改走本机回环。
+                    message = `${message}\n\n${i18n.t("modelPlugin.networkNoResponseLargeBody", { size: `${Math.round(bodyRaw / 1024)} KB` })}`;
+                }
             }
         }
         /**
