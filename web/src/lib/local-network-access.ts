@@ -58,6 +58,16 @@ const listeners = new Set<LocalNetworkAccessListener>();
 
 /** origin → 可达性。key 统一用 `new URL(...).origin`，含端口。 */
 const reachability = new Map<string, LoopbackReachability>();
+/**
+ * 结论的时效。**「blocked」不能是终身判决**（2026-11-28 第五次报障）。
+ *
+ * 页面启动那一刻网关可能还没起、Chrome 也可能还没拿到用户手势 —— 那一次探测必然失败。
+ * 若把那个 `blocked` 当永久结论，用户把网关打开之后预览和下载仍然一辈子走 45 KB/s 的中继，
+ * 表现为「以前一点就放，现在怎么都慢」。45 s 足够「一次操作内别重复探」，又短到能自愈；
+ * `reachable` 给 10 分钟，省掉反复探活。
+ */
+const REACHABILITY_TTL_MS = { reachable: 10 * 60_000, blocked: 45_000 } as const;
+const reachabilityAt = new Map<string, number>();
 const reachabilityInflight = new Map<string, Promise<LoopbackReachability>>();
 type ReachabilityListener = (origin: string, next: LoopbackReachability) => void;
 const reachabilityListeners = new Set<ReachabilityListener>();
@@ -122,8 +132,22 @@ export function __setLocalNetworkAccessStateForProbe(next: LocalNetworkAccessSta
 export function __setLoopbackReachabilityForProbe(url: string, next: LoopbackReachability | null) {
     const key = originKey(url);
     if (!key) return;
-    if (next === null) reachability.delete(key);
-    else reachability.set(key, next);
+    if (next === null) {
+        reachability.delete(key);
+        reachabilityAt.delete(key);
+    } else {
+        reachability.set(key, next);
+        reachabilityAt.set(key, Date.now());
+    }
+}
+
+/**
+ * 仅供探针：把某个 origin 的探测结论「做旧」，用来验证 TTL 自愈（`blocked` 不许定终身）。
+ */
+export function __expireLoopbackReachabilityForProbe(url: string) {
+    const key = originKey(url);
+    if (!key) return;
+    if (reachability.has(key)) reachabilityAt.set(key, 0);
 }
 
 /**
@@ -144,11 +168,38 @@ function originKey(url: string): string {
     }
 }
 
-/** 读某个地址楼层的可达性结论（同步）。 */
+/** 读某个地址楼层的可达性结论（同步）。过期的结论按「没探过」处理，逼调用方重探。 */
 export function loopbackReachability(url: string): LoopbackReachability {
     const key = originKey(url);
     if (!key) return "unknown";
-    return reachability.get(key) ?? "unknown";
+    const value = reachability.get(key);
+    if (!value || value === "unknown") return "unknown";
+    const at = reachabilityAt.get(key) || 0;
+    if (Date.now() - at > REACHABILITY_TTL_MS[value]) {
+        reachability.delete(key);
+        reachabilityAt.delete(key);
+        return "unknown";
+    }
+    return value;
+}
+
+/**
+ * 等一次真实探测的结论，最多等 `budgetMs`（拿不到就回 `unknown`，由调用方保守处理）。
+ *
+ * 🔴 为什么需要这个（2026-11-28 第五次报障）：「首帧必须同步出地址」这条约束让播放器只能在
+ * 探测还没回来时先给公网入口 —— 而那一跳只有 45–260 KB/s，一个 1.8 MB 成片要几十秒。
+ * 用户体感就是「以前一点就放，现在要读秒」。先花几百毫秒把「这台机器的 loopback 通不通」
+ * 问清楚，比直接掉进中继划算得多（800 ms vs 40 s）。
+ */
+export async function awaitLoopbackReachability(url: string, budgetMs = 800): Promise<LoopbackReachability> {
+    const cached = loopbackReachability(url);
+    if (cached !== "unknown") return cached;
+    if (!originKey(url)) return "unknown";
+    const probe = probeLoopbackReachability(url, Math.max(300, budgetMs));
+    const budget = new Promise<LoopbackReachability>((resolve) => {
+        setTimeout(() => resolve("unknown"), Math.max(300, budgetMs));
+    });
+    return Promise.race([probe, budget]);
 }
 
 /**
@@ -199,6 +250,7 @@ export function probeLoopbackReachability(
         }
         const prev = reachability.get(key);
         reachability.set(key, next);
+        reachabilityAt.set(key, Date.now());
         if (prev !== next) {
             for (const listener of reachabilityListeners) {
                 try {
@@ -232,12 +284,15 @@ export function probeLoopbackReachability(
  * 也就是说：**授权正常的 Chrome 反而被我们自己降速了 4000 倍**。Funnel 是 DERP 中继，
  * 单连接实测只有 ~45 KB/s（四路并发聚合 ~130 KB/s），画布一次挂十几个节点就是几十秒黑屏。
  *
- * 判定分两层，**权限只是第一层，真实可达性才是最终一票**：
+ * 判定顺序（2026-11-28 起）：**权限只是第一层，真实可达性才是最终一票**：
  *
- *   granted              → 直连（权限已明确，直接给最快的那条）。
- *   prompt / denied      → 不直连（前者可能静默挂起，后者明确被拒）。
- *   unsupported / unknown → 看真实探测：reachable 才直连，blocked 绝不直连，
- *                          还没探过就先发起一次探测、本次按「不直连」保守处理。
+ *   granted                        → 直连（权限已明确，直接给最快的那条）。
+ *   其它一切状态（prompt / denied / unsupported / unknown）
+ *                                  → 看真实探测：reachable 直连、blocked 绝不直连、
+ *                                    还没探过就发起一次探测并按「不直连」保守处理。
+ *
+ * 🔴 `prompt` 不再一票否决：Chrome 对 LNA 这几个人造权限名经常恒回 `prompt`，
+ * 一票否决等于把「其实完全通的用户」永久按进中继（第五条报障的真因）。
  *
  * 传入 `url` 是目标本机地址（`http://127.0.0.1:17800/...`）；不传就看不了探测结论，
  * 只按权限判（`granted` 才 true）。这样「公网入口要不要降回 loopback」这种需要落到
@@ -245,15 +300,27 @@ export function probeLoopbackReachability(
  */
 export function canUseLocalNetworkDirectly(url?: string): boolean {
     if (state === "granted") return true;
-    if (state !== "unsupported") return false;
     if (!url) return false;
+    /**
+     * 🔴 真实探测对**所有**权限态都是第一票（2026-11-28 第五次报障）。
+     *
+     * 旧实现只让 `unsupported` 去看探测结论，`prompt` 直接判「不许直连」。可 Chrome 里
+     * `navigator.permissions.query()` 对 LNA 这几个人造权限名经常恒回 `prompt`
+     * （甚至会因为查询本身不是用户手势而永远不弹气泡），于是**请求其实完全通、我们却把
+     * 每一条成片都赶进了 45–260 KB/s 的 Funnel 中继** —— 用户的原话就是
+     * 「以前生成完一点就放，现在到底什么情况」。
+     *
+     * 判据翻过来的理由和 `unsupported` 那条一样：**拿到响应就是硬证据**。
+     * 探测是 no-cors 打到同一个 origin 的 `/v1/health`（网关免鉴权），能回来就说明
+     * 浏览器放行了这个 loopback origin，`<video>` / `fetch` 打同一个 origin 必然也放行。
+     * 反过来探到 blocked 就绝不打 —— 那才是 `MEDIA_ELEMENT_ERROR: Network error` 的根因。
+     * 权限状态变化时 `watchPermissionStatus.onchange` 会清掉探测结论，不会留下陈旧判断。
+     */
     const reach = loopbackReachability(url);
     if (reach === "reachable") return true;
-    if (reach === "unknown") {
-        // 还没探过：这次保守走公网，同时把探测排出去，下一次渲染就能拿到结论。
-        void probeLoopbackReachability(url);
-        return false;
-    }
+    if (reach === "blocked") return false;
+    // 还没探过（或结论已过期）：这次保守走公网，同时把探测排出去，下一次取址就能拿到结论。
+    void probeLoopbackReachability(url);
     return false;
 }
 
@@ -272,8 +339,9 @@ export function localNetworkIsRelayed(): boolean {
  */
 export function anyLoopbackBlocked(): boolean {
     if (state === "granted") return false;
-    for (const value of reachability.values()) {
-        if (value === "blocked") return true;
+    for (const key of Array.from(reachability.keys())) {
+        // 走 `loopbackReachability()` 才能顺手清掉过期结论（blocked 只有 45 s 寿命）。
+        if (loopbackReachability(key) === "blocked") return true;
     }
     return false;
 }
@@ -285,8 +353,9 @@ function queryDescriptor(name: string): PermissionDescriptor {
 function watchPermissionStatus(status: PermissionStatus) {
     status.onchange = () => {
         const next = status.state;
-        // 授权状态变了 → 之前探到的可达性结论就过期了，清掉重探。
+        // 授权状态变了 → 之前探到的可达性结论就过期了，清掉重探（连时间戳一起清）。
         reachability.clear();
+        reachabilityAt.clear();
         if (next === "granted") {
             commitState("granted");
             return;
@@ -391,7 +460,25 @@ export async function primeLocalNetworkAccess(): Promise<LocalNetworkAccessState
 
         // 不管权限是什么，都探一次 —— unsupported 时要靠它决定能不能直连。
         // granted 也探：否则「权限给了但网关没起」会把所有节点降级成必然失败的首帧。
-        void probeLoopbackReachability("http://127.0.0.1:17800");
+        void probeLoopbackReachability("http://127.0.0.1:17800").then((reach) => {
+            /**
+             * 🔴 启动那一刻的探测失败**不代表** loopback 打不通（2026-11-28 第五次报障的最后一环）：
+             * 页面刚加载时还没有用户手势，Chrome 既不会弹 LNA 气泡，也可能直接把这条
+             * local-network 请求掐掉。若把这次 blocked 当结论，用户第一次播视频就是几十秒中继，
+             * 体感「以前一点就放，现在怎么都慢」。
+             *
+             * 于是挂一个**一次性** pointerdown：用户第一次点画面时清掉结论、重探一次。
+             * 那时已经有手势，探测结论才是真的 —— 通了，播放器和下载的下一跳立刻回到 loopback。
+             */
+            if (reach !== "blocked" || typeof window === "undefined") return;
+            const retry = () => {
+                const key = originKey("http://127.0.0.1:17800");
+                reachability.delete(key);
+                reachabilityAt.delete(key);
+                void probeLoopbackReachability("http://127.0.0.1:17800");
+            };
+            window.addEventListener("pointerdown", retry, { once: true, passive: true });
+        });
         return state;
     })();
     return primed;
@@ -434,6 +521,7 @@ export async function requestLocalNetworkAccess(): Promise<LocalNetworkAccessSta
     if (after) commitState(after);
     // 用户点完「允许」后必须重新探一次：之前缓存的多半是 blocked。
     reachability.delete(originKey("http://127.0.0.1:17800"));
+    reachabilityAt.delete(originKey("http://127.0.0.1:17800"));
     await probeLoopbackReachability("http://127.0.0.1:17800");
     return state;
 }

@@ -20,7 +20,7 @@ import { describeVideoContainer, describeVideoSummary, readVideoContainer } from
 import { getMediaBlob, refreshMediaUrl, resolveMediaUrl } from "@/services/file-storage";
 import { isLocalNetworkUrl } from "@/lib/api-proxy";
 import { downgradePublicGatewayUrl, isLocalGatewayPublicUrl } from "@/lib/local-gateway";
-import { canUseLocalNetworkDirectly, localNetworkIsRelayed, subscribeLoopbackReachability } from "@/lib/local-network-access";
+import { awaitLoopbackReachability, canUseLocalNetworkDirectly, localNetworkIsRelayed, subscribeLoopbackReachability } from "@/lib/local-network-access";
 import { portableMediaUrls, preferPublicMediaUrl } from "@/lib/media-portable";
 import { needsMediaRecovery } from "@/lib/canvas/media-recovery";
 import { resolveBlobSource, saveBlobAs } from "@/lib/fs/save-blob";
@@ -1470,6 +1470,40 @@ function CanvasNodeVideoPlayer({ src, posterSrc, storageKey, mimeType, model, me
             cancelled = true;
         };
     }, [storageKey]);
+
+    /**
+     * 🔴 首帧别急着掉进中继（2026-11-28 第五次报障「以前一点就放，现在要读秒」）。
+     *
+     * 取 src 是同步的，探测结论通常还没回来，`preferPublicMediaUrl` 只能保守给公网入口；
+     * 而那一跳是 Tailscale DERP 中继，实测 45–260 KB/s —— 1.85 MB 的成片要 40 s 才起播，
+     * 同一份字节走 loopback 只要 10 ms。这里的取舍是：宁可多花最多 800 ms 把
+     * 「这台机器的 loopback 到底通不通」问清楚，也别让用户对着黑框等半分钟。
+     *
+     * 只换「还没开播」时的地址；本地副本（`blob:`）本来就零网络，绝不动它。
+     */
+    useEffect(() => {
+        const target = String(src || "").trim();
+        if (!/^https?:\/\//i.test(target)) return;
+        const local = isLocalGatewayPublicUrl(target)
+            ? downgradePublicGatewayUrl(target)
+            : isLocalNetworkUrl(target)
+              ? target
+              : "";
+        if (!local) return;
+        let cancelled = false;
+        void awaitLoopbackReachability(local, 800).then((reach) => {
+            if (cancelled || reach !== "reachable") return;
+            if (activated || wantPlayRef.current) return;
+            setPlayableSrc((prev) => {
+                if (prev.startsWith("blob:")) return prev;
+                const next = preferPublicMediaUrl(target);
+                return prev === next ? prev : next;
+            });
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [src, activated]);
 
     /**
      * 🔴 探测结论晚到也要「换回直连」（2026-11-26 第三次报障「成片无法播放」的收尾）。
