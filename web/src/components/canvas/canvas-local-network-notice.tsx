@@ -4,9 +4,14 @@ import { App } from "antd";
 import { Cable, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { localNetworkIsRelayed, primeLocalNetworkAccess, requestLocalNetworkAccess, subscribeLocalNetworkAccess } from "@/lib/local-network-access";
+import { anyLoopbackBlocked, localNetworkIsRelayed, primeLocalNetworkAccess, requestLocalNetworkAccess, subscribeLocalNetworkAccess, subscribeLoopbackReachability } from "@/lib/local-network-access";
 
 const DISMISS_KEY = "canvas-local-network-notice-dismissed";
+
+/** 提示条的显示判据收口在这一处，别在组件里散着写。 */
+function shouldShowNotice(): boolean {
+    return localNetworkIsRelayed() || anyLoopbackBlocked();
+}
 
 /**
  * 公网页面直连本机被 Chrome 拦下时的提示。
@@ -16,13 +21,16 @@ const DISMISS_KEY = "canvas-local-network-notice-dismissed";
  * 是「浏览器不让直连」，而用户完全没有可点的入口：`primeLocalNetworkAccess()` 在启动时
  * 没有用户激活，Chrome 通常不弹气泡。所以这里给一个按钮，在 click 手势里重新触发授权。
  *
- * 只在真的被降级时出现（`localNetworkIsRelayed()`：prompt / denied），
- * granted / unsupported 一律不打扰。关掉后本会话不再弹（sessionStorage）。
+ * 出现条件（两者之一）：
+ *   `localNetworkIsRelayed()` —— prompt / denied，权限 API 明确说了不行；
+ *   `anyLoopbackBlocked()`   —— 权限名一个都问不出来（`unsupported`），但真实探测被拦。
+ * 🔴 第二种是 2026-11-28 新加的：那种状态下提示条以前不出现，用户永远没有修复入口，
+ * 只能一直走中继（实测 230–470 KB/s）。granted 一律不打扰。关掉后本会话不再弹。
  */
 export function CanvasLocalNetworkNotice() {
     const { t } = useTranslation();
     const { message } = App.useApp();
-    const [relayed, setRelayed] = useState(() => localNetworkIsRelayed());
+    const [relayed, setRelayed] = useState(() => shouldShowNotice());
     const [dismissed, setDismissed] = useState(() => {
         try {
             return sessionStorage.getItem(DISMISS_KEY) === "1";
@@ -32,10 +40,12 @@ export function CanvasLocalNetworkNotice() {
     });
     const [checking, setChecking] = useState(false);
 
-    useEffect(() => subscribeLocalNetworkAccess(() => setRelayed(localNetworkIsRelayed())), []);
+    useEffect(() => subscribeLocalNetworkAccess(() => setRelayed(shouldShowNotice())), []);
+    // 真实探测结论晚到（启动时那一次）也要能把提示条顶出来。
+    useEffect(() => subscribeLoopbackReachability(() => setRelayed(shouldShowNotice())), []);
 
     useEffect(() => {
-        void primeLocalNetworkAccess().then(() => setRelayed(localNetworkIsRelayed()));
+        void primeLocalNetworkAccess().then(() => setRelayed(shouldShowNotice()));
     }, []);
 
     const handleRequest = useCallback(async () => {
@@ -61,7 +71,7 @@ export function CanvasLocalNetworkNotice() {
                 });
                 return;
             }
-            setRelayed(localNetworkIsRelayed());
+            setRelayed(shouldShowNotice());
             message.warning({ content: t("canvas.localNetworkStillBlocked"), duration: 15 });
         } finally {
             setChecking(false);

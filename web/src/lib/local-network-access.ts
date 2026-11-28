@@ -262,6 +262,22 @@ export function localNetworkIsRelayed(): boolean {
     return state === "prompt" || state === "denied";
 }
 
+/**
+ * 有没有某个本机 origin 被**探明打不通**。
+ *
+ * 🔴 为什么要这一条（2026-11-28 第四次报障的收尾）：权限名全都问不出来时状态是
+ * `unsupported`，`localNetworkIsRelayed()` 返回 false —— 提示条不出现，用户就永远
+ * 没有「允许直连」的入口，只能一直走中继变慢。这一条让那种情况也能提示。
+ * `granted` 时一律 false（已经明确授权了，不再打扰）。
+ */
+export function anyLoopbackBlocked(): boolean {
+    if (state === "granted") return false;
+    for (const value of reachability.values()) {
+        if (value === "blocked") return true;
+    }
+    return false;
+}
+
 function queryDescriptor(name: string): PermissionDescriptor {
     return { name } as unknown as PermissionDescriptor;
 }
