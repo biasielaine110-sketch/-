@@ -104,6 +104,19 @@ const VIDEO_POLL_MAX_ATTEMPTS = 360;
 const VIDEO_POLL_INTERVAL_MS = 2500;
 
 /**
+ * 单次「问一下任务状态」的上限。
+ *
+ * 🔴 为什么必须给（2026-11-28 qf 黑屏的根因之一）：画布没有全局 axios 超时，
+ * 而 qf 网关回的是 `http://127.0.0.1:17800/v1/files/...` 这类本机地址 —— 在
+ * `https://….pages.dev` 页面上，Chrome 的 Local Network Access 没授权时那条请求是
+ * **静默挂起**（既不 resolve 也不 reject）。于是 `await` 永远不返回，画布表现成
+ * 「无限读秒」，任务其实早就在后台跑完了。
+ * 本机地址给它 20s（正常是毫秒级），公网地址 60s。
+ */
+const VIDEO_POLL_TIMEOUT_LOCAL_MS = 20_000;
+const VIDEO_POLL_TIMEOUT_REMOTE_MS = 60_000;
+
+/**
  * Most CN relay sites (New API / hfsyapi / autodl) allow browser CORS, so when a
  * body would exceed the site-proxy cap, POST the direct URL instead of dying 413.
  */
@@ -3106,9 +3119,43 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     });
 }
 
+/**
+ * 这次「问任务状态」失败，是「还能再试」还是「已经没救」。
+ *
+ * 🔴 背景（2026-11-28 用户报障「后台生成了视频，前台报错，视频窗口黑的」）：
+ * 原来 `pollOpenAIVideoTask` 把**任何**异常都 `throw` 出去，一次网络抖动就终止整条生成。
+ * qf 渠道（本机 quota-flow 网关，走 Tailscale Funnel 公网入口）的 15s 成片要盯轮询
+ * 6–10 分钟，`funnel-guard.log` 里反复记着「能通但极慢 / TCP 没建立」——断一两拍是常态。
+ * 后果是整个前台流程结束、节点没有内容（黑框），而后台 WebView 照样跑完并把文件落盘，
+ * 前端**从头到尾没拿到那条 URL**（所以网关 `/v1/files` 日志里 0 命中）。
+ *
+ * 判据：
+ *   · 4xx（401 鉴权 / 404 任务已过期 / 400 参数）→ 重试也长不出结果，立刻暴露；
+ *   · 5xx / 超时 / 连接被重置 / 无响应 → 「这轮没问到」，回 `pending` 交给外层继续问；
+ *   · 取消（用户主动 abort）→ 原样抛，不算抖动。
+ *
+ * 导出给探针（`video-poll-resilience-probe`）钉这套判据。
+ */
+export function isTransientVideoQueryError(error: unknown): boolean {
+    if (axios.isCancel(error)) return false;
+    if (error instanceof DOMException && error.name === "AbortError") return false;
+    if (!axios.isAxiosError(error)) return false;
+    const status = error.response?.status;
+    if (typeof status === "number") return status >= 500;
+    // 没有 response：DNS / TCP / TLS / 代理断链 / 我们自己的 timeout —— 都值得再问一次。
+    return true;
+}
+
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
-        const rawResponse = (await axios.get<ApiVideoResponse>(aiApiUrl(config, `/videos/${task.id}`), { headers: aiHeaders(config), signal: options?.signal })).data;
+        const pollUrl = aiApiUrl(config, `/videos/${task.id}`);
+        const rawResponse = (
+            await axios.get<ApiVideoResponse>(pollUrl, {
+                headers: aiHeaders(config),
+                signal: options?.signal,
+                timeout: isLocalNetworkUrl(pollUrl) ? VIDEO_POLL_TIMEOUT_LOCAL_MS : VIDEO_POLL_TIMEOUT_REMOTE_MS,
+            })
+        ).data;
         const video = unwrapVideoResponse(rawResponse);
         const url = videoResultUrl(video);
         if (url) return { status: "completed", result: await videoResultFromUrl(url, options, config) };
@@ -3118,7 +3165,12 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
             // 这里再失败就说明「任务完成但响应里没有可用直链」，必须给能定位的文案 ——
             // 把顶层字段和截断的原始 JSON 一起带出去，用户截图/贴回来就能知道该认哪个字段。
             try {
-                const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), { headers: aiHeaders(config), responseType: "blob", signal: options?.signal });
+                const content = await axios.get<Blob>(aiApiUrl(config, `/videos/${task.id}/content`), {
+                    headers: aiHeaders(config),
+                    responseType: "blob",
+                    signal: options?.signal,
+                    timeout: VIDEO_POLL_TIMEOUT_REMOTE_MS,
+                });
                 await assertVideoBlob(content.data);
                 return { status: "completed", result: { blob: content.data } };
             } catch (contentError) {
@@ -3132,6 +3184,16 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
         if (video.status === "failed" || video.status === "cancelled") return { status: "failed", error: readApiErrorMessage(video.error?.message) || apiText("videoGenerationFailed") };
         return { status: "pending" };
     } catch (error) {
+        if (axios.isCancel(error) || options?.signal?.aborted) throw error;
+        /**
+         * 🔴 抖动不算失败：回 `pending`，让外层按 2.5s 继续问（总预算仍由
+         * `VIDEO_POLL_MAX_ATTEMPTS` 兜住）。这里若直接抛，后台已经跑完的成片就永远
+         * 到不了前台 —— 用户看到「报错 + 黑框」，而网关里文件完好无损。
+         */
+        if (isTransientVideoQueryError(error)) {
+            console.warn("[video] 这一轮没问到任务状态，继续轮询：", readAxiosError(error, apiText("videoTaskQueryFailed")));
+            return { status: "pending" };
+        }
         throw new Error(readAxiosError(error, apiText("videoTaskQueryFailed")));
     }
 }
@@ -3198,9 +3260,14 @@ async function videoResultFromUrl(url: string, options?: RequestOptions, config?
         }
     }
     // 取不到字节时**保留可移植的那条**（公开地址），绝不再把 `127.0.0.1` 写进节点。
-    return { url: remoteSeeds[0] || portable || direct, mimeType: "video/mp4" };
-    // 取不到字节时**保留可移植的那条**（公开地址），绝不再把 `127.0.0.1` 写进节点。
-    return { url: portable || direct, mimeType: "video/mp4" };
+    // 顺序：渠道公开地址 → 内置网关公网入口 → 本来就非本机的原地址 → 原样
+    // （只有「这个端口根本没有公网入口」时才会落到 loopback）。
+    const stored =
+        remoteSeeds[0] ||
+        (portable && !isLocalNetworkUrl(portable) ? portable : "") ||
+        (!isLocalNetworkUrl(direct) ? direct : "") ||
+        direct;
+    return { url: stored, mimeType: "video/mp4" };
 }
 
 function assertVideoConfig(config: AiConfig, model: string) {
