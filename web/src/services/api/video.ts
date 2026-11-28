@@ -18,6 +18,7 @@ import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveM
 import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, forceProxyApiUrl, isKnownDirectCorsUrl, isLocalNetworkUrl, isTunnelCorsUrl, rewriteLocalMediaUrl } from "@/lib/api-proxy";
 import { publicBaseForLocalGateway } from "@/lib/local-gateway";
 import { canUseLocalNetworkDirectly } from "@/lib/local-network-access";
+import { isTransientRequestError } from "@/lib/transient-request-error";
 // 传输层判定与请求体估算抽到 `net-transport`，与生图/音频共用同一口径（唯一咽喉）。
 import { PROXY_BODY_SAFE_BYTES, estimateBodyBytes, isProxiedApiUrl, isTransportFailure } from "./net-transport";
 import { uploadTemporaryPublicImage, uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
@@ -3137,13 +3138,9 @@ function blobToDataUrl(blob: Blob): Promise<string> {
  * 导出给探针（`video-poll-resilience-probe`）钉这套判据。
  */
 export function isTransientVideoQueryError(error: unknown): boolean {
-    if (axios.isCancel(error)) return false;
-    if (error instanceof DOMException && error.name === "AbortError") return false;
-    if (!axios.isAxiosError(error)) return false;
-    const status = error.response?.status;
-    if (typeof status === "number") return status >= 500;
-    // 没有 response：DNS / TCP / TLS / 代理断链 / 我们自己的 timeout —— 都值得再问一次。
-    return true;
+    // 判据本体已收口到 `@/lib/transient-request-error`：模型脚本执行层的 `poll()` 用的是
+    // 同一套（`model-plugin.ts`），免得两处各写一遍再慢慢漂移。这里保留原名给探针和调用点。
+    return isTransientRequestError(error);
 }
 
 async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {

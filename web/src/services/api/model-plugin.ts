@@ -3,8 +3,39 @@ import axios, { type AxiosRequestConfig } from "axios";
 import i18n from "@/i18n";
 import { buildApiUrl, modelOptionName, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { isLocalNetworkUrl, proxyApiUrl } from "@/lib/api-proxy";
+import { isTransientRequestError } from "@/lib/transient-request-error";
 
 type RequestOptions = { signal?: AbortSignal };
+
+/**
+ * 单次插件请求的上限。
+ *
+ * 🔴 为什么必须给（2026-11-28）：画布没有全局 axios 超时，而 qf 渠道的请求会被
+ * `proxyApiUrl` 升级到公网入口（Tailscale Funnel）。Funnel 半死不活时那条连接是
+ * **静默挂起**（既不 resolve 也不 reject）—— 脚本里的 `await request(...)` 于是永不返回，
+ * 画布表现成「一直读秒」，比报错还难查。本机 20s（正常是毫秒级）、公网 60s。
+ *
+ * `blob` / `arraybuffer` 不设上限：那是真的在传字节，掐断只会变成「下载失败」。
+ */
+const PLUGIN_REQUEST_TIMEOUT_LOCAL_MS = 20_000;
+const PLUGIN_REQUEST_TIMEOUT_REMOTE_MS = 60_000;
+
+function pluginTimeoutMs(url: string, responseType?: string): number {
+    if (responseType === "blob" || responseType === "arraybuffer") return 0;
+    return isLocalNetworkUrl(url) ? PLUGIN_REQUEST_TIMEOUT_LOCAL_MS : PLUGIN_REQUEST_TIMEOUT_REMOTE_MS;
+}
+
+/**
+ * 脚本里 `poll()` 的预算下限。
+ *
+ * 🔴 内置视频模板原来写 `timeoutMs: 300000`（5 分钟），是按普通 5s 成片设的。qf 渠道
+ * 15s 的 Seedance 2.0 Fast 实测要 **6–10 分钟**，5 分钟的上限会把一个正在正常推进的任务
+ * 判死 —— 用户看到「插件轮询超时」，后台半小时后照样把文件写进网关，前端永远拿不到。
+ * 主流程（`video.ts` 的 360 × 2.5s）预算本来就是 15 分钟，这里对齐，脚本写得更短也按 15 分钟走。
+ * 用户主动取消（`signal`）不受影响，随时能停。
+ */
+const PLUGIN_POLL_DEFAULT_MS = 300_000;
+const PLUGIN_POLL_MIN_MS = 15 * 60 * 1000;
 
 export type PluginHttpOptions = {
     headers?: Record<string, string>;
@@ -88,8 +119,10 @@ function isEmptyBodyRejection(error: unknown, data: unknown): boolean {
  * 正常只发一次；命中「body 丢失」才换传输重提一次，仍失败就给一句能指导用户的话。
  */
 async function pluginRequest(config: AiConfig, requestConfig: AxiosRequestConfig & { url: string }, options?: RequestOptions) {
+    // 调用方（脚本作者）显式给了 timeout 就尊重它，否则按目标地址补一个，别让挂起的连接拖成无限读秒。
+    const timeout = requestConfig.timeout ?? pluginTimeoutMs(String(requestConfig.url || ""), requestConfig.responseType);
     try {
-        return await axios.request({ ...requestConfig, signal: options?.signal });
+        return await axios.request({ ...requestConfig, timeout, signal: options?.signal });
     } catch (error) {
         if (!isEmptyBodyRejection(error, requestConfig.data)) throw error;
         const direct = String(requestConfig.url || "");
@@ -98,7 +131,12 @@ async function pluginRequest(config: AiConfig, requestConfig: AxiosRequestConfig
         if (!proxied || proxied === direct || isLocalNetworkUrl(direct)) throw error;
         console.warn("[model-plugin] 提交体在直连链路上丢失（网关只收到请求头），已改走边缘代理重提一次");
         try {
-            return await axios.request({ ...requestConfig, url: proxied, signal: options?.signal });
+            return await axios.request({
+                ...requestConfig,
+                url: proxied,
+                timeout: requestConfig.timeout ?? pluginTimeoutMs(proxied, requestConfig.responseType),
+                signal: options?.signal,
+            });
         } catch (retryError) {
             // 换了传输还是「prompt 为空」→ 确实没送达。给一句准确的话，别让用户以为提示词写错了。
             if (isEmptyBodyRejection(retryError, requestConfig.data)) throw new Error(i18n.t("modelPlugin.submitNotDelivered"));
@@ -153,14 +191,40 @@ function sleep(ms: number, signal?: AbortSignal) {
     });
 }
 
+/**
+ * 脚本里的 `poll(fn, extract, { intervalMs, timeoutMs })`。
+ *
+ * 🔴 关键行为（2026-11-28 补）：**请求本身抖动不算失败**。
+ * 用户截图里的「模型调用脚本执行失败：Network Error」就是这里来的 —— 网关（qf，走 Funnel）
+ * 抖了一下，`await request(...)` 抛了个没有回包的 AxiosError，旧代码直接冒泡出 `poll()`，
+ * 整个脚本结束、前台报错；而后台 WebView 还在跑，最后把成片写进网关了事。
+ *
+ * 现在只有两种情况会结束轮询：
+ *   · `extract()` 抛错（脚本自己判定任务失败）—— 那是真结论，原样抛；
+ *   · 到 deadline —— 抛 `pollTimeout`。
+ * `request()` 抛的 5xx / 超时 / 无回包 → 打一行 console.warn，继续下一拍。
+ * 4xx（401 / 404 / 400）不吞：重试长不出结果，立刻暴露给用户。
+ */
 function createPoll(signal?: AbortSignal) {
     return async function poll<T, R>(request: () => Promise<T>, extract: (value: T) => R | null | undefined | false, options?: PluginPollOptions): Promise<R> {
         const intervalMs = options?.intervalMs ?? 2500;
-        const timeoutMs = options?.timeoutMs ?? 300000;
+        const timeoutMs = Math.max(options?.timeoutMs ?? PLUGIN_POLL_DEFAULT_MS, PLUGIN_POLL_MIN_MS);
         const deadline = performance.now() + timeoutMs;
         for (;;) {
             if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-            const result = extract(await request());
+            let value: T;
+            try {
+                value = await request();
+            } catch (error) {
+                if (signal?.aborted) throw error;
+                if (!isTransientRequestError(error)) throw error;
+                console.warn("[model-plugin] 这一轮没问到任务状态（网络抖动），继续轮询：", error instanceof Error ? error.message : String(error));
+                if (performance.now() >= deadline) throw new Error(i18n.t("modelPlugin.pollTimeout"));
+                await sleep(intervalMs, signal);
+                continue;
+            }
+            // extract 在 try 外面：脚本自己抛的「任务失败」必须原样冒出去，不能被当抖动吞掉。
+            const result = extract(value);
             if (result !== null && result !== undefined && result !== false) return result;
             if (performance.now() >= deadline) throw new Error(i18n.t("modelPlugin.pollTimeout"));
             await sleep(intervalMs, signal);
@@ -233,6 +297,10 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
                 message = i18n.t("apiErrors.autodlComfyAuthFailed");
             } else if (status && !bodyMessage) {
                 message = `${message} (HTTP ${status})`;
+            } else if (!status && !bodyMessage) {
+                // 没有 response 时 axios 只会给一句 "Network Error"，用户拿它什么都判断不了。
+                // 说清两件事：这是链路没回包；后端可能已经收下了，别急着重复提交。
+                message = i18n.t("modelPlugin.networkNoResponse");
             }
         }
         throw new Error(i18n.t("modelPlugin.executionFailed", { message }));
@@ -429,7 +497,7 @@ const task = await request({
 return await poll(
   () => request({ method: "get", url: \`\${baseUrl}/v1/videos/\${task.id}\`, headers }),
   (state) => state.status === "completed" ? { url: state.video_url || state.url } : null,
-  { intervalMs: 2500, timeoutMs: 300000 },
+  { intervalMs: 2500, timeoutMs: 15 * 60 * 1000 }, // 15 分钟：长片 + 慢网关（qf 15s 成片实测 6–10 分钟）
 );`,
         },
         {
@@ -454,7 +522,7 @@ return await poll(
     if (!uri) throw new Error(${JSON.stringify(i18n.t("modelPlugin.templates.geminiNoVideoUri"))});
     return { url: uri.includes("key=") ? uri : \`\${uri}\${uri.includes("?") ? "&" : "?"}key=\${apiKey}\` };
   },
-  { intervalMs: 5000, timeoutMs: 300000 },
+  { intervalMs: 5000, timeoutMs: 15 * 60 * 1000 },
 );`,
         },
         {
