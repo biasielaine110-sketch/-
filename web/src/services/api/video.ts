@@ -16,6 +16,8 @@ import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, forceProxyApiUrl, isKnownDirectCorsUrl, isLocalNetworkUrl, isTunnelCorsUrl, rewriteLocalMediaUrl } from "@/lib/api-proxy";
+import { publicBaseForLocalGateway } from "@/lib/local-gateway";
+import { canUseLocalNetworkDirectly } from "@/lib/local-network-access";
 // 传输层判定与请求体估算抽到 `net-transport`，与生图/音频共用同一口径（唯一咽喉）。
 import { PROXY_BODY_SAFE_BYTES, estimateBodyBytes, isProxiedApiUrl, isTransportFailure } from "./net-transport";
 import { uploadTemporaryPublicImage, uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
@@ -3146,23 +3148,57 @@ async function videoResultFromUrl(url: string, options?: RequestOptions, config?
      */
     const portable = config ? rewriteLocalMediaUrl(direct, config.baseUrl) : direct;
     if (!/^https?:\/\//i.test(direct)) return { url: direct, mimeType: "video/mp4" };
+    /**
+     * 🔴 本机地址必须再补一跳**内置网关映射**（2026-11-28 第四次报障的延长线）。
+     *
+     * 上一段的 `rewriteLocalMediaUrl(direct, config.baseUrl)` 对 qf 是**空转**：那个渠道的
+     * `baseUrl` 本身就是 `http://127.0.0.1:17800`，函数遇到「base 也是本机」直接放弃，
+     * 于是 `portable === direct`（还是 loopback）。后果是这里只试得到 loopback 一条：
+     * 浏览器没授权 LNA 就打不通 → 拿不到字节 → 节点 `content` 存成 loopback 且**没有 storageKey**
+     * → 以后每次下载都得重新走网络（这就是「下载慢」一直复发的隐性原因）。
+     *
+     * 补上 `publicBaseForLocalGateway()`（唯一映射来源，`127.0.0.1:17800` → Funnel），
+     * 就能经公网入口把字节取回来存进 IndexedDB，之后下载/预览都是本地副本、零网络。
+     */
+    const gatewayBase = isLocalNetworkUrl(direct) ? publicBaseForLocalGateway(direct) : "";
+    const gatewayPublic = gatewayBase ? rewriteLocalMediaUrl(direct, gatewayBase) : "";
     // Result buckets often omit Access-Control-Allow-Origin (Tencent COS / ByteDance TOS), so the
     // direct XHR is blocked by CORS even though the file itself is fine. A remote-URL fallback
     // keeps playback working, but then nothing lands in IndexedDB: no thumbnail, no export, and
     // the node breaks once the signed URL expires. Retry through the same-origin media proxy
     // (which sets ACAO) so we still get a real blob — same ladder as image-storage/save-blob.
-    // 本机地址多一跳：先按原地址取（同机浏览器最快），再按公开地址取（换设备也能拿到）。
-    const seeds = [...new Set([direct, portable].filter(Boolean))];
+    /**
+     * 取字节的候选顺序（本机地址专属的两条硬约束）：
+     *   ① **确认能直连才打 loopback** —— 没授权时那条请求在 Chrome 里是静默挂起，
+     *      会把整条生成结果卡在这里，比慢更糟；`canUseLocalNetworkDirectly()` 已经
+     *      把「权限 API + 真实探测」两层证据算过了。
+     *   ② loopback 与公开入口都要有**短超时** —— 生成链路不能因为一条取不到的死地址
+     *      就一直等（同一个 origin 已经有 183 MB/s vs 264 KB/s 的量级差，选错一条就是几十秒）。
+     */
+    const remoteSeeds = [...new Set([portable, gatewayPublic].filter((item) => item && !isLocalNetworkUrl(item)))];
+    const seeds: string[] = [];
+    if (!isLocalNetworkUrl(direct) || canUseLocalNetworkDirectly(direct)) seeds.push(direct);
+    for (const item of remoteSeeds) if (!seeds.includes(item)) seeds.push(item);
+    // 什么候选都没剩（本机地址又没授权、也映射不出公开入口）→ 只能原样试一次。
+    if (!seeds.length) seeds.push(direct);
     const targets = [...new Set(seeds.flatMap((seed) => [seed, proxyMediaUrl(seed), forceProxyMediaUrl(seed)]).filter(Boolean))];
     for (const target of targets) {
         try {
-            const response = await axios.get<Blob>(target, { responseType: "blob", signal: options?.signal });
+            const localTarget = isLocalNetworkUrl(target);
+            const response = await axios.get<Blob>(target, {
+                responseType: "blob",
+                signal: options?.signal,
+                // 本机直连要么 10 ms 回来，要么永远不会回来；给 15 s 上限把决定权交给下一条。
+                timeout: localTarget ? 15_000 : 120_000,
+            });
             await assertVideoBlob(response.data);
             return { blob: response.data };
         } catch (error) {
             if (axios.isCancel(error) || options?.signal?.aborted) throw error;
         }
     }
+    // 取不到字节时**保留可移植的那条**（公开地址），绝不再把 `127.0.0.1` 写进节点。
+    return { url: remoteSeeds[0] || portable || direct, mimeType: "video/mp4" };
     // 取不到字节时**保留可移植的那条**（公开地址），绝不再把 `127.0.0.1` 写进节点。
     return { url: portable || direct, mimeType: "video/mp4" };
 }
