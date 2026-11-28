@@ -240,6 +240,16 @@ export default {
         separator: ", ",
         promptPrefix: "Reference image labels: {{labels}}. Use these labels to interpret image references in the prompt.\n\n{{prompt}}",
     },
+    modelQuota: {
+        locked: "{{model}} has used up today's quota, so it is paused automatically. It comes back at {{time}} (in about {{remaining}}). To use it now, click \"Resume\" next to the model picker.",
+        remainingHours: "{{hours}}h {{minutes}}m",
+        remainingMinutes: "{{minutes}}m",
+        badge: "Out of quota",
+        badgeTitle: "Today's quota is used up · resumes at {{time}}",
+        paused: "Out of quota today, paused until {{time}}",
+        unlock: "Resume",
+        unlockTitle: "Resume this model now (use this when quota is actually left / you topped up / switched accounts)",
+    },
     modelPlugin: {
         pollTimeout: "Plugin polling timed out. Check the request script or try again later.",
         submitNotDelivered: "The submission never reached the gateway: its body was lost in transit (the gateway only received the headers). Nothing was queued and no quota was used — just click Generate again.",

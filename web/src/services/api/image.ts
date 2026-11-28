@@ -11,6 +11,7 @@ import { nanoid } from "nanoid";
 import { compressBodyImagesForProxy, compressReferenceDataUrl, dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { isMioraQueueBaseUrl, mediaUrlToDataUrl, runMioraGeneration } from "@/lib/miora-queue";
+import { withModelQuotaGuard } from "@/lib/model-quota-lockout";
 import { isMioraImageFamilyModel, isUnsupportedImageSizeError, resolveMioraImageSize } from "@/constant/image-size-presets";
 import { uploadTemporaryPublicImage, uploadTemporaryPublicImageFromDataUrl } from "@/lib/temp-public-image";
 import { fetchRemoteImageBlob, imageToDataUrl } from "@/services/image-storage";
@@ -3698,6 +3699,11 @@ async function requestJusuanhubImages(
 }
 
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<GeneratedImageResult[]> {
+    // 今日额度已用完的模型：提交前就拦住（省一次白跑，也不必让上游再拒一遍）。
+    return withModelQuotaGuard(config, config.model || config.imageModel, () => requestGenerationInner(config, prompt, options));
+}
+
+async function requestGenerationInner(config: AiConfig, prompt: string, options?: RequestOptions): Promise<GeneratedImageResult[]> {
     const requestConfig = resolveImageRequestConfig(config);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
@@ -3864,6 +3870,10 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
 }
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions): Promise<GeneratedImageResult[]> {
+    return withModelQuotaGuard(config, config.model || config.imageModel, () => requestEditInner(config, prompt, references, mask, options));
+}
+
+async function requestEditInner(config: AiConfig, prompt: string, references: ReferenceImage[], mask?: ReferenceImage, options?: RequestOptions): Promise<GeneratedImageResult[]> {
     const requestConfig = resolveImageRequestConfig(config);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);

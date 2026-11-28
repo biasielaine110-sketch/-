@@ -1,10 +1,11 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { Select, Tooltip } from "antd";
 import type { DefaultOptionType } from "antd/es/select";
-import { Cpu, ListChecks, RefreshCw } from "lucide-react";
+import { Cpu, ListChecks, LockOpen, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
+import { clearQuotaLock, getQuotaLock, subscribeQuotaLocks, type ModelQuotaLock } from "@/lib/model-quota-lockout";
 import { cn } from "@/lib/utils";
 import { ensureModelHealth, ensureModelsHealth, getModelHealth, modelHealthKey, subscribeModelHealth, type ModelHealthStatus } from "@/services/api/model-health";
 import { modelOptionLabel, modelOptionName, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
@@ -54,6 +55,8 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     const autoHealth = (healthCapability === "image" || healthCapability === "video") && !currentExtra;
 
     useEffect(() => subscribeModelHealth(() => bump((value) => value + 1)), []);
+    // 今日额度用完被停用 / 到期自动恢复 / 手动恢复 —— 都要让选择器立刻变样。
+    useEffect(() => subscribeQuotaLocks(() => bump((value) => value + 1)), []);
 
     useEffect(() => {
         if (!autoHealth || !current || current === "__empty__") return;
@@ -64,11 +67,17 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     }, [autoHealth, config, current, healthCapability]);
 
     const selectOptions = useMemo<DefaultOptionType[]>(() => {
-        const modelOptions: DefaultOptionType[] = models.map((model) => ({
-            value: model,
-            label: <ModelLabel config={config} model={model} capability={healthCapability} />,
-            title: modelOptionLabel(config, model),
-        }));
+        const modelOptions: DefaultOptionType[] = models.map((model) => {
+            // 「今日额度用完」的模型：下拉里直接标出来并禁选 —— 选它只会白跑一轮，
+            // 到期（北京时间次日 0 点）自动恢复，也可以点旁边的「恢复使用」手动解。
+            const lock = getQuotaLock(config, model);
+            return {
+                value: model,
+                disabled: Boolean(lock),
+                label: <ModelLabel config={config} model={model} capability={healthCapability} lock={lock} />,
+                title: modelOptionLabel(config, model),
+            };
+        });
         // 额外选项排在最后：它们是「换引擎」这种结构性的选择，别和模型列表混在一起。
         const extraEntries: DefaultOptionType[] = extraList.map((item) => ({
             value: item.value,
@@ -92,6 +101,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     }, [bump, capability, config, extraList, healthCapability, models]);
     const pickerPlaceholder = placeholder || t("settingsPanels.model.select");
     const currentHealth = current && current !== "__empty__" && !currentExtra ? getModelHealth(modelHealthKey(config, current, healthCapability)) : { status: "idle" as const };
+    const currentLock = current && current !== "__empty__" && !currentExtra ? getQuotaLock(config, current) : null;
     const canCheck = Boolean(current && current !== "__empty__" && !currentExtra);
     const checking = currentHealth.status === "checking";
     const anyChecking = bulkChecking || models.some((model) => getModelHealth(modelHealthKey(config, model, healthCapability)).status === "checking");
@@ -182,11 +192,27 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                                 />
                                 <ModelIcon model={model} />
                                 <span className="canvas-model-picker-text min-w-0 flex-1 truncate text-left">{text}</span>
+                                {currentLock ? <QuotaLockChip lock={currentLock} /> : null}
                             </span>
                         );
                     }}
                 />
             </div>
+            {currentLock ? (
+                <Tooltip title={t("modelQuota.unlockTitle")}>
+                    <button
+                        type="button"
+                        aria-label={t("modelQuota.unlock")}
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            if (current) clearQuotaLock(config, current);
+                        }}
+                        className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-amber-200 bg-amber-50 text-amber-600 transition hover:bg-amber-100 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-400 dark:hover:bg-amber-900/40"
+                    >
+                        <LockOpen className="size-3.5" />
+                    </button>
+                </Tooltip>
+            ) : null}
             {autoHealth ? (
                 <Tooltip title={t("settingsPanels.model.healthCheckAll")}>
                     <button
@@ -233,14 +259,27 @@ function emptyModelLabel(config: AiConfig, capability?: ModelCapability) {
     return config.models.length ? i18n.t("settingsPanels.model.noMatch", { capability: label }) : i18n.t("settingsPanels.model.addFirst");
 }
 
-function ModelLabel({ config, model, capability }: { config: AiConfig; model: string; capability: ModelCapability }) {
+function ModelLabel({ config, model, capability, lock }: { config: AiConfig; model: string; capability: ModelCapability; lock?: ModelQuotaLock | null }) {
     const health = getModelHealth(modelHealthKey(config, model, capability));
     return (
         <span className="flex w-full min-w-0 items-center gap-2">
             <HealthDot status={health.status} message={health.message} />
             <ModelIcon model={model} />
             <span className="min-w-0 flex-1 whitespace-nowrap" title={modelOptionName(model)}>{modelOptionLabel(config, model)}</span>
+            {lock ? <QuotaLockChip lock={lock} /> : null}
         </span>
+    );
+}
+
+/** 「额度用完」小标：点上去能看到具体几点自动恢复，以及上游的原话。 */
+function QuotaLockChip({ lock }: { lock: ModelQuotaLock }) {
+    const time = new Date(lock.until).toLocaleString();
+    return (
+        <Tooltip title={`${i18n.t("modelQuota.badgeTitle", { time })}${lock.reason ? `\n${lock.reason}` : ""}`}>
+            <span className="shrink-0 whitespace-nowrap rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:bg-amber-950/60 dark:text-amber-300">
+                {i18n.t("modelQuota.badge")}
+            </span>
+        </Tooltip>
     );
 }
 

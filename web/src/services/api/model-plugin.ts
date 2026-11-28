@@ -3,6 +3,7 @@ import axios, { type AxiosRequestConfig } from "axios";
 import i18n from "@/i18n";
 import { buildApiUrl, modelOptionName, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { isLocalNetworkUrl, proxyApiUrl } from "@/lib/api-proxy";
+import { assertModelQuotaAvailable, describeQuotaLock, noteModelQuotaFailure } from "@/lib/model-quota-lockout";
 import { isTransientRequestError } from "@/lib/transient-request-error";
 
 type RequestOptions = { signal?: AbortSignal };
@@ -241,6 +242,8 @@ function createPoll(signal?: AbortSignal) {
  */
 export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<T> {
     const { config } = args;
+    // 今日额度已用完的模型：连脚本都不跑（脚本第一句就是提交，跑了也是白跑一轮）。
+    assertModelQuotaAvailable(config, config.model);
     const http = createPluginHttp(config, { signal: args.signal });
     const request = createPluginRequest(config, { signal: args.signal });
     const poll = createPoll(args.signal);
@@ -303,6 +306,13 @@ export async function runModelPlugin<T = unknown>(args: RunPluginArgs): Promise<
                 message = i18n.t("modelPlugin.networkNoResponse");
             }
         }
+        /**
+         * 「今日额度用完」的脚本失败要把这个模型停用到次日 0 点：qf 这类按日发额度的渠道，
+         * 额度见底后每点一次就白跑一轮，用户还会以为是自己提示词/画布坏了。原文照留
+         * （那才是上游的说法），后面补一句「已暂停 + 几点回来」。
+         */
+        const quotaLock = noteModelQuotaFailure(config, config.model, message);
+        if (quotaLock) message = `${message}\n\n${describeQuotaLock(quotaLock)}`;
         throw new Error(i18n.t("modelPlugin.executionFailed", { message }));
     }
 }

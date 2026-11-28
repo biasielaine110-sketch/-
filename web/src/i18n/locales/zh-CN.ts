@@ -240,6 +240,16 @@ export default {
         separator: "、",
         promptPrefix: "参考图片编号：{{labels}}。请按这些编号理解提示词中的图片引用。\n\n{{prompt}}",
     },
+    modelQuota: {
+        locked: "{{model}} 今日额度已用完，已自动暂停使用；{{time}}（约 {{remaining}} 后）自动恢复。想现在就用：点模型选择器旁的「恢复使用」。",
+        remainingHours: "{{hours}} 小时 {{minutes}} 分钟",
+        remainingMinutes: "{{minutes}} 分钟",
+        badge: "额度用完",
+        badgeTitle: "今日额度已用完 · {{time}} 自动恢复",
+        paused: "今日额度已用完，暂停到 {{time}}",
+        unlock: "恢复使用",
+        unlockTitle: "立即恢复该模型（额度其实还有 / 已充值 / 换过账号时点这里）",
+    },
     modelPlugin: {
         pollTimeout: "插件轮询超时，请检查调用脚本或稍后重试",
         submitNotDelivered: "提交没有送达网关：请求体在链路上丢失了（网关只收到请求头）。这次没有入队、不会扣次数，直接再点一次生成即可。",

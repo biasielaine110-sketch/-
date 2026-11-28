@@ -27,6 +27,7 @@ import {
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { buildApiUrl, modelOptionName, resolveModelRequestConfig, resolveModelScript, type AiConfig } from "@/stores/use-config-store";
 import { proxyApiUrl, isKnownDirectCorsUrl, isTunnelCorsUrl } from "@/lib/api-proxy";
+import { withModelQuotaGuard } from "@/lib/model-quota-lockout";
 import { isProxiedApiUrl, isTransportFailure, withProxyFallback } from "./net-transport";
 import type { ReferenceAudio } from "@/types/media";
 import { uploadProviderMediaFile } from "./video";
@@ -51,6 +52,10 @@ function aiHeaders(config: AiConfig) {
 export type GeneratedAudioPayload = Blob | { remoteUrl: string; mimeType?: string };
 
 export async function requestAudioGeneration(config: AiConfig, prompt: string, options?: RequestOptions): Promise<GeneratedAudioPayload> {
+    return withModelQuotaGuard(config, config.model || config.audioModel, () => requestAudioGenerationInner(config, prompt, options));
+}
+
+async function requestAudioGenerationInner(config: AiConfig, prompt: string, options?: RequestOptions): Promise<GeneratedAudioPayload> {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.audioModel);
     const model = requestConfig.model.trim();
     const format = normalizeAudioFormatValue(config.audioFormat);

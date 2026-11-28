@@ -18,6 +18,7 @@ import { boolConfig, buildApiUrl, modelOptionName, resolveModelChannel, resolveM
 import { resolveApiTransport, proxyApiUrl, proxyMediaUrl, forceProxyMediaUrl, forceProxyApiUrl, isKnownDirectCorsUrl, isLocalNetworkUrl, isTunnelCorsUrl, rewriteLocalMediaUrl } from "@/lib/api-proxy";
 import { publicBaseForLocalGateway } from "@/lib/local-gateway";
 import { canUseLocalNetworkDirectly } from "@/lib/local-network-access";
+import { describeQuotaLock, noteModelQuotaFailure, withModelQuotaGuard } from "@/lib/model-quota-lockout";
 import { isTransientRequestError } from "@/lib/transient-request-error";
 // 传输层判定与请求体估算抽到 `net-transport`，与生图/音频共用同一口径（唯一咽喉）。
 import { PROXY_BODY_SAFE_BYTES, estimateBodyBytes, isProxiedApiUrl, isTransportFailure } from "./net-transport";
@@ -671,6 +672,12 @@ export async function requestVideoGeneration(config: AiConfig, prompt: string, r
 
 export async function createVideoGenerationTask(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationTask> {
     const selectedModel = (config.model || config.videoModel).trim();
+    // 今日额度已用完的模型：**根本不发请求**（qf 这类按日发额度的渠道，派过去只会秒失败）。
+    return withModelQuotaGuard(config, selectedModel, () => createVideoGenerationTaskInner(config, prompt, references, options));
+}
+
+async function createVideoGenerationTaskInner(config: AiConfig, prompt: string, references: ReferenceImage[] = [], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const selectedModel = (config.model || config.videoModel).trim();
     const requestConfig = resolveModelRequestConfig(config, selectedModel);
     const script = resolveModelScript(config, selectedModel);
     // Pre-compress oversized local references before dispatch so no path sends a body
@@ -757,6 +764,18 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
 }
 
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    const state = await pollVideoGenerationTaskInner(config, task, options);
+    if (state.status !== "failed") return state;
+    /**
+     * 🔴 注意这里**只记账、不拦**：任务已经提交出去了，正在跑的轮询不能被停用闸门打断，
+     * 否则一条快要好的成片会被自己判死。停用只作用于「下一次提交」。
+     */
+    const lock = task.model ? noteModelQuotaFailure(config, task.model, state.error) : null;
+    if (!lock) return state;
+    return { status: "failed", error: `${state.error}\n\n${describeQuotaLock(lock)}` };
+}
+
+async function pollVideoGenerationTaskInner(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     if (task.provider === "plugin") {
         const result = pluginVideoResults.get(task.id);
         return result ? { status: "completed", result } : { status: "failed", error: apiText("pluginVideoExpired") };
